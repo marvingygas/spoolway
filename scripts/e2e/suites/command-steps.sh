@@ -866,18 +866,15 @@ else
   diff "$PANE_DOC_BEFORE" "$SPOOLWAY_PROJECT_HOME/queue/paneless.md" | sed 's/^/        /'
 fi
 
-# `--plain` is the flag that would be an exemption if any flag were: it is
-# what every script here passes to keep a dispatch a log rather than the
-# redrawing board, and a gate read after the board was chosen would let it
-# through. Asked as its own invocation rather than reasoned about from the
-# gate's signature, since what is being denied is that any argv reaches the
-# run first.
-OUT=$(HERDR_STUB_NO_PANE=1 "$SPOOLWAY" dispatch --plain 2>&1)
+# An ordinary `dispatch` outside a pane, with no flag to be an exemption:
+# there is no board to draw any more, only the one plain run, so the gate
+# is checked before any argv reaches it.
+OUT=$(HERDR_STUB_NO_PANE=1 "$SPOOLWAY" dispatch 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ] \
    && grep -qF "Open herdr and start spoolway there:" <<<"$OUT"; then
-  ok "and --plain is refused identically, not exempted"
-else bad "and --plain is refused identically, not exempted"; sed 's/^/        /' <<<"$OUT"; fi
+  ok "and an ordinary dispatch is refused the same way, not exempted"
+else bad "and an ordinary dispatch is refused the same way, not exempted"; sed 's/^/        /' <<<"$OUT"; fi
 
 # Taken back out rather than left to be picked up for real: its pipeline is
 # an ordinary agent-starting one, and this suite has no live agent to answer

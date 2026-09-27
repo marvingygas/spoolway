@@ -13,14 +13,16 @@ repository is listed in herdr's marketplace.
 
 [`herdr-plugin.toml`](../herdr-plugin.toml) at the repository root declares spoolway's id,
 version, minimum herdr version, description, `platforms = ["linux", "macos"]`, one `[[build]]`
-step and four panes and actions, one pair per command:
+step and three panes and actions, one pair per command:
 
 | Action | Action title | Pane title | Placement |
 |---|---|---|---|
 | `init` | Set up this project | Set up this project | popup |
-| `queue` | Show the queue | Queue | tab |
-| `dispatch` | Run the dispatcher | Dispatch | tab |
+| `dispatch` | Open spoolway | Spoolway | tab |
 | `doctor` | Check this project | Check this project | popup |
+
+The `dispatch` action opens bare `spoolway`, the one screen holding the dispatch, queue, jobs
+and eval tabs.
 
 The `[[build]]` step runs `scripts/fetch-or-build.sh`, which downloads the release archive
 matching the manifest's own `version`, verifies its `SHA256SUMS`, and unpacks the binary to
@@ -33,12 +35,12 @@ there. See [Installation and setup](installation.md) for the fallback in full.
 
 `herdr plugin link <PATH>` skips `[[build]]` entirely — it proves the manifest parses and the
 panes and actions load without a download, but leaves no `./bin/spoolway` behind, so none of its
-four commands run yet.
+three commands run yet.
 
 ## What `bind` and `unbind` write
 
 herdr has no keybinding section of its own manifest format, so `herdr-plugin.toml` declares no
-keys. `spoolway herdr bind` writes four `[[keys.command]]` blocks straight into herdr's own
+keys. `spoolway herdr bind` writes three `[[keys.command]]` blocks straight into herdr's own
 config file at `~/.config/herdr/config.toml`, one per pane, each running the plugin's binary
 directly rather than `herdr plugin action invoke` — bare `spoolway` when that resolves on
 `PATH`, or the absolute `.../bin/spoolway` inside the plugin's own root otherwise.
@@ -53,7 +55,7 @@ by hand, at a terminal, before the topic goes on the repository — it is the on
 the listing appears.
 
 1. `herdr plugin link ~/spoolway` — manifest, panes and actions, no build.
-2. `herdr plugin action list` — four actions: `init`, `queue`, `dispatch`, `doctor`.
+2. `herdr plugin action list` — three actions: `init`, `dispatch`, `doctor`.
 3. `herdr plugin unlink spoolway`
 4. `herdr plugin install marvingygas/spoolway --ref herdr-plugin` — the real path, build script
    and all, off the branch under review rather than `main`.

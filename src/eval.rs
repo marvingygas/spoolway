@@ -1769,11 +1769,10 @@ fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String
 
 // ----------------------------------------------------------------- the screen
 //
-// Bare `spoolway eval`, no flags and no `--json`: this rather than the
-// printing path above, which every flag still takes — see
-// `cli::eval_is_bare`. Modelled on `commands::queue_screen`: raw mode through
-// `platform::TermGuard`, one byte at a time off stdin through
-// `crate::screen::read_key`, so a real tty in raw mode and a pipe an
+// Bare `spoolway`'s eval tab, the one place left that reaches this any more
+// — `spoolway eval` itself always prints now, whatever flags it carries.
+// Raw mode through `platform::TermGuard`, one byte at a time off stdin
+// through `crate::screen::read_key`, so a real tty in raw mode and a pipe an
 // end-to-end suite is scripting drive it identically, and the screen ends
 // the moment either runs out.
 //
@@ -2903,25 +2902,11 @@ impl ScreenState {
     }
 }
 
-/// Open the eval screen: read the ledger under the default filters — exactly
-/// what bare `spoolway eval` means before a person touches anything — and
-/// drive it from the keyboard until `q` or the input runs out.
-///
-/// Degrades rather than crashes with no terminal to drive, the same way
-/// `commands::queue_screen` does: [`crate::platform::TermGuard`] only
-/// changes stdin's mode on a real tty, so a piped `spoolway eval` reads
-/// exactly the bytes it was given and ends the moment they run out.
-pub fn screen(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
-    let mut stdin = crate::screen::RawStdin;
-    let mut stdout = std::io::stdout();
-    let _term = crate::platform::TermGuard::new();
-    // Nothing hosts this screen, so how it ended has nowhere to go.
-    run_screen(repo, pipelines, &bare_args(), &mut stdin, &mut stdout).map(|_| ())
-}
-
-/// Bare `spoolway`'s eval tab: the same screen [`screen`] opens, under the
-/// strip and over the terminal the shell around it already holds — so no
-/// guard of its own. Nothing below the strip differs.
+/// Bare `spoolway`'s eval tab: the eval screen, under the strip and over the
+/// terminal the shell around it already holds — so no guard of its own.
+/// Nothing below the strip differs. `spoolway eval` itself never opens
+/// this any more — it prints, same as every other flag — so this tab is
+/// the one place left that reaches it at all.
 pub(crate) fn tab(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2931,10 +2916,10 @@ pub(crate) fn tab(
     run_screen(repo, pipelines, &bare_args(), input, out)
 }
 
-/// Every flag at its bare default — `cli::eval_is_bare` is what routed
-/// `spoolway eval` to [`screen`] in the first place, so this is exactly the
-/// invocation that reached it rather than `run`. Bare `spoolway`'s eval tab
-/// opens on the same.
+/// Every flag at its bare default — what bare `spoolway`'s eval tab opens
+/// on before a person touches anything, the same defaults `spoolway eval`
+/// with no flags used to route to the screen for, before this only ever
+/// printed.
 fn bare_args() -> EvalArgs {
     EvalArgs {
         by: EvalBy::Pipeline,
@@ -4725,8 +4710,8 @@ mod screen_tests {
         assert!(text.contains("Nothing to compare"), "{text}");
     }
 
-    /// Bare `spoolway eval` opens on the lanes table by pipeline, with its
-    /// `Total` line and the bracketed key line naming `tab`'s other table.
+    /// The screen opens on the lanes table by pipeline, with its `Total`
+    /// line and the bracketed key line naming `tab`'s other table.
     #[test]
     fn the_screen_opens_by_pipeline_with_a_total_and_bracketed_keys() {
         let repo = fixture_with_one_run("screen-opens");

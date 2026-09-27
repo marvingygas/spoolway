@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The queue screen's `t` picker, driven end to end — the one path no unit
-# test can drive, since `run_screen` is exercised headlessly in Rust
-# already, but never as the whole binary reading real keystrokes off a real
-# pipe. `t` forks a whole group: one pipeline assigned per task on the first
-# popup, one skip set per task on the second, one new arm per source task
-# under one freshly minted trial id.
+# The queue tab's `t` picker, driven end to end — the one path no unit test
+# can drive, since `run_screen` is exercised headlessly in Rust already, but
+# never as the whole binary reading real keystrokes off a real pipe, under
+# the pty `on_screen` gives it. `t` forks a whole group: one pipeline
+# assigned per task on the first popup, one skip set per task on the second,
+# one new arm per source task under one freshly minted trial id.
 #
 # The first half of this suite drives no dispatcher: a trial's whole setup job
 # is landing arms in the queue directory with the right `pipeline:`, `skip:`,
@@ -66,7 +66,7 @@ pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
 # appended to it; `beta` contributes five the same way. `enter` mints and
 # writes both arms and goes back to browsing; the trailing `n` is noise the
 # screen ignores, and the pipe running dry ends it the same way `esc` would.
-printf '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' /dev/null
 
 works "the alpha arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
@@ -138,7 +138,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
   "attempts: 2" \
   "pipeline:"
 
-printf 'fold-run\rt\x1b[C\x1b[C\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 'fold-run\rt\x1b[C\x1b[C\r\rn' /dev/null
 
 works "the reset lets a stamped document reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
@@ -326,7 +326,7 @@ for pipeline_file in .spoolway/pipelines/*.yml; do
 done
 
 pending_doc oneoff "$BODY" "group: oneoff" "touches: [notes/oneoff.md]"
-printf 'foneoff\rt\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 'foneoff\rt\r\rn' /dev/null
 
 works "the one-task trial's arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"

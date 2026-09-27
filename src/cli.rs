@@ -26,23 +26,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
-
-    /// Whether `eval` was invoked with none of its *own* flags — filled in
-    /// by [`parse`] from the raw `ArgMatches`, not derived from `EvalArgs`
-    /// itself: `EvalArgs::is_bare` used to enumerate every one of its own
-    /// fields by hand, which meant a new flag on `EvalArgs` had to remember
-    /// to extend that list too, or bare `spoolway eval` would silently take
-    /// the wrong path. [`eval_is_bare`] answers the same question off the
-    /// parser's own bookkeeping instead, so nothing here grows when
-    /// `EvalArgs` does. `spoolway eval` bare opens the screen; any of
-    /// `eval`'s own flags, even one spelled out to its own default, takes
-    /// the printing path instead — see `main.rs`. `--repo`/`-C` and
-    /// `--json` are excluded on purpose: both are `global = true`, so they
-    /// answer a question about the whole invocation, not about `eval`, and a
-    /// person piping `-C ~/project` in front of a bare `eval` still wants
-    /// the screen.
-    #[arg(skip)]
-    pub eval_bare: bool,
 }
 
 // One of these exists per process; the spread between variants is the args
@@ -103,7 +86,7 @@ pub enum Command {
     /// Install pipeline skills and agent definitions for a coding agent.
     Install(InstallArgs),
 
-    /// Run the pipeline: a loop that draws the live board until the queue empties.
+    /// Run the pipeline: a loop that prints a line per pass until the queue empties.
     Dispatch(DispatchArgs),
 
     /// Read the model price table, or refresh it from litellm.
@@ -168,11 +151,10 @@ pub enum Command {
     /// session, and this says where it is.
     Lane(LaneArgs),
 
-    /// Work with the task queue. Bare, opens the queue screen.
-    Queue {
-        #[command(subcommand)]
-        command: Option<QueueCommand>,
-    },
+    /// Work with the task queue. Bare `spoolway`'s queue tab is the screen;
+    /// this prints its usage with no subcommand.
+    #[command(subcommand)]
+    Queue(QueueCommand),
 
     /// Print or validate the task-document contract.
     #[command(subcommand)]
@@ -199,11 +181,10 @@ pub enum Command {
     Group(GroupCommand),
 
     /// Read and fire cron jobs — routines the dispatcher runs on a schedule.
-    /// Bare, opens the jobs screen a person writes a job from.
-    Jobs {
-        #[command(subcommand)]
-        command: Option<JobsCommand>,
-    },
+    /// Bare `spoolway`'s jobs tab is the screen a person writes a job from;
+    /// this prints its usage with no subcommand.
+    #[command(subcommand)]
+    Jobs(JobsCommand),
 
     /// Read or write single config values non-interactively.
     #[command(subcommand)]
@@ -361,9 +342,7 @@ pub fn command() -> clap::Command {
 /// No command at all, with stdout on a terminal, is [`Command::Screen`]. Off a
 /// terminal — `spoolway | cat`, a script — it is exactly what it was before
 /// the screen existed: clap's own refusal, which prints the grouped help and
-/// exits 2. The screen draws with raw mode and full-screen escapes, which is
-/// a frame of garbage anywhere but a terminal — the same check bare
-/// `spoolway eval` makes before it opens its own screen.
+/// exits 2.
 pub fn parse() -> Cli {
     use clap::FromArgMatches;
     use std::io::IsTerminal;
@@ -375,13 +354,10 @@ pub fn parse() -> Cli {
         return cli;
     }
     let matches = base.clone().get_matches();
-    let eval_bare = eval_is_bare(&base, &matches);
-    let mut cli = match Cli::from_arg_matches(&matches) {
+    match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(err) => err.exit(),
-    };
-    cli.eval_bare = eval_bare;
-    cli
+    }
 }
 
 /// `argv` as [`Command::Screen`] when it names no command — only the globals
@@ -407,36 +383,6 @@ fn bare(base: &clap::Command, argv: impl IntoIterator<Item = std::ffi::OsString>
         repo: matches.get_one::<PathBuf>("repo").cloned(),
         json: matches.get_flag("json"),
         command: Command::Screen,
-        eval_bare: false,
-    })
-}
-
-/// Whether the `eval` subcommand, if that is what was typed, carried none of
-/// its *own* flags — read off the raw `ArgMatches` rather than `EvalArgs`'s
-/// fields, so this never has to change when a flag is added to or removed
-/// from `EvalArgs`. `None` (no `eval` subcommand at all) is not bare: this is
-/// only ever consulted once `main.rs` has already matched `Command::Eval`.
-///
-/// `ArgMatches::args_present()` on `eval`'s own submatch is not enough on its
-/// own: `--repo`/`-C` and `--json` are declared `global = true` on [`Cli`]
-/// (so they can be typed after the subcommand, e.g. `eval --json`, and not
-/// only before it), and clap copies a typed global into every subcommand's
-/// matches — so `args_present()` sees one and reports "not bare" even though
-/// nothing about `eval` itself was asked for. Filtering to arguments this
-/// subcommand actually declares (`!a.is_global_set()`) and checking each was
-/// really typed on the command line, rather than merely defaulted, is what
-/// tells `spoolway -C ~/project eval` apart from `spoolway eval --csv`.
-fn eval_is_bare(command: &clap::Command, matches: &clap::ArgMatches) -> bool {
-    let Some(sub) = command.find_subcommand("eval") else {
-        return false;
-    };
-    let Some(sub_matches) = matches.subcommand_matches("eval") else {
-        return false;
-    };
-    !sub.get_arguments().any(|arg| {
-        !arg.is_global_set()
-            && sub_matches.value_source(arg.get_id().as_str())
-                == Some(clap::parser::ValueSource::CommandLine)
     })
 }
 
@@ -828,22 +774,10 @@ impl Tracker {
 #[derive(Debug, Args, Default)]
 #[command(long_about = "Run the pipeline, and show what it is doing.\n\n\
         A resident run holds the terminal it was started in: each pass starts and tears down \
-        what the queue calls for, and between passes the live board is drawn there — a line per \
-        task with the step it is on and where it goes next, ordered top to bottom within its \
-        group by the order its tasks will run in. `ctrl-c` stops the run and leaves the last \
-        frame on screen.\n\n\
-        `--plain` keeps the loop but prints a line per pass instead of drawing. A run refuses \
-        to start at all outside a herdr pane, so there is always somewhere for that board to \
-        draw.")]
+        what the queue calls for, and prints a line per pass to say what it did. `ctrl-c` stops \
+        the run. Bare `spoolway`'s dispatch tab draws the live board instead — this is the \
+        plain print-per-pass command scripts, CI and the e2e suite drive.")]
 pub struct DispatchArgs {
-    /// Print a line per pass instead of drawing the live board.
-    ///
-    /// The board owns the terminal and redraws about once a second, which
-    /// is what you want in front of you and not what you want in a pipe, a CI
-    /// log or a terminal that mangles the redraw.
-    #[arg(long)]
-    pub plain: bool,
-
     /// Stop for nobody: a block starts a lane on `blocked` instead of parking
     /// the task in front of a person. Every pipeline stages `blocked` —
     /// `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*`
@@ -1566,6 +1500,39 @@ mod tests {
         assert!(bare_from(&["no-such-command"]).is_none());
     }
 
+    /// Only bare `spoolway` is a screen. `queue` and `jobs` typed alone are
+    /// refused with their usage, `dispatch --plain` is a flag that no longer
+    /// exists, and `eval` alone is the printing command, not a screen.
+    #[test]
+    fn the_old_screen_commands_are_plain() {
+        for verb in ["queue", "jobs"] {
+            let err = Cli::try_parse_from(["spoolway", verb])
+                .expect_err("a bare queue or jobs names no subcommand");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+                "`spoolway {verb}` prints its usage"
+            );
+            assert!(bare(&command(), ["spoolway", verb].map(Into::into)).is_none());
+        }
+
+        let err = Cli::try_parse_from(["spoolway", "dispatch", "--plain"])
+            .expect_err("`--plain` is gone");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(matches!(
+            Cli::try_parse_from(["spoolway", "dispatch"])
+                .unwrap()
+                .command,
+            Command::Dispatch(_)
+        ));
+
+        assert!(matches!(
+            Cli::try_parse_from(["spoolway", "eval"]).unwrap().command,
+            Command::Eval(_)
+        ));
+        assert!(bare(&command(), ["spoolway", "eval"].map(Into::into)).is_none());
+    }
+
     /// `--runs` is gone: `--by task` is the one-row-per-run table now, and
     /// `--group`, `--task` and `--trial` narrow any `by` without it.
     #[test]
@@ -1645,72 +1612,6 @@ mod tests {
     #[test]
     fn attach_requires_a_lane() {
         assert!(try_lane_args(&["--attach"]).is_err());
-    }
-
-    /// `eval_is_bare` reads the raw `ArgMatches` for the `eval` subcommand
-    /// rather than `EvalArgs`'s own fields, through the same `command()`
-    /// [`parse`] itself calls — so this exercises the real path, not a
-    /// second parse of the same argv.
-    fn eval_bare_from(argv: &[&str]) -> bool {
-        let mut full = vec!["spoolway", "eval"];
-        full.extend_from_slice(argv);
-        let base = command();
-        let matches = base.clone().try_get_matches_from(full).unwrap();
-        eval_is_bare(&base, &matches)
-    }
-
-    /// Argv built before the subcommand name, for a global flag typed the
-    /// way a person actually types it: `spoolway -C ~/project eval`, not
-    /// `spoolway eval -C ~/project`.
-    fn eval_bare_from_full(argv: &[&str]) -> bool {
-        let base = command();
-        let matches = base.clone().try_get_matches_from(argv).unwrap();
-        eval_is_bare(&base, &matches)
-    }
-
-    #[test]
-    fn truly_bare_eval_is_bare() {
-        assert!(eval_bare_from(&[]));
-    }
-
-    #[test]
-    fn any_other_flag_is_not_bare_either() {
-        assert!(!eval_bare_from(&["--pipeline", "default"]));
-        assert!(!eval_bare_from(&["--csv"]));
-        assert!(!eval_bare_from(&["--by", "step"]));
-        assert!(
-            !eval_bare_from(&["--by", "pipeline"]),
-            "spelled out to its own default, it still prints"
-        );
-    }
-
-    /// The mechanism this replaced — `EvalArgs::is_bare()` enumerating every
-    /// field by hand — silently stayed correct only as long as every new
-    /// flag remembered to add itself to the list. `eval_is_bare` reads
-    /// `args_present()` instead, so a flag this test adds without ever
-    /// touching `cli.rs`'s bareness logic still gets caught by it.
-    #[test]
-    fn a_flag_never_mentioned_by_name_still_defeats_bareness() {
-        assert!(!eval_bare_from(&["--trial", "solo"]));
-        assert!(!eval_bare_from(&["--task", "solo-1"]));
-        assert!(!eval_bare_from(&["--group", "audits"]));
-        assert!(!eval_bare_from(&["--pipeline-version", "1.0"]));
-    }
-
-    /// `--repo`/`-C` and `--json` are `global = true` on [`Cli`], so clap
-    /// copies a typed one into `eval`'s own submatches — the regression this
-    /// pins: an earlier version of `eval_is_bare` read `args_present()` on
-    /// that submatch directly, which saw the global and reported "not bare"
-    /// even though nothing about `eval` itself was asked for, so `spoolway
-    /// -C ~/project eval` silently stopped opening the screen.
-    #[test]
-    fn a_global_flag_never_defeats_bareness() {
-        assert!(eval_bare_from_full(&["spoolway", "-C", "/tmp", "eval"]));
-        assert!(eval_bare_from_full(&["spoolway", "eval", "-C", "/tmp"]));
-        assert!(eval_bare_from_full(&["spoolway", "--json", "eval"]));
-        assert!(!eval_bare_from_full(&[
-            "spoolway", "-C", "/tmp", "eval", "--csv"
-        ]));
     }
 
     /// `eval --month` was a deprecated alias for the removed `spend --month`

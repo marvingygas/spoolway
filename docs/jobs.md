@@ -54,9 +54,9 @@ With no job enabled, an empty queue stops the run as usual. See
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
-`spoolway jobs` opens the screen. It is the only thing that writes a job. The left pane lists
-every job from both stores. The right pane shows the highlighted job: its routine, schedule,
-pipeline, scope, next firing, last firing, and the documents it queues.
+Bare `spoolway`'s jobs tab opens this screen. It is the only thing that writes a job. The left
+pane lists every job from both stores. The right pane shows the highlighted job: its routine,
+schedule, pipeline, scope, next firing, last firing, and the documents it queues.
 
 | Key | What it does |
 |---|---|
@@ -125,11 +125,13 @@ One name in both stores is refused.
 ## Usage
 
 ```
-spoolway jobs                      # the screen: write, edit, pause, delete, fire
+spoolway jobs                      # prints usage
 spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 spoolway jobs run <name>           # fire one job now
 ```
+
+Bare `spoolway`'s jobs tab is where a job is written, edited, paused or deleted.
 
 ```
 NAME           SCOPE    SCHEDULE      PIPELINE    NEXT        LAST

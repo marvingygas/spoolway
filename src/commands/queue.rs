@@ -2416,12 +2416,13 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
 
 // ----------------------------------------------------------------- the screen
 //
-// Bare `spoolway queue` opens this rather than listing anything: the queue's
-// own subcommands are unchanged, but where the work actually enters the
-// queue used to be an agent skill typing `queue add --from` on a human's say-
-// so is now this screen, reading the same task documents any producer writes
-// into the pending directory and submitting through the very same `--from`
-// path below. Nothing here decides a split or a pipeline — that stayed with
+// Bare `spoolway`'s queue tab is the only thing that opens this any more —
+// `spoolway queue` bare now prints its usage instead. The queue's own
+// subcommands are unchanged, but where the work actually enters the queue
+// used to be an agent skill typing `queue add --from` on a human's say-so is
+// now this screen, reading the same task documents any producer writes into
+// the pending directory and submitting through the very same `--from` path
+// below. Nothing here decides a split or a pipeline — that stayed with
 // whoever wrote the documents; the screen's whole job is picking which
 // already-written groups go, and when.
 //
@@ -2447,9 +2448,9 @@ use super::routines::{RoutineFolder, RoutineTask};
 
 /// Which pane a `Char(' ')` or an arrow acts on.
 ///
-/// `pub(super)` because the `spoolway jobs` screen reuses this module's
+/// `pub(super)` because bare `spoolway`'s jobs tab reuses this module's
 /// routines browser — its keys and its navigation — to pick a job's target
-/// — see [`super::jobs::jobs_screen`].
+/// — see [`super::jobs::jobs_tab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
     Groups,
@@ -2776,8 +2777,8 @@ fn queued_panel(ids: &[String], tickets: &[String]) -> Mode {
 enum ScreenExit {
     Quit,
     /// `←`, `→` or `q` while browsing, inside bare `spoolway`'s queue tab —
-    /// see [`crate::screen::shell::leave_on`]. Never reached from
-    /// `spoolway queue` on its own, where no shell is hosting the screen.
+    /// see [`crate::screen::shell::leave_on`]. Never reached outside that
+    /// tab, where nothing is hosting the screen to hand a key back to.
     Leave(crate::screen::shell::Leave),
 }
 
@@ -3069,7 +3070,7 @@ fn group_score(group: &Group, query: &str) -> Option<i64> {
     best.filter(|&s| s >= super::pending::MATCH_FLOOR)
 }
 
-/// What `queue_screen` prints instead of opening — or `None` when there is
+/// What the queue tab holds as its opening message — or `None` when there is
 /// nothing wrong with the pending directory worth saying first.
 ///
 /// An empty pending directory is not one of those things. The screen opens
@@ -3093,7 +3094,7 @@ fn group_score(group: &Group, query: &str) -> Option<i64> {
 /// the ordinary empty-pending case together with both the queue-only and
 /// archive-only ones.
 ///
-/// Pulled out of [`queue_screen`] so this can be checked without a real
+/// Pulled out of [`queue_tab`] so this can be checked without a real
 /// terminal or a captured stdout — the same split `skeleton_document` makes
 /// from `print_skeleton_document`.
 fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
@@ -3128,69 +3129,15 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
     None
 }
 
-/// Open the queue screen: list every group waiting in the pending directory
-/// and the queue directory, let a person choose which to queue and where to
-/// gate their tasks, and submit the chosen documents through
-/// [`validate_batch`] — the same validation `queue add --from` runs — with
-/// nothing drawn between `enter` and the write but the tool-requirements
-/// gate, when the hook declares a tool this machine cannot meet.
+/// Bare `spoolway`'s queue tab: the same screen `spoolway queue` used to open
+/// on its own, over the terminal the shell around it already holds — so no
+/// guard and no `ctrl-c` handler of its own. Answers the [`Leave`] that ended
+/// it.
 ///
-/// Degrades rather than crashes with no terminal to drive: [`TermGuard`]
-/// only changes stdin's mode on a real tty, so a redirected or piped stdin
-/// is read exactly as written, and running out of it — `read_key` returning
-/// `None`, the same as `ctrl-c` caught and noticed by `wait_for_key` —
-/// ends the screen rather than blocking on a read that will never come.
-/// That is also what lets the end-to-end suite
-/// drive the submit path headlessly: a script's `printf '...' | spoolway
-/// queue` plays a key sequence in and the screen ends the moment the pipe is
-/// empty.
-///
-/// [`TermGuard`]: crate::platform::TermGuard
-pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> Result<()> {
-    let groups = super::pending::list_groups(repo)?;
-    if let Some(msg) = opening_message(repo, &groups) {
-        println!("{msg}");
-        return Ok(());
-    }
-    // Read once here rather than lazily on the first `r` — the same
-    // up-front read `groups` gets, and cheap for the same reason: a
-    // routines tree is at most a handful of small documents.
-    let routines = super::routines::list_routines(repo)?;
-
-    let mut stdin = crate::screen::RawStdin;
-    let mut stdout = std::io::stdout();
-
-    // Installed before the guard takes the terminal, the same order
-    // `commands::dispatch` uses for its own board: a `ctrl-c` between the two
-    // calls would otherwise kill the process with the terminal already raw
-    // and nothing left to restore it.
-    crate::platform::stop::catch_interrupt();
-
-    // `_term` is a real binding rather than a `_` wildcard so it lives to the
-    // end of the screen, and its own drop drains stdin before restoring the
-    // mode — nothing typed at the screen leaks into the shell prompt. How the
-    // screen ended changes nothing here: `Leave` only ever comes back from a
-    // hosted screen, and this one is not — see `ScreenExit::Leave`.
-    let _term = crate::platform::TermGuard::new();
-    run_screen(
-        repo,
-        pipelines,
-        cwd,
-        groups,
-        routines,
-        &mut stdin,
-        &mut stdout,
-    )?;
-    Ok(())
-}
-
-/// Bare `spoolway`'s queue tab: the same screen [`queue_screen`] opens, over
-/// the terminal the shell around it already holds — so no guard and no
-/// `ctrl-c` handler of its own. Answers the [`Leave`] that ended it.
-///
-/// Where `spoolway queue` prints its opening message and ends, the tab has a
-/// strip and three other tabs to keep drawing, so the message is held on the
-/// tab as its [`Mode::Outcome`] instead, closed like any other.
+/// Where the old standalone screen printed its opening message and ended,
+/// the tab has a strip and three other tabs to keep drawing, so the message
+/// is held on the tab as its [`Mode::Outcome`] instead, closed like any
+/// other.
 ///
 /// `on_open` is what the screen has to say the moment it opens — the sync
 /// gate and the update notice, see [`crate::screen::shell::OnOpen`] — shown
@@ -3226,6 +3173,11 @@ pub(crate) fn queue_tab(
     })
 }
 
+// Only the tests below open the screen through a fresh `ScreenState` any
+// more — `spoolway queue` no longer does, and `queue_tab` needs the opening
+// message held on its own state instead (see `queue_tab`'s `opening_message`
+// call), so this wrapper has no production caller left.
+#[cfg(test)]
 fn run_screen(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -3301,8 +3253,8 @@ fn run_screen_from(
         }
 
         // No mode reads a quit key of its own any more — `ctrl-c` is the one
-        // way out of `spoolway queue`, caught above `run_screen` and noticed
-        // by `wait_for_key` — so every mode's match is just its own keys,
+        // way out, caught by bare `spoolway`'s own screen and noticed by
+        // `wait_for_key` — so every mode's match is just its own keys,
         // with `q` falling to whatever an unrecognised character already
         // does there. Only `Mode::Filter` gives that character any meaning of
         // its own, appending it to the query the same as any other letter —
@@ -8078,10 +8030,10 @@ mod tests {
         );
     }
 
-    /// Where `spoolway queue` prints its opening message and ends, the queue
-    /// tab holds it on screen under the strip, as a popup over the tab —
-    /// every key but `enter` is the popup's to ignore, `enter` closes it onto
-    /// the ordinary screen, and `←` then leaves.
+    /// Where the old standalone screen printed its opening message and
+    /// ended, the queue tab holds it on screen under the strip, as a popup
+    /// over the tab — every key but `enter` is the popup's to ignore, `enter`
+    /// closes it onto the ordinary screen, and `←` then leaves.
     #[test]
     fn the_queue_tab_holds_its_opening_message_instead_of_ending() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
@@ -8162,8 +8114,9 @@ mod tests {
         assert!(last.contains("[enter] close"), "{last}");
     }
 
-    /// Drawn by `spoolway queue` itself, nothing hosts the screen: no strip,
-    /// no `q` on the key line, and `←` leaves nothing.
+    /// Driven through [`run_screen`] directly rather than through the tab,
+    /// so nothing hosts the screen: no strip, no `q` on the key line, and
+    /// `←` leaves nothing.
     #[test]
     fn unhosted_the_screen_draws_no_strip_and_the_arrows_do_not_leave() {
         let repo = fixture("screen-unhosted");
@@ -10411,11 +10364,11 @@ mod tests {
 
     /// Nothing in the pending directory is not an error — the screen opens
     /// onto an empty list rather than refusing. Driven through `run_screen`
-    /// with a scripted input, never `queue_screen`: that one reads the test
-    /// process's own stdin, and whether it ever returns depends on what the
-    /// harness handed it — a closed `/dev/null` ends the screen at once, a
-    /// pipe with a writer that never closes keeps it redrawing forever,
-    /// which is how this test once hung `cargo test` for ten minutes.
+    /// with a scripted input, never the process's own stdin: whether that
+    /// ever returns depends on what the harness handed it — a closed
+    /// `/dev/null` ends the screen at once, a pipe with a writer that never
+    /// closes keeps it redrawing forever, which is how this test once hung
+    /// `cargo test` for ten minutes.
     #[test]
     fn opening_the_screen_with_nothing_pending_does_not_error() {
         let repo = fixture("screen-nothing-pending");
@@ -10552,7 +10505,7 @@ mod tests {
     }
 
     /// An empty pending directory used to be indistinguishable from a project
-    /// with nothing queued at all, and `queue_screen` printed "No task
+    /// with nothing queued at all, and the screen printed "No task
     /// documents" instead of opening. A group whose documents have already
     /// been submitted still has a row — built from the queue directory — so
     /// the screen has something to open onto even here.

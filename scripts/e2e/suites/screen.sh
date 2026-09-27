@@ -34,6 +34,11 @@ export SPOOLWAY_SKIP_VERSION_CHECK=1
 new_repo "$LIVE/proj"
 configure_project plan/live
 
+# A fixture is never synced — every other command asks that only on a
+# terminal — so the screen would open on its sync popup, which takes every
+# key too. Brought up to date first, the same as `lib.sh`'s `on_screen` does.
+must "the project synced" "$SPOOLWAY" sync
+
 # One pending group, so the queue tab has a row of its own to draw.
 BODY="$LIVE/body.md"
 task_body "$BODY"
@@ -122,8 +127,8 @@ sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "Dispatcher already running" "$SECOND.plain"
 lacks "without drawing a screen" "dispatch        queue        jobs        eval" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
-  "Dispatcher already running" "$SPOOLWAY" dispatch --plain
-exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch --plain
+  "Dispatcher already running" "$SPOOLWAY" dispatch
+exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
 
 wait "$HELD_PID"
 if poll_until 10 bash -c '! kill -0 "$(head -1 "$1" 2>/dev/null)" 2>/dev/null' _ "$SCREEN_LOCK"

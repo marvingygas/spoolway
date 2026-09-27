@@ -2,10 +2,10 @@
 # CLI behaviour that needs a real process, a real project or a real forge,
 # and belongs to no domain of its own: scaffolding (`init`, `sync`), the
 # contracts (`task contract`, `pipeline contract`, `prompt contract`), the
-# queue screen read off a real pipe, the archive's own rows, `config`'s
-# checkout/project asymmetry, the overrides layer resolved through a linked
-# worktree, housekeeping's retention sweep, and the confirm-dialog gate driven
-# over a real pty.
+# queue tab of bare `spoolway` driven over a real pty, the archive's own rows,
+# `config`'s checkout/project asymmetry, the overrides layer resolved through
+# a linked worktree, housekeeping's retention sweep, and the confirm-dialog
+# gate driven over a real pty.
 #
 # This suite used to also assert the `agent list`/`agent verify` output, the
 # transcript an ambient session is read from, and every refusal `pipeline
@@ -779,11 +779,11 @@ says "and still holds the pass for the person who opens the pane" \
 rm -f .spoolway/pipelines/gate-check.yml
 
 # ------------------------------------------------------------- the queue screen
-# The one thing no unit test can reach: `spoolway queue` reading real keystrokes
-# off a pipe, submitting a real group, and clearing that group's documents off
-# a real disk. `run_screen` is driven headlessly in Rust already — what is only
-# provable here is that the whole binary, invoked as a person invokes it, does
-# the same thing end to end.
+# The one thing no unit test can reach: bare `spoolway`'s queue tab reading
+# real keystrokes off a pipe, submitting a real group, and clearing that
+# group's documents off a real disk. `run_screen` is driven headlessly in Rust
+# already — what is only provable here is that the whole binary, invoked as a
+# person invokes it, does the same thing end to end.
 #
 # Two documents of one group, and a third of another, so "removes exactly that
 # group's documents" has something to be wrong about.
@@ -799,9 +799,9 @@ pending_doc screen-two "$BODY" "group: screen-batch" \
 # space selects the highlighted group, enter submits it and draws the
 # `queued` popup over the tab, which only `enter` closes — so the `esc` after
 # it is taken by the popup. The screen ends on its own the moment the
-# pipe runs dry — see `queue_screen`'s own doc comment on why a pipe is read
-# exactly as a terminal would be.
-printf ' \r\x1b' | "$SPOOLWAY" queue >/dev/null 2>&1
+# pipe runs dry — see `on_screen` in `lib.sh` on why the keys arrive on a
+# pipe while the screen draws to a pty.
+on_screen ' \r\x1b' /dev/null
 
 works "the screen queues the first task of the group it submitted" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
@@ -829,7 +829,7 @@ works "its document is back in the pending directory" \
 works "and gone from the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
 
-printf ' \r\x1b' | "$SPOOLWAY" queue >"$LIVE/screen-requeue.out" 2>&1
+on_screen ' \r\x1b' "$LIVE/screen-requeue.out"
 
 works "screen-two reaches the queue again" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
@@ -880,7 +880,7 @@ works "it never touched the pending directory" \
 # cleared every document out of it — so this is also the one place proving
 # the screen opens on an empty pending directory rather than reporting "No
 # task documents", so long as the queue itself still holds a group.
-printf 'h' | "$SPOOLWAY" queue >"$LIVE/queue-screen-only.out" 2>&1
+on_screen 'h' "$LIVE/queue-screen-only.out"
 if grep -q "No task documents" "$LIVE/queue-screen-only.out"; then
   bad "a group with nothing left in pending still opens the screen"
   sed 's/^/        /' "$LIVE/queue-screen-only.out"
@@ -914,7 +914,7 @@ works "and landed in the archive" \
 # python snippet below splits the raw output back into the four frames this
 # draws — opening, then one per press — rather than grepping the whole file,
 # which could never tell "shown once, then hidden again" from "never shown".
-printf 'hhh' | "$SPOOLWAY" queue >"$LIVE/queue-h-cycle.out" 2>&1
+on_screen 'hhh' "$LIVE/queue-h-cycle.out"
 if python3 - "$LIVE/queue-h-cycle.out" arch-row <<'PY'
 import sys
 

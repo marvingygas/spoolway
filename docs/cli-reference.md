@@ -71,8 +71,10 @@ The open tab's label is in normal ink. The other three labels and both arrows ar
 Inside the eval tab's filter panel and the queue tab's routines view, `←` and `→` keep their
 own meaning instead.
 
-Each tab draws exactly what its own command draws, under the strip: `spoolway dispatch`'s
-board, `spoolway queue`, `spoolway jobs` and `spoolway eval`.
+Each tab draws its own screen, under the strip. The dispatch tab draws the board, from a
+`spoolway dispatch` child it starts and stops. The queue, jobs and eval tabs draw the queue,
+jobs and eval screens described below. Typed bare, `spoolway queue`, `spoolway jobs` and
+`spoolway eval` print their usage or their tables instead.
 
 The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
 says, asking the overrides and warnings gates as popups first, each only when it has something
@@ -86,13 +88,18 @@ A child the tab started stays up on an empty queue and the board reads `nothing 
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
 a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`.
 
+<img src="screenshots/dispatch.png" alt="the dispatcher board">
+
 With stdout not a terminal — `spoolway | cat`, a script — it prints the grouped help instead,
 the same as `spoolway --help`.
 
 ### `spoolway queue`
 
-Open the queue screen. The left pane lists one row per `group:` across the pending, queue and
-archive directories. The right pane lists the highlighted group's tasks.
+With no subcommand, prints its usage and exits, the same as `spoolway queue --help`.
+
+Bare `spoolway`'s queue tab draws the queue screen. The left pane lists one row per `group:`
+across the pending, queue and archive directories. The right pane lists the highlighted group's
+tasks.
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
@@ -230,26 +237,17 @@ pipeline-handover             1 open — pipeline-and-prompts
 
 ### `spoolway dispatch`
 
-Run the pipeline. It draws the live board and keeps running until the queue is empty.
-
-<img src="screenshots/dispatch.png" alt="the dispatcher board">
-
-| Key | What it does |
-|---|---|
-| `↑` `↓` | Move the cursor |
-| `r` / `R` | Resume the highlighted paused or blocked task / every paused task |
-| `p` / `P` | Interrupt and park the highlighted task / every live lane |
-| `u` / `U` | Move the highlighted queued task, and every unstarted task that depends on it, back to pending / do the same for every unstarted task in the run |
-| `ctrl-c` | Stop the run |
+Run the pipeline. It prints one line per pass and keeps running until the queue is empty.
+`ctrl-c` stops the run. Bare `spoolway`'s dispatch tab draws the board instead of printing —
+see [`spoolway`](#spoolway).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--plain` | | Print one line per pass. The board is not drawn |
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
 | `--attended` | | Park blocked tasks for a person, whatever the config says |
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
-No flag exempts it, `--plain` included. See [The dispatcher](dispatcher.md#running-it).
+See [The dispatcher](dispatcher.md#running-it).
 
 Before anything else, each pre-loop check prints its own line as it returns:
 
@@ -265,9 +263,8 @@ Before anything else, each pre-loop check prints its own line as it returns:
     ✓ backend checkout
 ```
 
-A check still running names what it is waiting on, in place of the `✓`. `--plain` prints none
-of this; it keeps its own one-line-per-pass log instead. `backend available` names the backend,
-with no version.
+A check still running names what it is waiting on, in place of the `✓`. `backend available`
+names the backend, with no version.
 
 Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
 refuses the whole start and dispatches nothing:
@@ -280,7 +277,7 @@ Nothing was dispatched.
 ```
 
 If another dispatcher, or a screen opened with bare `spoolway`, already holds the project, it
-prints the same line and exits without drawing a board:
+prints the same line and exits:
 
 ```
 Dispatcher already running
@@ -357,7 +354,9 @@ is configured or the hook has no `fetch` branch. See
 
 ### `spoolway jobs`
 
-Open the jobs screen. It is the only place that writes a cron job.
+With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
+
+Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writes a cron job.
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
@@ -389,12 +388,13 @@ Fire one job now. Its schedule is unchanged.
 
 ### `spoolway eval`
 
-What each pipeline costs to run, grouped one way at a time. Bare, in a terminal, it opens the
-eval screen. With any flag, or when stdout is not a terminal, it prints the lanes table.
+What each pipeline costs to run, grouped one way at a time. It always prints the lanes table.
 
 ```
 spoolway eval
 ```
+
+Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 
 <img src="screenshots/eval.png" alt="the eval screen">
 
@@ -901,22 +901,21 @@ By default it prints only failures, notes and a closing line. A failing run exit
 
 ### `spoolway herdr bind`
 
-Print the four `[[keys.command]]` blocks this writes into herdr's
+Print the three `[[keys.command]]` blocks this writes into herdr's
 `~/.config/herdr/config.toml`, then write them once confirmed.
 
 ```
 $ spoolway herdr bind
 
-  ~/.config/herdr/config.toml — 4 bindings to add
+  ~/.config/herdr/config.toml — 3 bindings to add
 
   prefix+alt+s  popup   spoolway init
-  prefix+alt+d  popup   spoolway dispatch
-  prefix+alt+q  popup   spoolway queue
+  prefix+alt+d  popup   spoolway
   prefix+alt+k  popup   spoolway doctor
 
   Write them? [y/N] y
 
-  wrote 4 bindings to ~/.config/herdr/config.toml
+  wrote 3 bindings to ~/.config/herdr/config.toml
   reloaded the running herdr config
 ```
 
@@ -924,7 +923,7 @@ $ spoolway herdr bind
 |---|---|---|
 | `--yes` | | Answer the confirmation yes without asking |
 
-Each block opens `init`, `dispatch`, `queue` or `doctor` as an 80%×80% popup. A key already
+Each block opens `init`, bare `spoolway` or `doctor` as an 80%×80% popup. A key already
 bound, to this or to anything else, is skipped and reported, never overwritten. The command
 each block runs is `spoolway`, when that resolves on `PATH`; otherwise the absolute path to the
 plugin's own binary, read off `herdr plugin list --json`. After a successful write it runs
@@ -939,13 +938,13 @@ comment and table untouched.
 ```
 $ spoolway herdr unbind
 
-  ~/.config/herdr/config.toml — 4 bindings to remove
+  ~/.config/herdr/config.toml — 3 bindings to remove
 
-  prefix+alt+s   prefix+alt+d   prefix+alt+q   prefix+alt+k
+  prefix+alt+s   prefix+alt+d   prefix+alt+k
 
   Remove them? [y/N] y
 
-  removed 4 bindings from ~/.config/herdr/config.toml
+  removed 3 bindings from ~/.config/herdr/config.toml
   reloaded the running herdr config
 ```
 

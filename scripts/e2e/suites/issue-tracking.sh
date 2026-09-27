@@ -333,7 +333,7 @@ must "the hook is restored to the plain one" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 
 # ------------------------------------------ the queue tab asks before `open`
-# `spoolway queue`'s `enter` no longer runs the hook straight away: with
+# The queue tab's `enter` no longer runs the hook straight away: with
 # tracking on, it asks first — `[enter] create and queue`, `[n] queue only`,
 # `[esc] back` — over every task in the batch. What only this suite can say
 # is that `n` really does keep the hook's process from ever starting: the
@@ -350,7 +350,7 @@ pending_doc asked-b "$BODY" "group: asked" "touches: [notes/asked-b.md]" \
 TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
 
 ASK_ESC="$LIVE/ask-esc.out"
-printf ' \r\x1b' | "$SPOOLWAY" queue 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$ASK_ESC"
+on_screen ' \r\x1b' "$ASK_ESC"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_ESC"
 has "enter on the queue tab asks before any ticket is opened" \
   "create 2 issues on open for asked" "$ASK_ESC"
 has "in a popup over the queue tab" "┌─ issue tracking " "$ASK_ESC"
@@ -363,7 +363,7 @@ works "and the hook was never called" \
   bash -c '[ ! -e "$1/task-file.asked-a" ] && [ ! -e "$1/task-file.asked-b" ]' _ "$TRACKING"
 
 ASK_N="$LIVE/ask-n.out"
-printf ' \rn' | "$SPOOLWAY" queue 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$ASK_N"
+on_screen ' \rn' "$ASK_N"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_N"
 works "n on the question queues the group" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
 works "the whole of it" test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-b.md"
@@ -377,7 +377,7 @@ has "the result says what was queued" "queued 2 tasks" "$ASK_N"
 pending_doc asked-yes "$BODY" "group: asked-yes" "touches: [notes/asked-yes.md]" \
   "group_description: one task queued through the question's enter"
 ASK_YES="$LIVE/ask-yes.out"
-printf ' \r\r' | "$SPOOLWAY" queue 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$ASK_YES"
+on_screen ' \r\r' "$ASK_YES"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_YES"
 works "enter on the question queues the group" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
 works "after calling the hook for it" test -e "$TRACKING/task-file.asked-yes"

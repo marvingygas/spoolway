@@ -145,9 +145,9 @@ pub(crate) fn strip_rows() -> usize {
 /// What `key` means to the shell, read by a tab's screen only while nothing
 /// of its own is open — a popup, a filter, a picker — or for a key the open
 /// sub-mode reads nothing of its own on, so every key a sub-mode reads keeps
-/// its meaning there. `None` with no shell around the
-/// screen at all: `spoolway queue` on its own has no neighbouring tab to go
-/// to, and `q` there keeps whatever meaning it already had.
+/// its meaning there. `None` with no shell around the screen at all — a
+/// standalone `run_screen` driven directly by a test has no neighbouring tab
+/// to go to, and `q` there keeps whatever meaning it already had.
 pub(crate) fn leave_on(key: Key) -> Option<Leave> {
     hosted()?;
     match key {
@@ -249,10 +249,11 @@ fn strip_line(open: Tab, width: usize) -> String {
 /// this returns, so it is gone the moment the screen quits.
 ///
 /// Holds the one [`crate::platform::TermGuard`] every tab draws under and
-/// installs the one `ctrl-c` handler, in the same order `queue_screen` does
-/// for its own — see there for why the order matters. Opens on the queue tab,
-/// with the sync gate and `update` — the update notice's line, which `main`
-/// holds back from stderr for this — as popups over it.
+/// installs the one `ctrl-c` handler ahead of it: a `ctrl-c` between the two
+/// would otherwise kill the process with the terminal already raw and
+/// nothing left to restore it. Opens on the queue tab, with the sync gate
+/// and `update` — the update notice's line, which `main` holds back from
+/// stderr for this — as popups over it.
 ///
 /// A dispatcher the dispatch tab started stops when this returns, however it
 /// returns — see [`super::dispatcher::Dispatcher`]'s own `Drop`.

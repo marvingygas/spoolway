@@ -57,14 +57,14 @@ echo $$ > "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 # the generic 1 an error gets — and each the exact same line, with no count
 # behind it that eventually gives up and no count that lets a later one
 # through either.
-# `--plain`, on every call below: a start that finds the lock held returns
-# at once with exit 4 and one line either way, and `--plain` keeps every call
-# here to exactly the plain output and the exit code the suite is actually
-# asserting on.
+# A start that finds the lock held returns at once with exit 4 and one
+# line either way — `dispatch` prints a line per pass now, not a board, so
+# every call here is exactly the plain output and the exit code the suite
+# is actually asserting on.
 for n in 1 2 3 4 5; do
-  exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch --plain
+  exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch
   says "start $n prints the same line every time" \
-    "Dispatcher already running" "$SPOOLWAY" dispatch --plain
+    "Dispatcher already running" "$SPOOLWAY" dispatch
 done
 
 rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
@@ -75,7 +75,7 @@ rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 # Exit 3 every time, never the lock's own exit 4.
 for n in 1 2 3 4 5 6; do
   exit_code "an empty queue is an ordinary ending, not a refusal (start $n)" 3 \
-    "$SPOOLWAY" dispatch --plain
+    "$SPOOLWAY" dispatch
 done
 
 # ------------------------------- state that already exists: a workspace on the checkout
@@ -125,7 +125,7 @@ task_doc selfsweep.md selfsweep "$SELFSWEEP_BODY" "group: demo" \
 must "a task queues behind the planted workspace" "$SPOOLWAY" queue add --from selfsweep.md
 
 exit_code "the run settles once its one step passes, with a workspace on the checkout already present" 0 \
-  "$SPOOLWAY" dispatch --plain
+  "$SPOOLWAY" dispatch
 
 # The planted rows by name, not the table's line count: the task's own tab —
 # renamed to its bare slug, `selfsweep`, the moment it is cut, rather than
@@ -176,10 +176,10 @@ task_doc identity.md identity identity-body.md "group: demo" \
 must "a task queues" "$SPOOLWAY" queue add --from identity.md
 
 exit_code "no git identity refuses outright, not an empty queue" 1 \
-  "$SPOOLWAY" dispatch --plain
-says "refusing to start" "refusing to start" "$SPOOLWAY" dispatch --plain
-says "naming the missing key" "user.email" "$SPOOLWAY" dispatch --plain
+  "$SPOOLWAY" dispatch
+says "refusing to start" "refusing to start" "$SPOOLWAY" dispatch
+says "naming the missing key" "user.email" "$SPOOLWAY" dispatch
 says "and a command that sets it" "git config --global user.email" \
-  "$SPOOLWAY" dispatch --plain
+  "$SPOOLWAY" dispatch
 
 finish

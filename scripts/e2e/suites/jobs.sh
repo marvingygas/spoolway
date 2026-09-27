@@ -32,27 +32,14 @@ configure_project plan/live
 BODY="$LIVE/body.md"
 task_body "$BODY"
 
-# A one-shot board dispatcher — the same shape `disaster.sh`'s own
-# `one_shot_start_board`/`one_shot_stop` use, repeated here rather than
-# shared: this suite needs it once, to read the dispatcher board's job
-# ledger, which `dispatcher_start`'s own `--plain` mode never draws.
-one_shot_start_board() {
-  local pidfile="$LIVE/one-shot-board.pid"
-  rm -f "$pidfile"
-  setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch \
-    >>"$E2E_DISPATCH_LOG" 2>&1 </dev/null &
-  poll_until 10 test -s "$pidfile" || {
-    printf '  \033[31mSETUP\033[0m the one-shot board dispatcher never started\n' >&2
-    exit 2
-  }
-  cat "$pidfile"
-}
-one_shot_stop() {
-  local pid=$1
-  [ -n "$pid" ] || return 0
-  kill -INT "$pid" 2>/dev/null
-  poll_while 15 kill -0 "$pid"
+# The board's job ledger is read off bare `spoolway`'s dispatch tab, kept open
+# by `lib.sh`'s `screen_start` and walked onto the tab by `screen_board`. The
+# ledger is drawn whether or not the tab is dispatching, so it never starts a
+# run of its own.
+BOARD_LOG="$LIVE/board.out"
+board_open() {
+  screen_start "$BOARD_LOG"
+  screen_board
 }
 
 # The routine a job points at: two documents straight in `nightly/`, the
@@ -119,11 +106,10 @@ dispatcher_stop
 # above the key controls — whether the queue is empty or has work in it. No
 # `covers:` tag here either, for the same reason the top of this file gives.
 #
-# `nightly-audit` moves off `* * * * *` first, straight in the store the same
-# way it was written: this section's own one-shot board is a real dispatcher,
-# and a job still due every minute would refire into the very queue this
-# section empties out from under it, racing the "empty board" case below
-# against its own schedule.
+# Read off the dispatch tab with nothing dispatching, so the ledger is all
+# that is being watched. `nightly-audit` still moves off `* * * * *` first,
+# straight in the store the same way it was written, so no job is due while
+# the board is read at all.
 cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
 [jobs.nightly-audit]
 schedule = "0 3 * * *"
@@ -139,65 +125,51 @@ task_doc "$LIVE/ledger-busy.md" ledger-busy "$BODY" "group: ledger-busy"
 must "a plain task queues, to keep the board busy" \
   "$SPOOLWAY" queue add --from "$LIVE/ledger-busy.md"
 
-BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
-BOARD_PID=$(one_shot_start_board)
-if wait_for_text 15 "$E2E_DISPATCH_LOG" "2 active"; then
+BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
+board_open
+if poll_until 15 screen_drew_since "$BEFORE" "2 active"; then
   ok "a busy board draws the job ledger"
 else
   bad "a busy board draws the job ledger"
 fi
-tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/busy-board.out"
-if grep -qF "2 active" "$LIVE/busy-board.out" \
-   && grep -qF "nightly-audit" "$LIVE/busy-board.out" \
-   && grep -qF "release-readiness" "$LIVE/busy-board.out"; then
+tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/busy-board.out"
+if grep -qaF "2 active" "$LIVE/busy-board.out" \
+   && grep -qaF "nightly-audit" "$LIVE/busy-board.out" \
+   && grep -qaF "release-readiness" "$LIVE/busy-board.out"; then
   ok "the busy board's ledger names both enabled jobs"
 else
   bad "the busy board's ledger names both enabled jobs"
   sed 's/^/        /' "$LIVE/busy-board.out"
 fi
-one_shot_stop "$BOARD_PID"
+screen_stop
 
 # Empty the queue outright — everything this suite has queued so far, fired
 # copies included — so the very same board is read again with nothing left
 # to work on.
 rm -f "$SPOOLWAY_PROJECT_HOME"/queue/*.md
 
-BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
-BOARD_PID=$(one_shot_start_board)
-if wait_for_text 15 "$E2E_DISPATCH_LOG" "queue is empty"; then
+BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
+board_open
+if poll_until 15 screen_drew_since "$BEFORE" "queue is empty"; then
   ok "an empty board still says why it is resident"
 else
   bad "an empty board still says why it is resident"
 fi
-tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/empty-board.out"
-if grep -qF "2 active" "$LIVE/empty-board.out" \
-   && grep -qF "nightly-audit" "$LIVE/empty-board.out" \
-   && grep -qF "release-readiness" "$LIVE/empty-board.out"; then
+tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/empty-board.out"
+if grep -qaF "2 active" "$LIVE/empty-board.out" \
+   && grep -qaF "nightly-audit" "$LIVE/empty-board.out" \
+   && grep -qaF "release-readiness" "$LIVE/empty-board.out"; then
   ok "the empty board's ledger names both enabled jobs too"
 else
   bad "the empty board's ledger names both enabled jobs too"
   sed 's/^/        /' "$LIVE/empty-board.out"
 fi
-# `spoolway dispatch` prints one plain "queue is empty" line at process
-# startup, before the board ever draws a frame — the same announcement
-# `--plain` prints, "next: ..." line included, and a real terminal never
-# shows it past the first redraw's screen clear. Only the drawn frames
-# themselves are this task's own claim, so the check reads past the first
-# `\x1b[2J\x1b[H` rather than the whole capture.
-if python3 - "$LIVE/empty-board.out" <<'PY'
-import sys
-data = open(sys.argv[1], "rb").read()
-frames = data.split(b"\x1b[2J\x1b[H")[1:]
-body = b"\x1b[2J\x1b[H".join(frames)
-sys.exit(1 if b"next: nightly-audit," in body else 0)
-PY
-then
-  ok "the empty-queue copy does not repeat a job's next firing the ledger already names"
-else
-  bad "the empty-queue copy does not repeat a job's next firing the ledger already names"
-  sed 's/^/        /' "$LIVE/empty-board.out"
-fi
-one_shot_stop "$BOARD_PID"
+# The plain run prints a "next: ..." line between its own empty-queue lines;
+# the board leaves it out, since its ledger already names every job's next
+# firing.
+lacks "the empty-queue copy does not repeat a job's next firing the ledger already names" \
+  "next: nightly-audit," "$LIVE/empty-board.out"
+screen_stop
 
 # `spoolway doctor` names a job whose expression will not parse, one whose
 # expression parses but never comes round, one whose routine is gone, and one

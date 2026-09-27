@@ -220,7 +220,7 @@ chmod +x "$LOWVER_BIN/gh"
 pending_doc gate-esc "$BODY" "group: gate-esc" "touches: [notes/gate-esc.md]"
 
 GATE_ESC_OUT="$LIVE/gate-esc.out"
-printf ' \r\x1b' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ESC_OUT" 2>&1
+on_screen ' \r\x1b' "$GATE_ESC_OUT" PATH="$LOWVER_BIN:$PATH"
 has "the gate draws over an unmet gh version" \
   "issue tracking is not supported." "$GATE_ESC_OUT"
 has "naming the declared floor" "gh >= 2.97.0" "$GATE_ESC_OUT"
@@ -233,7 +233,7 @@ works "and nothing reached the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
 
 GATE_ENTER_OUT="$LIVE/gate-enter.out"
-printf ' \r\rn' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ENTER_OUT" 2>&1
+on_screen ' \r\rn' "$GATE_ENTER_OUT" PATH="$LOWVER_BIN:$PATH"
 has "the gate draws the same way when enter is pressed instead" \
   "issue tracking is not supported." "$GATE_ENTER_OUT"
 works "enter over the gate queues the batch anyway" \

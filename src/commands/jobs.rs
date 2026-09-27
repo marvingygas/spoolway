@@ -1,8 +1,8 @@
-//! `spoolway jobs`: `jobs list` and `jobs run` for scripts, and the bare
-//! `spoolway jobs` screen a person writes a job from. The screen is the only
-//! thing that writes a job — it walks the routine, the cron expression and the
-//! pipeline, then saves through [`crate::jobs::write`]. No `jobs add`, no
-//! config key.
+//! `spoolway jobs`: `jobs list` and `jobs run` for scripts, and bare
+//! `spoolway`'s jobs tab, the screen a person writes a job from. The screen
+//! is the only thing that writes a job — it walks the routine, the cron
+//! expression and the pipeline, then saves through [`crate::jobs::write`]. No
+//! `jobs add`, no config key.
 
 use std::path::{Path, PathBuf};
 
@@ -15,9 +15,7 @@ use super::queue::{
 use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
-use crate::screen::{
-    Key, Notice, PollableRead, RawStdin, key_hint, keys, overlay, pad_to, panel, read_key,
-};
+use crate::screen::{Key, Notice, PollableRead, key_hint, keys, overlay, pad_to, panel, read_key};
 use crate::task::Task;
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
@@ -268,11 +266,12 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The screen. Bare `spoolway jobs` opens it. It lists both stores' jobs,
-// shows the highlighted one in full, and walks three panels — the routines
-// browser (its keys reused from `queue`), a cron field, and a pipeline picker — to
-// write one. `e` edits through the same three, `space` pauses, `x` deletes,
-// `r` fires now.
+// The screen. Bare `spoolway`'s jobs tab is the only thing that opens it any
+// more — `spoolway jobs` bare now prints its usage instead. It lists both
+// stores' jobs, shows the highlighted one in full, and walks three panels —
+// the routines browser (its keys reused from `queue`), a cron field, and a
+// pipeline picker — to write one. `e` edits through the same three, `space`
+// pauses, `x` deletes, `r` fires now.
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the routine → schedule → pipeline
@@ -371,34 +370,9 @@ struct JobsState {
     mode: JobMode,
 }
 
-/// `spoolway jobs` with no subcommand.
-pub fn jobs_screen(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> {
-    let jobs = jobs::load(repo)?;
-    let routines = super::routines::list_routines(repo)?;
-
-    let mut stdin = RawStdin;
-    let mut stdout = std::io::stdout();
-    // Installed before the guard takes the terminal — see `queue_screen`'s
-    // own call for why the order matters.
-    crate::platform::stop::catch_interrupt();
-    // Scoped so raw mode is restored before anything else wants the terminal.
-    let _term = crate::platform::TermGuard::new();
-    // Nothing hosts this screen, so how it ended has nowhere to go.
-    run_jobs_screen(
-        repo,
-        pipelines,
-        cwd,
-        jobs,
-        routines,
-        &mut stdin,
-        &mut stdout,
-    )
-    .map(|_| ())
-}
-
-/// Bare `spoolway`'s jobs tab: the same screen [`jobs_screen`] opens, over
-/// the terminal the shell around it already holds — so no guard and no
-/// `ctrl-c` handler of its own.
+/// Bare `spoolway`'s jobs tab: the same screen `spoolway jobs` used to open
+/// on its own, over the terminal the shell around it already holds — so no
+/// guard and no `ctrl-c` handler of its own.
 pub(crate) fn jobs_tab(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -660,10 +634,10 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
 /// The cursor only ever addresses a real job — the `(new)` row belongs to the
 /// walk, not this state — so `e`, `space`, `x` and `r` are gated on the list
 /// not being empty and always act on `jobs[cursor]`. `n` starts the walk.
-/// Quitting is not among these keys any more — `ctrl-c` is the only way out
-/// of `spoolway jobs`, caught above `run_jobs_screen` rather than read as a
-/// key at all. Inside bare `spoolway`'s jobs tab, `run_jobs_screen` reads `q`
-/// before this is reached.
+/// Quitting is not among these keys any more — `ctrl-c` is caught by bare
+/// `spoolway`'s own screen rather than read as a key at all, and `q` over
+/// the resting list is [`crate::screen::shell::leave_on`]'s to read, ahead
+/// of this handler.
 fn handle_list_key(
     repo: &Repo,
     pipelines: &Pipelines,

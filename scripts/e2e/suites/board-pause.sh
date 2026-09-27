@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The board's confirm-panel keys, driven end to end: real keystrokes read off
-# a real pipe by a real `spoolway dispatch`, over a real headless lane that is
-# genuinely mid-turn.
+# a real pipe by bare `spoolway`'s dispatch tab, dispatching through a real
+# `spoolway dispatch` child, over a real headless lane that is genuinely
+# mid-turn.
 #
 # Everything else about the board is rendering, and `run.sh` says why that is
 # not worth a suite. Two things here are the exception. Answering a panel
@@ -23,18 +24,16 @@
 # it does not disturb the state `R`'s own assertions read, not because
 # anything here is scarce enough to make the order matter.
 #
-# How a key gets in. The board reads stdin itself, between redraws — both
-# while the dispatcher is waiting out its interval and, since the pass-yields
-# task, between a pass's own units of work too, so a key answers at the same
-# rate whether the queue is busy or idle — so this suite runs a
-# dispatcher of its own with the board drawn rather than `lib.sh`'s shared
-# `--plain` supervisor, with a fifo on its stdin. The fifo is opened
-# read-write here (`exec 9<>`) so opening it does not block on a reader, and
-# stays open for the suite's whole life so the board never reads EOF and
-# stops listening.
+# How a key gets in. The dispatch tab reads stdin between redraws, and the
+# dispatcher it started runs as a child of its own, so a key answers at the
+# same rate whether the queue is busy or idle. So this suite keeps bare
+# `spoolway` open on that tab rather than running `lib.sh`'s shared
+# supervisor, with a fifo on its stdin — `lib.sh`'s `screen_start`, which
+# holds the fifo open for as long as the screen is up so it never reads EOF
+# and stops listening.
 #
 # What is asserted is the two things a keypress leaves behind: the panel text
-# in the board's own output, which is redirected to a file here, and the
+# in the board's own frames, which `script` writes to a file here, and the
 # `stage:` in the task document. A live lane is the `hang` mode `agents/pi`
 # already has — it sleeps for five minutes and never reports — reached by
 # seeding `$CTL/<task>` before the task is queued, exactly as `disaster.sh`
@@ -67,8 +66,6 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 BOARD_LOG="$LIVE/board.out"
-BOARD_FIFO="$LIVE/keys"
-BOARD_PID=""
 : > "$BOARD_LOG"
 
 # queue_hang <task-id> [extra frontmatter...]
@@ -94,44 +91,21 @@ queue_idle() {
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
 
-# The dispatcher this suite drives: its own, with the board drawn and a fifo
-# on its stdin. `lib.sh`'s supervisor runs `--plain`, which draws no board and
-# reads no keys, and restarts on its own — neither of which this wants.
+# The board this suite drives: bare `spoolway`'s dispatch tab, kept open by
+# `lib.sh`'s `screen_start` with a fifo on its stdin and dispatching through
+# the child its `enter` starts. `lib.sh`'s resident supervisor runs a plain
+# `spoolway dispatch`, which draws no board and reads no keys.
 board_start() {
-  rm -f "$BOARD_FIFO"
-  mkfifo "$BOARD_FIFO" || { echo "no fifo" >&2; exit 2; }
-  # Read-write, so this open returns without waiting for the board to open
-  # the other end, and the board never sees EOF while the suite still holds
-  # it. A plain `exec 9>` would block here until the reader arrived.
-  exec 9<>"$BOARD_FIFO"
-  local pidfile="$LIVE/board.pid"
-  rm -f "$pidfile"
-  setsid bash -c 'echo $$ >"$1"; exec "$2" dispatch <"$3"' \
-    _ "$pidfile" "$SPOOLWAY" "$BOARD_FIFO" \
-    >>"$BOARD_LOG" 2>&1 &
-  disown
-  poll_until 10 test -s "$pidfile" || {
-    printf '  \033[31mSETUP\033[0m the board dispatcher never started\n' >&2
-    exit 2
-  }
-  BOARD_PID=$(cat "$pidfile")
+  screen_start "$BOARD_LOG"
+  screen_dispatch
 }
 
-board_stop() {
-  local pid=$BOARD_PID
-  BOARD_PID=""
-  [ -n "$pid" ] || return 0
-  kill -TERM -- "-$pid" 2>/dev/null
-  poll_while 5 kill -0 -- "-$pid"
-  kill -KILL -- "-$pid" 2>/dev/null
-  return 0
-}
-trap board_stop EXIT
+board_stop() { screen_stop; }
 
-# One keystroke into the board's stdin. `\x1b` for esc and `\r` for enter are
-# what a terminal actually sends, and `src/screen.rs` decodes them the same
-# way whether the descriptor behind them is a tty or this pipe.
-press() { printf '%s' "$1" >&9; }
+# One keystroke into the board. `\x1b` for esc and `\r` for enter are what a
+# terminal actually sends, and `src/screen.rs` decodes them the same way
+# whether the descriptor behind them is a tty or this pipe.
+press() { screen_press "$1"; }
 
 # Wait for the board to draw something, up to `secs` seconds. A frame lands
 # about once a second, so nothing here is a fixed sleep.
@@ -144,12 +118,13 @@ draws() {
   else bad "$what (the board never drew \"$want\")"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 }
 
-# How many frames the board has drawn so far. `Board::draw` (src/status/mod.rs)
-# writes this exact clear-and-home sequence, unconditionally, once every poll
-# slice — about once a second — whether or not the frame it drew differs from
-# the last, which is what makes counting them a real clock rather than a
-# sleep of another name: it advances on its own pace, never faster and never
-# slower than the board this suite is actually watching.
+# How many frames the board has drawn so far. The dispatch tab's `draw_board`
+# (src/screen/shell.rs) writes this exact clear-and-home sequence,
+# unconditionally, once every poll slice — about once a second — whether or
+# not the frame it drew differs from the last, which is what makes counting
+# them a real clock rather than a sleep of another name: it advances on its
+# own pace, never faster and never slower than the board this suite is
+# actually watching.
 _frame_count() { grep -aoF $'\x1b[2J\x1b[H' "$BOARD_LOG" 2>/dev/null | wc -l; }
 _frame_past()  { [ "$(_frame_count)" -gt "$1" ]; }
 
@@ -722,22 +697,20 @@ lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
 # --------------------------------- a park typed while six lanes race to start
-# `pass` now calls back into the board between its own units of work — see
-# `Dispatcher::pass` — so a keypress can land while a pass is still working
-# through the queue, not only once it returns and the run settles into its
-# interval wait. Six lanes launching in the very same pass (each a real
-# worktree cut and a real, if fake, agent start) makes a mid-pass read
-# likely, but this cannot *prove* the dispatcher was still busy the moment
-# `P` was read — `Phase::Passing` and `Phase::Waiting` draw identically on
-# purpose (`src/status/mod.rs`), so nothing on screen tells the two apart,
-# and the task itself is why: no suite can time a keypress against a pass's
-# own read. What this does cover end to end is the park itself, landing
-# either way without being lost — the mid-pass overwrite that could lose it
-# — `persist_task`'s own later write of a task it read before the park
-# lands — is proven at the unit level, by
-# `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
-# `src/dispatch.rs`; this is a real keystroke, read off a real pipe,
-# answered by a real dispatcher, reaching a real task document either way.
+# The dispatch tab reads keys while the child it started is still working
+# through a pass, not only once that pass returns and the run settles into
+# its interval wait: the two are separate processes, and the park is the
+# tab's own write to the task file. Six lanes launching in the very same
+# pass (each a real worktree cut and a real, if fake, agent start) makes a
+# park landing mid-pass likely, but this cannot *prove* the child was still
+# busy the moment `P` was read — nothing on screen tells a pass from a wait,
+# and no suite can time a keypress against a pass's own read. What this
+# does cover end to end is the park itself, landing either way without
+# being lost — the mid-pass overwrite that could lose it — `persist_task`'s
+# own later write of a task it read before the park lands — is proven at the
+# unit level, by `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
+# `src/dispatch.rs`; this is a real keystroke, read off a real pipe, reaching
+# a real task document under a real dispatcher either way.
 #
 # `P` rather than a single row's `p`, so this does not also depend on the
 # cursor's position among the dozens of rows the suite has already built —
@@ -750,13 +723,15 @@ done
 # is exactly the race this section exists to not care about: nothing live
 # yet parks the whole run on `P` alone, same as the "nothing live" case
 # above; anything already live opens the same confirm panel the "one lane
-# live" case above does, and the `enter` right behind `P` answers it. Both
-# are read either way — in one drain by the pass's own callback if `P`
-# lands mid-pass, a poll slice apart by the wait loop (which reads at most
-# one key per slice) if it lands during the wait instead — so sending them
-# back to back is not a bet on which of the two reads it.
+# live" case above does, and `enter` answers it. `enter` is sent only once
+# that panel is up: on the tab with no panel open, `enter` stops dispatching.
+RACE_MARK=$(wc -l < "$BOARD_LOG")
+_race_answered() {
+  _stage_is pass-race-0 paused || _since_says "$RACE_MARK" "Pausing aborts"
+}
 press P
-press $'\r'
+poll_until 30 _race_answered
+_stage_is pass-race-0 paused || press $'\r'
 # The longest wait in this suite, and the one place the default `20` is too
 # thin: the park lands only once the key is read, and the pass it has to be
 # read inside is cutting six real worktrees. `30` on the first assertion,

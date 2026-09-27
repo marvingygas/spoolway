@@ -122,21 +122,25 @@ spoolway task contract
 ### 3. Queue
 
 ```
-spoolway queue
+spoolway
 ```
 
 <img src="docs/screenshots/queue.png" alt="the queue screen">
 
-The queue groups pending tasks. Select a group and press `enter` to queue it.
+Bare `spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
+`enter` to queue it.
 
 ### 4. Dispatch
 
 ```
 herdr
-spoolway dispatch
+spoolway
 ```
 
 <img src="docs/screenshots/dispatch.png" alt="the dispatcher board">
+
+`←` from the queue tab opens the dispatch tab. Press `enter` there to start dispatching, or run
+`spoolway dispatch` from a script to print a line per pass instead of drawing the board.
 
 Every task on the board is in one of a few states:
 
@@ -237,10 +241,12 @@ dispatcher stays up on an empty queue. A `spoolway dispatch` left running overni
 job needs.
 
 ```
-spoolway jobs              # the screen: write, edit, pause, delete, or fire a job
 spoolway jobs list         # every job, its schedule, and when it fires next
 spoolway jobs run <name>   # fire one now, ignoring its schedule
 ```
+
+Bare `spoolway` opens the jobs tab, the only place a job is written, edited, paused, resumed or
+deleted.
 
 <img src="docs/screenshots/jobs.png" alt="the jobs screen">
 
@@ -371,9 +377,9 @@ pass rate and price.
 spoolway eval
 ```
 
-The eval screen opens on the lanes table, grouped by pipeline. `tab` switches to the directory
-table, `f` filters, and `e` exports CSV. `spoolway eval --by version` compares a pipeline's
-versions.
+`spoolway eval` prints the lanes table, grouped by pipeline. `spoolway eval --by version`
+compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table interactively:
+`tab` switches to the directory table, `f` filters, and `e` exports CSV.
 
 ## Documentation
 

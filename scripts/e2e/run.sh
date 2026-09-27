@@ -47,10 +47,10 @@
 # Uses whatever `spoolway` is on PATH; set SPOOLWAY to point at a build:
 #   SPOOLWAY=target/release/spoolway scripts/e2e/run.sh
 #
-# `--dry-run` is gone from `spoolway dispatch` — a run either draws where a
-# person can see it or it is refused outright, with no exemption left to
-# preview against. Nine cases across three suites used to prove something
-# with a throwaway pass, and each one is re-expressed or removed:
+# `--dry-run` is gone from `spoolway dispatch` — a run either really runs or
+# it is refused outright, with no exemption left to preview against. Nine
+# cases across three suites used to prove something with a throwaway pass, and
+# each one is re-expressed or removed:
 #
 #   stacking.sh   "nothing starts `top` while `base` is unfinished" is
 #                 re-expressed against the real, resident dispatcher `drive`

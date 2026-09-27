@@ -268,6 +268,159 @@ wait_for_said() {
   poll_until "$secs" _said "$@"
 }
 
+# Bare `spoolway` — the one screen — with `keys` typed into it, and every
+# frame it drew written to `out`. It opens on the queue tab; `\033[C` from
+# there is the jobs tab and `\033[D` the dispatch tab. The screen draws only
+# with stdout on a terminal, so `script` gives it a pty for stdout while the
+# keys still arrive on an ordinary pipe, and the screen ends the moment that
+# pipe runs dry. The keys and the binary go in through the environment rather
+# than being spliced into `script`'s command line, so an escape or a quote in
+# them means only what `printf` makes of it. Any `VAR=value` after `out` is
+# set for the screen alone.
+#
+# Two popups the screen can open on are kept out of the way, since either
+# would take every key sent: the release check is skipped, and the project is
+# brought up to date with `spoolway sync` first. A fixture is never synced
+# otherwise — every other command asks that question only on a terminal — so
+# the screen, which asks it as a popup, would open on it every time.
+#
+# A screen refuses while a dispatcher holds this project's lock, so the
+# resident dispatcher is stopped first; the next `drive` or `records` starts
+# it again.
+on_screen() {
+  local keys=$1 out=$2; shift 2
+  _screen_ready
+  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="$keys" E2E_BIN="$SPOOLWAY" \
+    script -qec 'printf "$E2E_KEYS" | "$E2E_BIN"' "$out" >/dev/null 2>&1
+}
+
+_screen_ready() {
+  dispatcher_stop
+  "$SPOOLWAY" sync >/dev/null 2>&1 || true
+}
+
+# ------------------------------------------------ a screen left open
+#
+# `on_screen` types its keys and is gone. A suite that has to watch the
+# dispatch tab while a run goes on under it — and answer the board's panels as
+# they open — keeps one screen open instead: `screen_start <log>` opens bare
+# `spoolway` under `script`, appending every frame to `<log>` as it is drawn,
+# with its stdin a fifo this shell holds open on fd 9 for as long as the
+# screen is up, so it never reads EOF and stops listening. `screen_press`
+# types into it. `screen_board` walks it onto the dispatch tab,
+# `screen_dispatch` does that and starts dispatching there, and `screen_stop`
+# quits it, which stops that dispatcher with it. One screen at a time per
+# suite; a second `screen_start` stops the first. It opens the way
+# `on_screen` does: no release check, the project synced, and the resident
+# dispatcher stopped.
+E2E_SCREEN_PID=""
+E2E_SCREEN_LOG=""
+
+screen_start() {
+  screen_stop
+  E2E_SCREEN_LOG=$1
+  local fifo="$1.keys" pidfile="$1.pid"
+  _screen_ready
+  touch "$E2E_SCREEN_LOG"
+  rm -f "$fifo" "$pidfile"
+  mkfifo "$fifo" || { echo "no fifo" >&2; exit 2; }
+  # Read-write, so this open returns without waiting for the screen to open
+  # the other end. A plain `exec 9>` would block here until the reader
+  # arrived.
+  exec 9<>"$fifo"
+  # `-f` flushes every frame to the log as it is drawn, so a suite polling
+  # the log reads what is on screen now; `-a` appends, so one log holds every
+  # screen a suite opens. The pid written down is the screen's own —
+  # `script` hands its shell the pty and that shell `exec`s the binary. The
+  # pty is given a size first: `script` off a terminal leaves it at 0x0, and
+  # the board's fallback width clips its NEXT column, by how much depending
+  # on what else is queued.
+  env SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_BIN="$SPOOLWAY" E2E_FIFO="$fifo" \
+      E2E_PIDFILE="$pidfile" \
+    setsid script -qfaec 'stty cols 160 rows 50; echo $$ >"$E2E_PIDFILE"; exec "$E2E_BIN" <"$E2E_FIFO"' \
+    "$E2E_SCREEN_LOG" </dev/null >/dev/null 2>&1 &
+  disown
+  poll_until 10 test -s "$pidfile" || {
+    printf '  \033[31mSETUP\033[0m the screen never started\n' >&2
+    exit 2
+  }
+  E2E_SCREEN_PID=$(cat "$pidfile")
+}
+
+# One keystroke, or several, into the open screen. `\x1b` for esc, `\r` for
+# enter and `\x1b[D` for `←` are what a terminal sends, and the screen decodes
+# them the same way off this pipe.
+screen_press() { printf '%s' "$1" >&9; }
+
+# How many frames the open screen has drawn so far. Every frame opens on this
+# clear-and-home, and the dispatch tab draws one every poll slice whether or
+# not it differs from the last — so the count is a clock that runs at the
+# screen's own pace.
+screen_frames() { grep -aoF $'\x1b[2J\x1b[H' "$E2E_SCREEN_LOG" 2>/dev/null | wc -l; }
+
+# What the screen has drawn since line `mark` of its log says `want`.
+screen_drew_since() {
+  tail -n "+$(($1 + 1))" "$E2E_SCREEN_LOG" | grep -qaF -- "$2"
+}
+
+# Onto the dispatch tab, one `←` from the queue tab the screen opens on, and
+# nothing started there. Fails the suite's setup if the board is never drawn.
+screen_board() {
+  local mark
+  mark=$(wc -l < "$E2E_SCREEN_LOG")
+  screen_press $'\x1b[D'
+  poll_until 10 screen_drew_since "$mark" "dispatcher stopped" || {
+    printf '  \033[31mSETUP\033[0m the screen never drew the dispatch tab\n' >&2
+    tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
+    exit 2
+  }
+}
+
+# Onto the dispatch tab, and dispatching. `enter` there asks the start gates —
+# the overrides popup and then doctor's warnings, each only when it has
+# something to say — and `x` answers each by hiding it until what it names
+# changes, which also starts the run once the last is answered. Done once the
+# header names the child's pid. Fails the suite's setup if it never does.
+screen_dispatch() {
+  local mark i
+  screen_board
+  screen_press $'\r'
+  for ((i = 0; i < 3; i++)); do
+    mark=$(wc -l < "$E2E_SCREEN_LOG")
+    poll_until 10 _screen_started_or_asked "$mark"
+    if screen_drew_since "$mark" "dispatcher running · pid "; then return 0; fi
+    screen_drew_since "$mark" "[x] hide until" && screen_press x
+  done
+  poll_until 10 screen_drew_since "$mark" "dispatcher running · pid " && return 0
+  printf '  \033[31mSETUP\033[0m the dispatch tab never started dispatching\n' >&2
+  tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
+  exit 2
+}
+_screen_started_or_asked() {
+  screen_drew_since "$1" "dispatcher running · pid " || screen_drew_since "$1" "[x] hide until"
+}
+
+# Quit the open screen: `esc` closes whatever panel is up, `q` quits, and
+# quitting stops the dispatcher it started. Then wait for both to be gone —
+# the screen, and whoever still holds the dispatch lock — killing either one
+# left standing, so the next screen or dispatcher a suite starts is never
+# refused for a lock the last one still held.
+screen_stop() {
+  local pid=$E2E_SCREEN_PID holder
+  E2E_SCREEN_PID=""
+  [ -n "$pid" ] || return 0
+  screen_press $'\x1b'
+  sleep 0.3
+  screen_press q
+  poll_while 10 kill -0 "$pid" || kill -KILL "$pid" 2>/dev/null
+  holder=$(head -1 "$SPOOLWAY_PROJECT_HOME/dispatch.pid" 2>/dev/null)
+  if [ -n "$holder" ] && ! poll_while 15 kill -0 "$holder"; then
+    kill -KILL "$holder" 2>/dev/null
+  fi
+  exec 9>&-
+  return 0
+}
+
 # The pid a headless lane wrote down, once it has written one — and while it
 # still says so. A lane's records are the dispatcher's to tidy away when its
 # turn is judged, so this answers about a lane that is *running*; there is no
@@ -396,7 +549,7 @@ dispatcher_start() {
       if [ "$round" -gt 1 ]; then
         echo "round $round: previous exit $status, waited ${wait}s" >> "$log"
       fi
-      "$spoolway" dispatch --plain >> "$log" 2>&1
+      "$spoolway" dispatch >> "$log" 2>&1
       status=$?
       case $status in
         # A clean end (the queue emptied, an empty queue to begin with, or
@@ -497,9 +650,10 @@ dispatcher_restart() {
 }
 
 # A suite reaching its end is the ordinary exit; a failed `must` is the other
-# one. Both have to take the dispatcher down with them, and both have to hand
-# run.sh the tally — see `record_results`.
-trap 'dispatcher_stop; record_results' EXIT
+# one. Both have to take the dispatcher down with them — and a screen left
+# open, with the dispatcher it started — and both have to hand run.sh the
+# tally — see `record_results`.
+trap 'screen_stop; dispatcher_stop; record_results' EXIT
 
 # ------------------------------------------------------------- the task queue
 stage_of() { grep '^stage:' "$SPOOLWAY_PROJECT_HOME/queue/$1.md" 2>/dev/null | awk '{print $2}'; }
@@ -594,6 +748,7 @@ drive_and_hold() {
 # that matters includes the part a suite killed by the watchdog never sees. A
 # suite run on its own has no such file and simply prints its own summary.
 finish() {
+  screen_stop
   dispatcher_stop
   echo
   if [ "$fail" -eq 0 ]; then

@@ -11,8 +11,7 @@ lookup in a task file or in the list of live lanes.
 ## Running it
 
 ```
-spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --plain         # print the board once as a plain table, for scripts
+spoolway dispatch                 # runs until the queue is empty, printing a line per pass
 ```
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one,
@@ -133,12 +132,11 @@ file's path. `spoolway prompt contract` prints the system prompt for a sample ta
 
 ## Reading the state
 
-The dispatcher draws the board in the terminal it runs in and runs a pass every ten seconds.
-That rate is not configurable, and stays the floor under how long a quiet run can go without a
-pass: a change in the queue or commands directory wakes the board or the next pass sooner, as
-described above. A pass that moves a task to a new stage, frees a lane or archives a task runs
-the next pass at once instead of waiting for the next one. A long run of such passes in a row
-eventually waits anyway.
+The dispatcher runs a pass every ten seconds. That rate is not configurable, and stays the floor
+under how long a quiet run can go without a pass: a change in the queue or commands directory
+wakes the next pass sooner, as described above. A pass that moves a task to a new stage, frees a
+lane or archives a task runs the next pass at once instead of waiting for the next one. A long
+run of such passes in a row eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 

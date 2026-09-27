@@ -3166,10 +3166,10 @@ impl<'a> Dispatcher<'a> {
     /// Every attempt, ceiling one included, gets its own bounded notice
     /// (`! task: could not <verb> ... (attempt N of 3)`) on `report.actions`
     /// rather than `report.problems` — so it still prints every pass, the way
-    /// `report.problems` always did under `--plain`, but does *not* reach the
-    /// project's problem log every pass the way a `report.problems` line
-    /// always does; see `src/commands/dispatch.rs`'s unconditional `for
-    /// problem in &report.problems`.
+    /// every `report.actions` line does, but does *not* reach the project's
+    /// problem log every pass the way a `report.problems` line always does;
+    /// see `src/commands/dispatch.rs`'s unconditional `for problem in
+    /// &report.problems`.
     ///
     /// Below the ceiling this is the whole of it: `None`, and the task stays
     /// on `step` for the next pass to try again. At the ceiling the reason is
@@ -5360,12 +5360,12 @@ fn start_one(
     // Why a `session:` step opened fresh, written down rather than only said.
     //
     // It is also handed back as the pass's own note, and that is where it used
-    // to end: under `--plain` a log line, and under the board — which is how a
-    // person actually runs the dispatcher — a line in `RECENT` that scrolls away
-    // within a pass or two. So the question `session_reuse_ctx` exists to be
-    // asked about, *why did my expensive review conversation not get reused*,
-    // had no answer available afterwards at all. One line per fresh session, in
-    // the place somebody auditing a task already looks.
+    // to end: a plain log line, or, under bare `spoolway`'s dispatch tab, a
+    // line in `RECENT` that scrolls away within a pass or two. So the
+    // question `session_reuse_ctx` exists to be asked about, *why did my
+    // expensive review conversation not get reused*, had no answer available
+    // afterwards at all. One line per fresh session, in the place somebody
+    // auditing a task already looks.
     if let Some(note) = &session_miss {
         task.log_status(&format!("`{}`: {note}", step.id));
     }
@@ -12614,11 +12614,11 @@ mod tests {
             report.actions
         );
 
-        // And it survives the pass. The action line is a log line under
-        // `--plain` and a `RECENT` row under the board, gone within a pass or
-        // two either way — so *why an expensive conversation was not reused* had
-        // no answer available after the fact at all. Written to the task, it is
-        // where somebody auditing one already looks.
+        // And it survives the pass. The action line is a plain log line, or a
+        // `RECENT` row under bare `spoolway`'s dispatch tab, gone within a
+        // pass or two either way — so *why an expensive conversation was not
+        // reused* had no answer available after the fact at all. Written to
+        // the task, it is where somebody auditing one already looks.
         let log = repo
             .task("demo")
             .unwrap()

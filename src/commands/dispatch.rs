@@ -106,27 +106,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         return Ok(EXIT_ALREADY_RUNNING);
     }
 
-    // Board::new() is what takes the terminal — hidden cursor, raw enough
-    // mode — and it is built here, ahead of every check below, rather than
-    // once the loop starts: nothing used to be drawn until the loop's first
-    // frame, so every check before it was dead screen time. Building it
-    // early is what gives the checklist below somewhere to write, and what
-    // makes its guard the one the three gates further down reuse instead of
-    // nesting a second one of their own — see `own_term`, below.
-    //
-    // Not for `--plain`, which keeps its own one-line-per-pass log and gains
-    // none of this: no board, no terminal taken, no checklist printed. Nor
-    // for a run the screen started, whose terminal is the screen's own.
-    let mut board = match args.plain || args.screen {
-        true => None,
-        false => Some(crate::status::Board::new()),
-    };
-    let mut out = std::io::stdout();
-    let checklist = board.is_some();
-    if checklist {
-        print_checklist_header(&mut out)?;
-    }
-
     // Whether the run has already said, this spell of empty queue, that a job
     // is keeping it resident. Reset every time the queue is not empty, so the
     // next drain says it again.
@@ -141,19 +120,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Not counted: a repo with nothing to do is not a storm, and restarting
     // into an empty queue forever is a caller's own choice to make, not
     // something this guard has any business refusing.
-    let live_tasks = checklist_row(
-        &mut out,
-        checklist,
-        "queue read",
-        "reading the queue",
-        || repo.tasks(),
-    )?;
-    checklist_done(
-        &mut out,
-        checklist,
-        "queue read",
-        &plural(live_tasks.len(), "task"),
-    )?;
+    let live_tasks = repo.tasks()?;
     // A run the screen started is the exception: it waits on an empty queue
     // for whatever the queue tab sends next, and the board says `nothing
     // queued` meanwhile — the screen, not the queue, decides when it ends.
@@ -174,32 +141,12 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Refused here, ahead of the lock, for the same reason as the three
     // checks below: found and fixed by a person reading this line, not
     // discovered mid-run and left for someone to stop by hand.
-    checklist_row(
-        &mut out,
-        checklist,
-        "task routes",
-        "checking routes",
-        || check_task_routes(pipelines, &live_tasks),
-    )?;
-    checklist_done(
-        &mut out,
-        checklist,
-        "task routes",
-        &task_route_names(&live_tasks),
-    )?;
+    check_task_routes(pipelines, &live_tasks)?;
 
     let mux = crate::mux::backend(repo)?;
-    checklist_row(
-        &mut out,
-        checklist,
-        "backend available",
-        &format!("starting {}", mux.name()),
-        || match mux.is_available() {
-            true => Ok(()),
-            false => bail!("{}", mux.unavailable()),
-        },
-    )?;
-    checklist_done(&mut out, checklist, "backend available", mux.name())?;
+    if !mux.is_available() {
+        bail!("{}", mux.unavailable());
+    }
 
     // The three things that certainly break a run, refused here rather than
     // left for a lane to discover mid-turn: no git identity where something
@@ -211,38 +158,16 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // has to be found and stopped by hand. `doctor` reports the same three
     // as rows, off the same functions, so the fix here and the fix there
     // never drift apart.
-    checklist_row(
-        &mut out,
-        checklist,
-        "git identity",
-        "checking git identity",
-        || refuse(check_git_identity(repo, pipelines, &repo.config)).context("refusing to start"),
-    )?;
-    checklist_done(&mut out, checklist, "git identity", "")?;
-    checklist_row(
-        &mut out,
-        checklist,
-        "index lock",
-        "checking the index lock",
-        || refuse(check_index_lock(repo)).context("refusing to start"),
-    )?;
-    checklist_done(&mut out, checklist, "index lock", "")?;
-    checklist_row(
-        &mut out,
-        checklist,
-        "backend checkout",
-        "checking the checkout",
-        || refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start"),
-    )?;
-    checklist_done(&mut out, checklist, "backend checkout", "")?;
+    refuse(check_git_identity(repo, pipelines, &repo.config)).context("refusing to start")?;
+    refuse(check_index_lock(repo)).context("refusing to start")?;
+    refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
 
     // There is one way to start a run and it is visible: refused here, in the
     // same early group as the three checks above, so a run begun in a
     // backgrounded shell or a `backend = headless` config edit outside the
     // harness is stopped before it takes the lock or writes anywhere, not
     // found and killed by hand once it is already spending. No exemption —
-    // not `--plain`, not an environment override, not a per-platform
-    // carve-out.
+    // not an environment override, not a per-platform carve-out.
     check_dispatcher_visible(mux.as_ref())?;
 
     // The last two things a person sees before anything is spawned or
@@ -254,23 +179,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // `args.screen` skips both: bare `spoolway`'s dispatch tab already asked
     // them as popups of its own, off [`overrides_popup`] and
     // [`warnings_popup`], before it started this run.
-    //
-    // `own_term` is false whenever a board is up: its own guard, taken above
-    // when the board was built, already has the cursor hidden and the tty
-    // deaf, and a gate constructing a second one of its own here would be a
-    // nested `TermGuard` — one whose `Drop`, firing the moment a gate
-    // returns, shows the cursor and restores cooked mode while the board's
-    // own guard is still held underneath it (`gate.rs` takes exactly this
-    // shape for the one blocking read it owns, and drops it deliberately —
-    // right there because nothing else is still holding the terminal when it
-    // does). `--plain` has no board to reuse, so its own gates still take
-    // their own guard.
-    let own_term = board.is_none();
     if !args.screen {
-        if !overrides_gate(repo, own_term)? {
+        if !overrides_gate(repo)? {
             return Ok(0);
         }
-        if !warnings_gate(repo, pipelines, own_term)? {
+        if !warnings_gate(repo, pipelines)? {
             return Ok(0);
         }
     }
@@ -305,44 +218,24 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // A failure here is held for `workspace_open_notice`, just below, rather
     // than printed on the spot — this is the one notice `warnings_gate`,
     // above, could not carry: this is only attempted once the lock is held,
-    // past the point `esc` could still mean "nothing happened yet". Its own
-    // pending row is printed and cleared here rather than through
-    // `checklist_row`, because its error must not abort the run the way
-    // every other row's does — it is reported through `workspace_open_notice`
-    // and stepped over instead.
-    checklist_pending(&mut out, checklist, "workspace", "opening the workspace")?;
+    // past the point `esc` could still mean "nothing happened yet".
     let mut workspace_open_error = None;
-    let mut workspace_id = None;
     match mux.dispatch_workspace(&repo.root, true) {
-        Ok(id) => workspace_id = id,
+        Ok(_) => {}
         Err(err) => {
             workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"))
         }
     }
-    checklist_clear(&mut out, checklist)?;
 
     // The one notice `warnings_gate` ran too early to carry — see just
     // above. Held on screen the same way, but with only `[enter]` to
     // dismiss it: by now the lock is held, so there is no earlier screen
     // left for `esc` to mean "back to" — see `workspace_open_notice`'s own
     // doc.
-    match &workspace_open_error {
-        Some(err) => workspace_open_notice(err, own_term)?,
-        None => checklist_done(
-            &mut out,
-            checklist,
-            "workspace",
-            workspace_id.as_deref().unwrap_or("—"),
-        )?,
+    if let Some(err) = &workspace_open_error {
+        workspace_open_notice(err)?;
     }
 
-    // The run watches itself. A resident dispatcher spends almost all of its
-    // time waiting for the next pass, and drawing the board through that wait
-    // costs the run nothing — where a scrolling log says only what the last
-    // pass did, the board says what the whole queue is doing right now.
-    //
-    // Not for `--plain`, which is a person who would rather have the log — a
-    // pipe, a CI job, a terminal that mangles the redraw.
     // From here the run holds live lanes, so an interrupted one's spend and
     // launch counter still have to be settled on the way out. Caught rather
     // than left to kill the process where it stands — see
@@ -366,43 +259,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     loop {
         let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
 
-        // Drawn before the pass rather than only after it, so a pass that takes
-        // a while is a board saying "pass running" instead of a blank terminal.
-        //
-        // When it was last drawn, so the callback below can keep the same
-        // once-a-second cadence the wait keeps — see the tick's own comment.
-        let mut drawn_at = std::time::Instant::now();
-        if let Some(board) = board.as_mut() {
-            let _ = board.draw(repo, pipelines, crate::status::Phase::Passing, &mut out);
-        }
-
-        // Stdin, and whether it is still worth reading. Declared once per
-        // pass rather than separately for the callback below and the wait
-        // loop further down, so a descriptor found gone (a closed pipe, no
-        // controlling terminal) while a pass was still working is not asked
-        // again a moment later by the wait that follows it — one direction
-        // only, within this one iteration: the next iteration's own pass
-        // starts the question over, the same as it always has.
-        //
-        // `listening` is cleared once stdin is found to have gone away, and
-        // never asked again this iteration. `poll_ready` reports a closed
-        // descriptor "ready" exactly as it does a real keystroke, since the
-        // read that follows either way returns promptly; without this guard,
-        // whichever of the callback or the wait loop reads next would keep
-        // taking that as a key, get `None` back from `read_key` every time,
-        // and spin down to nothing for the rest of the run (jobs review
-        // finding 8). What counts as "gone away" is a run of empty reads
-        // rather than one — see [`EMPTY_READS_BEFORE_DEAF`], which is also
-        // why a single interrupted read no longer costs the keyboard.
-        //
-        // Starts false on a target with no raw mode to listen through
-        // (`!cfg!(unix)`) or in `--plain` (`board.is_none()`, which never
-        // reads a key at all): a cooked stdin answers `byte_pending` with
-        // `false` at once (see `RawStdin`), and starting out listening
-        // there would spin on that answer with no sleep in it.
-        let mut stdin = crate::screen::RawStdin;
-        let mut listening = cfg!(unix) && board.is_some();
-
         let mut spent_out = None;
         // Whether this pass moved a task and so has more ready to try at
         // once — see the wait below, and `dispatch::skip_wait`. A pass that
@@ -410,56 +266,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // one wait, not be retried with no pause at all.
         let mut worked = false;
 
-        // The callback a pass calls between its own units of work — see
-        // `Dispatcher::pass`. Draining whatever is already on stdin
-        // and applying it here is what keeps the board's own keys answering
-        // at the same rate through a busy run as an idle one: a pass used
-        // to hold the keyboard dead for its whole duration, and
-        // `consecutive_working` below could run a hundred of those back to
-        // back before the wait loop this used to live in alone was ever
-        // reached again.
-        //
-        // Scoped to this block so its borrow of `board`/`out` ends the
-        // moment the pass returns, freeing both for the rest of the loop
-        // body below.
-        let pass_result = {
-            let mut tick = || {
-                let Some(board) = board.as_mut() else { return };
-                let keyed = drain_keys(repo, pipelines, board, &mut stdin, &mut listening);
-                // A pass is not a pause in the run, and the board must not
-                // read as one. Under a real multiplexer a pass runs for
-                // whole seconds at a stretch, and the one frame drawn above
-                // it would be the only thing on screen for all of them: the
-                // lockup stuck on the phase it was drawn at, the header's
-                // `up` and every row's TIME standing still, while the run
-                // moves on underneath. So a frame is owed here on the same
-                // once-a-second cadence the wait keeps, and one straight
-                // away wherever a key has just changed what it would show —
-                // a person who pressed something should not wait out the
-                // rest of the pass to see it land.
-                //
-                // What that covers is exactly what `Dispatcher::pass` calls
-                // this from, and no more — its own doc has the list. The
-                // long stretch it reaches is a lane start's wait on the
-                // herdr child it spawned, which hands `tick` back every
-                // `VACATE_POLL`; the rest are the checkpoints between units
-                // of work. Cutting the worktree is not among them:
-                // `dispatch::ensure_workspace` takes no `tick` and runs
-                // before the lane start that does, so the board still holds
-                // its last frame for as long as that takes.
-                //
-                // Capped by the clock rather than drawn at every tick point:
-                // a pass walking a long queue calls this between each task,
-                // and a frame per task would be a redraw storm that also
-                // asks the multiplexer for its lane list every time.
-                if tick_owes_a_frame(keyed, drawn_at.elapsed()) {
-                    let _ = board.draw(repo, pipelines, crate::status::Phase::Passing, &mut out);
-                    drawn_at = std::time::Instant::now();
-                }
-            };
-            dispatcher.pass(&mut tick)
-        };
-        match pass_result {
+        match dispatcher.pass(&mut || {}) {
             Ok(report) => {
                 worked = skip_wait(&report, consecutive_working);
                 // The ceiling drains rather than kills: the run is over, but not
@@ -470,36 +277,28 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 {
                     spent_out = Some(ceiling.clone());
                 }
-                // Appended whether or not a board is drawn: the board no
-                // longer carries a pass's trouble at all, so this is the only
-                // place any of it is kept. See `crate::problem_log`.
                 for problem in &report.problems {
                     crate::problem_log::append(repo, problem);
                 }
-                // With a board up, what a pass did is already on screen — the
-                // rows it moved are the report, and its trouble just went to
-                // the log above rather than the board.
-                if board.is_none() {
-                    for action in &report.actions {
-                        println!("  {action}");
-                    }
-                    for problem in &report.problems {
-                        println!("  ! {problem}");
-                    }
-                    if report.actions.is_empty() && report.problems.is_empty() {
-                        // A pass that started nothing because every lane is
-                        // still grinding is not an idle pipeline, and saying
-                        // "nothing to do" over a working lane is how a wedged
-                        // run hides in its own log. `quiet` is the distinction
-                        // the pass already drew.
-                        println!(
-                            "  {}",
-                            match report.quiet {
-                                true => "nothing to do",
-                                false => "lanes still working",
-                            }
-                        );
-                    }
+                for action in &report.actions {
+                    println!("  {action}");
+                }
+                for problem in &report.problems {
+                    println!("  ! {problem}");
+                }
+                if report.actions.is_empty() && report.problems.is_empty() {
+                    // A pass that started nothing because every lane is
+                    // still grinding is not an idle pipeline, and saying
+                    // "nothing to do" over a working lane is how a wedged
+                    // run hides in its own log. `quiet` is the distinction
+                    // the pass already drew.
+                    println!(
+                        "  {}",
+                        match report.quiet {
+                            true => "nothing to do",
+                            false => "lanes still working",
+                        }
+                    );
                 }
             }
             // A failed pass must not kill the loop: a transient herdr hiccup or
@@ -507,9 +306,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             Err(err) => {
                 let failure = format!("pass failed: {err:#}");
                 crate::problem_log::append(repo, &failure);
-                if board.is_none() {
-                    println!("  ! {failure}");
-                }
+                println!("  ! {failure}");
             }
         }
 
@@ -517,7 +314,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
         if let Some(ceiling) = spent_out {
-            stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
+            stop(repo, pipelines, mux.as_ref())?;
             // The screen shows stderr as the reason its dispatcher stopped,
             // and prints nothing of stdout at all.
             if args.screen {
@@ -537,7 +334,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Asked for while the last pass was running. Unwound here rather than
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
-            stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
+            stop(repo, pipelines, mux.as_ref())?;
             println!("  stopped.");
             return Ok(0);
         }
@@ -547,14 +344,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
                 if crate::jobs::enabled_count(repo) == 0 && !args.screen {
-                    stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
+                    stop(repo, pipelines, mux.as_ref())?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
                 }
                 // A job keeps the run resident. Say so once per spell of
-                // empty queue — not every pass, and never over a board,
-                // which owns the screen — then loop on into the wait.
-                if board.is_none() && !idle_announced {
+                // empty queue, not every pass, then loop on into the wait.
+                if !idle_announced {
                     println!();
                     print_staying_up(&crate::jobs::staying_up(repo));
                 }
@@ -572,125 +368,33 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // streak hit its ceiling — the count starts over from here.
         if worked {
             consecutive_working += 1;
-            // The wait this pass is skipping is where the keyboard used to be
-            // read, so a streak of up to `MAX_CONSECUTIVE_WORKING_PASSES`
-            // passes left the board deaf between the first and the hundredth.
-            // Reading here costs the streak nothing: this takes only what is
-            // already sitting in the terminal's input buffer and returns at
-            // once. The frame that goes with it is the one the top of the
-            // next iteration draws, a moment from now.
-            if let Some(board) = board.as_mut() {
-                drain_keys(repo, pipelines, board, &mut stdin, &mut listening);
-            }
             continue;
         }
         consecutive_working = 0;
 
-        match board.as_mut() {
-            // The wait: one frame per slice, and a slice never longer than
-            // `status::POLL`. The board's own clocks — the lockup's frame,
-            // the header's `up`, every running row's TIME — are all read at
-            // draw time off the wall clock, so a board that does not draw
-            // once a second stands still on screen while the run moves on
-            // underneath it. `view::spool_frame` is the sharpest case: it
-            // takes its frame from `secs % 2`, so at two draws per ten
-            // seconds the lockup samples the same phase every time and stops
-            // turning altogether.
-            //
-            // The watch stays inside the same `poll` — only the ceiling on a
-            // single slice comes down. A keystroke or a file landing still
-            // wakes the wait the instant it happens rather than at the end of
-            // the second it landed in.
-            //
-            // A key applies to the board and the next slice's own draw shows
-            // it. A queue change needs nothing beyond that draw, which
-            // already rereads the queue fresh. A commands change is what a
-            // finished background step is routed on, so that one breaks the
-            // wait outright and lets the top of the outer loop run a fresh
-            // pass at once.
-            Some(board) => {
-                // `stdin` and `listening`, declared once above rather than
-                // here, so a descriptor the pass's own callback already
-                // found gone this iteration is not asked again the moment
-                // this wait starts — see that declaration's own comment.
-                let until = std::time::Instant::now() + interval;
-                'wait: while let Some(left) =
-                    until.checked_duration_since(std::time::Instant::now())
-                {
-                    if crate::platform::stop::asked() {
-                        break;
-                    }
-                    // Ahead of the block rather than after it, so the frame a
-                    // slice is drawn for is up while that slice waits, not
-                    // after it has already elapsed.
-                    let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
-                    let slice = crate::status::POLL.min(left);
-                    let mut fds = Vec::new();
-                    if listening {
-                        fds.push(libc::STDIN_FILENO);
-                    }
-                    if let Some(watch) = &watch {
-                        fds.push(watch.fd());
-                    }
-                    // Nothing to poll on: no watch this run could open, and
-                    // stdin already found gone. The slice is the same second
-                    // either way, spent asleep instead.
-                    if fds.is_empty() {
-                        std::thread::sleep(slice);
-                        continue;
-                    }
-
-                    let ready = crate::screen::poll_ready(&fds, slice);
-                    let mut idx = 0;
-                    if listening {
-                        if ready[idx] {
-                            drain_keys(repo, pipelines, board, &mut stdin, &mut listening);
-                        }
-                        idx += 1;
-                    }
-                    if let Some(watch) = &watch
-                        && ready[idx]
-                    {
-                        // Drained whatever this slice then decides to do
-                        // with it. `DirWatch::drain` is the only read of the
-                        // inotify
-                        // fd, so a slice that polls it ready and leaves it
-                        // unread leaves it ready: every slice after it would
-                        // return from `poll_ready` at once and the wait would
-                        // spin through the rest of its interval, drawing a
-                        // full frame — and asking the multiplexer for its
-                        // lane list — as fast as the terminal would take it.
-                        let changed = watch.drain();
-                        if changed.contains(&crate::screen::Changed::Commands) {
-                            break 'wait;
-                        }
-                    }
-                }
+        // The wait between passes: the floor alone, unless a finished
+        // background command wakes it early — see
+        // `crate::screen::open_dir_watch`'s own doc.
+        println!(
+            "  next pass in {}",
+            crate::config::format_duration(interval)
+        );
+        let until = std::time::Instant::now() + interval;
+        while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+            if crate::platform::stop::asked() {
+                break;
             }
-            None => {
-                println!(
-                    "  next pass in {}",
-                    crate::config::format_duration(interval)
-                );
-                let until = std::time::Instant::now() + interval;
-                while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
-                    if crate::platform::stop::asked() {
-                        break;
-                    }
-                    let Some(watch) = &watch else {
-                        // The floor alone, in the same slices as before —
-                        // see `crate::screen::open_dir_watch`'s own doc —
-                        // so a stop asked for mid-wait is still noticed
-                        // within a second rather than a whole interval
-                        // later.
-                        std::thread::sleep(crate::status::POLL.min(left));
-                        continue;
-                    };
-                    let ready = crate::screen::poll_ready(&[watch.fd()], left);
-                    if ready[0] && watch.drain().contains(&crate::screen::Changed::Commands) {
-                        break;
-                    }
-                }
+            let Some(watch) = &watch else {
+                // The floor alone, in the same slices as before — see
+                // `crate::screen::open_dir_watch`'s own doc — so a stop asked
+                // for mid-wait is still noticed within a second rather than a
+                // whole interval later.
+                std::thread::sleep(crate::status::POLL.min(left));
+                continue;
+            };
+            let ready = crate::screen::poll_ready(&[watch.fd()], left);
+            if ready[0] && watch.drain().contains(&crate::screen::Changed::Commands) {
+                break;
             }
         }
     }
@@ -704,217 +408,6 @@ fn screen_stop_reason(ceiling: &crate::dispatch::Ceiling) -> String {
         "{}\nEvery task is where its last lane left it.",
         ceiling.reached
     )
-}
-
-/// Whether the pass's own callback owes the board a frame: at once wherever a
-/// key has just changed what one would show, and otherwise no faster than
-/// [`crate::status::POLL`], the same cadence the wait draws at.
-///
-/// Its own function so the rule can be read and tested apart from the
-/// closure it is used in — see the tests below.
-fn tick_owes_a_frame(keyed: bool, since_last_frame: std::time::Duration) -> bool {
-    keyed || since_last_frame >= crate::status::POLL
-}
-
-/// How many reads in a row may come back with nothing before the board stops
-/// listening to stdin for the rest of one loop iteration.
-///
-/// [`crate::screen::read_key`] answers `None` both for a descriptor that has
-/// gone away — a closed pipe, no controlling terminal — and for a read the
-/// kernel interrupted, and nothing under `crate::screen` tells the two apart.
-/// A gone descriptor polls "ready" forever and reads back empty every time,
-/// so a single `None` used to latch the keyboard off for the iteration to
-/// keep that from spinning down to nothing (jobs review finding 8). That also
-/// left one interrupted read — a window resize, the stop handler firing —
-/// costing the board every key for the rest of the iteration. Three in a row
-/// still catch the spin within a handful of turns, and one on its own no
-/// longer costs anything.
-const EMPTY_READS_BEFORE_DEAF: u32 = 3;
-
-/// Apply whatever is already sitting on stdin to `board`, and say whether any
-/// of it changed what the next frame would draw.
-///
-/// Never waits: it reads only what is pending (`Duration::ZERO`), so it is
-/// safe both between two passes of a streak that is deliberately not waiting
-/// and inside a pass between its own units of work.
-///
-/// `listening` is this loop iteration's own answer to whether stdin is still
-/// worth reading at all, and is cleared for good once
-/// [`EMPTY_READS_BEFORE_DEAF`] reads in a row come back empty.
-///
-/// A key that fails goes to the problem log rather than nowhere. A `p` or an
-/// `r` that could not be carried out used to be discarded here without a
-/// word, so a keypress that failed looked exactly like one that was never
-/// read at all. The board itself carries no trouble — see
-/// [`crate::problem_log`] — which is why this goes to the log under it.
-///
-/// Takes any [`crate::screen::PollableRead`] rather than `RawStdin` itself,
-/// the same seam [`crate::screen::read_key`] already reads through, so the
-/// tests below can script the reads this has to get right: an empty read
-/// that is only an interruption, and the run of them that means the
-/// descriptor has gone.
-fn drain_keys(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    board: &mut crate::status::Board,
-    stdin: &mut impl crate::screen::PollableRead,
-    listening: &mut bool,
-) -> bool {
-    let mut changed = false;
-    let mut empty: u32 = 0;
-    while *listening && stdin.byte_pending(std::time::Duration::ZERO) {
-        match crate::screen::read_key(stdin) {
-            Some(key) => {
-                empty = 0;
-                if let Err(err) = board.on_key(repo, pipelines, key) {
-                    crate::problem_log::append(repo, &format!("board key {key:?}: {err:#}"));
-                }
-                changed = true;
-            }
-            None => {
-                empty += 1;
-                *listening = empty < EMPTY_READS_BEFORE_DEAF;
-            }
-        }
-    }
-    changed
-}
-
-/// The checklist's own opening lines — the banner and the "starting"
-/// heading — pulled into its own function so [`dispatch`] and the 200ms
-/// acceptance test below (`the_first_checklist_write_lands_within_200ms`)
-/// run the exact same code, rather than the test re-typing a copy of it that
-/// could drift from the real first-write path and stop proving anything.
-fn print_checklist_header(out: &mut impl std::io::Write) -> Result<()> {
-    write!(out, "{}", crate::status::banner("dispatch"))?;
-    writeln!(out)?;
-    writeln!(out, "  starting")?;
-    Ok(())
-}
-
-/// The "starting" checklist's label column, sized to its own longest label
-/// (`backend available`) rather than borrowed from an unrelated table.
-const CHECKLIST_LABEL_W: usize = 22;
-
-fn checklist_label(label: &str) -> String {
-    format!("{label:<CHECKLIST_LABEL_W$}")
-}
-
-/// The still-running mark — the mockup's own "the pending one is an
-/// ellipsis", spelled out here as the real glyph rather than the two dots
-/// the mockup falls back to only so its own doc stays readable in a plain
-/// terminal (`fit` in `src/gate.rs` already uses this same character for the
-/// same reason: an ellipsis, not three periods).
-const CHECKLIST_PENDING: char = '…';
-
-/// The done mark — the mockup's own "the `OK` column is a check mark", the
-/// same glyph `status::view`'s own `Verdict::Pass` already draws for "this
-/// passed" rather than a second one invented for this checklist alone.
-const CHECKLIST_DONE: char = '✓';
-
-/// Print a check's pending row — [`CHECKLIST_PENDING`], `label`, then what
-/// it is waiting on — with no trailing newline, so [`checklist_clear`] can
-/// wipe exactly this one line once the check returns. A no-op under
-/// `--plain`: `checklist` is `board.is_some()` at the one call site in
-/// [`dispatch`], and every checklist function here takes the same flag
-/// rather than each re-deriving it.
-fn checklist_pending(
-    out: &mut impl std::io::Write,
-    checklist: bool,
-    label: &str,
-    waiting: &str,
-) -> Result<()> {
-    if !checklist {
-        return Ok(());
-    }
-    write!(
-        out,
-        "    {CHECKLIST_PENDING} {}{waiting}",
-        checklist_label(label)
-    )?;
-    out.flush()?;
-    Ok(())
-}
-
-/// Wipe the pending row [`checklist_pending`] printed, back to column zero —
-/// `\x1b[2K` clears the whole line rather than only what is left of it, so a
-/// short done row written over a longer pending one leaves nothing behind.
-fn checklist_clear(out: &mut impl std::io::Write, checklist: bool) -> Result<()> {
-    if !checklist {
-        return Ok(());
-    }
-    write!(out, "\r\x1b[2K")?;
-    Ok(())
-}
-
-/// Print a check's own [`CHECKLIST_DONE`] row, once it has returned
-/// successfully — `detail` is whatever the mockup draws beside it, or empty
-/// for the checks that draw nothing there.
-fn checklist_done(
-    out: &mut impl std::io::Write,
-    checklist: bool,
-    label: &str,
-    detail: &str,
-) -> Result<()> {
-    if !checklist {
-        return Ok(());
-    }
-    match detail.is_empty() {
-        true => writeln!(out, "    {CHECKLIST_DONE} {label}")?,
-        false => writeln!(
-            out,
-            "    {CHECKLIST_DONE} {}{detail}",
-            checklist_label(label)
-        )?,
-    }
-    Ok(())
-}
-
-/// One row of the "starting" checklist: a pending line naming what `check`
-/// is waiting on, replaced by its done row the moment it returns — or, on
-/// failure, left as a bare newline so the error `?` propagates lands on a
-/// fresh line rather than run into the pending text.
-///
-/// Only for a check whose own failure must abort the whole start — see the
-/// workspace-open row in [`dispatch`], which prints its pending and cleared
-/// rows the same way but by hand, because its own failure is reported and
-/// stepped over instead of raised.
-fn checklist_row<T>(
-    out: &mut impl std::io::Write,
-    checklist: bool,
-    label: &str,
-    waiting: &str,
-    check: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    checklist_pending(out, checklist, label, waiting)?;
-    match check() {
-        Ok(value) => {
-            checklist_clear(out, checklist)?;
-            Ok(value)
-        }
-        Err(err) => {
-            if checklist {
-                writeln!(out)?;
-            }
-            Err(err)
-        }
-    }
-}
-
-/// The unique `pipeline:` names a batch of live tasks routes through, in the
-/// order each is first seen — the "starting" checklist's own detail for
-/// `task routes`, drawn from the same tasks [`check_task_routes`] just
-/// validated rather than a second read of the queue.
-fn task_route_names(tasks: &[Task]) -> String {
-    let mut names: Vec<&str> = Vec::new();
-    for task in tasks {
-        if let Some(name) = task.front.pipeline.as_deref()
-            && !names.contains(&name)
-        {
-            names.push(name);
-        }
-    }
-    names.join(", ")
 }
 
 /// The first step, if any, whose `run:` calls `spoolway stack` — the one
@@ -951,26 +444,14 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
         .then(|| "`dispatch.auto_commit` is on".to_string())
 }
 
-/// `n` with its noun, singular where that is what `n` is — the checklist's
-/// own copy of the same rule `commands::queue::plural` already applies to the
-/// pending screen, kept local rather than shared across the two: neither
-/// module is the other's to reach into for one line of pluralization.
-fn plural(n: usize, noun: &str) -> String {
-    match n {
-        1 => format!("1 {noun}"),
-        _ => format!("{n} {noun}s"),
-    }
-}
-
 /// The standing consent gate for a patch layer (see [`crate::overrides`]):
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`, the one
 /// path that must reach the caller before `Lock::acquire` runs at all.
 ///
 /// A thin wrapper over [`overrides_gate_with`], which does the real work
 /// against an injected reader, writer and terminal guard — this is the only
-/// thing that touches the process's real stdio, the same split
-/// `commands::queue::queue_screen` draws around `run_screen`. `TermGuard::new`
-/// is handed over as a factory rather than constructed here: raw mode is a
+/// thing that touches the process's real stdio. `TermGuard::new` is handed
+/// over as a factory rather than constructed here: raw mode is a
 /// presentation detail for the one branch that actually blocks on a
 /// keypress, and building it eagerly printed `hide_cursor`'s escape into
 /// every single dispatch, layered or not, tty or not (finding: `hide_cursor`
@@ -978,17 +459,13 @@ fn plural(n: usize, noun: &str) -> String {
 /// `drain_stdin`). A test hands over `TermGuard::inert` instead, so it never
 /// fights another test over the real terminal (see `TermGuard`'s own `inert`
 /// field) even while driving the branch that would otherwise construct one.
-///
-/// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see the call site's own comment on why a second, nested
-/// `TermGuard` there would be a bug.
-fn overrides_gate(repo: &Repo, own_term: bool) -> Result<bool> {
+fn overrides_gate(repo: &Repo) -> Result<bool> {
     overrides_gate_with(
         repo,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
+        Some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -1006,11 +483,13 @@ fn overrides_gate(repo: &Repo, own_term: bool) -> Result<bool> {
 /// layer already acknowledged and unmoved since, this says nothing at all —
 /// "don't ask again until this changes" means exactly that.
 ///
-/// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
-/// of its own — `dispatch`'s board — and `Some` for one that does not, taken
-/// only just before the first blocking read: see
+/// `term` is `None` for a caller that already holds a
+/// [`crate::platform::TermGuard`] of its own, and `Some` for one that does
+/// not, taken only just before the first blocking read — see
 /// `commands::queue::tool_requirements_gate_with` on why a second, nested
-/// guard is a bug rather than merely redundant.
+/// guard is a bug rather than merely redundant. [`overrides_gate`] always
+/// passes `Some`: this project has no caller left that already holds its own
+/// guard going into this.
 fn overrides_gate_with(
     repo: &Repo,
     interactive: bool,
@@ -1130,16 +609,14 @@ fn overrides_gate_kind(row: &OverrideRow) -> String {
 /// is held — so it gets its own, smaller one instead; see
 /// [`workspace_open_notice`].
 ///
-/// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see [`overrides_gate`]'s own doc comment on the pair.
-fn warnings_gate(repo: &Repo, pipelines: &Pipelines, own_term: bool) -> Result<bool> {
+fn warnings_gate(repo: &Repo, pipelines: &Pipelines) -> Result<bool> {
     warnings_gate_with(
         repo,
         pipelines,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
+        Some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -1327,17 +804,13 @@ pub(crate) fn warnings_popup(repo: &Repo, pipelines: &Pipelines) -> Option<GateP
 /// fingerprinted: opening a workspace either works or it does not, once,
 /// this run — there is no standing state worth hiding until it changes.
 ///
-/// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see [`overrides_gate`]'s own doc comment on the pair. This
-/// is a fourth gate-shaped screen reached the same way the other three are,
-/// so it needs the same guard.
-fn workspace_open_notice(err: &str, own_term: bool) -> Result<()> {
+fn workspace_open_notice(err: &str) -> Result<()> {
     workspace_open_notice_with(
         err,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
+        Some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -1749,7 +1222,7 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     Ok(())
 }
 
-/// Settle the books on what the run was holding, and draw the last frame.
+/// Settle the books on what the run was holding.
 ///
 /// Both ways a dispatcher ends come through here — the queue emptying, and a
 /// person asking it to stop — because they leave the same things behind and
@@ -1759,13 +1232,7 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
 /// A settle that fails is reported and not raised: the run is over either
 /// way, and an unbanked lane is something to catch up by hand, not a reason
 /// to exit non-zero.
-fn stop(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    mux: &dyn crate::mux::Mux,
-    board: Option<&mut crate::status::Board>,
-    out: &mut std::io::Stdout,
-) -> Result<()> {
+fn stop(repo: &Repo, pipelines: &Pipelines, mux: &dyn crate::mux::Mux) -> Result<()> {
     let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux);
     let mut report = crate::dispatch::Report::default();
     match dispatcher.sweep_on_stop(&mut report) {
@@ -1775,13 +1242,6 @@ fn stop(
             }
         }
         Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
-    }
-
-    // The last frame stays where it is and the reason the run ended is printed
-    // under it: the board is on the main screen, so what it drew is still there
-    // to read when the process exits.
-    if let Some(board) = board {
-        let _ = board.draw(repo, pipelines, crate::status::Phase::Stopping, out);
     }
     Ok(())
 }
@@ -1799,27 +1259,6 @@ mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
 
-    /// A pass draws on the same once-a-second cadence the wait does, so the
-    /// lockup keeps turning and the clocks keep moving while a pass spends
-    /// whole seconds cutting a worktree or opening a pane.
-    #[test]
-    fn a_pass_owes_a_frame_once_a_second_and_no_faster() {
-        use std::time::Duration;
-
-        assert!(
-            !tick_owes_a_frame(false, Duration::ZERO),
-            "two tick points in the same instant are one frame, not two"
-        );
-        assert!(
-            !tick_owes_a_frame(false, crate::status::POLL - Duration::from_millis(1)),
-            "just under the cadence still owes nothing"
-        );
-        assert!(
-            tick_owes_a_frame(false, crate::status::POLL),
-            "a second since the last frame owes the next one"
-        );
-    }
-
     /// The dispatch tab's step-30 popup body, from the ceiling a pass
     /// reports: the key's own figures, not the run log's long sentence.
     #[test]
@@ -1835,269 +1274,6 @@ mod tests {
         );
     }
 
-    /// A key that changed the board is drawn straight away rather than at the
-    /// next second: a person who pressed something must not wait out the rest
-    /// of the pass to see it land.
-    #[test]
-    fn a_key_owes_a_frame_whatever_the_clock_says() {
-        assert!(tick_owes_a_frame(true, std::time::Duration::ZERO));
-    }
-
-    /// Stdin as a script: what each read answers, oldest first. `Some(byte)`
-    /// is a byte a key decodes from; `None` is a read that came back with
-    /// nothing, which is what [`crate::screen::read_key`] reports both for an
-    /// interrupted read and for a descriptor that has gone away.
-    ///
-    /// `byte_pending` answers for whatever is left of the script, so a
-    /// scripted empty read at the very end reads as "nothing more waiting"
-    /// — an interruption on an otherwise live terminal — while a run of them
-    /// reads as a descriptor that keeps polling ready and keeps coming back
-    /// empty, the shape [`EMPTY_READS_BEFORE_DEAF`] is there for.
-    struct ScriptedStdin(std::collections::VecDeque<Option<u8>>);
-
-    impl ScriptedStdin {
-        fn new(reads: impl IntoIterator<Item = Option<u8>>) -> ScriptedStdin {
-            ScriptedStdin(reads.into_iter().collect())
-        }
-    }
-
-    impl std::io::Read for ScriptedStdin {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            match self.0.pop_front() {
-                Some(Some(byte)) => {
-                    buf[0] = byte;
-                    Ok(1)
-                }
-                // An empty read: `Ok(0)`, the same answer a closed
-                // descriptor gives.
-                _ => Ok(0),
-            }
-        }
-    }
-
-    impl crate::screen::PollableRead for ScriptedStdin {
-        fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
-            !self.0.is_empty()
-        }
-    }
-
-    /// One empty read is an interruption — a window resize, the stop handler
-    /// firing — not a descriptor that has gone. The board keeps listening,
-    /// and the key typed after it still lands.
-    #[test]
-    fn a_lone_empty_read_leaves_the_board_still_listening() {
-        let repo = fixture("drain-keys-one-empty-read");
-        let pipelines = Pipelines::builtin();
-        let mut board = crate::status::Board::for_test();
-        let mut stdin = ScriptedStdin::new([None, Some(b'x')]);
-        let mut listening = true;
-
-        let changed = drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
-
-        assert!(listening, "one empty read must not cost the keyboard");
-        assert!(
-            changed,
-            "the key behind the empty read still reached the board"
-        );
-    }
-
-    /// A descriptor that has gone away polls ready for ever and reads back
-    /// empty every time. [`EMPTY_READS_BEFORE_DEAF`] in a row is what stops
-    /// the board spinning on it for the rest of the loop iteration.
-    #[test]
-    fn a_run_of_empty_reads_stops_the_board_listening() {
-        let repo = fixture("drain-keys-dead-descriptor");
-        let pipelines = Pipelines::builtin();
-        let mut board = crate::status::Board::for_test();
-        let empties = std::iter::repeat_n(None, EMPTY_READS_BEFORE_DEAF as usize + 5);
-        let mut stdin = ScriptedStdin::new(empties);
-        let mut listening = true;
-
-        let changed = drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
-
-        assert!(!listening, "a descriptor that only reads empty is gone");
-        assert!(!changed, "nothing was read, so nothing changed");
-        assert_eq!(
-            stdin.0.len(),
-            5,
-            "it gave up after {EMPTY_READS_BEFORE_DEAF} rather than reading the rest"
-        );
-    }
-
-    /// The run has to be unbroken: a key that lands between two empty reads
-    /// puts the count back to nothing, so a terminal interrupted now and
-    /// again never reads as one that has gone away.
-    #[test]
-    fn a_key_between_empty_reads_starts_the_count_over() {
-        let repo = fixture("drain-keys-interleaved");
-        let pipelines = Pipelines::builtin();
-        let mut board = crate::status::Board::for_test();
-        let mut stdin = ScriptedStdin::new([None, None, Some(b'x'), None, None, Some(b'x')]);
-        let mut listening = true;
-
-        drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
-
-        assert!(listening, "two in a row, twice over, is not a run of three");
-    }
-
-    /// A key that fails reaches the problem log under the board. It used to
-    /// be discarded without a word, so a `p` or an `r` that could not be
-    /// carried out looked exactly like one that was never read.
-    #[test]
-    fn a_key_that_fails_is_written_to_the_problem_log() {
-        let repo = fixture("drain-keys-failed-key");
-        let pipelines = Pipelines::builtin();
-        let mut board = crate::status::Board::for_test();
-        // `P` reads the whole queue to find what it would abort. A queue
-        // directory that is a plain file fails that read, which is the one
-        // thing about this test that has to be arranged — every other way a
-        // key fails is a race this cannot stage.
-        let queue = repo.queue_dir();
-        let _ = std::fs::remove_dir_all(&queue);
-        std::fs::write(&queue, "not a directory").unwrap();
-
-        let mut stdin = ScriptedStdin::new([Some(b'P')]);
-        let mut listening = true;
-        drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
-
-        let log = std::fs::read_to_string(crate::problem_log::path(&repo))
-            .expect("the failed key wrote no problem log at all");
-        assert!(log.contains("board key"), "{log}");
-        assert!(log.contains("'P'"), "{log}");
-    }
-
-    /// A check that returns at once prints its pending row and its done row
-    /// back to back, the pending one wiped by the same `\r\x1b[2K` a slow
-    /// check would otherwise leave standing alone — acceptance criterion:
-    /// each check prints its own line as it returns.
-    #[test]
-    fn checklist_row_prints_pending_then_wipes_it_for_done() {
-        let mut out = Vec::new();
-        let value = checklist_row(&mut out, true, "queue read", "reading the queue", || {
-            Ok::<_, anyhow::Error>(3)
-        })
-        .unwrap();
-        assert_eq!(value, 3);
-        let printed = String::from_utf8(out).unwrap();
-        assert!(
-            printed.starts_with(&format!("    {CHECKLIST_PENDING} queue read")),
-            "no pending row for the still-running check: {printed:?}"
-        );
-        assert!(printed.contains("reading the queue"), "{printed:?}");
-        assert!(
-            printed.contains("\r\x1b[2K"),
-            "the pending row must be wiped, not left standing: {printed:?}"
-        );
-    }
-
-    /// A check that fails prints its pending row and nothing past a bare
-    /// newline — the error itself is reported once the board's own
-    /// `TermGuard` has already restored the terminal on the way out through
-    /// `?`, not raced with a checklist row still open on the same line.
-    #[test]
-    fn checklist_row_leaves_a_clean_line_on_failure() {
-        let mut out = Vec::new();
-        let result = checklist_row(
-            &mut out,
-            true,
-            "git identity",
-            "checking git identity",
-            || Err::<(), _>(anyhow::anyhow!("no identity")),
-        );
-        assert!(result.is_err());
-        let printed = String::from_utf8(out).unwrap();
-        assert!(
-            printed.starts_with(&format!("    {CHECKLIST_PENDING} git identity")),
-            "{printed:?}"
-        );
-        assert!(printed.ends_with('\n'), "{printed:?}");
-        assert!(!printed.contains("\x1b[2K"), "{printed:?}");
-    }
-
-    /// `--plain` (and `args.screen`, through the same flag) prints
-    /// nothing at all — the checklist is the board's own setup, and
-    /// `checklist_row` must be a plain pass-through with `checklist: false`.
-    #[test]
-    fn checklist_row_prints_nothing_when_the_checklist_is_off() {
-        let mut out = Vec::new();
-        let value = checklist_row(&mut out, false, "queue read", "reading the queue", || {
-            Ok::<_, anyhow::Error>(7)
-        })
-        .unwrap();
-        assert_eq!(value, 7);
-        assert!(out.is_empty(), "{out:?}");
-    }
-
-    /// `checklist_done`'s own two shapes: a bare done row when there is
-    /// nothing to say beside it, and one with a detail column when there is
-    /// — the mockup's own two row shapes (`git identity` vs `queue read`).
-    #[test]
-    fn checklist_done_omits_the_gap_with_no_detail() {
-        let mut out = Vec::new();
-        checklist_done(&mut out, true, "git identity", "").unwrap();
-        checklist_done(&mut out, true, "queue read", "12 tasks").unwrap();
-        let printed = String::from_utf8(out).unwrap();
-        assert_eq!(
-            printed,
-            format!(
-                "    {CHECKLIST_DONE} git identity\n    {CHECKLIST_DONE} {}12 tasks\n",
-                checklist_label("queue read")
-            )
-        );
-    }
-
-    /// The checklist's own detail for `task routes`: every distinct
-    /// `pipeline:` a batch of tasks names, in the order each is first seen —
-    /// the mockup's own "impl_ui, impl, release", not an alphabetised list.
-    #[test]
-    fn task_route_names_lists_each_pipeline_once_in_first_seen_order() {
-        let a = crate::task::Task::parse(
-            std::path::PathBuf::from("a.md"),
-            "---\nid: a\nstage: queued\npipeline: impl_ui\n---\nbody\n",
-        )
-        .unwrap();
-        let b = crate::task::Task::parse(
-            std::path::PathBuf::from("b.md"),
-            "---\nid: b\nstage: queued\npipeline: impl\n---\nbody\n",
-        )
-        .unwrap();
-        let c = crate::task::Task::parse(
-            std::path::PathBuf::from("c.md"),
-            "---\nid: c\nstage: queued\npipeline: impl_ui\n---\nbody\n",
-        )
-        .unwrap();
-        let d = crate::task::Task::parse(
-            std::path::PathBuf::from("d.md"),
-            "---\nid: d\nstage: queued\npipeline: release\n---\nbody\n",
-        )
-        .unwrap();
-        assert_eq!(task_route_names(&[a, b, c, d]), "impl_ui, impl, release");
-    }
-
-    /// The 200ms acceptance bound: the board struct's own construction,
-    /// followed by the real [`print_checklist_header`] `dispatch` itself
-    /// calls, must land well inside it. This cannot exercise the real
-    /// `spoolway dispatch` entry point, which needs a live repo and backend;
-    /// it instead proves the construction and the print path together add
-    /// nothing that could ever cost 200ms on their own, which is the one
-    /// thing a future change to either could break. `Board::for_test`'s
-    /// guard is inert and calls neither `hide_cursor` nor `raw_mode` — see
-    /// its own doc — so the terminal-setup syscalls a real `Board::new`
-    /// would make are not, and cannot be, timed here; this bound covers only
-    /// the board struct itself and the print path.
-    #[test]
-    fn the_first_checklist_write_lands_within_200ms() {
-        let start = std::time::Instant::now();
-        let _board = crate::status::Board::for_test();
-        let mut out = Vec::new();
-        print_checklist_header(&mut out).unwrap();
-        assert!(
-            start.elapsed() < std::time::Duration::from_millis(200),
-            "took {:?}",
-            start.elapsed()
-        );
-    }
-
     /// A dispatcher already running for this repo must send `spoolway
     /// dispatch` out with [`EXIT_ALREADY_RUNNING`], never through
     /// [`crate::lock::Lock::acquire`] — a second start names the run, it
@@ -2108,17 +1284,13 @@ mod tests {
     /// then calls `dispatch` again against the same repo. `Lock::acquire`
     /// refuses a second holder outright — see its own doc comment — so a
     /// second acquire attempt here would surface as this call returning an
-    /// error naming "already running", not as a silent takeover. `--plain`
-    /// keeps this one call and one exit, with nothing left to interrupt.
+    /// error naming "already running", not as a silent takeover.
     #[test]
     fn a_dispatch_finding_the_lock_held_never_takes_it() {
         let repo = fixture("lock-held-never-taken");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
-        let args = DispatchArgs {
-            plain: true,
-            ..Default::default()
-        };
+        let args = DispatchArgs::default();
         let result = dispatch(&repo, &Pipelines::builtin(), &args);
 
         assert!(
@@ -2137,10 +1309,7 @@ mod tests {
         let repo = fixture("repeated-refusal");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
-        let args = DispatchArgs {
-            plain: true,
-            ..Default::default()
-        };
+        let args = DispatchArgs::default();
 
         for attempt in 1..=5 {
             assert_eq!(
@@ -2157,10 +1326,7 @@ mod tests {
     #[test]
     fn an_empty_queue_exits_three() {
         let repo = fixture("empty-queue-exit");
-        let args = DispatchArgs {
-            plain: true,
-            ..Default::default()
-        };
+        let args = DispatchArgs::default();
         assert_eq!(
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_EMPTY_QUEUE
@@ -2242,10 +1408,7 @@ mod tests {
     fn a_lock_already_held_exits_four() {
         let repo = fixture("lock-held-exit");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        let args = DispatchArgs {
-            plain: true,
-            ..Default::default()
-        };
+        let args = DispatchArgs::default();
         assert_eq!(
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_ALREADY_RUNNING
@@ -2260,10 +1423,7 @@ mod tests {
     fn a_live_screen_lock_refuses_a_typed_dispatch() {
         let repo = fixture("screen-lock-refuses");
         let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
-        let args = DispatchArgs {
-            plain: true,
-            ..Default::default()
-        };
+        let args = DispatchArgs::default();
         assert_eq!(
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_ALREADY_RUNNING
@@ -2843,7 +2003,7 @@ mod tests {
     #[test]
     fn overrides_gate_with_no_layer_proceeds_without_asking() {
         let repo = fixture("overrides-gate-no-layer");
-        assert!(overrides_gate(&repo, true).unwrap());
+        assert!(overrides_gate(&repo).unwrap());
     }
 
     /// A fixture with a real layer on it, forked the same way `spoolway

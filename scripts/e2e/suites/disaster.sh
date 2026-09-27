@@ -90,7 +90,7 @@ one_shot_start() {
   local pidfile="$LIVE/one-shot.pid"
   rm -f "$pidfile"
   setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch --plain \
+    _ "$pidfile" "$SPOOLWAY" dispatch \
     >>"$E2E_DISPATCH_LOG" 2>&1 &
   poll_until 10 test -s "$pidfile" || {
     printf '  \033[31mSETUP\033[0m the one-shot dispatcher never started\n' >&2
@@ -99,25 +99,10 @@ one_shot_start() {
   cat "$pidfile"
 }
 
-# `one_shot_start`'s own counterpart with a board drawn instead of `--plain`
-# — the one thing this suite needs it for is proving a pass's problems reach
-# `problem_log` and never this process's own output. Stdin closed rather than
-# inherited: a board takes the terminal for as long as it is up, and this one
-# has to find none to take. `TermGuard` already no-ops off a stdin that is not
-# a terminal, so `/dev/null` here is what keeps a backgrounded board from
-# reaching for a real one.
-one_shot_start_board() {
-  local pidfile="$LIVE/one-shot-board.pid"
-  rm -f "$pidfile"
-  setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch \
-    >>"$E2E_DISPATCH_LOG" 2>&1 </dev/null &
-  poll_until 10 test -s "$pidfile" || {
-    printf '  \033[31mSETUP\033[0m the one-shot board dispatcher never started\n' >&2
-    exit 2
-  }
-  cat "$pidfile"
-}
+# The board is bare `spoolway`'s dispatch tab, kept open by `lib.sh`'s
+# `screen_start` with every frame it draws written to one log for the whole
+# suite.
+BOARD_LOG="$LIVE/board.out"
 
 # `ctrl-c`, and wait for that one process — no group needed, since
 # `one_shot_start` never leaves a shell above it to also be a member of one.
@@ -352,11 +337,11 @@ sweep
 forget stop-live
 
 # ------------------------- a pass problem reaches the project log, not the board
-# `sweep` first: the resident supervisor `dispatcher_start` keeps running is
-# always `--plain`, and this case is about the one thing that differs when a
-# board is drawn instead — nothing here works if the resident dispatcher
-# might answer for `problem-log` before the board-mode one-shot below gets to
-# it.
+# `sweep` first: the resident supervisor `dispatcher_start` keeps running
+# prints every problem as a `  ! ` line, and this case is about the one thing
+# that differs when the dispatch tab dispatches instead — nothing here works
+# if the resident dispatcher might answer for `problem-log` before the
+# screen's own does.
 sweep
 task_doc "$LIVE/problem-log.md" problem-log "$BODY" "group: disaster" \
   "touches: [notes/problem-log.md]"
@@ -373,23 +358,24 @@ sed -i 's/^stage: .*/stage: not-a-real-step/' "$SPOOLWAY_PROJECT_HOME/queue/prob
 # the `binding-record` task.
 PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 rm -f "$PROJECT_LOG"
-# However many lines the shared dispatch log already carries — only what
-# lands after this point is this case's own to judge.
-BEFORE_LINES=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
+# However many lines the board's log already carries — only what lands
+# after this point is this case's own to judge.
+BEFORE_LINES=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
 
-BOARD_PID=$(one_shot_start_board)
+screen_start "$BOARD_LOG"
+screen_dispatch
 if wait_for_text 20 "$PROJECT_LOG" 'not-a-real-step'; then
   ok "a pass problem is appended to the project's own log"
 else
   bad "a pass problem is appended to the project's own log"
 fi
-one_shot_stop "$BOARD_PID"
+screen_stop
 
-if ! tail -n +"$((BEFORE_LINES + 1))" "$E2E_DISPATCH_LOG" | grep -q '  ! '; then
+if ! tail -n +"$((BEFORE_LINES + 1))" "$BOARD_LOG" | grep -qa '  ! '; then
   ok "and no problem line reaches the board's own output"
 else
   bad "and no problem line reaches the board's own output"
-  tail -n +"$((BEFORE_LINES + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+  tail -n +"$((BEFORE_LINES + 1))" "$BOARD_LOG" | sed 's/^/        /'
 fi
 forget problem-log
 
@@ -478,17 +464,17 @@ LOCAL_MODEL=$(local_model)   # `fake-local`, the model the mock's local steps na
 queue_hang localnote          # a task whose default pipeline routes through that step
 
 # Unflagged: no reason to expect the warning, and none appears.
-BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
-BOARD_PID=$(one_shot_start_board)
-poll_until 15 bash -c \
-  'tail -n +'"$((BEFORE + 1))"' "'"$E2E_DISPATCH_LOG"'" | grep -q "slots"'
-if tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | grep -qF "not considered by the slots pool"; then
+BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
+screen_start "$BOARD_LOG"
+screen_board
+poll_until 15 screen_drew_since "$BEFORE" "slots"
+if tail -n +"$((BEFORE + 1))" "$BOARD_LOG" | grep -qaF "not considered by the slots pool"; then
   bad "no board frame carries the retired warning (model unflagged)"
-  tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+  tail -n +"$((BEFORE + 1))" "$BOARD_LOG" | sed 's/^/        /'
 else
   ok "no board frame carries the retired warning (model unflagged)"
 fi
-one_shot_stop "$BOARD_PID"
+screen_stop
 
 # Flagged local, and given a pool of its own, `pi` — the profile
 # `localnote`'s `implement` step names — still earns a slots line on the
@@ -498,15 +484,16 @@ one_shot_stop "$BOARD_PID"
 # it is gone.
 must "flag the model local" "$SPOOLWAY" config set "models.$LOCAL_MODEL.local" true
 must "give the model a pool" "$SPOOLWAY" config set "models.$LOCAL_MODEL.slots" 3
-BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
-BOARD_PID=$(one_shot_start_board)
-if wait_for_text 20 "$E2E_DISPATCH_LOG" "$LOCAL_MODEL"; then
+BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
+screen_start "$BOARD_LOG"
+screen_board
+if poll_until 20 screen_drew_since "$BEFORE" "$LOCAL_MODEL"; then
   ok "the board still names the pooled model's own slots line"
 else
   bad "the board still names the pooled model's own slots line"
-  tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+  tail -n +"$((BEFORE + 1))" "$BOARD_LOG" | sed 's/^/        /'
 fi
-tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/local-pool.out"
+tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/local-pool.out"
 # `pi`'s line carries two figures: the profile's own (`slots n/∞`, since
 # `pi` has no `concurrency` of its own) and, after it, the pool's model and
 # its figure against the model's own cap (`fake-local   n/3`). Neither live
@@ -539,7 +526,7 @@ if grep -qF "not considered by the slots pool" "$LIVE/local-pool.out"; then
 else
   ok "flagging a model local does not bring the retired warning back"
 fi
-one_shot_stop "$BOARD_PID"
+screen_stop
 forget localnote
 
 # ---------------- `spoolway eval` banks no catch-up line for a live lane

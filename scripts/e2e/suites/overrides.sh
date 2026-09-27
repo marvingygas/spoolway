@@ -127,10 +127,9 @@ must "a task to dispatch against" "$SPOOLWAY" queue add --from "$LIVE/gate.md"
 # captures once and asserts against that capture several times — three real
 # dispatches rather than the seven throwaway ones this file used to do.
 #
-# `--plain` is deliberate and is not an exemption from anything: the gates
-# and the pane check both sit ahead of it. It keeps the run a log instead of
-# the redrawing board, which is the only form a captured file can be read
-# back from.
+# `dispatch` prints a line per pass rather than drawing a board — the gates
+# and the pane check both sit ahead of that, and the plain log is the only
+# form a captured file can be read back from.
 GATE_LOG="$LIVE/gate-run.log"
 GATE_PID="$LIVE/gate-run.pid"
 # Printed by the pass loop, so it is only ever reached past the lock — which
@@ -145,7 +144,7 @@ gate_run() {
   # together — the same shape as `dispatcher_start`, and for the same
   # reason. `setsid` may or may not fork, so the group leader `exec`s the
   # binary over itself after writing its own pid.
-  setsid bash -c 'echo $$ > "$2"; exec "$1" dispatch --plain' \
+  setsid bash -c 'echo $$ > "$2"; exec "$1" dispatch' \
     _ "$SPOOLWAY" "$GATE_PID" >"$GATE_LOG" 2>&1 &
   disown
   poll_until 10 test -s "$GATE_PID"

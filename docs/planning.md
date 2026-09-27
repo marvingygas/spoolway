@@ -13,7 +13,7 @@ them, and finishing the plan.
 flowchart LR
   A[goal] -->|/spoolway-plan| B[plan page]
   B -->|/spoolway-tasks| C[task documents in pending/]
-  C -->|spoolway queue| D[queue]
+  C -->|spoolway| D[queue]
   D -->|spoolway dispatch| E[pull requests]
 ```
 
@@ -76,8 +76,8 @@ runs `spoolway task contract --from` over the directory to check the set.
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
-`spoolway queue` opens the screen. The left pane lists one row per group in the pending
-directory. The right pane lists the highlighted group's tasks and what each waits on.
+Bare `spoolway` opens the screen, on the queue tab. The left pane lists one row per group in the
+pending directory. The right pane lists the highlighted group's tasks and what each waits on.
 
 | Key | What it does |
 |---|---|

@@ -666,18 +666,14 @@ const VACATE_POLL: Duration = Duration::from_millis(250);
 /// A plain sleep, on purpose, not a poll on stdin: an earlier version of
 /// this put `libc::STDIN_FILENO` in the poll set to wake early on a
 /// keypress, but `tick` is not always something that reads and drains one —
-/// `Herdr::call_watching_for_stall`'s own callers pass `&mut || {}`, and the
-/// board's own `tick` stops reading once its `listening` flag goes false
-/// (`commands::dispatch`, a closed stdin) or is never reading at all
-/// (`--plain`). Any of those left a byte sitting on stdin unread, and
-/// `crate::screen::poll_ready` answers `POLLIN` on it again immediately,
-/// so the "poll instead of sleep" became a 100% CPU spin for the rest of
-/// the wait rather than the early wake it was meant to be (review finding
-/// 2). `tick` still runs once every [`VACATE_POLL`] here — a bound this
-/// launch never had at all before, when it was dead for the whole of
-/// herdr's two-minute `agent start` — unlike `commands::dispatch`'s own
-/// interval wait between passes, where stdin is polled directly and a key
-/// wakes it at once rather than waiting out a poll interval.
+/// `Herdr::call_watching_for_stall`'s own callers pass `&mut || {}`, which
+/// leaves a byte sitting on stdin unread. `crate::screen::poll_ready`
+/// answers `POLLIN` on that byte again immediately, so the "poll instead of
+/// sleep" became a 100% CPU spin for the rest of the wait rather than the
+/// early wake it was meant to be (review finding 2). `tick` still runs once
+/// every [`VACATE_POLL`] here — a bound this launch never had at all
+/// before, when it was dead for the whole of herdr's two-minute
+/// `agent start`.
 fn poll_wait(tick: &mut dyn FnMut()) {
     tick();
     std::thread::sleep(VACATE_POLL);

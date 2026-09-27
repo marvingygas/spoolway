@@ -20,8 +20,8 @@ Total         56             5                                                  
 
 ## The screen
 
-`spoolway eval` with no flags, in a terminal, opens a screen. Any flag, or a redirected stdout,
-prints the lanes table instead.
+`spoolway eval` always prints the lanes table. Bare `spoolway`'s eval tab draws an interactive
+screen over the same rows.
 
 <img src="screenshots/eval.png" alt="the eval screen">
 
