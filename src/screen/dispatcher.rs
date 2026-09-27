@@ -22,11 +22,6 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 
-/// How wide the popup wraps the child's reason: narrow enough that the box
-/// and the board's margins either side of it fit the 100 columns the
-/// dispatch tab is drawn to.
-const REASON_WRAP: usize = 66;
-
 /// A dispatcher the dispatch tab started.
 pub(crate) struct Dispatcher {
     process: std::process::Child,
@@ -172,34 +167,7 @@ pub(crate) fn popup(ran: bool, reason: &str) -> Vec<String> {
         true => "the dispatcher stopped",
         false => "the dispatcher did not start",
     };
-    let mut body = vec![String::new()];
-    for line in reason.lines() {
-        body.extend(wrap(line, REASON_WRAP));
-    }
-    body.push(String::new());
-    body.push("[enter] close".to_string());
-    super::boxed(title, &body)
-}
-
-/// `line` word-wrapped to `width`, each continuation keeping the line's own
-/// leading indent so a command stays lined up under the one above it.
-fn wrap(line: &str, width: usize) -> Vec<String> {
-    let indent: String = line.chars().take_while(|c| *c == ' ').collect();
-    let mut lines = Vec::new();
-    let mut current = indent.clone();
-    for word in line.split_whitespace() {
-        if current.len() > indent.len()
-            && current.chars().count() + 1 + word.chars().count() > width
-        {
-            lines.push(std::mem::replace(&mut current, indent.clone()));
-        }
-        if current.len() > indent.len() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    lines.push(current);
-    lines
+    super::notice(title, reason, "[enter] close", super::NOTICE_WRAP)
 }
 
 #[cfg(test)]
@@ -348,11 +316,5 @@ mod tests {
         child.stop();
         assert!(child.stopping);
         assert_eq!(wait_ended(&mut child), None);
-    }
-
-    #[test]
-    fn a_long_line_wraps_under_its_own_indent() {
-        let lines = wrap("  one two three four", 11);
-        assert_eq!(lines, ["  one two", "  three", "  four"]);
     }
 }

@@ -224,6 +224,9 @@ printf ' \r\x1b' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ESC_OU
 has "the gate draws over an unmet gh version" \
   "issue tracking is not supported." "$GATE_ESC_OUT"
 has "naming the declared floor" "gh >= 2.97.0" "$GATE_ESC_OUT"
+has "in a popup over the queue screen" "┌─ issue tracking " "$GATE_ESC_OUT"
+has "whose keys read as drawn" \
+  "[enter] queue anyway, without issue tracking   [esc] back" "$GATE_ESC_OUT"
 works "esc leaves the document in pending, unqueued" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/gate-esc.md"
 works "and nothing reached the queue" \

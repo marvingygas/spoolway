@@ -848,10 +848,15 @@ a scan finds files to change, the command stops and draws a confirm panel titled
 installed, apply updates" before running. Enter runs `sync` for real, rewrites the stamp, and
 runs the command. Ctrl-c writes nothing, runs nothing, and restores the terminal.
 
-Where stdin or stdout is not a terminal, under `--json`, or inside a lane, no panel is drawn.
-One line goes to stderr instead and the command runs anyway; inside a lane the line omits the
-trailing "Open spoolway to apply them." sentence. `init`, `doctor`, `whats-new`, `update`,
-`config edit`, `config override` and `sync` itself never draw the panel or print the line.
+Bare `spoolway` asks the same question as a popup over the tab it opens on instead, closed by
+`[enter]` alone, unless the project's pipeline file cannot load, in which case its screen cannot
+open to show the popup and it draws the printed panel like every other command.
+
+Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither the panel nor
+the popup is drawn. One line goes to stderr instead and the command runs anyway; inside a lane
+the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
+`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel,
+the popup, or print the line.
 
 ### `spoolway whats-new`
 

@@ -10,6 +10,11 @@
 //! scan that finds nothing to do (every file already hand-matches what the
 //! new release would write) has nothing worth interrupting a command for.
 //!
+//! Bare `spoolway` asks the same question differently: its screen would
+//! wipe a printed panel with its first frame, so [`sync_popup`] hands the
+//! panel to the screen to lay over the tab it opens on, and [`apply`] is its
+//! `enter` — see `crate::screen::shell::OnOpen`.
+//!
 //! The split mirrors `commands::dispatch::overrides_gate` / `_with`: a thin
 //! wrapper over the process's real stdio and terminal, and an injectable
 //! core a test drives over a `Cursor` with `TermGuard::inert` — see
@@ -172,21 +177,12 @@ fn confirm_sync_gate_with(
     interrupt: impl FnOnce() -> SigintGuard,
     interrupted: impl Fn() -> bool,
 ) -> Result<bool> {
-    if !crate::sync::stamp_behind(&repo.home, &repo.checkout) {
+    let Some(outcomes) = behind(repo)? else {
         return Ok(true);
-    }
-
-    let dry = SyncArgs {
-        dry_run: true,
-        replace: Vec::new(),
     };
-    let outcomes = crate::sync::scan(repo, &dry)?;
     let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
     let notes = crate::sync::migration_notes(&outcomes);
     let count = wrote.len() + removed.len();
-    if count == 0 {
-        return Ok(true);
-    }
 
     // A lane is one of the places the Goal names outright — "a pipe, CI,
     // `--json`, a lane" — where no dialog can be drawn, independently of
@@ -242,6 +238,76 @@ fn confirm_sync_gate_with(
     }
 }
 
+/// What a real `spoolway sync` would do to this checkout, or `None` when the
+/// gate has nothing to ask: the stamp is current, or it has moved but a
+/// scan finds nothing to write or remove — see the module doc for why the
+/// two questions are asked in that order.
+fn behind(repo: &Repo) -> Result<Option<Vec<crate::sync::Outcome>>> {
+    if !crate::sync::stamp_behind(&repo.home, &repo.checkout) {
+        return Ok(None);
+    }
+    let dry = SyncArgs {
+        dry_run: true,
+        replace: Vec::new(),
+    };
+    let outcomes = crate::sync::scan(repo, &dry)?;
+    let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
+    if wrote.is_empty() && removed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(outcomes))
+}
+
+/// The same question as a popup, for bare `spoolway` to lay over the tab it
+/// opens on rather than print before its screen is drawn — or `None` when
+/// [`confirm_sync_gate`] would not ask either. `main` hands bare `spoolway`
+/// this instead of the printed gate; every other command keeps the gate.
+///
+/// The popup reads `enter` alone, the same as the printed gate, and the
+/// screen answers it with [`apply`]; its own `ctrl-c` quits the screen,
+/// which, as here, writes nothing and runs nothing.
+pub(crate) fn sync_popup(repo: &Repo) -> Result<Option<Vec<String>>> {
+    let Some(outcomes) = behind(repo)? else {
+        return Ok(None);
+    };
+    let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
+    let notes = crate::sync::migration_notes(&outcomes);
+    // Two blank rows over the paths where the printed panel has one, as
+    // step 38 of the screen's mockup draws the popup.
+    let mut body = vec![String::new()];
+    body.extend(panel_body(&wrote, &notes, &removed));
+    Ok(Some(screen::panel(TITLE, &body, KEYS)))
+}
+
+/// Whether bare `spoolway` may ask this question as [`sync_popup`] over its
+/// screen, rather than printed ahead of it the way every other command asks.
+///
+/// Not when the project's pipelines do not load. The screen needs them to
+/// open at all, and a pipeline file carrying a retired step shape is
+/// refused by the load and migrated by `sync` — so the popup that would fix
+/// it could never be drawn, and bare `spoolway` would end on the refusal
+/// the gate exists to answer. The printed gate asks instead, and `main`
+/// reads the graph only after it has been answered.
+pub(crate) fn asks_as_popup(repo: &Repo) -> bool {
+    crate::pipeline::Pipelines::load(&repo.root, &repo.config).is_ok()
+}
+
+/// `enter` on [`sync_popup`]: the real `spoolway sync` the printed gate runs,
+/// without its report. The screen is drawn over the terminal the report
+/// would print to, and the popup has already named every path it writes.
+pub(crate) fn apply(repo: &Repo) -> Result<()> {
+    let real = SyncArgs {
+        dry_run: false,
+        replace: Vec::new(),
+    };
+    crate::sync::scan(repo, &real)?;
+    // What `sync::run` does once its scan has written: the stamp records
+    // what this checkout was brought to, and a leftover skill stamp goes.
+    crate::sync::write_stamp(&repo.home, &repo.checkout)?;
+    crate::sync::remove_skill_stamp(&repo.home);
+    Ok(())
+}
+
 /// Truncate `line` to [`MAX_LINE`] characters, with a trailing mark where it
 /// was cut — sized for a whole panel row, borders included.
 fn fit(line: String) -> String {
@@ -265,6 +331,18 @@ fn print_panel(
     notes: &std::collections::BTreeMap<&str, Vec<(&str, &str)>>,
     removed: &[(&str, &str)],
 ) -> Result<()> {
+    for line in screen::panel(TITLE, &panel_body(wrote, notes, removed), KEYS) {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+/// The rows inside the panel, shared by the printed gate and [`sync_popup`].
+fn panel_body(
+    wrote: &[&str],
+    notes: &std::collections::BTreeMap<&str, Vec<(&str, &str)>>,
+    removed: &[(&str, &str)],
+) -> Vec<String> {
     let mut body = vec![String::new()];
     for path in wrote {
         body.push(fit(format!("{:<6}  {path}", "write")));
@@ -278,11 +356,7 @@ fn print_panel(
     }
     body.push(String::new());
     body.push(fit(KEPT_LINE.to_string()));
-
-    for line in screen::panel(TITLE, &body, KEYS) {
-        writeln!(out, "{line}")?;
-    }
-    Ok(())
+    body
 }
 
 #[cfg(test)]
@@ -600,6 +674,58 @@ mod tests {
         .unwrap();
         assert!(proceed);
         assert!(Config::path_in(&repo.checkout).is_file());
+    }
+
+    /// Bare `spoolway` gets the same question as a popup over its screen:
+    /// nothing to ask with the stamp current, the printed gate's panel
+    /// otherwise — and [`apply`] writes what the popup names and brings the
+    /// stamp current, so the next screen opened asks nothing.
+    #[test]
+    fn the_popup_asks_what_the_printed_gate_asks_and_apply_answers_it() {
+        let repo = fixture("popup");
+        assert!(
+            sync_popup(&repo).unwrap().is_none(),
+            "no stamp, no question"
+        );
+
+        make_stale(&repo);
+        let panel = sync_popup(&repo)
+            .unwrap()
+            .expect("a stale stamp with a config to write asks");
+        assert!(
+            panel[0].starts_with("┌─ new version installed, apply updates "),
+            "{panel:?}"
+        );
+        let flat = panel.join("\n");
+        assert!(flat.contains("config.toml"), "{flat}");
+        assert!(flat.contains(KEPT_LINE), "{flat}");
+        assert!(flat.contains("[enter] confirm"), "{flat}");
+
+        apply(&repo).unwrap();
+        assert!(Config::path_in(&repo.checkout).is_file());
+        assert!(sync_popup(&repo).unwrap().is_none(), "answered for good");
+    }
+
+    /// A pipeline with a retired step shape — the load refuses it, `sync`
+    /// migrates it — sends bare `spoolway` to the printed gate, since its
+    /// screen could never open to show the popup; once the file loads, the
+    /// popup asks.
+    #[test]
+    fn a_pipeline_sync_would_migrate_is_asked_about_printed_not_as_a_popup() {
+        let repo = fixture("popup-retired-shape");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let retired = "steps:\n  \
+                       - id: a\n    agent: pi\n    on_pass: b\n  \
+                       - id: b\n    agent: pi\n    loop:\n      a: 1\n    on_pass: z\n    \
+                       on_fail: a\n  \
+                       - id: z\n    end: true\n";
+        std::fs::write(dir.join("default.yml"), retired).unwrap();
+        assert!(!asks_as_popup(&repo));
+
+        let (migrated, _) = crate::pipeline::migrate_retired_shapes(retired).unwrap();
+        std::fs::write(dir.join("default.yml"), migrated).unwrap();
+        assert!(asks_as_popup(&repo));
     }
 
     /// The panel's width is bounded even when a path in it is not: every

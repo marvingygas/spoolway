@@ -425,11 +425,21 @@ impl Audience {
 /// On stderr, deliberately: no command's stdout gains a line, so nothing that
 /// reads spoolway's output has to learn about this at all.
 pub fn notify(audience: Audience) {
-    if !audience.wants_notice() {
-        return;
+    if let Some(notice) = notice(audience) {
+        eprintln!("{notice}");
     }
-    let Some(version) = newer() else { return };
-    eprintln!("{}", line(&version, Channel::detect()));
+}
+
+/// The line [`notify`] prints, or `None` when it would print nothing — for
+/// bare `spoolway`, which shows it as a popup over its screen instead: a
+/// line on stderr ahead of the screen is wiped by the screen's first frame
+/// before anybody could read it.
+pub fn notice(audience: Audience) -> Option<String> {
+    if !audience.wants_notice() {
+        return None;
+    }
+    let version = newer()?;
+    Some(line(&version, Channel::detect()))
 }
 
 /// The notice itself.
@@ -926,6 +936,20 @@ mod tests {
             }
             .wants_notice()
         );
+    }
+
+    /// `notice` answers to the same gates `notify` prints behind: nobody to
+    /// tell, no line — whatever the cache says, which this never reads.
+    #[test]
+    fn notice_is_none_for_an_audience_that_wants_none() {
+        let lane = Audience {
+            in_lane: true,
+            machine_readable: false,
+            tty: true,
+            enabled: true,
+            skipped: false,
+        };
+        assert_eq!(notice(lane), None);
     }
 
     /// A cache is two fields and survives a round trip; anything else parses

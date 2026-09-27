@@ -9,13 +9,15 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 
 use super::queue::{
-    Focus, RoutineNav, handle_routine_key, highlighted_routine_folder, highlighted_routine_task,
-    labeled_row, layout, render_routines, two_pane_frame, window,
+    Focus, RoutineNav, clip as clip_to, handle_routine_key, highlighted_routine_folder,
+    highlighted_routine_task, labeled_row, layout, routine_level, two_pane_frame, window,
 };
 use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
-use crate::screen::{Key, PollableRead, RawStdin, key_hint, overlay, pad_to, panel, read_key};
+use crate::screen::{
+    Key, Notice, PollableRead, RawStdin, key_hint, keys, overlay, pad_to, panel, read_key,
+};
 use crate::task::Task;
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
@@ -105,7 +107,10 @@ pub fn jobs_run(repo: &Repo, pipelines: &Pipelines, name: &str, in_lane: bool) -
     })?;
 
     let base = repo.branch()?;
-    let tasks = fire_job(repo, pipelines, job, &base)?;
+    let gate = ToolGate::Print {
+        interactive: crate::ask::interactive(),
+    };
+    let tasks = fire_job(repo, pipelines, job, &base, gate)?;
 
     for task in &tasks {
         println!("queued {} at `{}`", task.id(), crate::pipeline::QUEUED);
@@ -123,8 +128,15 @@ pub fn jobs_run(repo: &Repo, pipelines: &Pipelines, name: &str, in_lane: bool) -
 /// Fire one job now, ignoring its schedule: queue its routine under the job's
 /// own pipeline and record the manual firing so the LAST column updates and
 /// the dispatcher's overlap guard sees this run. Shared by `jobs run` and the
-/// screen's `r`.
-fn fire_job(repo: &Repo, pipelines: &Pipelines, job: &Job, base: &str) -> Result<Vec<Task>> {
+/// screen's `r`; `gate` is how each reaches the tool-requirements gate —
+/// printed from the CLI, answered already in the screen's own popup.
+fn fire_job(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    job: &Job,
+    base: &str,
+    gate: ToolGate,
+) -> Result<Vec<Task>> {
     // Parsed only to fail fast on a job whose expression is broken — firing
     // ignores the schedule itself.
     crate::cron::Cron::parse(&job.spec.schedule).map_err(|err| {
@@ -137,12 +149,12 @@ fn fire_job(repo: &Repo, pipelines: &Pipelines, job: &Job, base: &str) -> Result
         )
     })?;
 
-    let tasks = crate::commands::queue_routine_target(
+    let tasks = crate::commands::queue_routine_target_with(
         repo,
         pipelines,
         base,
-        &job.target(repo)?,
-        &job.spec.pipeline,
+        (&job.target(repo)?, &job.spec.pipeline),
+        gate,
     )?;
     jobs::record_manual_fire(repo, &job.name, &tasks)?;
     Ok(tasks)
@@ -258,7 +270,7 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 // ---------------------------------------------------------------------------
 // The screen. Bare `spoolway jobs` opens it. It lists both stores' jobs,
 // shows the highlighted one in full, and walks three panels — the routines
-// browser (reused from `queue`), a cron field, and a pipeline picker — to
+// browser (its keys reused from `queue`), a cron field, and a pipeline picker — to
 // write one. `e` edits through the same three, `space` pauses, `x` deletes,
 // `r` fires now.
 // ---------------------------------------------------------------------------
@@ -326,8 +338,9 @@ impl Draft {
 enum JobMode {
     /// The list and the highlighted job's detail — the resting state.
     List,
-    /// The routines browser, reused whole from `queue`, picking the draft's
-    /// target.
+    /// The routines browser `queue` drives — its keys and its navigation,
+    /// reused whole — picking the draft's target, drawn as a popup over the
+    /// list: see [`routine_panel`].
     PickRoutine { draft: Draft, nav: RoutineNav },
     /// The cron field: `draft.schedule` is the editable buffer.
     Schedule { draft: Draft },
@@ -339,9 +352,15 @@ enum JobMode {
     },
     /// `x` waiting on a `y`.
     ConfirmDelete(String),
-    /// A message held on screen until the next key — a refused save, a fired
-    /// job — since `draw` clears the screen before every frame.
-    Outcome(String),
+    /// `r` stopped at the tool-requirements gate, asked in a popup over the
+    /// list — `panel` is `queue::tool_gate_popup`'s. `enter` fires the job
+    /// named `job` with issue tracking switched off; `esc` goes back to the
+    /// list having fired nothing.
+    ToolGate { panel: Vec<String>, job: String },
+    /// A message in a popup over the list until `enter` closes it — a
+    /// refused save, a fired job — since `draw` clears the screen before
+    /// every frame. Every other key is the popup's to ignore.
+    Outcome(Notice),
 }
 
 struct JobsState {
@@ -449,7 +468,11 @@ fn run_jobs_screen(
         }
 
         match &state.mode {
-            JobMode::Outcome(_) => state.mode = JobMode::List,
+            JobMode::Outcome(_) => {
+                if key == Key::Enter {
+                    state.mode = JobMode::List;
+                }
+            }
 
             JobMode::ConfirmDelete(name) => match key {
                 Key::Char('y') => {
@@ -461,9 +484,12 @@ fn run_jobs_screen(
                             clamp_cursor(&jobs, &mut state);
                         }
                         Err(err) => {
-                            state.mode = JobMode::Outcome(format!(
-                                "Could not delete the job `{name}`: {err:#}. Its store may be \
-                                 read-only; fix that and try again."
+                            state.mode = JobMode::Outcome(Notice::new(
+                                "delete this job",
+                                format!(
+                                    "Could not delete the job `{name}`: {err:#}. Its store may \
+                                     be read-only; fix that and try again."
+                                ),
                             ));
                         }
                     }
@@ -472,6 +498,20 @@ fn run_jobs_screen(
             },
 
             JobMode::List => handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)?,
+
+            JobMode::ToolGate { job, .. } => match key {
+                Key::Enter => {
+                    // The list is re-read while the popup is up only on an
+                    // idle tick over the resting list, which this is not —
+                    // but a job gone by name fires nothing all the same.
+                    state.mode = match jobs.iter().find(|j| &j.name == job) {
+                        Some(job) => fire_now(repo, pipelines, cwd, job, true)?,
+                        None => JobMode::List,
+                    };
+                }
+                Key::Esc => state.mode = JobMode::List,
+                _ => {}
+            },
 
             JobMode::PickRoutine { draft, nav } => match key {
                 Key::Esc => state.mode = JobMode::List,
@@ -571,7 +611,7 @@ fn run_jobs_screen(
                                         jobs.iter().position(|job| job.name == name).unwrap_or(0);
                                     JobMode::List
                                 }
-                                Err(message) => JobMode::Outcome(message),
+                                Err(message) => JobMode::Outcome(Notice::new("not saved", message)),
                             };
                             clamp_cursor(&jobs, &mut state);
                         }
@@ -658,10 +698,13 @@ fn handle_list_key(
             match jobs::write(repo, scope, &name, &spec) {
                 Ok(()) => reload(repo, jobs),
                 Err(err) => {
-                    state.mode = JobMode::Outcome(format!(
-                        "Could not {verb} the job `{name}` in `{}`: {err:#}. Check the file is \
-                         writable and try again.",
-                        store_label(repo, &store_of(repo, scope)),
+                    state.mode = JobMode::Outcome(Notice::new(
+                        verb,
+                        format!(
+                            "Could not {verb} the job `{name}` in `{}`: {err:#}. Check the \
+                             file is writable and try again.",
+                            store_label(repo, &store_of(repo, scope)),
+                        ),
                     ));
                 }
             }
@@ -669,31 +712,63 @@ fn handle_list_key(
         Key::Char('x') if has_jobs => {
             state.mode = JobMode::ConfirmDelete(jobs[state.cursor].name.clone());
         }
+        // Asked first, in a popup over the list, when the hook declares a
+        // tool this machine cannot meet — the jobs screen's own form of the
+        // queue screen's `Mode::ToolGate`. Printed under the frame instead,
+        // it would draw where no frame is, and take a second terminal guard
+        // inside the screen's.
         Key::Char('r') if has_jobs => {
-            let base = crate::repo::branch_at(cwd)?;
             let job = &jobs[state.cursor];
-            state.mode = match fire_job(repo, pipelines, job, &base) {
-                Ok(tasks) => {
-                    let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
-                    JobMode::Outcome(if ids.is_empty() {
-                        format!(
-                            "Fired `{}` now, but its routine had no documents to queue.",
-                            job.name
-                        )
-                    } else {
-                        format!("Fired `{}` now. Queued {}.", job.name, ids.join(", "))
-                    })
-                }
-                Err(err) => JobMode::Outcome(format!(
-                    "Could not fire `{}` now: {err:#}. Fix its routine, pipeline or store — \
-                     `spoolway doctor` names the fault — then press r again.",
-                    job.name
-                )),
+            state.mode = match crate::commands::tool_gate_popup(repo) {
+                Some(panel) => JobMode::ToolGate {
+                    panel,
+                    job: job.name.clone(),
+                },
+                None => fire_now(repo, pipelines, cwd, job, false)?,
             };
         }
         _ => {}
     }
     Ok(())
+}
+
+/// `r`, once the tool-requirements gate has nothing more to ask: fire `job`
+/// and say how it went, in a popup over the list. `tracking_off` is the
+/// gate's answer — `true` when a requirement was unmet and `enter` fired it
+/// anyway.
+fn fire_now(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &Path,
+    job: &Job,
+    tracking_off: bool,
+) -> Result<JobMode> {
+    let base = crate::repo::branch_at(cwd)?;
+    let gate = ToolGate::Answered { tracking_off };
+    Ok(match fire_job(repo, pipelines, job, &base, gate) {
+        Ok(tasks) => {
+            let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
+            JobMode::Outcome(Notice::new(
+                "run now",
+                if ids.is_empty() {
+                    format!(
+                        "Fired `{}` now, but its routine had no documents to queue.",
+                        job.name
+                    )
+                } else {
+                    format!("Fired `{}` now. Queued {}.", job.name, ids.join(", "))
+                },
+            ))
+        }
+        Err(err) => JobMode::Outcome(Notice::new(
+            "run now",
+            format!(
+                "Could not fire `{}` now: {err:#}. Fix its routine, pipeline or store — \
+                         `spoolway doctor` names the fault — then press r again.",
+                job.name
+            ),
+        )),
+    })
 }
 
 /// `resume`/`pause` for the message the pause toggle prints on failure — the
@@ -814,14 +889,14 @@ fn open_highlighted_job_routine(
     let command = crate::status::editor_command(&task.path);
     let mux = match crate::mux::backend(repo) {
         Ok(mux) => mux,
-        Err(err) => return JobMode::Outcome(format!("o: {err:#}")),
+        Err(err) => return JobMode::Outcome(Notice::new("open task", format!("o: {err:#}"))),
     };
     match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
         Ok(()) => JobMode::PickRoutine {
             draft,
             nav: nav.clone(),
         },
-        Err(err) => JobMode::Outcome(format!("o: {err:#}")),
+        Err(err) => JobMode::Outcome(Notice::new("open task", format!("o: {err:#}"))),
     }
 }
 
@@ -924,28 +999,11 @@ fn jobs_wait_for_key(
 }
 
 fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
-    match &state.mode {
-        JobMode::Outcome(message) => {
-            let mut lines: Vec<String> = message.lines().map(str::to_string).collect();
-            lines.push(String::new());
-            lines.push("press any key to continue".to_string());
-            return lines;
-        }
-        JobMode::PickRoutine { nav, .. } => {
-            let footer = jobs_footer(&state.mode);
-            let mut frame =
-                render_routines(ctx.routines, ctx.routines_dir, ctx.pipelines, nav, &footer);
-            frame.push(footer);
-            return frame;
-        }
-        _ => {}
-    }
-
     let footer = jobs_footer(&state.mode);
     let lay = layout(&footer);
     let in_walk = matches!(
         state.mode,
-        JobMode::Schedule { .. } | JobMode::PickPipeline { .. }
+        JobMode::PickRoutine { .. } | JobMode::Schedule { .. } | JobMode::PickPipeline { .. }
     );
 
     // Build the overlay panel first. The headless frame is only as tall as its
@@ -954,6 +1012,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     // `overlay` writes the panel into rows that do not exist and the firing
     // lines, the key line and the bottom border are silently dropped.
     let overlay_panel: Option<Vec<String>> = match &state.mode {
+        JobMode::PickRoutine { nav, .. } => Some(routine_panel(ctx, nav)),
         JobMode::Schedule { draft } => Some(schedule_panel(draft)),
         JobMode::PickPipeline { query, cursor, .. } => {
             Some(pipeline_panel(ctx.pipelines, query, *cursor))
@@ -961,13 +1020,19 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
         JobMode::ConfirmDelete(name) => Some(panel(
             "delete this job",
             &[
-                clip(&format!("  {name}")),
                 String::new(),
+                clip(&format!("  {name}")),
                 "  its schedule is removed from the store.".to_string(),
             ],
-            "y delete   n keep",
+            &keys(&[("y", "delete"), ("n", "keep")]),
         )),
-        _ => None,
+        JobMode::ToolGate { panel, .. } => Some(panel.clone()),
+        // Wrapped no wider than the frame has room for, so a narrow
+        // terminal still sees the popup's right border.
+        JobMode::Outcome(notice) => Some(
+            notice.panel(crate::screen::NOTICE_WRAP.min((lay.left + lay.right).saturating_sub(1))),
+        ),
+        JobMode::List => None,
     };
     let min_rows = overlay_panel.as_ref().map_or(0, |panel| panel.len() + 4);
 
@@ -1017,7 +1082,9 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
 fn jobs_footer(mode: &JobMode) -> String {
     match mode {
         // `q` only inside bare `spoolway`'s jobs tab, the one place it quits.
-        JobMode::List => key_hint(
+        // The same line under a notice, which reads only the `enter` its own
+        // popup names: this is the line the list reads again once it closes.
+        JobMode::List | JobMode::Outcome(_) | JobMode::ToolGate { .. } => key_hint(
             &[
                 [
                     ("n", "new"),
@@ -1034,20 +1101,10 @@ fn jobs_footer(mode: &JobMode) -> String {
         // Names exactly the keys `run_jobs_screen`'s own `PickRoutine` arm
         // and `handle_routine_key` read, the same set the queue screen's own
         // routines pane names — `o` included, gated the same way there.
-        JobMode::PickRoutine { .. } => key_hint(&[
-            ("o", "open task"),
-            ("space", "select"),
-            ("enter", "use it"),
-            ("esc", "cancel"),
-        ]),
+        JobMode::PickRoutine { .. } => key_hint(ROUTINE_KEYS),
         JobMode::Schedule { .. } => key_hint(&[("enter", "accept"), ("esc", "cancel")]),
         JobMode::PickPipeline { .. } => key_hint(&[("enter", "choose"), ("esc", "cancel")]),
         JobMode::ConfirmDelete(_) => key_hint(&[("y", "delete"), ("n", "keep")]),
-        // Never drawn: `render_jobs`'s own `JobMode::Outcome` arm returns its
-        // frame before `jobs_footer` is ever called for it. Kept rather than
-        // dropped so this match stays exhaustive without a wildcard hiding a
-        // mode a later variant might add.
-        JobMode::Outcome(_) => "  press any key".to_string(),
     }
 }
 
@@ -1238,7 +1295,11 @@ fn clip(s: &str) -> String {
 /// expression that will not parse says so in place of the three lines.
 fn schedule_panel(draft: &Draft) -> Vec<String> {
     let expr = draft.schedule.trim();
-    let mut body = vec![clip(&format!("  {}_", draft.schedule)), String::new()];
+    let mut body = vec![
+        String::new(),
+        clip(&format!("  {}_", draft.schedule)),
+        String::new(),
+    ];
 
     if expr.is_empty() {
         body.push("  (type a cron expression)".to_string());
@@ -1263,7 +1324,7 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
     panel(
         &format!("when does {} run", draft.name()),
         &body,
-        "enter accept   esc cancel",
+        &keys(&[("enter", "accept"), ("esc", "cancel")]),
     )
 }
 
@@ -1273,7 +1334,11 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
 fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<String> {
     let matches = pipeline_matches(pipelines, query);
     let cursor = cursor.min(matches.len().saturating_sub(1));
-    let mut body = vec![clip(&format!("  find: {query}_")), String::new()];
+    let mut body = vec![
+        String::new(),
+        clip(&format!("  find: {query}_")),
+        String::new(),
+    ];
 
     if matches.is_empty() {
         body.push("  no pipeline matches".to_string());
@@ -1294,7 +1359,82 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
         }
     }
 
-    panel("which pipeline", &body, "enter choose   esc cancel")
+    panel(
+        "which pipeline",
+        &body,
+        &keys(&[("enter", "choose"), ("esc", "cancel")]),
+    )
+}
+
+/// The routine picker's keys, in its popup and on the line under the frame.
+const ROUTINE_KEYS: &[(&str, &str)] = &[
+    ("o", "open task"),
+    ("space", "select"),
+    ("enter", "use it"),
+    ("esc", "cancel"),
+];
+
+/// The routine picker's overlay, as step 32 of the screen's mockup draws it:
+/// the folders at the browser's current level, each with its tick, and under
+/// them the highlighted folder's own documents — the ones `enter` would use
+/// — by id and title. The same browser the queue screen's routines pane
+/// drives, [`handle_routine_key`] and all, drawn in a box over the list
+/// rather than in place of it.
+fn routine_panel(ctx: &Ctx, nav: &RoutineNav) -> Vec<String> {
+    let key_row = keys(ROUTINE_KEYS);
+    // As wide as the key row under it, so a long title never widens the
+    // popup past what the keys already take.
+    let width = key_row.chars().count();
+    let level = routine_level(ctx.routines, &nav.path);
+
+    let mut body = vec![String::new()];
+    if level.is_empty() {
+        body.push(clip_to(
+            match nav.path.is_empty() {
+                true => format!("nothing under {}", ctx.routines_dir.display()),
+                false => "nothing here".to_string(),
+            },
+            width,
+        ));
+    }
+    for (i, folder) in level.iter().enumerate() {
+        let marker = match i == nav.folder_cursor && nav.focus == Focus::Groups {
+            true => ">",
+            false => " ",
+        };
+        let tick = match nav.selected.contains(&folder.path) {
+            true => "[x]",
+            false => "[ ]",
+        };
+        body.push(clip_to(format!("{marker} {tick} {}", folder.name), width));
+    }
+
+    if let Some(folder) = highlighted_routine_folder(ctx.routines, nav)
+        && !folder.tasks.is_empty()
+    {
+        body.push(String::new());
+        let widest = folder
+            .tasks
+            .iter()
+            .map(|task| task.id.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (i, task) in folder.tasks.iter().enumerate() {
+            let marker = match i == nav.task_cursor && nav.focus == Focus::Tasks {
+                true => ">",
+                false => " ",
+            };
+            let title = task.description.as_deref().unwrap_or("");
+            body.push(clip_to(
+                format!("{marker} {}   {title}", pad_to(&task.id, widest))
+                    .trim_end()
+                    .to_string(),
+                width,
+            ));
+        }
+    }
+
+    panel("which routine", &body, &key_row)
 }
 
 #[cfg(test)]
@@ -1636,9 +1776,139 @@ mod tests {
         .unwrap();
 
         // Walk a fresh job off the same `nightly` folder: same derived name.
+        // The refusal is a popup over the list, and `q` under it is the
+        // popup's to ignore.
         let drawn = drive(&repo, "n \r@daily\r\rq");
         assert_eq!(jobs::load(&repo).unwrap().len(), 1, "nothing was added");
-        assert!(drawn.contains("already exists"), "{}", last_frame(&drawn));
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("already exists"), "{frame}");
+        assert!(frame.contains("┌─ not saved "), "{frame}");
+        assert!(frame.contains("[enter] close"), "{frame}");
+        assert!(frame.contains("─ jobs"), "the list under it: {frame}");
+    }
+
+    /// `enter` closes a notice onto the list again.
+    #[test]
+    fn enter_closes_a_notice_onto_the_list() {
+        let repo = fixture("jobs-screen-notice-enter");
+        seed_routines(&repo);
+        jobs::write(
+            &repo,
+            Scope::Project,
+            "nightly",
+            &JobSpec {
+                schedule: "@daily".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: "nightly".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        let drawn = drive(&repo, "n \r@daily\r\r\r");
+        let frame = last_frame(&drawn);
+        assert!(!frame.contains("not saved"), "{frame}");
+        assert!(frame.contains("[n] new"), "{frame}");
+    }
+
+    /// A job over `nightly` whose hook declares a floor this machine's
+    /// `cargo` cannot meet, so `r` has the tool-requirements gate to ask.
+    fn job_behind_an_unmet_hook(name: &str) -> Repo {
+        let mut repo = fixture(name);
+        one_job(&repo);
+        let dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("versioned.sh");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n# spoolway-requires: cargo >= 999.0.0\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        repo.config.issue_tracking.hook = "versioned.sh".to_string();
+        repo
+    }
+
+    /// `r` asks the tool-requirements gate as a popup over the list, never
+    /// printed under the frame, and `esc` goes back having fired nothing.
+    #[test]
+    fn r_asks_the_tool_gate_in_a_popup_and_esc_fires_nothing() {
+        let repo = job_behind_an_unmet_hook("jobs-screen-tool-gate-esc");
+
+        let drawn = drive(&repo, "r");
+        assert!(
+            drawn.starts_with("\x1b[2J\x1b[H"),
+            "nothing outside a frame"
+        );
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("┌─ issue tracking "), "{frame}");
+        assert!(frame.contains("cargo >= 999.0.0"), "{frame}");
+        assert!(
+            frame.contains("[enter] queue anyway, without issue tracking   [esc] back"),
+            "{frame}"
+        );
+        assert!(frame.contains("─ jobs"), "the list under it: {frame}");
+
+        let drawn = drive(&repo, "r\x1b");
+        let frame = last_frame(&drawn);
+        assert!(!frame.contains("issue tracking"), "{frame}");
+        assert!(frame.contains("[n] new"), "{frame}");
+        assert!(
+            std::fs::read_dir(repo.queue_dir())
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "nothing was queued"
+        );
+    }
+
+    /// `enter` on the gate fires the job with issue tracking switched off:
+    /// the routine is queued and the hook is never called.
+    #[test]
+    fn enter_on_the_tool_gate_fires_the_job_without_tracking() {
+        let repo = job_behind_an_unmet_hook("jobs-screen-tool-gate-enter");
+        crate::repo::run(&repo.root, "git", &["init", "-q", "-b", "main"]).unwrap();
+
+        let drawn = drive(&repo, "r\r");
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("┌─ run now "), "{frame}");
+        assert!(frame.contains("Fired `nightly` now."), "{frame}");
+        let queued: Vec<_> = std::fs::read_dir(repo.queue_dir())
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert!(!queued[0].contains("ticket:"), "{}", queued[0]);
+        assert!(
+            std::fs::read_dir(repo.tracking_dir())
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "the hook must never have been called"
+        );
+    }
+
+    /// `n` opens the routine picker as a popup over the list, as step 32 of
+    /// the screen's mockup draws it: the folders with their ticks, the
+    /// highlighted folder's documents under them, and the keys in brackets.
+    #[test]
+    fn the_routine_picker_is_a_popup_over_the_list() {
+        let repo = fixture("jobs-screen-routine-popup");
+        seed_routines(&repo);
+        let frame = drive(&repo, "n ").to_string();
+        let frame = last_frame(&frame);
+        assert!(frame.contains("┌─ which routine "), "{frame}");
+        assert!(frame.contains("> [x] nightly"), "{frame}");
+        assert!(frame.contains("  [ ] weekly"), "{frame}");
+        assert!(
+            frame.contains("audit   chore(audit): do the audit"),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("[o] open task   [space] select   [enter] use it   [esc] cancel"),
+            "{frame}"
+        );
+        assert!(frame.contains("─ jobs"), "the list under it: {frame}");
     }
 
     #[test]
@@ -1751,7 +2021,7 @@ mod tests {
         let drawn = drive(&repo, "no\x1bq");
 
         assert!(
-            !drawn.contains("press any key to continue"),
+            !drawn.contains("┌─ open task "),
             "`o` with the folders pane focused must never reach `JobMode::Outcome`:\n{drawn}"
         );
         assert!(jobs::load(&repo).unwrap().is_empty());
@@ -1775,6 +2045,7 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
+        assert!(last.contains("┌─ open task "), "in a popup: {last}");
     }
 
     #[test]

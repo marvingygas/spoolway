@@ -8,8 +8,9 @@
 # What is asserted is the order of the frames it drew: the first is the queue
 # tab, and `←` from there draws the dispatch tab's board, where `enter` starts
 # and stops a dispatcher. While one screen is open, a second `spoolway` or
-# `spoolway dispatch` in the same project refuses. Off a terminal, bare
-# `spoolway` still prints the grouped help.
+# `spoolway dispatch` in the same project refuses. A refusal on the queue tab
+# is drawn in a popup over the tab. Off a terminal, bare `spoolway` still
+# prints the grouped help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -23,6 +24,12 @@ source "$HERE/../fixture.sh"
 source "$HERE/../agents.sh"
 
 LIVE=${WORK:-$(mktemp -d)}
+
+# Bare `spoolway` shows a newer release as a popup over the queue tab, and a
+# popup takes every key — so a release cache that names one, or the lookup
+# the first run here starts, would eat the keys every check below sends.
+# What this suite drives is the screen, not the release check.
+export SPOOLWAY_SKIP_VERSION_CHECK=1
 
 new_repo "$LIVE/proj"
 configure_project plan/live
@@ -128,6 +135,25 @@ works "a screen opened after it opens as usual" \
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "Dispatcher already running" "$AFTER.plain"
 has "drawing the strip" "dispatch        queue        jobs        eval" "$AFTER.plain"
+
+# A refusal on the queue tab is a popup over the tab, not a frame of its own:
+# a group whose document sets a key spoolway reserves is refused at `enter`.
+# Written last, so it is the newest group and the one the cursor opens on;
+# `space` selects it and `enter` submits it. The pipe then runs out with the
+# popup still up — it closes on `enter` alone — so the last frame is the one
+# with the popup on it.
+pending_doc bad-stage "$BODY" "group: refused" "stage: taken" "touches: [notes/refused.md]"
+REFUSED="$LIVE/refused.txt"
+works "a refused submission on the queue tab ends when its keys run out" \
+  script -qec "printf ' \\r' | '$SPOOLWAY'" "$REFUSED"
+awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
+has "naming the reserved key" "stage" "$LAST"
+has "closed by enter" "[enter] close" "$LAST"
+has "over the queue tab, still drawn under it" "─ groups" "$LAST"
+has "under the strip" "dispatch        queue        jobs        eval" "$LAST"
+works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

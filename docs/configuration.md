@@ -373,11 +373,12 @@ comment line, one per tool. `spoolway doctor` reads these lines and checks each 
 `--version` output against the floor. Only `<tool> >= <version>` is understood; any other
 shape in the line is reported as unreadable rather than interpreted.
 
-Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a routine —
-checks the same lines before it opens any ticket. A tool below its floor, or missing from
-PATH, gates the submission: the queue screen's `enter` shows what is unmet and waits for
-`enter` to queue without issue tracking or `esc` to back out, and a non-interactive submit
-prints the same notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+Every submit route — the queue screen's `enter`, the jobs screen's `r`, `spoolway queue add
+--from`, `spoolway jobs run` and a job the dispatcher fires — checks the same lines before it
+opens any ticket. A tool below its floor, or missing from PATH, gates the submission. On a
+screen it shows what is unmet as a popup: `enter` queues without issue tracking, `esc` backs
+out. From the CLI or the dispatcher, where there is no key to wait on, it prints the same
+notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
 
 | Script | Needs | What it does |
 |---|---|---|

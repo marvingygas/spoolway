@@ -14,7 +14,15 @@
 //! back here and returns, and this loop opens the neighbouring tab. That is
 //! what lets every key the tab's screen already reads, inside its filters or
 //! its routines view, keep its own meaning without this module knowing what
-//! any of them are.
+//! any of them are. A sub-mode that reads nothing of its own on a key may
+//! still hand that one key over — the queue tab's routines view does for
+//! `q`, and its key line says so.
+//!
+//! What the screen has to say the moment it opens — the sync gate and the
+//! update notice, which every other command prints ahead of itself — is
+//! handed to the queue tab, the one the screen opens on, to show as popups
+//! over it: printed ahead of the screen, the first frame would wipe it
+//! before anybody could read it. See [`OnOpen`].
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
 //! through every screen's own `render`: the strip and the two rows it takes
@@ -34,6 +42,16 @@ use anyhow::Result;
 use super::{Key, PollableRead, RawStdin, read_key};
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
+
+/// What the screen shows the moment it opens, over the queue tab — see the
+/// module doc. Each is `None` when there is nothing to say.
+#[derive(Debug, Default)]
+pub(crate) struct OnOpen {
+    /// The sync gate's popup — [`crate::gate::sync_popup`].
+    pub(crate) sync: Option<Vec<String>>,
+    /// The update notice's line — [`crate::release::notice`].
+    pub(crate) update: Option<String>,
+}
 
 /// One tab of the shell, in strip order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,8 +143,9 @@ pub(crate) fn strip_rows() -> usize {
 }
 
 /// What `key` means to the shell, read by a tab's screen only while nothing
-/// of its own is open — a popup, a filter, a picker — so every key a
-/// sub-mode reads keeps its meaning there. `None` with no shell around the
+/// of its own is open — a popup, a filter, a picker — or for a key the open
+/// sub-mode reads nothing of its own on, so every key a sub-mode reads keeps
+/// its meaning there. `None` with no shell around the
 /// screen at all: `spoolway queue` on its own has no neighbouring tab to go
 /// to, and `q` there keeps whatever meaning it already had.
 pub(crate) fn leave_on(key: Key) -> Option<Leave> {
@@ -231,11 +250,18 @@ fn strip_line(open: Tab, width: usize) -> String {
 ///
 /// Holds the one [`crate::platform::TermGuard`] every tab draws under and
 /// installs the one `ctrl-c` handler, in the same order `queue_screen` does
-/// for its own — see there for why the order matters. Opens on the queue tab.
+/// for its own — see there for why the order matters. Opens on the queue tab,
+/// with the sync gate and `update` — the update notice's line, which `main`
+/// holds back from stderr for this — as popups over it.
 ///
 /// A dispatcher the dispatch tab started stops when this returns, however it
 /// returns — see [`super::dispatcher::Dispatcher`]'s own `Drop`.
-pub(crate) fn run(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> {
+pub(crate) fn run(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &Path,
+    update: Option<String>,
+) -> Result<()> {
     // `false`: bare `spoolway` is never the `--from-screen` child, so both
     // locks are checked, the same as a typed `spoolway dispatch`. Shared
     // with `commands::dispatch` rather than written out a second time here,
@@ -246,12 +272,18 @@ pub(crate) fn run(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> 
         return Ok(());
     }
     let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None)?;
+    // Asked before the terminal is taken: a scan that fails is reported the
+    // way the printed gate reports it, as this command's own error.
+    let on_open = OnOpen {
+        sync: crate::gate::sync_popup(repo)?,
+        update,
+    };
 
     crate::platform::stop::catch_interrupt();
     let _term = crate::platform::TermGuard::new();
     let mut stdin = RawStdin;
     let mut stdout = std::io::stdout();
-    host(repo, pipelines, cwd, &mut stdin, &mut stdout)
+    host(repo, pipelines, cwd, on_open, &mut stdin, &mut stdout)
 }
 
 /// The tab loop, apart from the terminal it runs on so a test can drive it
@@ -260,6 +292,7 @@ fn host(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &Path,
+    mut on_open: OnOpen,
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -279,7 +312,16 @@ fn host(
                 Tab::Dispatch => {
                     dispatch_tab(repo, pipelines, cwd, &mut board, &mut dispatch, input, out)?
                 }
-                Tab::Queue => crate::commands::queue_tab(repo, pipelines, cwd, input, out)?,
+                // Taken on the first visit, so a notice is shown once and
+                // not again on every return to the tab.
+                Tab::Queue => crate::commands::queue_tab(
+                    repo,
+                    pipelines,
+                    cwd,
+                    std::mem::take(&mut on_open),
+                    input,
+                    out,
+                )?,
                 Tab::Jobs => crate::commands::jobs_tab(repo, pipelines, cwd, input, out)?,
                 Tab::Eval => crate::eval::tab(repo, pipelines, input, out)?,
             }
@@ -651,6 +693,7 @@ mod tests {
             repo,
             &Pipelines::builtin(),
             &repo.root,
+            OnOpen::default(),
             &mut input,
             &mut out,
         )

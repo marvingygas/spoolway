@@ -425,6 +425,29 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// `render`, `spoolway eval`'s own `footer` in `src/eval.rs`, and
 /// [`shell`]'s own `message_tab`.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
+    hint(&keys(pairs))
+}
+
+/// A key row already built — [`keys`], with words of its own between pairs
+/// where a row needs them — dimmed and indented the way [`key_hint`] draws
+/// its own, so the two read alike under a frame.
+pub(crate) fn hint(row: &str) -> String {
+    format!(
+        "{dim} {row}{reset}",
+        dim = crate::status::DIM,
+        reset = crate::status::RESET
+    )
+}
+
+/// The same `[key] label` pairs [`key_hint`] draws, with no colour and no
+/// leading space — the key row a [`panel`] carries inside its own box.
+///
+/// Plain because [`overlay`] lays a panel over a frame one character at a
+/// time: a colour code there would be counted as columns it does not take,
+/// and the panel's right border would land short of where the box says.
+/// Shared with `key_hint` so a key named in a popup and the same key named
+/// on the row under the frame read exactly alike.
+pub(crate) fn keys(pairs: &[(&str, &str)]) -> String {
     let mut line = String::new();
     for (i, (key, label)) in pairs.iter().enumerate() {
         if i > 0 {
@@ -432,11 +455,7 @@ pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
         }
         line.push_str(&format!("[{key}] {label}"));
     }
-    format!(
-        "{dim} {line}{reset}",
-        dim = crate::status::DIM,
-        reset = crate::status::RESET
-    )
+    line
 }
 
 /// A framed box — a title and whatever lines fill it — to be drawn over a
@@ -477,6 +496,89 @@ pub(crate) fn panel(title: &str, body: &[String], keys: &str) -> Vec<String> {
     boxed(title, &full)
 }
 
+/// How wide [`notice`] wraps its text: a popup then stays inside the 100
+/// columns every tab is drawn to, with the tab's own panes showing either
+/// side of it.
+pub(crate) const NOTICE_WRAP: usize = 66;
+
+/// A popup that says something and names the keys that answer it: `text`
+/// word-wrapped to `width` between a blank row above it and the key row
+/// [`panel`] puts under it — the shape every notice over a tab is drawn in,
+/// a refusal, a result or a gate alike.
+///
+/// Each of `text`'s own lines wraps on its own, keeping its own indent, so a
+/// message that lays out rows of its own — the failed open hook's `opened`
+/// and `log` — keeps them.
+pub(crate) fn notice(title: &str, text: &str, keys: &str, width: usize) -> Vec<String> {
+    let mut body = vec![String::new()];
+    for line in text.lines() {
+        body.extend(wrap(line, width));
+    }
+    panel(title, &body, keys)
+}
+
+/// What a screen has to tell a person — a refusal, a result — held on the
+/// tab it belongs to as a popup until `enter` closes it.
+#[derive(Debug, Clone)]
+pub(crate) struct Notice {
+    pub(crate) title: String,
+    pub(crate) text: String,
+}
+
+impl Notice {
+    pub(crate) fn new(title: &str, text: impl Into<String>) -> Notice {
+        Notice {
+            title: title.to_string(),
+            text: text.into(),
+        }
+    }
+
+    /// The popup, its text wrapped to `width` — see [`notice`] — over the
+    /// one key that closes it.
+    pub(crate) fn panel(&self, width: usize) -> Vec<String> {
+        notice(&self.title, &self.text, &keys(&[("enter", "close")]), width)
+    }
+}
+
+/// `line` word-wrapped to `width`, each continuation keeping the line's own
+/// leading indent so a command stays lined up under the one above it.
+///
+/// A single word too long for a row of its own — a path, most often — is
+/// broken across as many rows as it takes. Left whole, it would widen the
+/// popup past the frame [`overlay`] lays it on, and `overlay` drops whatever
+/// runs past the frame's edge: the popup's right border, and the end of the
+/// very path it was showing.
+pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
+    let indent: String = line.chars().take_while(|c| *c == ' ').collect();
+    let room = width.saturating_sub(indent.chars().count()).max(1);
+    let mut lines = Vec::new();
+    let mut current = indent.clone();
+    for word in line.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        while word.len() > room {
+            if current.len() > indent.len() {
+                lines.push(std::mem::replace(&mut current, indent.clone()));
+            }
+            let rest = word.split_off(room);
+            current.extend(word);
+            lines.push(std::mem::replace(&mut current, indent.clone()));
+            word = rest;
+        }
+        let word: String = word.into_iter().collect();
+        if current.len() > indent.len()
+            && current.chars().count() + 1 + word.chars().count() > width
+        {
+            lines.push(std::mem::replace(&mut current, indent.clone()));
+        }
+        if current.len() > indent.len() {
+            current.push(' ');
+        }
+        current.push_str(&word);
+    }
+    lines.push(current);
+    lines
+}
+
 /// Draw `panel` over `frame`, centred, one row down from centre so the
 /// frame's own top border and its titles stay readable behind it.
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
@@ -514,6 +616,36 @@ mod tests {
         assert_eq!(
             key_hint(&[("o", "open"), ("r", "routines")]),
             "\x1b[2m [o] open   [r] routines\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn a_long_line_wraps_under_its_own_indent() {
+        let lines = wrap("  one two three four", 11);
+        assert_eq!(lines, ["  one two", "  three", "  four"]);
+    }
+
+    #[test]
+    fn a_word_too_long_for_a_row_is_broken_across_rows() {
+        let lines = wrap("  at /a/very/long/path end", 10);
+        assert_eq!(lines, ["  at", "  /a/very/", "  long/pat", "  h end"]);
+    }
+
+    // The shape every notice over a tab takes, as the queue tab's own
+    // refusal is drawn: a blank row, the text, a blank row, the keys.
+    #[test]
+    fn a_notice_is_its_text_between_blank_rows_over_its_keys() {
+        let panel = notice("trial refused", "a b", "[enter] close", 40);
+        assert_eq!(
+            panel,
+            [
+                "┌─ trial refused ──┐",
+                "│                  │",
+                "│  a b             │",
+                "│                  │",
+                "│  [enter] close   │",
+                "└──────────────────┘",
+            ]
         );
     }
 

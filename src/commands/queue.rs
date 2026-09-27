@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::platform::PathExt;
-use crate::screen::{Key, PollableRead, key_hint, overlay, pad_to, panel, read_key};
+use crate::screen::{
+    Key, Notice, PollableRead, hint, key_hint, keys, overlay, pad_to, panel, read_key,
+};
 
 /// Which dependencies a task on a wait step is still waiting for.
 ///
@@ -1031,14 +1033,10 @@ fn queue_add_documents(
     // error and exit 1 the way `dispatch::overrides_gate`'s own `esc`
     // never does (review finding 5).
     let task_files = readable_task_files(documents);
-    if let Err(err) = open_and_prefix(
-        repo,
-        documents,
-        &task_files,
-        &mut tasks,
-        crate::ask::interactive(),
-        true,
-    ) {
+    let gate = ToolGate::Print {
+        interactive: crate::ask::interactive(),
+    };
+    if let Err(err) = open_and_prefix(repo, documents, &task_files, &mut tasks, gate) {
         return match err.downcast_ref::<GateCancelled>() {
             Some(_) => Ok(()),
             None => Err(err),
@@ -1159,39 +1157,24 @@ fn readable_task_files(documents: &[(String, String)]) -> Vec<String> {
 /// document read from standard input, say — rather than a path nothing can
 /// open.
 ///
-/// `interactive` is not `crate::ask::interactive()`'s own tty check —
-/// callers driving the queue screen (`finish_submit`, `finish_routine`) pass
-/// `true` unconditionally, since the screen already blocks on a key for
-/// every other prompt it draws regardless of whether a real terminal is on
-/// the other end, and `read_key` returning `None` is what ends it gracefully
-/// under a script or a closed pane. Only a caller with no screen at all —
-/// `queue_add_documents`, `queue_routine_target` — asks `crate::ask` whether
-/// anyone is really there.
-///
-/// `own_terminal` is a separate question: whether the gate must take the
-/// terminal for itself before it can safely block on a key. A caller with
-/// no screen at all has taken no guard of its own, so it passes `true`. The
-/// queue screen has already taken one for the whole of `run_screen` (see
-/// `queue_screen`'s own doc comment on why that guard is dropped only once
-/// the screen itself is done), and passes `false`: a second `TermGuard`
-/// nested inside it would still be safe to construct, but its `Drop` runs
-/// `show_cursor` and `drain_stdin` the moment this call returns, undoing the
-/// outer guard's own hidden cursor and leaving the rest of the session with
-/// the cursor visible again — review finding 2.
+/// `gate` says how the tool-requirements gate is reached — see [`ToolGate`].
 fn open_and_prefix(
     repo: &Repo,
     documents: &[(String, String)],
     task_files: &[String],
     tasks: &mut [Task],
-    interactive: bool,
-    own_terminal: bool,
+    gate: ToolGate,
 ) -> Result<()> {
     // Before `open_tickets` ever calls the hook: a declared requirement this
     // machine cannot meet means the call can only fail, and by the time it
     // does the group's epic may already exist on the forge — see
     // `tool_requirements_gate`. `true` means the gate drew and this
     // submission goes on with issue tracking switched off for it.
-    if tool_requirements_gate(repo, interactive, own_terminal)? {
+    let tracking_off = match gate {
+        ToolGate::Print { interactive } => tool_requirements_gate(repo, interactive)?,
+        ToolGate::Answered { tracking_off } => tracking_off,
+    };
+    if tracking_off {
         return Ok(());
     }
 
@@ -1208,15 +1191,36 @@ fn open_and_prefix(
     Ok(())
 }
 
+/// How [`open_and_prefix`] reaches the tool-requirements gate.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ToolGate {
+    /// Nobody has asked yet: [`tool_requirements_gate`] prints it and, when
+    /// someone is there, reads the answer — a caller with no screen at all:
+    /// `queue add --from`, `jobs run`, or the dispatcher firing a job on its
+    /// schedule.
+    ///
+    /// `interactive` is that caller's own `crate::ask::interactive()`, whether
+    /// anyone is really there to answer. Such a caller holds no terminal
+    /// guard of its own, so the gate takes one before it reads a key.
+    Print { interactive: bool },
+    /// A screen has asked already, as a popup over its own tab — the queue
+    /// screen's [`Mode::ToolGate`], or the jobs screen's own over `r` — and
+    /// printing the gate again under the screen would draw it where no frame
+    /// is, and take a second terminal guard inside the screen's. See
+    /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
+    /// requirement was unmet and `enter` queued anyway.
+    Answered { tracking_off: bool },
+}
+
 /// `esc` out of [`tool_requirements_gate_with`] — bailed as an ordinary
 /// `Err` so [`open_and_prefix`] stays the one place every route reaches
 /// [`open_tickets`] through, and told apart at each call site from a real
-/// refusal: `esc` means "go back", not "here is what went wrong". The queue
-/// screen's own callers — `begin_submission`, `begin_routine_queue`,
-/// `begin_routine_solo` — turn it into [`refusal_mode`]'s own `Mode::Outcome`
-/// rather than a message saying something failed; a caller with no screen at
-/// all — `queue_add_documents`, `queue_routine_target` — catches it and
-/// exits clean, the way `dispatch::overrides_gate`'s own `esc` does.
+/// refusal: `esc` means "go back", not "here is what went wrong". Only a
+/// caller with no screen at all ever sees it — `queue_add_documents`, which
+/// catches it and exits clean the way `dispatch::overrides_gate`'s own `esc`
+/// does, and `queue_routine_target` under `jobs run`. The queue and jobs
+/// screens ask the gate in a popup of their own instead, whose `esc` goes
+/// back without an error at all.
 #[derive(Debug)]
 struct GateCancelled;
 
@@ -1227,21 +1231,6 @@ impl std::fmt::Display for GateCancelled {
 }
 
 impl std::error::Error for GateCancelled {}
-
-/// What an interactive screen submit's own `Err` becomes: every ordinary
-/// refusal keeps the `Mode::Outcome` a person has always seen here, and
-/// [`GateCancelled`] gets one too, rather than `Mode::Browsing` — the mode
-/// the screen was already showing when `enter` was pressed, and so a frame
-/// `draw`'s own unchanged-frame check (review finding 1) would never
-/// repaint over the gate's own printed block. `Mode::Outcome` always renders
-/// as a new frame, so the next draw clears it away; any key from there
-/// returns to browsing exactly as every other outcome message does.
-fn refusal_mode(prefix: &str, err: anyhow::Error) -> Mode {
-    match err.downcast_ref::<GateCancelled>() {
-        Some(_) => Mode::Outcome("nothing was queued.".to_string()),
-        None => Mode::Outcome(format!("{prefix}: {err:#}")),
-    }
-}
 
 /// One `# spoolway-requires:` declaration the configured hook's own text
 /// carries that this machine cannot meet right now — what
@@ -1340,6 +1329,13 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
     unmet
 }
 
+/// The line under the gate's rows saying what they mean — the same words
+/// printed by [`print_tool_gate_notice`] and in the queue screen's popup.
+const TOOL_GATE_VERDICT: &str = "issue tracking is not supported.";
+
+/// The gate's two keys, printed and in the popup alike.
+const TOOL_GATE_KEYS: &str = "[enter] queue anyway, without issue tracking   [esc] back";
+
 /// The gate's own box, drawn once per unmet requirement pair — the
 /// declaration line and what this machine actually has — followed by the
 /// one line saying what it means. Column widths grow with the content
@@ -1347,6 +1343,39 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
 /// sizes its own rows, so a longer hook name or tool never runs its column
 /// into the next.
 fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequirement]) -> Result<()> {
+    writeln!(out)?;
+    for row in tool_gate_rows(unmet) {
+        writeln!(out, "    {row}")?;
+    }
+    writeln!(out)?;
+    writeln!(out, "  {TOOL_GATE_VERDICT}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+/// The gate as a popup, for a screen to lay over its tab before it queues —
+/// `None` when every requirement is met and there is nothing to ask. The
+/// queue screen's [`Mode::ToolGate`] and the jobs screen's `r` both draw it,
+/// and answer [`open_and_prefix`] with [`ToolGate::Answered`].
+pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
+    let unmet = unmet_requirements(repo);
+    (!unmet.is_empty()).then(|| tool_gate_panel(&unmet))
+}
+
+/// The screens' own popup for the gate: the same rows and the same line
+/// under them as [`print_tool_gate_notice`], in a box over the tab, as step
+/// 14 of the screen's mockup draws it.
+fn tool_gate_panel(unmet: &[UnmetRequirement]) -> Vec<String> {
+    let mut body = vec![String::new()];
+    body.extend(tool_gate_rows(unmet));
+    body.push(String::new());
+    body.push(TOOL_GATE_VERDICT.to_string());
+    panel("issue tracking", &body, TOOL_GATE_KEYS)
+}
+
+/// One pair of rows per unmet requirement, unindented — see
+/// [`print_tool_gate_notice`] on how the columns are sized.
+fn tool_gate_rows(unmet: &[UnmetRequirement]) -> Vec<String> {
     let col1 = unmet
         .iter()
         .flat_map(|u| [u.hook.len(), u.tool.len()])
@@ -1364,22 +1393,18 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
         .unwrap_or(0)
         + 3;
 
-    writeln!(out)?;
+    let mut rows = Vec::new();
     for u in unmet {
-        writeln!(
-            out,
-            "    {:<col1$}{:<col2$}{} >= {}",
+        rows.push(format!(
+            "{:<col1$}{:<col2$}{} >= {}",
             u.hook, "requires", u.tool, u.floor
-        )?;
-        match &u.found {
-            Some((found, path)) => writeln!(out, "    {:<col1$}{:<col2$}{}", u.tool, found, path)?,
-            None => writeln!(out, "    {:<col1$}not on PATH", u.tool)?,
-        }
+        ));
+        rows.push(match &u.found {
+            Some((found, path)) => format!("{:<col1$}{:<col2$}{}", u.tool, found, path),
+            None => format!("{:<col1$}not on PATH", u.tool),
+        });
     }
-    writeln!(out)?;
-    writeln!(out, "  issue tracking is not supported.")?;
-    writeln!(out)?;
-    Ok(())
+    rows
 }
 
 /// Whether a batch's configured hook declares a tool requirement this
@@ -1388,15 +1413,9 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
 /// submission, `false` means every requirement is met (or none exist) and
 /// [`open_and_prefix`] goes on exactly as it does today. The one `Err` this
 /// ever returns is [`GateCancelled`], `esc`'s own signal back up to the
-/// caller that drove the screen.
+/// caller.
 ///
-/// `interactive` is [`open_and_prefix`]'s own — not decided here, since
-/// whether anyone is there to answer means something different for a
-/// caller with no screen at all than for one already mid-way through
-/// driving one; see that function's own doc comment. `own_terminal` is the
-/// same function's own second question — whether this call must take the
-/// terminal for itself before blocking on a key, or whether a caller
-/// already holds one (see review finding 2).
+/// `interactive` is [`ToolGate::Print`]'s own — not decided here; see there.
 ///
 /// A thin wrapper over [`tool_requirements_gate_with`], the same split
 /// [`dispatch::overrides_gate`] draws around [`dispatch::overrides_gate_with`]
@@ -1404,13 +1423,13 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
 /// process's real stdio, so a test can drive every branch — including the
 /// no-tty print-and-proceed path — against an injected reader and writer
 /// instead.
-fn tool_requirements_gate(repo: &Repo, interactive: bool, own_terminal: bool) -> Result<bool> {
+fn tool_requirements_gate(repo: &Repo, interactive: bool) -> Result<bool> {
     tool_requirements_gate_with(
         repo,
         interactive,
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        own_terminal.then_some(crate::platform::TermGuard::new as fn() -> _),
+        crate::platform::TermGuard::new,
     )
 }
 
@@ -1420,22 +1439,18 @@ fn tool_requirements_gate(repo: &Repo, interactive: bool, own_terminal: bool) ->
 /// unattended path [`dispatch::overrides_gate_with`] takes for a layer
 /// notice.
 ///
-/// `term` is `None` for a caller already holding a terminal guard of its
-/// own — the queue screen, for the whole of `run_screen` — and `Some` for
-/// one that is not, taken only just before the first blocking read for the
-/// same reason `dispatch::overrides_gate_with`'s own guard is: every early
-/// return above it constructs nothing, hides nothing and shows nothing. A
-/// second guard nested inside the screen's own would still be memory-safe
-/// to build, but its `Drop` shows the cursor and drains stdin the moment
-/// this call returns — undoing the outer guard's own hidden cursor for the
-/// rest of the session (review finding 2), which is why the screen's own
-/// callers pass `None` rather than a second `TermGuard::new`.
+/// `term` takes the terminal only just before the first blocking read, for
+/// the same reason `dispatch::overrides_gate_with`'s own guard waits: every
+/// early return above it constructs nothing, hides nothing and shows
+/// nothing. Neither the queue screen nor the jobs screen calls this — each
+/// holds a guard of its own for as long as it is open, and asks the gate as
+/// a popup instead; see [`ToolGate::Answered`].
 fn tool_requirements_gate_with(
     repo: &Repo,
     interactive: bool,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
-    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+    term: impl FnOnce() -> crate::platform::TermGuard,
 ) -> Result<bool> {
     let unmet = unmet_requirements(repo);
     if unmet.is_empty() {
@@ -1446,12 +1461,9 @@ fn tool_requirements_gate_with(
     if !interactive {
         return Ok(true);
     }
-    writeln!(
-        out,
-        "  [enter] queue anyway, without issue tracking   [esc] back"
-    )?;
+    writeln!(out, "  {TOOL_GATE_KEYS}")?;
 
-    let _term = term.map(|term| term());
+    let _term = term();
     loop {
         match read_key(input) {
             Some(Key::Enter) => return Ok(true),
@@ -2389,8 +2401,8 @@ use super::routines::{RoutineFolder, RoutineTask};
 /// Which pane a `Char(' ')` or an arrow acts on.
 ///
 /// `pub(super)` because the `spoolway jobs` screen reuses this module's
-/// routines browser whole to pick a job's target — see
-/// [`super::jobs::jobs_screen`].
+/// routines browser — its keys and its navigation — to pick a job's target
+/// — see [`super::jobs::jobs_screen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
     Groups,
@@ -2419,12 +2431,33 @@ enum Mode {
     /// screen dropping this mode is what "leaves the selection exactly as
     /// it was" means.
     Trial(TrialState),
-    /// What validating or writing a submission came back with, held on
-    /// screen until the next key press dismisses it. This exists because
-    /// `draw`'s first act is always to clear the screen — a message written
-    /// straight to `out` and then let the loop redraw over would never be
-    /// read at all.
-    Outcome(String),
+    /// What validating or writing a submission came back with — a refusal,
+    /// a result — in a popup over the screen it came from, held until
+    /// `enter` closes it. This exists because `draw`'s first act is always
+    /// to clear the screen — a message written straight to `out` and then
+    /// let the loop redraw over would never be read at all.
+    ///
+    /// `routines` is the routines pane the popup was opened over, when it
+    /// was: that pane stays drawn under it, and closing it goes back there
+    /// rather than to the pending screen.
+    Outcome {
+        notice: Notice,
+        routines: Option<RoutineNav>,
+    },
+    /// The tool-requirements gate, asked in a popup over the screen before
+    /// a submit reaches the hook — the printed form is
+    /// [`tool_requirements_gate`]. `panel` is [`tool_gate_panel`]'s; `then`
+    /// is the submit `enter` goes back and finishes with issue tracking
+    /// switched off, and the screen `esc` goes back to having queued
+    /// nothing.
+    ToolGate {
+        panel: Vec<String>,
+        then: Resume,
+    },
+    /// The sync gate bare `spoolway` opens on — [`crate::gate::sync_popup`]'s
+    /// panel. `enter` applies the updates, the only key it reads; `ctrl-c`
+    /// quits the screen with nothing written, as it does the printed gate.
+    SyncGate(Vec<String>),
     /// `r`'s own screen: the left pane swapped for the folder tree under
     /// `.spoolway/routines/` — see [`RoutineNav`] for what it tracks between
     /// keys. The folders and documents themselves live in `run_screen`'s own
@@ -2441,6 +2474,64 @@ enum Mode {
         group: GroupKey,
         name: String,
     },
+}
+
+/// A [`Mode::Outcome`] over the pending screen.
+fn outcome(title: &str, text: impl Into<String>) -> Mode {
+    outcome_over(None, title, text)
+}
+
+/// A [`Mode::Outcome`] over the routines pane `routines` describes, or over
+/// the pending screen with none.
+fn outcome_over(routines: Option<&RoutineNav>, title: &str, text: impl Into<String>) -> Mode {
+    Mode::Outcome {
+        notice: Notice::new(title, text),
+        routines: routines.cloned(),
+    }
+}
+
+/// The submit [`Mode::ToolGate`] finishes once `enter` answers it, run again
+/// from the start with issue tracking switched off — validating it again is
+/// cheap, and it is what a person would see had they pressed the key that
+/// opened the gate a second time.
+#[derive(Debug, Clone)]
+enum Resume {
+    /// The pending screen's `enter`, over `ScreenState::selected`.
+    Selection,
+    /// The routines pane's `enter`, over the folders ticked in `nav`.
+    Routines(RoutineNav),
+    /// The routines pane's `space`, over the document under `nav`'s cursor.
+    RoutineTask(RoutineNav),
+}
+
+impl Resume {
+    /// Where `esc` off the gate goes back to: the screen the submit started
+    /// from.
+    fn back(&self) -> Mode {
+        match self {
+            Resume::Selection => Mode::Browsing,
+            Resume::Routines(nav) | Resume::RoutineTask(nav) => Mode::Routines(nav.clone()),
+        }
+    }
+}
+
+/// Whether a screen submit may still stop at the tool-requirements gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tracking {
+    /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and nothing
+    /// is queued until it is answered.
+    Ask,
+    /// `enter` on that popup: queue with issue tracking switched off.
+    Off,
+}
+
+/// The gate a submit about to reach [`open_and_prefix`] stops at, or `None`
+/// when it goes straight on: already answered, or every requirement met.
+fn tool_gate(repo: &Repo, tracking: Tracking, then: Resume) -> Option<Mode> {
+    if tracking == Tracking::Off {
+        return None;
+    }
+    tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
 }
 
 /// How the screen ended: on its own, or — inside bare `spoolway`'s queue tab
@@ -2639,6 +2730,10 @@ struct ScreenState {
     /// see `with_gate` for why the file on disk is never rewritten to record
     /// one.
     gates: std::collections::BTreeMap<TaskKey, String>,
+    /// Popups waiting behind the one on screen, each opened in turn as the
+    /// one before it closes — the notices bare `spoolway` opens with, which
+    /// can be more than one at once.
+    waiting: std::collections::VecDeque<Mode>,
 }
 
 impl ScreenState {
@@ -2657,7 +2752,14 @@ impl ScreenState {
             task_cursor: 0,
             selected: Default::default(),
             gates: Default::default(),
+            waiting: Default::default(),
         }
+    }
+
+    /// What the screen shows once the popup on it closes: the next one
+    /// waiting, or `closed` with none.
+    fn after_popup(&mut self, closed: Mode) -> Mode {
+        self.waiting.pop_front().unwrap_or(closed)
     }
 }
 
@@ -2794,7 +2896,8 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
 /// and the queue directory, let a person choose which to queue and where to
 /// gate their tasks, and submit the chosen documents through
 /// [`validate_batch`] — the same validation `queue add --from` runs — with
-/// nothing drawn between `enter` and the write.
+/// nothing drawn between `enter` and the write but the tool-requirements
+/// gate, when the hook declares a tool this machine cannot meet.
 ///
 /// Degrades rather than crashes with no terminal to drive: [`TermGuard`]
 /// only changes stdin's mode on a real tty, so a redirected or piped stdin
@@ -2851,13 +2954,19 @@ pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -
 ///
 /// Where `spoolway queue` prints its opening message and ends, the tab has a
 /// strip and three other tabs to keep drawing, so the message is held on the
-/// tab as its [`Mode::Outcome`] instead, dismissed like any other.
+/// tab as its [`Mode::Outcome`] instead, closed like any other.
+///
+/// `on_open` is what the screen has to say the moment it opens — the sync
+/// gate and the update notice, see [`crate::screen::shell::OnOpen`] — shown
+/// as popups over this tab, the one the screen opens on, in that order and
+/// ahead of the opening message.
 ///
 /// [`Leave`]: crate::screen::shell::Leave
 pub(crate) fn queue_tab(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &std::path::Path,
+    on_open: crate::screen::shell::OnOpen,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
@@ -2866,9 +2975,14 @@ pub(crate) fn queue_tab(
     let groups = super::pending::list_groups(repo)?;
     let routines = super::routines::list_routines(repo)?;
     let mut state = ScreenState::new();
+    state.waiting.extend(on_open.sync.map(Mode::SyncGate));
+    state
+        .waiting
+        .extend(on_open.update.map(|line| outcome("update available", line)));
     if let Some(msg) = opening_message(repo, &groups) {
-        state.mode = Mode::Outcome(msg);
+        state.waiting.push_back(outcome("nothing to queue", msg));
     }
+    state.mode = state.after_popup(Mode::Browsing);
     let exit = run_screen_from(repo, pipelines, cwd, (groups, routines), state, input, out)?;
     Ok(match exit {
         ScreenExit::Quit => Leave::Quit,
@@ -2940,6 +3054,15 @@ fn run_screen_from(
         {
             return Ok(ScreenExit::Leave(leave));
         }
+        // The routines pane reads the arrows itself, to move between its
+        // own two panes, but nothing of its own on `q` — so there `q` alone
+        // is the shell's, as the pane's own key line says.
+        if matches!(state.mode, Mode::Routines(_))
+            && key == Key::Char('q')
+            && let Some(leave) = crate::screen::shell::leave_on(key)
+        {
+            return Ok(ScreenExit::Leave(leave));
+        }
 
         // No mode reads a quit key of its own any more — `ctrl-c` is the one
         // way out of `spoolway queue`, caught above `run_screen` and noticed
@@ -2993,13 +3116,62 @@ fn run_screen_from(
                     };
                 }
             },
-            Mode::Outcome(_) => match key {
-                Key::Char('q') => break,
-                // Any other key dismisses it. The message was already read
-                // on the draw that preceded this key — holding it in
-                // `state` rather than writing it straight to `out` is what
-                // let it survive that draw at all.
-                _ => state.mode = Mode::Browsing,
+            // `enter` closes it, and nothing else does: a popup takes every
+            // key while it is open, so a key meant for the screen under it
+            // cannot slip past a message not yet read. The message was
+            // already drawn on the frame that preceded this key — holding it
+            // in `state` rather than writing it straight to `out` is what let
+            // it survive that draw at all.
+            Mode::Outcome { routines, .. } => {
+                if key == Key::Enter {
+                    let closed = match routines {
+                        Some(nav) => Mode::Routines(nav.clone()),
+                        None => Mode::Browsing,
+                    };
+                    state.mode = state.after_popup(closed);
+                }
+            }
+            Mode::SyncGate(_) => {
+                if key == Key::Enter {
+                    state.mode = match crate::gate::apply(repo) {
+                        Ok(()) => state.after_popup(Mode::Browsing),
+                        Err(err) => outcome("updates not applied", format!("{err:#}")),
+                    };
+                }
+            }
+            Mode::ToolGate { then, .. } => match key {
+                Key::Enter => {
+                    let then = then.clone();
+                    let base = crate::repo::branch_at(cwd)?;
+                    state.mode = match &then {
+                        Resume::Selection => begin_submission(
+                            repo,
+                            pipelines,
+                            &base,
+                            &mut groups,
+                            &mut state,
+                            Tracking::Off,
+                        ),
+                        Resume::Routines(nav) => begin_routine_queue(
+                            repo,
+                            pipelines,
+                            &base,
+                            &routines,
+                            nav,
+                            Tracking::Off,
+                        ),
+                        Resume::RoutineTask(nav) => begin_routine_solo(
+                            repo,
+                            pipelines,
+                            &base,
+                            &routines,
+                            nav,
+                            Tracking::Off,
+                        ),
+                    };
+                }
+                Key::Esc => state.mode = then.back(),
+                _ => {}
             },
             Mode::SaveRoutine { group, name } => match key {
                 // The name field reads every ordinary character it is typed,
@@ -3036,7 +3208,8 @@ fn run_screen_from(
                 Key::Enter if nav.focus == Focus::Groups && !nav.selected.is_empty() => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_queue(repo, pipelines, &base, &routines, &nav);
+                    state.mode =
+                        begin_routine_queue(repo, pipelines, &base, &routines, &nav, Tracking::Ask);
                 }
                 // `space` over the tasks pane queues that one document alone
                 // — over the folders pane it is `handle_routine_key`'s own
@@ -3044,7 +3217,8 @@ fn run_screen_from(
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_solo(repo, pipelines, &base, &routines, &nav);
+                    state.mode =
+                        begin_routine_solo(repo, pipelines, &base, &routines, &nav, Tracking::Ask);
                 }
                 // `o` over the documents pane: open the highlighted document
                 // in an editor pane, the same shape `open_highlighted` gives
@@ -3065,13 +3239,21 @@ fn run_screen_from(
             },
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
-                // through — nothing is drawn in between any more. A
-                // validation failure hands back `Mode::Outcome`; a clean
-                // write goes back to browsing. Starting a dispatcher is the
+                // through — nothing is drawn in between but the
+                // tool-requirements gate, when it has something to ask. A
+                // refusal hands back `Mode::Outcome`; a clean write goes
+                // back to browsing. Starting a dispatcher is the
                 // dispatch tab's `enter`, not this one's.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_submission(repo, pipelines, &base, &mut groups, &mut state);
+                    state.mode = begin_submission(
+                        repo,
+                        pipelines,
+                        &base,
+                        &mut groups,
+                        &mut state,
+                        Tracking::Ask,
+                    );
                 }
                 // Gated exactly the way `g` is — see `handle_browse_key`'s
                 // own `g` arm — since a document only exists to open when
@@ -3497,18 +3679,19 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     let command = crate::status::editor_command(&task.path);
     let mux = match crate::mux::backend(repo) {
         Ok(mux) => mux,
-        Err(err) => return Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => return outcome("open task", format!("o: {err:#}")),
     };
     match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
         Ok(()) => Mode::Browsing,
-        Err(err) => Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => outcome("open task", format!("o: {err:#}")),
     }
 }
 
 /// `o` over the routines pane's own tasks pane: open the highlighted
 /// document in an editor pane — the same shape [`open_highlighted`] gives
 /// the pending screen, including the same [`Mode::Outcome`] a backend with
-/// no pane to open one in is surfaced through. Returns to [`Mode::Routines`]
+/// no pane to open one in is surfaced through — drawn over this pane, and
+/// closed back onto it. Returns to [`Mode::Routines`]
 /// with `nav` exactly as it was rather than [`Mode::Browsing`], since this
 /// key never leaves the pane the way the pending screen's `o` has nothing to
 /// stay in.
@@ -3519,11 +3702,11 @@ fn open_highlighted_routine(repo: &Repo, routines: &[RoutineFolder], nav: &Routi
     let command = crate::status::editor_command(&task.path);
     let mux = match crate::mux::backend(repo) {
         Ok(mux) => mux,
-        Err(err) => return Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => return outcome_over(Some(nav), "open task", format!("o: {err:#}")),
     };
     match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
         Ok(()) => Mode::Routines(nav.clone()),
-        Err(err) => Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => outcome_over(Some(nav), "open task", format!("o: {err:#}")),
     }
 }
 
@@ -4260,7 +4443,7 @@ fn routine_task_lines(
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
 /// [`two_pane_frame`] lays the pending screen out with, folders on the left
 /// and the highlighted one's own documents on the right.
-pub(super) fn render_routines(
+fn render_routines(
     routines: &[RoutineFolder],
     routines_dir: &std::path::Path,
     pipelines: &Pipelines,
@@ -4372,39 +4555,63 @@ pub(super) fn two_pane_frame(
 /// second hand-spelled literal, so a key line here reads exactly the same
 /// way the board's own does — see that function's own doc comment.
 ///
-/// The arrows that move the cursor are never named: naming every key a
-/// screen reads would crowd out the ones a person actually has to be told
-/// about, and `↑↓` are read the same way by every screen in this project
-/// regardless. `q` is not named for the opposite reason — no mode reads it
-/// as anything special any more, so there is nothing about it to say;
-/// `ctrl-c` is the way out, and a footer line has no key of its own to name
-/// for that either. Inside bare `spoolway`'s queue tab it does quit, while
-/// browsing, and the browsing line names it there.
+/// The arrows that move the cursor are never named on the ordinary line:
+/// naming every key a screen reads would crowd out the ones a person
+/// actually has to be told about, and `↑↓` are read the same way by every
+/// screen in this project regardless. The trial picker's own lines are the
+/// exception — they repeat the key row inside its popup, which names them.
+/// `q` is not named outside bare `spoolway`, where no mode reads it as
+/// anything special, so there is nothing about it to say; `ctrl-c` is the
+/// way out, and a footer line has no key of its own to name for that
+/// either. Inside bare `spoolway`'s queue tab it does quit, while browsing
+/// and over the routines pane, and those two lines name it there.
+///
+/// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
+/// [`Mode::SaveRoutine`] — none of the ordinary line's keys is read, so this
+/// draws the picker's own key row instead, the same keys its popup names. A
+/// notice is different: it reads only `enter` to close it, which its own
+/// popup says, and the line under the frame stays the one the screen will
+/// read again once it is closed.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of `space select` through `enter queue` reads a key while the filter
 /// box has focus — so this draws the filter's own line instead, naming
 /// exactly the one key [`handle_filter_key`] does not simply append to the
 /// query: `enter`, which leaves it.
-fn footer(state: &ScreenState) -> String {
+fn footer(groups: &[Group], state: &ScreenState) -> String {
     match &state.mode {
         Mode::Filter => key_hint(&[("enter", "leave search")]),
         // The save panel reads a name the same way the filter box reads a
         // query, so its own line names the same two keys the filter's does
         // to leave it — `enter`/`esc` — rather than any of the ordinary
         // line's, none of which this mode reads as anything but a letter.
-        Mode::SaveRoutine { .. } => key_hint(&[("enter", "save"), ("esc", "cancel")]),
+        Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
+        Mode::Gate(_) => key_hint(GATE_KEYS),
+        Mode::Trial(trial) => match trial.stage {
+            TrialStage::AssignPipelines => hint(&assign_keys(
+                trial_group(groups, trial).is_some_and(|group| trial_fully_assigned(group, trial)),
+            )),
+            TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
+        },
         // Its own screen, not an overlay over the pending one — so its own
         // line, naming exactly the keys `handle_routine_key`,
         // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
         // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
-        // which apply here. `esc` is what leaves the pane now, not `r`.
-        Mode::Routines(_) => key_hint(&[
-            ("o", "open task"),
-            ("space", "select"),
-            ("enter", "queue"),
-            ("esc", "back"),
-        ]),
+        // which apply here. `esc` is what leaves the pane now, not `r`. The
+        // same line under a notice drawn over the pane.
+        _ if routines_beneath(&state.mode).is_some() => key_hint(
+            &[
+                [
+                    ("o", "open task"),
+                    ("space", "select"),
+                    ("enter", "queue"),
+                    ("esc", "back"),
+                ]
+                .as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
+        ),
         _ => {
             let hide = match state.hide_scope {
                 HideScope::Pending => "show queued",
@@ -4449,37 +4656,151 @@ struct Panes<'a> {
     pipelines: &'a Pipelines,
 }
 
-fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
-    match &state.mode {
-        Mode::Outcome(msg) => {
-            return vec![
-                msg.clone(),
-                String::new(),
-                "press any key to continue".to_string(),
-            ];
-        }
-        Mode::Routines(nav) => {
-            let footer = footer(state);
-            let mut frame = render_routines(
-                panes.routines,
-                panes.routines_dir,
-                panes.pipelines,
-                nav,
-                &footer,
-            );
-            frame.push(footer);
-            return frame;
-        }
-        Mode::Browsing
-        | Mode::Gate(_)
-        | Mode::Trial(_)
-        | Mode::Filter
-        | Mode::SaveRoutine { .. } => {}
-    }
+/// The gate picker's keys, in its popup and on the line under the frame.
+const GATE_KEYS: &[(&str, &str)] = &[("enter", "set"), ("g", "clear"), ("esc", "cancel")];
 
-    let pipelines = panes.pipelines;
-    let footer = footer(state);
+/// The save panel's keys, in its popup and on the line under the frame.
+const SAVE_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "cancel")];
+
+/// The trial picker's second screen's keys, in its popup and on the line
+/// under the frame.
+const SKIP_KEYS: &[(&str, &str)] = &[
+    ("↑↓", "move"),
+    ("space", "toggle"),
+    ("enter", "run"),
+    ("esc", "pipelines"),
+];
+
+/// The trial picker's first screen's key row. `enter` refuses to advance
+/// until every task has an assignment (see `handle_trial_key`) — silently,
+/// unless the row says why, which is what the unassigned form is for.
+fn assign_keys(assigned: bool) -> String {
+    let moves = keys(&[("↑↓", "task"), ("←→", "pipeline")]);
+    match assigned {
+        true => format!(
+            "{moves}{}{}",
+            crate::status::GUTTER,
+            keys(&[("enter", "next"), ("esc", "cancel")])
+        ),
+        false => format!(
+            "{moves}{gutter}assign every task, then [enter]{gutter}{}",
+            keys(&[("esc", "cancel")]),
+            gutter = crate::status::GUTTER,
+        ),
+    }
+}
+
+/// A trial popup's key row, kept inside `width` like every other row it
+/// draws — the bracketed row is often its widest, and on a narrow frame it
+/// would otherwise push the popup's right border off it. Tightened to two
+/// spaces between keys first, as step 5 of the screen's mockup draws a
+/// cramped one, and cut only when even that does not fit.
+fn fit_keys(row: String, width: usize) -> String {
+    if row.chars().count() <= width {
+        return row;
+    }
+    clip(row.replace(crate::status::GUTTER, "  "), width)
+}
+
+/// The routines pane a mode is drawn over, when it is: the pane itself, a
+/// notice opened from it, or the tool-requirements gate a routine submit
+/// stopped at. `None` for everything drawn over the pending screen.
+fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
+    match mode {
+        Mode::Routines(nav)
+        | Mode::Outcome {
+            routines: Some(nav),
+            ..
+        }
+        | Mode::ToolGate {
+            then: Resume::Routines(nav) | Resume::RoutineTask(nav),
+            ..
+        } => Some(nav),
+        _ => None,
+    }
+}
+
+/// A frame: the pending screen, or the routines pane, with whatever popup
+/// the mode has open laid over it and the key line under it.
+fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
+    let footer = footer(groups, state);
     let layout = layout(&footer);
+    let mut frame = match routines_beneath(&state.mode) {
+        Some(nav) => render_routines(
+            panes.routines,
+            panes.routines_dir,
+            panes.pipelines,
+            nav,
+            &footer,
+        ),
+        None => pending_frame(groups, panes.pipelines, state, layout),
+    };
+    if let Some(popup) = popup(groups, panes.pipelines, state, layout) {
+        stretch(&mut frame, popup.len() + 4);
+        overlay(&mut frame, &popup);
+    }
+    frame.push(footer);
+    frame
+}
+
+/// Lengthen a [`two_pane_frame`] to at least `lines` lines, borders
+/// included, with empty rows above its bottom border.
+///
+/// A frame drawn with no terminal to measure is only as tall as its content
+/// — see [`two_pane_frame`]'s `rows: None` — and [`overlay`] writes nothing
+/// past the frame's last line, so a popup taller than a short list would
+/// lose its key row and its bottom border. A real terminal's frame already
+/// fills the rows it has, and is left as it is.
+fn stretch(frame: &mut Vec<String>, lines: usize) {
+    let Some(bottom) = frame.last() else {
+        return;
+    };
+    // The bottom border with its corners and dashes blanked is exactly an
+    // empty row of the same two panes.
+    let empty: String = bottom
+        .chars()
+        .map(|c| match c {
+            '└' | '┴' | '┘' => '│',
+            _ => ' ',
+        })
+        .collect();
+    while frame.len() < lines {
+        let at = frame.len() - 1;
+        frame.insert(at, empty.clone());
+    }
+}
+
+/// The popup the mode has open over the screen, if any. A picker whose
+/// group or task has gone from under it draws none — see [`gate_panel`].
+fn popup(
+    groups: &[Group],
+    pipelines: &Pipelines,
+    state: &ScreenState,
+    layout: Layout,
+) -> Option<Vec<String>> {
+    match &state.mode {
+        Mode::Gate(cursor) => gate_panel(groups, pipelines, state, *cursor),
+        Mode::Trial(trial) => trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)),
+        Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
+        // Wrapped no wider than the frame has room for, so a narrow
+        // terminal still sees the popup's right border — see
+        // `checkbox_row_cap`.
+        Mode::Outcome { notice, .. } => {
+            Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
+        }
+        Mode::ToolGate { panel, .. } | Mode::SyncGate(panel) => Some(panel.clone()),
+        Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
+    }
+}
+
+/// The pending screen's own two panes, groups on the left and the
+/// highlighted group's tasks on the right.
+fn pending_frame(
+    groups: &[Group],
+    pipelines: &Pipelines,
+    state: &ScreenState,
+    layout: Layout,
+) -> Vec<String> {
     let shown = shown(groups, state);
     let left = groups_pane_lines(groups, &shown, state, layout.left);
     let (right, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
@@ -4497,35 +4818,13 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
     // the filter's own row is added on top of that.
     let query_row = usize::from(matches!(state.mode, Mode::Filter));
     let group_line = query_row + group_line_index(state.group_cursor, &boundary_for(&shown, state));
-    let mut frame = two_pane_frame(
+    two_pane_frame(
         &window(&left, (group_line, group_line), layout.rows),
         &window(&right, focus, layout.rows),
         &left_title,
         title,
         layout,
-    );
-
-    match &state.mode {
-        Mode::Gate(cursor) => {
-            if let Some(picker) = gate_panel(groups, pipelines, state, *cursor) {
-                overlay(&mut frame, &picker);
-            }
-        }
-        Mode::Trial(trial) => {
-            if let Some(picker) = trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)) {
-                overlay(&mut frame, &picker);
-            }
-        }
-        Mode::SaveRoutine { group, name } => {
-            if let Some(picker) = save_routine_panel(groups, group, name) {
-                overlay(&mut frame, &picker);
-            }
-        }
-        Mode::Browsing | Mode::Outcome(_) | Mode::Filter | Mode::Routines(_) => {}
-    }
-
-    frame.push(footer);
-    frame
+    )
 }
 
 /// Redraw the screen, but only when [`render`] actually comes back
@@ -4572,21 +4871,17 @@ fn gate_panel(
     let pipeline = task_pipeline(&task.doc, pipelines).ok()?;
 
     let chosen = state.gates.get(&task_key(task));
-    let body: Vec<String> = pipeline
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(i, step)| {
-            let marker = if i == cursor { ">" } else { " " };
-            let mark = if chosen == Some(&step.id) { " ·" } else { "" };
-            format!("{marker} {}{mark}", step.id)
-        })
-        .collect();
+    let mut body = vec![String::new()];
+    body.extend(pipeline.steps.iter().enumerate().map(|(i, step)| {
+        let marker = if i == cursor { ">" } else { " " };
+        let mark = if chosen == Some(&step.id) { " ·" } else { "" };
+        format!("{marker} {}{mark}", step.id)
+    }));
 
     Some(panel(
         &format!("gate {} at", task.id),
         &body,
-        "enter set   g clear   esc cancel",
+        &keys(GATE_KEYS),
     ))
 }
 
@@ -4660,6 +4955,7 @@ fn assign_pipelines_panel(
         .min(id_budget);
 
     let mut body = vec![
+        String::new(),
         "assign one pipeline to every task".to_string(),
         String::new(),
     ];
@@ -4681,15 +4977,12 @@ fn assign_pipelines_panel(
         ));
     }
 
-    // `enter` on this screen silently refuses to advance until every task
-    // has an assignment (see `handle_trial_key`) — silently unless the
-    // footer says why, which is what it is here for.
-    let footer = if trial_fully_assigned(group, trial) {
-        "↑↓ task   ←→ pipeline   enter next   esc cancel"
-    } else {
-        "↑↓ task   ←→ pipeline   assign every task, then enter   esc cancel"
-    };
-    panel(&clip(format!("trial {}", group.name), width), &body, footer)
+    let footer = fit_keys(assign_keys(trial_fully_assigned(group, trial)), width);
+    panel(
+        &clip(format!("trial {}", group.name), width),
+        &body,
+        &footer,
+    )
 }
 
 /// The widest a line [`choose_skips_panel`] draws may run before it wraps
@@ -4765,7 +5058,11 @@ fn choose_skips_panel(
     trial: &TrialState,
     width: usize,
 ) -> Vec<String> {
-    let mut body = vec!["choose steps to skip".to_string(), String::new()];
+    let mut body = vec![
+        String::new(),
+        "choose steps to skip".to_string(),
+        String::new(),
+    ];
     let mut flat = 0usize;
     for task in &group.tasks {
         let key = task_key(task);
@@ -4811,7 +5108,7 @@ fn choose_skips_panel(
     panel(
         &clip(format!("trial {}", group.name), width),
         &body,
-        "↑↓ move   space toggle   enter run   esc pipelines",
+        &fit_keys(keys(SKIP_KEYS), width),
     )
 }
 
@@ -4852,7 +5149,9 @@ fn save_routine_panel(groups: &[Group], group: &GroupKey, name: &str) -> Option<
     // — `crate::config::ROUTINES_DIR` is that relative path already, so
     // this needs no `Repo` to build it from.
     let body = vec![
+        String::new(),
         format!("{}/{name}_", crate::config::ROUTINES_DIR),
+        String::new(),
         format!(
             "copies {} unchanged, same ids",
             plural(group.tasks.len(), "document")
@@ -4861,7 +5160,7 @@ fn save_routine_panel(groups: &[Group], group: &GroupKey, name: &str) -> Option<
     Some(panel(
         &format!("save {} as a routine", group.name),
         &body,
-        "enter save   esc cancel",
+        &keys(SAVE_KEYS),
     ))
 }
 
@@ -4957,11 +5256,14 @@ fn plural(n: usize, noun: &str) -> String {
 }
 
 /// Validate the selection and write it — the whole of what pressing `enter`
-/// does. Nothing is drawn in between: a validation failure hands back
-/// [`Mode::Outcome`], the same refusal `queue_add_documents` used to hand
-/// straight back, and a clean batch goes on to [`finish_submit`] and back
-/// to [`Mode::Browsing`]. Queuing is all `enter` does: starting a dispatcher
-/// is the dispatch tab's own `enter`.
+/// does. Nothing is drawn in between but the tool-requirements gate, when
+/// the hook declares a tool this machine cannot meet: a validation failure
+/// hands back a [`Mode::Outcome`] titled `submission refused`, the same
+/// refusal `queue_add_documents` hands back, and a clean batch goes on to
+/// [`finish_submit`] and back to [`Mode::Browsing`]. A failure past
+/// validation — the hook's own, most often — is titled `queue refused`, as
+/// the screen's mockup draws a failed hook. Queuing is all `enter` does:
+/// starting a dispatcher is the dispatch tab's own `enter`.
 ///
 /// Takes `state` mutably rather than by reference: `selected_documents` reads
 /// it to build the batch, and a landed write clears its selection and gates
@@ -4972,24 +5274,42 @@ fn begin_submission(
     base: &str,
     groups: &mut Vec<Group>,
     state: &mut ScreenState,
+    tracking: Tracking,
 ) -> Mode {
     let documents = selected_documents(groups, state);
     let pending = match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(pending) => pending,
-        Err(err) => {
-            return Mode::Outcome(format!("submission refused: {err:#}"));
-        }
+        Err(err) => return outcome("submission refused", format!("{err:#}")),
     };
+    if let Some(gate) = tool_gate(repo, tracking, Resume::Selection) {
+        return gate;
+    }
     let selected = state.selected.clone();
-    match finish_submit(repo, groups, pending, &documents, base, &selected) {
+    let submit = Submit {
+        documents: &documents,
+        base,
+        selected: &selected,
+        tracking_off: tracking == Tracking::Off,
+    };
+    match finish_submit(repo, groups, pending, &submit) {
         Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
             Mode::Browsing
         }
-        Err(err) => refusal_mode("submission refused", err),
+        Err(err) => outcome("queue refused", format!("{err:#}")),
     }
+}
+
+/// What [`finish_submit`] writes beside the batch itself: the documents it
+/// came from, the branch it is based on, the groups it was selected as, and
+/// whether the tool-requirements gate switched issue tracking off for it.
+struct Submit<'a> {
+    documents: &'a [(String, String)],
+    base: &'a str,
+    selected: &'a std::collections::BTreeSet<GroupKey>,
+    tracking_off: bool,
 }
 
 /// Open the batch's tickets and name it, save it, clear the documents it
@@ -5018,10 +5338,14 @@ fn finish_submit(
     repo: &Repo,
     groups: &mut Vec<Group>,
     mut pending: Vec<Task>,
-    documents: &[(String, String)],
-    base: &str,
-    selected: &std::collections::BTreeSet<GroupKey>,
+    submit: &Submit,
 ) -> Result<String> {
+    let Submit {
+        documents,
+        base,
+        selected,
+        tracking_off,
+    } = *submit;
     // `validate_batch` already ran this over the same batch, and nothing
     // between there and here mutates it any more, so today this is a repeat
     // of a check `pending` already passed. Kept anyway as this function's own
@@ -5029,16 +5353,11 @@ fn finish_submit(
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
     check_dependencies_set(repo, &mut pending)?;
-    // `interactive: true` unconditionally: the queue screen already blocks
-    // on a key for every other prompt it draws — `Mode::SaveRoutine`, the
-    // tool-requirements gate — whether or not the
-    // process happens to have a real terminal, and relies on `read_key`
-    // answering `None` to end gracefully under a script or a closed pane.
-    // `own_terminal: false` since `queue_screen` already holds a `TermGuard`
-    // for the whole of `run_screen` — see `open_and_prefix`'s own doc
-    // comment.
+    // The screen asked the tool-requirements gate already, in its own
+    // popup — see `begin_submission` — so it is answered here, not printed.
     let task_files = readable_task_files(documents);
-    open_and_prefix(repo, documents, &task_files, &mut pending, true, false)?;
+    let gate = ToolGate::Answered { tracking_off };
+    open_and_prefix(repo, documents, &task_files, &mut pending, gate)?;
 
     for task in &pending {
         task.save()?;
@@ -5341,7 +5660,7 @@ fn begin_trial(
         let pipeline = match pipelines.get(&pipeline_name) {
             Ok(pipeline) => pipeline,
             Err(err) => {
-                return Mode::Outcome(format!("trial refused: {err:#}"));
+                return outcome("trial refused", format!("{err:#}"));
             }
         };
 
@@ -5349,7 +5668,7 @@ fn begin_trial(
         // ordinary submission runs in `validate_batch`.
         let id = mint_id(repo, &task.id, &minted);
         if let Err(err) = crate::mux::check_task_id(&id) {
-            return Mode::Outcome(format!("trial refused: {err:#}"));
+            return outcome("trial refused", format!("{err:#}"));
         }
         minted.insert(id.clone());
         id_map.insert(task.id.clone(), id.clone());
@@ -5366,7 +5685,7 @@ fn begin_trial(
         ) {
             Ok(arm) => arm,
             Err(err) => {
-                return Mode::Outcome(format!("trial refused: {err:#}"));
+                return outcome("trial refused", format!("{err:#}"));
             }
         };
 
@@ -5398,7 +5717,7 @@ fn begin_trial(
 
     match finish_trial(repo, arms) {
         Ok(()) => Mode::Browsing,
-        Err(err) => Mode::Outcome(format!("trial refused: {err:#}")),
+        Err(err) => outcome("trial refused", format!("{err:#}")),
     }
 }
 
@@ -5437,46 +5756,71 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
             Some(std::path::Component::Normal(_))
         )
     {
-        return Mode::Outcome(format!(
-            "`{name}` is not a folder name — one plain name, no `/` and no `..`"
-        ));
+        return outcome(
+            "not saved",
+            format!("`{name}` is not a folder name — one plain name, no `/` and no `..`"),
+        );
     }
     let dir = repo.routines_dir().join(name);
 
     match std::fs::read_dir(&dir) {
         Ok(mut entries) => {
             if entries.next().is_some() {
-                return Mode::Outcome(format!(
-                    "`{}` already holds documents — pick another name, or clear it first",
-                    dir.display()
-                ));
+                return outcome(
+                    "not saved",
+                    format!(
+                        "`{}` already holds documents — pick another name, or clear it first",
+                        dir.display()
+                    ),
+                );
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Mode::Outcome(format!("s: reading {}: {err:#}", dir.display())),
+        Err(err) => {
+            return outcome(
+                "not saved",
+                format!("s: reading {}: {err:#}", dir.display()),
+            );
+        }
     }
 
     if let Err(err) = std::fs::create_dir_all(&dir) {
-        return Mode::Outcome(format!("s: creating {}: {err:#}", dir.display()));
+        return outcome(
+            "not saved",
+            format!("s: creating {}: {err:#}", dir.display()),
+        );
     }
     for task in &group.tasks {
         let path = dir.join(format!("{}.md", task.id));
         let reset = match reset_for_reuse(&task.path.display().to_string(), &task.doc) {
             Ok(reset) => reset,
             Err(err) => {
-                return Mode::Outcome(format!("s: resetting {}: {err:#}", task.path.display()));
+                return outcome(
+                    "not saved",
+                    format!("s: resetting {}: {err:#}", task.path.display()),
+                );
             }
         };
         if let Err(err) = std::fs::write(&path, &reset) {
-            return Mode::Outcome(format!("s: writing {}: {err:#}", path.display()));
+            return outcome(
+                "not saved",
+                format!("s: writing {}: {err:#}", path.display()),
+            );
         }
     }
 
-    Mode::Outcome(format!(
-        "saved {} to {}",
-        plural(group.tasks.len(), "document"),
-        dir.display()
-    ))
+    // Named from the checkout, as the save panel names it and step 8 of the
+    // screen's mockup draws it: the absolute path is the same for every
+    // routine a person saves, and only pushes the part they chose off the
+    // popup's right edge.
+    outcome(
+        "saved",
+        format!(
+            "saved {} to {}",
+            plural(group.tasks.len(), "document"),
+            crate::platform::relative(&repo.checkout, &dir)
+        ),
+    )
 }
 
 /// Every document at or below the ticked folders at the routines pane's
@@ -5559,6 +5903,10 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
 /// [`validate_batch`] all-or-nothing and the saved tasks are handed back so
 /// a caller can record which ids it minted. The source documents under
 /// `.spoolway/routines/` are never touched.
+///
+/// Asks the tool-requirements gate printed, as a caller with no screen does
+/// — the dispatcher's scheduled firing. A caller that asked it already, in a
+/// popup of its own, uses [`queue_routine_target_with`].
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -5566,6 +5914,23 @@ pub(crate) fn queue_routine_target(
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
+    let gate = ToolGate::Print {
+        interactive: crate::ask::interactive(),
+    };
+    queue_routine_target_with(repo, pipelines, base, (target, pipeline), gate)
+}
+
+/// [`queue_routine_target`], reaching the tool-requirements gate the way
+/// `gate` says: `job` is the routine target and the pipeline it is queued
+/// on, paired to keep this inside the argument count the module keeps to.
+pub(crate) fn queue_routine_target_with(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: &str,
+    job: (&std::path::Path, &str),
+    gate: ToolGate,
+) -> Result<Vec<Task>> {
+    let (target, pipeline) = job;
     let mut documents = if target.is_dir() {
         let folder = super::routines::read_folder_at(target)?;
         // `folder.tasks` is already this folder's own documents plus every
@@ -5591,31 +5956,24 @@ pub(crate) fn queue_routine_target(
     }
 
     let mut tasks = validate_batch(repo, pipelines, Some(base), &documents)?;
-    // No document to write ids back into — see `open_and_prefix`. This route
-    // has no screen at all — a job, or `--pipeline`'s own CLI caller — so it
-    // asks `crate::ask` whether anyone is really there and takes its own
-    // terminal, the same way `queue_add_documents` does. `esc`'s
-    // `GateCancelled` is left to propagate as an ordinary `Err` rather than
-    // caught here: both callers — `jobs::fire_job`'s dispatcher loop and its
-    // own `jobs run` — already treat any `Err` as "did not fire" and neither
-    // marks the job fired nor records queued ids, which is the one honest
-    // answer for a run a person actually declined. Turning it into a fake
-    // empty success here would let the dispatcher believe this minute's
-    // firing already happened.
+    // No document to write ids back into — see `open_and_prefix`. A caller
+    // with no screen — the dispatcher firing a job, or `jobs run` — passes
+    // `ToolGate::Print`, which asks `crate::ask` whether anyone is really
+    // there and takes its own terminal, the same way `queue_add_documents`
+    // does; the jobs screen's `r` has asked in its own popup and passes
+    // `ToolGate::Answered`. `esc`'s `GateCancelled` is left to propagate as
+    // an ordinary `Err` rather than caught here: every caller already treats
+    // any `Err` as "did not fire" and neither marks the job fired nor records
+    // queued ids, which is the one honest answer for a run a person actually
+    // declined. Turning it into a fake empty success here would let the
+    // dispatcher believe this minute's firing already happened.
     //
     // `documents` is `&[]` — nothing here is ever written back into — but
     // `task_files` is not: a routine's own document is a real file under
     // `.spoolway/routines/`, safe for a hook to read, only never to write
     // to.
     let task_files = readable_task_files(&documents);
-    open_and_prefix(
-        repo,
-        &[],
-        &task_files,
-        &mut tasks,
-        crate::ask::interactive(),
-        true,
-    )?;
+    open_and_prefix(repo, &[], &task_files, &mut tasks, gate)?;
     // All or none: everything above parsed and validated, so these writes
     // are the commit — the same discipline `queue_add_documents` follows.
     for task in &tasks {
@@ -5634,11 +5992,17 @@ pub(crate) fn queue_routine_target(
 /// `task_files` still names each one's real path, for a hook's own
 /// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
 /// comment on why that is a different list from the empty `documents`.
-fn finish_routine(repo: &Repo, tasks: &mut [Task], task_files: &[String]) -> Result<()> {
-    // `interactive: true`, `own_terminal: false` — driven from the queue
-    // screen's own routines pane, which already holds the terminal for the
-    // whole of `run_screen`; see `open_and_prefix`'s own doc comment.
-    open_and_prefix(repo, &[], task_files, tasks, true, false)?;
+///
+/// `tracking_off` is the tool-requirements gate's answer, asked already in
+/// the screen's own popup — see [`ToolGate::Answered`].
+fn finish_routine(
+    repo: &Repo,
+    tasks: &mut [Task],
+    task_files: &[String],
+    tracking_off: bool,
+) -> Result<()> {
+    let gate = ToolGate::Answered { tracking_off };
+    open_and_prefix(repo, &[], task_files, tasks, gate)?;
     for task in tasks.iter() {
         task.save()?;
     }
@@ -5649,24 +6013,63 @@ fn finish_routine(repo: &Repo, tasks: &mut [Task], task_files: &[String]) -> Res
 /// documents through [`routine_batch_documents`] and queue them as one
 /// batch through [`validate_batch`] — the same all-or-nothing write
 /// [`begin_submission`] gives a pending selection.
+///
+/// A refusal is a popup over the routines pane, which closing it goes back
+/// to; the tool-requirements gate stops it first the way it stops
+/// [`begin_submission`].
 fn begin_routine_queue(
     repo: &Repo,
     pipelines: &Pipelines,
     base: &str,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
+    tracking: Tracking,
 ) -> Mode {
     let documents = routine_batch_documents(repo, routines, nav);
     if documents.is_empty() {
         return Mode::Browsing;
     }
     let task_files = readable_task_files(&documents);
-    match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files) {
-            Ok(()) => Mode::Browsing,
-            Err(err) => refusal_mode("queue refused", err),
-        },
-        Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
+    finish_routine_mode(
+        repo,
+        pipelines,
+        base,
+        (&documents, &task_files),
+        nav,
+        tracking,
+    )
+}
+
+/// The end both routine submits share: validate `batch` — the documents
+/// and the task files behind them — stop at the tool-requirements gate
+/// when it has something to ask, and queue it. `nav` is the routines pane
+/// it came from: a refusal is drawn over it, and the gate names it as the
+/// place `esc` goes back to.
+fn finish_routine_mode(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: &str,
+    batch: (&[(String, String)], &[String]),
+    nav: &RoutineNav,
+    tracking: Tracking,
+) -> Mode {
+    let (documents, task_files) = batch;
+    let mut tasks = match validate_batch(repo, pipelines, Some(base), documents) {
+        Ok(tasks) => tasks,
+        Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
+    };
+    // Which of the two submits this was, for `enter` on the gate to run
+    // again: a batch built from ticked folders, or one document on its own.
+    let then = match nav.focus {
+        Focus::Groups => Resume::Routines(nav.clone()),
+        Focus::Tasks => Resume::RoutineTask(nav.clone()),
+    };
+    if let Some(gate) = tool_gate(repo, tracking, then) {
+        return gate;
+    }
+    match finish_routine(repo, &mut tasks, task_files, tracking == Tracking::Off) {
+        Ok(()) => Mode::Browsing,
+        Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
 }
 
@@ -5683,6 +6086,7 @@ fn begin_routine_solo(
     base: &str,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
+    tracking: Tracking,
 ) -> Mode {
     let Some(folder) = highlighted_routine_folder(routines, nav) else {
         return Mode::Browsing;
@@ -5696,14 +6100,14 @@ fn begin_routine_solo(
     doc = with_frontmatter_field(&doc, "depends_on", "[]");
     let documents = vec![(task.path.display().to_string(), doc)];
     let task_files = readable_task_files(&documents);
-
-    match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files) {
-            Ok(()) => Mode::Browsing,
-            Err(err) => refusal_mode("queue refused", err),
-        },
-        Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
-    }
+    finish_routine_mode(
+        repo,
+        pipelines,
+        base,
+        (&documents, &task_files),
+        nav,
+        tracking,
+    )
 }
 
 #[cfg(test)]
@@ -7206,6 +7610,25 @@ mod tests {
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
     }
 
+    /// The routines pane reads nothing of its own on `q`, so hosted it
+    /// quits there as it does while browsing — and its key line says so, as
+    /// step 9 of the screen's mockup draws it.
+    #[test]
+    fn hosted_q_quits_from_the_routines_pane_and_its_line_names_it() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
+        let repo = fixture("screen-hosted-routines-q");
+        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "rq");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
+        assert!(
+            last_frame(&drawn)
+                .contains("[o] open task   [space] select   [enter] queue   [esc] back   [q] quit"),
+            "{drawn}"
+        );
+    }
+
     /// Inside a sub-mode the arrows keep their own meaning even when hosted:
     /// the routines view reads `→` itself, and the filter reads `q` into its
     /// query — neither leaves the tab.
@@ -7231,8 +7654,9 @@ mod tests {
     }
 
     /// Where `spoolway queue` prints its opening message and ends, the queue
-    /// tab holds it on screen under the strip, as its `Mode::Outcome` — any
-    /// key dismisses it onto the ordinary screen, where `←` then leaves.
+    /// tab holds it on screen under the strip, as a popup over the tab —
+    /// every key but `enter` is the popup's to ignore, `enter` closes it onto
+    /// the ordinary screen, and `←` then leaves.
     #[test]
     fn the_queue_tab_holds_its_opening_message_instead_of_ending() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
@@ -7244,12 +7668,13 @@ mod tests {
         .unwrap();
         let _hosting = Hosting::open(Tab::Queue);
 
-        let mut input = keys("x\x1b[D");
+        let mut input = keys("x\x1b[D\r\x1b[D");
         let mut out = Vec::new();
         let leave = queue_tab(
             &repo,
             &Pipelines::builtin(),
             &repo.root,
+            crate::screen::shell::OnOpen::default(),
             &mut input,
             &mut out,
         )
@@ -7257,8 +7682,59 @@ mod tests {
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let drawn = String::from_utf8(out).unwrap();
         let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
+        assert!(first.contains("┌─ nothing to queue "), "{first}");
         assert!(first.contains("no-group.md"), "{first}");
+        assert!(first.contains("[enter] close"), "{first}");
+        assert!(first.contains("─ groups"), "the tab under it: {first}");
         assert!(first.contains("dispatch"), "under the strip: {first}");
+    }
+
+    /// What the screen opens with — the sync gate, then the update notice —
+    /// is shown over the queue tab in that order, each closed by `enter`
+    /// alone, before the tab is the person's.
+    #[test]
+    fn the_queue_tab_opens_with_the_sync_gate_then_the_update_notice() {
+        use crate::screen::shell::{Hosting, OnOpen, Tab};
+        let repo = fixture("queue-tab-on-open");
+        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+        let on_open = OnOpen {
+            sync: Some(panel(
+                "new version installed, apply updates",
+                &[],
+                "[enter] confirm",
+            )),
+            update: Some("Update available: 0.42.0. Run \"spoolway update\"".to_string()),
+        };
+
+        // A stand-in sync popup whose `enter` finds nothing to write: the
+        // fixture's own stamp is never behind, so `gate::apply` only stamps.
+        let mut input = keys("x\r");
+        let mut out = Vec::new();
+        queue_tab(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            on_open,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
+        assert!(
+            frames[0].contains("┌─ new version installed, apply updates "),
+            "{}",
+            frames[0]
+        );
+        assert!(frames[0].contains("─ groups"), "{}", frames[0]);
+        let last = frames.last().unwrap();
+        assert!(last.contains("┌─ update available "), "{last}");
+        assert!(
+            last.contains("Update available: 0.42.0. Run \"spoolway update\""),
+            "{last}"
+        );
+        assert!(last.contains("[enter] close"), "{last}");
     }
 
     /// Drawn by `spoolway queue` itself, nothing hosts the screen: no strip,
@@ -7504,7 +7980,7 @@ mod tests {
     /// bare `spoolway`'s tab strip — is scrolled off the screen.
     #[test]
     fn wrapped_rows_counts_the_rows_a_key_line_wraps_onto() {
-        let line = footer(&ScreenState::new());
+        let line = footer(&[], &ScreenState::new());
         let columns = crate::status::strip_ansi(&line).chars().count();
         assert!(columns > 100, "the key line fits in 100 columns now");
         assert_eq!(wrapped_rows(&line, 100), 2);
@@ -7856,7 +8332,14 @@ mod tests {
         handle_browse_key(&groups, &mut state, Key::Char(' '));
 
         let pipelines = Pipelines::builtin();
-        let outcome = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
+        let outcome = begin_submission(
+            &repo,
+            &pipelines,
+            "plan/demo",
+            &mut groups,
+            &mut state,
+            Tracking::Ask,
+        );
         assert!(
             matches!(outcome, Mode::Browsing),
             "expected a clean submission to go back to browsing, got {outcome:?}"
@@ -7919,15 +8402,13 @@ mod tests {
         let documents = selected_documents(&groups, &state);
         let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
         let selected = state.selected.clone();
-        let msg = finish_submit(
-            &repo,
-            &mut groups,
-            pending,
-            &documents,
-            "plan/demo",
-            &selected,
-        )
-        .unwrap();
+        let submit = Submit {
+            documents: &documents,
+            base: "plan/demo",
+            selected: &selected,
+            tracking_off: false,
+        };
+        let msg = finish_submit(&repo, &mut groups, pending, &submit).unwrap();
 
         assert!(!beta_path.exists(), "beta's pending document must be gone");
         assert!(
@@ -7973,15 +8454,13 @@ mod tests {
         let documents = selected_documents(&groups, &state);
         let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
         let selected = state.selected.clone();
-        let msg = finish_submit(
-            &repo,
-            &mut groups,
-            pending,
-            &documents,
-            "plan/demo",
-            &selected,
-        )
-        .unwrap();
+        let submit = Submit {
+            documents: &documents,
+            base: "plan/demo",
+            selected: &selected,
+            tracking_off: false,
+        };
+        let msg = finish_submit(&repo, &mut groups, pending, &submit).unwrap();
 
         assert!(!beta_path.exists(), "beta's pending document must be gone");
         assert!(
@@ -8333,7 +8812,7 @@ mod tests {
             &panel(
                 "gate wire at",
                 &["> implement".to_string(), "  review".to_string()],
-                "enter set   g clear   esc cancel",
+                &crate::screen::keys(GATE_KEYS),
             ),
         );
 
@@ -8403,9 +8882,12 @@ mod tests {
         assert!(flat.contains("beta"), "{flat}");
         assert!(flat.contains("bugfix"), "{flat}");
         // alpha is still unassigned, so the footer says so rather than
-        // offering an `enter` that would silently refuse to advance.
+        // offering an `enter` that would silently refuse to advance —
+        // tightened to two spaces a key, to fit the headless frame's width.
         assert!(
-            flat.contains("↑↓ task   ←→ pipeline   assign every task, then enter   esc cancel"),
+            flat.contains(
+                "[↑↓] task  [←→] pipeline  assign every task, then [enter]  [esc] cancel"
+            ),
             "{flat}"
         );
     }
@@ -8540,7 +9022,7 @@ mod tests {
         // never ticked by alpha's own skip set.
         assert_eq!(flat.matches("[x]").count(), 1, "{flat}");
         assert!(
-            flat.contains("↑↓ move   space toggle   enter run   esc pipelines"),
+            flat.contains("[↑↓] move   [space] toggle   [enter] run   [esc] pipelines"),
             "{flat}"
         );
     }
@@ -9385,9 +9867,9 @@ mod tests {
         // space selects `two`, the highlighted (newest) group; j moves to
         // `one`; space selects it too; enter submits both and is refused — a
         // refusal shows an outcome, which is half of what this test guards;
-        // any key (`x`) dismisses it; space deselects `one`, which is still
-        // highlighted; enter resubmits with `two` alone.
-        screen(&repo, groups, " j \rx \r");
+        // `x` is the popup's to ignore and `enter` closes it; space deselects
+        // `one`, which is still highlighted; enter resubmits with `two` alone.
+        screen(&repo, groups, " j \rx\r \r");
 
         assert!(
             repo.queue_dir().join("good.md").exists(),
@@ -9445,20 +9927,15 @@ mod tests {
         );
     }
 
-    /// `q` ends the screen from a mode that is not browsing — the bug this
-    /// fixes. The confirmation panel `enter` used to open swallowed the key
-    /// through its own catch-all arm, dropping back to browsing instead of
-    /// quitting, so a person who pressed enter and then `q` saw nothing
-    /// happen. `Mode::Outcome`, reached here by a refused submission, is
-    /// where that same catch-all lives now that `Mode::Dispatch` is gone —
-    /// a clean submission goes straight back to browsing, so nothing after
-    /// it could reintroduce the bug even silently.
+    /// A popup takes every key until `enter` closes it — `q` included. A
+    /// refused submission puts one up; `q` under it neither quits nor
+    /// closes it, so a message nobody has read yet is never taken away by a
+    /// key meant for the screen underneath.
     ///
-    /// End of input ends the loop too, so a run that merely stops proves
-    /// nothing. The frames are the evidence: `q` quitting means no further
-    /// draw, and the footer is drawn once per browsing frame.
+    /// End of input ends the loop too, so the run ending proves nothing on
+    /// its own. The last frame is the evidence: the popup is still on it.
     #[test]
-    fn q_quits_from_a_mode_that_is_not_browsing() {
+    fn q_under_a_popup_is_the_popups_to_ignore() {
         let repo = fixture("screen-quit-report");
         write_pending(
             &repo,
@@ -9466,25 +9943,16 @@ mod tests {
             &document("bogus", "group: one\nstage: taken\n", BODY),
         );
         let groups = listed(&repo);
-        // Computed before `groups` moves into `run_screen`, but the
-        // footer's own text does not change across these two frames either
-        // way — no group here is queued yet, and `h` is never pressed.
-        let ordinary_footer = footer(&ScreenState::new());
 
         // Space selects, enter submits and is refused for a reserved key,
-        // putting the outcome up; `q` quits from under it.
+        // putting the refusal up; `q` is pressed under it.
         let (exit, drawn) = screen_exit(&repo, groups, " \rq");
 
-        assert_eq!(exit, ScreenExit::Quit);
-
-        // Two browsing frames — one before the space, one before the enter —
-        // and then the outcome, which draws no footer. A third would mean
-        // `q` had dropped back to browsing rather than quitting.
-        let frames = drawn.matches(&ordinary_footer).count();
-        assert_eq!(
-            frames, 2,
-            "`q` drew another browsing frame instead of quitting"
-        );
+        assert_eq!(exit, ScreenExit::Quit, "the input ran out");
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("┌─ submission refused "), "{frame}");
+        assert!(frame.contains("[enter] close"), "{frame}");
+        assert!(frame.contains("─ groups"), "the tab under it: {frame}");
     }
 
     /// `enter` only queues. A clean submission lands and the screen goes
@@ -9700,7 +10168,7 @@ mod tests {
         let drawn = screen(&repo, groups, "o");
 
         assert!(
-            !drawn.contains("press any key to continue"),
+            !drawn.contains("┌─ open task "),
             "`o` with the groups pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
     }
@@ -9723,6 +10191,8 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
+        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(last.contains("─ groups"), "over the tab: {last}");
     }
 
     // -------------------------------------------------------------- the filter
@@ -9940,7 +10410,7 @@ mod tests {
         let drawn = screen(&repo, Vec::new(), "ro");
 
         assert!(
-            !drawn.contains("press any key to continue"),
+            !drawn.contains("┌─ open task "),
             "`o` with the folders pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
     }
@@ -9966,6 +10436,8 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
+        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(last.contains("─ routines"), "over the pane: {last}");
     }
 
     /// `→` descends into a folder holding subfolders of its own, and `←`
@@ -10531,7 +11003,8 @@ mod tests {
                 validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &documents)
                     .unwrap();
             let task_files = readable_task_files(&documents);
-            open_and_prefix(&repo, &documents, &task_files, &mut tasks, false, true).unwrap();
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(&repo, &documents, &task_files, &mut tasks, gate).unwrap();
 
             let seen = std::fs::read_to_string(repo.tracking_dir().join("task-file.seen"));
             assert_eq!(
@@ -11125,6 +11598,7 @@ mod tests {
                 "plan/demo",
                 &mut groups,
                 &mut state,
+                Tracking::Ask,
             );
             assert!(matches!(outcome, Mode::Browsing), "{outcome:?}");
 
@@ -11417,7 +11891,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap();
             assert!(!skip, "nothing unmet means issue tracking stays on");
@@ -11442,7 +11916,7 @@ mod tests {
                 false,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap();
             assert!(skip, "issue tracking must be switched off for this run");
@@ -11475,7 +11949,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap();
             assert!(skip);
@@ -11484,8 +11958,8 @@ mod tests {
         }
 
         /// `esc` is the one path that must reach the caller as `GateCancelled`
-        /// — [`open_and_prefix`]'s own callers turn that into `Mode::Browsing`
-        /// rather than a refusal, since nothing here failed.
+        /// — `queue_add_documents` turns that into a clean exit rather than
+        /// a refusal, since nothing here failed.
         #[test]
         fn esc_over_the_gate_cancels() {
             let mut repo = fixture("tool-gate-esc");
@@ -11498,34 +11972,76 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap_err();
             assert!(err.downcast_ref::<GateCancelled>().is_some(), "{err:#}");
         }
 
-        /// Review finding 1: `Mode::Browsing` is exactly the mode the
-        /// screen was already showing when `enter` fired the submission
-        /// that hit the gate, so returning it on `esc` would render the
-        /// same frame `draw`'s own unchanged-frame check already has
-        /// cached and never repaint over the gate's raw-printed block.
-        /// `refusal_mode` must hand back a *different* mode instead, so the
-        /// next `draw` clears the screen — `Mode::Outcome` is what every
-        /// other refusal here already uses for exactly that reason.
-        #[test]
-        fn refusal_mode_never_returns_to_the_frame_that_was_already_on_screen() {
-            let cancelled = refusal_mode("submission refused", GateCancelled.into());
-            assert!(
-                !matches!(cancelled, Mode::Browsing),
-                "esc must not redraw the identical frame `enter` was pressed on: {cancelled:?}"
+        /// A pending group whose hook declares a floor this machine cannot
+        /// meet, selected and submitted on the queue screen: `enter` draws
+        /// the gate as a popup over the tab — the tab still drawn under it,
+        /// nothing printed outside the frame — and queues nothing yet.
+        fn submit_over_the_gate(name: &str, then: &str) -> (Repo, String) {
+            let mut repo = fixture(name);
+            with_versioned_hook(&mut repo, "999.0.0");
+            write_pending(
+                &repo,
+                "wire",
+                &document("wire", "group: a\ngroup_description: a\n", BODY),
             );
-            assert!(matches!(cancelled, Mode::Outcome(_)), "{cancelled:?}");
+            let (_, drawn) = screen_exit(&repo, listed(&repo), &format!(" \r{then}"));
+            (repo, drawn)
+        }
 
-            let refused = refusal_mode("submission refused", anyhow::anyhow!("bad batch"));
-            match refused {
-                Mode::Outcome(msg) => assert!(msg.contains("bad batch"), "{msg}"),
-                other => panic!("{other:?}"),
-            }
+        #[test]
+        fn the_screen_draws_the_gate_in_a_popup_over_the_tab() {
+            let (repo, drawn) = submit_over_the_gate("tool-gate-popup", "");
+            let frame = last_frame(&drawn);
+            assert!(frame.contains("┌─ issue tracking "), "{frame}");
+            assert!(frame.contains("versioned.sh"), "{frame}");
+            assert!(frame.contains("cargo >= 999.0.0"), "{frame}");
+            assert!(
+                frame.contains("issue tracking is not supported."),
+                "{frame}"
+            );
+            assert!(
+                frame.contains("[enter] queue anyway, without issue tracking   [esc] back"),
+                "{frame}"
+            );
+            assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+            // Nothing outside the frame: every byte written went out after
+            // a clear-screen, as part of one frame or another.
+            assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");
+            assert!(!repo.queue_dir().join("wire.md").exists());
+        }
+
+        /// `esc` goes back to the screen the submit started from, having
+        /// queued nothing and said nothing more.
+        #[test]
+        fn esc_off_the_gate_popup_goes_back_and_queues_nothing() {
+            let (repo, drawn) = submit_over_the_gate("tool-gate-popup-esc", "\x1b");
+            let frame = last_frame(&drawn);
+            assert!(!frame.contains("issue tracking"), "{frame}");
+            assert!(frame.contains("[x] a"), "still selected: {frame}");
+            assert!(!repo.queue_dir().join("wire.md").exists());
+        }
+
+        /// `enter` queues the batch with issue tracking switched off for it:
+        /// the hook is never called.
+        #[test]
+        fn enter_on_the_gate_popup_queues_without_tracking() {
+            let (repo, drawn) = submit_over_the_gate("tool-gate-popup-enter", "\r");
+            let frame = last_frame(&drawn);
+            assert!(!frame.contains("issue tracking"), "{frame}");
+            let task = queued(&repo, "wire");
+            assert_eq!(task.extra_str("ticket"), "");
+            assert!(
+                std::fs::read_dir(repo.tracking_dir())
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true),
+                "the hook must never have been called"
+            );
         }
 
         /// A tool the declared floor names but that is not on PATH at all is
@@ -11588,7 +12104,8 @@ mod tests {
             )
             .unwrap();
 
-            open_and_prefix(&repo, &[], &[], &mut tasks, false, true).unwrap();
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate).unwrap();
 
             assert_eq!(tasks[0].extra_str("ticket"), "");
             assert_eq!(tasks[0].extra_str("epic"), "");
