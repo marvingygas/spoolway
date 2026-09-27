@@ -17,6 +17,44 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.6.0
+
+### Highlights
+- spoolway now runs its own releases end to end: queue `release-spoolway`, approve or override the recommended version at the one planned stop, and every other step — repair, review, merge, changelog, rehearsal, tag, publish and verification — runs unattended from there. This 0.6.0 release is the first one cut by that pipeline. (#336)
+- Command steps can now be scoped with two new pipeline keys: `first: true` runs a step only on a chain's undeclared-dependency root, and `serial: true` lets only one task's run of that step go at a time, with the board and `spoolway queue list` showing a waiting task as `○ waiting … serial: after <task>`. (#370, #372, #391)
+- Upgrading a project is now closer to automatic: `spoolway sync` (or just opening spoolway once a project falls behind) migrates every pipeline shape a release retires and names each change it made, and installed skills are rewritten whenever they differ from the shipped copy. (#404, #405)
+- `spoolway eval` now groups by an explicit pipeline `version:` a person raises, rather than an automatic fingerprint: `--by version` lists every version newest first, and `--pipeline-version X.Y` filters to lanes that ran under one. (#392, #394)
+- The dispatcher board's header now names the running dispatcher's own version next to its pid, and adds `(restart to use latest installed version)` once a newer `spoolway` binary sits on `PATH`. (#374)
+
+### Breaking changes and migration
+- `spoolway spend` is removed; running it now fails as an unknown command, with no retirement hint. Use `spoolway eval` instead: `--by task`, `--by group` and `--by step` cover the matching old `spend` cuts, but `--by model`, `--by project`, `--by month` and `--by lane` have no direct replacement — `--since`/`--until` still take a `YYYY-MM` month to bound the window, just not to group by it. (#395)
+- `spoolway eval` drops `--runs`, `--limit` and `--month`. `--by` is now always applied (default `pipeline`), taking `group`, `task`, `pipeline`, `step` or `version`, and `--pipeline-version X.Y` is new. Replace `spoolway eval --runs` with `spoolway eval --by task`, and `spoolway eval --month 2026-08` with `spoolway eval --since 2026-08 --until 2026-08`. (#392, #394)
+- A pipeline's `loop:` written as a map, keyed by the step a failure is sent back from, is now refused at parse, naming the step that should carry the limit instead; `on_loop_max:` is refused the same way, since a spent loop always parks on `blocked` now. Run `spoolway sync` to fold every map form into a bare `loop:` on the step it named — set to one plus the sum of its entries — and to delete every `on_loop_max:` key. (#352, #393)
+- A step whose `on_fail:` names its own id is now refused by `spoolway pipeline check`, naming the step and the key, and the shipped pipelines' `checks` step is dropped entirely. Run `spoolway sync` to strip a self-routing `on_fail:` from an existing pipeline file; the step then waits on `blocked` for a person instead of retrying. (#337, #338)
+- `/spoolway-doctor` is retired. Use `/spoolway-config` instead, which now diagnoses and repairs a project as well as changing it. (#405)
+
+### Features
+- Any command run against a checkout that has fallen behind now says `Open spoolway to apply them.` instead of naming `spoolway sync` directly, so the fix always routes through the board. (#407)
+- Every provider's `spoolway-plan` skill now requires a clear decision on anything that would otherwise be left aside — a plan can no longer say something will be handled later, and "out of scope" is the person's own call. (#342)
+
+### Reliability
+- A group's banked totals on the board no longer double-count a step's arrivals against its own loop budget, and only count the slots the dispatcher actually enforces. (#333, #384)
+- The usage ledger banks only the time a lane was actually busy, and counts each lane once. (#389)
+- The shared Cargo target directory is now linked only into a Cargo worktree, not into every worktree spoolway creates. (#350)
+- `spoolway sync` keeps a hook script it replaces executable, instead of dropping its permission bit. (#334)
+- `spoolway sync` now prints `Nothing updating.` when a run writes or removes nothing, instead of claiming files were overwritten. (#335)
+- A task id is no longer capped to fit inside Herdr's agent-name length; the full id is used everywhere, including in Herdr panes and tabs. (#369)
+- Herdr tab and pane labels now name the task and the step running in them. (#371)
+- The prompt contract check now reads the pipelines in the task's own checkout, not the project root's, so a worktree with its own pipeline files is checked against the right ones. (#408)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.6.0`, or run it without installing via `npx spoolway@0.6.0`.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64.
+- After upgrading, open spoolway (or run `spoolway sync`) to migrate any retired pipeline shapes and refresh installed skills, per the breaking changes above.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.6.0
+
 ## 0.5.0
 
 ### Highlights
