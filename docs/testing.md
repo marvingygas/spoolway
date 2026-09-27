@@ -42,7 +42,8 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 | `--list` | | Print the suites and the setting-to-case map |
 
 Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
-`bash`, `curl`, `setsid` and `flock`. Only the `cloud` and `live` tiers run a real agent binary.
+`bash`, `curl`, `setsid`, `flock` and `script` (util-linux). Only the `cloud` and `live` tiers
+run a real agent binary.
 
 `spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
 environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
@@ -70,7 +71,7 @@ with a `// covers:` line.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | A person, by hand |
-| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, board-pause, queue-unqueue, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
+| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
 | `nightly` | the `pr` suites plus `upgrade` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
@@ -93,6 +94,7 @@ with a `// covers:` line.
 | `routines` | The routines pane and the `s` save panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | The `spoolway jobs` screen writing, pausing and deleting a job |
+| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, and the grouped help off a terminal |
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
 | `restart` | The dispatcher's restart guard and its exit codes |

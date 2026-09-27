@@ -1484,8 +1484,13 @@ pub(super) fn pane_width() -> usize {
 /// fallback height: output that is not a terminal has no bottom to fall off,
 /// and a board redirected to a file should keep every line it was going to
 /// write rather than being cut to a guess.
+///
+/// Inside bare `spoolway`'s dispatch tab the tab strip takes its own rows off
+/// the top first — see `crate::screen::shell::strip_rows`, zero everywhere
+/// else — so the board is measured against what is actually left under it.
 pub(super) fn pane_height() -> Option<usize> {
-    terminal_size::terminal_size().map(|(_, h)| h.0 as usize)
+    terminal_size::terminal_size()
+        .map(|(_, h)| (h.0 as usize).saturating_sub(crate::screen::shell::strip_rows()))
 }
 
 /// `text` cut to `room` visible characters, ending in `…` when anything had
@@ -1635,7 +1640,7 @@ pub(super) fn clamp_rows(frame: &str, height: Option<usize>) -> String {
 /// carries no colour of its own, so the frame beneath one can afford to lose
 /// its while it is up; the next frame, once the panel closes, is read fresh
 /// and in colour again.
-pub(super) fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

@@ -308,10 +308,12 @@ pub mod stop {
 /// once the board holding this goes out of scope.
 pub struct TermGuard {
     original: Option<libc::termios>,
-    /// An inert guard hides nothing and restores nothing. Test-only: a `Board`
-    /// built in a test must not take the process's real terminal raw —
-    /// parallel tests each restore in their own order, and the last one to run
-    /// decides whether the developer's shell is left without echo (finding 53).
+    /// An inert guard hides nothing and restores nothing. A `Board` built in a
+    /// test must not take the process's real terminal raw — parallel tests
+    /// each restore in their own order, and the last one to run decides
+    /// whether the developer's shell is left without echo (finding 53) — and
+    /// the board inside bare `spoolway`'s dispatch tab must not either, since
+    /// the screen around it already holds the one real guard.
     inert: bool,
 }
 
@@ -349,7 +351,6 @@ impl Drop for TermGuard {
 
 impl TermGuard {
     /// A guard that touches nothing. See the `inert` field.
-    #[cfg(test)]
     pub fn inert() -> TermGuard {
         TermGuard {
             original: None,

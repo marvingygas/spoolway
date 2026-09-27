@@ -1,6 +1,6 @@
 ---
 domain: cli
-covers: ["src/cli.rs", "src/commands/**", "src/main.rs"]
+covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**"]
 ---
 
 # CLI reference
@@ -39,6 +39,36 @@ override`, `prompt contract`, `prompt list`, `prompt override`, `config show`, `
 
 ## Your work
 
+### `spoolway`
+
+At a terminal, with no other command typed, opens one screen: four tabs, dispatch, queue,
+jobs and eval, in that order. It opens on the queue tab.
+
+```
+spoolway
+```
+
+The open tab's label is in normal ink. The other three labels and both arrows are dim.
+`dispatch` is always in the accent colour: bright when it is the open tab, dim otherwise.
+
+| Key | What it does |
+|---|---|
+| `←` `→` | Move to the neighbouring tab, when no popup or sub-mode of the tab's own is open |
+| `q` | Quit the whole screen, when no popup or sub-mode of the tab's own is open |
+
+Inside the eval tab's filter panel and the queue tab's routines view, `←` and `→` keep their
+own meaning instead.
+
+Each tab draws exactly what its own command draws, under the strip: `spoolway dispatch`'s
+board, `spoolway queue`, `spoolway jobs` and `spoolway eval`. The dispatch tab shows the board
+with no pass running behind it: its header reads `dispatcher running` and the pid of whichever
+process holds the dispatch lock, or `dispatcher stopped` with no pid when nothing does. The
+queue tab's `enter` still confirms and starts a dispatcher the way `spoolway queue`'s does: the
+screen ends first, and the dispatcher takes the terminal.
+
+With stdout not a terminal — `spoolway | cat`, a script — it prints the grouped help instead,
+the same as `spoolway --help`.
+
 ### `spoolway queue`
 
 Open the queue screen. The left pane lists one row per `group:` across the pending, queue and
@@ -49,6 +79,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 | Key | What it does |
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
+| `tab` | Switch focus between the groups and tasks panes |
 | `space` | Select a group. A group is queued whole |
 | `enter` | Check the selection, queue it, and offer to start a dispatcher, or to go to one already running |
 | `g` | Set or clear a `gate_at` on the highlighted task |

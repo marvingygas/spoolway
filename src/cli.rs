@@ -92,6 +92,14 @@ pub enum Command {
     #[command(name = crate::release::REFRESH_COMMAND, hide = true)]
     VersionCheck,
 
+    /// Bare `spoolway` in a terminal: the one screen, with its dispatch,
+    /// queue, jobs and eval tabs — see [`crate::screen::shell`].
+    ///
+    /// Skipped by the parser, so nobody can type it: [`parse`] is the only
+    /// thing that ever builds it, and only when no command was typed at all.
+    #[command(skip)]
+    Screen,
+
     /// Install pipeline skills and agent definitions for a coding agent.
     Install(InstallArgs),
 
@@ -349,10 +357,23 @@ pub fn command() -> clap::Command {
 
 /// Parse the command line through [`command`], so the grouped help is what
 /// `spoolway --help` prints.
+///
+/// No command at all, with stdout on a terminal, is [`Command::Screen`]. Off a
+/// terminal — `spoolway | cat`, a script — it is exactly what it was before
+/// the screen existed: clap's own refusal, which prints the grouped help and
+/// exits 2. The screen draws with raw mode and full-screen escapes, which is
+/// a frame of garbage anywhere but a terminal — the same check bare
+/// `spoolway eval` makes before it opens its own screen.
 pub fn parse() -> Cli {
     use clap::FromArgMatches;
+    use std::io::IsTerminal;
 
     let base = command();
+    if std::io::stdout().is_terminal()
+        && let Some(cli) = bare(&base, std::env::args_os())
+    {
+        return cli;
+    }
     let matches = base.clone().get_matches();
     let eval_bare = eval_is_bare(&base, &matches);
     let mut cli = match Cli::from_arg_matches(&matches) {
@@ -361,6 +382,33 @@ pub fn parse() -> Cli {
     };
     cli.eval_bare = eval_bare;
     cli
+}
+
+/// `argv` as [`Command::Screen`] when it names no command — only the globals
+/// `--repo`/`-C` and `--json`, or nothing at all — and `None` for anything
+/// else, including `--help` and `--version`, which the ordinary parse answers.
+/// Parsed with the subcommand made optional rather than by reading `argv`
+/// by hand, so `-C dir`, `--repo=dir` and every other spelling clap accepts
+/// is accepted here too.
+fn bare(base: &clap::Command, argv: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Cli> {
+    let matches = base
+        .clone()
+        .subcommand_required(false)
+        // The derive sets this beside `subcommand_required` for a required
+        // subcommand, and it alone would still turn an empty `argv` into the
+        // help screen.
+        .arg_required_else_help(false)
+        .try_get_matches_from(argv)
+        .ok()?;
+    if matches.subcommand().is_some() {
+        return None;
+    }
+    Some(Cli {
+        repo: matches.get_one::<PathBuf>("repo").cloned(),
+        json: matches.get_flag("json"),
+        command: Command::Screen,
+        eval_bare: false,
+    })
 }
 
 /// Whether the `eval` subcommand, if that is what was typed, carried none of
@@ -1501,6 +1549,28 @@ mod tests {
             rendered.contains("[possible values: group, task, pipeline, step, version]"),
             "{rendered}"
         );
+    }
+
+    /// No command at all — only the globals, or nothing — is the screen;
+    /// anything clap would answer on its own, `--help` and `--version`
+    /// included, is not, and neither is any real command.
+    #[test]
+    fn bare_is_the_screen_only_with_no_command_typed() {
+        let bare_from = |argv: &[&str]| {
+            let argv = std::iter::once("spoolway").chain(argv.iter().copied());
+            bare(&command(), argv.map(std::ffi::OsString::from))
+        };
+
+        let cli = bare_from(&[]).expect("nothing typed is the screen");
+        assert!(matches!(cli.command, Command::Screen));
+        let cli = bare_from(&["-C", "/tmp/proj", "--json"]).expect("globals only");
+        assert_eq!(cli.repo, Some(PathBuf::from("/tmp/proj")));
+        assert!(cli.json);
+
+        assert!(bare_from(&["queue"]).is_none());
+        assert!(bare_from(&["--help"]).is_none());
+        assert!(bare_from(&["--version"]).is_none());
+        assert!(bare_from(&["no-such-command"]).is_none());
     }
 
     /// `--runs` is gone: `--by task` is the one-row-per-run table now, and

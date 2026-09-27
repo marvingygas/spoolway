@@ -32,7 +32,7 @@ use crate::cli::{EvalArgs, EvalBy};
 use crate::fmt::csv_field;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-use crate::screen::{Key, PollableRead, boxed, key_hint, overlay, pad_to, panel, read_key};
+use crate::screen::{Key, PollableRead, boxed, key_hint, overlay, pad_to, panel};
 use crate::usage::{Entry, ModelPrice, Tokens};
 
 /// The printing path: every `spoolway eval` with a flag of its own. The
@@ -2484,12 +2484,17 @@ fn frame_chrome(notes: usize) -> usize {
     4 + notes
 }
 
-/// How many body rows the frame gets once `frame_chrome` is counted. `None`
-/// where there is no terminal to measure, which is what lets a piped run
-/// keep every row rather than losing the ones past some guessed height.
+/// How many body rows the frame gets once `frame_chrome` is counted — and,
+/// inside bare `spoolway`'s eval tab, once the strip's own rows are too (see
+/// `crate::screen::shell::strip_rows`, zero everywhere else). `None` where
+/// there is no terminal to measure, which is what lets a piped run keep
+/// every row rather than losing the ones past some guessed height.
 fn frame_rows(notes: usize) -> Option<usize> {
-    terminal_size::terminal_size()
-        .map(|(_, h)| (h.0 as usize).saturating_sub(frame_chrome(notes)).max(1))
+    terminal_size::terminal_size().map(|(_, h)| {
+        (h.0 as usize)
+            .saturating_sub(frame_chrome(notes) + crate::screen::shell::strip_rows())
+            .max(1)
+    })
 }
 
 fn frame_top(title: &str, right: &str, width: usize) -> String {
@@ -2654,6 +2659,11 @@ fn draw(
     out: &mut impl std::io::Write,
 ) {
     let _ = write!(out, "\x1b[2J\x1b[H");
+    // Bare `spoolway`'s tab strip, when it hosts this screen as its eval tab,
+    // and nothing at all otherwise — see `crate::screen::shell::strip`.
+    for line in crate::screen::shell::strip() {
+        let _ = writeln!(out, "{line}");
+    }
 
     // Computed before `frame_rows`, which has to know how many of these are
     // about to take a row of their own — see `frame_rows`'s own doc comment.
@@ -2905,10 +2915,28 @@ pub fn screen(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     let mut stdin = crate::screen::RawStdin;
     let mut stdout = std::io::stdout();
     let _term = crate::platform::TermGuard::new();
-    // Every flag at its bare default — `cli::eval_is_bare` is what routed
-    // this call here in the first place, so this is exactly the invocation
-    // that reached `screen` rather than `run`.
-    let args = EvalArgs {
+    // Nothing hosts this screen, so how it ended has nowhere to go.
+    run_screen(repo, pipelines, &bare_args(), &mut stdin, &mut stdout).map(|_| ())
+}
+
+/// Bare `spoolway`'s eval tab: the same screen [`screen`] opens, under the
+/// strip and over the terminal the shell around it already holds — so no
+/// guard of its own. Nothing below the strip differs.
+pub(crate) fn tab(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<crate::screen::shell::Leave> {
+    run_screen(repo, pipelines, &bare_args(), input, out)
+}
+
+/// Every flag at its bare default — `cli::eval_is_bare` is what routed
+/// `spoolway eval` to [`screen`] in the first place, so this is exactly the
+/// invocation that reached it rather than `run`. Bare `spoolway`'s eval tab
+/// opens on the same.
+fn bare_args() -> EvalArgs {
+    EvalArgs {
         by: EvalBy::Pipeline,
         group: None,
         task: None,
@@ -2923,31 +2951,57 @@ pub fn screen(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         discard: None,
         force: false,
         csv: false,
-    };
-    run_screen(repo, pipelines, &args, &mut stdin, &mut stdout)
+    }
 }
 
+/// The screen's own loop. Ends in [`Leave::Quit`] on `q` or when the input
+/// runs out, and in whatever [`crate::screen::shell::leave_on`] reads off
+/// `←` or `→` while browsing when bare `spoolway` hosts this as its eval tab.
+///
+/// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
 fn run_screen(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &EvalArgs,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
-) -> Result<()> {
+) -> Result<crate::screen::shell::Leave> {
+    use crate::screen::shell::Leave;
+
     let mut state = ScreenState::new(args);
     let mut loaded = match load(repo, &state.filters) {
         Ok(loaded) => loaded,
+        // Hosted, the tab still has a strip and three neighbours to reach,
+        // so the reason is held on it rather than printed on the way out.
+        Err(err) if crate::screen::shell::hosted().is_some() => {
+            return Ok(crate::screen::shell::message_tab(
+                &format!("spoolway eval: {err:#}"),
+                input,
+                out,
+            ));
+        }
         Err(err) => {
             let _ = writeln!(out, "spoolway eval: {err:#}");
-            return Ok(());
+            return Ok(Leave::Quit);
         }
     };
 
     loop {
         draw(pipelines, &loaded, &state, out);
-        let Some(key) = read_key(input) else {
+        // Not a bare `read_key`: inside bare `spoolway` a `ctrl-c` has to end
+        // this wait too, and a blocking read never sees one — see
+        // `crate::screen::shell::wait_key`. `spoolway eval` on its own installs
+        // no handler, so there nothing is ever caught and this only reads.
+        let Some(key) = crate::screen::shell::wait_key(input, || {}) else {
             break;
         };
+        // Browsing is the one mode with no filter panel, calendar or notice
+        // open: the only one where `←` and `→` are a hosting shell's.
+        if matches!(state.mode, Mode::Browsing)
+            && let Some(leave) = crate::screen::shell::leave_on(key)
+        {
+            return Ok(leave);
+        }
         if key == Key::Char('q') {
             break;
         }
@@ -3087,7 +3141,7 @@ fn run_screen(
             },
         }
     }
-    Ok(())
+    Ok(Leave::Quit)
 }
 
 /// The one string a calendar row's own value lives in — what the calendar
@@ -4457,6 +4511,61 @@ mod screen_tests {
         let mut out = Vec::new();
         run_screen(repo, &pipelines, &no_args(), &mut input, &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// Hosted, a ledger eval cannot read is held on the tab under the strip
+    /// — the shell still has three other tabs to reach — rather than printed
+    /// on the way out, and `←` leaves it.
+    #[test]
+    fn hosted_an_unreadable_window_is_held_on_the_tab_until_a_shell_key() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture_with_one_run("screen-hosted-load-error");
+        let _hosting = Hosting::open(Tab::Eval);
+        let args = EvalArgs {
+            since: Some("not-a-date".into()),
+            ..no_args()
+        };
+        let mut input = keys("x\x1b[D");
+        let mut out = Vec::new();
+        let leave = run_screen(&repo, &Pipelines::builtin(), &args, &mut input, &mut out).unwrap();
+        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(drawn.contains("spoolway eval: "), "{drawn}");
+        assert!(drawn.contains("dispatch"), "under the strip: {drawn}");
+    }
+
+    /// Hosted as bare `spoolway`'s eval tab, `←` and `→` while browsing hand
+    /// the screen back to the shell, and the frame is eval's own under the
+    /// strip. Inside the filter panel they keep cycling a row's value.
+    #[test]
+    fn hosted_browsing_leaves_on_the_arrows_but_the_filters_keep_them() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture_with_one_run("screen-hosted-leave");
+        let _hosting = Hosting::open(Tab::Eval);
+        let run = |input: &str| {
+            let mut input = keys(input);
+            let mut out = Vec::new();
+            let leave = run_screen(
+                &repo,
+                &Pipelines::builtin(),
+                &no_args(),
+                &mut input,
+                &mut out,
+            )
+            .unwrap();
+            (leave, String::from_utf8(out).unwrap())
+        };
+
+        let (leave, drawn) = run("\x1b[D");
+        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
+        assert!(first.contains("dispatch"), "{first}");
+        assert!(first.contains("─ eval · by pipeline"), "{first}");
+        assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
+
+        // `f` opens the filters; `→` there cycles a row, and the input then
+        // runs out inside the panel.
+        assert_eq!(run("f\x1b[C\x1b[D").0, Leave::Quit);
     }
 
     /// Every draw opens on a clear-screen, so a whole captured transcript

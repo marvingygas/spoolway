@@ -9,7 +9,11 @@
 //! second screen from re-deciding any of that for itself.
 //!
 //! Each screen still owns its own frame layout, its own modes and its own key
-//! handling — only what is generic across any of them lives here.
+//! handling — only what is generic across any of them lives here. [`shell`]
+//! is what bare `spoolway` opens: the same screens, one per tab, under one
+//! strip, one terminal guard and one quit.
+
+pub(crate) mod shell;
 
 /// One key a screen reads, decoded from however many bytes it took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,7 +420,8 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 ///
 /// Called by the queue screen's own `footer`, the jobs screen's own
 /// `jobs_footer`, the board's own key line in `src/status/mod.rs`'s
-/// `render`, and `spoolway eval`'s own `footer` in `src/eval.rs`.
+/// `render`, `spoolway eval`'s own `footer` in `src/eval.rs`, and
+/// [`shell`]'s own `message_tab`.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
     let mut line = String::new();
     for (i, (key, label)) in pairs.iter().enumerate() {

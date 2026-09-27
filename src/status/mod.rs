@@ -1,4 +1,6 @@
-//! The live board `spoolway dispatch` draws in its own terminal, between passes.
+//! The live board `spoolway dispatch` draws in its own terminal, between passes
+//! — and bare `spoolway` draws on its dispatch tab, where no pass runs behind it
+//! at all (see [`Phase::Watching`]).
 //!
 //! A renderer, not a participant. Every frame is read from the same two sources
 //! of truth a pass reconciles from — the task files and the live lane list —
@@ -37,10 +39,10 @@ pub use view::{banner, plain_table};
 // out a second time — see `screen::key_hint`.
 use view::{
     AMBER, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals, masthead, pane_height,
-    pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, strip_ansi, table, ticker,
+    pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, table, ticker,
     unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
-pub(crate) use view::{DIM, GUTTER, RESET};
+pub(crate) use view::{DIM, GUTTER, RESET, strip_ansi};
 
 /// The redraw rate every screen's own wait polls stdin at — the jobs screen,
 /// the queue screen, and the dispatcher board, whose wait slices its whole
@@ -122,10 +124,11 @@ pub enum State {
 /// What the run is doing at the moment a frame is drawn, which is the one
 /// thing on the board that no task file records.
 ///
-/// Only [`Phase::Stopping`] changes what is drawn, and it is the one state a
-/// reader cannot infer from a frame sitting in front of them: a board between
-/// passes and a board mid-pass look identical, and how long until the next
-/// pass is not something a person watching can act on. The variants stay
+/// Only [`Phase::Stopping`] and [`Phase::Watching`] change what is drawn, and
+/// `Stopping` is the one state a reader cannot infer from a frame sitting in
+/// front of them: a board between passes and a board mid-pass look identical,
+/// and how long until the next pass is not something a person watching can
+/// act on. The variants stay
 /// apart anyway — the dispatcher knows which it is in, and a board that had to
 /// guess would be the wrong shape for the next thing anyone wants to show.
 #[derive(Clone, Copy)]
@@ -136,6 +139,12 @@ pub enum Phase {
     Waiting,
     /// The last frame: the queue is empty and the run is ending.
     Stopping,
+    /// A board no dispatcher is drawing: bare `spoolway`'s dispatch tab,
+    /// which runs no pass of its own. Carries the pid holding the dispatch
+    /// lock, if anything does, so the header names the process actually
+    /// dispatching rather than the screen's own — and says `dispatcher
+    /// stopped`, with no pid at all, when nothing is.
+    Watching(Option<u32>),
 }
 
 pub struct Row {
@@ -296,7 +305,10 @@ impl Row {
 /// Held by the dispatch loop, which draws a frame before each pass and then
 /// keeps drawing through the wait until the next one is due. There is no
 /// separate process and no lock to poll — the thing rendering the run *is* the
-/// run, so a frame is up exactly as long as the dispatcher is.
+/// run, so a frame is up exactly as long as the dispatcher is. The one
+/// exception is bare `spoolway`'s dispatch tab, which holds a
+/// [`Board::hosted`] of its own and reads the lock only to name who is
+/// dispatching.
 pub struct Board {
     /// Task id → the stage it was on at the last frame.
     stages: BTreeMap<String, String>,
@@ -380,6 +392,32 @@ impl Board {
     #[cfg(test)]
     pub fn for_test() -> Board {
         Board::with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// A board drawn inside bare `spoolway`'s dispatch tab. Its guard is
+    /// inert for the same reason [`Board::for_test`]'s is, from the other
+    /// side: the screen already holds the terminal's one guard for every
+    /// tab, and a second one restoring on this board's drop would hand the
+    /// terminal back while the other tabs are still drawing on it.
+    pub(crate) fn hosted() -> Board {
+        Board::with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// Whether no confirm panel is open — the one state in which `←`, `→`
+    /// and `q` belong to the screen around the board rather than to the
+    /// panel, which reads every key until it is answered.
+    pub(crate) fn at_rest(&self) -> bool {
+        matches!(self.mode, BoardMode::Browsing)
+    }
+
+    /// One frame for the dispatch tab: [`Board::frame`] under
+    /// [`Phase::Watching`], naming whichever process holds the dispatch lock.
+    /// A lock file that cannot be read reads as nobody holding it — the same
+    /// fallback the queue screen's own `after_write` takes, since this must
+    /// never name a live pid it did not see.
+    pub(crate) fn hosted_frame(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<String> {
+        let holder = crate::lock::Lock::holder(&repo.lock_file()).unwrap_or(None);
+        self.frame(repo, pipelines, Phase::Watching(holder))
     }
 
     /// Draw one frame over whatever is on the terminal.
@@ -1684,20 +1722,40 @@ fn render(
     // the wordmark turns while a lane is running; with nothing running the
     // board holds still, and a still board over a still queue is the truth
     // rather than something to animate over.
-    let header = [
-        match phase {
-            Phase::Stopping => "dispatcher stopped".to_string(),
-            _ => "dispatcher running".to_string(),
-        },
-        format!("pid {}", std::process::id()),
-        version_label(crate::release::installed_newer().as_deref()),
-    ];
+    let version = version_label(crate::release::installed_newer().as_deref());
+    let header = match phase {
+        Phase::Stopping => vec![
+            "dispatcher stopped".to_string(),
+            format!("pid {}", std::process::id()),
+            version,
+        ],
+        Phase::Passing | Phase::Waiting => vec![
+            "dispatcher running".to_string(),
+            format!("pid {}", std::process::id()),
+            version,
+        ],
+        Phase::Watching(Some(pid)) => {
+            vec![
+                "dispatcher running".to_string(),
+                format!("pid {pid}"),
+                version,
+            ]
+        }
+        // Nothing is dispatching, so there is no pid to name — this
+        // process's own would read as a dispatcher that is not there.
+        Phase::Watching(None) => vec!["dispatcher stopped".to_string(), version],
+    };
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. `masthead`
     // stays untouched: `init` prints its banner through the same function and
-    // must not gain a line it never asked for.
-    frame.push('\n');
+    // must not gain a line it never asked for. Inside bare `spoolway`'s
+    // dispatch tab the blank row under the tab strip is that margin already,
+    // and a second one would push the board a row lower than the mockup
+    // draws it.
+    if crate::screen::shell::hosted().is_none() {
+        frame.push('\n');
+    }
     // The spool only turns while something on the board reads `Running` — a
     // lane, a command step, or a row still inside its own handoff grace
     // window — so a queue with nothing to do, and nothing about to, prints
@@ -1779,15 +1837,21 @@ fn render(
     // row on its own, without naming `↑↓`: every screen this project draws
     // leaves the arrows and `q` off its own key line, since a person reads
     // those the same way everywhere.
-    tail.push_str(&format!(
-        "\n{}\n",
-        crate::screen::key_hint(&[
+    //
+    // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
+    // it quits — see `crate::screen::shell::quit_hint`.
+    let keys = [
+        [
             ("o", "open task"),
             ("r/R", "resume / all"),
             ("p/P", "pause / all"),
             ("u/U", "unqueue / all"),
-        ])
-    ));
+        ]
+        .as_slice(),
+        crate::screen::shell::quit_hint(),
+    ]
+    .concat();
+    tail.push_str(&format!("\n{}\n", crate::screen::key_hint(&keys)));
 
     let height = pane_height();
     let rows = match height {

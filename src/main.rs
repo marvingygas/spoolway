@@ -408,6 +408,11 @@ fn run() -> Result<()> {
                         cli.json,
                     )
                 }
+                // Bare `spoolway` in a terminal: the one screen, holding the
+                // dispatch, queue, jobs and eval tabs. Off a terminal no
+                // command at all never gets this far — `cli::parse` prints
+                // the grouped help instead.
+                Command::Screen => screen::shell::run(&repo, routing(&graph)?, &cwd),
                 // Bare `spoolway queue`, with no subcommand: the screen.
                 Command::Queue { command: None } => {
                     commands::queue_screen(&repo, routing(&graph)?, &cwd)

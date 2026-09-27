@@ -159,6 +159,11 @@ The header above the task rows names the running dispatcher's version, next to i
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
 
+Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, with no pass running
+behind it. Its header names the pid of whichever process holds the dispatch lock, or reads
+`dispatcher stopped` with no pid when nothing does. See
+[`spoolway`](cli-reference.md#spoolway).
+
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
 The total is the group's banked spend: every step that has settled, across every task in the
 group, added up as soon as each one banks. It does not include a running step's unbanked

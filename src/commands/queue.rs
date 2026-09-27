@@ -2456,6 +2456,10 @@ enum Mode {
 enum ScreenExit {
     Quit,
     StartDispatcher,
+    /// `←`, `→` or `q` while browsing, inside bare `spoolway`'s queue tab —
+    /// see [`crate::screen::shell::leave_on`]. Never reached from
+    /// `spoolway queue` on its own, where no shell is hosting the screen.
+    Leave(crate::screen::shell::Leave),
 }
 
 /// A task, addressed by the path of the document it is written in — exactly
@@ -2852,7 +2856,9 @@ pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -
     };
 
     match exit {
-        ScreenExit::Quit => Ok(()),
+        // `Leave` only ever comes back from a hosted screen, and this one is
+        // not — see `ScreenExit::Leave`.
+        ScreenExit::Quit | ScreenExit::Leave(_) => Ok(()),
         // The exit code `dispatch` returns is for a process about to end —
         // this screen's own caller keeps running afterwards, so there is no
         // process exit to carry it into.
@@ -2873,16 +2879,74 @@ pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -
     }
 }
 
+/// Bare `spoolway`'s queue tab: the same screen [`queue_screen`] opens, over
+/// the terminal the shell around it already holds — so no guard and no
+/// `ctrl-c` handler of its own. `None` once a person has confirmed a start
+/// from the tab's own `enter`, for the shell to hand the terminal to a
+/// dispatcher; the tab's own [`Leave`] otherwise.
+///
+/// Where `spoolway queue` prints its opening message and ends, the tab has a
+/// strip and three other tabs to keep drawing, so the message is held on the
+/// tab as its [`Mode::Outcome`] instead, dismissed like any other.
+///
+/// [`Leave`]: crate::screen::shell::Leave
+pub(crate) fn queue_tab(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &std::path::Path,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<Option<crate::screen::shell::Leave>> {
+    use crate::screen::shell::Leave;
+
+    let groups = super::pending::list_groups(repo)?;
+    let routines = super::routines::list_routines(repo)?;
+    let mut state = ScreenState::new();
+    if let Some(msg) = opening_message(repo, &groups) {
+        state.mode = Mode::Outcome(msg);
+    }
+    let exit = run_screen_from(repo, pipelines, cwd, (groups, routines), state, input, out)?;
+    Ok(match exit {
+        ScreenExit::StartDispatcher => None,
+        ScreenExit::Quit => Some(Leave::Quit),
+        ScreenExit::Leave(leave) => Some(leave),
+    })
+}
+
 fn run_screen(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &std::path::Path,
-    mut groups: Vec<Group>,
-    mut routines: Vec<RoutineFolder>,
+    groups: Vec<Group>,
+    routines: Vec<RoutineFolder>,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<ScreenExit> {
-    let mut state = ScreenState::new();
+    run_screen_from(
+        repo,
+        pipelines,
+        cwd,
+        (groups, routines),
+        ScreenState::new(),
+        input,
+        out,
+    )
+}
+
+/// [`run_screen`], opening on `state` rather than a fresh one — the queue
+/// tab's opening message is the one caller that needs another. `lists` is the
+/// pending groups and the routine folders, paired so this stays inside the
+/// argument count the rest of this module keeps to.
+fn run_screen_from(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &std::path::Path,
+    lists: (Vec<Group>, Vec<RoutineFolder>),
+    mut state: ScreenState,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<ScreenExit> {
+    let (mut groups, mut routines) = lists;
     let mut last = None;
     let routines_dir = repo.routines_dir();
 
@@ -2904,13 +2968,23 @@ fn run_screen(
             break;
         };
 
+        // Inside bare `spoolway`'s queue tab, `←`, `→` and `q` belong to the
+        // shell while browsing — the one mode with no popup or sub-mode
+        // open. Every other mode keeps them: the routines pane's own arrows,
+        // the trial picker's, the filter's `q` typed into its query.
+        if matches!(state.mode, Mode::Browsing)
+            && let Some(leave) = crate::screen::shell::leave_on(key)
+        {
+            return Ok(ScreenExit::Leave(leave));
+        }
+
         // No mode reads a quit key of its own any more — `ctrl-c` is the one
-        // way out, caught above `run_screen` and noticed by `wait_for_key`
-        // — so every mode's match is just its own keys, with `q` falling to
-        // whatever an unrecognised character already does there. Only
-        // `Mode::Filter` gives that character any meaning of its own,
-        // appending it to the query the same as any other letter — see
-        // `handle_filter_key`'s own doc comment.
+        // way out of `spoolway queue`, caught above `run_screen` and noticed
+        // by `wait_for_key` — so every mode's match is just its own keys,
+        // with `q` falling to whatever an unrecognised character already
+        // does there. Only `Mode::Filter` gives that character any meaning of
+        // its own, appending it to the query the same as any other letter —
+        // see `handle_filter_key`'s own doc comment.
         match &state.mode {
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
             Mode::Gate(cursor) => {
@@ -3201,6 +3275,11 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 /// and `t` needs the pipelines to seed the trial picker's first screen — so
 /// nothing this reads can leave the screen or reach outside it. `q` reaches
 /// this function like any other unrecognised character and does nothing.
+///
+/// `tab` is the one key that moves focus between the two panes. `←` and `→`
+/// used to as well, but inside bare `spoolway` they move between tabs, and
+/// one screen reading them two ways depending on where it was opened would
+/// be one more thing to remember — so they do nothing here.
 fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     match key {
         Key::Char('h') => {
@@ -3208,7 +3287,7 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
             clamp_cursors(groups, state);
         }
         Key::Char('f') => state.mode = Mode::Filter,
-        Key::Tab | Key::Left | Key::Right => {
+        Key::Tab => {
             state.focus = match state.focus {
                 Focus::Groups => Focus::Tasks,
                 Focus::Tasks => Focus::Groups,
@@ -3754,16 +3833,36 @@ const PANE_CHROME_ROWS: usize = 4;
 const SPARE_COLUMN: usize = 1;
 
 /// The layout for this frame, measured fresh every draw so a resized
-/// terminal reflows on the next one.
-pub(super) fn layout() -> Layout {
+/// terminal reflows on the next one — less the rows bare `spoolway`'s tab
+/// strip takes off the top when it hosts this screen or the jobs screen,
+/// which lays itself out through this too (zero everywhere else; see
+/// `crate::screen::shell::strip_rows`), and less every row past the first
+/// that `footer` wraps onto. The queue's own key line is wider than a
+/// 100-column terminal, and each row it wraps onto pushes the frame's top
+/// row — the strip, or the box's own border — off the top of the screen.
+pub(super) fn layout(footer: &str) -> Layout {
     match terminal_size::terminal_size() {
-        Some((width, height)) => layout_for(width.0 as usize, height.0 as usize),
+        Some((width, height)) => layout_for(
+            width.0 as usize,
+            (height.0 as usize)
+                .saturating_sub(crate::screen::shell::strip_rows())
+                .saturating_sub(wrapped_rows(footer, width.0 as usize) - 1),
+        ),
         None => Layout {
             left: LEFT_PANE_WIDTH,
             right: RIGHT_PANE_WIDTH,
             rows: None,
         },
     }
+}
+
+/// How many terminal rows `line` takes at `width` columns: one, plus one for
+/// every time its visible text runs past the right edge. A line exactly as
+/// wide as the terminal still takes one — its newline lands on the wrap the
+/// terminal was already holding back.
+fn wrapped_rows(line: &str, width: usize) -> usize {
+    let columns = crate::status::strip_ansi(line).chars().count();
+    columns.div_ceil(width.max(1)).max(1)
 }
 
 /// How a terminal that size is split between the two panes. The left pane
@@ -4224,8 +4323,9 @@ pub(super) fn render_routines(
     routines_dir: &std::path::Path,
     pipelines: &Pipelines,
     nav: &RoutineNav,
+    footer: &str,
 ) -> Vec<String> {
-    let layout = layout();
+    let layout = layout(footer);
     let level = routine_level(routines, &nav.path);
     let left = routine_folder_lines(routines_dir, level, nav, layout.left);
     let highlighted = level.get(nav.folder_cursor);
@@ -4336,7 +4436,8 @@ pub(super) fn two_pane_frame(
 /// regardless. `q` is not named for the opposite reason — no mode reads it
 /// as anything special any more, so there is nothing about it to say;
 /// `ctrl-c` is the way out, and a footer line has no key of its own to name
-/// for that either.
+/// for that either. Inside bare `spoolway`'s queue tab it does quit, while
+/// browsing, and the browsing line names it there.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of `space select` through `enter queue` reads a key while the filter
@@ -4368,17 +4469,25 @@ fn footer(state: &ScreenState) -> String {
                 HideScope::PlusQueued => "show done",
                 HideScope::PlusDone => "hide all",
             };
-            key_hint(&[
-                ("space", "select"),
-                ("f", "find"),
-                ("g", "gate"),
-                ("o", "open task"),
-                ("t", "trial"),
-                ("r", "routines"),
-                ("s", "save routine"),
-                ("enter", "queue"),
-                ("h", hide),
-            ])
+            // `q` only inside bare `spoolway`'s queue tab, the one place it
+            // quits — see `crate::screen::shell::quit_hint`.
+            let keys = [
+                [
+                    ("space", "select"),
+                    ("f", "find"),
+                    ("g", "gate"),
+                    ("o", "open task"),
+                    ("t", "trial"),
+                    ("r", "routines"),
+                    ("s", "save routine"),
+                    ("enter", "queue"),
+                    ("h", hide),
+                ]
+                .as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat();
+            key_hint(&keys)
         }
     }
 }
@@ -4408,9 +4517,15 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
             ];
         }
         Mode::Routines(nav) => {
-            let mut frame =
-                render_routines(panes.routines, panes.routines_dir, panes.pipelines, nav);
-            frame.push(footer(state));
+            let footer = footer(state);
+            let mut frame = render_routines(
+                panes.routines,
+                panes.routines_dir,
+                panes.pipelines,
+                nav,
+                &footer,
+            );
+            frame.push(footer);
             return frame;
         }
         Mode::Browsing
@@ -4421,7 +4536,8 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
     }
 
     let pipelines = panes.pipelines;
-    let layout = layout();
+    let footer = footer(state);
+    let layout = layout(&footer);
     let shown = shown(groups, state);
     let left = groups_pane_lines(groups, &shown, state, layout.left);
     let (right, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
@@ -4466,7 +4582,7 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
         Mode::Browsing | Mode::Outcome(_) | Mode::Filter | Mode::Routines(_) => {}
     }
 
-    frame.push(footer(state));
+    frame.push(footer);
     frame
 }
 
@@ -4485,7 +4601,10 @@ fn draw(
     last: &mut Option<Vec<String>>,
     out: &mut impl std::io::Write,
 ) {
-    let frame = render(groups, panes, state);
+    // Under the strip when bare `spoolway` hosts this screen as its queue
+    // tab, and exactly as before everywhere else — see
+    // `crate::screen::shell::under_strip`.
+    let frame = crate::screen::shell::under_strip(render(groups, panes, state));
     if last.as_ref() == Some(&frame) {
         return;
     }
@@ -7295,6 +7414,113 @@ mod tests {
         drawn.rsplit("\x1b[2J\x1b[H").next().unwrap_or(drawn)
     }
 
+    /// `←` and `→` no longer move focus between the two panes — `tab` is the
+    /// one key for that now, so the same arrows can move between tabs inside
+    /// bare `spoolway` without meaning two things on one screen.
+    #[test]
+    fn only_tab_moves_focus_between_the_two_panes() {
+        let repo = fixture("screen-focus-tab-only");
+        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        let groups = listed(&repo);
+        let mut state = ScreenState::new();
+
+        handle_browse_key(&groups, &mut state, Key::Right);
+        assert_eq!(state.focus, Focus::Groups);
+        handle_browse_key(&groups, &mut state, Key::Tab);
+        assert_eq!(state.focus, Focus::Tasks);
+        handle_browse_key(&groups, &mut state, Key::Left);
+        assert_eq!(state.focus, Focus::Tasks);
+    }
+
+    /// Hosted as bare `spoolway`'s queue tab, `←`, `→` and `q` while
+    /// browsing hand the screen back to the shell, and the frame opens under
+    /// the strip.
+    #[test]
+    fn hosted_the_arrows_and_q_leave_the_tab_while_browsing() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("screen-hosted-leave");
+        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[D");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
+        assert!(last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(last_frame(&drawn).contains("[q] quit"), "{drawn}");
+
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[C");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "q");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
+    }
+
+    /// Inside a sub-mode the arrows keep their own meaning even when hosted:
+    /// the routines view reads `→` itself, and the filter reads `q` into its
+    /// query — neither leaves the tab.
+    #[test]
+    fn hosted_a_sub_mode_keeps_the_arrows_and_q_for_itself() {
+        use crate::screen::shell::{Hosting, Tab};
+        let repo = fixture("screen-hosted-sub-mode");
+        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, _) = screen_exit(&repo, listed(&repo), "r\x1b[C\x1b[D");
+        assert_eq!(
+            exit,
+            ScreenExit::Quit,
+            "the input ran out inside the routines view"
+        );
+        let (exit, _) = screen_exit(&repo, listed(&repo), "fq\x1b[D");
+        assert_eq!(
+            exit,
+            ScreenExit::Quit,
+            "the input ran out inside the filter"
+        );
+    }
+
+    /// Where `spoolway queue` prints its opening message and ends, the queue
+    /// tab holds it on screen under the strip, as its `Mode::Outcome` — any
+    /// key dismisses it onto the ordinary screen, where `←` then leaves.
+    #[test]
+    fn the_queue_tab_holds_its_opening_message_instead_of_ending() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("queue-tab-opening-message");
+        std::fs::write(
+            repo.pending_dir().join("no-group.md"),
+            "---\nid: stray\ntitle: stray\n---\n## Goal\n\nx\n",
+        )
+        .unwrap();
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let mut input = keys("x\x1b[D");
+        let mut out = Vec::new();
+        let leave = queue_tab(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(leave, Some(Leave::Switch(Toward::Left)));
+        let drawn = String::from_utf8(out).unwrap();
+        let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
+        assert!(first.contains("no-group.md"), "{first}");
+        assert!(first.contains("dispatch"), "under the strip: {first}");
+    }
+
+    /// Drawn by `spoolway queue` itself, nothing hosts the screen: no strip,
+    /// no `q` on the key line, and `←` leaves nothing.
+    #[test]
+    fn unhosted_the_screen_draws_no_strip_and_the_arrows_do_not_leave() {
+        let repo = fixture("screen-unhosted");
+        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[Dq");
+        assert_eq!(exit, ScreenExit::Quit);
+        assert!(!last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(!last_frame(&drawn).contains("[q] quit"), "{drawn}");
+    }
+
     /// `with_gate` is the one place a gate chosen on the screen reaches a
     /// task's document — in memory only, since the file in the pending
     /// directory is never rewritten to record one.
@@ -7518,6 +7744,24 @@ mod tests {
             }
         }
         assert_eq!(layout_for(100, 1).rows, Some(1), "one row is still a row");
+    }
+
+    /// The queue's key line is wider than a 100-column terminal, and every
+    /// row it wraps onto has to come off the panes, or the frame's top row —
+    /// bare `spoolway`'s tab strip — is scrolled off the screen.
+    #[test]
+    fn wrapped_rows_counts_the_rows_a_key_line_wraps_onto() {
+        let line = footer(&ScreenState::new());
+        let columns = crate::status::strip_ansi(&line).chars().count();
+        assert!(columns > 100, "the key line fits in 100 columns now");
+        assert_eq!(wrapped_rows(&line, 100), 2);
+        assert_eq!(
+            wrapped_rows(&line, columns),
+            1,
+            "exactly as wide is one row"
+        );
+        assert_eq!(wrapped_rows(&line, columns - 1), 2);
+        assert_eq!(wrapped_rows("", 100), 1, "an empty line is still a row");
     }
 
     /// A pane taller than the terminal scrolls to the highlighted block and

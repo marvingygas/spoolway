@@ -364,6 +364,7 @@ pub fn jobs_screen(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()>
     crate::platform::stop::catch_interrupt();
     // Scoped so raw mode is restored before anything else wants the terminal.
     let _term = crate::platform::TermGuard::new();
+    // Nothing hosts this screen, so how it ended has nowhere to go.
     run_jobs_screen(
         repo,
         pipelines,
@@ -373,6 +374,22 @@ pub fn jobs_screen(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()>
         &mut stdin,
         &mut stdout,
     )
+    .map(|_| ())
+}
+
+/// Bare `spoolway`'s jobs tab: the same screen [`jobs_screen`] opens, over
+/// the terminal the shell around it already holds — so no guard and no
+/// `ctrl-c` handler of its own.
+pub(crate) fn jobs_tab(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &Path,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<crate::screen::shell::Leave> {
+    let jobs = jobs::load(repo)?;
+    let routines = super::routines::list_routines(repo)?;
+    run_jobs_screen(repo, pipelines, cwd, jobs, routines, input, out)
 }
 
 /// Everything a frame needs beside the job list and the screen state —
@@ -385,6 +402,12 @@ struct Ctx<'a> {
     routines_dir: &'a Path,
 }
 
+/// The screen's own loop. Ends in [`Leave::Quit`] when the input runs out or
+/// `ctrl-c` is caught, and in whatever [`crate::screen::shell::leave_on`]
+/// reads off `←`, `→` or `q` over the resting list when bare `spoolway` hosts
+/// this as its jobs tab.
+///
+/// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
 fn run_jobs_screen(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -393,7 +416,7 @@ fn run_jobs_screen(
     routines: Vec<RoutineFolder>,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
-) -> Result<()> {
+) -> Result<crate::screen::shell::Leave> {
     let routines_dir = repo.routines_dir();
     let ctx = Ctx {
         repo,
@@ -416,6 +439,14 @@ fn run_jobs_screen(
             // the same way.
             break;
         };
+
+        // The resting list is the one mode with no popup or walk open, so
+        // it is the one where a hosting shell's keys are the shell's.
+        if matches!(state.mode, JobMode::List)
+            && let Some(leave) = crate::screen::shell::leave_on(key)
+        {
+            return Ok(leave);
+        }
 
         match &state.mode {
             JobMode::Outcome(_) => state.mode = JobMode::List,
@@ -568,7 +599,7 @@ fn run_jobs_screen(
             }
         }
     }
-    Ok(())
+    Ok(crate::screen::shell::Leave::Quit)
 }
 
 /// Re-read both stores into `jobs`, keeping the old list if the read fails —
@@ -589,8 +620,10 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
 /// The cursor only ever addresses a real job — the `(new)` row belongs to the
 /// walk, not this state — so `e`, `space`, `x` and `r` are gated on the list
 /// not being empty and always act on `jobs[cursor]`. `n` starts the walk.
-/// Quitting is not among these keys any more — `ctrl-c` is the only way out,
-/// caught above `run_jobs_screen` rather than read as a key at all.
+/// Quitting is not among these keys any more — `ctrl-c` is the only way out
+/// of `spoolway jobs`, caught above `run_jobs_screen` rather than read as a
+/// key at all. Inside bare `spoolway`'s jobs tab, `run_jobs_screen` reads `q`
+/// before this is reached.
 fn handle_list_key(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -841,7 +874,9 @@ fn draw_jobs(
     last: &mut Option<Vec<String>>,
     out: &mut impl std::io::Write,
 ) {
-    let frame = render_jobs(ctx, jobs, state);
+    // Under the strip when bare `spoolway` hosts this as its jobs tab — see
+    // `crate::screen::shell::under_strip`.
+    let frame = crate::screen::shell::under_strip(render_jobs(ctx, jobs, state));
     if last.as_ref() == Some(&frame) {
         return;
     }
@@ -897,14 +932,17 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
             return lines;
         }
         JobMode::PickRoutine { nav, .. } => {
-            let mut frame = render_routines(ctx.routines, ctx.routines_dir, ctx.pipelines, nav);
-            frame.push(jobs_footer(&state.mode));
+            let footer = jobs_footer(&state.mode);
+            let mut frame =
+                render_routines(ctx.routines, ctx.routines_dir, ctx.pipelines, nav, &footer);
+            frame.push(footer);
             return frame;
         }
         _ => {}
     }
 
-    let lay = layout();
+    let footer = jobs_footer(&state.mode);
+    let lay = layout(&footer);
     let in_walk = matches!(
         state.mode,
         JobMode::Schedule { .. } | JobMode::PickPipeline { .. }
@@ -966,7 +1004,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
         overlay(&mut frame, panel);
     }
 
-    frame.push(jobs_footer(&state.mode));
+    frame.push(footer);
     frame
 }
 
@@ -978,13 +1016,21 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
 /// `queue`'s own `footer` for why.
 fn jobs_footer(mode: &JobMode) -> String {
     match mode {
-        JobMode::List => key_hint(&[
-            ("n", "new"),
-            ("e", "edit"),
-            ("space", "pause"),
-            ("x", "delete"),
-            ("r", "run now"),
-        ]),
+        // `q` only inside bare `spoolway`'s jobs tab, the one place it quits.
+        JobMode::List => key_hint(
+            &[
+                [
+                    ("n", "new"),
+                    ("e", "edit"),
+                    ("space", "pause"),
+                    ("x", "delete"),
+                    ("r", "run now"),
+                ]
+                .as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
+        ),
         // Names exactly the keys `run_jobs_screen`'s own `PickRoutine` arm
         // and `handle_routine_key` read, the same set the queue screen's own
         // routines pane names — `o` included, gated the same way there.
@@ -1403,6 +1449,50 @@ mod tests {
 
     fn last_frame(drawn: &str) -> &str {
         drawn.rsplit("\x1b[2J\x1b[H").next().unwrap_or(drawn)
+    }
+
+    /// Hosted as bare `spoolway`'s jobs tab, the resting list hands `←`, `→`
+    /// and `q` to the shell and draws under the strip; a walk in progress
+    /// keeps them — `q` is a character of the cron expression there.
+    #[test]
+    fn hosted_the_resting_list_leaves_on_the_arrows_and_q_but_a_walk_does_not() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("jobs-hosted-leave");
+        seed_routines(&repo);
+        let _hosting = Hosting::open(Tab::Jobs);
+
+        let run = |input: &str| {
+            let routines = super::super::routines::list_routines(&repo).unwrap();
+            let mut keys = std::io::Cursor::new(input.as_bytes().to_vec());
+            let mut out = Vec::new();
+            let leave = run_jobs_screen(
+                &repo,
+                &Pipelines::builtin(),
+                &repo.root,
+                Vec::new(),
+                routines,
+                &mut keys,
+                &mut out,
+            )
+            .unwrap();
+            (leave, String::from_utf8(out).unwrap())
+        };
+
+        let (leave, drawn) = run("\x1b[D");
+        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert!(last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(last_frame(&drawn).contains("[q] quit"), "{drawn}");
+        assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
+        assert_eq!(run("q").0, Leave::Quit);
+
+        // `n`, a folder ticked, `enter` into the cron field, then `q` typed
+        // into it: the input runs out inside the walk, never leaving.
+        let (leave, drawn) = run("n \rq");
+        assert_eq!(leave, Leave::Quit);
+        assert!(
+            last_frame(&drawn).contains("[enter] accept"),
+            "still in the cron field: {drawn}"
+        );
     }
 
     #[test]
