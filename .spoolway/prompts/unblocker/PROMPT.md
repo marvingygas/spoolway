@@ -8,10 +8,9 @@ about to act on, do them.
 
 Three things are normally never yours:
 
-- Merging or landing anything. The only exception is a task blocked at an explicit
-  `merge-*` step whose own prompt authorizes the release pipeline to merge. In that
-  case, re-check the diff and required checks under that prompt's rules and finish
-  the merge; do not turn an authorized unattended release back into a human gate.
+- Merging or landing anything. Every pull request the release pipeline opens is merged by a
+  person on GitHub; a command step right after the review waits for that merge, so clearing a
+  block never means merging on somebody's behalf.
 - Stopping the dispatcher. It is the process running you.
 - Destroying work you cannot restore — no force-push over somebody else's commits,
   no deleting the only copy of anything.

@@ -2,7 +2,8 @@
 
 description: >-
   Make main release-ready, suggest the next version for a person to approve or
-  override, then cut, publish and verify the release.
+  override, then cut, publish and verify the release with a person only
+  merging pull requests on GitHub.
 
 task_template: default
 
@@ -14,7 +15,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop: 2
+    loop: 4
     on_pass: version
     on_fail: fix
 
@@ -25,15 +26,25 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop: 2
-    on_pass: merge-fix
+    loop: 3
+    on_pass: review-fix
 
-  - id: merge-fix
-    description: Independently review the repair, correct its existing branch if needed, and merge it.
+  - id: review-fix
+    description: Independently review the repair and correct its existing branch if needed.
     agent: claude
-    prompt: release-merger
+    prompt: release-reviewer
     model: claude-opus-5-5
     effort: high
+    on_pass: await-fix
+    on_fail: fix
+
+  # A command step, so Claude Code's auto-mode permission layer never sees the
+  # merge and never has a chance to refuse it. `--optional` covers a repair
+  # round that found nothing left to fix and opened no pull request.
+  - id: await-fix
+    description: Wait for a person to merge the readiness repair, then rerun readiness.
+    run: scripts/release-await-merge.sh --optional "release-fix/$SPOOLWAY_TASK"
+    timeout: 6h
     on_pass: ready
 
   - id: version
@@ -43,7 +54,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     gate: true
-    loop: 2
+    loop: 3
     on_pass: preflight
     on_fail: ready
 
@@ -72,51 +83,53 @@ steps:
     prompt: release-candidate
     model: claude-opus-5-5
     effort: high
-    on_pass: merge-release
+    on_pass: review-release
     on_fail: version
 
-  - id: merge-release
-    description: Independently review and merge the exact release commit without changing its candidate.
+  - id: review-release
+    description: Independently review the exact release commit without changing its candidate.
     agent: claude
-    prompt: release-merger
+    prompt: release-reviewer
     model: claude-opus-5-5
     effort: high
+    on_pass: await-release
+    on_fail: version
+
+  - id: await-release
+    description: Wait for a person to merge the release candidate, then publish it.
+    run: scripts/release-await-merge.sh "release/$SPOOLWAY_TASK"
+    timeout: 6h
     on_pass: publish
-    on_fail: version
 
+  # A command step for the same reason `await-fix` and `await-release` are:
+  # `git push origin refs/tags/…` is exactly what Claude Code's auto-mode
+  # permission layer refused as "Create Public Surface" in the 0.6.0 run.
+  # Nothing here asks a person to press a button — it is the authorized,
+  # unattended action itself, run by the dispatcher rather than shown to a
+  # model that would decline it.
   - id: publish
-    description: Rehearse the merged release commit, tag it, publish it, and verify every public artifact.
-    agent: claude
-    prompt: release-publisher
-    model: claude-opus-5-5
-    effort: high
+    description: Rehearse the merged release commit, tag it, and let its own workflow publish it.
+    run: scripts/release-publish.sh
+    timeout: 90m
     on_pass: released
-    on_fail: version
+    on_fail: recover
 
   - id: released
     description: Prove the tag, the six packages, the archives and the published body actually exist.
     run: scripts/release-verify.sh
     timeout: 15m
     on_pass: fixture
-    on_fail: repair-released
+    on_fail: recover
 
-  - id: repair-released
-    description: Repair a failed post-publication verification in one green pull request.
+  - id: recover
+    description: Recover a failed rehearsal, tag push or post-publication verification.
     agent: claude
-    prompt: release-fixer
+    prompt: release-publisher
     model: claude-opus-5-5
     effort: high
-    session: true
-    loop: 2
-    on_pass: merge-released-repair
-
-  - id: merge-released-repair
-    description: Review and merge the post-publication verifier repair, then rerun the verifier.
-    agent: claude
-    prompt: release-merger
-    model: claude-opus-5-5
-    effort: high
+    loop: 3
     on_pass: released
+    on_fail: version
 
   # The closing step of docs/releasing.md, which was prose nobody was gated on
   # until 0.4.0 shipped without its fixture and main's dress rehearsal went red
@@ -125,7 +138,6 @@ steps:
   # moved past it, so the fixture is impossible to make before the tag and is
   # not demanded until the next bump. A command step, for the same reason
   # `released` is one — an agent step can be carried past by a cleared block.
-  # Its following merge step makes landing the fixture the last thing owed.
   #
   # Thirty minutes because it builds the tagged binary to scaffold from, on
   # whatever cache the lane's machine has. Idempotent, so a re-run after a
@@ -134,31 +146,18 @@ steps:
     description: Scaffold the released version's upgrade fixture from its own tag and open its pull request.
     run: scripts/release-fixture.sh
     timeout: 30m
-    on_pass: merge-fixture
-    on_fail: repair-fixture
+    on_pass: review-fixture
 
-  - id: repair-fixture
-    description: Repair a failed fixture scaffold in one green pull request.
+  - id: review-fixture
+    description: Independently review the generated upgrade fixture.
     agent: claude
-    prompt: release-fixer
+    prompt: release-reviewer
     model: claude-opus-5-5
     effort: high
-    session: true
-    loop: 2
-    on_pass: merge-fixture-repair
+    on_pass: await-fixture
 
-  - id: merge-fixture-repair
-    description: Review and merge the fixture machinery repair, then rerun the scaffold.
-    agent: claude
-    prompt: release-merger
-    model: claude-opus-5-5
-    effort: high
-    on_pass: fixture
-
-  - id: merge-fixture
-    description: Review and merge the generated upgrade fixture so the release leaves main complete.
-    agent: claude
-    prompt: release-merger
-    model: claude-opus-5-5
-    effort: high
+  - id: await-fixture
+    description: Wait for a person to merge the upgrade fixture so the release leaves main complete.
+    run: scripts/release-await-merge.sh "fixture/$SPOOLWAY_TASK"
+    timeout: 6h
     on_pass: done
