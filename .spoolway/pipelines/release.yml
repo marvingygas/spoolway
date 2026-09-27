@@ -16,9 +16,30 @@ steps:
     effort: high
     session: true
     loop: 4
+    on_pass: upgrade
+    on_fail: fix
+
+  # Readiness proves main works on a fresh checkout; this proves it works on a
+  # project the last release set up. 0.5.0 -> main left both shipped pipelines
+  # refusing to load after a `sync` that reported success, and nothing in the
+  # suite or the gate asked. `preflight`'s upgrade suite asks a narrower
+  # question — whether one scripted fixture's values survive `sync` — and reads
+  # no message a person would meet. A defect goes to the same fixer as a red
+  # gate, and its merge returns through `ready`, since the repair moved main.
+  # Migration items pass forward to `notes`, which writes them into the
+  # changelog and `docs/migrations.md`.
+  - id: upgrade
+    description: Upgrade a project the last release set up to this main, and record every edit its owner has to make.
+    agent: claude
+    prompt: release-upgrade
+    model: claude-opus-5-5
+    effort: high
+    session: true
     on_pass: version
     on_fail: fix
 
+  # Four, not three: `ready`, `upgrade` and `preflight` all send defects here,
+  # and `review-fix` sends its findings back.
   - id: fix
     description: Repair every release blocker in one pull request and drive its checks green.
     agent: claude
@@ -26,7 +47,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop: 3
+    loop: 4
     on_pass: review-fix
 
   - id: review-fix
@@ -69,7 +90,7 @@ steps:
     on_fail: fix
 
   - id: notes
-    description: Write and validate the changelog section that ships everywhere.
+    description: Write and validate the changelog section that ships everywhere, and the migration guide's section for this upgrade.
     agent: claude
     prompt: release-notes
     model: claude-sonnet-5
@@ -78,7 +99,7 @@ steps:
     on_pass: candidate
 
   - id: candidate
-    description: Build the exact four-file release commit and open one green pull request for it.
+    description: Build the exact release commit, with the migration guide when notes wrote one, and open one green pull request for it.
     agent: claude
     prompt: release-candidate
     model: claude-opus-5-5

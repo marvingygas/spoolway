@@ -9,7 +9,12 @@ copy anywhere, so this is the public explanation of why someone should upgrade �
 and not internal project minutes. What this lane records is what the pipeline ships byte-for-byte,
 so hand the candidate lane a section that is ready to publish.
 
-Read `docs/releasing.md` and every preflight's findings. Read the contract at the top of
+You also write this release's section of the migration guide, `docs/migrations.md`. It is the page
+a person opens when moving a project between releases, so it carries the same migration work as the
+changelog, as steps rather than as news.
+
+Read `docs/releasing.md`, every preflight's findings, and the upgrade walk's migration items — the
+edits a project the last release set up really needed. Read the contract at the top of
 `CHANGELOG.md` in full before drafting; the binary parses that structure and a section that breaks
 it fails the repository's own tests. Verify important claims against the diff from the previous tag
 to the recorded main commit. This lane is the editorial decision: validate the section yourself
@@ -36,27 +41,37 @@ and do not wait for a person to approve it.
    - an upgrade section whose bullets carry copyable npm installation or update commands and name the
      supported artifacts; and
    - `Release: https://github.com/marvingygas/spoolway/releases/tag/vX.Y.Z` as the final line.
-3. Every line of the section is either a `### ` heading, a `- ` bullet under one, or the final
+3. Every migration item the upgrade walk recorded appears as a bullet under
+   `### Breaking changes and migration`. An item the walk did not record, but the diff shows, is
+   added too.
+4. When the section carries migration work, write `migrations.md` in the same scratch directory:
+   the whole of `docs/migrations.md` as it should read once this release lands. Add one
+   `## <previous minor>.x to <this minor>.x` section above the newest existing one, in the guide's
+   own voice, with one `- ` bullet per migration item giving the exact edit or command that settles
+   it. Add its row to the top of the version overview table, and move the install example to this
+   version. Change nothing else in the file. When there is no migration work, write no
+   `migrations.md`.
+5. Every line of the section is either a `### ` heading, a `- ` bullet under one, or the final
    `Release: ` line. The parser accepts nothing else — no prose between the heading and the first
    section, no sub-headings, no fenced code blocks, no loose paragraphs, no blank bullets — so put
    commands in backticks inside a bullet and split a long thought into two bullets rather than a
    paragraph. Read your draft against the contract line by line before handing off; a structural
    mistake here is caught by the publisher's focused parser checks before the release commit.
-4. Match the house style of the previous section preflight reported. This file is read as a history,
+6. Match the house style of the previous section preflight reported. This file is read as a history,
    so a reader moving from one version to the next should not feel the voice change.
-5. Make every claim falsifiable. Preserve exact CLI, config, pipeline, model, file-format, and platform
+7. Make every claim falsifiable. Preserve exact CLI, config, pipeline, model, file-format, and platform
    names from the released tree. Quantify improvements only when the repository contains evidence.
-6. Write for three readers at once: a new user scanning the highlights, an existing user checking
+8. Write for three readers at once: a new user scanning the highlights, an existing user checking
    for migration work, and a maintainer looking for traceability. Put the critical upgrade risk
    before the long detail.
-7. Re-read the notes against the complete diff. Remove hype, repeated points, implementation trivia,
+9. Re-read the notes against the complete diff. Remove hype, repeated points, implementation trivia,
    empty sections, and claims that cannot be linked to code, docs, an issue, or a pull request.
-8. Give the selected version, candidate commit, scratch-file path, and every migration item the
-   publisher must preserve. State plainly whether a
-   `### Breaking changes and migration` section is present, and when it is absent name the evidence
-   that proves no user-facing break exists in this candidate. This exact text becomes the committed
-   changelog entry and the published release body, so say so and quote the section in full for the
-   publisher to verify.
+10. Give the selected version, candidate commit, both scratch-file paths or the fact that no
+   `migrations.md` was written, and every migration item the publisher must preserve. State plainly
+   whether a `### Breaking changes and migration` section is present, and when it is absent name
+   the evidence that proves no user-facing break exists in this candidate. This exact text becomes
+   the committed changelog entry and the published release body, so say so and quote the section in
+   full for the publisher to verify.
 
 ## Never
 
@@ -70,5 +85,5 @@ and do not wait for a person to approve it.
 - Never treat missing archived task files as a gap in the changes; the diff and the merged pull
   requests are the coverage proof, and a task title is never publishable prose on its own.
 - Never write anything into `release-notes.md` outside the single section, and never carry a section
-  drafted for an earlier candidate forward when preflight has run again on a moved main.
+  or a `migrations.md` drafted for an earlier candidate forward when preflight has run again on a moved main.
 - Never approve without a complete, non-empty `release-notes.md` grounded in the recorded candidate.
