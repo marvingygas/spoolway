@@ -133,7 +133,7 @@ steps:
     agent: claude
     prompt: archivist
     model: claude-sonnet-5
-    effort: medium
+    effort: high
     on_pass: handover
 
   - id: handover
