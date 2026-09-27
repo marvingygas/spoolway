@@ -335,6 +335,13 @@ has no file of its own, such as a `queue add --from -` stream entry.
 The submission is refused, naming the group, when no document in a group sets
 `group_description:`.
 
+On the queue screen, `enter` asks before any of this runs. The question names the tracker,
+the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
+every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with no
+hook call, and `esc` goes back with nothing queued. Queueing a routine asks the same question.
+A trial never asks and opens no ticket. See [`spoolway
+queue`](cli-reference.md#spoolway-queue).
+
 A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
 holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
 empty. A line with no placeholder, or one where at least one placeholder resolves to

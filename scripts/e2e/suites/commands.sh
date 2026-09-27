@@ -796,8 +796,9 @@ pending_doc screen-one "$BODY" "group: screen-batch" "touches: [notes/screen-one
 pending_doc screen-two "$BODY" "group: screen-batch" \
   "depends_on: [screen-one]" "touches: [notes/screen-two.md]"
 
-# space selects the highlighted group, enter submits it and goes back to
-# browsing, `esc` leaves. The screen ends on its own the moment the
+# space selects the highlighted group, enter submits it and draws the
+# `queued` popup over the tab, which only `enter` closes — so the `esc` after
+# it is taken by the popup. The screen ends on its own the moment the
 # pipe runs dry — see `queue_screen`'s own doc comment on why a pipe is read
 # exactly as a terminal would be.
 printf ' \r\x1b' | "$SPOOLWAY" queue >/dev/null 2>&1

@@ -101,7 +101,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `↑` `↓` / `j` `k` | Move the cursor |
 | `tab` | Switch focus between the groups and tasks panes |
 | `space` | Select a group. A group is queued whole |
-| `enter` | Check the selection and queue it |
+| `enter` | Check the selection, queue it, and show what queued |
 | `g` | Set or clear a `gate_at` on the highlighted task |
 | `o` | Open the highlighted task's document in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
@@ -113,13 +113,22 @@ archive directories. The right pane lists the highlighted group's tasks.
 Queueing deletes the group's pending documents from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that
 fails validation is refused and nothing is deleted. See [Queueing a
-plan](planning.md#queueing-a-plan).
+plan](planning.md#queueing-a-plan). Queueing a group or a routine ends on a popup naming what
+queued; `enter` closes it back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements. A requirement this machine does not meet draws a gate naming what is unmet:
 `enter` queues the group with issue tracking switched off, and `esc` returns to the queue
 screen with nothing queued. See [the shipped hook
 scripts](configuration.md#the-shipped-hook-scripts).
+
+When every requirement is met and the batch still has a task with no `ticket:`, `enter` asks
+before it opens any ticket. The question names the tracker and lists every task in the batch.
+`enter` opens the tickets and queues, `n` queues the batch with no hook call, and `esc` returns
+to the queue screen with nothing queued. Once the hook runs, a popup fills in each task's row
+as the hook answers it and takes `enter` only once every row is done. Queueing a routine from
+the routines pane asks the same question. A trial never asks and opens no ticket. See
+[`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue add`
 

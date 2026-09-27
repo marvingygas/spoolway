@@ -639,6 +639,19 @@ pub fn configured(repo: &Repo) -> bool {
     hook_path(repo).is_some()
 }
 
+/// The tracker a configured hook opens tickets on, as the queue screen's
+/// question names it before any is opened: the hook's own filename with its
+/// extension dropped — `github.sh` is `github`, `jira.sh` is `jira`. A hook
+/// says nothing else about where its tickets go, and the shipped hooks are
+/// named for their trackers, so the name is the one honest thing to say.
+pub(crate) fn tracker(repo: &Repo) -> String {
+    let hook = repo.config.issue_tracking.hook.trim();
+    Path::new(hook)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| hook.to_string())
+}
+
 /// Whether `config.toml`'s `on_fail` asks a failed hook to hold the task
 /// rather than only record the failure. Blank reads as `"ignore"`.
 pub fn pauses_on_fail(repo: &Repo) -> bool {

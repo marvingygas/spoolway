@@ -57,6 +57,12 @@ const ESCAPE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50)
 /// only impl that actually asks the kernel.
 pub(crate) trait PollableRead: std::io::Read {
     fn byte_pending(&self, timeout: std::time::Duration) -> bool;
+
+    /// Throw away whatever was typed and not yet read — keys pressed while
+    /// the screen was busy and could not answer them, which a person meant
+    /// for a screen that was not yet drawn. An in-memory reader holds a
+    /// script, not keys typed early, and keeps every byte of it.
+    fn discard_typed(&mut self) {}
 }
 
 impl PollableRead for std::io::Cursor<Vec<u8>> {
@@ -100,6 +106,16 @@ impl std::io::Read for RawStdin {
 impl PollableRead for RawStdin {
     fn byte_pending(&self, timeout: std::time::Duration) -> bool {
         fd_has_byte_within(libc::STDIN_FILENO, timeout)
+    }
+
+    fn discard_typed(&mut self) {
+        // SAFETY: stdin's descriptor is open for the life of the process;
+        // on anything but a terminal this fails harmlessly and discards
+        // nothing, which is the in-memory readers' answer too.
+        #[cfg(unix)]
+        unsafe {
+            libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+        }
     }
 }
 

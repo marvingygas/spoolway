@@ -1036,7 +1036,14 @@ fn queue_add_documents(
     let gate = ToolGate::Print {
         interactive: crate::ask::interactive(),
     };
-    if let Err(err) = open_and_prefix(repo, documents, &task_files, &mut tasks, gate) {
+    if let Err(err) = open_and_prefix(
+        repo,
+        documents,
+        &task_files,
+        &mut tasks,
+        gate,
+        &mut PrintedTickets,
+    ) {
         return match err.downcast_ref::<GateCancelled>() {
             Some(_) => Ok(()),
             None => Err(err),
@@ -1158,12 +1165,15 @@ fn readable_task_files(documents: &[(String, String)]) -> Vec<String> {
 /// open.
 ///
 /// `gate` says how the tool-requirements gate is reached — see [`ToolGate`].
+/// `log` is where what the hook answers goes as it answers — see
+/// [`TicketLog`].
 fn open_and_prefix(
     repo: &Repo,
     documents: &[(String, String)],
     task_files: &[String],
     tasks: &mut [Task],
     gate: ToolGate,
+    log: &mut dyn TicketLog,
 ) -> Result<()> {
     // Before `open_tickets` ever calls the hook: a declared requirement this
     // machine cannot meet means the call can only fail, and by the time it
@@ -1182,13 +1192,59 @@ fn open_and_prefix(
     // it into the queue — because a sibling document further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    let group_slug = open_tickets(repo, documents, task_files, tasks)?;
+    let group_slug = open_tickets(repo, documents, task_files, tasks, log)?;
 
     // The prefix goes on in a pass of its own, after the hook has answered:
     // the slug does not exist until `open_tickets` has run, and `branch:` was
     // already stamped and the lane name already checked by `validate_batch`.
-    prefix_generated_names(tasks, &group_slug);
+    prefix_generated_names(tasks, &group_slug, log);
     Ok(())
+}
+
+/// Where [`open_tickets`] reports each ticket as the hook answers it. A
+/// caller with no screen prints the rows under its own command line —
+/// [`PrintedTickets`]; the queue screen draws them into a popup over its tab
+/// instead, one row at a time — see [`PopupTickets`] — since a row printed
+/// under a drawn frame lands where no frame is and is cleared by the next
+/// draw.
+pub(crate) trait TicketLog {
+    /// `group`'s tickets are about to be opened.
+    fn group(&mut self, group: &str);
+    /// The hook is about to be called for task `id`, and nothing answers
+    /// until it returns.
+    fn waiting(&mut self, id: &str);
+    /// One ticket or epic: `kind`, what became of it, its id on the tracker
+    /// and the task or group it belongs to.
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str);
+    /// A line that is not a ticket — a slug dropped, names prefixed.
+    fn note(&mut self, line: &str);
+    /// Every task in the batch has its answer.
+    fn done(&mut self);
+}
+
+/// [`TicketLog`] for a caller with no screen: `queue add --from`, `jobs run`
+/// and a job the dispatcher fires — the same lines those have always
+/// printed.
+pub(crate) struct PrintedTickets;
+
+impl TicketLog for PrintedTickets {
+    fn group(&mut self, group: &str) {
+        println!("issue_tracking: opening tickets for group `{group}`\n");
+    }
+
+    fn waiting(&mut self, _id: &str) {}
+
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+        println!("  {kind:<8} {status:<9} {ticket:<13} {name}");
+    }
+
+    fn note(&mut self, line: &str) {
+        println!("{line}");
+    }
+
+    fn done(&mut self) {
+        println!();
+    }
 }
 
 /// How [`open_and_prefix`] reaches the tool-requirements gate.
@@ -1208,7 +1264,8 @@ pub(crate) enum ToolGate {
     /// printing the gate again under the screen would draw it where no frame
     /// is, and take a second terminal guard inside the screen's. See
     /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
-    /// requirement was unmet and `enter` queued anyway.
+    /// requirement was unmet and `enter` queued anyway, or when the queue
+    /// screen's [`Mode::IssueQuestion`] was answered `n`.
     Answered { tracking_off: bool },
 }
 
@@ -1490,7 +1547,11 @@ fn tool_requirements_gate_with(
 /// find these branches where they look today; the worktree directory follows
 /// the branch and so picks the prefix up on its own — see
 /// [`crate::mux::branch_slug`].
-fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, String>) {
+fn prefix_generated_names(
+    tasks: &mut [Task],
+    group_slug: &BTreeMap<String, String>,
+    log: &mut dyn TicketLog,
+) {
     // The one winning slug per group onto every `slug:` first — the same
     // stamp the failure path runs before `write_back_ids`.
     stamp_group_slugs(tasks, group_slug);
@@ -1510,7 +1571,9 @@ fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, Stri
         task.front.branch = Some(format!("task/{slug}-{}", task.front.id));
         task.front.group = Some(prefixed_group.clone());
         if announced.insert((slug.clone(), prefixed_group.clone())) {
-            println!("issue_tracking: names prefixed `{slug}` — group `{prefixed_group}`\n");
+            log.note(&format!(
+                "issue_tracking: names prefixed `{slug}` — group `{prefixed_group}`\n"
+            ));
         }
     }
 }
@@ -1545,6 +1608,7 @@ fn open_tickets(
     documents: &[(String, String)],
     task_files: &[String],
     tasks: &mut [Task],
+    log: &mut dyn TicketLog,
 ) -> Result<BTreeMap<String, String>> {
     // `group:` on every task in this batch is still the bare name a document
     // wrote — `validate_batch` never prefixes it — so every map here is keyed
@@ -1636,11 +1700,11 @@ fn open_tickets(
             if accept_slug(&slug) {
                 group_slug.entry(group).or_insert(slug);
             } else {
-                println!(
+                log.note(&format!(
                     "  issue_tracking: slug `{slug}` on `{}` is not a valid name \
                      (lowercase letters, digits and hyphens) — ignored",
                     task.id()
-                );
+                ));
                 task.front.extra.remove("slug");
             }
         }
@@ -1655,7 +1719,7 @@ fn open_tickets(
     for i in open_order(tasks) {
         let group = tasks[i].front.group.clone().unwrap_or_default();
         if printed_header.insert(group.clone()) {
-            println!("issue_tracking: opening tickets for group `{group}`\n");
+            log.group(&group);
         }
 
         let already = tasks[i].extra_str("ticket").to_string();
@@ -1664,13 +1728,7 @@ fn open_tickets(
             if !epic.is_empty() {
                 group_epic.entry(group.clone()).or_insert(epic);
             }
-            println!(
-                "  {:<8} {:<9} {:<13} {}",
-                "ticket",
-                "kept",
-                already,
-                tasks[i].id()
-            );
+            log.row("ticket", "kept", &already, tasks[i].id());
             continue;
         }
 
@@ -1690,6 +1748,7 @@ fn open_tickets(
         // exist until every document in this batch has opened its ticket.
         let task_file = task_files.get(i).cloned().unwrap_or_default();
 
+        log.waiting(tasks[i].id());
         match crate::tracking::open_ticket(
             repo,
             &tasks[i],
@@ -1708,7 +1767,7 @@ fn open_tickets(
             } => {
                 if !epic.is_empty() && !group_epic.contains_key(&group) {
                     group_epic.insert(group.clone(), epic.clone());
-                    println!("  {:<8} {:<9} {:<13} {}", "epic", "created", epic, group);
+                    log.row("epic", "created", &epic, &group);
                     opened.push(format!("epic {epic} (`{group}`)"));
                 }
                 if !epic.is_empty() {
@@ -1726,22 +1785,10 @@ fn open_tickets(
                     &group,
                     &mut group_slug,
                 );
-                println!(
-                    "  {:<8} {:<9} {:<13} {}",
-                    "ticket",
-                    "created",
-                    ticket,
-                    tasks[i].id()
-                );
+                log.row("ticket", "created", &ticket, tasks[i].id());
             }
             crate::tracking::OpenResult::Failed { exit_code } => {
-                println!(
-                    "  {:<8} {:<9} {:<13} {}",
-                    "ticket",
-                    "FAILED",
-                    "—",
-                    tasks[i].id()
-                );
+                log.row("ticket", "FAILED", "—", tasks[i].id());
                 // The group's winning slug onto every task first, so the
                 // ids written back carry the dependency-order decision — not
                 // a later task's own raw answer, which document order would
@@ -1786,7 +1833,7 @@ fn open_tickets(
             }
         }
     }
-    println!();
+    log.done();
     Ok(group_slug)
 }
 
@@ -2454,6 +2501,20 @@ enum Mode {
         panel: Vec<String>,
         then: Resume,
     },
+    /// The question a submit stops at before any ticket is opened, with
+    /// issue tracking on — [`issue_question`]'s panel. A ticket on a public
+    /// tracker is seen by other people and hard to take back, so nothing
+    /// reaches the hook until a person says yes here. `enter` runs `then`
+    /// again and opens the tickets, `n` runs it with issue tracking switched
+    /// off for it, and `esc` goes back having queued nothing.
+    IssueQuestion {
+        panel: Vec<String>,
+        then: Resume,
+    },
+    /// What a screen submit queued — [`queued_panel`]'s popup, the tickets
+    /// the hook opened when it opened any. `enter` closes it, the same as
+    /// [`Mode::Outcome`].
+    Queued(Vec<String>),
     /// The sync gate bare `spoolway` opens on — [`crate::gate::sync_popup`]'s
     /// panel. `enter` applies the updates, the only key it reads; `ctrl-c`
     /// quits the screen with nothing written, as it does the printed gate.
@@ -2490,10 +2551,9 @@ fn outcome_over(routines: Option<&RoutineNav>, title: &str, text: impl Into<Stri
     }
 }
 
-/// The submit [`Mode::ToolGate`] finishes once `enter` answers it, run again
-/// from the start with issue tracking switched off — validating it again is
-/// cheap, and it is what a person would see had they pressed the key that
-/// opened the gate a second time.
+/// The submit [`Mode::ToolGate`] or [`Mode::IssueQuestion`] finishes once it
+/// is answered, run again from the start as the answer says — see
+/// [`resume`].
 #[derive(Debug, Clone)]
 enum Resume {
     /// The pending screen's `enter`, over `ScreenState::selected`.
@@ -2515,23 +2575,199 @@ impl Resume {
     }
 }
 
-/// Whether a screen submit may still stop at the tool-requirements gate.
+/// Whether a screen submit may still stop at the tool-requirements gate or
+/// the issue question, and how it answered them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tracking {
-    /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and nothing
-    /// is queued until it is answered.
+    /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and with
+    /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
+    /// opened. Nothing is queued until each is answered.
     Ask,
-    /// `enter` on that popup: queue with issue tracking switched off.
+    /// `enter` on the tool gate, or `n` on the question: queue with issue
+    /// tracking switched off.
     Off,
+    /// `enter` on the question: open the tickets and queue.
+    Open,
 }
 
 /// The gate a submit about to reach [`open_and_prefix`] stops at, or `None`
 /// when it goes straight on: already answered, or every requirement met.
+/// `Open` has passed the gate on the way to the question.
 fn tool_gate(repo: &Repo, tracking: Tracking, then: Resume) -> Option<Mode> {
-    if tracking == Tracking::Off {
+    if tracking != Tracking::Ask {
         return None;
     }
     tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
+}
+
+/// The issue question's keys, in its popup.
+fn issue_keys() -> String {
+    keys(&[
+        ("enter", "create and queue"),
+        ("n", "queue only"),
+        ("esc", "back"),
+    ])
+}
+
+/// A body for one of the issue popups — the question, the tickets opening,
+/// what was queued — opening on a blank row as wide as the question's own
+/// key row. The three follow one another over the same spot, and holding
+/// them to one width keeps the box from jumping between them as each
+/// replaces the last, or growing a column every time a row comes in.
+fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut body = vec![" ".repeat(issue_keys().chars().count())];
+    body.extend(lines);
+    body
+}
+
+/// [`Mode::IssueQuestion`] over the batch `tasks`, or `None` when there is
+/// nothing to ask: the submit has already been answered, no hook is
+/// configured, or every task already names its `ticket:` — a batch a failed
+/// hook wrote back, which [`open_tickets`] reports `kept` and never hands
+/// the hook again.
+///
+/// Lists every task in the batch and names the tracker — see
+/// [`crate::tracking::tracker`]. The count is the tickets still to open.
+fn issue_question(repo: &Repo, tracking: Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
+    if tracking != Tracking::Ask || !crate::tracking::configured(repo) {
+        return None;
+    }
+    let opening = tasks
+        .iter()
+        .filter(|task| task.extra_str("ticket").is_empty())
+        .count();
+    if opening == 0 {
+        return None;
+    }
+    let mut groups: Vec<&str> = Vec::new();
+    for group in tasks.iter().filter_map(|task| task.front.group.as_deref()) {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    let ask = format!(
+        "create {} on {} for {}",
+        plural(opening, "issue"),
+        crate::tracking::tracker(repo),
+        groups.join(", ")
+    );
+    let tasks = tasks.iter().map(|task| format!("  {}", task.id()));
+    let body = issue_body(std::iter::once(ask).chain(tasks));
+    Some(Mode::IssueQuestion {
+        panel: panel("issue tracking", &body, &issue_keys()),
+        then,
+    })
+}
+
+/// One ticket row in the issue popups — narrower than the printed form's
+/// id column, which leaves room for a jira key the popup's width has no
+/// room to spare for.
+fn ticket_row(kind: &str, status: &str, ticket: &str, name: &str) -> String {
+    format!("{kind:<8} {status:<9} {ticket:<6} {name}")
+}
+
+/// [`TicketLog`] for the queue screen: each row goes into the `opening
+/// issues` popup as the hook answers it, and `redraw` lays the popup over
+/// the tab again straight away — the hook runs on the screen's own thread,
+/// so nothing else draws until it returns. The task at the hook is drawn
+/// as a `…` row until its answer replaces it, over room for every row the
+/// batch can still add, so the box does not grow row by row under the
+/// person watching it.
+struct PopupTickets<'a> {
+    rows: Vec<String>,
+    waiting: Option<String>,
+    /// A ticket per task and an epic per group: the most rows the batch can
+    /// answer with.
+    room: usize,
+    redraw: &'a mut dyn FnMut(&[String]),
+}
+
+impl<'a> PopupTickets<'a> {
+    fn new(tasks: &[Task], redraw: &'a mut dyn FnMut(&[String])) -> PopupTickets<'a> {
+        let groups: std::collections::BTreeSet<_> = tasks
+            .iter()
+            .filter_map(|task| task.front.group.as_deref())
+            .collect();
+        PopupTickets {
+            rows: Vec::new(),
+            waiting: None,
+            room: tasks.len() + groups.len(),
+            redraw,
+        }
+    }
+
+    /// The popup while the hook is still answering.
+    fn panel(&self) -> Vec<String> {
+        let mut rows = self.rows.clone();
+        rows.extend(
+            self.waiting
+                .as_deref()
+                .map(|id| ticket_row("ticket", "…", "", id)),
+        );
+        while rows.len() < self.room {
+            rows.push(String::new());
+        }
+        rows.extend([
+            String::new(),
+            String::new(),
+            "waiting on the hook".to_string(),
+        ]);
+        crate::screen::boxed("opening issues", &issue_body(rows))
+    }
+
+    fn show(&mut self) {
+        let panel = self.panel();
+        (self.redraw)(&panel);
+    }
+}
+
+impl TicketLog for PopupTickets<'_> {
+    fn group(&mut self, _group: &str) {}
+
+    fn waiting(&mut self, id: &str) {
+        self.waiting = Some(id.to_string());
+        self.show();
+    }
+
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+        // An epic is answered in the same call as the first ticket of its
+        // group, and drawn above it — the task stays at the hook until its
+        // own row comes in.
+        if kind != "epic" {
+            self.waiting = None;
+        }
+        self.rows.push(ticket_row(kind, status, ticket, name));
+        self.show();
+    }
+
+    /// Left off the popup. The popups draw tickets and nothing else, and a
+    /// note is no ticket: the names-prefixed line — which the shipped
+    /// `github.sh` earns on every batch by always answering `slug=` — comes
+    /// after [`TicketLog::done`], so drawing it would put `waiting on the
+    /// hook` back up once the hook has finished, and it is wider than
+    /// [`issue_body`]'s width, so it would stretch the box. The prefix
+    /// itself is on every queued name the tab lists.
+    fn note(&mut self, _line: &str) {}
+
+    fn done(&mut self) {
+        self.waiting = None;
+    }
+}
+
+/// [`Mode::Queued`] for a batch that queued `ids`: the tickets the hook
+/// answered with, when it was asked, over the count queued; or, with no
+/// ticket to show, the count over every task it queued.
+fn queued_panel(ids: &[String], tickets: &[String]) -> Mode {
+    let queued = format!("queued {}", plural(ids.len(), "task"));
+    let (title, body) = if tickets.is_empty() {
+        let ids = ids.iter().map(|id| format!("  {id}"));
+        ("queued", issue_body(std::iter::once(queued).chain(ids)))
+    } else {
+        let mut lines = tickets.to_vec();
+        lines.extend([String::new(), queued]);
+        ("issues created", issue_body(lines))
+    };
+    Mode::Queued(panel(title, &body, &keys(&[("enter", "close")])))
 }
 
 /// How the screen ended: on its own, or — inside bare `spoolway`'s queue tab
@@ -3131,6 +3367,11 @@ fn run_screen_from(
                     state.mode = state.after_popup(closed);
                 }
             }
+            Mode::Queued(_) => {
+                if key == Key::Enter {
+                    state.mode = state.after_popup(Mode::Browsing);
+                }
+            }
             Mode::SyncGate(_) => {
                 if key == Key::Enter {
                     state.mode = match crate::gate::apply(repo) {
@@ -3143,32 +3384,69 @@ fn run_screen_from(
                 Key::Enter => {
                     let then = then.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = match &then {
-                        Resume::Selection => begin_submission(
-                            repo,
-                            pipelines,
-                            &base,
-                            &mut groups,
-                            &mut state,
-                            Tracking::Off,
-                        ),
-                        Resume::Routines(nav) => begin_routine_queue(
-                            repo,
-                            pipelines,
-                            &base,
-                            &routines,
-                            nav,
-                            Tracking::Off,
-                        ),
-                        Resume::RoutineTask(nav) => begin_routine_solo(
-                            repo,
-                            pipelines,
-                            &base,
-                            &routines,
-                            nav,
-                            Tracking::Off,
-                        ),
+                    let at = Submitting {
+                        repo,
+                        pipelines,
+                        base: &base,
+                        routines: &routines,
                     };
+                    state.mode = resume(
+                        &at,
+                        &then,
+                        Tracking::Off,
+                        &mut groups,
+                        &mut state,
+                        &mut |_| {},
+                    );
+                }
+                Key::Esc => state.mode = then.back(),
+                _ => {}
+            },
+            Mode::IssueQuestion { then, .. } => match key {
+                // Yes: the hook runs here, on this thread, and the tab under
+                // the question is held as it stands while it does — each
+                // ticket it answers is laid over that frame as it comes in.
+                // Whatever was typed while the hook ran is thrown away once it
+                // returns: the result popup takes `enter` only once it is on
+                // screen, never an `enter` pressed at the one still filling.
+                Key::Enter => {
+                    let then = then.clone();
+                    let base = crate::repo::branch_at(cwd)?;
+                    let at = Submitting {
+                        repo,
+                        pipelines,
+                        base: &base,
+                        routines: &routines,
+                    };
+                    let held = Held::new(&groups, &panes, &state);
+                    let mut redraw = |panel: &[String]| held.draw(panel, &mut last, out);
+                    state.mode = resume(
+                        &at,
+                        &then,
+                        Tracking::Open,
+                        &mut groups,
+                        &mut state,
+                        &mut redraw,
+                    );
+                    input.discard_typed();
+                }
+                Key::Char('n') => {
+                    let then = then.clone();
+                    let base = crate::repo::branch_at(cwd)?;
+                    let at = Submitting {
+                        repo,
+                        pipelines,
+                        base: &base,
+                        routines: &routines,
+                    };
+                    state.mode = resume(
+                        &at,
+                        &then,
+                        Tracking::Off,
+                        &mut groups,
+                        &mut state,
+                        &mut |_| {},
+                    );
                 }
                 Key::Esc => state.mode = then.back(),
                 _ => {}
@@ -3208,8 +3486,15 @@ fn run_screen_from(
                 Key::Enter if nav.focus == Focus::Groups && !nav.selected.is_empty() => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode =
-                        begin_routine_queue(repo, pipelines, &base, &routines, &nav, Tracking::Ask);
+                    state.mode = begin_routine_queue(
+                        repo,
+                        pipelines,
+                        &base,
+                        &routines,
+                        &nav,
+                        Tracking::Ask,
+                        &mut |_| {},
+                    );
                 }
                 // `space` over the tasks pane queues that one document alone
                 // — over the folders pane it is `handle_routine_key`'s own
@@ -3217,8 +3502,15 @@ fn run_screen_from(
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode =
-                        begin_routine_solo(repo, pipelines, &base, &routines, &nav, Tracking::Ask);
+                    state.mode = begin_routine_solo(
+                        repo,
+                        pipelines,
+                        &base,
+                        &routines,
+                        &nav,
+                        Tracking::Ask,
+                        &mut |_| {},
+                    );
                 }
                 // `o` over the documents pane: open the highlighted document
                 // in an editor pane, the same shape `open_highlighted` gives
@@ -3240,10 +3532,11 @@ fn run_screen_from(
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
                 // through — nothing is drawn in between but the
-                // tool-requirements gate, when it has something to ask. A
-                // refusal hands back `Mode::Outcome`; a clean write goes
-                // back to browsing. Starting a dispatcher is the
-                // dispatch tab's `enter`, not this one's.
+                // tool-requirements gate and the issue question, when each
+                // has something to ask. A refusal hands back
+                // `Mode::Outcome`; a clean write says what it queued in
+                // `Mode::Queued`. Starting a dispatcher is the dispatch
+                // tab's `enter`, not this one's.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
                     state.mode = begin_submission(
@@ -3253,6 +3546,7 @@ fn run_screen_from(
                         &mut groups,
                         &mut state,
                         Tracking::Ask,
+                        &mut |_| {},
                     );
                 }
                 // Gated exactly the way `g` is — see `handle_browse_key`'s
@@ -3286,6 +3580,77 @@ fn run_screen_from(
         }
     }
     Ok(ScreenExit::Quit)
+}
+
+/// What a submit resumed off the tool gate or the issue question runs
+/// against, bundled to keep [`resume`] inside the argument count this module
+/// keeps to.
+struct Submitting<'a> {
+    repo: &'a Repo,
+    pipelines: &'a Pipelines,
+    base: &'a str,
+    routines: &'a [RoutineFolder],
+}
+
+/// Run the submit `then` names again from the start, answered as `tracking`
+/// says — validating it again is cheap, and it is what a person would see had
+/// they pressed the key that opened the popup a second time.
+fn resume(
+    at: &Submitting,
+    then: &Resume,
+    tracking: Tracking,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    redraw: &mut dyn FnMut(&[String]),
+) -> Mode {
+    let Submitting {
+        repo,
+        pipelines,
+        base,
+        routines,
+    } = *at;
+    match then {
+        Resume::Selection => {
+            begin_submission(repo, pipelines, base, groups, state, tracking, redraw)
+        }
+        Resume::Routines(nav) => {
+            begin_routine_queue(repo, pipelines, base, routines, nav, tracking, redraw)
+        }
+        Resume::RoutineTask(nav) => {
+            begin_routine_solo(repo, pipelines, base, routines, nav, tracking, redraw)
+        }
+    }
+}
+
+/// The tab as it stood when the issue question was answered, with no popup
+/// on it — what the `opening issues` popup is laid over while the hook runs.
+/// Rendered once and owned, so drawing it again borrows nothing the submit
+/// itself is busy changing.
+struct Held {
+    frame: Vec<String>,
+    footer: String,
+}
+
+impl Held {
+    fn new(groups: &[Group], panes: &Panes, state: &ScreenState) -> Held {
+        let footer = footer(groups, state);
+        Held {
+            frame: beneath(groups, panes, state, &footer),
+            footer,
+        }
+    }
+
+    /// The held tab with `panel` over it, written the way [`draw`] writes
+    /// any frame.
+    fn draw(
+        &self,
+        panel: &[String],
+        last: &mut Option<Vec<String>>,
+        out: &mut impl std::io::Write,
+    ) {
+        let frame = compose(self.frame.clone(), Some(panel), self.footer.clone());
+        paint(frame, last, out);
+    }
 }
 
 fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
@@ -4703,8 +5068,9 @@ fn fit_keys(row: String, width: usize) -> String {
 }
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
-/// notice opened from it, or the tool-requirements gate a routine submit
-/// stopped at. `None` for everything drawn over the pending screen.
+/// notice opened from it, or the tool-requirements gate or the issue
+/// question a routine submit stopped at. `None` for everything drawn over
+/// the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
     match mode {
         Mode::Routines(nav)
@@ -4713,6 +5079,10 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
             ..
         }
         | Mode::ToolGate {
+            then: Resume::Routines(nav) | Resume::RoutineTask(nav),
+            ..
+        }
+        | Mode::IssueQuestion {
             then: Resume::Routines(nav) | Resume::RoutineTask(nav),
             ..
         } => Some(nav),
@@ -4724,20 +5094,31 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
 /// the mode has open laid over it and the key line under it.
 fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
     let footer = footer(groups, state);
-    let layout = layout(&footer);
-    let mut frame = match routines_beneath(&state.mode) {
+    let frame = beneath(groups, panes, state, &footer);
+    let popup = popup(groups, panes.pipelines, state, layout(&footer));
+    compose(frame, popup.as_deref(), footer)
+}
+
+/// The pending screen or the routines pane the mode is drawn over, with no
+/// popup on it and no key line under it.
+fn beneath(groups: &[Group], panes: &Panes, state: &ScreenState, footer: &str) -> Vec<String> {
+    match routines_beneath(&state.mode) {
         Some(nav) => render_routines(
             panes.routines,
             panes.routines_dir,
             panes.pipelines,
             nav,
-            &footer,
+            footer,
         ),
-        None => pending_frame(groups, panes.pipelines, state, layout),
-    };
-    if let Some(popup) = popup(groups, panes.pipelines, state, layout) {
+        None => pending_frame(groups, panes.pipelines, state, layout(footer)),
+    }
+}
+
+/// `frame` with `popup` laid over it and `footer` under it.
+fn compose(mut frame: Vec<String>, popup: Option<&[String]>, footer: String) -> Vec<String> {
+    if let Some(popup) = popup {
         stretch(&mut frame, popup.len() + 4);
-        overlay(&mut frame, &popup);
+        overlay(&mut frame, popup);
     }
     frame.push(footer);
     frame
@@ -4788,7 +5169,10 @@ fn popup(
         Mode::Outcome { notice, .. } => {
             Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
         }
-        Mode::ToolGate { panel, .. } | Mode::SyncGate(panel) => Some(panel.clone()),
+        Mode::ToolGate { panel, .. }
+        | Mode::IssueQuestion { panel, .. }
+        | Mode::Queued(panel)
+        | Mode::SyncGate(panel) => Some(panel.clone()),
         Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
     }
 }
@@ -4845,7 +5229,13 @@ fn draw(
     // Under the strip when bare `spoolway` hosts this screen as its queue
     // tab, and exactly as before everywhere else — see
     // `crate::screen::shell::under_strip`.
-    let frame = crate::screen::shell::under_strip(render(groups, panes, state));
+    paint(render(groups, panes, state), last, out);
+}
+
+/// Write `frame`, unless it is the one `last` already holds — [`draw`]'s own
+/// write, shared with [`Held::draw`].
+fn paint(frame: Vec<String>, last: &mut Option<Vec<String>>, out: &mut impl std::io::Write) {
+    let frame = crate::screen::shell::under_strip(frame);
     if last.as_ref() == Some(&frame) {
         return;
     }
@@ -5257,17 +5647,22 @@ fn plural(n: usize, noun: &str) -> String {
 
 /// Validate the selection and write it — the whole of what pressing `enter`
 /// does. Nothing is drawn in between but the tool-requirements gate, when
-/// the hook declares a tool this machine cannot meet: a validation failure
-/// hands back a [`Mode::Outcome`] titled `submission refused`, the same
-/// refusal `queue_add_documents` hands back, and a clean batch goes on to
-/// [`finish_submit`] and back to [`Mode::Browsing`]. A failure past
-/// validation — the hook's own, most often — is titled `queue refused`, as
-/// the screen's mockup draws a failed hook. Queuing is all `enter` does:
+/// the hook declares a tool this machine cannot meet, and with issue
+/// tracking on the question [`issue_question`] asks before any ticket is
+/// opened: a validation failure hands back a [`Mode::Outcome`] titled
+/// `submission refused`, the same refusal `queue_add_documents` hands back,
+/// and a clean batch goes on to [`finish_submit`] and to the
+/// [`Mode::Queued`] popup saying what it queued. A failure past validation
+/// — the hook's own, most often — is titled `queue refused`, as the
+/// screen's mockup draws a failed hook. Queuing is all `enter` does:
 /// starting a dispatcher is the dispatch tab's own `enter`.
 ///
 /// Takes `state` mutably rather than by reference: `selected_documents` reads
 /// it to build the batch, and a landed write clears its selection and gates
 /// right here, before the caller ever sees the resulting mode.
+///
+/// `redraw` lays the `opening issues` popup over the tab as each ticket
+/// comes in — see [`PopupTickets`].
 fn begin_submission(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -5275,6 +5670,7 @@ fn begin_submission(
     groups: &mut Vec<Group>,
     state: &mut ScreenState,
     tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let documents = selected_documents(groups, state);
     let pending = match validate_batch(repo, pipelines, Some(base), &documents) {
@@ -5284,6 +5680,11 @@ fn begin_submission(
     if let Some(gate) = tool_gate(repo, tracking, Resume::Selection) {
         return gate;
     }
+    if let Some(question) = issue_question(repo, tracking, &pending, Resume::Selection) {
+        return question;
+    }
+    let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
+    let mut tickets = PopupTickets::new(&pending, redraw);
     let selected = state.selected.clone();
     let submit = Submit {
         documents: &documents,
@@ -5291,12 +5692,12 @@ fn begin_submission(
         selected: &selected,
         tracking_off: tracking == Tracking::Off,
     };
-    match finish_submit(repo, groups, pending, &submit) {
+    match finish_submit(repo, groups, pending, &submit, &mut tickets) {
         Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            Mode::Browsing
+            queued_panel(&ids, &tickets.rows)
         }
         Err(err) => outcome("queue refused", format!("{err:#}")),
     }
@@ -5304,7 +5705,8 @@ fn begin_submission(
 
 /// What [`finish_submit`] writes beside the batch itself: the documents it
 /// came from, the branch it is based on, the groups it was selected as, and
-/// whether the tool-requirements gate switched issue tracking off for it.
+/// whether the tool-requirements gate or the issue question switched issue
+/// tracking off for it.
 struct Submit<'a> {
     documents: &'a [(String, String)],
     base: &'a str,
@@ -5315,9 +5717,8 @@ struct Submit<'a> {
 /// Open the batch's tickets and name it, save it, clear the documents it
 /// came from out of the pending directory, and build the per-task report
 /// this function's own return value carries — read back by a test directly
-/// rather than by any caller here: a landed batch goes back to browsing,
-/// which draws the queue fresh from disk instead of echoing back what this
-/// just wrote to it.
+/// rather than by any caller here: a landed batch's popup names only the
+/// tasks it queued and the tickets opened for them — see [`queued_panel`].
 ///
 /// The order is the whole guarantee behind "a submission that fails
 /// validation removes nothing". Nothing is deleted until every task file has
@@ -5339,6 +5740,7 @@ fn finish_submit(
     groups: &mut Vec<Group>,
     mut pending: Vec<Task>,
     submit: &Submit,
+    log: &mut dyn TicketLog,
 ) -> Result<String> {
     let Submit {
         documents,
@@ -5353,11 +5755,12 @@ fn finish_submit(
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
     check_dependencies_set(repo, &mut pending)?;
-    // The screen asked the tool-requirements gate already, in its own
-    // popup — see `begin_submission` — so it is answered here, not printed.
+    // The screen asked the tool-requirements gate and the issue question
+    // already, in its own popups — see `begin_submission` — so they are
+    // answered here, not printed.
     let task_files = readable_task_files(documents);
     let gate = ToolGate::Answered { tracking_off };
-    open_and_prefix(repo, documents, &task_files, &mut pending, gate)?;
+    open_and_prefix(repo, documents, &task_files, &mut pending, gate, log)?;
 
     for task in &pending {
         task.save()?;
@@ -5973,7 +6376,14 @@ pub(crate) fn queue_routine_target_with(
     // `.spoolway/routines/`, safe for a hook to read, only never to write
     // to.
     let task_files = readable_task_files(&documents);
-    open_and_prefix(repo, &[], &task_files, &mut tasks, gate)?;
+    open_and_prefix(
+        repo,
+        &[],
+        &task_files,
+        &mut tasks,
+        gate,
+        &mut PrintedTickets,
+    )?;
     // All or none: everything above parsed and validated, so these writes
     // are the commit — the same discipline `queue_add_documents` follows.
     for task in &tasks {
@@ -5983,9 +6393,9 @@ pub(crate) fn queue_routine_target_with(
 }
 
 /// Open the batch's tickets, save every task `validate_batch` handed back
-/// — the whole of what queuing a routine does, now that a landed batch
-/// goes back to browsing with no report to show: `finish_trial` never built
-/// one either, and this no longer does. The source documents under
+/// — the whole of what queuing a routine does; the popup a landed batch
+/// opens is built from the ids and the tickets `log` saw, not from a report
+/// here. The source documents under
 /// `.spoolway/routines/` are never touched — a routine is meant to be
 /// queued again, not consumed by being queued once — which is why nothing
 /// is handed to [`open_and_prefix`] to write ids back into.
@@ -5993,16 +6403,18 @@ pub(crate) fn queue_routine_target_with(
 /// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
 /// comment on why that is a different list from the empty `documents`.
 ///
-/// `tracking_off` is the tool-requirements gate's answer, asked already in
-/// the screen's own popup — see [`ToolGate::Answered`].
+/// `tracking_off` is the answer of the tool-requirements gate or the issue
+/// question, asked already in the screen's own popup — see
+/// [`ToolGate::Answered`].
 fn finish_routine(
     repo: &Repo,
     tasks: &mut [Task],
     task_files: &[String],
     tracking_off: bool,
+    log: &mut dyn TicketLog,
 ) -> Result<()> {
     let gate = ToolGate::Answered { tracking_off };
-    open_and_prefix(repo, &[], task_files, tasks, gate)?;
+    open_and_prefix(repo, &[], task_files, tasks, gate, log)?;
     for task in tasks.iter() {
         task.save()?;
     }
@@ -6015,8 +6427,8 @@ fn finish_routine(
 /// [`begin_submission`] gives a pending selection.
 ///
 /// A refusal is a popup over the routines pane, which closing it goes back
-/// to; the tool-requirements gate stops it first the way it stops
-/// [`begin_submission`].
+/// to; the tool-requirements gate and the issue question stop it first the
+/// way they stop [`begin_submission`].
 fn begin_routine_queue(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -6024,6 +6436,7 @@ fn begin_routine_queue(
     routines: &[RoutineFolder],
     nav: &RoutineNav,
     tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let documents = routine_batch_documents(repo, routines, nav);
     if documents.is_empty() {
@@ -6037,14 +6450,17 @@ fn begin_routine_queue(
         (&documents, &task_files),
         nav,
         tracking,
+        redraw,
     )
 }
 
 /// The end both routine submits share: validate `batch` — the documents
-/// and the task files behind them — stop at the tool-requirements gate
-/// when it has something to ask, and queue it. `nav` is the routines pane
-/// it came from: a refusal is drawn over it, and the gate names it as the
-/// place `esc` goes back to.
+/// and the task files behind them — stop at the tool-requirements gate and
+/// the issue question when each has something to ask, and queue it. `nav`
+/// is the routines pane it came from: a refusal is drawn over it, and the
+/// gate and the question name it as the place `esc` goes back to. A landed
+/// batch says what it queued over the pending screen, the one closing it
+/// goes back to.
 fn finish_routine_mode(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -6052,6 +6468,7 @@ fn finish_routine_mode(
     batch: (&[(String, String)], &[String]),
     nav: &RoutineNav,
     tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let (documents, task_files) = batch;
     let mut tasks = match validate_batch(repo, pipelines, Some(base), documents) {
@@ -6064,11 +6481,17 @@ fn finish_routine_mode(
         Focus::Groups => Resume::Routines(nav.clone()),
         Focus::Tasks => Resume::RoutineTask(nav.clone()),
     };
-    if let Some(gate) = tool_gate(repo, tracking, then) {
+    if let Some(gate) = tool_gate(repo, tracking, then.clone()) {
         return gate;
     }
-    match finish_routine(repo, &mut tasks, task_files, tracking == Tracking::Off) {
-        Ok(()) => Mode::Browsing,
+    if let Some(question) = issue_question(repo, tracking, &tasks, then) {
+        return question;
+    }
+    let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
+    let mut tickets = PopupTickets::new(&tasks, redraw);
+    let tracking_off = tracking == Tracking::Off;
+    match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
+        Ok(()) => queued_panel(&ids, &tickets.rows),
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
 }
@@ -6087,6 +6510,7 @@ fn begin_routine_solo(
     routines: &[RoutineFolder],
     nav: &RoutineNav,
     tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let Some(folder) = highlighted_routine_folder(routines, nav) else {
         return Mode::Browsing;
@@ -6107,6 +6531,7 @@ fn begin_routine_solo(
         (&documents, &task_files),
         nav,
         tracking,
+        redraw,
     )
 }
 
@@ -8339,10 +8764,11 @@ mod tests {
             &mut groups,
             &mut state,
             Tracking::Ask,
+            &mut |_| {},
         );
         assert!(
-            matches!(outcome, Mode::Browsing),
-            "expected a clean submission to go back to browsing, got {outcome:?}"
+            matches!(outcome, Mode::Queued(_)),
+            "expected a clean submission to say what it queued, got {outcome:?}"
         );
 
         assert!(!path.exists(), "the document must be gone from pending");
@@ -8397,7 +8823,8 @@ mod tests {
         let pipelines = Pipelines::builtin();
         // Driven straight through `finish_submit` rather than
         // `begin_submission`: the "left alone" note it builds is no longer
-        // shown on any screen — a clean submission goes back to browsing —
+        // shown on any screen — a clean submission's popup names only what it
+        // queued —
         // so this is the one place left that can still read it back.
         let documents = selected_documents(&groups, &state);
         let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
@@ -8408,7 +8835,7 @@ mod tests {
             selected: &selected,
             tracking_off: false,
         };
-        let msg = finish_submit(&repo, &mut groups, pending, &submit).unwrap();
+        let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
 
         assert!(!beta_path.exists(), "beta's pending document must be gone");
         assert!(
@@ -8460,7 +8887,7 @@ mod tests {
             selected: &selected,
             tracking_off: false,
         };
-        let msg = finish_submit(&repo, &mut groups, pending, &submit).unwrap();
+        let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
 
         assert!(!beta_path.exists(), "beta's pending document must be gone");
         assert!(
@@ -9523,7 +9950,7 @@ mod tests {
     }
 
     /// With a dispatcher already holding the queue's lock, a clean
-    /// submission still writes and still goes back to browsing — there is
+    /// submission still writes and still only says what it queued — there is
     /// nothing to join and nothing to focus: the running dispatcher picks
     /// the task up on its next pass.
     #[test]
@@ -9955,13 +10382,13 @@ mod tests {
         assert!(frame.contains("─ groups"), "the tab under it: {frame}");
     }
 
-    /// `enter` only queues. A clean submission lands and the screen goes
-    /// back to browsing: no overview, no overrides gate and no warnings
+    /// `enter` only queues. A clean submission lands and the screen says
+    /// what it queued in a popup: no overview, no overrides gate and no warnings
     /// screen, even with `unattended.enabled` on and something to warn
     /// about — asking those is the dispatch tab's `enter`, before it starts
     /// a dispatcher, and this screen never starts one.
     #[test]
-    fn enter_only_queues_and_goes_back_to_browsing() {
+    fn enter_only_queues_and_says_what_it_queued() {
         let mut repo = fixture("screen-enter-only-queues");
         repo.config.unattended.enabled = true;
         write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
@@ -9974,6 +10401,12 @@ mod tests {
         assert!(!drawn.contains("queued  1 group"), "{drawn}");
         assert!(!drawn.contains("before this run starts"), "{drawn}");
         assert!(!drawn.contains("start a dispatcher"), "{drawn}");
+        // With issue tracking off nothing is asked: the popup says what was
+        // queued, and `enter` closes it.
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("┌─ queued "), "{frame}");
+        assert!(frame.contains("queued 1 task"), "{frame}");
+        assert!(!drawn.contains("┌─ issue tracking "), "{drawn}");
     }
 
     /// Nothing in the pending directory is not an error — the screen opens
@@ -11004,7 +11437,15 @@ mod tests {
                     .unwrap();
             let task_files = readable_task_files(&documents);
             let gate = ToolGate::Print { interactive: false };
-            open_and_prefix(&repo, &documents, &task_files, &mut tasks, gate).unwrap();
+            open_and_prefix(
+                &repo,
+                &documents,
+                &task_files,
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+            )
+            .unwrap();
 
             let seen = std::fs::read_to_string(repo.tracking_dir().join("task-file.seen"));
             assert_eq!(
@@ -11570,7 +12011,8 @@ mod tests {
 
         /// The queue screen's `enter` is the third way a batch arrives, and
         /// it takes the same prefix: driven through `begin_submission` the
-        /// way the screen's own tests do.
+        /// way the screen's own tests do, with the issue question already
+        /// answered yes.
         #[test]
         fn a_screen_submission_takes_the_prefix_like_queue_add() {
             let mut repo = fixture("open-screen-prefix");
@@ -11598,9 +12040,10 @@ mod tests {
                 "plan/demo",
                 &mut groups,
                 &mut state,
-                Tracking::Ask,
+                Tracking::Open,
+                &mut |_| {},
             );
-            assert!(matches!(outcome, Mode::Browsing), "{outcome:?}");
+            assert!(matches!(outcome, Mode::Queued(_)), "{outcome:?}");
 
             let task = queued(&repo, "wire");
             assert_eq!(task.front.group.as_deref(), Some("proj-12-one"));
@@ -11841,6 +12284,279 @@ mod tests {
             // `rework` and `PROJ-rework` are unrelated groups once `PROJ` is
             // rejected, so `fresh` did not inherit `EPIC-1`.
             assert_ne!(queued(&repo, "fresh").extra_str("epic"), "EPIC-1");
+        }
+
+        /// The queue screen's own issue question: with a hook configured,
+        /// nothing reaches it until a person says yes on the tab.
+        mod issue_question {
+            use super::*;
+
+            /// A hook that logs every call it gets and answers an epic and a
+            /// ticket numbered by the call, and one pending group `cart` of
+            /// two tasks, ready to select with `space`.
+            fn cart(name: &str) -> Repo {
+                let mut repo = fixture(name);
+                with_hook(
+                    &mut repo,
+                    r#"log="$(dirname "$SPOOLWAY_OUT")/calls.log"
+                       echo "$SPOOLWAY_TASK" >>"$log"
+                       n=$(wc -l <"$log")
+                       { echo "epic=#410"; echo "ticket=#$(( 410 + n ))"; } >"$SPOOLWAY_OUT""#,
+                );
+                write_pending_two(
+                    &repo,
+                    "cart-empty-state",
+                    &document(
+                        "cart-empty-state",
+                        "group: cart
+group_description: the cart
+",
+                        BODY,
+                    ),
+                    "cart-totals",
+                    &document(
+                        "cart-totals",
+                        "group: cart
+depends_on: [cart-empty-state]
+",
+                        BODY,
+                    ),
+                );
+                repo
+            }
+
+            fn hook_calls(repo: &Repo) -> Vec<String> {
+                std::fs::read_to_string(repo.tracking_dir().join("calls.log"))
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect()
+            }
+
+            /// `enter` stops at the question before the hook runs: it lists
+            /// every task in the batch and names the tracker, over the tab.
+            #[test]
+            fn enter_asks_before_the_hook_runs() {
+                let repo = cart("issue-question-asks");
+                let drawn = screen(&repo, listed(&repo), " \r");
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ issue tracking "), "{frame}");
+                assert!(
+                    frame.contains("create 2 issues on open for cart"),
+                    "{frame}"
+                );
+                assert!(frame.contains("    cart-empty-state"), "{frame}");
+                assert!(frame.contains("    cart-totals"), "{frame}");
+                assert!(
+                    frame.contains("[enter] create and queue   [n] queue only   [esc] back"),
+                    "{frame}"
+                );
+                assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran unasked");
+                assert!(repo.queued_ids().is_empty());
+            }
+
+            /// `n` queues the group with issue tracking off: no hook call,
+            /// no ticket, and a popup naming what it queued.
+            #[test]
+            fn n_queues_with_no_hook_call() {
+                let repo = cart("issue-question-n");
+                let drawn = screen(&repo, listed(&repo), " \rn");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
+                let task = queued(&repo, "cart-totals");
+                assert_eq!(task.extra_str("ticket"), "");
+                assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
+
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ queued "), "{frame}");
+                assert!(frame.contains("queued 2 tasks"), "{frame}");
+                assert!(frame.contains("    cart-empty-state"), "{frame}");
+                assert!(frame.contains("[enter] close"), "{frame}");
+            }
+
+            /// `esc` queues nothing and opens nothing, and leaves the
+            /// selection as it was.
+            #[test]
+            fn esc_queues_nothing_and_opens_nothing() {
+                let repo = cart("issue-question-esc");
+                let drawn = screen(&repo, listed(&repo), " \r\x1b");
+                assert!(hook_calls(&repo).is_empty());
+                assert!(repo.queued_ids().is_empty());
+                let frame = last_frame(&drawn);
+                assert!(!frame.contains("issue tracking"), "{frame}");
+                assert!(frame.contains("[x] cart"), "still selected: {frame}");
+            }
+
+            /// `enter` opens the tickets and queues. The popup fills in row
+            /// by row while the hook answers — the task at the hook drawn as
+            /// `…` — and once it is done says what was opened and queued,
+            /// taking `enter` to close.
+            #[test]
+            fn enter_opens_the_tickets_row_by_row_and_queues() {
+                let repo = cart("issue-question-enter");
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                assert_eq!(
+                    queued(&repo, "cart-empty-state").extra_str("ticket"),
+                    "#411"
+                );
+                assert_eq!(queued(&repo, "cart-totals").extra_str("ticket"), "#412");
+
+                let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").collect();
+                let opening: Vec<&&str> = frames
+                    .iter()
+                    .filter(|frame| frame.contains("┌─ opening issues "))
+                    .collect();
+                assert!(
+                    opening
+                        .iter()
+                        .all(|frame| frame.contains("waiting on the hook")),
+                    "{opening:?}"
+                );
+                // The second task at the hook, under the first one's answer.
+                assert!(
+                    opening.iter().any(|frame| {
+                        frame.contains("epic     created   #410   cart")
+                            && frame.contains("ticket   created   #411   cart-empty-state")
+                            && frame.contains("ticket   …                cart-totals")
+                    }),
+                    "{opening:?}"
+                );
+                assert!(
+                    !opening.iter().any(|frame| frame.contains("[enter] close")),
+                    "a popup still filling takes no key: {opening:?}"
+                );
+
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ issues created "), "{frame}");
+                assert!(
+                    frame.contains("ticket   created   #412   cart-totals"),
+                    "{frame}"
+                );
+                assert!(frame.contains("queued 2 tasks"), "{frame}");
+                assert!(frame.contains("[enter] close"), "{frame}");
+                // Nothing printed under the frame: every byte went out after a
+                // clear-screen, as part of one frame or another.
+                assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");
+                assert!(
+                    !drawn.contains("issue_tracking: opening tickets"),
+                    "{drawn}"
+                );
+            }
+
+            /// A hook answering `slug=` with `key_in_names` on prefixes the
+            /// names, as the shipped `github.sh` does on every batch — and
+            /// the result is still step 12: ticket rows, then what was
+            /// queued, the box held to the question's width, and no
+            /// `opening issues` frame drawn once the last ticket is in.
+            #[test]
+            fn a_slug_answer_keeps_the_result_to_the_ticket_rows() {
+                let mut repo = cart("issue-question-slug");
+                repo.config.issue_tracking.key_in_names = true;
+                with_hook(
+                    &mut repo,
+                    r#"log="$(dirname "$SPOOLWAY_OUT")/calls.log"
+                       echo "$SPOOLWAY_TASK" >>"$log"
+                       n=$(wc -l <"$log")
+                       { echo "epic=#410"; echo "ticket=#$(( 410 + n ))"
+                         echo "slug=gh-410"; } >"$SPOOLWAY_OUT""#,
+                );
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(
+                    queued(&repo, "cart-totals").front.group.as_deref(),
+                    Some("gh-410-cart")
+                );
+
+                let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").collect();
+                let last_opening = frames
+                    .iter()
+                    .rposition(|frame| frame.contains("┌─ opening issues "))
+                    .unwrap();
+                assert!(
+                    frames[last_opening].contains("#412   cart-totals"),
+                    "the last `opening issues` frame is the last ticket's: {}",
+                    frames[last_opening]
+                );
+
+                let frame = last_frame(&drawn);
+                assert!(!frame.contains("names prefixed"), "{frame}");
+                let body: Vec<String> = frame
+                    .lines()
+                    .skip_while(|line| !line.contains("┌─ issues created "))
+                    .skip(1)
+                    .take_while(|line| !line.contains('└') || line.contains('│'))
+                    .map(|line| line.split('│').nth(2).unwrap_or("").trim().to_string())
+                    .collect();
+                assert_eq!(
+                    body[..7],
+                    [
+                        "",
+                        "epic     created   #410   cart",
+                        "ticket   created   #411   cart-empty-state",
+                        "ticket   created   #412   cart-totals",
+                        "",
+                        "queued 2 tasks",
+                        "",
+                    ],
+                    "{frame}"
+                );
+                let top = frame
+                    .lines()
+                    .find(|line| line.contains("┌─ issues created "))
+                    .unwrap();
+                let width = top
+                    .chars()
+                    .skip_while(|c| *c != '┌')
+                    .take_while(|c| *c != '┐')
+                    .count()
+                    + 1;
+                assert_eq!(width, 60, "held to the question's width: {frame}");
+            }
+
+            /// Queuing a routine asks the same question, over the routines
+            /// pane, and `n` there queues it with no hook call.
+            #[test]
+            fn queuing_a_routine_asks_the_same_question() {
+                let repo = cart("issue-question-routine");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &document(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let drawn = screen(&repo, listed(&repo), "r \r");
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ issue tracking "), "{frame}");
+                assert!(
+                    frame.contains("create 1 issue on open for nightly"),
+                    "{frame}"
+                );
+                assert!(
+                    frame.contains("─ routines"),
+                    "over the routines pane: {frame}"
+                );
+                assert!(repo.queued_ids().is_empty());
+
+                screen(&repo, listed(&repo), "r \rn");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
+                assert_eq!(repo.queued_ids().len(), 1, "{:?}", repo.queued_ids());
+            }
+
+            /// A trial never asks and opens no tickets, as before.
+            #[test]
+            fn a_trial_never_asks_and_opens_no_tickets() {
+                let repo = cart("issue-question-trial");
+                let drawn = screen(&repo, listed(&repo), "t\r\r");
+                assert!(!drawn.contains("issue tracking"), "{drawn}");
+                assert!(hook_calls(&repo).is_empty());
+                assert_eq!(repo.queued_ids().len(), 2, "{:?}", repo.queued_ids());
+            }
         }
     }
 
@@ -12105,7 +12821,7 @@ mod tests {
             .unwrap();
 
             let gate = ToolGate::Print { interactive: false };
-            open_and_prefix(&repo, &[], &[], &mut tasks, gate).unwrap();
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
 
             assert_eq!(tasks[0].extra_str("ticket"), "");
             assert_eq!(tasks[0].extra_str("epic"), "");

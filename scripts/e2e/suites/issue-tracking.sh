@@ -332,6 +332,59 @@ must "key_in_names is turned back off" \
 must "the hook is restored to the plain one" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 
+# ------------------------------------------ the queue tab asks before `open`
+# `spoolway queue`'s `enter` no longer runs the hook straight away: with
+# tracking on, it asks first — `[enter] create and queue`, `[n] queue only`,
+# `[esc] back` — over every task in the batch. What only this suite can say
+# is that `n` really does keep the hook's process from ever starting: the
+# whole binary reading real keys off a pipe, against the real `open.sh` above,
+# which writes `tracking/task-file.<task>` on every `open` it is called for.
+# `enter` on the same question is the control — the same hook, the same
+# marker, written — so a marker missing after `n` is the question working, not
+# a hook that never fires. One group in pending at a time, so the cursor opens
+# on it.
+pending_doc asked-a "$BODY" "group: asked" "touches: [notes/asked-a.md]" \
+  "group_description: a pair queued through the question"
+pending_doc asked-b "$BODY" "group: asked" "touches: [notes/asked-b.md]" \
+  "depends_on: [asked-a]"
+TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
+
+ASK_ESC="$LIVE/ask-esc.out"
+printf ' \r\x1b' | "$SPOOLWAY" queue 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$ASK_ESC"
+has "enter on the queue tab asks before any ticket is opened" \
+  "create 2 issues on open for asked" "$ASK_ESC"
+has "in a popup over the queue tab" "┌─ issue tracking " "$ASK_ESC"
+has "listing every task in the batch" "asked-b" "$ASK_ESC"
+has "whose keys read as drawn" \
+  "[enter] create and queue   [n] queue only   [esc] back" "$ASK_ESC"
+works "esc queues nothing" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
+works "and leaves the group in pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/asked-a.md"
+works "and the hook was never called" \
+  bash -c '[ ! -e "$1/task-file.asked-a" ] && [ ! -e "$1/task-file.asked-b" ]' _ "$TRACKING"
+
+ASK_N="$LIVE/ask-n.out"
+printf ' \rn' | "$SPOOLWAY" queue 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$ASK_N"
+works "n on the question queues the group" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
+works "the whole of it" test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-b.md"
+works "with no hook call for either task" \
+  bash -c '[ ! -e "$1/task-file.asked-a" ] && [ ! -e "$1/task-file.asked-b" ]' _ "$TRACKING"
+lacks "so no ticket landed on the first" "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
+lacks "nor on the second" "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/asked-b.md"
+lacks "and no epic" "epic:" "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md"
+has "the result says what was queued" "queued 2 tasks" "$ASK_N"
+
+pending_doc asked-yes "$BODY" "group: asked-yes" "touches: [notes/asked-yes.md]" \
+  "group_description: one task queued through the question's enter"
+ASK_YES="$LIVE/ask-yes.out"
+printf ' \r\r' | "$SPOOLWAY" queue 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$ASK_YES"
+works "enter on the question queues the group" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
+works "after calling the hook for it" test -e "$TRACKING/task-file.asked-yes"
+has "whose ticket landed on the document" "ticket: acme/app#" \
+  "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
+has "and the result popup names what was created" "┌─ issues created " "$ASK_YES"
+
 # ------------------------------------------------- on_fail = "pause"
 # A hook that always fails, on each of the four events by hand: `pause` holds
 # a task on `queued` and out of the archive on `done`, and only records the
