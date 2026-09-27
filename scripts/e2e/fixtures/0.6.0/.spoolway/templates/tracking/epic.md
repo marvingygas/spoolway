@@ -1,0 +1,3 @@
+- Group: `${SPOOLWAY_GROUP}`
+- Source: `${SPOOLWAY_SOURCE}`
+- Tasks queued together: `${SPOOLWAY_GROUP_SIZE}`
