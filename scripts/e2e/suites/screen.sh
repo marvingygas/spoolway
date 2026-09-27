@@ -53,8 +53,9 @@ works "bare spoolway opens and ends when its keys run out" \
   script -qec "printf '\\033[D' | '$SPOOLWAY'" "$DRAWN"
 
 # Every frame opens on a clear-screen, so the transcript splits into frames on
-# it. The first one drawn is the queue tab's. Colour codes are taken out, so
-# the strip's labels read as the plain line the mockup draws.
+# it. The first one drawn is the queue tab's, its label bracketed on the
+# strip. Colour codes are taken out of the frames the tabs draw under it; the
+# strip itself carries none.
 FIRST="$LIVE/first.txt"
 LAST="$LIVE/last.txt"
 awk 'BEGIN { RS = "\033\\[2J\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
@@ -63,12 +64,14 @@ awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$DRAW
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "the strip names all four tabs in order" \
-  "dispatch        queue        jobs        eval" "$FIRST"
+  "dispatch       [queue]       jobs        eval" "$FIRST"
 has "it opens on the queue tab" "groups  1 of 1" "$FIRST"
 has "with the pending group listed" "cart" "$FIRST"
 lacks "not on the dispatch tab" "dispatcher" "$FIRST"
 
 has "← reaches the dispatch tab's board" "dispatcher stopped" "$LAST"
+has "drawn inside a box titled dispatch" "┌─ dispatch ─" "$LAST"
+has "with dispatch the open tab on the strip" "← [dispatch]       queue" "$LAST"
 lacks "which is no longer the queue tab" "groups  1 of 1" "$LAST"
 
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
@@ -125,7 +128,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "Dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "dispatch        queue        jobs        eval" "$SECOND.plain"
+lacks "without drawing a screen" "dispatch       [queue]       jobs        eval" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "Dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -139,7 +142,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "Dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "dispatch        queue        jobs        eval" "$AFTER.plain"
+has "drawing the strip" "dispatch       [queue]       jobs        eval" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -157,7 +160,7 @@ has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "closed by enter" "[enter] close" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
-has "under the strip" "dispatch        queue        jobs        eval" "$LAST"
+has "under the strip" "dispatch       [queue]       jobs        eval" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.

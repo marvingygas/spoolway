@@ -1477,11 +1477,23 @@ fn spool_phase(elapsed_secs: u64) -> usize {
 /// Asked fresh every frame, so resizing the pane reflows the next redraw.
 /// The fallback is generous rather than tight: with no terminal to ask —
 /// output piped somewhere — clipping is not protecting any layout.
+///
+/// Inside bare `spoolway`'s dispatch tab the board draws inside a box — see
+/// [`boxed`] — and the box's two side borders come off first, so every row
+/// is laid out against the columns between them.
 pub(super) fn pane_width() -> usize {
-    terminal_size::terminal_size()
+    let width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
-        .unwrap_or(120)
+        .unwrap_or(120);
+    match crate::screen::shell::hosted() {
+        Some(_) => width.saturating_sub(BOX_SIDES),
+        None => width,
+    }
 }
+
+/// The columns the box around the hosted board takes, and the rows: one
+/// border on each side, and one border above and below.
+const BOX_SIDES: usize = 2;
 
 /// How tall the pane is, or `None` where there is no terminal to ask.
 ///
@@ -1492,10 +1504,101 @@ pub(super) fn pane_width() -> usize {
 ///
 /// Inside bare `spoolway`'s dispatch tab the tab strip takes its own rows off
 /// the top first — see `crate::screen::shell::strip_rows`, zero everywhere
-/// else — so the board is measured against what is actually left under it.
+/// else — and the box the board draws in there takes its top and bottom
+/// borders — see [`boxed`] — so the board is measured against what is
+/// actually left inside it. Left uncounted, the two borders push the board's
+/// foot under the key line and the top of the frame off the screen.
 pub(super) fn pane_height() -> Option<usize> {
+    let boxed = match crate::screen::shell::hosted() {
+        Some(_) => BOX_SIDES,
+        None => 0,
+    };
     terminal_size::terminal_size()
-        .map(|(_, h)| (h.0 as usize).saturating_sub(crate::screen::shell::strip_rows()))
+        .map(|(_, h)| (h.0 as usize).saturating_sub(crate::screen::shell::strip_rows() + boxed))
+}
+
+/// The hosted board's `body` inside a box titled `dispatch`, `inner` columns
+/// between its borders, with `keys` — the key line — under the bottom border,
+/// the way the queue, jobs and eval tabs draw theirs.
+///
+/// `height` is [`pane_height`]'s own: the body gets every row of it but the
+/// one the key line takes and the spare row left under it, cut to fit or
+/// padded with blank rows so the box always reaches the same bottom row.
+/// `None` — no terminal to measure — keeps every body row and pads none.
+///
+/// Each row is fitted to `inner` by its visible width — see [`fit_visible`]
+/// — so a row carrying colour codes or a hyperlink still ends in `│` in the
+/// terminal's last column rather than as far right as its escape bytes
+/// would count.
+pub(super) fn boxed(body: &str, keys: &str, inner: usize, height: Option<usize>) -> String {
+    let mut rows: Vec<&str> = body.lines().collect();
+    if let Some(height) = height {
+        let room = height.saturating_sub(2);
+        rows.truncate(room);
+        rows.resize(room, "");
+    }
+    let title = "─ dispatch ";
+    let dashes = inner.saturating_sub(title.chars().count());
+    let mut out = format!("┌{title}{}┐\n", "─".repeat(dashes));
+    for row in rows {
+        out.push_str(&format!("│{}│\n", fit_visible(row, inner)));
+    }
+    out.push_str(&format!("└{}┘\n", "─".repeat(inner)));
+    out.push_str(keys);
+    out.push('\n');
+    out
+}
+
+/// `line` cut or padded to exactly `width` visible characters, its escape
+/// codes kept whole and counted as no width at all — the same codes
+/// [`strip_ansi`] reads past. A line cut short has its colour reset and any
+/// hyperlink it opened closed, so neither runs on into the border after it.
+fn fit_visible(line: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut shown = 0;
+    let mut escaped = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            escaped = true;
+            out.push(c);
+            if chars.peek() == Some(&']') {
+                // An OSC sequence ends on `ESC \` or a bare BEL — see
+                // `strip_ansi` for why never on an `m`.
+                while let Some(c) = chars.next() {
+                    out.push(c);
+                    match c {
+                        '\u{7}' => break,
+                        '\u{1b}' => {
+                            out.extend(chars.next());
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                for c in chars.by_ref() {
+                    out.push(c);
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if shown == width {
+            // Cut here: a hyperlink closed with its target left empty is
+            // the one form every terminal reads as "link ends", open or not.
+            if escaped {
+                out.push_str(&format!("{OSC8}{ST}{RESET}"));
+            }
+            return out;
+        }
+        out.push(c);
+        shown += 1;
+    }
+    out.push_str(&" ".repeat(width - shown));
+    out
 }
 
 /// `text` cut to `room` visible characters, ending in `…` when anything had
@@ -1961,6 +2064,65 @@ mod tests {
         assert!(url.contains('m'), "the url needs an `m` for this to bite");
         let band = format!("{DIM}   ▌{OSC8}{url}{ST}proj-12-auth-rework{OSC8}{ST}{RESET}");
         assert_eq!(strip_ansi(&band), "   ▌proj-12-auth-rework");
+    }
+
+    /// A coloured row is padded by what a reader sees, not by its bytes: the
+    /// codes count for nothing, so the border after it lands where the
+    /// border after a plain row does.
+    #[test]
+    fn a_coloured_row_is_fitted_by_its_visible_width() {
+        let row = format!(" {DIM}● running{RESET}");
+        let fitted = fit_visible(&row, 14);
+        assert_eq!(strip_ansi(&fitted), " ● running    ");
+        assert!(fitted.starts_with(&row), "{fitted:?}");
+    }
+
+    /// A row cut short mid-colour and mid-link resets its colour and closes
+    /// its link, so neither runs on into the border drawn after it.
+    #[test]
+    fn a_clipped_row_closes_its_colour_and_link_before_the_border() {
+        let row = format!("{DIM}▌{OSC8}https://x.test{ST}proj-12-auth{OSC8}{ST}{RESET}");
+        let fitted = fit_visible(&row, 5);
+        assert_eq!(strip_ansi(&fitted), "▌proj");
+        assert!(
+            fitted.ends_with(&format!("{OSC8}{ST}{RESET}")),
+            "{fitted:?}"
+        );
+    }
+
+    /// The box: a `dispatch` title in the top border, every row ending in
+    /// `│` one column past `inner` — plain, coloured or clipped alike —
+    /// padded down to the height it was given, and the key line under the
+    /// bottom border.
+    #[test]
+    fn the_box_ends_every_row_in_the_last_column_under_a_dispatch_title() {
+        let body = format!("plain\n {DIM}dim{RESET}\n{}\n", "x".repeat(40));
+        let drawn = boxed(&body, "[q] quit", 20, Some(8));
+        let lines: Vec<&str> = drawn.lines().collect();
+        assert_eq!(lines[0], "┌─ dispatch ─────────┐");
+        assert_eq!(lines.len(), 1 + 6 + 1 + 1, "{drawn}");
+        for line in &lines[..lines.len() - 1] {
+            let seen = strip_ansi(line);
+            assert_eq!(seen.chars().count(), 22, "{seen:?}");
+        }
+        for line in &lines[1..7] {
+            assert!(line.starts_with('│') && line.ends_with('│'), "{line:?}");
+        }
+        assert_eq!(strip_ansi(lines[3]), format!("│{}│", "x".repeat(20)));
+        assert_eq!(lines[7], "└────────────────────┘");
+        assert_eq!(lines[8], "[q] quit");
+    }
+
+    /// More body than the box has rows for loses its last rows, never the
+    /// bottom border or the key line.
+    #[test]
+    fn a_body_taller_than_the_box_is_cut_above_the_bottom_border() {
+        let body = (0..10).map(|i| format!("row {i}\n")).collect::<String>();
+        let drawn = boxed(&body, "keys", 10, Some(5));
+        let lines: Vec<&str> = drawn.lines().collect();
+        assert_eq!(lines.len(), 1 + 3 + 1 + 1, "{drawn}");
+        assert_eq!(lines[3], "│row 2     │");
+        assert_eq!(lines[5], "keys");
     }
 
     /// A group's total counts a settled step the moment it banks, whether or

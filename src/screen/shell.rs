@@ -167,17 +167,15 @@ pub(crate) fn quit_hint() -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// The dispatch tab's own colour: the plan page's accent, `#d59a5c`, as the
-/// nearest 256-colour cell. Not any colour the board already paints a state
-/// with, so dispatch never reads as a row's `paused` or `blocked`.
-const ACCENT: &str = "\x1b[38;5;173m";
-
 /// How wide the strip is drawn with no terminal to measure: the width every
 /// mockup of this screen is drawn to.
 const FALLBACK_WIDTH: usize = 100;
 
-/// The gap between two tab labels on the strip.
-const LABEL_GAP: &str = "        ";
+/// The gap between two neighbouring tab slots on the strip. A slot is a
+/// label with one column either side for the open tab's brackets, so with
+/// these six spaces every label lands in the column it held when the strip
+/// marked the open tab by colour and spaced its labels eight apart.
+const SLOT_GAP: &str = "      ";
 
 /// The strip and the blank row under it, for a screen to put above its own
 /// frame — or nothing at all with no shell hosting one.
@@ -200,42 +198,30 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: `←` two columns in, `→` two
-/// columns short of the right edge, and the four labels centred between
-/// them. The open tab is in normal ink and every other label and both
-/// arrows are dim; dispatch is always in [`ACCENT`], bright when open and
-/// dim when not.
+/// The strip itself, `width` columns wide: the four tabs centred, each in a
+/// slot one column wider than its label on either side, and `←` and `→`
+/// one space outside the first and last slot. The open tab fills its slot's
+/// spare columns with `[` and `]`, the same mark the key line gives a key;
+/// every other slot leaves them blank. Nothing is coloured or dim — the
+/// brackets alone say which tab is open.
 ///
-/// Nothing is written past the `→`: a row that reaches the terminal's last
+/// At least two columns stay before `←` however narrow the terminal, and
+/// nothing is written past the `→`: a row that reaches the terminal's last
 /// column is followed by a newline the terminal has already wrapped for, and
 /// the frame under it comes out one row lower than it was measured for.
 fn strip_line(open: Tab, width: usize) -> String {
-    use crate::status::{DIM, RESET};
-
-    let labels: Vec<&str> = TABS.iter().map(|tab| tab.label()).collect();
-    let span = labels.iter().map(|l| l.chars().count()).sum::<usize>()
-        + LABEL_GAP.len() * (labels.len() - 1);
-    // Two columns of margin and the arrow on either side, and at least one
-    // space between an arrow and the nearest label.
+    let slots: Vec<String> = TABS
+        .iter()
+        .map(|tab| match *tab == open {
+            true => format!("[{}]", tab.label()),
+            false => format!(" {} ", tab.label()),
+        })
+        .collect();
+    let span =
+        slots.iter().map(|s| s.chars().count()).sum::<usize>() + SLOT_GAP.len() * (slots.len() - 1);
+    // Two columns of margin, the arrow, and one space before the first slot.
     let start = (width.saturating_sub(span) / 2).max(4);
-    let end = (start + span + 1).max(width.saturating_sub(3));
-
-    let mut line = format!("  {DIM}←{RESET}{}", " ".repeat(start - 3));
-    for (i, tab) in TABS.iter().enumerate() {
-        if i > 0 {
-            line.push_str(LABEL_GAP);
-        }
-        let ink = match (*tab == open, *tab == Tab::Dispatch) {
-            (true, true) => ACCENT.to_string(),
-            (false, true) => format!("{ACCENT}{DIM}"),
-            (true, false) => String::new(),
-            (false, false) => DIM.to_string(),
-        };
-        line.push_str(&format!("{ink}{}{RESET}", tab.label()));
-    }
-    line.push_str(&" ".repeat(end - start - span));
-    line.push_str(&format!("{DIM}→{RESET}"));
-    line
+    format!("{}← {} →", " ".repeat(start - 2), slots.join(SLOT_GAP))
 }
 
 /// Open the screen: bare `spoolway` in a terminal.
@@ -588,14 +574,16 @@ pub(crate) fn message_tab(
 mod tests {
     use super::*;
 
-    /// `line` with every `\x1b[...m` colour code taken out — the strip
-    /// paints nothing else.
+    /// `line` with every `\x1b[...` code taken out — the colour a tab's own
+    /// frame paints under the strip, which itself paints none, and the
+    /// screen clear ahead of it. Ends a code on any letter, not only `m`: the
+    /// clear's `J` and `H` would otherwise run the skip on into the strip.
     fn plain(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                chars.by_ref().find(|c| *c == 'm');
+                chars.by_ref().find(char::is_ascii_alphabetic);
             } else {
                 out.push(c);
             }
@@ -632,44 +620,37 @@ mod tests {
         assert!(!crate::commands::already_running(&repo, false).unwrap());
     }
 
-    // The mockup's own strip, drawn to 100 columns, column for column.
+    // The mockup's own strip for each open tab, drawn to 100 columns, column
+    // for column: every label in the column it held before the brackets.
     #[test]
     fn the_strip_lands_every_label_where_the_mockup_draws_it() {
-        let line = plain(&strip_line(Tab::Queue, 100));
+        let lines = TABS.map(|tab| strip_line(tab, 100));
         assert_eq!(
-            line,
-            "  ←                        dispatch        queue        jobs        eval                         →"
+            lines,
+            [
+                "                        ← [dispatch]       queue        jobs        eval  →",
+                "                        ←  dispatch       [queue]       jobs        eval  →",
+                "                        ←  dispatch        queue       [jobs]       eval  →",
+                "                        ←  dispatch        queue        jobs       [eval] →",
+            ]
         );
     }
 
+    // Brackets are the only mark: no label or arrow carries a colour code,
+    // open or closed.
     #[test]
-    fn the_open_tab_is_in_normal_ink_and_the_rest_are_dim() {
-        use crate::status::{DIM, RESET};
-        let line = strip_line(Tab::Queue, 100);
-        assert!(
-            line.contains(&format!("{LABEL_GAP}queue{RESET}")),
-            "{line:?}"
-        );
-        assert!(line.contains(&format!("{DIM}jobs{RESET}")), "{line:?}");
-        assert!(line.contains(&format!("{DIM}eval{RESET}")), "{line:?}");
-        assert!(line.contains(&format!("{DIM}←{RESET}")), "{line:?}");
-        assert!(line.contains(&format!("{DIM}→{RESET}")), "{line:?}");
-    }
-
-    #[test]
-    fn dispatch_is_always_in_the_accent_bright_when_open_and_dim_when_not() {
-        let closed = strip_line(Tab::Queue, 100);
-        assert!(closed.contains(&format!("{ACCENT}{}dispatch", crate::status::DIM)));
-        let open = strip_line(Tab::Dispatch, 100);
-        assert!(open.contains(&format!("{ACCENT}dispatch")));
-        assert!(!open.contains(&format!("{ACCENT}{}dispatch", crate::status::DIM)));
+    fn the_strip_draws_no_colour_code_on_any_tab() {
+        for tab in TABS {
+            let line = strip_line(tab, 100);
+            assert!(!line.contains('\x1b'), "{line:?}");
+        }
     }
 
     #[test]
     fn a_narrow_terminal_still_keeps_a_space_between_each_arrow_and_the_labels() {
-        let line = plain(&strip_line(Tab::Queue, 20));
-        assert!(line.starts_with("  ← "), "{line:?}");
-        assert!(line.ends_with(" →"), "{line:?}");
+        let line = strip_line(Tab::Queue, 20);
+        assert!(line.starts_with("  ←  dispatch"), "{line:?}");
+        assert!(line.ends_with("eval  →"), "{line:?}");
     }
 
     #[test]
@@ -712,12 +693,13 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
-            first.contains("dispatch        queue        jobs        eval"),
+            first.contains("dispatch       [queue]       jobs        eval"),
             "{first}"
         );
         assert!(first.contains("─ groups"), "{first}");
         let last = frames.last().unwrap();
         assert!(last.contains("dispatcher stopped"), "{last}");
+        assert!(last.contains("┌─ dispatch ─"), "{last}");
         assert!(!last.contains("─ groups"), "{last}");
         assert!(
             last.contains(
