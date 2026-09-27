@@ -968,9 +968,6 @@ pub enum QueueCommand {
     /// Queue whole task documents — the only way a task enters the queue.
     Add(QueueAddArgs),
 
-    /// Check queued tasks for overlapping `touches` globs.
-    Conflicts,
-
     /// Interrupt any live agent lane the task owns, then park it on `paused`
     /// — the same thing `p` does on the board for every state but one: a
     /// running command step, which the board asks a person about with its
@@ -1043,8 +1040,8 @@ pub struct QueueAddArgs {
     /// queued in the same breath is satisfied with nothing sorted first.
     ///
     /// Each document is `---\n<frontmatter>\n---\n<body>`, the same shape a
-    /// queued task is kept in. `id`, `touches`, `depends_on`, `parallel`,
-    /// `group`, `source`, `plan`, `pipeline`, `gate_at` and `base` are a
+    /// queued task is kept in. `id`, `depends_on`, `parallel`, `group`,
+    /// `source`, `plan`, `pipeline`, `gate_at` and `base` are a
     /// document's to set; `stage`, `run`, `attempts`, `base_commit` and
     /// `cut_from` are spoolway's alone, and a document setting one is
     /// refused by name. A document's own `base:` wins over `--base`; a

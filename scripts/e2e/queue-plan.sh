@@ -72,8 +72,8 @@ echo "queueing $selected of $count task(s) from $(basename "$PLAN") (pass $WANT_
 # lets `observer.html`'s `reads-doc` name `writes-doc` in `depends_on:`
 # while both are still in the same breath. The front matter keys are the
 # document's to set
-# (`id`, `pipeline`, `group`, `source`, `touches`, `depends_on`,
-# `parallel`); `group:` is the plan's own name, the key that groups the
+# (`id`, `pipeline`, `group`, `source`, `depends_on`, `parallel`);
+# `group:` is the plan's own name, the key that groups the
 # board and drains the chain as one, and `source:` carries the page's path
 # for a person to follow back.
 stream=""
@@ -123,7 +123,6 @@ for i in $(seq 0 $((count - 1))); do
     + "pipeline: " + (.pipeline | @json) + "\n"
     + (if $group != "" then "group: " + ($group | @json) + "\n" else "" end)
     + "source: " + ($source | @json) + "\n"
-    + list("touches"; .touches)
     + list("depends_on"; .depends_on)
     + (if .parallel == true then "parallel: true\n" else "" end)
   ' <<<"$task")
@@ -140,8 +139,7 @@ fi
 printf '%s' "$stream" | "$SPOOLWAY" queue add --from -
 
 # Step 6 and 7 of the skill: a plan whose tasks are not a chain stacks wrong,
-# and a plan under plans/ is a chain by construction — so this is a check that
-# the transcription above kept it one, not a judgement about the plan.
+# and a plan under plans/ is a chain by construction — so this is a look at
+# what actually queued, not a judgement about the plan.
 echo
-"$SPOOLWAY" queue conflicts || true
 "$SPOOLWAY" queue list

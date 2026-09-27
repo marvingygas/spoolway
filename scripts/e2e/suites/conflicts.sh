@@ -42,14 +42,14 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 task_doc "$LIVE/clash.md" clash "$BODY" "group: live" \
-  "touches: [src/main.rs]" "gate_at: document"
+  "gate_at: document"
 must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/clash.md"
 # A second rung, queued and never driven. Its only job is to still be open when
 # `clash` hands over, so that handover opens a pull request and stops instead of
 # going on to land the stack — landing merges the branch back into `plan/live`,
 # and the ancestry this suite is about reads backwards after that.
 task_doc "$LIVE/spare.md" spare "$BODY" "group: live" \
-  "touches: [src/spare.rs]" "depends_on: [clash]"
+  "depends_on: [clash]"
 must "and one above it, to keep the plan open" "$SPOOLWAY" queue add --from "$LIVE/spare.md"
 
 # Driven through its last agent step and held before the final command: its

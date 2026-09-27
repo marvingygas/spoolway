@@ -791,10 +791,10 @@ rm -f .spoolway/pipelines/gate-check.yml
 # newer group and the earlier name: the cursor opens on it under either
 # tie-break, and this case never depends on how fine-grained a birth time this
 # filesystem keeps.
-pending_doc screen-other "$BODY" "group: screen-other" "touches: [notes/other.md]"
-pending_doc screen-one "$BODY" "group: screen-batch" "touches: [notes/screen-one.md]"
+pending_doc screen-other "$BODY" "group: screen-other"
+pending_doc screen-one "$BODY" "group: screen-batch"
 pending_doc screen-two "$BODY" "group: screen-batch" \
-  "depends_on: [screen-one]" "touches: [notes/screen-two.md]"
+  "depends_on: [screen-one]"
 
 # space selects the highlighted group, enter submits it and reaches the
 # overview, `esc` declines it. The screen ends on its own the moment the
@@ -870,7 +870,7 @@ works "and clears the document out of the pending directory" \
 # keystroke off a real pipe.
 SCREEN_QUEUE_ONLY="$LIVE/screen-shipped.md"
 task_doc "$SCREEN_QUEUE_ONLY" screen-shipped "$BODY" \
-  "group: screen-shipped-group" "touches: [notes/screen-shipped.md]"
+  "group: screen-shipped-group"
 must "a group queued directly, never through the screen" \
   "$SPOOLWAY" queue add --from "$SCREEN_QUEUE_ONLY"
 works "it never touched the pending directory" \
@@ -898,7 +898,7 @@ has "\`h\` still lists a group whose documents are only in the queue now" \
 # tests read a synthetic fixture directory, never `Repo::archive_dir()`
 # after a real run.
 task_doc "$LIVE/archived-row.md" archived-row "$BODY" \
-  "group: arch-row" "touches: [notes/archived-row.md]"
+  "group: arch-row"
 must "a task queued for the archive-cycling case" \
   "$SPOOLWAY" queue add --from "$LIVE/archived-row.md"
 if drive archived-row gone 180; then
@@ -1079,7 +1079,7 @@ OLD_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/aged-queued-task.md"
 {
   echo "---"; echo "id: aged-queued-task"; echo "title: aged-queued-task, done"
   echo "stage: queued"; echo "group: live"; echo "pipeline: default"
-  echo "touches: [notes/aged-queued-task.md]"; echo "---"; cat "$BODY"
+  echo "---"; cat "$BODY"
 } > "$OLD_QUEUED"
 touch -d "2 days ago" "$OLD_QUEUED"
 

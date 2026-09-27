@@ -274,7 +274,7 @@ carried() {
 at_the_gate() {
   local task=$1 secs=$2 doctor=$3
   task_doc "$LIVE/$task.md" "$task" "$BODY" \
-    "group: live" "pipeline: warmth" "touches: [notes/$task.md]"
+    "group: live" "pipeline: warmth"
   must "a task for $task" "$SPOOLWAY" queue add --from "$LIVE/$task.md"
   if ! drive "$task" paused "$secs"; then
     bad "$task: the first real lane reached the gate (at \`$(stage_of "$task")\`)"
@@ -305,7 +305,7 @@ at_the_gate() {
   echo "stage: blocked"
   echo "blocked_from: first"
   echo "pipeline: warmth"
-  echo "touches: [notes/stuck.md]"
+  echo
   echo "---"
   printf '## Goal\n\nAdd `notes/stuck.md`.\n\n## Non-goals\n\nOut of scope.\n\n## Acceptance criteria\n\n- `notes/stuck.md` exists.\n'
 } > "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"

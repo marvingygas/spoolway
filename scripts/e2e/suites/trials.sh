@@ -42,8 +42,8 @@ task_body "$BODY"
 # A bare `pipeline:` line leaves each document genuinely unassigned — see
 # `task_doc`'s own doc comment — which is the whole point of this suite's
 # picker cases below.
-pending_doc alpha "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:"
-pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
+pending_doc alpha "$BODY" "group: audits" "pipeline:"
+pending_doc beta "$BODY" "group: audits" "pipeline:" \
   "depends_on: [alpha]"
 
 # `Tab` focuses the tasks pane on a task inside the group (`alpha`, first in
@@ -129,7 +129,6 @@ works "both source documents are left exactly where they were" \
 # again launches with nothing ticked to skip.
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
   "group: old-run" \
-  "touches: [src/main.rs]" \
   "stage: done" \
   "run: r00000000000000af" \
   "branch: task/old-run" \
@@ -209,7 +208,7 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 # itself.
 TRIAL_ID=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md" | awk '{print $2}')
 task_doc "$LIVE/control.md" control "$BODY" "group: control-live" \
-  "touches: [notes/control.md]" "pipeline: default" \
+  "pipeline: default" \
   "group_description: an ordinary control task beside the trial arms"
 must "control queues" "$SPOOLWAY" queue add --from "$LIVE/control.md"
 
@@ -326,7 +325,7 @@ for pipeline_file in .spoolway/pipelines/*.yml; do
   ' "$pipeline_file" > "$pipeline_file.gated" && mv "$pipeline_file.gated" "$pipeline_file"
 done
 
-pending_doc oneoff "$BODY" "group: oneoff" "touches: [notes/oneoff.md]"
+pending_doc oneoff "$BODY" "group: oneoff"
 printf 'foneoff\rt\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the one-task trial's arm reaches the queue" \

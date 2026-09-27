@@ -55,10 +55,11 @@ reading the file whole.
    coordination; **whole enough that one lane holds the change at once**, split by *subject*
    not size; **small in criteria too**, five bullets or split; **ordered**, chained with
    `depends_on` (a **join** — one task depending on two — rebases onto only one parent,
-   shipping silently missing the other's work); **disjoint** in files touched, so an overlap
-   is at worst a merge conflict. **A genuine fan is deliberate, not a default**: tasks with
-   nothing to say about each other's diff may skip the chain, but mark both `parallel: true`
-   when they do — still a mistake to share a `touches` glob.
+   shipping silently missing the other's work). Whether two tasks may run side by side is
+   judged from what each one actually changes, never from a shared file — a shared file
+   alone is no reason to chain them. **A genuine fan is deliberate, not a default**: tasks
+   whose changes do not step on each other may skip the chain, but mark both `parallel: true`
+   when they do.
 
    **Route each subject before sizing it, yourself.** Match each subject against step 1's
    contract — a bug found mid-plan wants `bugfix`, feature work beside it wants `default`,
@@ -140,8 +141,7 @@ reading the file whole.
    - `plan` — the calling page's own absolute path, when there is both an issue *and* a page
      — an issue read straight into tasks with no page carries no `plan:` at all, and neither
      does a page with no issue behind it, since `source:` already carries its path there.
-   - `touches`, `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate
-     fan.
+   - `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate fan.
 
    The body's `## Mockup` copies in the steps that task owns, from the calling record's own
    Mockup, only when the task changes something a person opens. Never paste a document's
@@ -161,11 +161,11 @@ reading the file whole.
    `parallel: true`, a chosen gap. **A join has to be fixed before you go on**: re-run step 2
    rather than patch ids after the fact.
 
-   Overlapping `touches` globs are not yours to resolve here any more. Nothing reports one
-   automatically either — the collision walk is gone, `enter` writes both documents straight
-   through with no `depends_on` invented, and `spoolway queue conflicts` is the only place an
-   overlap is named now. So say the pair out loud to the caller if you left one knowingly, and
-   never tell them something downstream will raise it; do not invent a section for it.
+   Whether two tasks are safe to run side by side is yours to judge from what each one
+   changes, not from a shared file — spoolway reports no overlap of its own, and `enter`
+   writes both documents straight through with no `depends_on` invented. So say the pair out
+   loud to the caller if you judged them safe beside each other on a shared file, and never
+   tell them something downstream will check it; do not invent a section for it.
 
    **Then check the top of the chain carries its own `last:` step.** The task with no
    dependent — the one nothing else in this breakdown depends on, or the only task where

@@ -151,10 +151,10 @@ pub struct Row {
     /// board's group band takes the first row of the group that has one as
     /// its hyperlink target — see the `group_urls` map in [`view::table`].
     pub issue_url: Option<String>,
-    /// Whether this task declared `parallel: true` — an overlap with another
-    /// declared-parallel task of the same group is deliberate, not a missing
-    /// `depends_on`. Marked on the row so a reader of the board sees the same
-    /// thing `queue conflicts` reasons from.
+    /// Whether this task declared `parallel: true` — a deliberate fan the
+    /// planner judged independent, not a missing `depends_on`. Marked on the
+    /// row so a reader of the board sees the same judgement the planner
+    /// made.
     pub parallel: bool,
     pub stage: String,
     /// How many times this task has arrived at the step it is on now —

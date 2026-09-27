@@ -30,7 +30,6 @@ const REQUIRED_KEYS: &[&str] = &["id", "title", "group", "pipeline"];
 const OPTIONAL_KEYS: &[&str] = &[
     "source",
     "plan",
-    "touches",
     "depends_on",
     "parallel",
     "gate_at",
@@ -126,18 +125,14 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          Kept but never parsed, and never required.",
     ),
     (
-        "touches",
-        "Glob patterns this task is expected to modify, used for conflict \
-         detection and reviewer-effort sizing.",
-    ),
-    (
         "depends_on",
         "Task ids that must finish before this one may start.",
     ),
     (
         "parallel",
-        "Set true only when a `touches` overlap with another task of the same \
-         group is deliberate, not a missing `depends_on`.",
+        "Set true to mark a deliberate fan the planner judged independent — a \
+         group's tasks may run side by side by nothing more than that \
+         judgement, not a missing `depends_on`.",
     ),
     (
         "pipeline",
@@ -345,9 +340,7 @@ fn print_contract(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
 /// `spoolway task contract --from`, once every document has passed: the same
 /// four things a person would otherwise have to read the code to know were
 /// checked, one line each, for every document in the batch.
-fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Result<()> {
-    let existing = repo.tasks()?;
-
+fn print_check_report(tasks: &[Task], pipelines: &Pipelines) -> Result<()> {
     for task in tasks {
         if tasks.len() > 1 {
             println!("{}", task.id());
@@ -363,35 +356,6 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
         // that check already confirmed, not to run a second one.
         pipelines.get(pipeline_name)?;
 
-        // The same overlap `queue conflicts` reports, against the queue as
-        // it stands today — advisory, like that command, and never a reason
-        // for this to exit non-zero: `queue add --from` does not refuse an
-        // overlap either, so neither does this.
-        let overlapping: Vec<&str> = existing
-            .iter()
-            .filter(|other| {
-                task.front.touches.iter().any(|glob| {
-                    other
-                        .front
-                        .touches
-                        .iter()
-                        .any(|theirs| crate::globs::overlaps(glob, theirs))
-                })
-            })
-            .map(Task::id)
-            .collect();
-        let touches = match overlapping.is_empty() {
-            true => format!(
-                "{} globs, overlapping nothing already queued",
-                task.front.touches.len()
-            ),
-            false => format!(
-                "{} globs, overlapping {} already queued",
-                task.front.touches.len(),
-                overlapping.join(", ")
-            ),
-        };
-
         let rows = [
             (
                 "frontmatter",
@@ -404,7 +368,6 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
                 "depends_on",
                 "every name resolves, in this set or in the queue".to_string(),
             ),
-            ("touches", touches),
         ];
         for (label, text) in rows {
             println!("  {label:<12} {text}");
@@ -437,7 +400,7 @@ pub fn task_contract(
 
     let documents = super::queue::gather_documents(&args.from)?;
     let tasks = super::queue::validate_batch(repo, pipelines, args.base.as_deref(), &documents)?;
-    print_check_report(&tasks, repo, pipelines)
+    print_check_report(&tasks, pipelines)
 }
 
 /// `spoolway task edit`: rewrite one section of a stopped task's document,

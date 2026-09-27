@@ -105,11 +105,6 @@ pub struct Frontmatter {
     /// as valid as the built-in ones.
     pub stage: String,
 
-    /// Glob patterns this task is expected to modify. Used for conflict
-    /// detection at queue time and for reviewer-effort auto rules.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub touches: Vec<String>,
-
     /// Task ids that must finish before this one may start.
     ///
     /// Every id named here has to belong to this task's own `group` — a
@@ -123,23 +118,18 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
 
-    /// Marks this task as meant to run beside the other declared-parallel
-    /// tasks of the same `group:`, rather than as one somebody forgot a
-    /// `depends_on` for. A document's own key, written by whoever produced
-    /// it — the two planning skills write `parallel: true` — not a flag on
-    /// any command.
+    /// Marks a deliberate fan the planner judged independent, rather than as
+    /// one somebody forgot a `depends_on` for. A document's own key, written
+    /// by whoever produced it — the two planning skills write `parallel:
+    /// true`, judging from what each task changes whether a group's tasks
+    /// may run side by side, never from any file overlap — not a flag on any
+    /// command.
     ///
-    /// It does not excuse a `touches` overlap. Two declared-parallel tasks
-    /// of one group that overlap are still reported by `queue conflicts`,
-    /// worded as a mistake in how the group was cut rather than a missing
-    /// edge: the pair said on purpose that they mean to run beside each
-    /// other, and the overlap is what that choice costs.
-    ///
-    /// Read only by `queue conflicts`, `queue list`, and the two planning
-    /// skills. Nothing that schedules or bases a task looks at it: the
-    /// dispatcher already starts every ready task at once, so this enables
-    /// nothing that was not already possible — it only tells the two queue
-    /// commands and the two skills that an overlap was chosen, not forgotten.
+    /// Read only by `queue list`, `spoolway stack`'s `siblings` line
+    /// (`parallel_conflicts`, which asks `git merge-tree` for a real
+    /// conflict), and the two planning skills. Nothing that schedules or
+    /// bases a task looks at it: the dispatcher already starts every ready
+    /// task at once, so this enables nothing that was not already possible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parallel: bool,
 
@@ -1280,6 +1270,10 @@ pub fn find(dirs: &[&Path], id: &str) -> Result<Task> {
 mod tests {
     use super::*;
 
+    // `touches:` is no longer a typed field, but a document that still sets
+    // it must keep loading and round-tripping — the key survives as
+    // passthrough in `extra`, the same as any other key spoolway does not
+    // name.
     const SAMPLE: &str = "---\nid: demo\nstage: queued\ntouches: [src/**]\n---\n## Goal\nDo a thing.\n\n## Status Log\n- earlier entry\n";
 
     #[test]
@@ -1287,7 +1281,12 @@ mod tests {
         let task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
         assert_eq!(task.id(), "demo");
         assert_eq!(task.stage(), "queued");
-        assert_eq!(task.front.touches, vec!["src/**"]);
+        assert_eq!(
+            task.front.extra.get("touches"),
+            Some(&serde_norway::Value::Sequence(vec![
+                serde_norway::Value::String("src/**".to_string())
+            ]))
+        );
         assert!(task.body.starts_with("## Goal"));
 
         let reparsed = Task::parse(PathBuf::from("demo.md"), &task.render().unwrap()).unwrap();

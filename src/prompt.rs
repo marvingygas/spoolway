@@ -401,7 +401,7 @@ fn agent_step(pipeline: &Pipeline, step: &Step) -> Result<()> {
 /// would have picked.
 fn sample_task(repo: &Repo, pipeline: &str, stage: &str) -> Result<Task> {
     let skeleton = crate::task_template::resolve(repo, pipeline);
-    let raw = format!("---\nid: example\nstage: {stage}\ntouches:\n  - src/**\n---\n{skeleton}");
+    let raw = format!("---\nid: example\nstage: {stage}\n---\n{skeleton}");
     Task::parse(repo.queue_dir().join("example.md"), &raw)
 }
 

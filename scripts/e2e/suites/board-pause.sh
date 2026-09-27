@@ -79,7 +79,7 @@ queue_hang() {
   local id=$1; shift
   mkdir -p "$CTL"
   echo hang > "$CTL/$id"
-  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: board" "touches: [notes/$id.md]" "$@"
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: board" "$@"
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
 
@@ -90,7 +90,7 @@ queue_hang() {
 queue_idle() {
   local id=$1 on=$2
   task_doc "$LIVE/$id.md" "$id" "$BODY" "group: board" \
-    "touches: [notes/$id.md]" "depends_on: [$on]"
+    "depends_on: [$on]"
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
 
@@ -520,14 +520,13 @@ has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME
 board_stop
 mkdir -p "$CTL"
 echo hang > "$CTL/chain-gate"
-task_doc "$LIVE/chain-gate.md" chain-gate "$BODY" "group: 0-chain" \
-  "touches: [notes/chain-gate.md]"
+task_doc "$LIVE/chain-gate.md" chain-gate "$BODY" "group: 0-chain"
 must "chain-gate queues" "$SPOOLWAY" queue add --from "$LIVE/chain-gate.md"
 task_doc "$LIVE/chain-head.md" chain-head "$BODY" "group: 0-chain" \
-  "touches: [notes/chain-head.md]" "depends_on: [chain-gate]"
+  "depends_on: [chain-gate]"
 must "chain-head queues" "$SPOOLWAY" queue add --from "$LIVE/chain-head.md"
 task_doc "$LIVE/chain-tail.md" chain-tail "$BODY" "group: 0-chain" \
-  "touches: [notes/chain-tail.md]" "depends_on: [chain-head]"
+  "depends_on: [chain-head]"
 must "chain-tail queues" "$SPOOLWAY" queue add --from "$LIVE/chain-tail.md"
 board_start
 
@@ -583,8 +582,7 @@ must "the unblocker's agent, so its own \`hang\` ctl mode is honoured" \
   "$SPOOLWAY" config set unattended.blocked_agent pi
 echo hang > "$CTL/stuck"
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/stuck.md" stuck "$BODY" \
-  "stage: blocked" "blocked_from: implement" "group: 0-blocked" \
-  "touches: [notes/stuck.md]"
+  "stage: blocked" "blocked_from: implement" "group: 0-blocked"
 board_start
 
 STUCK_PID=$(lane_pid "stuck · blocked" 30)
@@ -635,7 +633,7 @@ stage_reaches "the task lands back on \`blocked\`, not \`resume_target\`'s entry
 mkdir -p "$SOLUTIONS/pause-fail-catch"
 printf 'not a real patch\n' > "$SOLUTIONS/pause-fail-catch/implement.patch"
 task_doc "$LIVE/pause-fail-catch.md" pause-fail-catch "$BODY" "group: board" \
-  "touches: [notes/pause-fail-catch.md]" "gate_at: implement"
+  "gate_at: implement"
 must "pause-fail-catch queues" "$SPOOLWAY" queue add --from "$LIVE/pause-fail-catch.md"
 
 # `implement`'s own `on_fail` is `blocked` by default, so without the
@@ -664,7 +662,7 @@ stage_reaches "and it lands there" pause-fail-catch blocked 25
 # would run it: from outside the lane entirely, against a task already
 # parked.
 task_doc "$LIVE/gate-edit.md" gate-edit "$BODY" "group: board" \
-  "touches: [notes/gate-edit.md]" "gate_at: implement"
+  "gate_at: implement"
 must "gate-edit queues" "$SPOOLWAY" queue add --from "$LIVE/gate-edit.md"
 
 stage_reaches "a gated pass parks on paused" gate-edit paused 30

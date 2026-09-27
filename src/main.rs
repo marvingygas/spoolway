@@ -21,7 +21,6 @@ mod eval;
 mod fmt;
 mod gate;
 mod gitignore;
-mod globs;
 mod graph;
 mod headless;
 mod install;
@@ -423,16 +422,6 @@ fn run() -> Result<()> {
                 } => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     commands::queue_add(&repo, routing(&graph)?, args, &cwd, in_lane)
-                }
-                Command::Queue {
-                    command: Some(QueueCommand::Conflicts),
-                } => {
-                    // `queue_conflicts` no longer needs a `Pipelines` itself, but a
-                    // broken `pipelines.yml` should still refuse this the same as
-                    // every other queue command — so the value is checked and
-                    // dropped rather than left unpassed.
-                    routing(&graph)?;
-                    commands::queue_conflicts(&repo)
                 }
                 Command::Queue {
                     command: Some(QueueCommand::Pause(args)),

@@ -113,8 +113,8 @@ the page that buys nothing.
 - The decision's figure — drawn or mocked, per "The record's figure" below.
 - The paragraph after the figure — what it does not show: the name, the default, the thing a
   reader would otherwise get wrong.
-- `.cost` — one sentence naming what the decision costs. Never empty; a record with nothing
-  here was not a decision.
+- `.risks` — each risk this decision carries and how it is mitigated, one sentence per pair.
+  Never empty; a record with no risk to name was not a decision.
 - `.change` — the record's last line, painted highlighted: one plain sentence stating the
   change that will now happen.
 - Each mockup step's `<h3>` — two or three words naming the moment — and its figure. Nothing
@@ -181,7 +181,7 @@ a browser — `spoolway-tasks` reads it by name and learns nothing about the mar
 **Fill it last, in one pass once the rest of the page is done** — never mirrored slot by slot as
 each section above it is written; the block is prose written once, not markup kept in step with
 markup. It carries every heading, every paragraph, every mock panel and every decision's
-`forces`, `cost` and `change` line, from Intend through Mockup, in the page's own order; a
+`forces`, `risks` and `change` line, from Intend through Mockup, in the page's own order; a
 figure that has no Markdown form of its own appears as `[figure] ` followed by that figure's
 `aria-label`. A revision rewrites the whole block, the same pass it rewrites the prose and
 figures it followed.

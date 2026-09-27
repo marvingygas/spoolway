@@ -30,9 +30,6 @@
       "references": [
         "docs/cli.md \u2014 what this repository is"
       ],
-      "touches": [
-        "src/bails.rs"
-      ],
       "e2e": [
         "no suite \u2014 src/dispatch.rs's unit tests already cover where a block lands, attended and unattended",
         "scripts/e2e/plans/escalation.html \u2014 this task is the plan-side one"
@@ -59,9 +56,6 @@
       ],
       "references": [
         "src/main.rs \u2014 where the crate starts"
-      ],
-      "touches": [
-        "src/loops.rs"
       ],
       "e2e": [
         "src/dispatch.rs \u2014 the headless case for a route running out of rounds",
@@ -91,9 +85,6 @@
       ],
       "references": [
         "docs/cli.md \u2014 what this repository is"
-      ],
-      "touches": [
-        "src/quiet.rs"
       ],
       "e2e": [
         "src/dispatch.rs \u2014 the headless case for a lane that never reports",
@@ -131,7 +122,6 @@
         "docs/cli.md \u2014 what this repository is",
         "docs/pipelines.md#staffing-blocked \u2014 what the `blocked` step is staffed for and what it is not"
       ],
-      "touches": [],
       "e2e": [
         "src/dispatch.rs \u2014 the headless case: a lane really runs on `blocked` and its own pass is recorded",
         "scripts/e2e/plans/escalation.html \u2014 this task is the plan-side one, and the only one meant for a second, unattended pass"

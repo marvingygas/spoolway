@@ -42,7 +42,7 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # --------------------------------------------- the ordinary hand-off, once
-task_doc "$LIVE/shipped.md" shipped "$BODY" "group: live" "touches: [src/main.rs]"
+task_doc "$LIVE/shipped.md" shipped "$BODY" "group: live"
 must "a task" "$SPOOLWAY" queue add --from "$LIVE/shipped.md"
 
 if drive shipped gone 200; then ok "a task hands its change over and is archived"
@@ -107,7 +107,7 @@ HOLD="$LIVE/let-handed-through"
 # handover` is the first in the file; the one written just above is the last.
 sed -i '0,/^    on_pass: handover$/s//    on_pass: hold/' .spoolway/pipelines/default.yml
 
-task_doc "$LIVE/handed.md" handed "$BODY" "group: live" "touches: [src/main.rs]"
+task_doc "$LIVE/handed.md" handed "$BODY" "group: live"
 must "a task whose branch will end up empty" "$SPOOLWAY" queue add --from "$LIVE/handed.md"
 
 if drive_and_hold handed hold 150; then ok "it reaches the step before the hand-off with its own work still on the branch"

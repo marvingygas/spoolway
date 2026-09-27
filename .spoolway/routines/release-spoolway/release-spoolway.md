@@ -7,12 +7,6 @@ group_description: |
   `CHANGELOG.md` section, rehearse the release workflow on the exact release commit, tag it,
   and verify what npm and GitHub actually published. `docs/releasing.md` is the runbook.
 pipeline: release
-touches:
-  - "Cargo.toml"
-  - "Cargo.lock"
-  - "CHANGELOG.md"
-  - "herdr-plugin.toml"
-  - ".github/workflows/release.yml"
 ---
 
 ## Context

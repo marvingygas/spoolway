@@ -165,8 +165,6 @@ title: "feat(auth): add session tokens on top of login"
 group: auth
 pipeline: default
 base: main
-touches:
-  - src/auth/**
 depends_on:
   - login
 ---
