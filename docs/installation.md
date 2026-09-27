@@ -276,14 +276,8 @@ back, overwriting that provider's whole set with no `.bak` saved. Replacing a ho
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
 names a command or flag this binary does not have.
 
-On success, `sync` records this binary's version and a fingerprint of the text it would write
-in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
-stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
-the same per-checkout stamp for a freshly scaffolded or newly installed project.
-
-Every other command that needs a project reads that stamp back first. When it no longer
-matches and a scan finds files to change, the command stops and draws a confirm panel titled
-"new version installed, apply updates", listing each write and removal:
+At a terminal, with something to write or remove, `sync` lists it and waits before writing
+anything:
 
 ```
 ┌─ new version installed, apply updates ───────────────────────┐
@@ -294,19 +288,34 @@ matches and a scan finds files to change, the command stops and draws a confirm 
 │                                                                │
 │  Your config values, prompts and task skeletons are kept.     │
 │                                                                │
-│  [enter] confirm                                               │
+│  [enter] apply   [esc] cancel                                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Enter runs `sync` for real, rewrites the stamp, and then runs the command. Ctrl-c writes
-nothing, runs nothing, and restores the terminal. No other key does anything.
+Enter writes the files, records the version stamp described next, and prints the report `sync`
+always prints. Esc, ctrl-c, or the terminal going away mid-question writes nothing, changes no
+stamp, and prints "Nothing was changed." With no terminal to answer, under `--json`, inside a
+lane, with `--dry-run`, with `--replace`, or with nothing to write, `sync` writes straight away
+and draws no panel.
+
+On success, `sync` records this binary's version and a fingerprint of the text it would write
+in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
+stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
+the same per-checkout stamp for a freshly scaffolded or newly installed project.
+
+Every other command that needs a project reads that stamp back first. When it no longer
+matches and a scan finds files to change, the command stops and draws the same panel shown
+above, titled "new version installed, apply updates" — keyed `[enter] confirm` alone, since
+there is no separate cancel key besides ctrl-c. Enter runs `sync` for real, rewrites the stamp,
+and then runs the command. Ctrl-c writes nothing, runs nothing, and restores the terminal. No
+other key does anything.
 
 Bare `spoolway` asks the same question as a popup over the tab it opens on, closed by
 `[enter]` alone, since the screen's first frame would wipe a panel printed ahead of it. When the
 project's pipeline file cannot load, the screen cannot open to show the popup, so bare
-`spoolway` falls back to the printed panel described above.
+`spoolway` falls back to the printed panel just described.
 
-Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither the panel nor
+Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither this panel nor
 the popup is drawn. Instead one line goes to stderr and the command runs anyway:
 
 ```
@@ -314,8 +323,9 @@ spoolway wants to update: 1 file(s) in this checkout. Open spoolway to apply the
 ```
 
 Inside a lane the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
-`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel,
-the popup, or print the line.
+`whats-new`, `update`, `config edit` and `config override` never draw this panel, the popup, or
+print the line. `sync` never draws this one either: it asks its own version of the same
+question first, above.
 
 ## Platform notes
 

@@ -210,6 +210,104 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `spoolway sync` says when the panel was answered with esc or ctrl-c.
+const CANCELLED: &str = "Nothing was changed.";
+
+/// How the confirm panel in front of a real sync ended.
+enum Answer {
+    /// Enter: write the files and print [`run`]'s own report.
+    Apply,
+    /// Esc, ctrl-c, or the terminal going away mid-question: write nothing.
+    /// A read that ran out of input is a cancel rather than a yes, unlike
+    /// the gate's own default — here the only thing enter would do is write,
+    /// and this module's failure mode is "did nothing and said so".
+    Cancel,
+}
+
+/// `spoolway sync` as a person runs it: the files it is about to write or
+/// remove, drawn in the gate's own panel, and [`run`] only once enter says
+/// so. `run` itself never asks, because the gate's enter already calls it
+/// once a person has answered the identical panel.
+pub(crate) fn run_asking(repo: &Repo, args: &SyncArgs, json: bool, in_lane: bool) -> Result<()> {
+    run_asking_with(
+        repo,
+        args,
+        json,
+        in_lane,
+        crate::ask::interactive(),
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        crate::platform::TermGuard::new,
+        crate::gate::SigintGuard::new,
+    )
+}
+
+/// [`run_asking`]'s own logic over injected input, output, terminal and
+/// `SIGINT` handling — the same split, and the same reasons, as
+/// `crate::gate::confirm_sync_gate_with`.
+#[allow(clippy::too_many_arguments)]
+fn run_asking_with(
+    repo: &Repo,
+    args: &SyncArgs,
+    json: bool,
+    in_lane: bool,
+    interactive: bool,
+    input: &mut impl crate::screen::PollableRead,
+    out: &mut impl std::io::Write,
+    term: impl FnOnce() -> crate::platform::TermGuard,
+    interrupt: impl FnOnce() -> crate::gate::SigintGuard,
+) -> Result<()> {
+    // Nobody to answer, or nothing to ask about: a script (the e2e suites run
+    // `sync` with no terminal), `--json`, and a lane — whose pane can carry a
+    // real terminal nobody is watching, the hang `confirm_sync_gate_with`
+    // documents — write straight away. `--dry-run` writes nothing to ask
+    // about, and `--replace` names its files on the command line already.
+    if !interactive || json || in_lane || args.dry_run || !args.replace.is_empty() {
+        return run(repo, args, json);
+    }
+    let dry = SyncArgs {
+        dry_run: true,
+        replace: Vec::new(),
+    };
+    let outcomes = scan(repo, &dry)?;
+    let (wrote, removed) = dedup_paths(&outcomes);
+    if wrote.is_empty() && removed.is_empty() {
+        return run(repo, args, json);
+    }
+    let notes = migration_notes(&outcomes);
+    let keys = crate::screen::keys(&[("enter", "apply"), ("esc", "cancel")]);
+    let body = crate::gate::panel_body(&wrote, &notes, &removed);
+    for line in crate::screen::panel(crate::gate::TITLE, &body, &keys) {
+        writeln!(out, "{line}")?;
+    }
+
+    // Taken only around the one read that blocks, and given back before
+    // anything else prints — `run`'s report is ordinary output and must land
+    // on a terminal with its cursor and echo restored.
+    let answer = {
+        let _term = term();
+        let _sigint = interrupt();
+        loop {
+            match crate::screen::read_key(input) {
+                Some(crate::screen::Key::Enter) => break Answer::Apply,
+                // Ctrl-c arrives as `SIGINT`, never as a byte — see
+                // `crate::gate`'s module doc — so it lands here as the read
+                // failing (`None`), the same as input running out. The gate
+                // has to tell those two apart; here both mean write nothing.
+                Some(crate::screen::Key::Esc) | None => break Answer::Cancel,
+                _ => {}
+            }
+        }
+    };
+    match answer {
+        Answer::Apply => run(repo, args, json),
+        Answer::Cancel => {
+            writeln!(out, "{CANCELLED}")?;
+            Ok(())
+        }
+    }
+}
+
 /// The paths worth naming out of a scan, deduplicated: one file can be
 /// behind for several reasons at once — a config gains a setting and drops a
 /// retired one in the same rewrite — and a path printed twice reads as two
@@ -1253,6 +1351,102 @@ mod tests {
             dry_run: false,
             replace: Vec::new(),
         }
+    }
+
+    /// [`run_asking_with`] over `keys` as typed input, with an inert
+    /// terminal and `SIGINT` guard, returning what it drew — the panel and
+    /// the cancel line, never `run`'s report, which prints to the real
+    /// stdout.
+    fn ask(
+        repo: &Repo,
+        args: &SyncArgs,
+        json: bool,
+        in_lane: bool,
+        tty: bool,
+        keys: &str,
+    ) -> String {
+        let mut input = std::io::Cursor::new(keys.as_bytes().to_vec());
+        let mut out = Vec::new();
+        run_asking_with(
+            repo,
+            args,
+            json,
+            in_lane,
+            tty,
+            &mut input,
+            &mut out,
+            crate::platform::TermGuard::inert,
+            crate::gate::SigintGuard::inert,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// Enter at the panel writes the files, records the stamp and draws
+    /// nothing more than the panel itself; a stray key before it is ignored.
+    #[test]
+    fn asking_sync_writes_only_once_enter_is_pressed() {
+        let repo = fixture("ask-enter");
+        let drawn = ask(&repo, &args(), false, false, true, "q\r");
+        assert!(drawn.contains(crate::gate::TITLE), "{drawn}");
+        assert!(drawn.contains("config.toml"), "{drawn}");
+        assert!(drawn.contains("[enter] apply"), "{drawn}");
+        assert!(drawn.contains("[esc] cancel"), "{drawn}");
+        assert!(!drawn.contains(CANCELLED), "{drawn}");
+        assert!(Config::path_in(&repo.checkout).is_file());
+        assert!(stamp_path(&repo.home).is_file());
+    }
+
+    /// Esc, and ctrl-c — which reaches `read_key` as a read that failed,
+    /// the same `None` as input running out — write nothing, leave the
+    /// stamp alone and say so.
+    #[test]
+    fn asking_sync_writes_nothing_on_esc_or_ctrl_c() {
+        for (name, keys) in [("ask-esc", "\x1b"), ("ask-ctrl-c", "")] {
+            let repo = fixture(name);
+            let drawn = ask(&repo, &args(), false, false, true, keys);
+            assert!(drawn.contains(crate::gate::TITLE), "{name}: {drawn}");
+            assert!(
+                drawn.ends_with(&format!("{CANCELLED}\n")),
+                "{name}: {drawn}"
+            );
+            assert!(!Config::path_in(&repo.checkout).exists(), "{name}");
+            assert!(!stamp_path(&repo.home).exists(), "{name}");
+        }
+    }
+
+    /// No terminal, `--json` or a lane: written straight away with no panel
+    /// and no key read — `keys` is empty, so a read would cancel and leave
+    /// the config unwritten rather than pass by accident.
+    #[test]
+    fn asking_sync_writes_straight_away_with_nobody_to_answer() {
+        for (name, json, in_lane, tty) in [
+            ("ask-no-tty", false, false, false),
+            ("ask-json", true, false, true),
+            ("ask-lane", false, true, true),
+        ] {
+            let repo = fixture(name);
+            let drawn = ask(&repo, &args(), json, in_lane, tty, "");
+            assert!(drawn.is_empty(), "{name}: {drawn}");
+            assert!(Config::path_in(&repo.checkout).is_file(), "{name}");
+            assert!(stamp_path(&repo.home).is_file(), "{name}");
+        }
+    }
+
+    /// `--dry-run` never draws the panel, and neither does a sync with
+    /// nothing left to write.
+    #[test]
+    fn asking_sync_draws_no_panel_for_a_dry_run_or_nothing_to_do() {
+        let repo = fixture("ask-dry-run");
+        let dry = SyncArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        assert!(ask(&repo, &dry, false, false, true, "").is_empty());
+        assert!(!Config::path_in(&repo.checkout).exists());
+
+        run(&repo, &args(), false).unwrap();
+        assert!(ask(&repo, &args(), false, false, true, "").is_empty());
     }
 
     fn outcome_lines(outcomes: &[Outcome]) -> Vec<String> {

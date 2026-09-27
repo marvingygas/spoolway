@@ -499,7 +499,12 @@ fn run() -> Result<()> {
                     crate::install::report(installed);
                     Ok(())
                 }
-                Command::Sync(args) => sync::run(&repo, args, cli.json),
+                Command::Sync(args) => sync::run_asking(
+                    &repo,
+                    args,
+                    cli.json,
+                    std::env::var_os(dispatch::ENV_STEP).is_some(),
+                ),
             }
         }
     }

@@ -47,6 +47,11 @@
 //! or touching that flag. Installed and restored to whatever was there
 //! before around this one blocking read alone, so ctrl-c means exactly what
 //! it always has in whatever this process runs next, gate or no gate.
+//!
+//! `spoolway sync` asks the same question over the same rows before it
+//! writes — see `crate::sync::run_asking` — and borrows [`TITLE`],
+//! [`panel_body`] and [`SigintGuard`] from here rather than keeping a second
+//! copy of either the panel or the one handler that makes ctrl-c unblock it.
 
 use std::io::Write;
 
@@ -62,7 +67,7 @@ use crate::screen::{self, Key, PollableRead};
 /// paths in it are.
 const MAX_LINE: usize = 74;
 
-const TITLE: &str = "new version installed, apply updates";
+pub(crate) const TITLE: &str = "new version installed, apply updates";
 const KEPT_LINE: &str = "Your config values, prompts and task skeletons are kept.";
 const KEYS: &str = "[enter] confirm";
 
@@ -85,7 +90,7 @@ enum Answer {
 /// fact of the interrupt itself is [`crate::platform::stop`]'s own shared
 /// one, read back through the `interrupted` closure so a test never has to
 /// touch it.
-struct SigintGuard {
+pub(crate) struct SigintGuard {
     previous: libc::sigaction,
     /// An inert guard installs and restores nothing — test-only, the same
     /// reason `TermGuard::inert` exists: a test must never touch the real
@@ -98,7 +103,7 @@ extern "C" fn record_interrupt(_: libc::c_int) {
 }
 
 impl SigintGuard {
-    fn new() -> SigintGuard {
+    pub(crate) fn new() -> SigintGuard {
         // SAFETY: `action` and `previous` are plain-old-data structs;
         // `sigemptyset` and `sigaction` are ordinary syscalls against a
         // buffer this function owns for the call's duration.
@@ -120,7 +125,7 @@ impl SigintGuard {
     }
 
     #[cfg(test)]
-    fn inert() -> SigintGuard {
+    pub(crate) fn inert() -> SigintGuard {
         SigintGuard {
             // SAFETY: never installed and never restored — see `inert`.
             previous: unsafe { std::mem::zeroed() },
@@ -337,8 +342,9 @@ fn print_panel(
     Ok(())
 }
 
-/// The rows inside the panel, shared by the printed gate and [`sync_popup`].
-fn panel_body(
+/// The rows inside the panel, shared by the printed gate, [`sync_popup`]
+/// and `spoolway sync`'s own confirm — see `crate::sync::run_asking`.
+pub(crate) fn panel_body(
     wrote: &[&str],
     notes: &std::collections::BTreeMap<&str, Vec<(&str, &str)>>,
     removed: &[(&str, &str)],
