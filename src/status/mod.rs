@@ -101,6 +101,12 @@ pub enum State {
     /// Something is working the task right now: a live lane, or the run of a
     /// command step, which has no lane at all.
     Running,
+    /// The dispatcher has claimed a slot for the task and is booting its
+    /// lane, which herdr does not list until the boot is well along — read
+    /// off the dispatcher's boot mark, see [`crate::claim`]. The row names
+    /// the step being booted, which is not yet the task's own stage when
+    /// it is coming off `queued`.
+    Starting,
     /// At the pipeline's blocked step, carrying its reason.
     Blocked,
     /// A live lane's pane is holding a permission prompt — herdr's own
@@ -1725,9 +1731,9 @@ fn render(
     // can act on: when the next pass is due changes nothing they would do,
     // and how long the run has been up only ever said the board was alive —
     // which is not worth the room the version now takes. The spool beside
-    // the wordmark turns while a lane is running; with nothing running the
-    // board holds still, and a still board over a still queue is the truth
-    // rather than something to animate over.
+    // the wordmark turns while a lane is running or starting; with nothing
+    // running the board holds still, and a still board over a still queue is
+    // the truth rather than something to animate over.
     let version = version_label(crate::release::installed_newer().as_deref());
     let header = match phase {
         Phase::Watching {
@@ -1756,11 +1762,12 @@ fn render(
     }
     // The spool only turns while something on the board reads `Running` — a
     // lane, a command step, or a row still inside its own handoff grace
-    // window — so a queue with nothing to do, and nothing about to, prints
-    // the still mark instead. A mid-handoff row turning the spool with
+    // window — or `Starting`, a lane the dispatcher is booting, so a queue
+    // with nothing to do, and nothing about to, prints the still mark
+    // instead. A mid-handoff row turning the spool with
     // neither a lane nor a command step behind it is that third case working
     // as the mockup intends, not an animation with nothing behind it.
-    let running = rows.iter().any(|row| row.state == State::Running);
+    let running = logo_turns(&rows);
     frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
     frame.push('\n');
 
@@ -2034,6 +2041,55 @@ struct SlotsUsed<'a> {
     agent_model: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
+/// Whether the masthead's spool turns this frame: while any row reads
+/// `Running`, or `Starting` — the dispatcher is working that task too, only
+/// its agent is not up yet.
+fn logo_turns(rows: &[Row]) -> bool {
+    rows.iter()
+        .any(|row| matches!(row.state, State::Running | State::Starting))
+}
+
+/// Where `task` goes once `step_id` passes, for the NEXT column of a row
+/// working that step — a running one, or a starting one whose boot mark
+/// names it.
+///
+/// One step ahead and no further. The whole remaining chain is a fact about
+/// the pipeline, which does not change and is one `spoolway pipeline show`
+/// away; what moves — and so what is worth a column that redraws every
+/// second — is where this task goes when the step it is on passes.
+///
+/// A gated step used to read its lane's question out of `## Blocker` here.
+/// There is no question: a gated lane works and reports like any other, and
+/// the waiting happens after it, on `paused`, which has a row of its own.
+///
+/// A `gate_at` naming this step is `s`'s own schedule, still live: the step
+/// it names is where it is headed regardless of what the pipeline's own
+/// `on_pass` would otherwise carry it to, since `commands::report` is about
+/// to park it there the moment this step reports at all — whatever it
+/// reports, not only a pass.
+fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_id: &str) -> String {
+    if task.front.gate_at.as_deref() == Some(step_id) {
+        format!("→ paused after {step_id}")
+    } else if step_id == crate::pipeline::BLOCKED {
+        // `blocked` names no `on_pass` of its own, and its resumability is a
+        // person's question, not a lane's — a staffed lane working it right
+        // now reads the same destination a cleared block would, and nothing
+        // else. Not resumable: a lane is already working this step, so there
+        // is no `[r]` action to offer here.
+        blocked_next(task, pipeline, false)
+    } else {
+        match pipeline.next_running_step(step_id) {
+            // Plain text, no colour: this string is clipped to the room the
+            // pane has left, and a cut through an escape sequence dyes the
+            // rest of the board. No arrival count here — see `arrivals` in
+            // `build_rows`, which counts the step this task is *on* rather
+            // than the one named here.
+            Some(next) => format!("→ {next}"),
+            None => "→ done".to_string(),
+        }
+    }
+}
+
 /// Where a pass out of `blocked` would carry this task, prefixed for the NEXT
 /// column — `cleared_block_target` itself, so the board can never name a
 /// destination the dispatcher would not actually take it to. Read for both a
@@ -2160,15 +2216,25 @@ fn build_rows(
     // weeks held thousands of dead ones (review finding 54). The set collected
     // here prunes the cache at the end of the render.
     let mut live_sessions: HashSet<String> = HashSet::new();
+    // Every task a live dispatcher is booting a lane for this frame, and the
+    // step it is booting — empty with no dispatcher behind the lock, so a
+    // mark a killed one left never pins a row on `starting`.
+    let claims = crate::claim::live(repo);
     let mut rows: Vec<Row> = Vec::new();
     for task in tasks {
         let pipeline = pipelines.for_task(task)?;
         let step = pipeline.step(task.stage());
+        // The step a boot mark names, when there is one. It is what STEP
+        // reads for this row: a task coming off `queued` keeps that stage
+        // on disk until its boot has returned, and the row should name the
+        // step being booted rather than the queue it is leaving.
+        let claimed = claims.get(task.id()).map(String::as_str);
+        let shown_stage = claimed.unwrap_or(task.stage());
         // How many times the task has reached the step it is on, whichever
         // route carried it there each time. Computed once, ahead of the
         // match below, because it is a fact about the step a task sits on
         // and not about any one of the states that match branches out into.
-        let arrivals = task.rounds_at(task.stage());
+        let arrivals = task.rounds_at(shown_stage);
         let lane = crate::mux::lane_name(task.stage(), task.id());
         // By name alone: a task's lane runs in its own worktree, so the
         // checkout path is no test of ownership here the way it is in a pass.
@@ -2227,6 +2293,10 @@ fn build_rows(
         // step it goes to; for one that is stuck it is whatever has to happen
         // before it moves at all, which is a person far more often than a step.
         let (state, next, resumable) = match step {
+            // Ahead of every other arm, the task's own stage included: while
+            // the mark stands the dispatcher is booting this step, whatever
+            // the task file still says.
+            _ if claimed.is_some() => (State::Starting, onward(task, pipeline, shown_stage), false),
             // The dispatcher's own states. `queued` names the dependency it is
             // held by, which is the only thing worth saying about a task there
             // — a fixed description said the same thing at every one of them.
@@ -2356,48 +2426,7 @@ fn build_rows(
                     true => State::Running,
                     false => State::Queued,
                 };
-                // One step ahead and no further. The whole remaining chain is a
-                // fact about the pipeline, which does not change and is one
-                // `spoolway pipeline show` away; what moves — and so what is
-                // worth a column that redraws every second — is where this
-                // task goes when the step it is on passes.
-                //
-                // A gated step used to read its lane's question out of
-                // `## Blocker` here. There is no question: a gated lane works
-                // and reports like any other, and the waiting happens after it,
-                // on `paused`, which has a row of its own above.
-                //
-                // A `gate_at` naming the step this task is on right now is
-                // `s`'s own schedule, still live: the step it names is where
-                // it is headed regardless of what the pipeline's own
-                // `on_pass` would otherwise carry it to, since
-                // `commands::report` is about to park it there the moment
-                // this step reports at all — whatever it reports, not only a
-                // pass.
-                let next = if task.front.gate_at.as_deref() == Some(step.id.as_str()) {
-                    format!("→ paused after {}", step.id)
-                } else if step.id == crate::pipeline::BLOCKED {
-                    // `blocked` names no `on_pass` of its own, and its
-                    // resumability is a person's question, not a lane's — a
-                    // staffed lane working it right now reads the same
-                    // destination a cleared block would, and nothing else:
-                    // acceptance criterion 1. Not resumable: a lane is
-                    // already working this step, so there is no `[r]` action
-                    // to offer here.
-                    blocked_next(task, pipeline, false)
-                } else {
-                    match pipeline.next_running_step(&step.id) {
-                        // Plain text, no colour: this string is clipped to the
-                        // room the pane has left, and a cut through an escape
-                        // sequence dyes the rest of the board. No arrival
-                        // count here — see `arrivals`, above, which counts
-                        // the step this task is *on* rather than the one
-                        // named here.
-                        Some(next) => format!("→ {next}"),
-                        None => "→ done".to_string(),
-                    }
-                };
-                (state, next, false)
+                (state, onward(task, pipeline, &step.id), false)
             }
         };
         // The lane's clock, which runs from the launch of the round in flight
@@ -2414,7 +2443,7 @@ fn build_rows(
             group: task.front.group.clone(),
             issue_url: issue_url_of(task),
             parallel: task.front.parallel,
-            stage: task.stage().to_string(),
+            stage: shown_stage.to_string(),
             arrivals,
             pipeline: pipeline.name.clone(),
             state,
@@ -3745,6 +3774,62 @@ mod tests {
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.state.word(), "○ queued");
         assert_eq!(row.next, "waiting on: search-typo");
+    }
+
+    /// A task the dispatcher is booting reads `◌ starting` on the step its
+    /// boot mark names, with that step's next hop in NEXT — though the task
+    /// file still says `queued` — and the logo turns for it.
+    #[test]
+    fn a_claimed_task_reads_starting_on_its_claimed_step() {
+        let repo = fixture("claimed-starting");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        add(&repo, "profile", &[], Some(crate::pipeline::QUEUED));
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let mut claims = crate::claim::Claims::new(&repo);
+        claims.claim("login", "implement");
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Starting), "{}", row.next);
+        assert_eq!(row.state.word(), "◌ starting");
+        assert_eq!(row.stage, "implement");
+        let pipeline = pipelines.get("default").unwrap();
+        let hop = pipeline.next_running_step("implement").unwrap();
+        assert_eq!(row.next, format!("→ {hop}"));
+        let other = rows.iter().find(|r| r.id == "profile").unwrap();
+        assert!(matches!(other.state, State::Queued), "{}", other.next);
+        assert!(logo_turns(&rows));
+        assert!(!logo_turns(std::slice::from_ref(other)));
+
+        // The boot returned: the mark is gone and the row reads as before.
+        claims.release("login");
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Queued), "{}", row.next);
+        assert_eq!(row.stage, crate::pipeline::QUEUED);
+    }
+
+    /// A mark with no live dispatcher behind the lock is one a killed
+    /// dispatcher left: the row reads `queued`, never `starting`.
+    #[test]
+    fn a_boot_mark_with_no_live_dispatcher_is_ignored() {
+        let repo = fixture("claimed-stale");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let mut claims = crate::claim::Claims::new(&repo);
+        claims.claim("login", "implement");
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Queued), "{}", row.next);
+        assert_eq!(row.stage, crate::pipeline::QUEUED);
+        assert!(!logo_turns(&rows));
     }
 
     /// A live lane's clock is its own: `now - launched_at`, not whatever the

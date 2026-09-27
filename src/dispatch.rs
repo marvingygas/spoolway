@@ -881,6 +881,11 @@ impl<'a> Dispatcher<'a> {
 
     fn run_pass(&mut self, tick: &mut dyn FnMut()) -> Result<Report> {
         let mut report = Report::default();
+        // Any boot mark still on disk is one a dispatcher killed mid-boot
+        // left behind — this pass's own are set and cleared inside
+        // `start_lanes` — so it goes before anything here could set a new
+        // one. See [`crate::claim`].
+        crate::claim::clear(self.repo);
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
 
@@ -3380,6 +3385,12 @@ impl<'a> Dispatcher<'a> {
         // See [`Dispatcher::pass`]'s own doc on `tick` for why the boot
         // itself, and not the prep ahead of it, is what moves onto threads.
         let mut pending: Vec<PendingLane> = Vec::new();
+        // Each candidate that clears the caps below is marked as booting
+        // from that moment until its boot returns, so the board reads it as
+        // `starting` instead of `queued` meanwhile — see [`crate::claim`].
+        // Dropped at the end of this call, which clears whatever a `?` out
+        // of the bookkeeping below left marked.
+        let mut claims = crate::claim::Claims::new(self.repo);
 
         for candidate in candidates {
             // Between each lane start — see [`Dispatcher::pass`]'s
@@ -3620,6 +3631,7 @@ impl<'a> Dispatcher<'a> {
             }
 
             let task = &mut tasks[candidate.task_index];
+            claims.claim(task.id(), &step.id);
 
             // A retry reuses the lane name, so the previous attempt's record is
             // about to be overwritten. Bank what it spent first: those tokens
@@ -3711,6 +3723,7 @@ impl<'a> Dispatcher<'a> {
                     });
                 }
                 Err(err) => {
+                    claims.release(task.id());
                     if let Some(stuck) = handover.filter(|handover| !handover.ready) {
                         // Nothing replaced it, so it is not closed here.
                         // Handed back instead, and closed with the rest of
@@ -3776,6 +3789,7 @@ impl<'a> Dispatcher<'a> {
                 }
                 Err(err) => {
                     let task = &mut tasks[pending[i].candidate.task_index];
+                    claims.release(task.id());
                     // Handed back rather than closed — see the matching
                     // arm above, where a stuck pane first gets this
                     // treatment.
@@ -3816,6 +3830,9 @@ impl<'a> Dispatcher<'a> {
         // more.
         for (&i, prompt_result) in ready.iter().zip(prompt_results) {
             let task = &mut tasks[pending[i].candidate.task_index];
+            // Its boot has returned, whichever way — the lane is up and
+            // listed, or the failure below settles the task.
+            claims.release(task.id());
             let handover = pending[i].handover.take();
             match prompt_result {
                 Ok(started) => {
@@ -8767,6 +8784,66 @@ mod tests {
             "{:?}",
             report.problems
         );
+    }
+
+    /// Every claimed candidate carries a boot mark naming its step for as
+    /// long as its boot runs, and none is left once the pass returns — the
+    /// mark the board reads as `◌ starting`. See [`crate::claim`].
+    #[test]
+    fn a_claimed_lane_is_marked_while_it_boots_and_cleared_after() {
+        let repo = fixture("claim-mark-while-booting");
+        for id in ["a", "b"] {
+            add_task(&repo, id, crate::pipeline::QUEUED);
+        }
+        let mux = FakeMux::new(vec![]).with_boot_delay(Duration::from_millis(800));
+
+        let seen = std::thread::scope(|scope| {
+            let pass = scope.spawn(|| run_pass(&repo, &mux));
+            let mut seen: BTreeMap<String, String> = BTreeMap::new();
+            while !pass.is_finished() {
+                for id in ["a", "b"] {
+                    if let Ok(step) = std::fs::read_to_string(repo.claims_dir().join(id)) {
+                        seen.insert(id.to_string(), step);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            pass.join().unwrap();
+            seen
+        });
+
+        assert_eq!(
+            seen.get("a").map(String::as_str),
+            Some("implement"),
+            "{seen:?}"
+        );
+        assert_eq!(
+            seen.get("b").map(String::as_str),
+            Some("implement"),
+            "{seen:?}"
+        );
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// A boot that fails clears its mark the same as one that succeeds, and
+    /// a mark a killed dispatcher left behind is swept by the next pass.
+    #[test]
+    fn a_failed_boot_and_a_leftover_mark_both_leave_no_mark() {
+        let repo = fixture("claim-mark-failed-boot");
+        add_task(&repo, "a", crate::pipeline::QUEUED);
+        crate::task::write_atomic(&repo.claims_dir().join("gone"), "review").unwrap();
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+
+        run_pass(&repo, &mux);
+
+        assert!(!mux.did("start").is_empty(), "{:?}", mux.did("start"));
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
     }
 
     /// `tick` keeps the keyboard alive while a lane's boot runs — see

@@ -67,8 +67,8 @@ const NO_CURSOR: &str = "  ";
 /// Two frames because the mark has two hand-drawn ones, thread on opposite
 /// phases — see `docs/logo/mark.py`. `masthead` takes which frame to draw:
 /// the board picks between them off the wall clock while at least one row is
-/// running, and holds frame 0 — the logo exactly as it ships — the moment
-/// nothing is, the same as `banner` and every other caller.
+/// running or starting, and holds frame 0 — the logo exactly as it ships —
+/// the moment nothing is, the same as `banner` and every other caller.
 ///
 /// A half-block splits the cell 1x2, which makes each pixel square, because a
 /// character cell is about twice as tall as it is wide. That is the whole
@@ -140,6 +140,7 @@ impl State {
         match self {
             State::Paused => "● paused",
             State::Running => "● running",
+            State::Starting => "◌ starting",
             State::Blocked => "● blocked",
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
@@ -156,6 +157,10 @@ impl State {
             // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
+            // Running's own colour: the dispatcher is working this task, it
+            // is only that the agent is not up yet. The hollow dot is what
+            // tells the two apart.
+            State::Starting => format!("{GREEN}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
             // A live lane, not a stop, so it takes `Running`'s own colour —
             // the task has not left its step, only paused for a keystroke.
@@ -1710,9 +1715,11 @@ mod tests {
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
         assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
+        assert_eq!(State::Starting.dot(), format!("{GREEN}◌ starting{RESET}"));
         for state in [
             State::Paused,
             State::Running,
+            State::Starting,
             State::Blocked,
             State::Prompt,
             State::Queued,
