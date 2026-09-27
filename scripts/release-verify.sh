@@ -2,11 +2,13 @@
 # Prove the release the repository claims actually shipped, as an exit code.
 # Run by the `released` step of the release pipeline, after `publish`.
 #
-# This step exists because `publish` is an agent step: under
-# `unattended.skip_blocked_lane` a cleared block on an agent step carries the
-# task one step past it, so a release could reach `done` without anything
-# being published. A command step is never carried past, so whatever this
-# script asserts is the real condition for `done`.
+# This step exists because a release is not `done` on anyone's say-so, agent
+# or script — it is done when the tag, the packages, the archives and the
+# published body actually exist. `publish` pushes the tag and watches its
+# workflow, but a workflow exit code is not the registry's own state, and a
+# release that recovered from a partial publish should not be trusted merely
+# because the recovery lane reported success. This script reads the public
+# record directly and is the real condition for `done`.
 #
 # Every check below reads the version from `origin/main`, so a `publish` that
 # pushed nothing at all leaves this script proving the release that shipped
@@ -20,9 +22,12 @@
 # `SPOOLWAY_HEAD`, which carries the same fact in one word; command steps
 # are not, so this reads the document instead.)
 #
-# Needs only git, curl, jq and gh — deliberately not node or npm, which a
-# release lane's own machine is not required to have. Nothing here
-# authenticates to npm: every read is of a public package.
+# Needs only git, curl, jq and gh for the checks that prove the release is
+# public. npm is used only for the one check that installs it — a release
+# lane's own machine is not required to have node or npm, so that check is
+# skipped with a note rather than failing the whole script when it is
+# missing. Nothing here authenticates to npm: every read is of a public
+# package, and the one install is of the just-published public wrapper.
 set -euo pipefail
 
 say() { printf '%s\n' "$*" >&2; }
@@ -146,4 +151,29 @@ diff <(printf '%s\n' "$section" | sed -e 's/[[:space:]]*$//') \
      <(printf '%s\n' "$body" | sed -e 's/[[:space:]]*$//') \
   || die "the published release body is not the changelog section tagged at $tag"
 
-say "release-verify: $tag is published — tag on origin, ${#pkgs[@]} platform packages plus the wrapper, $expected release assets, and a body matching the tagged section"
+# 6. A real install, wrapper plus exactly one platform package, in a fixed-
+#    purpose scratch directory that is removed whether the install succeeds
+#    or not. Skipped with a note rather than failing the script when this
+#    machine has no npm — see the header.
+install_summary="npm is not on this machine, so the real-install check was skipped"
+if command -v npm >/dev/null 2>&1; then
+  install_dir="$(mktemp -d)"
+  cleanup_install() { rm -rf "$install_dir"; }
+  trap cleanup_install EXIT
+  (
+    cd "$install_dir"
+    npm install --silent "spoolway@$version" >/dev/null
+  ) || die "npm install spoolway@$version failed in $install_dir"
+  got="$("$install_dir/node_modules/.bin/spoolway" --version)" \
+    || die "the installed wrapper in $install_dir would not run"
+  case "$got" in
+    *"$version"*) ;;
+    *) die "installed spoolway reports '$got', not $version" ;;
+  esac
+  say "release-verify: installed spoolway@$version in $install_dir and it reports $got"
+  install_summary="a real install checked"
+else
+  say "release-verify: npm is not on this machine — skipping the real-install check"
+fi
+
+say "release-verify: $tag is published — tag on origin, ${#pkgs[@]} platform packages plus the wrapper, $expected release assets, a body matching the tagged section, and $install_summary"

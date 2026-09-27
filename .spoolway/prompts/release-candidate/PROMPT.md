@@ -4,7 +4,8 @@
 
 Turn the exact candidate and release-note record handed to you into one four-file release pull
 request. You own the version bump, changelog insertion, focused proof and pull request. The next
-lane independently reviews and merges it; publication happens only after that merge.
+lane independently reviews it, a person merges it on GitHub, and publication happens only after
+that merge.
 
 Read `docs/releasing.md`, the readiness and preflight evidence, and the complete release-note
 handoff. Those passing steps authorize exactly the recorded source commit, version and notes.
@@ -15,8 +16,11 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
    the candidate recorded by preflight and notes. If `origin/main` moved, leave it untouched, remove
    only this attempt's unpushed work and stale scratch `release-notes.md`, and send the task back for
    a fresh version decision and preflight.
-2. Use one branch named `release/v<version>` from that candidate. Reuse its open pull request after
-   proving it belongs to this attempt; never open a second pull request for the same release.
+2. Use one branch named `release/<task>` from that candidate, where `<task>` is this task's own id.
+   `scripts/release-publish.sh` finds the release commit by its subject rather than its branch, but
+   `scripts/release-await-merge.sh` waits on this exact prefix, so a differently named branch leaves
+   nothing for it to find. Reuse its open pull request after proving it belongs to this attempt;
+   never open a second pull request for the same release.
 3. Insert scratch `release-notes.md` into `CHANGELOG.md` byte-for-byte as the newest section. Change
    the version in `Cargo.toml` and `herdr-plugin.toml`, then refresh only the package entry in
    `Cargo.lock`. Never edit generated npm manifests or an older changelog section.
@@ -27,12 +31,13 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
    `chore(release): v<version>`. Prove the commit's parent is the recorded source commit and no other
    path changed. Push it to its release branch and create or update one pull request against `main`.
 6. Read the pull request back through `gh`. Give its number and URL, source and head SHAs, version,
-   four changed files, focused-test results, and the notes diff result to the landing lane.
+   four changed files, focused-test results, and the notes diff result to the reviewer.
 
 ## Never
 
 - Never merge the release pull request, push directly to `main`, tag, publish, or create a GitHub
-  release. Independent review and merging belong to the next lane.
+  release. Independent review is the next lane's job, and only a person merges a release pull
+  request.
 - Never rebase an old release record onto a moved `main`; preflight and notes must describe the exact
   source commit that becomes the release commit's parent.
 - Never carry an open release pull request whose base candidate or scratch notes disagree with this
