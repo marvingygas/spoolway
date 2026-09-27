@@ -1895,7 +1895,7 @@ mod tests {
     /// `Herdr::task_owns_workspace` under `MuxMode::Grouped` — passes.
     ///
     /// `grouped`'s own per-task route is `project_tab`, in `src/dispatch.rs`:
-    /// every branch of `start_one`'s dispatch match — a borrowed checkout, a
+    /// every branch of `prepare_boot`'s dispatch match — a borrowed checkout, a
     /// freshly cut one, a healed stale pane — takes the `task_owns_workspace
     /// == false` arm into `project_tab` unconditionally, which opens the
     /// shared dispatch workspace on `dispatch_home()` and the task's own tab

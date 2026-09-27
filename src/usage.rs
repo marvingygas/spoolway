@@ -270,8 +270,8 @@ pub struct ModelPrice {
     ///
     /// Mostly planning: the planning skill uses it to judge whether a task is
     /// small enough for this model to finish in one sitting, and it does not
-    /// truncate, chunk, or cap anything a lane does. `dispatch::start_one` is
-    /// the one runtime reader — a `session:` step's declared bound is a
+    /// truncate, chunk, or cap anything a lane does. `dispatch::prepare_boot`
+    /// is the one runtime reader — a `session:` step's declared bound is a
     /// percentage of this when that profile enables a reuse ceiling. A step
     /// naming a model with no window here can still resume when the ceiling is
     /// off. Zero means unset; a hosted model's planner falls back to what it

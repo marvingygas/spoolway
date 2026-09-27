@@ -1426,7 +1426,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
 /// Sets no `parked_from` at all when the task is still on `queued`: `queued`
 /// is not a step any pipeline declares, so a `parked_from: queued` would
 /// never match the step a launch is starting and would never be spent by
-/// `Dispatcher::start_one` — it would sit in the task for the rest of the
+/// `finish_launch_bookkeeping` — it would sit in the task for the rest of the
 /// run. `resume_target` already answers `queued` itself when nothing names a
 /// step, which is where a task that never started belongs — see
 /// [`build_rows`]'s `paused` arm, which reads the same answer to skip the

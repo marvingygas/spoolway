@@ -255,7 +255,7 @@ backdate() {
 # replaced it is better anyway: a `session:` step that opens fresh writes one
 # Status Log line naming the step and why (`- \`second\`: … — opened fresh`),
 # and a carried session writes no such line at all. See `session_miss` in
-# `dispatch::start_one`.
+# `dispatch::prepare_boot`.
 #
 # Read out of the archive, since a landed task has left the queue.
 carried() {

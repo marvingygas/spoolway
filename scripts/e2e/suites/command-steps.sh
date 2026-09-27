@@ -975,7 +975,7 @@ else
 fi
 
 # An *agent* lane's pane takes the same label by the same branch in
-# `start_one`, and hands it to the same `rename_pane` this case just proved
+# `prepare_boot`, and hands it to the same `rename_pane` this case just proved
 # carries a label through to herdr — but it is never asserted here, and that
 # is deliberate rather than forgotten. `Herdr::start_lane` only reaches
 # `rename_pane` once `agent start` has succeeded, and this double answers no
