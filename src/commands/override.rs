@@ -283,6 +283,152 @@ pub(crate) fn collect_override_rows(repo: &Repo) -> Result<Vec<OverrideRow>> {
     Ok(rows)
 }
 
+/// How wide [`IgnoredPopup::panel`] wraps a row at most: wider than
+/// [`crate::screen::NOTICE_WRAP`], because a validation error's reason is
+/// one sentence with its own trailing explanation — the Mockup draws
+/// `names both `run:` and `agent:` — a step runs a process or a model, not
+/// both` on one row — and the box it makes still fits inside the 100
+/// columns every tab is drawn to.
+pub(crate) const IGNORED_POPUP_WRAP: usize = 80;
+
+/// The narrowest the keys column is ever wrapped to. A file and a step
+/// wider than the whole popup would otherwise leave it no room at all, and
+/// [`crate::screen::wrap`] would stack the keys one character to a row.
+const IGNORED_KEYS_MIN: usize = 12;
+
+/// The "override ignored" popup bare `spoolway` opens on — see
+/// [`crate::screen::shell::OnOpen`] and [`ignored_popup`]. It holds the
+/// entries rather than a drawn panel, so the tab under it can wrap them to
+/// the width its own frame has on the draw that shows them.
+#[derive(Debug, Clone)]
+pub(crate) struct IgnoredPopup {
+    entries: Vec<IgnoredEntry>,
+}
+
+/// One ignored override, as [`IgnoredPopup`] draws it.
+#[derive(Debug, Clone)]
+struct IgnoredEntry {
+    file: String,
+    step: String,
+    keys: String,
+    reason: String,
+}
+
+/// The "override ignored" popup, or `None` with nothing in the layer left
+/// out of the merge.
+///
+/// Asked on every open and never acknowledged, unlike the before-start
+/// overrides popup's `[x]`: a skipped override changes what lanes run, and
+/// a person who silenced that popup for an older layer would otherwise
+/// start dispatching without ever learning an entry stopped fitting.
+pub(crate) fn ignored_popup(repo: &Repo) -> Result<Option<IgnoredPopup>> {
+    Ok(IgnoredPopup::from_rows(&collect_override_rows(repo)?))
+}
+
+impl IgnoredPopup {
+    /// Every ignored entry across `rows`, or `None` with none — `rows` as
+    /// [`collect_override_rows`] returns them.
+    pub(crate) fn from_rows(rows: &[OverrideRow]) -> Option<IgnoredPopup> {
+        let entries: Vec<IgnoredEntry> = rows
+            .iter()
+            .flat_map(|row| {
+                row.ignored.iter().map(move |item| {
+                    let (step, keys) = ignored_columns(row, item);
+                    IgnoredEntry {
+                        file: row.target.clone(),
+                        step,
+                        keys,
+                        reason: item.reason.clone(),
+                    }
+                })
+            })
+            .collect();
+        (!entries.is_empty()).then_some(IgnoredPopup { entries })
+    }
+
+    /// The boxed popup, its rows wrapped to `width`, over `[enter] close`.
+    pub(crate) fn panel(&self, width: usize) -> Vec<String> {
+        let mut body = vec![String::new()];
+        body.extend(self.lines(width));
+        crate::screen::panel(
+            "override ignored",
+            &body,
+            &crate::screen::keys(&[("enter", "close")]),
+        )
+    }
+
+    /// One pair of rows per ignored override: the file, the step and the
+    /// keys it sets, then the full reason under them — the whole reason
+    /// rather than [`crate::overrides::Ignored::short_reason`], since this
+    /// popup is the one place with the room to say why.
+    fn lines(&self, width: usize) -> Vec<String> {
+        let file_w = self.entries.iter().map(|e| e.file.len()).max().unwrap_or(0);
+        let step_w = self
+            .entries
+            .iter()
+            .map(|e| e.step.chars().count())
+            .max()
+            .unwrap_or(0);
+
+        let mut lines = Vec::new();
+        for IgnoredEntry {
+            file,
+            step,
+            keys,
+            reason,
+        } in &self.entries
+        {
+            // A config key or a whole file has no step to name; the column
+            // is left out altogether when no entry has one, rather than
+            // drawn as a run of blanks between the file and its keys.
+            let head = match step_w {
+                0 => format!("{file:<file_w$}   "),
+                _ => format!("{file:<file_w$}   {step:<step_w$}   "),
+            };
+            // `wrap` collapses runs of spaces, so only the keys go through
+            // it — the columns before them are padded by hand — and a long
+            // list of keys continues under its own column rather than under
+            // the file.
+            let lead = head.chars().count();
+            let room = width.saturating_sub(lead).max(IGNORED_KEYS_MIN);
+            for (i, part) in crate::screen::wrap(keys, room).into_iter().enumerate() {
+                match i {
+                    0 => lines.push(format!("{head}{part}")),
+                    _ => lines.push(format!("{}{part}", " ".repeat(lead))),
+                }
+            }
+            lines.extend(crate::screen::wrap(&format!("  {reason}"), width));
+        }
+        lines
+    }
+}
+
+/// The step and keys columns for one ignored entry: `step publish` and
+/// `agent, model` for a pipeline step's entry — its `fields` are dotted
+/// under the step, `publish.agent, publish.model` — no step and the dotted
+/// key itself for a config entry, and `the whole file` for an entry that
+/// names no field at all, the same words `override list` uses for it.
+/// Shared with `commands::dispatch`'s before-start overrides popup, which
+/// labels its own `ignored` row the same way.
+pub(crate) fn ignored_columns(
+    row: &OverrideRow,
+    item: &crate::overrides::Ignored,
+) -> (String, String) {
+    if item.fields.is_empty() {
+        return (String::new(), "the whole file".to_string());
+    }
+    if !row.target.starts_with("pipelines/") {
+        return (String::new(), item.fields.clone());
+    }
+    let step = item.fields.split('.').next().unwrap_or_default();
+    let keys: Vec<&str> = item
+        .fields
+        .split(", ")
+        .map(|field| field.split_once('.').map_or(field, |(_, key)| key))
+        .collect();
+    (format!("step {step}"), keys.join(", "))
+}
+
 /// `--json override list`'s payload, rendered as a string so a test can
 /// parse it back without capturing stdout — an empty `rows` renders `[]`,
 /// never the prose the plain form prints for an empty layer.
@@ -754,6 +900,81 @@ mod tests {
                  `run:` and `agent:` — a step runs a process or a model, not both"
             );
         });
+    }
+
+    /// The Mockup's "override ignored" popup: the file, the step and the
+    /// keys it sets on one row, the whole reason under it — and no popup
+    /// at all once nothing in the layer is ignored.
+    #[test]
+    fn ignored_popup_names_each_ignored_override_with_its_whole_reason() {
+        with_repo("ignored-popup", |repo| {
+            assert!(ignored_popup(repo).unwrap().is_none(), "no layer at all");
+
+            let dir = repo.overrides_dir();
+            write_atomic(
+                &crate::overrides::pipeline_patch_path(&dir, "demo"),
+                "steps:\n  implement:\n    run: echo hi\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            let panel = ignored_popup(repo)
+                .unwrap()
+                .expect("one override is ignored")
+                .panel(IGNORED_POPUP_WRAP);
+            let drawn = panel.join("\n");
+            assert!(panel[0].starts_with("┌─ override ignored "), "{drawn}");
+            assert!(
+                drawn.contains("  pipelines/demo.yml   step implement   run, model "),
+                "{drawn}"
+            );
+            assert!(
+                drawn.contains(
+                    "    names both `run:` and `agent:` — a step runs a process or a model, not \
+                     both"
+                ),
+                "{drawn}"
+            );
+            assert!(drawn.contains("  [enter] close "), "{drawn}");
+
+            std::fs::remove_file(crate::overrides::pipeline_patch_path(&dir, "demo")).unwrap();
+            assert!(ignored_popup(repo).unwrap().is_none(), "nothing ignored");
+        });
+    }
+
+    /// A config key names no step, so the step column is left out; an entry
+    /// with no field of its own — a prompt the checkout no longer has —
+    /// reads `the whole file`, the way `override list` says it.
+    #[test]
+    fn ignored_lines_name_a_config_key_and_a_whole_file() {
+        let rows = vec![
+            OverrideRow {
+                target: "prompts/retired".into(),
+                kind: "whole file",
+                overrides: "—".into(),
+                ignored: vec![crate::overrides::Ignored::missing_prompt("retired")],
+            },
+            OverrideRow {
+                target: crate::config::CONFIG_FILE.into(),
+                kind: "patch",
+                overrides: String::new(),
+                ignored: vec![crate::overrides::Ignored {
+                    target: crate::config::CONFIG_FILE.into(),
+                    fields: "dispatch.nonesuch".into(),
+                    reason: "unknown key `dispatch.nonesuch`".into(),
+                }],
+            },
+        ];
+        assert_eq!(
+            IgnoredPopup::from_rows(&rows)
+                .unwrap()
+                .lines(IGNORED_POPUP_WRAP),
+            vec![
+                "prompts/retired   the whole file",
+                "  names prompt `retired`, which the checkout does not have",
+                "config.toml       dispatch.nonesuch",
+                "  unknown key `dispatch.nonesuch`",
+            ]
+        );
     }
 
     /// A patch for a pipeline the checkout no longer has at all — renamed or

@@ -102,9 +102,10 @@ impl Ignored {
 
 /// Whether this process should say anything about an ignored override at
 /// all — `false` inside a lane, per `commands::TASK_ENV`'s own doc: a lane's
-/// prompt never carries a notice a person did not ask to see, and the popup
-/// the `stale-override-popup` task adds is the screen's own way of saying
-/// the same thing to a person watching the board instead. Its own function,
+/// prompt never carries a notice a person did not ask to see, and bare
+/// `spoolway`'s own "override ignored" popup —
+/// [`crate::commands::ignored_popup`] — is the screen's way of saying the
+/// same thing to a person watching it instead. Its own function,
 /// pulled out of [`print_ignored_notices`], so a test can drive the decision
 /// directly rather than trying to catch a real `eprintln!` on the way past.
 pub(crate) fn should_announce_ignored_overrides() -> bool {

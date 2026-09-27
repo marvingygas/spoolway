@@ -295,6 +295,15 @@ patched and waits for a key:
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
 
+An entry the load left out draws its own row instead of its keys, labelled the same way:
+
+```
+    pipelines/release.yml  step publish  ignored — names both `run:` and `agent:`
+```
+
+Every other row, the title and the three keys, `[x]` included, are unchanged. See [the
+overrides layer](configuration.md#the-overrides-layer).
+
 It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
 a key:
 

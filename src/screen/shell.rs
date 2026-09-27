@@ -18,10 +18,10 @@
 //! still hand that one key over — the queue tab's routines view does for
 //! `q`, and its key line says so.
 //!
-//! What the screen has to say the moment it opens — the sync gate and the
-//! update notice, which every other command prints ahead of itself — is
-//! handed to the queue tab, the one the screen opens on, to show as popups
-//! over it: printed ahead of the screen, the first frame would wipe it
+//! What the screen has to say the moment it opens — the sync gate, any
+//! override the load left out and the update notice, which every other
+//! command prints ahead of itself — is handed to the queue tab, the one the
+//! screen opens on, to show as popups over it: printed ahead of the screen, the first frame would wipe it
 //! before anybody could read it. See [`OnOpen`].
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
@@ -49,6 +49,8 @@ use crate::repo::Repo;
 pub(crate) struct OnOpen {
     /// The sync gate's popup — [`crate::gate::sync_popup`].
     pub(crate) sync: Option<Vec<String>>,
+    /// The "override ignored" popup — [`crate::commands::ignored_popup`].
+    pub(crate) ignored: Option<crate::commands::IgnoredPopup>,
     /// The update notice's line — [`crate::release::notice`].
     pub(crate) update: Option<String>,
 }
@@ -277,6 +279,7 @@ pub(crate) fn run(
     // way the printed gate reports it, as this command's own error.
     let on_open = OnOpen {
         sync: crate::gate::sync_popup(repo)?,
+        ignored: crate::commands::ignored_popup(repo)?,
         update,
     };
 

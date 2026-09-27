@@ -108,6 +108,15 @@ spoolway: override ignored — pipelines/release.yml step `publish`: names both 
 A command running inside a lane prints nothing. `spoolway override list`, its `--json` form
 and `spoolway doctor`'s standing note mark the same entries and reasons.
 
+Bare `spoolway` shows the same thing as an "override ignored" popup over the tab it opens on
+instead, since the stderr line would be wiped by the screen's first frame. The popup has one
+row per entry left out: the file, the step and the keys it set, or the config key, or "the
+whole file" for a prompt, then the whole reason under it. `[enter]` closes it. The popup comes
+back on the next open while the entry is still left out; nothing silences it for good, since a
+skipped override changes what lanes run. The before-start overrides popup (see [`spoolway
+dispatch`](cli-reference.md#spoolway-dispatch)) draws the same entry's row as `ignored —
+<reason>` in place of its keys, with every other row unchanged.
+
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
