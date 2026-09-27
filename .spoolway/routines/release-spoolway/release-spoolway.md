@@ -2,6 +2,10 @@
 id: release-spoolway
 title: "chore(release): cut the next spoolway release"
 group: release-spoolway
+group_description: |
+  Cut the next spoolway release. Bump the version in `Cargo.toml`, commit the approved
+  `CHANGELOG.md` section, rehearse the release workflow on the exact release commit, tag it,
+  and verify what npm and GitHub actually published. `docs/releasing.md` is the runbook.
 pipeline: release
 touches:
   - "Cargo.toml"
