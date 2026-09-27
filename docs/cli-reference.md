@@ -662,6 +662,9 @@ the output directory, the allowed and refused keys, one sentence per key, and th
 hold across a set. `--from` runs the same validation as `queue add --from`
 and exits non-zero on a refusal.
 
+Bare, with no `--from`, the contract also carries a top-level `base`: the branch the checkout
+it ran in has out. A worktree reports its own branch. A detached checkout reports `null`.
+
 ### `spoolway template contract`
 
 Print the prose template a project owns and where it lives.

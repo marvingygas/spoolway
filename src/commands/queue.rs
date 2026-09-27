@@ -2841,6 +2841,12 @@ struct ScreenState {
     /// see `with_gate` for why the file on disk is never rewritten to record
     /// one.
     gates: std::collections::BTreeMap<TaskKey, String>,
+    /// The branch the board's own checkout has out — what `enter` hands a
+    /// task that names no `base:` of its own, and so what the tasks pane's
+    /// `Base:` row shows for one. `None` on a detached checkout, where
+    /// `enter` refuses rather than guess, and in the tests that open the
+    /// screen with no checkout behind it.
+    board_branch: Option<String>,
     /// Popups waiting behind the one on screen, each opened in turn as the
     /// one before it closes — the notices bare `spoolway` opens with, which
     /// can be more than one at once.
@@ -2863,6 +2869,7 @@ impl ScreenState {
             task_cursor: 0,
             selected: Default::default(),
             gates: Default::default(),
+            board_branch: None,
             waiting: Default::default(),
         }
     }
@@ -3090,6 +3097,10 @@ fn run_screen_from(
     let routines_dir = repo.routines_dir();
 
     loop {
+        // Read again every key rather than once at open: the board can be
+        // left open while its checkout moves to another branch, and the
+        // `Base:` row must name the branch `enter` would read right now.
+        state.board_branch = crate::repo::branch_at(cwd).ok();
         let panes = Panes {
             routines: &routines,
             routines_dir: &routines_dir,
@@ -3924,6 +3935,15 @@ fn doc_pipeline_name(doc: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A peek at a task's own `base:` key, the same shallow way
+/// [`doc_pipeline_name`] reads `pipeline:` — `None` for a blank one too,
+/// which `enter` treats exactly as an absent one.
+fn doc_base(doc: &str) -> Option<String> {
+    let (yaml, _) = crate::task::split_fence(doc).ok()?;
+    let value: serde_norway::Value = serde_norway::from_str(yaml).ok()?;
+    super::pending::front_str(&value, "base")
+}
+
 fn handle_gate_key(
     groups: &[Group],
     pipelines: &Pipelines,
@@ -4202,7 +4222,7 @@ fn layout_for(width: usize, height: usize) -> Layout {
 /// The column every row's value starts at in [`labeled_row`]'s wide layout:
 /// four columns of indent, then the widest label this pane ever draws —
 /// `Description:`, at 13 characters padded — so `Pipeline:`, `Depends on:`,
-/// `Gate:` and `Description:` all line up under each other regardless of
+/// `Base:`, `Gate:` and `Description:` all line up under each other regardless of
 /// which one owns a given row. A constant rather than something measured off
 /// the label set at draw time — see the non-goal this is: the labels are
 /// fixed, so the column never has anything to measure.
@@ -4453,8 +4473,8 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 }
 
 /// The right pane's rows: the highlighted group's tasks, each as a labelled
-/// block — its pipeline, what it depends on, any gate chosen for it, and its
-/// own one-sentence description — plus the task's own header row above them.
+/// block — its pipeline, what it depends on, the branch it is cut from, any
+/// gate chosen for it, and its own one-sentence description — plus the task's own header row above them.
 ///
 /// Read-only. Nothing here is picked: the checkbox is on the group, in the
 /// pane to the left, and this is what that group holds.
@@ -4508,6 +4528,15 @@ fn tasks_pane_lines(
             depends_on.join(", ")
         };
         lines.extend(labeled_row("Depends on:", &depends_value, width));
+
+        // A task naming no `base:` of its own is sent on the board
+        // checkout's branch — see `board_branch` — so that is what it
+        // shows, and `-` only when the checkout is detached and `enter`
+        // would refuse it.
+        let base = doc_base(&task.doc)
+            .or_else(|| state.board_branch.clone())
+            .unwrap_or_else(|| "-".to_string());
+        lines.extend(labeled_row("Base:", &base, width));
 
         if let Some(step) = state.gates.get(&task_key(task)) {
             lines.extend(labeled_row("Gate:", step, width));
@@ -4580,7 +4609,8 @@ fn routine_folder_lines(
 /// The routines pane's own right-hand rows: the highlighted folder's own
 /// tasks — every one at or below it, the same set `enter` would queue —
 /// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
-/// pending task, minus the `Gate:` row a routine has no gate picker to set.
+/// pending task, minus the `Gate:` row a routine has no gate picker to set
+/// and the `Base:` row, which this pane has never drawn.
 fn routine_task_lines(
     folder: Option<&RoutineFolder>,
     _pipelines: &Pipelines,
@@ -8700,7 +8730,7 @@ mod tests {
 
         let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         // Only the blank separator the loop always opens a task with, the
-        // task row, its Pipeline: row and its Depends on: row — nothing
+        // task row, its Pipeline:, Depends on: and Base: rows — nothing
         // past it, since this task has no title to draw a Description:
         // row from. The task names no `pipeline:` either, and there is
         // no project default to show in its place any more.
@@ -8711,6 +8741,7 @@ mod tests {
                 "  wire".to_string(),
                 format!("    {:<LABEL_FIELD$}{}", "Pipeline:", TRIAL_UNASSIGNED),
                 "    Depends on:  -".to_string(),
+                "    Base:        -".to_string(),
             ],
             "{lines:?}"
         );
@@ -8796,7 +8827,7 @@ mod tests {
     }
 
     /// Every fact a wide pane draws about a task — its pipeline, what it
-    /// depends on, its gate and its description — starts its value at the
+    /// depends on, its base, its gate and its description — starts its value at the
     /// same column, in that order, the same as the mockup this task's own
     /// acceptance criterion is drawn from.
     #[test]
@@ -8807,13 +8838,16 @@ mod tests {
             "tracking-open",
             &task_text(
                 "tracking-open",
-                "group: one\npipeline: default\ndepends_on: [tracking-core]\n",
+                "group: one\npipeline: default\ndepends_on: [tracking-core]\n\
+                 base: task/gh-412-checkout\n",
                 BODY,
             ),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let mut state = ScreenState::new();
+        // The task's own `base:` wins over the board's branch.
+        state.board_branch = Some("main".to_string());
         state
             .gates
             .insert(task_key(&groups[0].tasks[0]), "review".to_string());
@@ -8826,9 +8860,43 @@ mod tests {
                 "  tracking-open".to_string(),
                 "    Pipeline:    default".to_string(),
                 "    Depends on:  tracking-core".to_string(),
+                "    Base:        task/gh-412-checkout".to_string(),
                 "    Gate:        review".to_string(),
                 "    Description: tracking-open, done".to_string(),
             ],
+            "{lines:?}"
+        );
+    }
+
+    /// A task naming no `base:` shows the branch the board's checkout has
+    /// out, since that is the branch `enter` would send it on — and a
+    /// blank `base:` reads the same as an absent one, as it does there.
+    #[test]
+    fn a_task_with_no_base_shows_the_boards_branch() {
+        let repo = fixture("screen-base-fallback");
+        write_pending(
+            &repo,
+            "cart-totals",
+            &task_text("cart-totals", "group: one\n", BODY),
+        );
+        write_pending(
+            &repo,
+            "cart-empty",
+            &task_text("cart-empty", "group: one\nbase: \"\"\n", BODY),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new();
+        state.board_branch = Some("feat/checkout".to_string());
+
+        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        let base_rows: Vec<_> = lines
+            .iter()
+            .filter(|line| line.trim_start().starts_with("Base:"))
+            .collect();
+        assert_eq!(
+            base_rows,
+            vec!["    Base:        feat/checkout"; 2],
             "{lines:?}"
         );
     }
@@ -8857,6 +8925,8 @@ mod tests {
                 "    Pipeline:".to_string(),
                 "      default".to_string(),
                 "    Depends on:".to_string(),
+                "      -".to_string(),
+                "    Base:".to_string(),
                 "      -".to_string(),
                 "    Description:".to_string(),
                 "      wire, done".to_string(),

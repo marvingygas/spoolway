@@ -35,9 +35,14 @@ predates that block and the command comes back empty, say so to the caller and f
 reading the file whole.
 
 1. **Gather, before anything is sized.** One command, and nothing is opened past it:
-   `spoolway task contract` — every pipeline this project defines, its own `sizing` guidance, and
-   per pipeline its `description:`, `longest_agent_step`, `gate_at` steps, `last_of_chain`, and
-   skeleton `body`.
+   `spoolway task contract` — the `base` this checkout has out, every pipeline this project
+   defines, its own `sizing` guidance, and per pipeline its `description:`,
+   `longest_agent_step`, `gate_at` steps, `last_of_chain`, and skeleton `body`.
+
+   **The branch you are on is what the work builds on.** `base` is the branch this checkout
+   has out, and every task takes it unless a note on the ballot changes it. When `base` comes
+   back `null`, the checkout is detached: stop there, write nothing, and tell the caller to
+   check out the branch this work builds on and run this again.
 
    **A project with no pipelines is not a dead end.** Where this reports `no pipelines
    defined`, install the shipped ones yourself: `spoolway init --provider claude --yes` —
@@ -87,6 +92,7 @@ reading the file whole.
 
    ```
    1  <task-id>                  <size>   <pipeline>
+      base  <branch>
       What this task is, in one or two plain sentences.
 
    2  <task-id>                  <size>   <pipeline>
@@ -101,6 +107,11 @@ reading the file whole.
    sentences under each task at around 48 characters, because the preview box they are read
    in is narrow.
 
+   **A task with no `depends_on` starts a chain, and carries a `base` line** — step 1's `base`,
+   until a note changes it. A task that depends on another shares that chain's base and shows
+   no `base` line of its own. Never propose any other base yourself: not a pending pull
+   request, not the default branch.
+
    **The block is the option's `preview`, never its `description`.** `preview` is the only
    field that renders it as written: a monospace box that keeps the newlines and holds the
    three columns in line. A `description` is prose — it reflows, and the newlines come back
@@ -108,6 +119,29 @@ reading the file whole.
    count out of. So each option carries the block in `preview`, and in `description` one
    plain sentence saying what that count trades away — never a second copy of the layout.
    Previews need `multiSelect: false`, which this ballot already is.
+
+   **A note on the answer changes a chain's base.** The person may add a note to the option
+   they pick, such as `1 from #412, cart-empty from main`: a task's number or id, `from`, then
+   a branch or a pull request number. Each part sets the base of the chain that task is in. A
+   branch is taken as written. A `#<n>` is resolved with `gh pr view <n> --json
+   headRefName,state,isCrossRepository`, and its `headRefName` is the base.
+
+   Then ask the ballot once more, with the resolved bases drawn. Open the question text with
+   the notes line, `notes: 1 from #412, cart-empty from main`, and draw each task on its one
+   row, with every chain's `base` line under its first task and no sentences:
+
+   ```
+   1  cart-totals      medium   default
+      base  task/gh-412-checkout
+   2  cart-discounts   small    default
+   3  cart-empty       small    default
+      base  main
+   ```
+
+   The answer to that one stands. Bring the ballot back with the problem named, and nothing
+   changed, when a note names no task on the ballot, names a number `gh pr view` finds no
+   pull request for, names a pull request from a fork (`isCrossRepository` is true — its
+   branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
 3. **Write one file per task**, with **Write**, at
    `~/.spoolway/<project>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
@@ -146,6 +180,8 @@ reading the file whole.
    - `plan` — the calling page's own absolute path, when there is both an issue *and* a page
      — an issue read straight into tasks with no page carries no `plan:` at all, and neither
      does a page with no issue behind it, since `source:` already carries its path there.
+   - `base` — on every task, a dependent included: its chain's base from step 2, which is
+     step 1's `base` unless a note changed it. A dependency and its dependent must share one.
    - `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate fan.
 
    The body's `## Mockup` copies in the steps that task owns, from the calling record's own

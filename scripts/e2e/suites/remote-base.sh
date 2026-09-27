@@ -54,6 +54,12 @@ works "and no remote-tracking ref for it either — nothing here has fetched it"
 BODY="$LIVE/body.md"
 task_body "$BODY"
 
+# A stand-in's turn is over in milliseconds, so a lane left to run carries the
+# task through every step and into the archive between two of `drive`'s polls
+# — it never sees `implement`, and the queue file the checks below read is
+# gone. Hung mid-turn, the task sits on `implement` with its worktree cut.
+echo hang > "$CTL/stacked"
+
 task_doc "$LIVE/stacked.md" stacked "$BODY" "group: live" \
   "base: $REMOTE_ONLY"
 must "a task based on a branch only origin has queues" \

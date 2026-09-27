@@ -19,8 +19,15 @@ flowchart LR
 
 ## Why a plan is a branch
 
-Each task's `base:` is the branch the plan lands in, such as `main` or a release branch. Set it
-in each task, or once with `spoolway queue add --base` for the whole submission.
+Each task's `base:` is the branch the plan lands in, such as `main` or a release branch.
+`/spoolway-tasks` writes it for you, from `spoolway task contract`'s own `base`: the branch
+your checkout has out. It stops instead of guessing when that checkout is detached.
+
+A chain's base can also be set with a note on the split ballot's answer, such as `1 from #412`
+or `cart-empty from main`: a branch is taken as written, and a pull request number resolves to
+that pull request's own branch. A task can still name its own `base:` by hand, or the whole
+submission can share one with `spoolway queue add --base`.
+
 Several plans can be queued from one checkout. They all share one queue and one dispatcher.
 
 ## Two skills, cut at approval
