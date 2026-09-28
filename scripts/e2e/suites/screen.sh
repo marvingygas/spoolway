@@ -54,8 +54,8 @@ works "bare spoolway opens and ends when its keys run out" \
 
 # Every frame opens on a clear-screen, so the transcript splits into frames on
 # it. The first one drawn is the queue tab's, its label bracketed on the
-# strip. Colour codes are taken out of the frames the tabs draw under it; the
-# strip itself carries none.
+# strip. Colour codes are taken out of each frame — the strip's own bold and
+# the colour of the tab drawn under it.
 FIRST="$LIVE/first.txt"
 LAST="$LIVE/last.txt"
 awk 'BEGIN { RS = "\033\\[2J\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
