@@ -9,8 +9,9 @@ set -euo pipefail
 # later than this checkout's sources were written is taken as fresh here, and
 # its tests run against that worktree's code and CARGO_MANIFEST_DIR. Touching
 # the crate root recompiles this crate from this checkout; dependencies stay
-# shared.
-touch src/main.rs
+# shared. Integration tests are their own crates and bake the other
+# worktree's CARGO_BIN_EXE_spoolway path in, so they are touched too.
+touch src/main.rs tests/*.rs
 
 cargo fmt --check
 cargo deny check advisories
