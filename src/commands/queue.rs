@@ -2390,9 +2390,10 @@ enum Mode {
     /// the hook opened when it opened any. `enter` closes it, the same as
     /// [`Mode::Outcome`].
     Queued(Vec<String>),
-    /// The sync gate bare `spoolway` opens on — [`crate::gate::sync_popup`]'s
-    /// panel. `enter` applies the updates, the only key it reads; `ctrl-c`
-    /// quits the screen with nothing written, as it does the printed gate.
+    /// The notice bare `spoolway` opens on once an update is installed but
+    /// not yet synced — [`crate::gate::sync_popup`]'s panel. `enter`
+    /// dismisses it, the only key it reads, and writes nothing: only
+    /// `spoolway sync` applies the update.
     SyncGate(Vec<String>),
     /// `r`'s own screen: the left pane swapped for the folder tree under
     /// `.spoolway/routines/` — see [`RoutineNav`] for what it tracks between
@@ -3021,7 +3022,7 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
 /// other.
 ///
 /// `on_open` is what the screen has to say the moment it opens — the sync
-/// gate and the update notice, see [`crate::screen::shell::OnOpen`] — shown
+/// notice and the update notice, see [`crate::screen::shell::OnOpen`] — shown
 /// as popups over this tab, the one the screen opens on, in that order and
 /// ahead of the opening message.
 ///
@@ -3211,10 +3212,7 @@ fn run_screen_from(
             }
             Mode::SyncGate(_) => {
                 if key == Key::Enter {
-                    state.mode = match crate::gate::apply(repo) {
-                        Ok(()) => state.after_popup(Mode::Browsing),
-                        Err(err) => outcome("updates not applied", format!("{err:#}")),
-                    };
+                    state.mode = state.after_popup(Mode::Browsing);
                 }
             }
             Mode::ToolGate { then, .. } => match key {
@@ -7853,26 +7851,26 @@ mod tests {
         assert!(first.contains("dispatch"), "under the strip: {first}");
     }
 
-    /// What the screen opens with — the sync gate, then the update notice —
-    /// is shown over the queue tab in that order, each closed by `enter`
-    /// alone, before the tab is the person's.
+    /// What the screen opens with — the sync notice, then the update notice
+    /// — is shown over the queue tab in that order, each closed by `enter`
+    /// alone, before the tab is the person's. Dismissing the sync notice
+    /// writes nothing: no stamp appears where `sync` would record one.
     #[test]
-    fn the_queue_tab_opens_with_the_sync_gate_then_the_update_notice() {
+    fn the_queue_tab_opens_with_the_sync_notice_then_the_update_notice() {
         use crate::screen::shell::{Hosting, OnOpen, Tab};
         let repo = fixture("queue-tab-on-open");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
         let on_open = OnOpen {
-            sync: Some(panel(
-                "new version installed, apply updates",
-                &[],
-                "[enter] confirm",
+            sync: Some(crate::screen::notice(
+                "update installed",
+                crate::gate::LINE,
+                "[enter] dismiss",
+                crate::screen::NOTICE_WRAP,
             )),
             update: Some("Update available: 0.42.0. Run \"spoolway update\"".to_string()),
         };
 
-        // A stand-in sync popup whose `enter` finds nothing to write: the
-        // fixture's own stamp is never behind, so `gate::apply` only stamps.
         let mut input = keys("x\r");
         let mut out = Vec::new();
         queue_tab(
@@ -7886,12 +7884,14 @@ mod tests {
         .unwrap();
         let drawn = String::from_utf8(out).unwrap();
         let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
-        assert!(
-            frames[0].contains("┌─ new version installed, apply updates "),
-            "{}",
-            frames[0]
-        );
+        assert!(frames[0].contains("┌─ update installed "), "{}", frames[0]);
+        assert!(frames[0].contains(crate::gate::LINE), "{}", frames[0]);
+        assert!(frames[0].contains("[enter] dismiss"), "{}", frames[0]);
         assert!(frames[0].contains("─ groups"), "{}", frames[0]);
+        assert!(
+            !crate::sync::stamp_path(&repo.home).exists(),
+            "dismissing the notice must not sync"
+        );
         let last = frames.last().unwrap();
         assert!(last.contains("┌─ update available "), "{last}");
         assert!(

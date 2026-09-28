@@ -1,52 +1,25 @@
-//! The confirm dialog in front of a command that needs a project, once
-//! `spoolway update` has installed a newer binary than the one that last
-//! brought this checkout's files current.
+//! The notice in front of a command that needs a project, once `spoolway
+//! update` has installed a newer binary than the one that last brought this
+//! checkout's files current.
+//!
+//! It only informs. Nothing here writes a file, reads a key or stops a
+//! command: `spoolway sync` is the one thing that applies an update, and it
+//! shows what it will write and asks first (`crate::sync::run_asking`). A
+//! notice that applied the update itself would be a second, less careful way
+//! to do the same writes.
 //!
 //! [`crate::sync::stamp_behind`] is the cheap question — one file read and a
 //! few hashes — asked before anything else here runs, so a project already
 //! current pays nothing extra on every single command. Only once that says
-//! yes does this pay for a real [`crate::sync::scan`], and only once *that*
-//! finds something does anybody see a panel: a stamp that has moved but a
-//! scan that finds nothing to do (every file already hand-matches what the
-//! new release would write) has nothing worth interrupting a command for.
+//! yes does this pay for a real, dry [`crate::sync::scan`], and only once
+//! *that* finds something does anybody see the notice: a stamp that has moved
+//! but a scan that finds nothing to do (every file already hand-matches what
+//! the new release would write) has nothing worth mentioning.
 //!
-//! Bare `spoolway` asks the same question differently: its screen would
-//! wipe a printed panel with its first frame, so [`sync_popup`] hands the
-//! panel to the screen to lay over the tab it opens on, and [`apply`] is its
-//! `enter` — see `crate::screen::shell::OnOpen`.
-//!
-//! The split mirrors `commands::dispatch::overrides_gate` / `_with`: a thin
-//! wrapper over the process's real stdio and terminal, and an injectable
-//! core a test drives over a `Cursor` with `TermGuard::inert` — see
-//! `src/commands/dispatch.rs:1614` for the same shape proven out first.
-//!
-//! Enter is the only key that does anything, and it does two things at
-//! once: `spoolway sync` for real, un-dried, and then the command this
-//! checkout was actually asked to run. Ctrl-c is the only other exit, and it
-//! runs neither — the two are inseparable, because a caller that saw only
-//! the files change without the command it asked for would have to notice
-//! the confusion for itself.
-//!
-//! Ctrl-c has no [`crate::screen::Key`] variant of its own: under this
-//! project's one raw mode (`crate::platform::TermGuard`, `ISIG` deliberately
-//! kept, see its own doc), a real ctrl-c is intercepted by the terminal
-//! driver and delivered as `SIGINT`, not as a byte a `read` call ever sees.
-//! Left uncaught, the kernel's default disposition would kill this process
-//! before `TermGuard`'s own `Drop` ever ran, leaving the terminal in raw
-//! mode for whatever shell prompt landed next — so [`confirm_sync_gate`]
-//! installs its own handler for the span of the one blocking read below.
-//!
-//! It is a `sigaction`, not [`crate::platform::stop::catch_interrupt`]'s
-//! `signal`: glibc's `signal` installs with `SA_RESTART`, which — a real
-//! regression found in review — restarts the blocked `read` underneath
-//! `screen::read_key` instead of failing it with `EINTR`, so the interrupt
-//! is caught, the flag is set, and the read simply keeps blocking as if
-//! nothing happened. `SA_RESTART` off is what actually unblocks it. The
-//! flag itself is still [`crate::platform::stop`]'s own shared one — a test
-//! drives the same branch by injecting a closure, never by raising a signal
-//! or touching that flag. Installed and restored to whatever was there
-//! before around this one blocking read alone, so ctrl-c means exactly what
-//! it always has in whatever this process runs next, gate or no gate.
+//! Every other command prints [`LINE`] on stderr and runs — see [`notify`].
+//! Bare `spoolway` would wipe a printed line with its screen's first frame,
+//! so [`sync_popup`] hands the same sentence to the screen to lay over the
+//! tab it opens on — see `crate::screen::shell::OnOpen`.
 
 use std::io::Write;
 
@@ -54,197 +27,20 @@ use anyhow::Result;
 
 use crate::cli::SyncArgs;
 use crate::repo::Repo;
-use crate::screen::{self, Key, PollableRead};
+use crate::screen;
 
-/// Every body line, truncated to this many characters before
-/// [`screen::panel`] sizes the box around it — so the panel's total width,
-/// its two border columns included, never exceeds 80 columns whatever the
-/// paths in it are.
-const MAX_LINE: usize = 74;
+/// The notice, printed and in the popup alike.
+pub(crate) const LINE: &str = "Run spoolway sync to apply the last update.";
 
-const TITLE: &str = "new version installed, apply updates";
-const KEPT_LINE: &str = "Your config values, prompts and task skeletons are kept.";
-const KEYS: &str = "[enter] confirm";
+/// The popup's title.
+const TITLE: &str = "update installed";
 
-/// How a blocking read at the panel ended.
-enum Answer {
-    /// Enter: write the files for real, then run the command.
-    Confirmed,
-    /// Ctrl-c: write nothing, run nothing.
-    Aborted,
-    /// The tty went away mid-question, or nobody was ever going to answer.
-    /// Nothing here may hang waiting for an answer that cannot come, so this
-    /// runs the command exactly as if the gate had never fired — the same
-    /// default `overrides_gate_with` takes for the identical shape.
-    JustRun,
-}
-
-/// This gate's own `SIGINT` handler for the span of one blocking read —
-/// see the module doc for why it cannot be [`crate::platform::stop::
-/// catch_interrupt`]'s `signal`. Stores nothing but a stack-only flag; the
-/// fact of the interrupt itself is [`crate::platform::stop`]'s own shared
-/// one, read back through the `interrupted` closure so a test never has to
-/// touch it.
-struct SigintGuard {
-    previous: libc::sigaction,
-    /// An inert guard installs and restores nothing — test-only, the same
-    /// reason `TermGuard::inert` exists: a test must never touch the real
-    /// process's signal disposition, parallel tests included.
-    inert: bool,
-}
-
-extern "C" fn record_interrupt(_: libc::c_int) {
-    crate::platform::stop::asked_for();
-}
-
-impl SigintGuard {
-    fn new() -> SigintGuard {
-        // SAFETY: `action` and `previous` are plain-old-data structs;
-        // `sigemptyset` and `sigaction` are ordinary syscalls against a
-        // buffer this function owns for the call's duration.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = record_interrupt as *const () as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            // No `SA_RESTART`: this handler exists so the blocking `read`
-            // underneath `screen::read_key` fails with `EINTR` and returns,
-            // not so it silently resumes as if ctrl-c had never happened.
-            action.sa_flags = 0;
-            let mut previous: libc::sigaction = std::mem::zeroed();
-            libc::sigaction(libc::SIGINT, &action, &mut previous);
-            SigintGuard {
-                previous,
-                inert: false,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn inert() -> SigintGuard {
-        SigintGuard {
-            // SAFETY: never installed and never restored — see `inert`.
-            previous: unsafe { std::mem::zeroed() },
-            inert: true,
-        }
-    }
-}
-
-impl Drop for SigintGuard {
-    fn drop(&mut self) {
-        if self.inert {
-            return;
-        }
-        // SAFETY: restoring exactly what `new` read off `sigaction` a
-        // moment ago, on the same signal, unmodified.
-        unsafe {
-            libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut());
-        }
-    }
-}
-
-/// The real-stdio wrapper — see the module doc for the split.
-pub(crate) fn confirm_sync_gate(repo: &Repo, in_lane: bool, json: bool) -> Result<bool> {
-    confirm_sync_gate_with(
-        repo,
-        in_lane,
-        json,
-        crate::ask::interactive(),
-        &mut screen::RawStdin,
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
-        crate::platform::TermGuard::new,
-        SigintGuard::new,
-        crate::platform::stop::asked,
-    )
-}
-
-/// [`confirm_sync_gate`]'s own logic, taking whether anyone is there to
-/// answer, where the notice and the panel go, how to take the terminal and
-/// the `SIGINT` disposition for the one branch that reads a key, and how to
-/// tell a real ctrl-c apart from a `read` that simply ran out of input — so
-/// a test can drive every branch without a real terminal, and without ever
-/// raising a real signal.
-#[allow(clippy::too_many_arguments)]
-fn confirm_sync_gate_with(
-    repo: &Repo,
-    in_lane: bool,
-    json: bool,
-    interactive: bool,
-    input: &mut impl PollableRead,
-    out: &mut impl Write,
-    err: &mut impl Write,
-    term: impl FnOnce() -> crate::platform::TermGuard,
-    interrupt: impl FnOnce() -> SigintGuard,
-    interrupted: impl Fn() -> bool,
-) -> Result<bool> {
-    let Some(outcomes) = behind(repo)? else {
-        return Ok(true);
-    };
-    let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
-    let notes = crate::sync::migration_notes(&outcomes);
-    let count = wrote.len() + removed.len();
-
-    // A lane is one of the places the Goal names outright — "a pipe, CI,
-    // `--json`, a lane" — where no dialog can be drawn, independently of
-    // whether a tty happens to be attached: a command step runs in a real
-    // pane, which can carry a real controlling terminal, and a dialog
-    // parked there waiting on a key nobody is watching for would hang the
-    // step until its own timeout. `release::Audience::wants_notice` treats
-    // `in_lane` the same way, as a hard no on its own.
-    if !interactive || json || in_lane {
-        let mut line = format!("spoolway wants to update: {count} file(s) in this checkout.");
-        if !in_lane {
-            line.push_str(" Open spoolway to apply them.");
-        }
-        writeln!(err, "{line}")?;
-        return Ok(true);
-    }
-
-    print_panel(out, &wrote, &notes, &removed)?;
-
-    // Taken only now, right before the first read that can actually block —
-    // the same reason `overrides_gate_with` waits this long: every branch
-    // above returns without ever touching the cursor or the real `SIGINT`
-    // disposition.
-    let _term = term();
-    let _sigint = interrupt();
-    let answer = loop {
-        match screen::read_key(input) {
-            Some(Key::Enter) => break Answer::Confirmed,
-            None if interrupted() => break Answer::Aborted,
-            None => break Answer::JustRun,
-            _ => {}
-        }
-    };
-    // Before anything more is printed: `sync::run`'s own report is ordinary,
-    // non-raw output, and it must land on a terminal already given back —
-    // cursor shown, echo restored — not the one this dialog borrowed. The
-    // real `SIGINT` disposition goes back the same moment, so whatever runs
-    // next sees ctrl-c behave exactly as it always has.
-    drop(_sigint);
-    drop(_term);
-
-    match answer {
-        Answer::Aborted => Ok(false),
-        Answer::JustRun => Ok(true),
-        Answer::Confirmed => {
-            let real = SyncArgs {
-                dry_run: false,
-                replace: Vec::new(),
-            };
-            crate::sync::run(repo, &real, json)?;
-            Ok(true)
-        }
-    }
-}
-
-/// What a real `spoolway sync` would do to this checkout, or `None` when the
-/// gate has nothing to ask: the stamp is current, or it has moved but a
-/// scan finds nothing to write or remove — see the module doc for why the
-/// two questions are asked in that order.
-fn behind(repo: &Repo) -> Result<Option<Vec<crate::sync::Outcome>>> {
+/// Whether this checkout is behind what this binary would write: the stamp
+/// has moved, and a dry scan finds something to write or remove — see the
+/// module doc for why the two questions are asked in that order.
+fn behind(repo: &Repo) -> Result<bool> {
     if !crate::sync::stamp_behind(&repo.home, &repo.checkout) {
-        return Ok(None);
+        return Ok(false);
     }
     let dry = SyncArgs {
         dry_run: true,
@@ -252,111 +48,74 @@ fn behind(repo: &Repo) -> Result<Option<Vec<crate::sync::Outcome>>> {
     };
     let outcomes = crate::sync::scan(repo, &dry)?;
     let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
-    if wrote.is_empty() && removed.is_empty() {
+    Ok(!wrote.is_empty() || !removed.is_empty())
+}
+
+/// Print [`LINE`] on stderr when this checkout is behind and a person is
+/// there to read it. The real-stderr wrapper over [`notify_with`].
+pub(crate) fn notify(repo: &Repo, in_lane: bool, json: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    notify_with(
+        repo,
+        in_lane,
+        json,
+        std::io::stderr().is_terminal(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// [`notify`]'s own logic, taking whether stderr is a terminal and where the
+/// line goes, so a test can drive every branch.
+///
+/// Only to a person at a terminal, the same audience
+/// `crate::release::Audience::wants_notice` picks for the update notice: not
+/// with `--json`, where something is parsing the output; not in a lane,
+/// where a line naming `spoolway sync` is a lane that runs it, mid-step, in
+/// the worktree it is being reviewed on; and not with stderr going anywhere
+/// but a terminal. Asked before [`behind`], so none of those pays for a scan.
+fn notify_with(
+    repo: &Repo,
+    in_lane: bool,
+    json: bool,
+    tty: bool,
+    err: &mut impl Write,
+) -> Result<()> {
+    if in_lane || json || !tty || !behind(repo)? {
+        return Ok(());
+    }
+    writeln!(err, "{LINE}")?;
+    Ok(())
+}
+
+/// The same notice as a popup, for bare `spoolway` to lay over the tab it
+/// opens on rather than print before its screen is drawn — or `None` when
+/// this checkout is not behind. `enter` dismisses it and does nothing else.
+///
+/// Its key reads `dismiss` where every other notice over a tab reads
+/// `close`: this one names something left undone, and closing it does not
+/// do it.
+pub(crate) fn sync_popup(repo: &Repo) -> Result<Option<Vec<String>>> {
+    if !behind(repo)? {
         return Ok(None);
     }
-    Ok(Some(outcomes))
+    Ok(Some(screen::notice(
+        TITLE,
+        LINE,
+        &screen::keys(&[("enter", "dismiss")]),
+        screen::NOTICE_WRAP,
+    )))
 }
 
-/// The same question as a popup, for bare `spoolway` to lay over the tab it
-/// opens on rather than print before its screen is drawn — or `None` when
-/// [`confirm_sync_gate`] would not ask either. `main` hands bare `spoolway`
-/// this instead of the printed gate; every other command keeps the gate.
-///
-/// The popup reads `enter` alone, the same as the printed gate, and the
-/// screen answers it with [`apply`]; its own `ctrl-c` quits the screen,
-/// which, as here, writes nothing and runs nothing.
-pub(crate) fn sync_popup(repo: &Repo) -> Result<Option<Vec<String>>> {
-    let Some(outcomes) = behind(repo)? else {
-        return Ok(None);
-    };
-    let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
-    let notes = crate::sync::migration_notes(&outcomes);
-    // Two blank rows over the paths where the printed panel has one, as
-    // step 38 of the screen's mockup draws the popup.
-    let mut body = vec![String::new()];
-    body.extend(panel_body(&wrote, &notes, &removed));
-    Ok(Some(screen::panel(TITLE, &body, KEYS)))
-}
-
-/// Whether bare `spoolway` may ask this question as [`sync_popup`] over its
-/// screen, rather than printed ahead of it the way every other command asks.
+/// Whether bare `spoolway` may show this notice as [`sync_popup`] over its
+/// screen, rather than printed ahead of it the way every other command does.
 ///
 /// Not when the project's pipelines do not load. The screen needs them to
 /// open at all, and a pipeline file carrying a retired step shape is
-/// refused by the load and migrated by `sync` — so the popup that would fix
-/// it could never be drawn, and bare `spoolway` would end on the refusal
-/// the gate exists to answer. The printed gate asks instead, and `main`
-/// reads the graph only after it has been answered.
+/// refused by the load and migrated by `sync` — so the popup could never be
+/// drawn, and bare `spoolway` ends on the refusal. It prints [`LINE`] first
+/// instead, so the refusal is not the only thing it says.
 pub(crate) fn asks_as_popup(repo: &Repo) -> bool {
     crate::pipeline::Pipelines::load(&repo.root, &repo.config).is_ok()
-}
-
-/// `enter` on [`sync_popup`]: the real `spoolway sync` the printed gate runs,
-/// without its report. The screen is drawn over the terminal the report
-/// would print to, and the popup has already named every path it writes.
-pub(crate) fn apply(repo: &Repo) -> Result<()> {
-    let real = SyncArgs {
-        dry_run: false,
-        replace: Vec::new(),
-    };
-    crate::sync::scan(repo, &real)?;
-    // What `sync::run` does once its scan has written: the stamp records
-    // what this checkout was brought to, and a leftover skill stamp goes.
-    crate::sync::write_stamp(&repo.home, &repo.checkout)?;
-    crate::sync::remove_skill_stamp(&repo.home);
-    Ok(())
-}
-
-/// Truncate `line` to [`MAX_LINE`] characters, with a trailing mark where it
-/// was cut — sized for a whole panel row, borders included.
-fn fit(line: String) -> String {
-    if line.chars().count() <= MAX_LINE {
-        return line;
-    }
-    let head: String = line.chars().take(MAX_LINE - 1).collect();
-    format!("{head}…")
-}
-
-/// Draw the panel itself: [`TITLE`] reads as a sentence in its own right
-/// now, so a blank row separates it from the list rather than running the
-/// two together — then what `sync` would write, in the order the mockup
-/// draws it: every write, with a retired-shape migration's own short note
-/// under it where `notes` carries one, then every removal with its reason on
-/// the line under it, then the one sentence that answers "did it eat my
-/// config?" before anybody has pressed anything.
-fn print_panel(
-    out: &mut impl Write,
-    wrote: &[&str],
-    notes: &std::collections::BTreeMap<&str, Vec<(&str, &str)>>,
-    removed: &[(&str, &str)],
-) -> Result<()> {
-    for line in screen::panel(TITLE, &panel_body(wrote, notes, removed), KEYS) {
-        writeln!(out, "{line}")?;
-    }
-    Ok(())
-}
-
-/// The rows inside the panel, shared by the printed gate and [`sync_popup`].
-fn panel_body(
-    wrote: &[&str],
-    notes: &std::collections::BTreeMap<&str, Vec<(&str, &str)>>,
-    removed: &[(&str, &str)],
-) -> Vec<String> {
-    let mut body = vec![String::new()];
-    for path in wrote {
-        body.push(fit(format!("{:<6}  {path}", "write")));
-        for (_, panel) in notes.get(path).into_iter().flatten() {
-            body.push(fit(format!("        ({panel})")));
-        }
-    }
-    for (path, why) in removed {
-        body.push(fit(format!("{:<6}  {path}", "remove")));
-        body.push(fit(format!("        ({why})")));
-    }
-    body.push(String::new());
-    body.push(fit(KEPT_LINE.to_string()));
-    body
 }
 
 #[cfg(test)]
@@ -392,45 +151,67 @@ mod tests {
         .unwrap();
     }
 
-    fn keys(s: &str) -> std::io::Cursor<Vec<u8>> {
-        std::io::Cursor::new(s.as_bytes().to_vec())
+    fn stamp(repo: &Repo) -> String {
+        std::fs::read_to_string(crate::sync::stamp_path(&repo.home)).unwrap()
+    }
+
+    /// What [`notify_with`] printed, as `(in_lane, json, tty)` say.
+    fn notified(repo: &Repo, in_lane: bool, json: bool, tty: bool) -> String {
+        let mut err = Vec::new();
+        notify_with(repo, in_lane, json, tty, &mut err).unwrap();
+        String::from_utf8(err).unwrap()
+    }
+
+    /// A behind checkout at a terminal gets exactly the one line — and the
+    /// command's files are left as they were: no config written, the stamp
+    /// untouched.
+    #[test]
+    fn a_behind_checkout_at_a_terminal_prints_the_line_and_writes_nothing() {
+        let repo = fixture("notify");
+        make_stale(&repo);
+        let before = stamp(&repo);
+        assert_eq!(
+            notified(&repo, false, false, true),
+            "Run spoolway sync to apply the last update.\n"
+        );
+        assert!(!Config::path_in(&repo.checkout).exists());
+        assert_eq!(stamp(&repo), before);
+    }
+
+    /// `--json`, a lane and a stderr that is no terminal each print nothing,
+    /// behind or not.
+    #[test]
+    fn json_a_lane_and_no_terminal_each_print_nothing() {
+        let repo = fixture("notify-gated");
+        make_stale(&repo);
+        for (in_lane, json, tty) in [
+            (false, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                notified(&repo, in_lane, json, tty),
+                "",
+                "in_lane {in_lane}, json {json}, tty {tty}"
+            );
+        }
     }
 
     /// A project whose stamp was never written at all — a fixture that never
-    /// ran `init` or `sync` — must not be nagged: [`crate::sync::
-    /// stamp_behind`] has nothing to compare against, so this proceeds
-    /// without ever touching `input`, which is left empty on purpose: a
-    /// `read_key` call here would hang the test rather than fail it.
+    /// ran `init` or `sync` — is not nagged: [`crate::sync::stamp_behind`]
+    /// has nothing to compare against.
     #[test]
-    fn no_stamp_at_all_proceeds_without_reading_a_key() {
+    fn no_stamp_at_all_prints_nothing() {
         let repo = fixture("no-stamp");
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            false,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(notified(&repo, false, false, true), "");
+        assert!(sync_popup(&repo).unwrap().is_none());
     }
 
     /// A stale stamp with nothing for a scan to do — every tracked file
-    /// already matches what this binary would write — draws no panel and
-    /// proceeds silently. Acceptance criterion: the dialog is for a stamp
-    /// *and* a scan that both say so, not either alone.
+    /// already matches what this binary would write — says nothing either:
+    /// the notice is for a stamp *and* a scan that both say so.
     #[test]
-    fn a_stale_stamp_with_nothing_to_scan_proceeds_silently() {
+    fn a_stale_stamp_with_nothing_to_scan_prints_nothing() {
         let repo = fixture("stale-nothing-to-do");
         make_stale(&repo);
         // A rendered config already in the canonical shape `sync` would
@@ -438,280 +219,36 @@ mod tests {
         // rewrite — the one file this fixture has for it to look at.
         let rendered = Config::default().render().unwrap();
         std::fs::write(Config::path_in(&repo.checkout), rendered).unwrap();
-
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            false,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(notified(&repo, false, false, true), "");
+        assert!(sync_popup(&repo).unwrap().is_none());
     }
 
-    /// No tty on either end: the one-line notice goes to stderr, names the
-    /// count, and the command proceeds without a key ever being read.
+    /// Bare `spoolway`'s popup: the one sentence, titled `update installed`,
+    /// over `[enter] dismiss` — and building it writes nothing.
     #[test]
-    fn no_tty_prints_one_stderr_line_and_proceeds() {
-        let repo = fixture("no-tty");
-        make_stale(&repo);
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            false,
-            false,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(out.is_empty(), "no cursor drawing on this path: {out:?}");
-        let printed = String::from_utf8(err).unwrap();
-        assert!(printed.contains("spoolway wants to update:"), "{printed}");
-        assert!(
-            printed.contains("Open spoolway to apply them."),
-            "{printed}"
-        );
-    }
-
-    /// `--json` takes the same stderr path even with both ends a terminal —
-    /// something is parsing the real output, and a panel drawn into it would
-    /// be exactly the noise `--json` promises never to add.
-    #[test]
-    fn json_takes_the_stderr_path_even_at_a_tty() {
-        let repo = fixture("json-at-tty");
-        make_stale(&repo);
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            true,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(out.is_empty());
-        assert!(!err.is_empty());
-    }
-
-    /// Inside a lane, the same notice drops the sentence that names a
-    /// command nobody in a lane's worktree is meant to run by hand.
-    #[test]
-    fn a_lane_omits_the_sync_sentence() {
-        let repo = fixture("lane");
-        make_stale(&repo);
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        confirm_sync_gate_with(
-            &repo,
-            true,
-            false,
-            false,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        let printed = String::from_utf8(err).unwrap();
-        assert!(printed.contains("spoolway wants to update:"), "{printed}");
-        assert!(
-            !printed.contains("Open spoolway to apply them."),
-            "{printed}"
-        );
-    }
-
-    /// A command step runs in a real pane, which can carry a real
-    /// controlling terminal — `interactive` true — and a lane must still
-    /// take the stderr path rather than draw a panel nobody is watching
-    /// for: review found this hangs a step until its own timeout otherwise.
-    /// `input` is left empty on purpose, so a `read_key` call here would
-    /// hang the test rather than fail it.
-    #[test]
-    fn a_lane_never_draws_the_panel_even_at_a_real_tty() {
-        let repo = fixture("lane-at-tty");
-        make_stale(&repo);
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            true,
-            false,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(out.is_empty(), "no panel on this path: {out:?}");
-        let printed = String::from_utf8(err).unwrap();
-        assert!(printed.contains("spoolway wants to update:"), "{printed}");
-    }
-
-    /// Enter at the panel writes the files for real, rewrites the stamp, and
-    /// says to proceed — the acceptance criterion in full.
-    #[test]
-    fn enter_confirms_writes_the_files_and_rewrites_the_stamp() {
-        let repo = fixture("enter");
-        make_stale(&repo);
-        let mut input = keys("\r");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            false,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(
-            Config::path_in(&repo.checkout).is_file(),
-            "the missing config.toml should have been written for real"
-        );
-        assert!(
-            !crate::sync::stamp_behind(&repo.home, &repo.checkout),
-            "the stamp should now match what this binary just wrote"
-        );
-        // The panel, not `sync::run`'s own report — that one prints straight
-        // to the real stdout in production, not through `out`.
-        let printed = String::from_utf8(out).unwrap();
-        assert!(printed.contains(TITLE), "{printed}");
-        assert!(printed.contains(KEYS), "{printed}");
-    }
-
-    /// Ctrl-c writes nothing and says not to proceed — the only other exit,
-    /// driven here by a closure standing in for the real interrupt, not by
-    /// raising one: `read_key` genuinely runs out of input either way, and
-    /// only `interrupted` tells the two apart.
-    #[test]
-    fn ctrl_c_aborts_and_writes_nothing() {
-        let repo = fixture("ctrl-c");
-        make_stale(&repo);
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            false,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || true,
-        )
-        .unwrap();
-        assert!(!proceed);
-        assert!(
-            !Config::path_in(&repo.checkout).is_file(),
-            "ctrl-c must write nothing"
-        );
-    }
-
-    /// No other key does anything: a stray character is read and dropped,
-    /// and the loop keeps waiting for Enter or the interrupt.
-    #[test]
-    fn a_stray_key_does_nothing_and_enter_still_confirms() {
-        let repo = fixture("stray-key");
-        make_stale(&repo);
-        let mut input = keys("q\r");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let proceed = confirm_sync_gate_with(
-            &repo,
-            false,
-            false,
-            true,
-            &mut input,
-            &mut out,
-            &mut err,
-            crate::platform::TermGuard::inert,
-            SigintGuard::inert,
-            || false,
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(Config::path_in(&repo.checkout).is_file());
-    }
-
-    /// Bare `spoolway` gets the same question as a popup over its screen:
-    /// nothing to ask with the stamp current, the printed gate's panel
-    /// otherwise — and [`apply`] writes what the popup names and brings the
-    /// stamp current, so the next screen opened asks nothing.
-    #[test]
-    fn the_popup_asks_what_the_printed_gate_asks_and_apply_answers_it() {
+    fn the_popup_carries_the_line_over_enter_dismiss() {
         let repo = fixture("popup");
-        assert!(
-            sync_popup(&repo).unwrap().is_none(),
-            "no stamp, no question"
-        );
-
         make_stale(&repo);
+        let before = stamp(&repo);
         let panel = sync_popup(&repo)
             .unwrap()
-            .expect("a stale stamp with a config to write asks");
-        assert!(
-            panel[0].starts_with("┌─ new version installed, apply updates "),
-            "{panel:?}"
-        );
+            .expect("a stale stamp with a config to write shows the popup");
+        assert!(panel[0].starts_with("┌─ update installed "), "{panel:?}");
         let flat = panel.join("\n");
-        assert!(flat.contains("config.toml"), "{flat}");
-        assert!(flat.contains(KEPT_LINE), "{flat}");
-        assert!(flat.contains("[enter] confirm"), "{flat}");
-
-        apply(&repo).unwrap();
-        assert!(Config::path_in(&repo.checkout).is_file());
-        assert!(sync_popup(&repo).unwrap().is_none(), "answered for good");
+        assert!(flat.contains(LINE), "{flat}");
+        assert!(flat.contains("[enter] dismiss"), "{flat}");
+        assert!(!flat.contains("[enter] close"), "{flat}");
+        assert!(!flat.contains("[esc]"), "{flat}");
+        assert!(!Config::path_in(&repo.checkout).exists());
+        assert_eq!(stamp(&repo), before);
     }
 
     /// A pipeline with a retired step shape — the load refuses it, `sync`
-    /// migrates it — sends bare `spoolway` to the printed gate, since its
+    /// migrates it — sends bare `spoolway` to the printed line, since its
     /// screen could never open to show the popup; once the file loads, the
-    /// popup asks.
+    /// popup shows.
     #[test]
-    fn a_pipeline_sync_would_migrate_is_asked_about_printed_not_as_a_popup() {
+    fn a_pipeline_sync_would_migrate_is_told_printed_not_as_a_popup() {
         let repo = fixture("popup-retired-shape");
         let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
@@ -726,24 +263,5 @@ mod tests {
         let (migrated, _) = crate::pipeline::migrate_retired_shapes(retired).unwrap();
         std::fs::write(dir.join("default.yml"), migrated).unwrap();
         assert!(asks_as_popup(&repo));
-    }
-
-    /// The panel's width is bounded even when a path in it is not: every
-    /// row `screen::boxed` draws — borders included — stays at or under 80
-    /// columns.
-    #[test]
-    fn the_panel_is_at_most_eighty_columns_wide() {
-        let long = "a/very/long/path/".repeat(6) + "SKILL.md";
-        let wrote = [long.as_str()];
-        let mut out = Vec::new();
-        print_panel(&mut out, &wrote, &std::collections::BTreeMap::new(), &[]).unwrap();
-        let printed = String::from_utf8(out).unwrap();
-        for line in printed.lines() {
-            assert!(
-                line.chars().count() <= 80,
-                "{} columns: {line}",
-                line.chars().count()
-            );
-        }
     }
 }

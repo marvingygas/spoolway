@@ -276,14 +276,8 @@ back, overwriting that provider's whole set with no `.bak` saved. Replacing a ho
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
 names a command or flag this binary does not have.
 
-On success, `sync` records this binary's version and a fingerprint of the text it would write
-in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
-stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
-the same per-checkout stamp for a freshly scaffolded or newly installed project.
-
-Every other command that needs a project reads that stamp back first. When it no longer
-matches and a scan finds files to change, the command stops and draws a confirm panel titled
-"new version installed, apply updates", listing each write and removal:
+At a terminal, with something to write or remove, `sync` lists it and waits before writing
+anything:
 
 ```
 ┌─ new version installed, apply updates ───────────────────────┐
@@ -294,28 +288,51 @@ matches and a scan finds files to change, the command stops and draws a confirm 
 │                                                                │
 │  Your config values, prompts and task skeletons are kept.     │
 │                                                                │
-│  [enter] confirm                                               │
+│  [enter] apply   [esc] cancel                                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Enter runs `sync` for real, rewrites the stamp, and then runs the command. Ctrl-c writes
-nothing, runs nothing, and restores the terminal. No other key does anything.
+Enter writes the files, records the version stamp described next, and prints the report `sync`
+always prints. Esc, ctrl-c, or the terminal going away mid-question writes nothing, changes no
+stamp, and prints "Nothing was changed." With no terminal to answer, under `--json`, inside a
+lane, with `--dry-run`, with `--replace`, or with nothing to write, `sync` writes straight away
+and draws no panel.
 
-Bare `spoolway` asks the same question as a popup over the tab it opens on, closed by
-`[enter]` alone, since the screen's first frame would wipe a panel printed ahead of it. When the
-project's pipeline file cannot load, the screen cannot open to show the popup, so bare
-`spoolway` falls back to the printed panel described above.
+On success, `sync` records this binary's version and a fingerprint of the text it would write
+in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
+stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
+the same per-checkout stamp for a freshly scaffolded or newly installed project.
 
-Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither the panel nor
-the popup is drawn. Instead one line goes to stderr and the command runs anyway:
+Every other command that needs a project reads that stamp back first. When it no longer
+matches and a scan finds files to change, the command prints one line on stderr and then runs:
 
 ```
-spoolway wants to update: 1 file(s) in this checkout. Open spoolway to apply them.
+Run spoolway sync to apply the last update.
 ```
 
-Inside a lane the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
-`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel,
-the popup, or print the line.
+That line prints only to a person at a terminal: never under `--json`, never inside a lane, and
+never when stderr is not a terminal. It never stops the command and never reads a key. Only
+`spoolway sync` writes the files.
+
+Bare `spoolway` shows the same sentence in a popup over the tab it opens on, since the screen's
+first frame would wipe a line printed ahead of it:
+
+```
+┌─ update installed ────────────────────────────┐
+│                                               │
+│  Run spoolway sync to apply the last update.  │
+│                                               │
+│  [enter] dismiss                              │
+└───────────────────────────────────────────────┘
+```
+
+Enter dismisses the popup and writes nothing. When the project's pipeline file cannot load, the
+screen cannot open to show the popup, so bare `spoolway` prints the line first and then ends on
+the pipeline refusal.
+
+`init`, `doctor`, `whats-new`, `update`, `config edit` and `config override` never print this
+line or show this popup. `sync` never does either: it asks its own version of the same question
+first, above.
 
 ## Platform notes
 

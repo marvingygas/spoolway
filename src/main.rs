@@ -269,31 +269,29 @@ fn run() -> Result<()> {
             };
 
             // Whether this checkout has fallen behind a `spoolway update`
-            // that already ran, before anything else here reads a file:
-            // `sync` is the one command this must never draw in front of —
-            // it *is* the thing the panel offers to run — so it is excluded
+            // that already ran, said before the command runs and never in
+            // its way: `gate::notify` prints one line and returns. `sync` is
+            // the one command this must never print in front of — it *is*
+            // the thing the line tells a person to run — so it is excluded
             // by name here rather than left to fall out of the match below.
             // Every other excluded command (`init`, `doctor`, `whats-new`,
             // `update`, `config edit`, `config override`) is answered in an
             // earlier arm of the outer match and never reaches this one at
             // all.
             //
-            // Bare `spoolway` asks the same question as a popup over the tab
-            // it opens on instead — see `gate::sync_popup` — which reads the
+            // Bare `spoolway` shows the same line as a popup over the tab it
+            // opens on instead — see `gate::sync_popup` — which reads the
             // project's pipelines first, the one file read ahead of the
             // question. When they do not load, the screen could not open to
-            // ask, and it is asked here, printed, like every other command:
-            // see `gate::asks_as_popup`.
+            // show it, and it is printed here like every other command's,
+            // ahead of the refusal: see `gate::asks_as_popup`.
             let popup = matches!(command, Command::Screen) && gate::asks_as_popup(&repo);
-            if !matches!(command, Command::Sync(_))
-                && !popup
-                && !gate::confirm_sync_gate(
+            if !matches!(command, Command::Sync(_)) && !popup {
+                gate::notify(
                     &repo,
                     std::env::var_os(dispatch::ENV_STEP).is_some(),
                     cli.json,
-                )?
-            {
-                return Ok(());
+                )?;
             }
 
             // Byproducts older than `housekeeping.retention_days` go, once per process —
@@ -498,7 +496,12 @@ fn run() -> Result<()> {
                     crate::install::report(installed);
                     Ok(())
                 }
-                Command::Sync(args) => sync::run(&repo, args, cli.json),
+                Command::Sync(args) => sync::run_asking(
+                    &repo,
+                    args,
+                    cli.json,
+                    std::env::var_os(dispatch::ENV_STEP).is_some(),
+                ),
             }
         }
     }

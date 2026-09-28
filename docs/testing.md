@@ -81,7 +81,7 @@ with a `// covers:` line.
 | Suite | Covers |
 |---|---|
 | `flow` | A task's whole life: queued, agent steps, command steps, archived |
-| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, a confirm dialog over a real pty |
+| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, the sync notice over a real pty |
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `blocked`, `paused`, `done` and `open`, the shipped `github.sh` against the `gh` double, and `key_in_names` |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |

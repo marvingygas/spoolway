@@ -1329,7 +1329,9 @@ pub struct UpdateArgs {}
 #[derive(Debug, Args)]
 #[command(after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
         spoolway sync --dry-run     what it would change, and nothing else\n  \
-        spoolway sync               take it\n\n\
+        spoolway sync               list it, then take it on enter\n\n\
+        At a terminal it lists what it would write and waits: enter takes it, esc writes \
+        nothing. With no terminal, `--json` or inside a lane it takes it without asking.\n\n\
         Everything spoolway writes is tracked in git, so `git diff` is the review.")]
 pub struct SyncArgs {
     /// Print what would change and write nothing.
