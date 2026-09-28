@@ -142,6 +142,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // checks below: found and fixed by a person reading this line, not
     // discovered mid-run and left for someone to stop by hand.
     check_task_routes(pipelines, &live_tasks)?;
+    check_task_bases(repo, &live_tasks)?;
 
     let mux = crate::mux::backend(repo)?;
     if !mux.is_available() {
@@ -1222,6 +1223,31 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     Ok(())
 }
 
+/// Refuse the whole start over any live task whose `base:` has drifted out
+/// from under it — a dependent that no longer agrees with its dependency's
+/// base, or a cut task whose worktree was started from a base it no longer
+/// names — and over a task still waiting to be cut whose base has vanished
+/// from both places a worktree could start from.
+///
+/// Beside [`check_task_routes`] for the same reason: found and fixed by a
+/// person reading this line before the lock is taken, not discovered mid-run
+/// by whichever lane happens to reach it first. [`crate::dispatch::base_problem`]
+/// is the one place the checks themselves live, shared with the running
+/// dispatcher's own per-pass hold, so the fact and the fix never drift
+/// between the two.
+fn check_task_bases(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    // Shared across the whole batch, not rebuilt per task — see
+    // [`crate::dispatch::base_problem`]'s own doc for why a chain sharing
+    // one `base` must cost one `git ls-remote`, not one per task on it.
+    let mut remote_cache = std::collections::HashMap::new();
+    for task in tasks {
+        if let Some((reason, fix)) = crate::dispatch::base_problem(repo, task, &mut remote_cache) {
+            bail!("refusing to start: {reason}\n  {fix}\n\nNothing was dispatched.");
+        }
+    }
+    Ok(())
+}
+
 /// Settle the books on what the run was holding.
 ///
 /// Both ways a dispatcher ends come through here — the queue emptying, and a
@@ -1400,6 +1426,119 @@ mod tests {
         )
         .unwrap();
         assert!(check_task_routes(&pipelines, &[a, b]).is_ok());
+    }
+
+    /// A dependent whose `base:` no longer agrees with its dependency's —
+    /// one of them edited by hand after the batch was sent, since
+    /// `validate_batch` already enforced this once — refuses the whole
+    /// start, naming both tasks and both bases, and the fix.
+    #[test]
+    fn check_task_bases_refuses_a_dependent_that_disagrees_with_its_dependency() {
+        let repo = fixture("bases-chain-disagrees");
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        crate::commands::testutil::add(&repo, "cart-discounts", &["cart-totals"]);
+        let mut discounts = repo.task("cart-discounts").unwrap();
+        discounts.front.base = Some("main".to_string());
+        discounts.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let err = check_task_bases(&repo, &tasks).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(
+                "refusing to start: task `cart-discounts` is based on `main` but depends on \
+                 `cart-totals`, which is based on `plan/demo`"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("A chain has one base. Set `base:` in cart-discounts to `plan/demo`."),
+            "{message}"
+        );
+        assert!(message.contains("Nothing was dispatched."), "{message}");
+    }
+
+    /// A cut task's worktree cannot move. If its `base:` no longer names
+    /// what `cut_from` recorded at cut time, that is an edit nobody can
+    /// honour, and the start refuses rather than silently keep the old
+    /// worktree.
+    #[test]
+    fn check_task_bases_refuses_a_cut_task_whose_base_moved() {
+        let repo = fixture("bases-cut-moved");
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        let mut totals = repo.task("cart-totals").unwrap();
+        totals.front.cut_from = Some("plan/demo".to_string());
+        totals.front.base = Some("main".to_string());
+        totals.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let err = check_task_bases(&repo, &tasks).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(
+                "refusing to start: task `cart-totals` was cut from `plan/demo` but now says \
+                 `base: main`"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("Its worktree can't move. Set `base:` back to `plan/demo`."),
+            "{message}"
+        );
+    }
+
+    /// A task still waiting to be cut whose base has vanished from both
+    /// places a worktree could start from refuses the start too, checked
+    /// locally before `origin` is ever asked.
+    #[test]
+    fn check_task_bases_refuses_a_task_whose_base_exists_nowhere() {
+        let repo = fixture("bases-base-gone");
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        let mut totals = repo.task("cart-totals").unwrap();
+        totals.front.base = Some("task/gh-412-checkout".to_string());
+        totals.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let err = check_task_bases(&repo, &tasks).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(
+                "refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, \
+                 which exists neither locally nor on `origin`"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("Set `base:` in cart-totals to a branch that exists."),
+            "{message}"
+        );
+    }
+
+    /// A cut task is not asked to prove its base still exists — its worktree
+    /// is already there, and a base that merges away afterward is not an
+    /// error (non-goal).
+    #[test]
+    fn check_task_bases_does_not_ask_existence_of_a_task_already_cut() {
+        let repo = fixture("bases-cut-not-asked");
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        let mut totals = repo.task("cart-totals").unwrap();
+        totals.front.cut_from = Some("plan/demo".to_string());
+        totals.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        assert!(check_task_bases(&repo, &tasks).is_ok());
+    }
+
+    /// A batch where every base is consistent and reachable passes through
+    /// untouched.
+    #[test]
+    fn check_task_bases_passes_a_consistent_chain() {
+        let repo = fixture("bases-consistent");
+        crate::commands::testutil::add(&repo, "cart-totals", &[]);
+        crate::commands::testutil::add(&repo, "cart-discounts", &["cart-totals"]);
+
+        let tasks = repo.tasks().unwrap();
+        assert!(check_task_bases(&repo, &tasks).is_ok());
     }
 
     /// A lock already held exits 4, whether or not it is the first start to

@@ -2,7 +2,8 @@
 //! is queued.
 //!
 //! `spoolway task contract` is the whole interface a producer needs. Printed
-//! bare, it is every key a task may set, every key it may not, a
+//! bare, it is the branch the checkout it ran in has out — the `base` a
+//! task takes by default — every key a task may set, every key it may not, a
 //! sentence on how to size a breakdown, and — per pipeline — its longest
 //! agent step, the steps `gate_at` accepts, its own `description:`, which step is
 //! `last-of-chain`, and the
@@ -161,10 +162,11 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "base",
-        "The branch this task is cut from and merges back into — must name a \
-         branch the repository already has locally. Leave it unset to take the \
-         submission's own `queue add --base` instead; a submission that sets \
-         neither is refused, naming the task.",
+        "The branch this task is cut from and merges back into — by default the \
+         contract's own top-level `base`, the branch the checkout it was printed \
+         in has out. Must name a branch the repository has locally or on \
+         `origin`. Left unset, the submission's own `queue add --base` applies \
+         instead; a submission that sets neither is refused, naming the task.",
     ),
     (
         "group_description",
@@ -262,6 +264,12 @@ const SIZING: &str = "Cut a reasonable number of tasks for the shape at hand, ea
 /// contract`.
 #[derive(Debug, serde::Serialize)]
 struct Contract {
+    /// The branch the checkout this was run in has out — the base a
+    /// producer writes on every task by default, since the branch somebody
+    /// is on while planning says what the work builds on, and the board may
+    /// be on another by the time it is sent. `null` on a detached checkout,
+    /// which a producer takes as a reason to stop rather than guess one.
+    base: Option<String>,
     sizing: &'static str,
     output: ContractOutput,
     keys: ContractKeys,
@@ -270,7 +278,7 @@ struct Contract {
     pipelines: std::collections::BTreeMap<String, PipelineContract>,
 }
 
-fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
+fn build_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> Contract {
     let pipelines_out = pipelines
         .pipelines
         .iter()
@@ -305,6 +313,10 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
     let pending = pending.display().to_string();
 
     Contract {
+        // `cwd`, not `repo.checkout`: run from a worktree, the branch that
+        // worktree has out is the one being planned on, not the main
+        // checkout's.
+        base: crate::repo::branch_at(cwd).ok(),
         sizing: SIZING,
         output: ContractOutput {
             verify: format!("spoolway task contract --from {pending}"),
@@ -329,10 +341,10 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
 
 /// Bare `spoolway task contract`: the contract, and nothing else on stdout —
 /// see the acceptance criterion this exists to satisfy.
-fn print_contract(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
+fn print_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&build_contract(repo, pipelines))?
+        serde_json::to_string_pretty(&build_contract(repo, pipelines, cwd))?
     );
     Ok(())
 }
@@ -390,12 +402,13 @@ pub fn task_contract(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &TaskContractArgs,
-    // No longer read for a base: see `queue_add`'s own `_cwd` for why this
-    // stays in the signature unused rather than pulled from every call site.
-    _cwd: &std::path::Path,
+    // Read only by the bare contract, for its `base` — `--from` takes a
+    // task's base from the task or `--base`, never from the checkout, the
+    // same as `queue add --from` does.
+    cwd: &std::path::Path,
 ) -> Result<()> {
     if args.from.is_empty() {
-        return print_contract(repo, pipelines);
+        return print_contract(repo, pipelines, cwd);
     }
 
     let tasks = super::queue::gather_tasks(&args.from)?;
@@ -522,6 +535,32 @@ mod tests {
         }
     }
 
+    /// The contract's `base` is the branch the directory it ran in has out:
+    /// a worktree reports its own branch, not the main checkout's, and a
+    /// detached checkout reports none at all.
+    #[test]
+    fn contract_base_is_the_branch_the_checkout_has_out() {
+        let repo = fixture("contract-base");
+        let json = |cwd: &std::path::Path| {
+            serde_json::to_value(build_contract(&repo, &Pipelines::builtin(), cwd)).unwrap()
+        };
+        assert_eq!(json(&repo.root)["base"], "plan/demo");
+
+        let worktree = repo.root.with_file_name("commands-contract-base-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        let path = worktree.display().to_string();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["worktree", "add", "-q", "-b", "feat/checkout", &path],
+        )
+        .unwrap();
+        assert_eq!(json(&worktree)["base"], "feat/checkout");
+
+        crate::repo::run(&worktree, "git", &["checkout", "-q", "--detach"]).unwrap();
+        assert!(json(&worktree)["base"].is_null(), "{}", json(&worktree));
+    }
+
     /// Every public field [`crate::task::Frontmatter`] declares has to show up
     /// in one of the four groups bare `task contract` prints — read off
     /// `task.rs`'s own source rather than a hand-copied list, so a field added
@@ -530,7 +569,7 @@ mod tests {
     #[test]
     fn every_frontmatter_field_is_in_some_contract_group() {
         let repo = fixture("contract-groups");
-        let contract = build_contract(&repo, &Pipelines::builtin());
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let mut known = std::collections::BTreeSet::new();
         known.extend(contract.keys.required.iter().copied());
         known.extend(contract.keys.optional.iter().copied());
@@ -562,7 +601,7 @@ mod tests {
     #[test]
     fn every_settable_key_has_a_fields_entry() {
         let repo = fixture("contract-fields");
-        let contract = build_contract(&repo, &Pipelines::builtin());
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let mut settable = std::collections::BTreeSet::new();
         settable.extend(contract.keys.required.iter().copied());
         settable.extend(contract.keys.optional.iter().copied());
@@ -603,7 +642,8 @@ mod tests {
     fn bare_contract_prints_only_the_contract_as_json() {
         let repo = fixture("contract-bare");
         let value: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&build_contract(&repo, &Pipelines::builtin())).unwrap(),
+            &serde_json::to_string(&build_contract(&repo, &Pipelines::builtin(), &repo.root))
+                .unwrap(),
         )
         .unwrap();
         assert!(
@@ -648,7 +688,7 @@ mod tests {
     #[test]
     fn title_field_names_all_nine_commit_types() {
         let repo = fixture("contract-title-types");
-        let contract = build_contract(&repo, &Pipelines::builtin());
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let title = contract.fields["title"];
         for kind in [
             "feat", "fix", "docs", "refactor", "perf", "test", "build", "ci", "chore",
@@ -673,7 +713,7 @@ mod tests {
         with_last.steps.first_mut().unwrap().last = true;
 
         let repo = fixture("contract-last-of-chain");
-        let contract = build_contract(&repo, &pipelines);
+        let contract = build_contract(&repo, &pipelines, &repo.root);
 
         let default_out = &contract.pipelines["default"];
         assert_eq!(default_out.description.as_deref(), Some("a test pipeline"));
@@ -702,7 +742,7 @@ mod tests {
         with_both.steps.last_mut().unwrap().last = true;
 
         let repo = fixture("contract-first-of-chain");
-        let contract = build_contract(&repo, &pipelines);
+        let contract = build_contract(&repo, &pipelines, &repo.root);
 
         let default_out = &contract.pipelines["default"];
         assert_eq!(
@@ -727,7 +767,7 @@ mod tests {
     #[test]
     fn the_contract_names_the_directory_tasks_are_written_to() {
         let repo = fixture("contract-output");
-        let contract = build_contract(&repo, &Pipelines::builtin());
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
 
         assert_eq!(
             std::path::Path::new(&contract.output.dir),

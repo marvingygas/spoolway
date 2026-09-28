@@ -224,6 +224,33 @@ impl Repo {
             .unwrap_or(false)
     }
 
+    /// Whether `origin` has `branch`, asked of the remote directly rather
+    /// than of this checkout's own remote-tracking refs — a branch nobody
+    /// here has ever fetched still answers `git ls-remote` honestly, which
+    /// is the whole point of accepting a base only `origin` has ever seen.
+    ///
+    /// Git's own credential prompt is turned off: a private remote this
+    /// process has no terminal to answer for must fail outright rather than
+    /// hang a queue submission or a dispatcher start on a password nobody
+    /// is there to type.
+    pub fn remote_branch_exists(&self, branch: &str) -> bool {
+        if !self.has_remote() {
+            return false;
+        }
+        // The full ref, never the bare name: `ls-remote` reads a pattern as
+        // a glob matched against the tail of a ref, starting at a `/`
+        // boundary, so a bare `gh-412-checkout` would answer `true` for a
+        // real `refs/heads/task/gh-412-checkout` it never named at all
+        // (review finding 1).
+        let full_ref = format!("refs/heads/{branch}");
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "origin", &full_ref])
+            .current_dir(&self.root)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output();
+        matches!(output, Ok(o) if o.status.success() && !o.stdout.is_empty())
+    }
+
     /// The checkout that has `branch` out, if any.
     ///
     /// The main checkout is one entry among the worktrees here, so a plan
@@ -2624,6 +2651,47 @@ mod tests {
             !repo.has_remote(),
             "local-only repos must not attempt a push"
         );
+    }
+
+    /// A branch nobody here has ever fetched still answers `git ls-remote`
+    /// honestly — the check a base only `origin` has depends on to be
+    /// accepted at all, and a name neither place has answers `false`
+    /// exactly the same way.
+    #[test]
+    fn remote_branch_exists_asks_origin_directly_rather_than_a_local_fetch() {
+        let (origin, work) = fixture("remote-branch-exists");
+        git(&work, &["push", "-q", "origin", "plan/x:main"]);
+        git(&origin, &["branch", "task/remote-only", "main"]);
+        let repo = discover_registered(&work).unwrap();
+
+        assert!(
+            repo.remote_branch_exists("task/remote-only"),
+            "origin has the branch, even though this checkout never fetched it"
+        );
+        assert!(
+            !repo.remote_branch_exists("task/nowhere"),
+            "neither place has this one"
+        );
+    }
+
+    /// `git ls-remote` reads a bare pattern as a glob matched against the
+    /// *tail* of a ref, starting at a `/` boundary — so a name that is a
+    /// real branch's own tail, `gh-412-checkout` against a real
+    /// `task/gh-412-checkout`, must not read as a match. Passed a full
+    /// `refs/heads/<branch>` pattern instead, which only ever matches the
+    /// exact ref (review finding 1).
+    #[test]
+    fn remote_branch_exists_does_not_match_a_real_branchs_own_suffix() {
+        let (origin, work) = fixture("remote-branch-suffix");
+        git(&work, &["push", "-q", "origin", "plan/x:main"]);
+        git(&origin, &["branch", "task/gh-412-checkout", "main"]);
+        let repo = discover_registered(&work).unwrap();
+
+        assert!(
+            !repo.remote_branch_exists("gh-412-checkout"),
+            "`gh-412-checkout` is a suffix of the real branch, not the branch itself"
+        );
+        assert!(repo.remote_branch_exists("task/gh-412-checkout"));
     }
 
     /// The trap `checkout_of` used to fall into: a git repo whose single

@@ -414,9 +414,8 @@ fn run() -> Result<()> {
                     commands::queue_unqueue(&repo, routing(&graph)?, args)
                 }
 
-                // `cwd`, for the same reason `queue add` reads it: `--from`
-                // resolves `base` the same way, and the cross-base rule it
-                // checks depends on that being the checkout this ran in.
+                // `cwd`, for the bare contract's `base`: the branch the
+                // checkout this ran in has out, a worktree's own included.
                 Command::Task(TaskCommand::Contract(args)) => {
                     commands::task_contract(&repo, routing(&graph)?, args, &cwd)
                 }

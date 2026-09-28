@@ -2531,9 +2531,28 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
     }
     let path_arg = path.display().to_string();
     let exists = run(repo, "git", &["rev-parse", "--verify", "--quiet", branch]).is_ok();
+    let base_ref;
     let args: Vec<&str> = match exists {
         true => vec!["worktree", "add", &path_arg, branch],
-        false => vec!["worktree", "add", "-b", branch, &path_arg, base],
+        false => {
+            base_ref = resolve_cut_base(repo, base);
+            // `--no-track`: git's own `branch.autoSetupMerge` default sets
+            // this new branch's upstream to `origin/<base>` when the start
+            // point is a remote-tracking ref, which a cut from a local base
+            // never did — an ordinary `git push` in the lane then fails,
+            // asking for `--set-upstream` on a branch nothing ever asked to
+            // track (review finding 3). Both cut paths must leave the same
+            // branch behind.
+            vec![
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                branch,
+                &path_arg,
+                &base_ref,
+            ]
+        }
     };
     run(repo, "git", &args)
         .with_context(|| format!("could not cut a worktree for `{branch}` at {path_arg}"))?;
@@ -2541,6 +2560,50 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
         link_shared_target(worktrees_dir, path);
     }
     Ok(())
+}
+
+/// The commit-ish a fresh branch is cut from: `base` itself when this
+/// checkout already has it as a local branch, `origin/<base>` when only
+/// `origin` does. Cleanup deletes a finished task's local branch once it is
+/// pushed, so a pending pull request's branch — a common `base:` for the
+/// next task in a stack — is usually only there.
+///
+/// Fetched first, since a base only `origin` has ever seen may never have
+/// reached this checkout's own remote-tracking refs. This never creates a
+/// local branch of its own: `git worktree add -b <branch> <path>
+/// <commit-ish>` only ever makes `<branch>`, whatever `<commit-ish>` names,
+/// and a fetch only ever updates `refs/remotes/origin/*`.
+pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
+    let local = format!("refs/heads/{base}");
+    if run(repo, "git", &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
+        return base.to_string();
+    }
+    // Best-effort, and prompts off: a base this checkout has never fetched
+    // may be gone by the time this runs, offline, or (private remote) behind
+    // a credential nobody here is at a terminal to type — any of which
+    // fails this fetch, and the fall-through below, naming `base` bare, is
+    // exactly what the ordinary `git worktree add` error already told a
+    // person about it before this function existed at all. The prompt is
+    // turned off for the same reason `Repo::remote_branch_exists` turns it
+    // off: this must fail outright rather than hang the dispatcher waiting
+    // on a password (review finding 5).
+    let _ = std::process::Command::new("git")
+        .args(["fetch", "origin", base])
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+    let remote = format!("origin/{base}");
+    let remote_ref = format!("refs/remotes/{remote}");
+    match run(
+        repo,
+        "git",
+        &["rev-parse", "--verify", "--quiet", &remote_ref],
+    )
+    .is_ok()
+    {
+        true => remote,
+        false => base.to_string(),
+    }
 }
 
 /// Point this worktree's `target/debug` at one directory shared by every
@@ -4227,5 +4290,61 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A base only `origin` has — the ordinary shape of a pending pull
+    /// request's branch once cleanup deletes its local copy — is cut from
+    /// directly, with no local branch of that name left behind: nothing here
+    /// runs `git branch <base>` or `git checkout <base>`, only a `worktree
+    /// add -b` naming `origin/<base>` as its start point.
+    #[test]
+    fn a_base_only_origin_has_is_cut_from_with_no_local_branch_left_behind() {
+        let origin = crate::scratch::root("mux-cut-remote-only-origin");
+        let work = crate::scratch::root("mux-cut-remote-only-work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        run(&origin, "git", &["init", "-q", "--bare", "-b", "main"]).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        run(&work, "git", &["config", "user.email", "t@example.com"]).unwrap();
+        run(&work, "git", &["config", "user.name", "t"]).unwrap();
+        std::fs::write(work.join("README"), "seed").unwrap();
+        run(&work, "git", &["add", "README"]).unwrap();
+        run(&work, "git", &["commit", "-q", "-m", "seed"]).unwrap();
+        run(
+            &work,
+            "git",
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        run(&work, "git", &["push", "-q", "origin", "main:main"]).unwrap();
+        run(&origin, "git", &["branch", "task/remote-only", "main"]).unwrap();
+
+        let path = work.join("worktrees").join("task-new");
+        cut_worktree(&work, &path, "task/new", "task/remote-only").unwrap();
+
+        assert!(path.join("README").is_file(), "the worktree was cut");
+        assert!(
+            run(
+                &work,
+                "git",
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/task/remote-only"
+                ],
+            )
+            .is_err(),
+            "no local branch was made for the remote-only base"
+        );
+        assert!(
+            run(&path, "git", &["rev-parse", "--abbrev-ref", "task/new@{u}"]).is_err(),
+            "cutting from origin/<base> must not set an upstream — a cut from \
+             a local base never did, and a lane's own push must not be told \
+             to push to the base instead of its own branch (review finding 3)"
+        );
+
+        std::fs::remove_dir_all(&origin).ok();
+        std::fs::remove_dir_all(&work).ok();
     }
 }
