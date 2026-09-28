@@ -77,10 +77,11 @@ With `--all`, a `PROJECT` column appears when the rows span more than one projec
 
 ### The filter panel
 
-`[f]` opens a panel of eight rows: `by`, `group`, `task`, `pipeline`, `step`, `version`,
-`since` and `until`. `[↑↓]` moves between rows, `[←→]` cycles a row's value, `[enter]` on
-`since` or `until` opens a calendar. The `task` row cycles only the tasks the rest of the
-panel's filters still admit. `[enter]` applies the panel, `[esc]` cancels it.
+`[f]` opens a panel of six rows: `by`, `pipeline`, `step`, `version`, `since` and `until`.
+`[↑↓]` moves between rows, `[←→]` cycles a row's value, `[enter]` on `since` or `until` opens
+a calendar. On a cycled row, `‹` or `›` is drawn only on the side that still changes the
+value, a space in its place otherwise. `by` opens on `pipeline`, its left end, so only `→`
+moves it at first. `[enter]` applies the panel, `[esc]` cancels it.
 
 In the calendar, `←`/`→` move a day, `↑`/`↓` a week, `pgup`/`pgdn` a month. `enter` picks the
 day, `x` clears the bound, `esc` goes back.
