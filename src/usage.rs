@@ -1390,25 +1390,39 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
         }
     };
 
-    for dir in std::fs::read_dir(home.join(agent.sessions_dir))
-        .ok()?
-        .flatten()
-    {
-        if !dir.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(dir.path()) else {
-            continue;
-        };
-        for file in entries.flatten() {
-            let name = file.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(&suffix) {
-                return Some(file.path());
-            }
-        }
+    // A full recursive walk rather than the project directory's own files,
+    // because a subagent's transcript sits two levels deeper still, at
+    // `<project-dir>/<parent-session>/subagents/agent-<id>.jsonl` — see
+    // `dir_candidates`, which is what surfaces that id to callers in the
+    // first place.
+    newest_matching(&home.join(agent.sessions_dir), |stem| {
+        format!("{stem}.jsonl").ends_with(&suffix)
+    })
+}
+
+/// The session `session` is a subagent of, if it is one at all.
+///
+/// A subagent's own id carries nothing that says so — `dir_candidates` reads
+/// it straight off the file stem, the same as any other session — so this
+/// answers off the transcript's own location instead: Claude Code writes a
+/// subagent's transcript to `<parent-session>/subagents/agent-<id>.jsonl`,
+/// so a transcript found directly inside a directory named `subagents` names
+/// its parent in the directory one level further up. `None` either for a
+/// root session, or for a subagent whose transcript is no longer on disk to
+/// ask — see [`crate::eval`]'s own fold of `dirs` entries onto this, which is
+/// the one place this matters.
+pub fn parent_session(kind: &str, session: &str) -> Option<String> {
+    parent_session_in(&home_dir()?, kind, session)
+}
+
+fn parent_session_in(home: &Path, kind_name: &str, session: &str) -> Option<String> {
+    let path = session_file_in(home, kind_name, session)?;
+    let subagents_dir = path.parent()?;
+    if subagents_dir.file_name()?.to_str()? != "subagents" {
+        return None;
     }
-    None
+    let parent_dir = subagents_dir.parent()?;
+    Some(parent_dir.file_name()?.to_string_lossy().into_owned())
 }
 
 /// The most recently modified `.jsonl` anywhere under `root`.
@@ -2683,16 +2697,22 @@ fn session_span_at(
 }
 
 /// Every `<command-name>` a session's transcript holds, verbatim and without
-/// its surrounding `<command-args>` — a `<command-name>` marks where a skill
-/// started and never where it ended (see the task's own context for why that
-/// rules out apportioning inside one), so this only ever answers "did this
-/// session run that skill at all", which [`crate::eval`]'s own skill filter is
-/// the one thing that asks.
+/// its surrounding `<command-args>`, plus every skill a Skill tool call named
+/// — a skill named mid-sentence runs through that tool instead of a typed
+/// slash command, and writes no `<command-name>` marker at all (see the
+/// task's own context). Either form marks only where a skill started and
+/// never where it ended, so this only ever answers "did this session run
+/// that skill at all", which [`crate::eval`]'s own skill filter is the one
+/// thing that asks. The two forms are not normalized against each other
+/// here — [`crate::eval::normalize_skill`] is where a typed command's
+/// leading slash is dropped so both read as the same skill.
 ///
-/// A plain substring scan rather than a parse of the surrounding JSON: the
-/// marker is written as literal text inside a `content` string, and
-/// `serde_json` does not escape `<`/`>`, so the raw bytes of the file already
-/// hold the marker exactly as this reads it.
+/// A plain substring scan for the `<command-name>` marker rather than a parse
+/// of the surrounding JSON: the marker is written as literal text inside a
+/// `content` string, and `serde_json` does not escape `<`/`>`, so the raw
+/// bytes of the file already hold the marker exactly as this reads it. The
+/// Skill tool call has no such text form — it is a structured `tool_use`
+/// block — so that half is read one line of JSON at a time instead.
 pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let Some(path) = session_file(kind, session) else {
@@ -2711,6 +2731,23 @@ pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
         };
         out.insert(rest[..end].to_string());
         rest = &rest[end + CLOSE.len()..];
+    }
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let content = value.pointer("/message/content").and_then(|c| c.as_array());
+        for block in content.into_iter().flatten() {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            if block.get("name").and_then(|n| n.as_str()) != Some("Skill") {
+                continue;
+            }
+            if let Some(skill) = block.pointer("/input/skill").and_then(|s| s.as_str()) {
+                out.insert(skill.to_string());
+            }
+        }
     }
     out
 }
@@ -3466,6 +3503,72 @@ mod tests {
         assert_eq!(live.harvest.tokens.output, 76 + 42);
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A repro of the lookup this fixed: `session_file_in` used to read only
+    /// the files directly inside a project directory, one level below
+    /// `sessions_dir`, so nothing nested any deeper was ever found. This
+    /// fixture nests one level deeper than that — under a bare `subagents/`,
+    /// looser than the real `<parent-session>/subagents/` Claude Code
+    /// actually writes (see [`parent_session_in_names_the_session_a_subagent_transcript_sits_under`]
+    /// for that layout) — which is already enough to prove the walk is no
+    /// longer bounded to one level at all.
+    #[test]
+    fn session_file_in_finds_a_subagent_transcript_nested_under_subagents() {
+        let session = "0198e2c0-2222-4000-8000-000000000010";
+        let subagent = "agent-01k2ffed";
+        let root = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let subagents_dir = root
+            .join(".claude/projects/-home-someone-work")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        std::fs::write(
+            subagents_dir.join(format!("{subagent}.jsonl")),
+            CLAUDE_TRANSCRIPT,
+        )
+        .unwrap();
+
+        let path = session_file_in(&root, "claude", subagent);
+        assert!(
+            path.is_some(),
+            "a subagent transcript next to its parent must be found by its own id"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Real layout, not the looser one [`session_file_in_finds_a_subagent_transcript_nested_under_subagents`]
+    /// uses: a subagent's transcript sits under a directory named after its
+    /// parent session, so `parent_session_in` must read that name back out of
+    /// the path rather than off the subagent's own id, which carries nothing
+    /// of its parent at all.
+    #[test]
+    fn parent_session_in_names_the_session_a_subagent_transcript_sits_under() {
+        let parent = "0198e2c0-2222-4000-8000-000000000011";
+        let subagent = "agent-01k2ffed";
+        let root = home_with("claude", parent, CLAUDE_TRANSCRIPT);
+        let subagents_dir = root
+            .join(".claude/projects/-home-someone-work")
+            .join(parent)
+            .join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        std::fs::write(
+            subagents_dir.join(format!("{subagent}.jsonl")),
+            CLAUDE_TRANSCRIPT,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parent_session_in(&root, "claude", subagent),
+            Some(parent.to_string())
+        );
+        assert_eq!(
+            parent_session_in(&root, "claude", parent),
+            None,
+            "a root session's own transcript is not anyone's subagent"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -5301,6 +5404,47 @@ mod tests {
         assert_eq!(
             markers,
             BTreeSet::from(["/spoolway-plan".to_string(), "/spoolway-tasks".to_string()])
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A skill named mid-sentence runs through the Skill tool rather than a
+    /// slash command, and writes an assistant `tool_use` block
+    /// (`name: "Skill"`, `input.skill: "spoolway-plan"`, no leading slash)
+    /// instead of a `<command-name>` marker. `skill_markers` must count that
+    /// the same as a typed `/spoolway-plan` — see the task's own context.
+    #[test]
+    fn skill_markers_reads_a_skill_named_mid_sentence_through_the_skill_tool() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let session = "0198e2c0-8888-4000-8000-00000000d010";
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type":"assistant",
+                "timestamp":"2026-08-04T06:14:20.000Z",
+                "message":{
+                    "model":"claude-opus-5",
+                    "usage":{"input_tokens":2,"output_tokens":10},
+                    "content":[
+                        {"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"spoolway-plan"}}
+                    ]
+                }
+            }),
+            serde_json::json!({
+                "type":"user",
+                "isMeta":true,
+                "timestamp":"2026-08-04T06:14:21.000Z",
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1"}]},
+                "sourceToolUseID":"toolu_1"
+            }),
+        );
+        let home = claude_home_with("skill-tool", session, &lines);
+        let markers =
+            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
+        assert_eq!(
+            markers,
+            BTreeSet::from(["spoolway-plan".to_string()]),
+            "a skill run through the Skill tool must be read the same as a typed slash command"
         );
         std::fs::remove_dir_all(&home).ok();
     }

@@ -55,6 +55,10 @@ A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run
 A session already banked as a lane is never banked again under `dir`. A transcript that has not
 changed since its last banked line is not read again.
 
+A subagent's transcript is banked as its own session line, under its own id. `spoolway eval`
+folds that line onto the session that ran it, so the directory table never shows a row for a
+subagent on its own. See [The directory table](eval.md#the-directory-table).
+
 codex sessions are not swept. Its session store records no working directory, so there is
 nothing to match against a watched root.
 

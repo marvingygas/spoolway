@@ -162,6 +162,10 @@ directory.
 | `USD` | That session's own cost |
 | `TIME` | That session's own wall time |
 
+A skill counts whether a session typed its command or ran it through the Skill tool; either
+way names the same skill. A subagent's tokens, cost and skills count on the session that ran
+it, not on a row of its own.
+
 A `Total` line closes the table: the session count and `USD` under `by dir`, and every token
 class, `USD` and `TIME` under `by session`.
 
