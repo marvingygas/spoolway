@@ -141,6 +141,7 @@ impl State {
             State::Paused => "● paused",
             State::Running => "● running",
             State::Starting => "◌ starting",
+            State::Finished => "✓ finished",
             State::Blocked => "● blocked",
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
@@ -161,6 +162,9 @@ impl State {
             // is only that the agent is not up yet. The hollow dot is what
             // tells the two apart.
             State::Starting => format!("{GREEN}{word}{RESET}"),
+            // Dim, not `Running`'s green: nothing is working this step any
+            // more, and the board's green means something is.
+            State::Finished => format!("{DIM}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
             // A live lane, not a stop, so it takes `Running`'s own colour —
             // the task has not left its step, only paused for a keystroke.
@@ -244,29 +248,16 @@ impl Verdict {
     }
 }
 
-/// [`BoardMode::ConfirmPause`]'s panel — `p`'s own single-abort mockup for
-/// [`PauseScope::Cursor`], `P`'s multi-line one for [`PauseScope::All`]. Both
-/// read `aborts` off the same [`Abort`] shape; which panel is drawn is
-/// [`PauseScope`] alone; there is always at least one abort by the time this
-/// is called, since [`Board::begin_pause_cursor`] and
-/// [`Board::begin_pause_all`] both park with no panel at all rather than
-/// call this with none.
-pub(super) fn pause_confirm_panel(aborts: &[Abort], scope: &PauseScope) -> Vec<String> {
-    match scope {
-        PauseScope::Cursor(id) => cursor_pause_panel(id, &aborts[0]),
-        PauseScope::All => all_pause_panel(aborts),
-    }
-}
-
-/// `p`'s own panel: one abort, so the body names the step it is on directly
-/// rather than repeating the task id the title already carries, and closes
+/// [`BoardMode::ConfirmPause`]'s panel, `p`'s own: one abort, so the body
+/// names the step it is on directly rather than repeating the task id the
+/// title already carries, and closes
 /// with the two lines that distinguish an interrupted turn from a killed
 /// run — the one thing a person answering `enter` needs to know before they
 /// do. The key line splits in two rather than one, `[enter]` on its own row
 /// and `[s]`/`[esc]` on the next, so the schedule this panel adds reads as a
 /// third, unhurried answer rather than one more word crowded onto the first
 /// line — see the mockup in `docs/dispatcher.md`.
-fn cursor_pause_panel(id: &str, abort: &Abort) -> Vec<String> {
+pub(super) fn pause_confirm_panel(id: &str, abort: &Abort) -> Vec<String> {
     let time = abort
         .elapsed
         .map(|d| human_secs(d.as_secs() as i64))
@@ -291,49 +282,6 @@ fn cursor_pause_panel(id: &str, abort: &Abort) -> Vec<String> {
     body.push("[enter] pause it".to_string());
     body.push("[s] schedule   [esc] cancel".to_string());
     crate::screen::boxed(&format!("pause {id}"), &body)
-}
-
-/// `P`'s own panel: one line per abort, columns lined up on the widest task
-/// · step label and the widest kind word so `agent` and `command` read as a
-/// column rather than a run-on phrase — the same reason [`GUTTER`] separates
-/// every other column on the board. The aborts and the key line are the
-/// whole panel: what `enter` and `s` do to the rest of the run — parking it
-/// outright either way, since neither has a step in flight to wait out — is
-/// unchanged and not worth a line of its own here any more.
-fn all_pause_panel(aborts: &[Abort]) -> Vec<String> {
-    let mut body = vec![
-        format!(
-            "Pausing aborts {} running step{}:",
-            aborts.len(),
-            if aborts.len() == 1 { "" } else { "s" }
-        ),
-        String::new(),
-    ];
-    let labels: Vec<String> = aborts
-        .iter()
-        .map(|a| format!("{} · {}", a.task, a.step))
-        .collect();
-    let label_width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let kind_width = aborts
-        .iter()
-        .map(|a| a.kind.word().chars().count())
-        .max()
-        .unwrap_or(0);
-    for (abort, label) in aborts.iter().zip(&labels) {
-        let time = abort
-            .elapsed
-            .map(|d| human_secs(d.as_secs() as i64))
-            .unwrap_or_else(|| NOTHING.to_string());
-        body.push(format!(
-            "{}{GUTTER}{}{GUTTER}{time}",
-            crate::screen::pad_to(label, label_width),
-            crate::screen::pad_to(abort.kind.word(), kind_width),
-        ));
-    }
-    body.push(String::new());
-    body.push("[enter] pause them".to_string());
-    body.push("[s] schedule   [esc] cancel".to_string());
-    crate::screen::boxed("pause all", &body)
 }
 
 /// [`BoardMode::ConfirmResume`]'s panel: the gated tasks, named, and nothing
@@ -1823,6 +1771,7 @@ mod tests {
             State::Paused,
             State::Running,
             State::Starting,
+            State::Finished,
             State::Blocked,
             State::Prompt,
             State::Queued,

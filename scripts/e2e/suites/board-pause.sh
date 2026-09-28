@@ -13,11 +13,11 @@
 # off a real `PATH` and running it, which is the one part of the board no
 # unit test can stand up — the last section covers it.
 #
-# `p` and `P` carry most of the suite,
-# since pausing is the one panel that can also abort a live lane; `U` and a
-# `p` of a task that never started each get one pass through the same
-# `enter`/`esc` answers near the bottom, to cover the other panels and the
-# `parked_from` record a park off `queued` leaves; `R` proves it sends that
+# `p` and the dispatch tab's stop popup carry most of the suite, since
+# pausing and stopping with `i` are the two answers that can also abort a
+# live lane; `U` gets one pass through the same `enter`/`esc` answers near
+# the bottom, to cover the other panels, and a park off `queued` is checked
+# for the `parked_from` record it leaves; `R` proves it sends that
 # same kind of row straight back to `queued`, dependency or not, still
 # gating on a real one beside it. Last of all is the pass-yields section,
 # which queues six more hang lanes of its own — placed after `R` simply so
@@ -83,7 +83,7 @@ queue_hang() {
 # queue_idle <task-id> <depends-on>
 #
 # A task that will never start a lane while the task it depends on is
-# unfinished — the "nothing live" row `p` and `P` have to park on the spot.
+# unfinished — a row with nothing live, which a stop's `i` leaves alone.
 queue_idle() {
   local id=$1 on=$2
   task_doc "$LIVE/$id.md" "$id" "$BODY" "group: board" \
@@ -363,60 +363,73 @@ else
   tail -30 "$BOARD_LOG" | sed 's/^/        /'
 fi
 
-# ---------------------------------- `P` with one lane live and one task idle
-# The run-wide panel lists every abort and counts what pauses behind it, so
-# the whole of what the keypress does is on screen before it happens.
+# ------------------------------- stopping with `i` over a live lane
+# `enter` over a running dispatcher asks how to stop it: `enter` again lets
+# running steps finish, `i` interrupts them. `i` parks each task it
+# interrupted with a mark saying the stop parked it, and leaves everything
+# else — here `behind`, which has nothing running — exactly where it was.
+# Starting again resumes exactly the marked tasks.
 queue_hang busy
 queue_idle behind busy
 BUSY_PID=$(lane_pid "busy · implement" 30)
 if [ -n "$BUSY_PID" ]; then ok "a second lane is mid-turn"
 else bad "a second lane is mid-turn"; fi
 
-press P
-draws "\`P\` opens one panel for the run" "Pausing aborts 1 running step:"
-draws "naming the task and step it aborts" "busy · implement"
-draws "and offers enter on its own line" "[enter] pause them"
-draws "with schedule and cancel on the line under it" "[s] schedule   [esc] cancel"
-stage_stays "no task file is written while the panel is open" busy implement
-stage_stays "not even the idle one" behind queued
+press $'\r'
+draws "\`enter\` over a running dispatcher opens the stop popup" "┌─ stop dispatching"
+draws "saying no new steps will start" "No new steps will be started."
+draws "offering enter to let running steps finish" "[enter] let running steps finish"
+draws "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back"
+stage_stays "no task file is written while the popup is open" busy implement
 
 press $'\x1b'
-stops_drawing "esc closes the run-wide panel" "Pausing aborts"
-stage_stays "and leaves the live task where it was" busy implement
-if kill -0 "$BUSY_PID" 2>/dev/null; then ok "and leaves its lane running"
-else bad "and leaves its lane running"; fi
+stops_drawing "esc closes the stop popup" "No new steps will be started."
+MARK=$(wc -l < "$BOARD_LOG")
+draws_since_waited "and the dispatcher is still running" "dispatcher running · pid " "$MARK"
+if kill -0 "$BUSY_PID" 2>/dev/null; then ok "and leaves the lane running"
+else bad "and leaves the lane running"; fi
 
-# `s` on the run-wide panel schedules the one task with something live and
-# parks the rest of the run at once — there is no step in flight to wait out
-# for those.
-press P
-next_frame
-press s
-stops_drawing "\`s\` closes the run-wide panel without aborting anything" "Pausing aborts"
-stage_stays "the live task keeps running" busy implement
-has "and gains a schedule naming its own step" "gate_at: implement" \
-  "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
-stage_reaches "the idle task parks at once, exactly as enter would" behind paused 25
-if kill -0 "$BUSY_PID" 2>/dev/null; then ok "and the live lane is still running"
-else bad "and the live lane is still running"; fi
-
-# What a scheduled pause does once the step it names actually passes is
-# `commands::report`'s own road, covered there — this suite owns the
-# keypress alone, so the rest of the run is parked outright the ordinary way.
-press P
-next_frame
+MARK=$(wc -l < "$BOARD_LOG")
 press $'\r'
-stage_reaches "enter parks the task that was live" busy paused 25
+draws_since_waited "\`enter\` asks again" "No new steps will be started." "$MARK"
+MARK=$(wc -l < "$BOARD_LOG")
+press i
+stage_reaches "\`i\` parks the task it interrupted" busy paused 25
+if poll_while 15 kill -0 "$BUSY_PID"; then ok "and the turn it interrupted is over"
+else bad "and the turn it interrupted is over"; fi
+has "marking the park as the stop's" "parked_by_stop: true" \
+  "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
+has "beside the step it came off" "parked_from: implement" \
+  "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
+draws_since_waited "and the dispatcher stops" "dispatcher stopped" "$MARK" 30
+draws "the row says the next start resumes it" \
+  "→ implement — resumes when dispatching starts" 30
+stage_stays "a task with nothing running is left alone" behind queued
+stage_stays "and so is one a person paused" mid-turn paused
 
-# ------------------------------------------ `P` with nothing live at all
-# Nothing is running now, so there is nothing to confirm: the keypress parks
-# on the spot and no panel is drawn at all.
+# Starting again, from the same tab, resumes the one task the stop parked.
+screen_dispatch
+stage_reaches "starting again resumes what the stop interrupted" busy implement 25
+lacks "spending the stop's mark" "parked_by_stop:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
+RESUMED_PID=$(lane_pid "busy · implement" 30)
+if [ -n "$RESUMED_PID" ] && [ "$RESUMED_PID" != "$BUSY_PID" ]; then
+  ok "in a lane of its own again"
+else bad "in a lane of its own again"; fi
+stage_stays "the task a person paused stays paused" mid-turn paused
+
+# The rest of this suite wants `busy` stopped, and its dependents parked off
+# `queued` for `R` to reach below. `P` used to do that in one key; with it
+# gone, each goes through `spoolway queue pause`, the same `park` the board's
+# `p` writes.
+must "pausing busy by hand" "$SPOOLWAY" queue pause busy
+stage_reaches "busy parks" busy paused 25
+lacks "and a park by hand carries no stop mark" "parked_by_stop:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
+must "pausing behind by hand" "$SPOOLWAY" queue pause behind
 queue_idle late busy
 next_frame
-MARK=$(wc -l < "$BOARD_LOG")
-press P
-stage_reaches "\`P\` with nothing live parks the run at once" late paused 25
-never_draws "with no panel to answer" "Pausing aborts" "$MARK"
+must "pausing late by hand" "$SPOOLWAY" queue pause late
 
 # ----------------------------------------------- a paused row is a no-op
 MARK=$(wc -l < "$BOARD_LOG")
@@ -426,14 +439,11 @@ never_draws "\`p\` over an already-paused row opens nothing" "Pausing aborts" "$
 
 # ------------------------------- pausing a task that never started at all
 # Nothing live, nothing declared for `queued` in any pipeline, so this parks
-# on the spot exactly like the "nothing live" `P` above — the one thing worth
-# checking here is the record it leaves, not the keypress.
+# on the spot — the one thing worth checking here is the record it leaves.
 queue_idle never-run late
 next_frame
-MARK=$(wc -l < "$BOARD_LOG")
-press P
+must "pausing a task that never started" "$SPOOLWAY" queue pause never-run
 stage_reaches "pausing a task that never started parks it at once" never-run paused 25
-never_draws "with no panel to answer" "Pausing aborts" "$MARK"
 lacks "and writes no \`parked_from\` for a task that was still \`queued\`" \
   "parked_from:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 
@@ -448,7 +458,7 @@ lacks "carrying no leftover \`parked_from\`" "parked_from:" \
 lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 
 # --------------------------------------- `U` answers only to enter now
-# The other panels this task hands the same two answers `p`/`P`'s own already
+# The other panels this task hands the same two answers `p`'s own already
 # had: `U` still opens unconditionally, but the letter that opened it no
 # longer closes it — only `enter` does, the same rule proven above for the
 # pause panel. Two tasks sit on `queued` now: `stalled`, and `never-run`
@@ -584,7 +594,7 @@ has "blocked_from survives the park untouched, beside it" "blocked_from: impleme
 # the same session carried forward, not `resume_target`'s ordinary road. No
 # "freed stale lane" line is expected here: headless's own interrupt above
 # already dropped the lane's record whole rather than leaving it settled (see
-# `pressing_shift_p_opens_a_panel_over_a_live_headless_lane_and_only_enter_interrupts_it`
+# `a_stop_interrupt_ends_a_live_agent_turn_and_the_next_start_resumes_it`
 # in `src/status/mod.rs`), so there is nothing left for `free_stale_lanes` to
 # find.
 RESUME_OUT=$("$SPOOLWAY" resume stuck 2>&1)
@@ -673,8 +683,8 @@ has "and the stdin content lands on disk" "read from stdin" \
 # The reach this task adds: the run-wide resume key reaches a row parked off
 # `queued` itself exactly as it reaches a real step, and does not hold it for
 # a dependency the way a real step's row still would. `behind` and `late`
-# have sat on `paused` since `P` first parked them, both still gated by
-# `busy` — still paused itself, and never resumed by anything above — so
+# have sat on `paused` since `queue pause` parked them off `queued`, both
+# still gated by `busy` — paused itself, and never resumed since — so
 # neither dependency has finished. `gate-edit` is still paused too, a real
 # gate, so this also proves `R`'s panel still gates on it the same as ever
 # while the queued parks beside it need no such asking. `mid-turn` and
@@ -694,53 +704,32 @@ stage_reaches "and every other queued park along with it" behind queued 25
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
-# --------------------------------- a park typed while six lanes race to start
-# The dispatch tab reads keys while the child it started is still working
-# through a pass, not only once that pass returns and the run settles into
-# its interval wait: the two are separate processes, and the park is the
-# tab's own write to the task file. Six lanes launching in the very same
-# pass (each a real worktree cut and a real, if fake, agent start) makes a
-# park landing mid-pass likely, but this cannot *prove* the child was still
-# busy the moment `P` was read — nothing on screen tells a pass from a wait,
-# and no suite can time a keypress against a pass's own read. What this
-# does cover end to end is the park itself, landing either way without
-# being lost — the mid-pass overwrite that could lose it — `persist_task`'s
-# own later write of a task it read before the park lands — is proven at the
-# unit level, by `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
-# `src/dispatch.rs`; this is a real keystroke, read off a real pipe, reaching
-# a real task under a real dispatcher either way.
-#
-# `P` rather than a single row's `p`, so this does not also depend on the
-# cursor's position among the dozens of rows the suite has already built —
-# `on_key` routes both through the same `park_under_lock`, so the write
-# path this is proving is identical either way.
+# --------------------------- one `i` interrupts every live lane at once
+# The stop's `i` reaches every running step in the run, not only the one a
+# cursor sits on: six live lanes, one keypress, six parks, each marked as the
+# stop's. The dispatcher keeps passing while the popup's `i` writes those
+# parks, and a pass holding a copy of a task read before the park cannot
+# overwrite it — `persist_task`'s own fingerprint check, proven at the unit
+# level by `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
+# `src/dispatch.rs`; this is that park landing for real, over live lanes.
 for n in 0 1 2 3 4 5; do
   queue_hang "pass-race-$n"
 done
-# Whether any of the six is already confirmed live by the moment this lands
-# is exactly the race this section exists to not care about: nothing live
-# yet parks the whole run on `P` alone, same as the "nothing live" case
-# above; anything already live opens the same confirm panel the "one lane
-# live" case above does, and `enter` answers it. `enter` is sent only once
-# that panel is up: on the tab with no panel open, `enter` stops dispatching.
-RACE_MARK=$(wc -l < "$BOARD_LOG")
-_race_answered() {
-  _stage_is pass-race-0 paused || _since_says "$RACE_MARK" "Pausing aborts"
-}
-press P
-poll_until 30 _race_answered
-_stage_is pass-race-0 paused || press $'\r'
-# The longest wait in this suite, and the one place the default `20` is too
-# thin: the park lands only once the key is read, and the pass it has to be
-# read inside is cutting six real worktrees. `30` on the first assertion,
-# which is the one that waits on the read at all; `25` — the margin every
-# other park here already takes — on the five that follow, since one `P`
-# parks them all and they are on disk by the time the first one is.
-stage_reaches "\`P\`, typed the instant six lanes race to start, still parks them" \
-  pass-race-0 paused 30
-for n in 1 2 3 4 5; do
-  stage_reaches "and every lane racing to start beside it" "pass-race-$n" paused 25
+for n in 0 1 2 3 4 5; do
+  if [ -n "$(lane_pid "pass-race-$n · implement" 30)" ]; then ok "pass-race-$n is mid-turn"
+  else bad "pass-race-$n is mid-turn"; fi
 done
+MARK=$(wc -l < "$BOARD_LOG")
+press $'\r'
+draws_since_waited "\`enter\` opens the stop popup again" "No new steps will be started." "$MARK"
+MARK=$(wc -l < "$BOARD_LOG")
+press i
+for n in 0 1 2 3 4 5; do
+  stage_reaches "\`i\` parks every live lane" "pass-race-$n" paused 30
+  has "each marked as the stop's" "parked_by_stop: true" \
+    "$SPOOLWAY_PROJECT_HOME/queue/pass-race-$n.md"
+done
+draws_since_waited "and the dispatcher stops" "dispatcher stopped" "$MARK" 30
 
 # ------------------------------- the version in the header, and the restart
 # The header names the build the dispatcher is *running*, which after an

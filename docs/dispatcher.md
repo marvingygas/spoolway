@@ -145,10 +145,36 @@ The header above the task rows names the running dispatcher's version, next to i
 installed version)`.
 
 Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
-dispatch` child the tab starts and stops on `enter` — the tab runs no pass itself. Its header
-names the pid of that child, or reads `dispatcher stopped` with no pid once it has stopped. On
-`enter`, before the child's first pass has claimed anything, the tab covers the board with a
-keyless `Starting dispatcher` popup. See [`spoolway`](cli-reference.md#spoolway).
+dispatch` child the tab starts on `enter` and stops behind a popup the next `enter` opens — the
+tab runs no pass itself. Its header names the pid of that child, or reads `dispatcher stopped`
+with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
+· 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
+turns while that count is above zero. On `enter`, before the child's first pass has claimed
+anything, the tab covers the board with a keyless `Starting dispatcher` popup. See
+[`spoolway`](cli-reference.md#spoolway).
+
+`enter` over a running dispatcher always opens the stop popup, even with nothing running:
+
+```
+┌─ stop dispatching ──────────────────────────────────────────────────┐
+│                                                                     │
+│  No new steps will be started.                                      │
+│  Interrupting stops agents and commands. When resumed, agents pick  │
+│  up where they left off and commands restart.                       │
+│                                                                     │
+│  [enter] let running steps finish                                   │
+│  [i] interrupt them now   [esc] back                                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+`enter` there stops the child the way `ctrl-c` does: nothing is interrupted, and every lane
+keeps running. `i` interrupts every live agent turn and kills every running command step first,
+parking each of those tasks on `paused` with a mark saying the stop parked it, then stops the
+child. `esc` leaves the dispatcher running. A second `enter` while a stop is already going does
+nothing: there is nothing left to ask.
+
+Starting dispatching again, from the tab or with `spoolway dispatch`, resumes every task the
+stop parked, back onto the step it was on, before its first pass.
 
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
 The total is the group's banked spend: every step that has settled, across every task in the
@@ -170,7 +196,7 @@ task id marks `parallel: true`.
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -185,7 +211,7 @@ stateDiagram-v2
   running --> starting: step passes or fails, the next lane starts
   running --> prompt: a permission prompt in its pane
   prompt --> running: the prompt is answered
-  running --> paused: gate, or p on the board
+  running --> paused: gate, p on the board, or the stop popup's i
   running --> blocked: a step reports a block or a budget runs out
   paused --> running: spoolway resume
   blocked --> running: spoolway resume
@@ -199,9 +225,10 @@ stateDiagram-v2
 | `starting` | The dispatcher has claimed a slot and is booting the lane. herdr does not list it until the boot is well along. The logo turns the same as it does for `running`. |
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
-| `paused` | The task's own stage is `paused`: a gate, or a park from `p`. |
+| `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
 | `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
+| `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
 `RECENT` lists the last task moves. Errors from a pass go to `~/.spoolway/logs/<project>.log`.
 
@@ -216,7 +243,6 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 | `r` | Resume a paused or blocked row whose dependencies are done. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
-| `P` | Pause every task in the run, including any `blocked`. Asks first, listing what it would interrupt. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
@@ -226,9 +252,8 @@ Pausing an agent turn sends Escape to the pane, so a resume picks the session ba
 a command step kills the run, and the command runs again in full on resume.
 
 `s` on a pause panel interrupts nothing. It writes a `gate_at` for the step the panel named, so
-each named task pauses itself once that step reports, whatever it reports. Under `P`, the tasks
-with nothing running still park at once. Press `s` again on a row that already has a scheduled
-pause to clear it.
+the named task pauses itself once that step reports, whatever it reports. Press `s` again on a
+row that already has a scheduled pause to clear it.
 
 ### Footer
 
@@ -260,16 +285,20 @@ spoolway resume deploy-login --stage implement -m "not tonight"  # send it back 
 A paused task holds no slot. You can type into its pane. When that turn ends, the dispatcher
 commits the worktree with a `## Status Log` line saying a person drove the round.
 
-Three other things put a task on `paused`:
+Other things put a task on `paused`:
 
 | Cause | How the task file records it |
 |---|---|
-| `p` or `P` on the board | `parked_from: <step>` |
+| `p` on the board | `parked_from: <step>` |
+| The dispatch tab's stop popup, `i` | `parked_from: <step>` and `parked_by_stop: true` |
 | Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
 | A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
 
-`spoolway resume` on any of these puts the task back on its step. A paused task's pane survives
-a stop of the dispatcher.
+`spoolway resume` on any of these puts the task back on its step, and so does `r` on the board.
+A task the stop popup parked also resumes on its own, back onto the step it was on, the next
+time dispatching starts — from the tab or from `spoolway dispatch` — and its NEXT column reads
+`→ <step> — resumes when dispatching starts` until then. A paused task's pane survives a stop of
+the dispatcher.
 
 ## A lane that settles without reporting
 

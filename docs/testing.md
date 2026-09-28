@@ -94,8 +94,8 @@ with a `// covers:` line.
 | `routines` | The routines pane and the `s` save panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | Bare `spoolway`'s jobs tab writing, pausing and deleting a job |
-| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting and stopping a dispatcher, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, and the grouped help off a terminal |
-| `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
+| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting a dispatcher and, behind the stop popup, `enter` stopping it, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, and the grouped help off a terminal |
+| `board-pause` | The board's confirm panels: `p` and the dispatch tab's stop popup's `i`, and `U`, over a live lane |
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
 | `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |

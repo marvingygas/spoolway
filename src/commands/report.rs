@@ -1409,6 +1409,11 @@ fn back_onto_its_step(
     mut task: Task,
     args: &ResumeArgs,
 ) -> Result<()> {
+    // A stop's mark is spent by any resume, whoever sends it: left set on a
+    // task a person resumed by hand, the next start would find it again —
+    // see `crate::status::resume_stop_parked`. Every road below saves.
+    task.front.parked_by_stop = false;
+
     // A `p` park is answered differently from a real stop: nothing was ever
     // in the way, so putting it back is not a lap and runs none of
     // `resume_at`'s bookkeeping — see `unpark`. Only when nobody has

@@ -2441,8 +2441,8 @@ impl<'a> Dispatcher<'a> {
     /// unlocked, and the diff is against this pass's [`Dispatcher::ledger`]
     /// snapshot rather than a fresh read — criterion 3's one-read-per-pass.
     /// The lock covers the paths that are *not* the dispatcher: `sweep` and
-    /// `bank_lane` (a `queue pause` or board `p`/`P` in another
-    /// process). The dispatcher is the only writer of lane lines in the common
+    /// `bank_lane` (a `queue pause`, a board `p` or the dispatch tab's stop,
+    /// in another process). The dispatcher is the only writer of lane lines in the common
     /// case, so its own appends are serial. The one gap is a `bank_lane`
     /// racing this call for the *same carried session* — a narrow window
     /// accepted in favour of not re-reading the ledger per lane.
@@ -7252,6 +7252,7 @@ mod tests {
             blocked_from: None,
             parked_from: None,
             escalated: false,
+            parked_by_stop: false,
             resume: None,
             // Required now — a test naming a task with no `pipeline:` of
             // its own overrides this back to `None` explicitly with `edit`.

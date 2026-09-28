@@ -120,7 +120,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               refused on the lock with one line naming the first. The
 #               board's keys are a different question and do have a suite:
 #               `board-pause` drives
-#               `p`, `P` and `U` as real keystrokes into a real dispatcher,
+#               `p`, `U` and the stop popup's `i` as real keystrokes into a
+#               real dispatcher,
 #               because those interrupt a live lane, write or move a task
 #               file, and answer only to `enter`/`esc` once a panel is open —
 #               none of which a frame comparison can see.

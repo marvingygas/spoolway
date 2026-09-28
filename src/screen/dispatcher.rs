@@ -1,5 +1,6 @@
 //! The `spoolway dispatch` child bare `spoolway`'s dispatch tab starts on
-//! `enter` and stops on the next one.
+//! `enter`, and stops once the popup the next `enter` opens — see
+//! [`stop_panel`] — is answered.
 //!
 //! The screen never runs a pass itself. It starts a child with
 //! `--from-screen`, and the child dispatches exactly as `spoolway dispatch`
@@ -85,6 +86,15 @@ impl Dispatcher {
         })
     }
 
+    /// A shell command standing in for `spoolway dispatch --from-screen`,
+    /// for the dispatch tab's own tests — see [`Dispatcher::spawn`].
+    #[cfg(test)]
+    pub(crate) fn stand_in(script: &str) -> Dispatcher {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        Dispatcher::spawn(command).unwrap()
+    }
+
     /// Ask the child to stop, with the signal `spoolway dispatch` already
     /// answers: it settles what it holds, tears nothing down, and exits,
     /// leaving every lane running. Asked once. A second `SIGINT` would find
@@ -102,6 +112,13 @@ impl Dispatcher {
         }
         #[cfg(not(unix))]
         let _ = self.process.kill();
+    }
+
+    /// Whether the screen has already asked this child to stop. A child
+    /// still settling after that has nothing left to ask, so the tab's
+    /// `enter` does nothing over it rather than opening the stop popup again.
+    pub(crate) fn stopping(&self) -> bool {
+        self.stopping
     }
 
     /// `None` while the child is still running. Once it has exited, the
@@ -170,6 +187,24 @@ pub(crate) fn popup(ran: bool, reason: &str) -> Vec<String> {
     super::notice(title, reason, "[enter] close", super::NOTICE_WRAP)
 }
 
+/// The popup `enter` opens over a running dispatcher: whether its running
+/// steps finish, or are interrupted now. Asked on every stop, even with
+/// nothing running — the choice is the person's each time, never
+/// remembered. Laid out line by line rather than wrapped, so it reads
+/// exactly as the plan's mockup draws it.
+pub(crate) fn stop_panel() -> Vec<String> {
+    let body = [
+        "",
+        "No new steps will be started.",
+        "Interrupting stops agents and commands. When resumed, agents pick",
+        "up where they left off and commands restart.",
+        "",
+        "[enter] let running steps finish",
+        "[i] interrupt them now   [esc] back",
+    ];
+    super::boxed("stop dispatching", &body.map(str::to_string))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,11 +268,27 @@ mod tests {
         );
     }
 
-    /// A shell command standing in for `spoolway dispatch --from-screen`.
+    /// The stop popup, border and all, as the plan's mockup draws it.
+    #[test]
+    fn the_stop_popup_is_drawn_as_the_mockup_draws_it() {
+        assert_eq!(
+            stop_panel(),
+            [
+                "┌─ stop dispatching ──────────────────────────────────────────────────┐",
+                "│                                                                     │",
+                "│  No new steps will be started.                                      │",
+                "│  Interrupting stops agents and commands. When resumed, agents pick  │",
+                "│  up where they left off and commands restart.                       │",
+                "│                                                                     │",
+                "│  [enter] let running steps finish                                   │",
+                "│  [i] interrupt them now   [esc] back                                │",
+                "└─────────────────────────────────────────────────────────────────────┘",
+            ]
+        );
+    }
+
     fn child(script: &str) -> Dispatcher {
-        let mut command = Command::new("sh");
-        command.args(["-c", script]);
-        Dispatcher::spawn(command).unwrap()
+        Dispatcher::stand_in(script)
     }
 
     /// Poll [`Dispatcher::ended`] until the child has exited. The lock file
@@ -313,8 +364,9 @@ mod tests {
     #[test]
     fn a_child_asked_to_stop_ends_without_a_popup() {
         let mut child = child("exec sleep 30");
+        assert!(!child.stopping());
         child.stop();
-        assert!(child.stopping);
+        assert!(child.stopping());
         assert_eq!(wait_ended(&mut child), None);
     }
 }

@@ -1036,6 +1036,7 @@ mod tests {
             blocked_from: None,
             parked_from: None,
             escalated: false,
+            parked_by_stop: false,
             resume: None,
             pipeline: None,
             group: None,

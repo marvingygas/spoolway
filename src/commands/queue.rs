@@ -112,6 +112,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Paused => "paused",
         Running => "running",
         Starting => "starting",
+        Finished => "finished",
         Blocked => "blocked",
         Prompt => "prompt",
         Queued => "queued",
@@ -729,6 +730,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.blocked_from = None;
     front.parked_from = None;
     front.escalated = false;
+    front.parked_by_stop = false;
     front.resume = None;
     front.branch = Some(format!("task/{}", front.id));
     // A task that names its own `base:` keeps it — a task cut for a

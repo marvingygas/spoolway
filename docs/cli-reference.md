@@ -85,9 +85,22 @@ to say, then spawns a `spoolway dispatch` child. The moment the child starts, a 
 dispatcher` popup covers the board, naming no key: `enter`, the arrow keys and every other key
 on this page still reach the board underneath it. It closes once the child's first pass has
 claimed a slot or found nothing to claim, and does not open again on a later pass. `enter`
-again stops that child straight away, with no question: nothing is torn down, and every lane
-keeps running. The header reads `dispatcher running` and the child's pid, or `dispatcher
-stopped` with no pid once it has stopped. `r`/`R`, `p`/`P` and `u`/`U` work whether or not a
+again, over a running child, opens a popup asking how to stop it, in place of `Starting
+dispatcher` if that is still up:
+
+```
+[enter] let running steps finish
+[i] interrupt them now   [esc] back
+```
+
+`enter` there stops the child the way `ctrl-c` does: nothing is torn down, and every lane keeps
+running. `i` interrupts every live agent turn and kills every running command step first, parks
+each of those tasks on `paused`, then stops the child. `esc` leaves the dispatcher running, and
+a second `enter` while a stop is already going does nothing. Starting dispatching again resumes
+every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
+header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
+it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
+finishing` for one, left out once none are). `r`/`R`, `p` and `u`/`U` work whether or not a
 child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
