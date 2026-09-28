@@ -428,9 +428,15 @@ pub struct Step {
     /// it down and writes a short account for the person who really does read
     /// this pane.
     ///
-    /// Unattended is the exception the mode already defines: there is no person
-    /// to approve, so `gate:` does not apply and the pass routes as written. See
-    /// `unattended.enabled`.
+    /// Holds in an unattended run too — a gate is a person's decision by
+    /// design, and nobody staffing the run is a reason to wait longer for
+    /// them, not a reason to let the pass through. See `unattended.enabled`.
+    ///
+    /// The gate belongs to the step, whoever does its work: an unblocker's
+    /// `--pass` from `blocked` is held here exactly the same way, at the gate
+    /// of the step named by the task's own `blocked_from` rather than of
+    /// `blocked` itself. See `commands::report::route` and
+    /// `commands::gate_hold`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gate: bool,
 

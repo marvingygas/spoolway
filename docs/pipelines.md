@@ -209,6 +209,11 @@ step. Any other key is refused. Keys left out fall back to the config.
 - A `--pass` carries the task past the blocked step to that step's `on_pass` for an agent step,
   and back to itself for a command step. `--pass --stage <step>` sends it to `<step>` instead,
   bounded by the steps this task has already run.
+- The gate belongs to the step, whoever does its work: if the step this task blocked on is
+  `gate: true`, a plain `--pass` lands on `paused` at that step's own gate instead, exactly as it
+  would have if that step's own lane had reported the pass. `--stage` may not name a step past a
+  gate this task's pass has not yet answered for — naming the gate step itself, or a step before
+  it, still works. See [Gates](#gates).
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
@@ -371,6 +376,11 @@ spoolway resume <task> --stage implement -m "why"  # send it back to a step you 
   warns about it. Writing `on_fail: blocked` outright silences that warning without changing
   where the fail goes, so `pipeline check` warns about the redundant key instead.
 - A gate waits for a person in an unattended run too.
+- A gate holds an unblocker's `--pass` from `blocked` too, at the gate of the step this pass
+  stands in for rather than of `blocked` itself: `spoolway resume` still takes that step's own
+  `on_pass`. `--pass --stage <step>` off `blocked` may not name a step past a gate it has not
+  answered for — naming the gate step itself, or a step before it, still works. See
+  [Staffing `blocked`](#staffing-blocked).
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.
 

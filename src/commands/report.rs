@@ -176,6 +176,7 @@ pub fn report(
     let pause_note = routed.pause_note;
     let resumed = routed.resumed;
     let paused_from_blocked = routed.paused_from_blocked;
+    let gated_at = routed.gated_at;
 
     // Committing is deterministic, so it is not left to a model. Every lane
     // goes through this command — that is the pipeline's central contract,
@@ -275,11 +276,21 @@ pub fn report(
         // belongs to whoever reads it next, and every choice a stop offers
         // is printed key first, then the command, the same as the board's
         // own row for this task will read the moment it redraws.
-        None if gated => println!(
-            "{id}: {current} --{outcome}--> {} - held here for a person{}",
-            crate::pipeline::PAUSED,
-            stop_choices(&id, &current)
-        ),
+        // `current` alone does not say which step's gate this is when the
+        // hold came from an unblocker's pass — `current` is `blocked` there,
+        // not the step the person actually has to answer for — so
+        // `gated_at` names it.
+        None if gated => {
+            let at = gated_at
+                .as_deref()
+                .map(|step| format!(", at `{step}`'s gate"))
+                .unwrap_or_default();
+            println!(
+                "{id}: {current} --{outcome}--> {} - held here for a person{at}{}",
+                crate::pipeline::PAUSED,
+                stop_choices(&id, &current)
+            )
+        }
         // `blocked` had nowhere else to send this — see `paused_from_blocked`
         // above — so the lane that reported it, and anyone reading the log
         // afterwards, needs telling why the destination is `paused` rather
@@ -322,6 +333,12 @@ pub struct Routed {
     /// `paused` instead. [`report`]'s own final message tells this apart
     /// from an ordinary park.
     pub paused_from_blocked: bool,
+    /// The step whose own gate held an unblocker's `--pass`, when that is
+    /// what `gated` above means — `None` for every other kind of gate, an
+    /// ordinary step's own pass among them, where the pane a person reads is
+    /// already that step's own and needs no further naming. [`report`]'s
+    /// final message adds the clause this names; nothing else reads it.
+    pub gated_at: Option<String>,
 }
 
 /// The routing decision, lifted out of [`report`] so a test can walk every
@@ -358,8 +375,16 @@ pub fn route(
     // repeat of that to but a person, so it borrows `gate:`'s own shape: see
     // the branch below.
     let paused_from_blocked = current == crate::pipeline::BLOCKED && outcome != Outcome::Pass;
+    let mut gated_at = None;
 
     let mut destination = if current == crate::pipeline::BLOCKED && outcome == Outcome::Pass {
+        // Where this task actually stopped, read once before anything below
+        // mutates the fields that answer it — the step whose work this pass
+        // stands in for, and so the step whose gate answers for it, never
+        // `blocked`'s own. Both the `--stage` refusal and the gate hold
+        // below need it.
+        let origin = resume_target(task, pipeline);
+
         // `blocked` declares no `on_pass` of its own — where its pass goes is
         // read from the task's own record of where it stopped, by
         // `cleared_block_target`. For an agent step, that is one step *past*
@@ -381,9 +406,59 @@ pub fn route(
         // unblocker names one — bounded by `steps_run`, the steps this task
         // has actually run a lane at, so a `--stage` can send it back onto
         // ground already covered but never somewhere it was never staffed.
+        // And never past a gate: `gate_between` reads the same pipeline
+        // order `steps_run` already bounds this to, from `origin` (inclusive,
+        // so naming the gate step itself is still allowed — it runs again
+        // and its own gate holds its own pass) up to but not including
+        // `named` (exclusive, so naming a step that is itself gated is never
+        // refused for being "past" its own gate). Checked first, ahead of
+        // `steps_run`'s own bound below: a `--stage` naming a step this task
+        // has genuinely never run is still a step past an unanswered gate,
+        // and the gate is the more useful refusal to give — it says what is
+        // actually in the way, where "has never been at" would read as a
+        // typo rather than a wall.
         let target = match stage {
             Some(named) => {
                 let run = steps_run(task, pipeline);
+                if let Some(gate_step) = gate_between(pipeline, &origin, named) {
+                    // Only the steps at or before the gate itself — a step
+                    // past it is exactly what this refusal exists to keep
+                    // `--stage` from naming, so listing it back as an
+                    // alternative would contradict the refusal in the same
+                    // breath.
+                    let gate_idx = pipeline.steps.iter().position(|s| s.id == gate_step);
+                    let allowed: Vec<&String> = run
+                        .iter()
+                        .filter(|s| {
+                            let idx = pipeline.steps.iter().position(|step| step.id == **s);
+                            matches!((idx, gate_idx), (Some(i), Some(g)) if i <= g)
+                        })
+                        .collect();
+                    // `origin` is what this task's pass stands in for;
+                    // `gate_step` is whose gate answers for it — the same
+                    // step whenever `origin` is itself gated, which is the
+                    // common case, but not always: an ungated `origin` can
+                    // still have a gate further on, between it and `named`.
+                    let subject = if origin == gate_step {
+                        format!("task `{}` stopped at `{origin}`, which is gated", task.id())
+                    } else {
+                        format!(
+                            "task `{}` stopped at `{origin}`, and `{gate_step}` after it is \
+                             gated",
+                            task.id()
+                        )
+                    };
+                    bail!(
+                        "{subject} - a pass from `{blocked}` may not name a step past it. Name \
+                         `{gate_step}` or a step before it: {}",
+                        allowed
+                            .iter()
+                            .map(|s| format!("`{s}`"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        blocked = crate::pipeline::BLOCKED,
+                    );
+                }
                 if !run.iter().any(|s| s == named) {
                     bail!(
                         "task `{}` has never been at `{named}` - a pass from `{blocked}` may \
@@ -398,18 +473,35 @@ pub fn route(
                 }
                 named.to_string()
             }
+            // No `--stage` named: the unblocker's pass is taken at its word
+            // for `origin` itself, so `origin`'s own gate is what answers for
+            // it — not the step `cleared_block_target` would carry it to,
+            // which has done no work yet for any gate to hold. Read before
+            // `cleared_block_target` runs: that call reads `blocked_from` too,
+            // through the same `resume_target`, and nothing between here and
+            // there changes what it would answer.
+            None if pipeline.step(&origin).is_some_and(|step| step.gate) => {
+                task.front.paused_at = Some(origin.clone());
+                task.front.paused_by = Some(Gate::Step.as_str().to_string());
+                task.front.blocked_from = None;
+                gated_at = Some(origin.clone());
+                crate::pipeline::PAUSED.to_string()
+            }
             None => cleared_block_target(task, pipeline, true),
         };
         // Checked before `resume_at` runs, not after: `target` may be spent —
-        // `loop:` now counts arrivals at the step it names, and an unblocker's
-        // pass is a lane's own move like any other, so it is refused the same
-        // way a fail into a spent step is. There is no third destination to
-        // reach for here, though — `apply_loop_budget` reads `current ==
-        // blocked` and parks this on `paused` instead of `blocked`, the same
-        // exit `paused_from_blocked` below takes for every other outcome
-        // reported from `blocked` itself.
+        // `loop:` now counts arrivals at the step it names, and an
+        // unblocker's pass is a lane's own move like any other, so it is
+        // refused the same way a fail into a spent step is. There is no
+        // third destination to reach for here, though — `apply_loop_budget`
+        // reads `current == blocked` and parks this on `paused` instead of
+        // `blocked`, the same exit `paused_from_blocked` below takes for
+        // every other outcome reported from `blocked` itself. A no-op on
+        // `target == paused`: nothing this pipeline declares is named
+        // `paused`, so `apply_loop_budget` finds no step to bound and hands
+        // the gate hold above straight back.
         let routed_target = apply_loop_budget(pipeline, task, current, target.clone(), unattended);
-        if routed_target == target {
+        if gated_at.is_none() && routed_target == target {
             resume_at(task, &target);
         }
         routed_target
@@ -497,7 +589,7 @@ pub fn route(
     // or block apart again, from `last_report` and `blocked_from` — see
     // `past_the_gate`.
     let hold = gate_hold(task, step, outcome, &destination);
-    let gated = hold.is_some();
+    let gated = hold.is_some() || gated_at.is_some();
     // What the status log's arrival line says, in place of the lane's own
     // `-m` message — the Mockup draws this note on the arrival, not the
     // lane's own account of its pass, which `report` writes back in as a
@@ -523,6 +615,14 @@ pub fn route(
         if kind == Gate::Schedule {
             task.front.gate_at = None;
         }
+    }
+    // The origin-gate hold above already stamped `paused_at`/`paused_by`
+    // itself, naming the step this pass stands in for rather than `blocked`
+    // — `hold` never fires for it (`step` here is `blocked`'s own, and
+    // `blocked` is never gated), so the note is written here instead, next
+    // to the one `hold` would have written for an ordinary gate.
+    if let Some(origin) = &gated_at {
+        pause_note = Some(format!("held by `{origin}`'s gate"));
     }
 
     // And in an unattended run, that is as far towards `blocked` as it gets.
@@ -569,6 +669,7 @@ pub fn route(
         pause_note,
         resumed,
         paused_from_blocked,
+        gated_at,
     })
 }
 
@@ -1018,6 +1119,46 @@ pub fn gate_hold(task: &Task, step: &Step, outcome: Outcome, destination: &str) 
         return Some(Gate::Step);
     }
     None
+}
+
+/// The first gated step in the pipeline's own order, at or after `origin` —
+/// what an unblocker's `--pass` may not be carried past, whether by the
+/// ordinary `on_pass` road or by a `--stage` naming a step further on. `None`
+/// when `origin` no longer names a step this pipeline has, or nothing from
+/// there on is gated.
+///
+/// Used directly by `compose::report_contract`, which names it in the
+/// `--stage` form's own "never one past" clause before a lane has reported
+/// anything at all, and indirectly by [`route`]'s own `--stage` refusal,
+/// through [`gate_between`], which is built on this.
+pub fn first_gated_from(pipeline: &Pipeline, origin: &str) -> Option<String> {
+    let idx = pipeline.steps.iter().position(|step| step.id == origin)?;
+    pipeline.steps[idx..]
+        .iter()
+        .find(|step| step.gate)
+        .map(|step| step.id.clone())
+}
+
+/// [`first_gated_from`], bounded above by `target` (exclusive) — `None` when
+/// the first gated step at or after `origin` is `target` itself, lies at or
+/// past it, or `target` is not forward of `origin` at all, so a `--stage`
+/// naming an already-run step behind `origin`, or the gated step itself, is
+/// never refused by this.
+///
+/// What [`route`] refuses a `--stage` for: naming a step this bounds is
+/// naming one past a gate this task's pass has not answered for.
+pub fn gate_between(pipeline: &Pipeline, origin: &str, target: &str) -> Option<String> {
+    let target_idx = pipeline.steps.iter().position(|step| step.id == target)?;
+    let origin_idx = pipeline.steps.iter().position(|step| step.id == origin)?;
+    if target_idx <= origin_idx {
+        return None;
+    }
+    let gate_step = first_gated_from(pipeline, origin)?;
+    let gate_idx = pipeline
+        .steps
+        .iter()
+        .position(|step| step.id == gate_step)?;
+    (gate_idx < target_idx).then_some(gate_step)
 }
 
 /// The three choices a stop offers, key first and then the command that does
@@ -2369,6 +2510,246 @@ mod tests {
             queued(&repo, "confirm-dialog").stage(),
             crate::pipeline::BLOCKED
         );
+    }
+
+    /// Three steps, the middle one gated — so a plain `--pass` off `blocked`,
+    /// a `--stage` naming the gate itself, and a `--stage` naming a step past
+    /// it can all be told apart against the same graph.
+    fn gated_middle_staffed_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: look\n  \
+                     - id: look\n    agent: pi\n    gate: true\n    on_pass: e2e\n  \
+                     - id: e2e\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// The decision the task is named for: the gate belongs to the step,
+    /// whoever does its work. A task blocked at `look` — which `look`'s own
+    /// `gate: true` would have held had its own lane reported the pass — is
+    /// held exactly the same way once an unblocker's `--pass` stands in for
+    /// that step instead, on `paused` at `look`'s own gate rather than
+    /// carried on to `e2e`. A later `spoolway resume` takes `look`'s own
+    /// `on_pass`, not `look` itself — the unblocker's pass is still taken at
+    /// its word, the same as an ungated one would be.
+    #[test]
+    fn a_pass_from_blocked_is_held_at_the_origins_own_gate() {
+        let repo = unattended_fixture("blocked-pass-origin-gate");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.bank_launch("implement", "review");
+        task.bank_launch("review", "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "tab-shell", Outcome::Pass);
+
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("look"));
+        assert_eq!(task.front.paused_by.as_deref(), Some("gate"));
+        assert_eq!(
+            task.front.blocked_from, None,
+            "cleared the same way an ordinary gate hold leaves it — nothing here is a \
+             caught block for `spoolway resume` to hand back to `blocked`"
+        );
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "tab-shell".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            queued(&repo, "tab-shell").stage(),
+            "e2e",
+            "`look`'s own `on_pass`, not `look` itself — the unblocker's pass still stands \
+             in for finished work"
+        );
+    }
+
+    /// Blocks `tab-shell` at `stopped` on `gated_middle_staffed_pipelines`,
+    /// after banking `banked` (each `(from, to)` in order), and returns the
+    /// error a `--pass --stage <stage>` from `blocked` is refused with —
+    /// asserting nothing was written.
+    fn staged_pass_refusal(
+        name: &str,
+        stopped: &str,
+        banked: &[(&str, &str)],
+        stage: &str,
+    ) -> String {
+        let repo = unattended_fixture(name);
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        for (from, to) in banked {
+            task.bank_launch(from, to);
+        }
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some(stopped.into());
+        task.save().unwrap();
+
+        clear_lane_env();
+        let err = report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("tab-shell".into()),
+                stage: Some(stage.into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("done".into()),
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(queued(&repo, "tab-shell").stage(), crate::pipeline::BLOCKED);
+        format!("{err:#}")
+    }
+
+    /// The other half: `--stage` may not carry the task past a gate it never
+    /// answered. Naming `e2e`, past `look`'s own gate, is refused by name,
+    /// and the steps it offers instead stop at the gate — `e2e` has been run,
+    /// but offering it back would contradict the refusal.
+    #[test]
+    fn a_staged_pass_from_blocked_may_not_name_a_step_past_a_gate() {
+        let err = staged_pass_refusal(
+            "staged-pass-past-a-gate",
+            "look",
+            &[
+                (crate::pipeline::QUEUED, "implement"),
+                ("implement", "review"),
+                ("review", "look"),
+                ("look", "e2e"),
+            ],
+            "e2e",
+        );
+        assert!(err.contains("stopped at `look`, which is gated"), "{err}");
+        assert!(
+            err.ends_with("Name `look` or a step before it: `implement`, `review`, `look`"),
+            "{err}"
+        );
+    }
+
+    /// A step past the gate that this task never ran is still refused for
+    /// the gate, not for being unrun — the gate is what is in the way.
+    #[test]
+    fn a_staged_pass_past_a_gate_to_an_unrun_step_names_the_gate() {
+        let err = staged_pass_refusal(
+            "staged-pass-past-a-gate-unrun",
+            "look",
+            &[
+                (crate::pipeline::QUEUED, "implement"),
+                ("implement", "review"),
+                ("review", "look"),
+            ],
+            "e2e",
+        );
+        assert!(!err.contains("has never been at"), "{err}");
+        assert_eq!(
+            err,
+            "task `tab-shell` stopped at `look`, which is gated - a pass from `blocked` may \
+             not name a step past it. Name `look` or a step before it: `implement`, `review`, \
+             `look`"
+        );
+    }
+
+    /// Stopped short of the gate: the refusal names the gate further on as
+    /// the gated step, not the step the task stopped at.
+    #[test]
+    fn a_staged_pass_stopped_short_of_the_gate_names_the_gate_after_it() {
+        let err = staged_pass_refusal(
+            "staged-pass-short-of-a-gate",
+            "review",
+            &[
+                (crate::pipeline::QUEUED, "implement"),
+                ("implement", "review"),
+                ("review", "look"),
+                ("look", "e2e"),
+            ],
+            "e2e",
+        );
+        assert!(
+            err.starts_with("task `tab-shell` stopped at `review`, and `look` after it is gated"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("Name `look` or a step before it: `implement`, `review`, `look`"),
+            "{err}"
+        );
+    }
+
+    /// Naming the gated step itself is not naming a step past it — it runs
+    /// again, and its own gate holds its own pass, same as any other visit.
+    #[test]
+    fn a_staged_pass_may_name_the_gated_step_itself() {
+        let repo = unattended_fixture("staged-pass-names-the-gate");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.bank_launch("implement", "review");
+        task.bank_launch("review", "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        task.save().unwrap();
+
+        clear_lane_env();
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("tab-shell".into()),
+                stage: Some("look".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("send it back for another look".into()),
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(
+            task.stage(),
+            "look",
+            "staged onto the gate step to run again, not held in front of it — the person \
+             asked for this by name"
+        );
+        assert_eq!(task.front.paused_at, None);
     }
 
     /// `--stage` is bounded to `--pass` off `blocked` itself, the same as

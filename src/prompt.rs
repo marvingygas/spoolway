@@ -241,7 +241,7 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // `crate::compose::report_contract` for why `blocked` keeps two forms,
     // and why every other step offers `--fail` only when it routes
     // somewhere `--block` does not.
-    for line in crate::compose::report_contract(&task, step).lines() {
+    for line in crate::compose::report_contract(&task, pipeline, step).lines() {
         println!("   {line}");
     }
     println!();

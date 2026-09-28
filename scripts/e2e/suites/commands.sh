@@ -778,6 +778,76 @@ says "and still holds the pass for the person who opens the pane" \
   "$SPOOLWAY" prompt contract --pipeline gate-check --step check
 rm -f .spoolway/pipelines/gate-check.yml
 
+# ------------------------------------------------- unblocker holds the gate
+# gh-448: the gate belongs to the step, whoever does its work. A task
+# hand-placed on `blocked` with `blocked_from` naming a `gate: true` step —
+# the same hand-placed shape `flow.sh`'s own "blocked has one turn, not a
+# loop" scenario proves the ordinary road out of a block with, no real lane
+# spent — is cleared with a plain `--pass` and must land on `paused` at that
+# step's own gate, not carried past it to `e2e` the way an ungated block
+# already is (see `command-steps.sh`'s own `--pass --stage` cases).
+cat > .spoolway/pipelines/gate-hold.yml <<'YML'
+steps:
+  - id: look
+    agent: pi
+    prompt: builder
+    model: fake-local
+    gate: true
+    on_pass: e2e
+
+  - id: e2e
+    agent: pi
+    prompt: builder
+    model: fake-local
+    on_pass: done
+YML
+
+GATE_TASK="tab-shell"
+{
+  echo "---"
+  echo "id: $GATE_TASK"
+  echo "title: stuck at a gate, blocked by hand"
+  echo "stage: blocked"
+  echo "blocked_from: look"
+  echo "pipeline: gate-hold"
+  echo "group: live"
+  echo
+  echo "---"
+  cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
+
+GATE_OUT=$("$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip" 2>&1)
+GATE_STATUS=$?
+if [ "$GATE_STATUS" -eq 0 ] && grep -qF "held here for a person, at \`look\`'s gate" <<<"$GATE_OUT"
+then
+  ok "an unblocker's pass off a gated step's own block names whose gate is holding it"
+else
+  bad "an unblocker's pass off a gated step's own block names whose gate is holding it \
+(exit $GATE_STATUS)"
+  sed 's/^/        /' <<<"$GATE_OUT"
+fi
+if [ "$(stage_of "$GATE_TASK")" = paused ]; then
+  ok "and the task lands on paused rather than carried past the gate to e2e"
+else
+  bad "and the task lands on paused rather than carried past the gate to e2e \
+(at \`$(stage_of "$GATE_TASK")\`)"
+fi
+has "paused_at names the step whose gate is holding it, not blocked" \
+  "paused_at: look" "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
+has "paused_by names the gate" "paused_by: gate" "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
+lacks "blocked_from does not survive the hold — nothing here is a caught block" \
+  "blocked_from:" "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
+
+must "resuming the held gate" "$SPOOLWAY" resume "$GATE_TASK"
+if [ "$(stage_of "$GATE_TASK")" = e2e ]; then
+  ok "resuming takes look's own on_pass — the unblocker's pass still stands in for finished work"
+else
+  bad "resuming takes look's own on_pass (at \`$(stage_of "$GATE_TASK")\`)"
+fi
+
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
+rm -f .spoolway/pipelines/gate-hold.yml
+
 # ------------------------------------------------------------- the queue screen
 # The one thing no unit test can reach: bare `spoolway`'s queue tab reading
 # real keystrokes off a pipe, submitting a real group, and clearing that
