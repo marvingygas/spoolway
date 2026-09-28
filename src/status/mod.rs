@@ -47,9 +47,8 @@ pub(crate) use view::{DIM, GUTTER, RESET, strip_ansi};
 /// The redraw rate every screen's own wait polls stdin at — the jobs screen,
 /// the queue screen, and the dispatcher board, whose wait slices its whole
 /// interval into stretches of this on every target. The board's wait also
-/// watches the queue and commands directories (see
-/// `crate::screen::DirWatch`), which ends a slice early; it never lengthens
-/// one.
+/// watches the commands directory (see `crate::screen::DirWatch`), which
+/// ends a slice early; it never lengthens one.
 ///
 /// One second, not two, because it is also the rate the lockup's mark is
 /// sampled at — see [`view::spool_frame`], which turns on every whole second. A

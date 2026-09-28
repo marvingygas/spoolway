@@ -177,24 +177,10 @@ pub(crate) fn poll_ready(
         .collect()
 }
 
-/// Which of the two directories a [`DirWatch`] wake belongs to — a lane's own
-/// `spoolway report` landing in the queue, or a background command step
-/// finishing in the commands directory. `commands::dispatch`'s wait loop
-/// answers the two differently: a queue change only redraws the board, since
-/// the next draw already reads the queue fresh; a commands change is what a
-/// finished background step is routed on, so it breaks the wait to run a
-/// fresh pass at once instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Changed {
-    Queue,
-    Commands,
-}
-
-/// Watches the queue directory and the commands directory for anything that
-/// used to be learned only by rereading them — see
-/// [`crate::dispatch::PROBE_INTERVAL`]'s own doc. Built once, outside
-/// `commands::dispatch`'s own loop, and polled alongside stdin every time
-/// that loop waits — see [`poll_ready`].
+/// Watches the commands directory for anything that used to be learned only
+/// by rereading it — see [`crate::dispatch::PROBE_INTERVAL`]'s own doc.
+/// Built once, outside `commands::dispatch`'s own loop, and polled alongside
+/// stdin every time that loop waits — see [`poll_ready`].
 ///
 /// Backed by [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html),
 /// a Linux-only kernel facility with no portable equivalent — see
@@ -202,24 +188,25 @@ pub(crate) enum Changed {
 #[cfg(target_os = "linux")]
 pub(crate) struct DirWatch {
     fd: std::os::unix::io::RawFd,
-    watches: Vec<(libc::c_int, Changed)>,
 }
 
 #[cfg(target_os = "linux")]
 impl DirWatch {
-    /// `None` on any failure to open the instance or watch either directory
-    /// — the caller falls back to the plain interval wait it already has,
+    /// `None` on any failure to open the instance or watch the directory —
+    /// the caller falls back to the plain interval wait it already has,
     /// rather than fail a whole run over a watch it can live without.
-    fn new(queue_dir: &std::path::Path, commands_dir: &std::path::Path) -> Option<Self> {
+    fn new(commands_dir: &std::path::Path) -> Option<Self> {
         use std::os::unix::ffi::OsStrExt;
 
-        // A new file (`IN_CREATE`, how a directly-created task file lands),
-        // one written and closed (`IN_CLOSE_WRITE` — the command wrapper's
-        // own exit-code file, a plain open/write/close with no rename),
-        // one replaced in place (`IN_MOVED_TO`, how `task::write_atomic`'s
-        // temp-file-then-rename lands a save) or removed (`IN_DELETE`, an
-        // archived task or a forgotten run) — everything either side of
-        // this watch actually does to one of these two directories.
+        // A new file (`IN_CREATE`, the wrapper's log file created before it
+        // is spawned, or a `.pid`/`.exit`/`.pane` file's first write), one
+        // written and closed (`IN_CLOSE_WRITE` — those same `.pid`, `.exit`
+        // and `.pane` files, each a plain open/write/close), one replaced in
+        // place (`IN_MOVED_TO`, how `command_step::Runs::roll_log_aside`
+        // renames the last run's log out of the way) or removed
+        // (`IN_DELETE`, a `.pane` file forgotten once its pane closes, or a
+        // task's run files cleaned up on archive) — everything either side
+        // of this watch actually does to the commands directory.
         const MASK: u32 =
             libc::IN_CREATE | libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_DELETE;
 
@@ -230,28 +217,21 @@ impl DirWatch {
         if fd < 0 {
             return None;
         }
-        let mut watches = Vec::new();
-        for (dir, changed) in [
-            (queue_dir, Changed::Queue),
-            (commands_dir, Changed::Commands),
-        ] {
-            let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
-                // SAFETY: `fd` was opened by this same call, above, and
-                // nothing else holds it yet.
-                unsafe { libc::close(fd) };
-                return None;
-            };
-            // SAFETY: `fd` is the instance opened above; `path` is a valid
-            // NUL-terminated buffer for the duration of this call.
-            let wd = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), MASK) };
-            if wd < 0 {
-                // SAFETY: as above.
-                unsafe { libc::close(fd) };
-                return None;
-            }
-            watches.push((wd, changed));
+        let Ok(path) = std::ffi::CString::new(commands_dir.as_os_str().as_bytes()) else {
+            // SAFETY: `fd` was opened by this same call, above, and nothing
+            // else holds it yet.
+            unsafe { libc::close(fd) };
+            return None;
+        };
+        // SAFETY: `fd` is the instance opened above; `path` is a valid
+        // NUL-terminated buffer for the duration of this call.
+        let wd = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), MASK) };
+        if wd < 0 {
+            // SAFETY: as above.
+            unsafe { libc::close(fd) };
+            return None;
         }
-        Some(Self { fd, watches })
+        Some(Self { fd })
     }
 
     pub(crate) fn fd(&self) -> std::os::unix::io::RawFd {
@@ -259,25 +239,17 @@ impl DirWatch {
     }
 
     /// Drain every event `poll_ready` just found waiting on [`Self::fd`],
-    /// and say which of the two watched directories any of them belonged
-    /// to — coalesced to at most one [`Changed::Queue`] and one
-    /// [`Changed::Commands`], since a pass can rewrite a dozen task files in
-    /// one go and the caller only needs to know it should act, not how many
-    /// times.
-    pub(crate) fn drain(&self) -> Vec<Changed> {
-        // `libc::inotify_event` needs 4-byte alignment — inotify(7) spells
-        // this out under NOTES as a `struct` a caller must declare "suitably
-        // aligned" itself, since the kernel packs records at aligned offsets
-        // only *within* whatever buffer it is handed. A `[u8; _]` has an
-        // alignment of 1, so a reference built straight over one is
-        // misaligned and reading it is undefined behaviour whatever a given
-        // architecture happens to tolerate — review finding 2. `[u64; _]`
-        // gives 8-byte alignment for free; only its byte length matters
-        // below.
+    /// and say whether any landed — a single run can write its `.pid`,
+    /// `.exit` and `.pane` files and roll its log aside in one go, and the
+    /// caller only needs to know it should act, not how many times.
+    pub(crate) fn drain(&self) -> bool {
+        // Only whether `read(2)` returned anything is checked below, so no
+        // `inotify_event` is ever parsed out of `buf` — but it still has to
+        // be at least one event long, and `[u64; _]` over `[u8; _]` costs
+        // nothing to keep, so it stays.
         let mut buf = [0u64; 512];
-        let base: *const u8 = buf.as_ptr().cast();
         let cap = std::mem::size_of_val(&buf);
-        let mut seen = Vec::new();
+        let mut any = false;
         loop {
             // SAFETY: `buf` is a valid, appropriately sized and aligned
             // buffer for the duration of this call, and `self.fd` is open
@@ -286,22 +258,9 @@ impl DirWatch {
             if n <= 0 {
                 break;
             }
-            let mut offset = 0usize;
-            while offset + std::mem::size_of::<libc::inotify_event>() <= n as usize {
-                // SAFETY: `offset` leaves at least one whole `inotify_event`
-                // header inside the `n` bytes just read, the kernel only
-                // ever writes complete, correctly aligned records here, and
-                // `base` itself is 8-byte aligned — see `buf`'s own doc.
-                let event = unsafe { &*(base.add(offset).cast::<libc::inotify_event>()) };
-                if let Some((_, changed)) = self.watches.iter().find(|(wd, _)| *wd == event.wd)
-                    && !seen.contains(changed)
-                {
-                    seen.push(*changed);
-                }
-                offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
-            }
+            any = true;
         }
-        seen
+        any
     }
 }
 
@@ -323,7 +282,7 @@ pub(crate) struct DirWatch;
 
 #[cfg(not(target_os = "linux"))]
 impl DirWatch {
-    fn new(_queue_dir: &std::path::Path, _commands_dir: &std::path::Path) -> Option<Self> {
+    fn new(_commands_dir: &std::path::Path) -> Option<Self> {
         None
     }
 
@@ -331,18 +290,15 @@ impl DirWatch {
         unreachable!("DirWatch::new never returns Some off this target")
     }
 
-    pub(crate) fn drain(&self) -> Vec<Changed> {
-        Vec::new()
+    pub(crate) fn drain(&self) -> bool {
+        false
     }
 }
 
-/// Open a [`DirWatch`] on `queue_dir` and `commands_dir`, or `None` where
-/// there is nothing to watch with — see [`DirWatch::new`] on each target.
-pub(crate) fn open_dir_watch(
-    queue_dir: &std::path::Path,
-    commands_dir: &std::path::Path,
-) -> Option<DirWatch> {
-    DirWatch::new(queue_dir, commands_dir)
+/// Open a [`DirWatch`] on `commands_dir`, or `None` where there is nothing to
+/// watch with — see [`DirWatch::new`] on each target.
+pub(crate) fn open_dir_watch(commands_dir: &std::path::Path) -> Option<DirWatch> {
+    DirWatch::new(commands_dir)
 }
 
 /// Read one key off `input`, blocking until it can. `None` at end of input —
@@ -882,35 +838,18 @@ mod tests {
         );
     }
 
-    /// Two scratch directories stand in for the queue and commands
-    /// directories a real [`DirWatch`] joins — see `commands::dispatch`'s
-    /// own wait loop. Writing into one must wake `poll_ready` on the
-    /// watch's own fd and [`DirWatch::drain`] must name only that
-    /// directory, never the other.
+    /// A scratch directory stands in for the commands directory a real
+    /// [`DirWatch`] joins — see `commands::dispatch`'s own wait loop.
+    /// Writing into it must wake `poll_ready` on the watch's own fd and
+    /// [`DirWatch::drain`] must say so.
     #[cfg(target_os = "linux")]
     #[test]
-    fn dir_watch_names_which_of_the_two_directories_changed() {
-        let queue_dir = crate::scratch::root("dir-watch-queue");
+    fn dir_watch_wakes_on_a_commands_directory_change() {
         let commands_dir = crate::scratch::root("dir-watch-commands");
-        let _ = std::fs::remove_dir_all(&queue_dir);
         let _ = std::fs::remove_dir_all(&commands_dir);
-        std::fs::create_dir_all(&queue_dir).unwrap();
         std::fs::create_dir_all(&commands_dir).unwrap();
 
-        let watch = DirWatch::new(&queue_dir, &commands_dir).expect("inotify must be available");
-
-        std::fs::write(queue_dir.join("demo.md"), "hello").unwrap();
-        let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(500));
-        assert_eq!(
-            ready,
-            vec![true],
-            "a write into the queue dir must wake the watch"
-        );
-        assert_eq!(
-            watch.drain(),
-            vec![Changed::Queue],
-            "only the queue directory changed"
-        );
+        let watch = DirWatch::new(&commands_dir).expect("inotify must be available");
 
         std::fs::write(commands_dir.join("demo.exit"), "0").unwrap();
         let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(500));
@@ -919,19 +858,14 @@ mod tests {
             vec![true],
             "a write into the commands dir must wake the watch"
         );
-        assert_eq!(
-            watch.drain(),
-            vec![Changed::Commands],
-            "only the commands directory changed"
-        );
+        assert!(watch.drain(), "the commands directory changed");
 
         // Nothing pending: a poll with no writes since the last drain must
         // time out rather than report a stale wake.
         let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(50));
         assert_eq!(ready, vec![false]);
-        assert!(watch.drain().is_empty());
+        assert!(!watch.drain());
 
-        let _ = std::fs::remove_dir_all(&queue_dir);
         let _ = std::fs::remove_dir_all(&commands_dir);
     }
 }

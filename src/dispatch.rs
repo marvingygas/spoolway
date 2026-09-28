@@ -34,9 +34,9 @@ pub(crate) const LANES_FILE: &str = "lanes.json";
 
 /// The fixed rate a full probe repeats at — [`Dispatcher::pass`] — when
 /// nothing wakes `commands::dispatch`'s wait loop early. A change that lands
-/// in the queue or commands directory wakes that wait the moment it is
-/// written (see `crate::screen::DirWatch`), so this is a floor under how
-/// often a pass runs, not the rate anything is actually learned at.
+/// in the commands directory wakes that wait the moment it is written (see
+/// `crate::screen::DirWatch`), so this is a floor under how often a pass
+/// runs, not the rate anything is actually learned at.
 ///
 /// Ten seconds — what `dispatch.interval` defaulted to before this task
 /// removed it. Kept at that size on purpose, on the same grounds

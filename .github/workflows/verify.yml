@@ -33,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
@@ -62,6 +63,14 @@ jobs:
       # warning nobody is made to look at is one that gets shipped.
       - name: clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Linux CI never builds the macOS targets it releases, so a warning
+      # that only fires there — like a `cfg`-gated variant no non-Linux
+      # build constructs — would otherwise first show up on someone's
+      # `cargo install`. No macOS SDK is needed: nothing in the dependency
+      # tree compiles C on this target.
+      - name: clippy (macOS target)
+        run: cargo clippy --all-targets --locked --target aarch64-apple-darwin -- -D warnings
 
       - run: cargo test --all-targets --locked
 
