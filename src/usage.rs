@@ -210,6 +210,19 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
 
+    /// Set on a lane-style line for a session a person opened by hand in a
+    /// task's worktree — see [`sweep_dirs`] — and on every catch-up line
+    /// that continues one, never on a line for a session the dispatcher
+    /// launched. Both kinds carry the same task, step and run, and
+    /// [`Entry::is_lane`] is true for both, so without this nothing in the
+    /// ledger tells the two apart — and [`sweep_dirs`] must: a subagent of
+    /// a hand session is banked beside its parent, while a subagent of a
+    /// dispatched lane is left alone, since how a lane banks its own spend is
+    /// not the sweep's to change. Omitted when false, so every other line
+    /// reads exactly as it did before this existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hand: bool,
+
     /// Which project this lane ran in. Never written to disk — a ledger lives
     /// inside its project, so storing the answer in every line would be a
     /// thousand copies of the file's own path. Filled in at load time, and only
@@ -1416,7 +1429,14 @@ pub fn parent_session(kind: &str, session: &str) -> Option<String> {
 }
 
 fn parent_session_in(home: &Path, kind_name: &str, session: &str) -> Option<String> {
-    let path = session_file_in(home, kind_name, session)?;
+    parent_of_transcript(&session_file_in(home, kind_name, session)?)
+}
+
+/// [`parent_session`]'s test, asked of a transcript already located — for a
+/// caller that found the file by walking the store and so already holds its
+/// path, where looking it up again by id would be a second walk of every
+/// transcript on the machine for an answer the path in hand already gives.
+fn parent_of_transcript(path: &Path) -> Option<String> {
     let subagents_dir = path.parent()?;
     if subagents_dir.file_name()?.to_str()? != "subagents" {
         return None;
@@ -2264,6 +2284,10 @@ fn bank_lane_at(
         run: carry.and_then(|c| c.run.clone()),
         trial: carry.and_then(|c| c.trial.clone()),
         dir: None,
+        // Copied like the columns above: a catch-up of a hand session's own
+        // line stays a hand line, and [`sweep_dirs`] marks the first one by
+        // handing in a carry it has already marked — see [`Entry::hand`].
+        hand: carry.is_some_and(|c| c.hand),
         project: String::new(),
     };
     append(repo, &entry).ok()?;
@@ -2406,17 +2430,45 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
     appended
 }
 
-/// Catch every session that ran inside a watched directory — see
-/// [`crate::config::Config::watch_roots`] — up to its transcript, the same
-/// job [`sweep`] does for a settled lane above, over a population that never
+/// Catch every session that ran inside a watched directory, or inside one of
+/// this project's own worktrees — see [`crate::config::Config::watch_roots`]
+/// and [`crate::mux::worktree_root`] — up to its transcript, the same job
+/// [`sweep`] does for a settled lane above, over a population that never
 /// dispatched at all.
 ///
 /// A session already carrying a lane line anywhere in the ledger is skipped
-/// outright, even if its own `cwd` happens to sit under a watched root:
-/// [`crate::mux`] cuts a lane's worktree outside every checkout, so the two
-/// populations do not overlap in the ordinary case, but a watched root may
-/// be anything a project names, and a session banked once must never be
-/// banked twice under a different name.
+/// outright, even if its own `cwd` happens to sit under a watched root or a
+/// worktree: [`crate::mux`] cuts a lane's worktree outside every checkout, so
+/// the two populations do not overlap in the ordinary case, but a watched
+/// root may be anything a project names, and a session banked once must
+/// never be banked twice under a different name. That includes a session
+/// this same function banked on an earlier sweep: a hand session found in a
+/// task's worktree is banked below through [`bank_lane_at`] — the same call
+/// [`catch_up_settled_lane`] makes for a settled lane — which makes
+/// [`Entry::is_lane`] true for it from then on, so the very check just
+/// described is what keeps a later sweep from banking it a second time as a
+/// directory line instead.
+///
+/// A subagent transcript follows its parent session, which is told from
+/// the transcript's own path (see [`parent_of_transcript`]):
+///
+/// - Parent is a hand session in a task's worktree — a line marked
+///   [`Entry::hand`], already in the ledger or banked earlier in this same
+///   sweep — so the subagent is banked beside it: same task, same step,
+///   same run, carried from the parent's most recent line. The ledger only
+///   has the hand parent once a sweep has banked it, and a subagent it
+///   starts after that sweep must still land on its row; sweeping every
+///   root transcript before any subagent is what lets one started before
+///   the parent's first sweep take the same road.
+/// - Parent is a dispatched lane, live or already carrying a lane line: the
+///   subagent is left out. A lane's own subagent spend is not banked on
+///   either table today, and banking it here, under a step nobody chose for
+///   it, would change how a lane banks its own spend, not what a person
+///   spends by hand.
+/// - Anything else, a subagent of an ordinary directory session most often,
+///   is classified by its own `cwd` like any other session, and
+///   [`crate::eval`] folds a directory one onto its parent's row at read
+///   time.
 ///
 /// `live` is the same set [`sweep`]'s own lane loop skips, and for the same
 /// reason: a lane in its first round has no ledger line yet to be caught by
@@ -2433,8 +2485,21 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
     if roots.is_empty() {
         return Vec::new();
     }
+    let task_roots = task_worktree_roots(repo);
+    let extra_worktrees = known_worktrees(repo);
+    // The worktree root itself, next to `extra_worktrees` — a directory
+    // under it that no task's own recorded path or recomputed name matches
+    // (a deleted task, or one cut under a naming scheme neither of those
+    // covers) is still found this way, even once removed: this is a string
+    // prefix test against the transcript's own recorded `cwd`, never a check
+    // that the directory still exists.
+    let wt_root = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).ok();
 
     let mut lane_sessions: HashSet<&str> = HashSet::new();
+    // The most recent line of each hand session in a task's worktree — the
+    // carry a subagent of that session is banked with. The ledger is in
+    // append order, so the last one seen is the most recent.
+    let mut hand_lines: BTreeMap<String, Entry> = BTreeMap::new();
     // The most recent directory line already banked for a session, if any —
     // its `ts` is the mtime gate's watermark and its `dir` is reused rather
     // than re-read off the transcript every sweep.
@@ -2445,6 +2510,9 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
         }
         if entry.is_lane() {
             lane_sessions.insert(&entry.session);
+            if entry.hand {
+                hand_lines.insert(entry.session.clone(), entry.clone());
+            }
             continue;
         }
         let Some(dir) = entry.dir.as_deref() else {
@@ -2467,7 +2535,12 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
 
     let mut appended = Vec::new();
     for adapter in watched_kinds() {
-        for (session, path) in dir_candidates(&home, adapter) {
+        let mut candidates = dir_candidates(&home, adapter);
+        // Root transcripts first, subagents after — a stable sort, so the
+        // walk's own order holds within each. See this function's own doc on
+        // why a subagent needs its parent classified before it.
+        candidates.sort_by_key(|(_, path)| parent_of_transcript(path).is_some());
+        for (session, path) in candidates {
             if lane_sessions.contains(session.as_str()) || live.contains(&session) {
                 continue;
             }
@@ -2488,17 +2561,124 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                 }
             }
 
-            let root = match known {
-                Some((_, dir)) => dir.to_string(),
-                None => {
-                    let Some(cwd) = transcript_cwd(&path) else {
-                        continue;
-                    };
-                    let Some(root) = matching_root(&cwd, &roots) else {
-                        continue;
-                    };
-                    root.to_string_lossy().into_owned()
+            // A session already banked as a directory line is diffed against
+            // its own known root, exactly as before — it can never turn out
+            // to be a task's worktree on a later sweep, since a task's own
+            // worktree is never a `dir` line's root (see this function's own
+            // doc), so there is nothing new to classify here.
+            if let Some((_, dir)) = known {
+                let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                    continue;
+                };
+                if let Some(entry) = bank_dir_session(
+                    repo,
+                    adapter.kind,
+                    &session,
+                    dir,
+                    banked_at,
+                    ledger,
+                    &harvest,
+                ) {
+                    appended.push(entry);
                 }
+                continue;
+            }
+
+            // A subagent's own spend belongs to whichever session started
+            // it, and a lane's subagent transcripts sit under that lane's
+            // own worktree the same as anything typed by hand there — so
+            // without this every one of a lane's own subagents would be
+            // banked as a hand session under a guessed step. Read off the
+            // path in hand, never looked up by id: that lookup walks every
+            // transcript on the machine, and a session outside every root
+            // reaches this line on every sweep. See this function's own doc.
+            if let Some(parent) = parent_of_transcript(&path) {
+                if let Some(carry) = hand_lines.get(&parent) {
+                    let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                        continue;
+                    };
+                    if let Some(entry) = bank_lane_at(
+                        repo,
+                        adapter.kind,
+                        &session,
+                        &carry.task,
+                        &carry.step,
+                        banked_at,
+                        Some(carry),
+                        ledger,
+                        &harvest,
+                    ) {
+                        appended.push(entry);
+                    }
+                    continue;
+                }
+                if lane_sessions.contains(parent.as_str()) || live.contains(&parent) {
+                    continue;
+                }
+            }
+
+            let Some(cwd) = transcript_cwd(&path) else {
+                continue;
+            };
+
+            // A task's own worktree wins over every other match: its spend
+            // belongs on that task's own step, not on the project row a
+            // watched root or a bare `git worktree list` entry would give it.
+            if let Some(task_id) = matching_task_worktree(&cwd, &task_roots) {
+                let Some(started_at) = session_span_at(&path).map(|(first, _)| first) else {
+                    continue;
+                };
+                let Some((step, carry)) = task_step_at(repo, ledger, task_id, started_at) else {
+                    // No lane line has ever been banked for this task, so
+                    // there is nothing yet to carry the pipeline, agent and
+                    // run from — try again once the lane itself has banked
+                    // at least one line.
+                    continue;
+                };
+                let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                    continue;
+                };
+                // Marked here, on the carry, since the task's own line it
+                // was copied from is a dispatched lane's — see
+                // [`Entry::hand`].
+                let carry = Entry {
+                    hand: true,
+                    ..carry.clone()
+                };
+                if let Some(entry) = bank_lane_at(
+                    repo,
+                    adapter.kind,
+                    &session,
+                    task_id,
+                    &step,
+                    banked_at,
+                    Some(&carry),
+                    ledger,
+                    &harvest,
+                ) {
+                    hand_lines.insert(session.clone(), entry.clone());
+                    appended.push(entry);
+                }
+                continue;
+            }
+
+            // Not a task's worktree: an ordinary watched root, a directory
+            // under the worktree root no task's own path names, or a
+            // worktree `git worktree list` names that no task owns. Either
+            // way it has no task or step of its own, so it is banked on the
+            // project root's own row — the directory table has no row for a
+            // worktree by itself, only for what watches it.
+            let under_project_worktrees = wt_root
+                .as_ref()
+                .is_some_and(|root| !root.as_os_str().is_empty() && cwd.starts_with(root))
+                || matching_root(&cwd, &extra_worktrees).is_some();
+            let root = match matching_root(&cwd, &roots) {
+                Some(root) => Some(root),
+                None if under_project_worktrees => roots.first().cloned(),
+                None => None,
+            };
+            let Some(root) = root else {
+                continue;
             };
 
             let Some(harvest) = harvest_file(adapter.kind, &path) else {
@@ -2508,7 +2688,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                 repo,
                 adapter.kind,
                 &session,
-                &root,
+                &root.to_string_lossy(),
                 banked_at,
                 ledger,
                 &harvest,
@@ -2518,6 +2698,158 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
         }
     }
     appended
+}
+
+/// Every task's own worktree — its recorded [`crate::task::Frontmatter::worktree_path`]
+/// where one is still on file, or else both directory names
+/// [`crate::mux::cut_worktree`]'s callers could have cut it under — over
+/// every task this project still queues and every one it has already
+/// archived, paired with the task's id.
+///
+/// The recorded path is trusted first and alone whenever it exists: it is
+/// exactly what git was told to cut, under whichever naming scheme was live
+/// that day, and it is never cleared when a task is archived — see
+/// `Dispatcher::clean_up` — so this still answers correctly for a task
+/// finished, and its worktree removed, long ago. Only a task with no
+/// recorded path — cleared by a self-heal check, or never dispatched under a
+/// build that wrote one — falls back to recomputing both shapes
+/// [`crate::mux::worktree_root`] could have named it: `task.id()` under a
+/// grouped workspace, `branch_slug(branch)` under every other layout.
+fn task_worktree_roots(repo: &Repo) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut collect = |tasks: Vec<crate::task::Task>| {
+        for task in tasks {
+            if let Some(recorded) = task.front.worktree_path.clone() {
+                out.push((recorded, task.id().to_string()));
+                continue;
+            }
+            let Ok(root) = crate::mux::worktree_root(&repo.root, &repo.config.dispatch) else {
+                continue;
+            };
+            let branch = task
+                .front
+                .branch
+                .clone()
+                .unwrap_or_else(|| crate::task::default_branch(task.id()));
+            out.push((root.join(task.id()), task.id().to_string()));
+            out.push((
+                root.join(crate::mux::branch_slug(&branch)),
+                task.id().to_string(),
+            ));
+        }
+    };
+    collect(repo.tasks().unwrap_or_default());
+    if let Ok((archived, _)) = crate::task::load_dir(&repo.archive_dir()) {
+        collect(archived);
+    }
+    out
+}
+
+/// The most specific task worktree `cwd` sits under, by task id — the same
+/// longest-match rule [`matching_root`] uses, over a population that also
+/// carries the task each root belongs to.
+fn matching_task_worktree<'a>(cwd: &Path, roots: &'a [(PathBuf, String)]) -> Option<&'a str> {
+    roots
+        .iter()
+        .filter(|(root, _)| !root.as_os_str().is_empty() && cwd.starts_with(root))
+        .max_by_key(|(root, _)| root.as_os_str().len())
+        .map(|(_, id)| id.as_str())
+}
+
+/// Every worktree `git worktree list` names right now, repo root included —
+/// read fresh on every sweep rather than cached, since this is exactly the
+/// population a task's own recorded path cannot stand in for: a worktree
+/// nothing here ever dispatched, so no task frontmatter names it at all.
+/// Empty, quietly, wherever `git` cannot answer — a checkout this is run
+/// against in a test fixture with no real repository behind it, most often.
+fn known_worktrees(repo: &Repo) -> Vec<PathBuf> {
+    let Ok(listing) = repo.git(&["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(|p| PathBuf::from(p.trim()))
+        .collect()
+}
+
+/// The step a task's worktree was on at `at`, and the lane line to carry the
+/// new hand session's pipeline, agent, plan, run and round from.
+///
+/// A lane's own ledger line is stamped when the step it describes is
+/// reported or torn down — see `dispatch::record_usage` — not when that step
+/// starts, so the step live at `at` is not the most recent line *before* it;
+/// it is named by the next one, the earliest line for this task with
+/// `ts >= at`. A session opened during `implement` and caught by this sweep
+/// only after `implement` reported is found this way, on `implement`, not on
+/// whatever ran after it.
+///
+/// When no such line exists yet — the sweep runs while that later step is
+/// still in progress, with nothing reported for it at all — the task's own
+/// file is what is left to answer with; see [`held_or_current_step`]. Falls
+/// back to the carry's own step if even that fails — the task's file is
+/// gone, or unreadable, or held with no step on record — which is the step
+/// that banked last, and a lane held mid-step banks its line when it is
+/// held.
+///
+/// The carry itself is always the task's most recent lane line overall,
+/// whichever step that was banked for: the run, pipeline, agent and plan
+/// it names hold for the whole life of one worktree, not per step, so the
+/// freshest line answers for them regardless of which step's line answers
+/// for `at`. `None` only when the task has no lane line in `ledger` at all —
+/// nothing to carry those columns from.
+fn task_step_at<'a>(
+    repo: &Repo,
+    ledger: &'a [Entry],
+    task_id: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Option<(String, &'a Entry)> {
+    let mut lines: Vec<(chrono::DateTime<chrono::Utc>, &Entry)> = ledger
+        .iter()
+        .filter(|entry| entry.task == task_id && entry.is_lane())
+        .filter_map(|entry| {
+            chrono::DateTime::parse_from_rfc3339(&entry.ts)
+                .ok()
+                .map(|ts| (ts.with_timezone(&chrono::Utc), entry))
+        })
+        .collect();
+    lines.sort_by_key(|(ts, _)| *ts);
+
+    let carry = lines.last().map(|(_, entry)| *entry)?;
+    let step = lines
+        .iter()
+        .find(|(ts, _)| *ts >= at)
+        .map(|(_, entry)| entry.step.clone())
+        .or_else(|| held_or_current_step(repo, task_id))
+        .unwrap_or_else(|| carry.step.clone());
+    Some((step, carry))
+}
+
+/// The step a task is on right now, read off its file: its `stage`, unless
+/// that is one of [`crate::pipeline::RESERVED`] — `paused`, `blocked`,
+/// `queued`, `done` — none of which is the step a person opening an agent
+/// in its worktree is working on. A held task names that step in
+/// `paused_at`, `parked_from` or `blocked_from`; the first that names a
+/// step is it, and `None` when none does. Banked under the hold's own name
+/// instead, a session opened while a lane was paused — the ordinary way a
+/// person ends up fixing something by hand — would sit on a `paused` row of
+/// its own in `spoolway eval --by step`, and stay there, since later
+/// catch-ups copy the step from that first line.
+///
+/// A staffed `blocked` step is a step too, but its own lane banks a line
+/// under `blocked` once it reports, and a session opened before then is
+/// answered by that line, not by this; mid-step, the step it stands in for
+/// is the nearest honest answer.
+fn held_or_current_step(repo: &Repo, task_id: &str) -> Option<String> {
+    let front = repo.task(task_id).ok()?.front;
+    let is_step = |step: &String| !crate::pipeline::RESERVED.contains(&step.as_str());
+    if is_step(&front.stage) {
+        return Some(front.stage);
+    }
+    [front.paused_at, front.parked_from, front.blocked_from]
+        .into_iter()
+        .flatten()
+        .find(is_step)
 }
 
 /// The kinds whose transcripts a directory sweep can walk at all: a kind
@@ -2644,6 +2976,7 @@ fn bank_dir_session(
         run: None,
         trial: None,
         dir: Some(dir.to_string()),
+        hand: false,
         project: String::new(),
     };
     append(repo, &entry).ok()?;
@@ -3796,6 +4129,7 @@ mod tests {
             run: Some("r00001".into()),
             trial: None,
             dir: None,
+            hand: false,
             project: String::new(),
         };
         let line = serde_json::to_string(&entry).unwrap();
@@ -3835,6 +4169,7 @@ mod tests {
             run: None,
             trial: None,
             dir: None,
+            hand: false,
             project: String::new(),
         }
     }
@@ -4465,6 +4800,7 @@ mod tests {
             run: None,
             trial: None,
             dir: None,
+            hand: false,
             project: String::new(),
         }
     }
@@ -5271,6 +5607,510 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&scratch_root).ok();
+    }
+
+    /// A minimal task file, written straight as YAML so the test only says
+    /// what it cares about — everything else falls to `Frontmatter`'s own
+    /// `#[serde(default)]` — the same shortcut `Task::parse` itself takes.
+    fn write_task(dir: &Path, id: &str, stage: &str, worktree_path: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{id}.md")),
+            format!(
+                "---\nid: {id}\nstage: {stage}\nworktree_path: \"{}\"\n---\n## Goal\ndemo\n",
+                worktree_path.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// One transcript record with a real `timestamp`, the field
+    /// `session_span_at` reads and `transcript_in`'s bare records leave out.
+    fn hand_session_record(cwd: &Path, at: &str, output: u64) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": at,
+                "cwd": cwd.to_string_lossy(),
+                "message": {
+                    "model": "claude-opus-5",
+                    "usage": {"input_tokens": 10, "output_tokens": output},
+                },
+            })
+        )
+    }
+
+    /// A hand session opened in a task's own worktree is banked onto that
+    /// task's current step and run — not as a directory line, and never
+    /// under a row of its own — and the whole thing still finds the session
+    /// once the worktree directory backing it is gone, since nothing here
+    /// ever checks that it still exists on disk.
+    ///
+    /// The task's only banked lane line is still on `implement`, but the
+    /// task file itself has since moved to `review` — mid-step, with nothing
+    /// reported for it yet — so a session starting after that line proves
+    /// [`task_step_at`]'s fallback: it reads the step from the task's own
+    /// current file rather than from that stale line.
+    #[test]
+    fn a_hand_session_in_a_tasks_worktree_is_banked_onto_that_tasks_step() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-task-worktree");
+        let worktree = root.join("nonexistent-task-worktree");
+
+        write_task(&repo.queue_dir(), "wt-task", "review", &worktree);
+
+        let lane = Entry {
+            ts: "2026-08-04T06:00:00+00:00".into(),
+            task: "wt-task".into(),
+            step: "implement".into(),
+            pipeline: "default".into(),
+            agent: "claude".into(),
+            kind: "claude".into(),
+            session: "sL".into(),
+            run: Some("r1".into()),
+            ..plain_entry()
+        };
+        append(&repo, &lane).unwrap();
+
+        let session = "0198e2c0-9999-4000-8000-00000000d00b";
+        let lines = hand_session_record(&worktree, "2026-08-04T07:00:00.000Z", 42);
+        let home = claude_home_with("task-worktree", session, &lines);
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one banked line for the hand session");
+        let banked = &appended[0];
+        assert_eq!(banked.task, "wt-task");
+        assert_eq!(
+            banked.step, "review",
+            "the task's current stage, not the stale implement line"
+        );
+        assert_eq!(banked.run.as_deref(), Some("r1"));
+        assert_eq!(banked.session, session);
+        assert_eq!(banked.tokens.output, 42);
+        assert!(banked.outcome.is_none(), "no verdict is guessed");
+        assert!(banked.dir.is_none(), "never a directory line");
+        assert!(
+            banked.is_lane(),
+            "joins the lanes table, not the directory one"
+        );
+        assert!(banked.hand, "told apart from the lane's own line");
+
+        // Swept again: already carries a lane line, so it is never banked a
+        // second time, as a lane line or as a directory line.
+        let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(again.is_empty(), "idempotent across repeated sweeps");
+        let count = read(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.session == session)
+            .count();
+        assert_eq!(count, 1, "banked once, even across sweeps");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A hand session started between two of a task's own lane lines is
+    /// banked on the step that reported *after* it started, not the one
+    /// that had already finished: a lane line is stamped when its step ends,
+    /// so `implement` reporting at `T1` and `review` reporting at `T2`
+    /// means a session opened at `T1 + 5m` ran while `review` was live, and
+    /// belongs on `review`.
+    #[test]
+    fn a_hand_session_started_between_two_lane_lines_is_banked_on_the_later_step() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-task-worktree-mid-step");
+        let worktree = root.join("nonexistent-task-worktree");
+
+        write_task(&repo.queue_dir(), "wt-task2", "review", &worktree);
+
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T06:00:00+00:00".into(),
+                task: "wt-task2".into(),
+                step: "implement".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: "sImplement".into(),
+                run: Some("r2".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T08:00:00+00:00".into(),
+                task: "wt-task2".into(),
+                step: "review".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: "sReview".into(),
+                run: Some("r2".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+
+        // Opened at 06:05, five minutes after `implement` reported and
+        // nearly two hours before `review` does.
+        let session = "0198e2c0-9999-4000-8000-00000000d00c";
+        let lines = hand_session_record(&worktree, "2026-08-04T06:05:00.000Z", 7);
+        let home = claude_home_with("task-worktree-mid-step", session, &lines);
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one banked line for the hand session");
+        let banked = &appended[0];
+        assert_eq!(banked.task, "wt-task2");
+        assert_eq!(
+            banked.step, "review",
+            "review was live at 06:05, even though it had not reported yet"
+        );
+        assert_eq!(banked.run.as_deref(), Some("r2"));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A lane held on `paused` banks its line when it is held, so a session
+    /// a person opens during the pause has no lane line after it until the
+    /// task is resumed. It is banked on the step the task was held from —
+    /// `paused_at` — not on `paused`, which is no step and would otherwise
+    /// open a row of its own under `--by step`.
+    #[test]
+    fn a_hand_session_opened_while_the_task_is_paused_is_banked_on_the_step_it_was_held_from() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-task-worktree-paused");
+        let worktree = root.join("nonexistent-task-worktree");
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("wt-paused.md"),
+            format!(
+                "---\nid: wt-paused\nstage: paused\npaused_at: review\nworktree_path: \"{}\"\n---\n## Goal\ndemo\n",
+                worktree.display()
+            ),
+        )
+        .unwrap();
+
+        for (ts, step, session) in [
+            ("2026-08-04T06:00:00+00:00", "implement", "sImplement"),
+            ("2026-08-04T08:00:00+00:00", "review", "sReview"),
+        ] {
+            append(
+                &repo,
+                &Entry {
+                    ts: ts.into(),
+                    task: "wt-paused".into(),
+                    step: step.into(),
+                    pipeline: "default".into(),
+                    agent: "claude".into(),
+                    kind: "claude".into(),
+                    session: session.into(),
+                    run: Some("r4".into()),
+                    ..plain_entry()
+                },
+            )
+            .unwrap();
+        }
+
+        // Opened at 08:30, half an hour into the pause review's line marks.
+        let session = "0198e2c0-9999-4000-8000-00000000d00e";
+        let lines = hand_session_record(&worktree, "2026-08-04T08:30:00.000Z", 11);
+        let home = claude_home_with("task-worktree-paused", session, &lines);
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one banked line for the hand session");
+        assert_eq!(appended[0].step, "review", "the step it was held from");
+        assert_eq!(appended[0].run.as_deref(), Some("r4"));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A subagent a hand session starts after that session's first sweep
+    /// is banked beside it on the next one — same task, step and run, and
+    /// marked a hand line too — rather than left out as if its parent were
+    /// a dispatched lane. Swept once more, nothing is banked twice.
+    #[test]
+    fn a_hand_sessions_later_subagent_is_banked_on_its_parents_step() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-hand-subagent-later");
+        let worktree = root.join("nonexistent-task-worktree");
+
+        write_task(&repo.queue_dir(), "wt-task5", "implement", &worktree);
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T06:00:00+00:00".into(),
+                task: "wt-task5".into(),
+                step: "implement".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: "sLane".into(),
+                run: Some("r5".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+
+        let parent = "0198e2c0-9999-4000-8000-00000000d00f";
+        let home = claude_home_with(
+            "hand-subagent-later",
+            parent,
+            &hand_session_record(&worktree, "2026-08-04T05:00:00.000Z", 3),
+        );
+        let first = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(first.len(), 1, "the hand session alone");
+        assert!(first[0].hand);
+
+        let subagent = "agent-later1";
+        let dir = home
+            .join(".claude/projects/-nonsense-escaping-nobody-should-read")
+            .join(parent)
+            .join("subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{subagent}.jsonl")),
+            hand_session_record(&worktree, "2026-08-04T09:00:00.000Z", 21),
+        )
+        .unwrap();
+
+        let second = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(second.len(), 1, "the subagent, and nothing else");
+        let banked = &second[0];
+        assert_eq!(banked.session, subagent);
+        assert_eq!(banked.task, "wt-task5");
+        assert_eq!(banked.step, first[0].step, "the parent's own step");
+        assert_eq!(banked.run.as_deref(), Some("r5"));
+        assert_eq!(banked.tokens.output, 21);
+        assert!(banked.hand && banked.is_lane() && banked.outcome.is_none());
+
+        let third = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(third.is_empty(), "idempotent across repeated sweeps");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A subagent already on disk when its hand parent is first found is
+    /// swept after that parent, whatever order the walk found them in, so
+    /// it lands on the parent's step in the very same sweep.
+    #[test]
+    fn a_hand_sessions_subagent_found_with_it_is_banked_on_its_parents_step() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-hand-subagent-same");
+        let worktree = root.join("nonexistent-task-worktree");
+
+        write_task(&repo.queue_dir(), "wt-task6", "review", &worktree);
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T06:00:00+00:00".into(),
+                task: "wt-task6".into(),
+                step: "implement".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: "sLane6".into(),
+                run: Some("r6".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+
+        // The parent started before implement's line, so it is on
+        // implement; the subagent's own start, after it, would read review
+        // if it were classified by itself.
+        let parent = "0198e2c0-9999-4000-8000-00000000d010";
+        let home = claude_home_with(
+            "hand-subagent-same",
+            parent,
+            &hand_session_record(&worktree, "2026-08-04T05:00:00.000Z", 3),
+        );
+        let dir = home
+            .join(".claude/projects/-nonsense-escaping-nobody-should-read")
+            .join(parent)
+            .join("subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent-same1.jsonl"),
+            hand_session_record(&worktree, "2026-08-04T07:00:00.000Z", 8),
+        )
+        .unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 2, "the parent and its subagent");
+        assert!(appended.iter().all(|e| e.step == "implement" && e.hand));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A worktree with no task behind it — the kind `git worktree list`
+    /// still names even though nothing here ever dispatched into it — banks
+    /// its sessions onto the project root's own directory row, not a row of
+    /// its own.
+    #[test]
+    fn a_hand_session_in_a_worktree_with_no_task_is_banked_on_the_project_root() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-non-task-worktree");
+
+        crate::scratch::git_init(&root, &[]);
+        std::fs::write(root.join("README.md"), "demo").unwrap();
+        crate::repo::run(&root, "git", &["add", "."]).unwrap();
+        crate::repo::run(&root, "git", &["commit", "-q", "-m", "init"]).unwrap();
+        let extra = root.with_file_name(format!(
+            "{}-extra-worktree",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::remove_dir_all(&extra).ok();
+        crate::repo::run(
+            &root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "extra-wt",
+                &extra.display().to_string(),
+            ],
+        )
+        .unwrap();
+
+        let session = "0198e2c0-aaaa-4000-8000-00000000d00a";
+        let home = claude_home_with(
+            "non-task-worktree",
+            session,
+            &transcript_in(&extra, &[("", 17)]),
+        );
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one directory line");
+        assert_eq!(appended[0].session, session);
+        assert_eq!(
+            appended[0].dir.as_deref(),
+            Some(root.to_string_lossy().as_ref()),
+            "grouped onto the project root's own row, not the worktree's"
+        );
+        assert!(!appended[0].is_lane(), "a directory line, not a lane");
+        assert_eq!(appended[0].task, "");
+
+        // Swept again: already carries a directory line for this session, so
+        // it is diffed rather than banked a second time.
+        let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(again.is_empty(), "idempotent across repeated sweeps");
+        let count = read(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.session == session)
+            .count();
+        assert_eq!(count, 1, "banked once, even across sweeps");
+
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&extra).ok();
+    }
+
+    /// A directory under the worktree root that no task's own recorded or
+    /// recomputed path names — a deleted task, or one cut under a naming
+    /// scheme neither covers — is still found, even once it is gone: the
+    /// match is a string prefix test against the transcript's own `cwd`,
+    /// never a check that the directory still exists.
+    #[test]
+    fn an_orphaned_directory_under_the_worktree_root_is_banked_on_the_project_root() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-worktree-root-orphan");
+
+        let home = crate::scratch::root("dir-sweep-wt-root-orphan");
+        std::fs::create_dir_all(&home).unwrap();
+        let wt_root = crate::platform::test_home::with_home(&home, || {
+            crate::mux::worktree_root(&repo.root, &repo.config.dispatch).expect("a worktree root")
+        });
+        // No task recorded this directory — it stands for one already
+        // deleted, or cut before this project used the current naming.
+        let orphan = wt_root.join("gone-task-worktree");
+
+        let session = "0198e2c0-bbbb-4000-8000-00000000d00d";
+        let dir = home.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{session}.jsonl")),
+            transcript_in(&orphan, &[("", 5)]),
+        )
+        .unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one directory line");
+        assert_eq!(appended[0].session, session);
+        assert_eq!(
+            appended[0].dir.as_deref(),
+            Some(root.to_string_lossy().as_ref()),
+            "grouped onto the project root's own row"
+        );
+        assert!(!appended[0].is_lane());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A lane's own subagent transcript sits under that lane's own worktree,
+    /// exactly the way a hand session's transcript does — but its parent
+    /// session is a lane, so it must never be banked as a hand session of
+    /// its own, on a step nobody chose for it.
+    #[test]
+    fn a_lane_sessions_own_subagent_is_never_banked_as_a_hand_session() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-lane-subagent");
+        let worktree = root.join("lane-worktree");
+
+        write_task(&repo.queue_dir(), "wt-task3", "implement", &worktree);
+
+        let lane_session = "sParent";
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T06:00:00+00:00".into(),
+                task: "wt-task3".into(),
+                step: "implement".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: lane_session.into(),
+                run: Some("r3".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+
+        let subagent_id = "agent-abc123";
+        let lines = hand_session_record(&worktree, "2026-08-04T07:00:00.000Z", 99);
+        let home = crate::scratch::root("dir-sweep-lane-subagent");
+        let dir = home
+            .join(".claude/projects/-nonsense-escaping-nobody-should-read")
+            .join(lane_session)
+            .join("subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{subagent_id}.jsonl")), &lines).unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(
+            appended.is_empty(),
+            "a lane's own subagent is never banked as a hand session"
+        );
+        let count = read(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.session == subagent_id)
+            .count();
+        assert_eq!(count, 0, "no line of its own, on either table");
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

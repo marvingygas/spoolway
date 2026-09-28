@@ -140,6 +140,10 @@ says which way it moved, not which arm is better.
 directory included, even one with no sessions yet. It opens on `by dir`, one row per watched
 directory.
 
+A session run by hand in one of the project's own worktrees counts here too, on the project
+root's own row. A session in a worktree a task owns counts on the lanes table instead. See
+[Worktree spend](cost.md#worktree-spend).
+
 | Column | What it is |
 |---|---|
 | `SESSIONS` | Sessions run in that directory |

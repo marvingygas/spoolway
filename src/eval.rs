@@ -3651,6 +3651,7 @@ mod tests {
             run: Some(format!("r-{task}")),
             trial: None,
             dir: None,
+            hand: false,
             project: "demo".into(),
         }
     }
@@ -4349,6 +4350,7 @@ mod tests {
             run: None,
             trial: None,
             dir: Some(dir.into()),
+            hand: false,
             project: "demo".into(),
         }
     }
@@ -4577,6 +4579,7 @@ mod screen_tests {
                 run: Some(format!("r-{task}")),
                 trial: None,
                 dir: None,
+                hand: false,
                 project: String::new(),
             },
         )
@@ -4669,6 +4672,7 @@ mod screen_tests {
                 run: None,
                 trial: None,
                 dir: None,
+                hand: false,
                 project: String::new(),
             },
         )
@@ -5104,6 +5108,7 @@ mod screen_tests {
             run: None,
             trial: None,
             dir: None,
+            hand: false,
             project: "demo".into(),
         }
     }
@@ -5501,6 +5506,7 @@ mod screen_tests {
                 run: None,
                 trial: None,
                 dir: Some(dir.to_string()),
+                hand: false,
                 project: String::new(),
             },
         )
