@@ -28,6 +28,12 @@ screen over the same rows.
 The screen holds two tables. The lanes table groups dispatched lanes. The directory table
 groups sessions run by hand in a watched directory. `tab` switches between them.
 
+Opening the tab, pressing `[r]`, or applying the filter panel shows a small `Loading…` popup
+while spoolway rereads the ledger and every session's transcript. On first opening the tab, the
+popup sits over an empty frame. On `[r]` or the filter panel, it sits over the table already on
+screen. It closes by itself when the read finishes, and only `[←]`, `[→]` and `[q]` work while
+it shows.
+
 | Key | What it does |
 |---|---|
 | `[↑↓]` | Move the cursor |

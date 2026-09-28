@@ -566,14 +566,7 @@ pub(crate) fn message_tab(
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Leave {
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in strip() {
-        let _ = writeln!(out, "{line}");
-    }
-    let _ = writeln!(out, " {message}");
-    let _ = writeln!(out);
-    let _ = writeln!(out, "{}", super::key_hint(&[("q", "quit")]));
-    let _ = out.flush();
+    message_frame(message, out);
     loop {
         let Some(key) = wait_key(input, || {}) else {
             return Leave::Quit;
@@ -582,6 +575,20 @@ pub(crate) fn message_tab(
             return leave;
         }
     }
+}
+
+/// [`message_tab`]'s one frame, on its own: eval draws it from inside a
+/// `wait_key` idle callback, where a load that failed on its thread is
+/// noticed, and that callback cannot also take the keys.
+pub(crate) fn message_frame(message: &str, out: &mut impl Write) {
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    for line in strip() {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = writeln!(out, " {message}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{}", super::key_hint(&[("q", "quit")]));
+    let _ = out.flush();
 }
 
 #[cfg(test)]
