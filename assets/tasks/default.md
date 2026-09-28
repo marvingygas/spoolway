@@ -1,9 +1,10 @@
 ## Context
 
-Three to five facts, one line each. The plan that produced this task is not
-something you can read, so this is where its ground goes: what the surrounding
-system does today, the decision this task implements, and the constraint that makes
-the obvious approach wrong. Facts and names, not argument.
+Three to five facts, one line each. The plan and every file behind this task
+are linked below, so this is only the ground a lane needs before opening
+them: what the surrounding system does today, the decision this task
+implements, and the constraint that makes the obvious approach wrong. Facts
+and names, not argument.
 
 - [[what is true today that this task changes]]
 - [[the decision it implements, in one line]]
@@ -16,12 +17,15 @@ plan it came from.]]
 
 ## Mockup
 
-What this looks like when it is done, drawn as the thing itself. Build what
-is here. If it cannot be built as drawn, say so in your report rather than
-improvising something near it.
+What this looks like when it is done, linked and never redrawn: one line per
+plan step or file that draws it. Panels are written out here only when no
+file draws them.
 
-    [[the panels this task has to match, copied from the plan — delete this
-    whole heading if the task does not change anything a person opens]]
+Open each link and build what it draws. If it cannot be built as drawn, say
+so in your report rather than improvising something near it.
+
+- [[`/abs/path/to/plan.html#m-step` — the step's own heading; delete this
+  whole heading if the task does not change anything a person opens]]
 
 ## Non-goals
 
@@ -47,4 +51,5 @@ Read these before you start. They describe the system as it is; work from them
 rather than restating them — a path here replaces a paragraph above, and stays
 true after the code moves.
 
+- [[`/abs/path/to/plan.html#d-record` — the decision record this task implements]]
 - [[path — why it matters]]
