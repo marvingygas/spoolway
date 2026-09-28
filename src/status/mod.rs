@@ -1872,8 +1872,8 @@ fn render(
         enter,
         [
             ("o", "open task"),
+            ("p", "pause task"),
             ("r/R", "resume / all"),
-            ("p", "pause"),
             ("u/U", "unqueue / all"),
         ]
         .as_slice(),
@@ -3749,7 +3749,9 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            frame.contains("[o] open task   [r/R] resume / all   [p] pause   [u/U] unqueue / all"),
+            frame.contains(
+                "[o] open task   [p] pause task   [r/R] resume / all   [u/U] unqueue / all"
+            ),
             "an empty queue's own frame should still carry the hint — {frame}"
         );
 
@@ -3767,7 +3769,9 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            frame.contains("[o] open task   [r/R] resume / all   [p] pause   [u/U] unqueue / all"),
+            frame.contains(
+                "[o] open task   [p] pause task   [r/R] resume / all   [u/U] unqueue / all"
+            ),
             "{frame}"
         );
     }

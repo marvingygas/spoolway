@@ -827,8 +827,8 @@ mod tests {
         assert!(!last.contains("─ groups"), "{last}");
         assert!(
             last.contains(
-                "[enter] start dispatching   [o] open task   [r/R] resume / all   \
-                 [p] pause   [u/U] unqueue / all   [q] quit"
+                "[enter] start dispatching   [o] open task   [p] pause task   \
+                 [r/R] resume / all   [u/U] unqueue / all   [q] quit"
             ),
             "{last}"
         );
