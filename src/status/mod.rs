@@ -38,8 +38,8 @@ pub use view::{banner, plain_table};
 // gutter the board paints its own key line with, rather than spelling either
 // out a second time — see `screen::key_hint`.
 use view::{
-    AMBER, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals, masthead, pane_height,
-    pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, table, ticker,
+    AMBER, RecentEvent, Style, Verdict, boxed, clamp_rows, footer, group_totals, masthead,
+    pane_height, pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, table, ticker,
     unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
 pub(crate) use view::{DIM, GUTTER, RESET, strip_ansi};
@@ -407,6 +407,9 @@ impl Board {
     /// A lock file that cannot be read reads as nobody holding it, since
     /// this must never name a live pid it did not see.
     ///
+    /// Drawn inside a box titled `dispatch` with the key line under it — see
+    /// `render` — so the tab reads like the three beside it.
+    ///
     /// `popup` is the tab's own — a start gate, or why its dispatcher ended
     /// — drawn over the table the same way the board's confirm panels are.
     /// The board's own panel wins while one is open: the tab opens no popup
@@ -493,7 +496,16 @@ impl Board {
                     // out to the widest one first, never shorter than
                     // `pane_width()`, gives every row the same floor to write
                     // onto and never truncates anything that already reached it.
-                    let stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
+                    let mut stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
+                    // Hosted, the last row is the key line under the board's
+                    // box — see `render` — and a panel lands on the box, never
+                    // on the key line: padded to one width with the box, a key
+                    // line wider than the terminal would widen every row of
+                    // the box past the terminal's last column along with it.
+                    let keys = match crate::screen::shell::hosted() {
+                        Some(_) => stripped.pop(),
+                        None => None,
+                    };
                     let width = stripped
                         .iter()
                         .map(|line| line.chars().count())
@@ -514,6 +526,7 @@ impl Board {
                         lines.push(" ".repeat(width));
                     }
                     crate::screen::overlay(&mut lines, &panel);
+                    lines.extend(keys);
                     lines.join("\n")
                 }
                 None => frame,
@@ -1859,19 +1872,32 @@ fn render(
         crate::screen::shell::quit_hint(),
     ]
     .concat();
-    tail.push_str(&format!("\n{}\n", crate::screen::key_hint(&keys)));
+    let keys = crate::screen::key_hint(&keys);
 
     let height = pane_height();
     let rows = match height {
         // Nothing to overflow: keep the ticker whole. See [`pane_height`].
         None => recent.len() + 2,
+        // The last two rows counted off are the blank row above the key
+        // line and the key line itself, pushed below.
         Some(height) => height
             .saturating_sub(1)
             .saturating_sub(frame.lines().count())
-            .saturating_sub(tail.lines().count()),
+            .saturating_sub(tail.lines().count())
+            .saturating_sub(2),
     };
     frame.push_str(&ticker(recent, pane, rows));
     frame.push_str(&tail);
+
+    // Inside bare `spoolway`'s dispatch tab the board draws in a box titled
+    // `dispatch`, the way the other three tabs draw theirs, with the key
+    // line under the box rather than inside it. The blank row above the key
+    // line stays inside, as the box's last row.
+    if crate::screen::shell::hosted().is_some() {
+        frame.push('\n');
+        return Ok(boxed(&frame, &keys, pane, height));
+    }
+    frame.push_str(&format!("\n{keys}\n"));
 
     Ok(clamp_rows(&frame, height))
 }
@@ -5106,6 +5132,48 @@ mod tests {
             .unwrap();
         assert!(frame.contains("finding 39"), "{frame}");
         assert!(frame.contains("[enter] its own key"), "{frame}");
+    }
+
+    /// Inside the dispatch tab the board draws in a box titled `dispatch`,
+    /// and a popup the tab opens still lands on it: every row of the box,
+    /// the popup's included, ends in the box's right border, and the key
+    /// line stays under the bottom border.
+    #[test]
+    fn a_hosted_board_draws_in_a_box_and_a_popup_lands_inside_it() {
+        let repo = fixture("hosted-board-boxed");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "boxed-row", &[], None);
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let mut board = Board::for_test();
+        let width = pane_width() + 2;
+        for popup in [
+            None,
+            Some(crate::screen::panel(
+                "a popup",
+                &["over it".into()],
+                "[enter] close",
+            )),
+        ] {
+            let frame = board
+                .hosted_frame(&repo, &pipelines, false, popup.as_deref())
+                .unwrap();
+            let lines: Vec<String> = frame.lines().map(strip_ansi).collect();
+            assert!(lines[0].starts_with("┌─ dispatch ─"), "{frame}");
+            let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
+            for line in &lines[..=bottom] {
+                assert_eq!(line.chars().count(), width, "{line:?}");
+            }
+            for line in &lines[1..bottom] {
+                assert!(line.starts_with('│') && line.ends_with('│'), "{line:?}");
+            }
+            assert!(
+                lines[bottom + 1].contains("[enter] start dispatching"),
+                "{frame}"
+            );
+            if popup.is_some() {
+                assert!(frame.contains("over it"), "{frame}");
+            }
+        }
     }
 
     /// A confirm panel is drawn in plain text over a frame the table beneath

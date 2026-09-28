@@ -60,8 +60,9 @@ Dispatcher already running
 A project is `-C <DIR>` or the current directory's repository. A screen open in one project
 never refuses one opened in another.
 
-The open tab's label is in normal ink. The other three labels and both arrows are dim.
-`dispatch` is always in the accent colour: bright when it is the open tab, dim otherwise.
+Every label and both arrows are in plain ink, with no colour. The open tab's label is marked
+with brackets, the same mark the key line gives a key: `[queue]`, `[dispatch]`. `←` sits one
+space outside `dispatch`, the first tab, and `→` sits one space outside `eval`, the last.
 
 | Key | What it does |
 |---|---|
@@ -71,10 +72,12 @@ The open tab's label is in normal ink. The other three labels and both arrows ar
 Inside the eval tab's filter panel and the queue tab's routines view, `←` and `→` keep their
 own meaning instead.
 
-Each tab draws its own screen, under the strip. The dispatch tab draws the board, from a
-`spoolway dispatch` child it starts and stops. The queue, jobs and eval tabs draw the queue,
-jobs and eval screens described below. Typed bare, `spoolway queue`, `spoolway jobs` and
-`spoolway eval` print their usage or their tables instead.
+Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
+titled `dispatch`, as wide and as tall as the terminal allows, from a `spoolway dispatch` child
+it starts and stops. The key line draws under the box, the same as under the queue, jobs and
+eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens described
+below. Typed bare, `spoolway queue`, `spoolway jobs` and `spoolway eval` print their usage or
+their tables instead.
 
 The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
 says, asking the overrides and warnings gates as popups first, each only when it has something
