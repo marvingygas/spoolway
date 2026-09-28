@@ -1559,10 +1559,11 @@ impl Config {
     }
 
     fn load_impl(root: &Path, overrides: Option<&Path>) -> Result<Config> {
-        let (config, notices) = Config::load_with_notices(root, overrides)?;
+        let (config, notices, ignored) = Config::load_with_notices(root, overrides)?;
         for notice in notices {
             eprintln!("{notice}");
         }
+        crate::overrides::print_ignored_notices(&ignored);
         Ok(config)
     }
 
@@ -1586,7 +1587,7 @@ impl Config {
             toml::from_str(&stripped).with_context(|| format!("parsing {}", path.display()))?;
         config.migrate();
         if let Ok(overrides) = crate::overrides::dir_for(root) {
-            config = crate::overrides::apply_config_patch(config, &overrides)?;
+            config = crate::overrides::apply_config_patch(config, &overrides)?.0;
         }
         Ok(config)
     }
@@ -1594,7 +1595,10 @@ impl Config {
     /// [`Config::load_impl`] with its retired-table notices handed back
     /// rather than printed, so a test can see which ones a given file on disk
     /// earns. `load_impl` is the only caller outside tests; it prints them.
-    fn load_with_notices(root: &Path, overrides: Option<&Path>) -> Result<(Config, Vec<String>)> {
+    fn load_with_notices(
+        root: &Path,
+        overrides: Option<&Path>,
+    ) -> Result<(Config, Vec<String>, Vec<crate::overrides::Ignored>)> {
         let path = Config::path_in(root);
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
@@ -1691,17 +1695,23 @@ impl Config {
                 // `migrate()` drops any profile on a retired kind — a patch
                 // applied any earlier silences the notices for a file that
                 // still spells those tables out.
+                let mut ignored = Vec::new();
                 if let Some(overrides) = overrides {
-                    config = crate::overrides::apply_config_patch(config, overrides)?;
+                    let (patched, ig) = crate::overrides::apply_config_patch(config, overrides)?;
+                    config = patched;
+                    ignored = ig;
                 }
-                Ok((config, notices))
+                Ok((config, notices, ignored))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let mut config = Config::default();
+                let mut ignored = Vec::new();
                 if let Some(overrides) = overrides {
-                    config = crate::overrides::apply_config_patch(config, overrides)?;
+                    let (patched, ig) = crate::overrides::apply_config_patch(config, overrides)?;
+                    config = patched;
+                    ignored = ig;
                 }
-                Ok((config, Vec::new()))
+                Ok((config, Vec::new(), ignored))
             }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -2872,7 +2882,7 @@ mod tests {
     #[test]
     fn a_backend_of_tmux_loads_as_herdr_with_a_notice() {
         with_override_fixture("backend-tmux", "[dispatch]\nbackend = \"tmux\"\n", |root| {
-            let (config, notices) = Config::load_with_notices(root, None).unwrap();
+            let (config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
             assert_eq!(config.dispatch.backend, Backend::Herdr);
             assert!(
                 notices.iter().any(|n| n.contains("dispatch.backend")
@@ -3226,6 +3236,40 @@ mod tests {
         );
     }
 
+    /// A config override key the tracked config would refuse — a bad value
+    /// for a typed field — is skipped, reported in `load_with_notices`'s own
+    /// `Ignored` list, and every other key in the same patch still applies.
+    #[test]
+    fn a_config_key_the_tracked_config_would_refuse_is_skipped_with_the_rest_applied() {
+        with_override_fixture(
+            "bad-value",
+            "[unattended]\nenabled = false\n[dispatch]\nworktree_root = \"/tracked\"\n",
+            |root| {
+                let overrides = crate::overrides::dir_for(root).unwrap();
+                std::fs::create_dir_all(&overrides).unwrap();
+                std::fs::write(
+                    overrides.join(CONFIG_FILE),
+                    "[unattended]\nenabled = \"not-a-bool\"\n[dispatch]\nworktree_root = \
+                     \"/patched\"\n",
+                )
+                .unwrap();
+
+                let (config, _notices, ignored) =
+                    Config::load_with_notices(root, Some(&overrides)).unwrap();
+                assert!(
+                    !config.unattended.enabled,
+                    "the refused key must never have applied — the tracked value stands"
+                );
+                assert_eq!(
+                    config.dispatch.worktree_root, "/patched",
+                    "a key in the same patch that the config accepts still applies"
+                );
+                assert_eq!(ignored.len(), 1, "{ignored:?}");
+                assert_eq!(ignored[0].fields, "unattended.enabled");
+            },
+        );
+    }
+
     /// `Config::load_tracked` is the second entry point the plan calls for:
     /// it answers the tracked config even where a patch is sitting right
     /// there on disk, for a caller that must not see the merge.
@@ -3274,7 +3318,8 @@ mod tests {
             )
             .unwrap();
 
-            let (config, patched) = Config::load_with_notices(root, Some(&overrides)).unwrap();
+            let (config, patched, _ignored) =
+                Config::load_with_notices(root, Some(&overrides)).unwrap();
             assert!(config.unattended.enabled, "the patch still applies");
             assert_eq!(
                 patched, bare,

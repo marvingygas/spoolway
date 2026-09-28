@@ -218,6 +218,141 @@ must "unattended off again, so nothing later in this file inherits it" \
 must "the dispatched-against task is taken back out" \
   "$SPOOLWAY" queue unqueue gate --force
 
+# ------------------------------------------------------------ a stale override
+# The incident the group's own task describes: a step's own shape changes
+# under an override that still names a key the step no longer takes — here,
+# `review` turning from an agent step into a command step while the layer
+# still sets `review.agent`. Before this task every command refused to load
+# at all; now the stale entry is skipped, one stderr line names it, and
+# every other override in the file still applies.
+must "fork a knob on the step that is about to change shape" \
+  "$SPOOLWAY" pipeline override default --set review.agent=fake-agent
+# A command step may declare none of `prompt`, `model`, `effort` or
+# `session` — those are a lane's — so turning `review` into one has to drop
+# all four, not just swap `agent:` for `run:`, or the tracked file is
+# invalid on its own before the override ever enters the picture.
+must "review turns into a command step, the override none the wiser" \
+  sed -i '/- id: review/,/- id: document/ {
+    s/^    agent: claude/    run: echo hi/
+    /^    prompt:/d
+    /^    model:/d
+    /^    effort:/d
+    /^    session:/d
+  }' "$TRACKED"
+
+LAYER_BYTES_BEFORE=$(cat "$LAYER")
+
+works "a plain command still loads — the stale entry is skipped, not refused" \
+  "$SPOOLWAY" pipeline check
+says "and its stderr names exactly the override left out" \
+  "spoolway: override ignored — pipelines/default.yml step \`review\`: names both \`run:\` and \`agent:\` — a step runs a process or a model, not both" \
+  "$SPOOLWAY" pipeline check
+says "stdout still carries the ordinary report" \
+  "pipeline(s) valid" \
+  "$SPOOLWAY" pipeline check
+
+# `says` reads both streams merged, so the three checks above cannot tell
+# which stream the notice went to, nor how often. One command loads its
+# pipelines several times over (`main.rs` ahead of its dispatch, the command
+# again after), which only a whole process shows — so split the streams of
+# one real invocation and count.
+IGNORED_LINE="spoolway: override ignored — pipelines/default.yml step \`review\`"
+STALE_ERR="$LIVE/stale-check.err"
+STALE_OUT=$("$SPOOLWAY" pipeline check 2>"$STALE_ERR")
+if [ "$(grep -cF -- "$IGNORED_LINE" "$STALE_ERR")" = 1 ]; then
+  ok "the notice is printed exactly once, however many times the command loads"
+else
+  bad "the notice is printed exactly once, however many times the command loads"
+  sed 's/^/        /' "$STALE_ERR"
+fi
+if grep -qF -- "override ignored" <<<"$STALE_OUT"; then
+  bad "and it goes to stderr only — stdout is left as it was"
+  sed 's/^/        /' <<<"$STALE_OUT"
+else
+  ok "and it goes to stderr only — stdout is left as it was"
+fi
+
+# Inside a lane the same load is silent: `SPOOLWAY_TASK` in the environment
+# is how a real process knows it is one.
+silent_about "a command run inside a lane prints nothing about the ignored override" \
+  "override ignored" \
+  env SPOOLWAY_TASK=gate "$SPOOLWAY" pipeline check
+works "and still loads" \
+  env SPOOLWAY_TASK=gate "$SPOOLWAY" pipeline check
+
+works "the override file is never edited or deleted" \
+  test -f "$LAYER"
+if [ "$(cat "$LAYER")" = "$LAYER_BYTES_BEFORE" ]; then
+  ok "and its bytes are exactly what they were before the load that skipped it"
+else
+  bad "and its bytes are exactly what they were before the load that skipped it"
+fi
+
+says "override list moves the stale entry into its own ignored line" \
+  "ignored  review.agent" \
+  "$SPOOLWAY" override list
+says "while the entry beside it in the same file is still listed as applying" \
+  "patch  implement.model" \
+  "$SPOOLWAY" override list
+
+# Bare `spoolway` says the same thing as a popup over the tab it opens on:
+# the stderr line above is printed ahead of the screen, and its first frame
+# clears it before anybody could read it. `frame N` pulls the Nth frame out
+# of a screen's typescript — every frame opens on a clear-screen — with the
+# colour codes taken out, so a row reads as the plain line the Mockup draws.
+frame() {
+  awk -v n="$(($2 + 1))" 'BEGIN { RS = "\033\\[2J\033\\[H" } NR == n { print; exit }' "$1" |
+    sed 's/\x1b\[[0-9;]*m//g'
+}
+IGNORED_SCREEN="$LIVE/ignored-screen.txt"
+# `on_screen` runs `spoolway sync` first, and sync rewrites the fixture's
+# `config.toml` into its own table order (`[agents.pi]` moves up), which
+# `git status` would then blame on the restore below. Settle that rewrite
+# into the fixture's history before the screen ever opens.
+"$SPOOLWAY" sync >/dev/null 2>&1 || true
+git commit -qm "settle config.toml the way sync writes it" -- .spoolway/config.toml >/dev/null 2>&1 || true
+on_screen '\r' "$IGNORED_SCREEN"
+frame "$IGNORED_SCREEN" 1 >"$IGNORED_SCREEN.first"
+frame "$IGNORED_SCREEN" 2 >"$IGNORED_SCREEN.second"
+has "bare spoolway opens on the override ignored popup" \
+  "┌─ override ignored " "$IGNORED_SCREEN.first"
+has "over the queue tab it opens on" \
+  "dispatch        queue        jobs        eval" "$IGNORED_SCREEN.first"
+has "naming the file, the step and the keys it set" \
+  "pipelines/default.yml   step review   agent" "$IGNORED_SCREEN.first"
+# The reason is wrapped to the queue tab's frame, so only its first row is
+# read whole: the part after the em dash is what `override list` leaves out.
+has "with the whole reason under them" \
+  "names both \`run:\` and \`agent:\` — a step runs a process or a model," \
+  "$IGNORED_SCREEN.first"
+has "and enter to close it" "[enter] close" "$IGNORED_SCREEN.first"
+lacks "enter closes it" "override ignored" "$IGNORED_SCREEN.second"
+has "and the queue tab is drawn again under the strip" \
+  "dispatch        queue        jobs        eval" "$IGNORED_SCREEN.second"
+
+# Never acknowledged: the next open asks again while the override is still
+# ignored.
+on_screen '\r' "$IGNORED_SCREEN.again"
+frame "$IGNORED_SCREEN.again" 1 >"$IGNORED_SCREEN.again.first"
+has "the next open shows it again" \
+  "┌─ override ignored " "$IGNORED_SCREEN.again.first"
+
+must "clean up: drop the layer entry" \
+  "$SPOOLWAY" override drop pipelines/default.yml
+# `git checkout --`, not a reverse `sed`: the edit above deleted lines
+# rather than only substituting them, so there is no single reverse
+# substitution that puts `review` back — restoring from the commit
+# `configure_project` made is the actual inverse.
+must "and restore the tracked step from the committed copy" \
+  git checkout -- "$TRACKED"
+works "the checkout is clean again" git_clean
+
+# With nothing in the layer ignored any more, the screen opens on no popup.
+on_screen '' "$IGNORED_SCREEN.gone"
+frame "$IGNORED_SCREEN.gone" 1 >"$IGNORED_SCREEN.gone.first"
+lacks "once nothing is ignored the screen opens without the popup" \
+  "override ignored" "$IGNORED_SCREEN.gone.first"
+
 # ------------------------------------------------- the four new contracts
 # Each one is a unit-tested render in src/commands/{config,override,template,
 # hook}.rs already; what a unit test cannot see is the command actually

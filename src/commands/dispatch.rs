@@ -507,7 +507,7 @@ fn overrides_gate_with(
     out: &mut impl std::io::Write,
     term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
-    let rows = collect_override_rows(&repo.overrides_dir())?;
+    let rows = collect_override_rows(repo)?;
     if rows.is_empty() {
         return Ok(true);
     }
@@ -572,20 +572,50 @@ fn print_overrides_notice(out: &mut impl std::io::Write, rows: &[OverrideRow]) -
 
 /// [`print_overrides_notice`]'s rows on their own, unindented — shared with
 /// the dispatch tab's popup of the same notice, [`overrides_popup`].
+///
+/// An override the load left out reads `ignored — <reason>` on a row of its
+/// own, labelled with the step or key it set, in place of its keys. A row
+/// with nothing left applying — a whole file ignored, or every step entry
+/// in the patch — draws only its ignored rows, never a `0 keys` row for
+/// what does not apply. The kind column's width is taken from the rows that
+/// still apply alone, so a layer with an ignored entry lays out every other
+/// row exactly as it did before.
 fn overrides_lines(rows: &[OverrideRow]) -> Vec<String> {
+    let applies = |row: &OverrideRow| {
+        row.ignored.is_empty()
+            || (!row.overrides.is_empty() && row.ignored.iter().all(|i| !i.fields.is_empty()))
+    };
     let target_w = rows.iter().map(|r| r.target.len()).max().unwrap_or(0);
     let labels: Vec<String> = rows.iter().map(overrides_gate_kind).collect();
-    let kind_w = labels.iter().map(String::len).max().unwrap_or(0);
-    rows.iter()
+    let kind_w = rows
+        .iter()
         .zip(&labels)
-        .map(|(row, kind)| match row.overrides == "—" {
-            true => format!("{:<target_w$}  {kind}", row.target),
-            false => format!(
-                "{:<target_w$}  {kind:<kind_w$}  {}",
-                row.target, row.overrides
-            ),
-        })
-        .collect()
+        .filter(|(row, _)| applies(row))
+        .map(|(_, kind)| kind.len())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (row, kind) in rows.iter().zip(&labels) {
+        if applies(row) {
+            lines.push(match row.overrides == "—" {
+                true => format!("{:<target_w$}  {kind}", row.target),
+                false => format!(
+                    "{:<target_w$}  {kind:<kind_w$}  {}",
+                    row.target, row.overrides
+                ),
+            });
+        }
+        for item in &row.ignored {
+            let (step, keys) = crate::commands::ignored_columns(row, item);
+            let label = if step.is_empty() { keys } else { step };
+            lines.push(format!(
+                "{:<target_w$}  {label:<kind_w$}  ignored — {}",
+                row.target,
+                item.short_reason()
+            ));
+        }
+    }
+    lines
 }
 
 /// "N keys" for a pipeline or config patch, "whole file" for a prompt.
@@ -744,7 +774,7 @@ impl GatePopup {
 /// The overrides popup, or `None` when [`overrides_gate`] would not ask:
 /// no layer at all, or one already acknowledged and unmoved since.
 pub(crate) fn overrides_popup(repo: &Repo) -> Result<Option<GatePopup>> {
-    let rows = collect_override_rows(&repo.overrides_dir())?;
+    let rows = collect_override_rows(repo)?;
     if rows.is_empty() {
         return Ok(None);
     }
@@ -1609,7 +1639,10 @@ mod tests {
             serde_norway::from_str("steps:\n  - id: a\n    end: true\n").unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
-        Pipelines { pipelines }
+        Pipelines {
+            pipelines,
+            ignored_overrides: Vec::new(),
+        }
     }
 
     /// Blank both `user.name` and `user.email` locally, overriding whatever
@@ -2295,6 +2328,7 @@ mod tests {
             target: "pipelines/impl.yml".into(),
             kind: "patch",
             overrides: "implement.model, test.timeout".into(),
+            ignored: Vec::new(),
         };
         assert_eq!(overrides_gate_kind(&two_keys), "2 keys");
 
@@ -2302,6 +2336,7 @@ mod tests {
             target: "config.toml".into(),
             kind: "patch",
             overrides: "agents.claude.concurrency".into(),
+            ignored: Vec::new(),
         };
         assert_eq!(overrides_gate_kind(&one_key), "1 key");
 
@@ -2309,8 +2344,70 @@ mod tests {
             target: "prompts/reviewer".into(),
             kind: "whole file",
             overrides: "—".into(),
+            ignored: Vec::new(),
         };
         assert_eq!(overrides_gate_kind(&prompt), "whole file");
+    }
+
+    /// An ignored override's row reads `ignored — <reason>` under the step
+    /// it named, in place of its keys; every row that still applies reads
+    /// byte for byte as it did with nothing ignored, and a row with nothing
+    /// left applying draws no `0 keys` row of its own.
+    #[test]
+    fn overrides_lines_draw_an_ignored_override_as_ignored_and_leave_the_rest() {
+        let ignored = |target: &str, fields: &str, reason: &str| crate::overrides::Ignored {
+            target: target.into(),
+            fields: fields.into(),
+            reason: reason.into(),
+        };
+        let release = |ignored: Vec<crate::overrides::Ignored>| OverrideRow {
+            target: "pipelines/release.yml".into(),
+            kind: "patch",
+            overrides: "fix.agent, fix.model, preflight.model".into(),
+            ignored,
+        };
+        let prompt = OverrideRow {
+            target: "prompts/reviewer".into(),
+            kind: "whole file",
+            overrides: "—".into(),
+            ignored: Vec::new(),
+        };
+        let before = overrides_lines(&[release(Vec::new()), prompt]);
+
+        let prompt = OverrideRow {
+            target: "prompts/reviewer".into(),
+            kind: "whole file",
+            overrides: "—".into(),
+            ignored: Vec::new(),
+        };
+        let gone = OverrideRow {
+            target: "pipelines/gone.yml".into(),
+            kind: "patch",
+            overrides: String::new(),
+            ignored: vec![crate::overrides::Ignored::missing_pipeline("gone")],
+        };
+        let after = overrides_lines(&[
+            release(vec![ignored(
+                "pipelines/release.yml step `publish`",
+                "publish.agent, publish.model",
+                "names both `run:` and `agent:` — a step runs a process or a model, not both",
+            )]),
+            prompt,
+            gone,
+        ]);
+
+        assert_eq!(after[0], before[0], "the row still applying is unchanged");
+        assert_eq!(
+            after[1],
+            "pipelines/release.yml  step publish  ignored — names both `run:` and `agent:`"
+        );
+        assert_eq!(after[2], before[1], "the prompt row is unchanged");
+        assert_eq!(
+            after[3],
+            "pipelines/gone.yml     the whole file  ignored — names pipeline `gone`, which the \
+             checkout does not have"
+        );
+        assert_eq!(after.len(), 4, "no `0 keys` row for gone.yml: {after:#?}");
     }
 
     /// The mockup's own three headings, in order, each skipped when its

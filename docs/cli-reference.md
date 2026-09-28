@@ -332,6 +332,15 @@ patched and waits for a key:
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
 
+An entry the load left out draws its own row instead of its keys, labelled the same way:
+
+```
+    pipelines/release.yml  step publish  ignored — names both `run:` and `agent:`
+```
+
+Every other row, the title and the three keys, `[x]` included, are unchanged. See [the
+overrides layer](configuration.md#the-overrides-layer).
+
 It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
 a key:
 
@@ -607,8 +616,9 @@ $ spoolway pipeline override impl --set implement.model=claude-opus-5
 |---|---|---|
 | `--set <STEP.KEY=VALUE>` | required | The step, key and new value |
 
-A step the pipeline does not have, or a key the merge refuses, is refused by name. `id:`
-cannot be set. See [`spoolway override`](#spoolway-override-list--promote--drop).
+A step the pipeline does not have, a key the merge refuses, or `id:` set on the step is left
+out of the merge instead: the command still runs, and prints one stderr line naming what it
+left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
 
 ### `spoolway prompt contract`
 
@@ -750,16 +760,20 @@ Manage the [overrides layer](configuration.md#the-overrides-layer).
 $ spoolway override list
 
 TARGET                     KIND        OVERRIDES
-pipelines/impl.yml         patch       implement.model, test.timeout
+pipelines/impl.yml         patch       implement.model
+                                        ignored  test.timeout — names step `test`, which pipeline `impl` does not have
 prompts/reviewer           whole file  —
 config.toml                patch       agents.claude.concurrency
 
 layer version  a91c4f02    3 artifacts    `override promote <target>` to keep one
 ```
 
+A stale entry gets its own `ignored` line under its row, naming the keys left out of the merge
+and why. `--json` carries the same list under `ignored`.
+
 | Subcommand | What it does |
 |---|---|
-| `list` | One line per patched artifact. `--json` prints an array |
+| `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
 | `promote <target>` | Write the patched values into the tracked file and clear the entry. Refused inside a linked worktree |
 | `drop [<target>]` | Remove one entry, or the whole layer when none is named |
 

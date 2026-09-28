@@ -1165,6 +1165,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
@@ -1196,6 +1197,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         pipeline_check(&repo, Ok(pipelines), false).expect("pi resumes, so this should pass");
@@ -1329,6 +1331,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         pipeline_check(&repo, Ok(pipelines), false)
@@ -1362,6 +1365,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         pipeline_check(&repo, Ok(pipelines), false)
@@ -1401,6 +1405,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         pipeline_check(&repo, Ok(pipelines), false)
@@ -1435,6 +1440,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
@@ -1473,6 +1479,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
@@ -1509,6 +1516,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         let home = crate::scratch::root("commands-skills-check-accepts-unfound-skill-home");
@@ -1549,6 +1557,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         let task = crate::task::Task::parse(

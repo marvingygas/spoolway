@@ -1065,6 +1065,15 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
                 return migrate_legacy_home(root, &legacy);
             }
 
+            // The legacy home was gone by the time it was looked for, but
+            // it may have been standing when `home` was read above: a
+            // racing migration renamed it onto `home` in between. The move
+            // only ever runs one way, so the record it carried is at `home`
+            // now, and a second pass reads it like any other.
+            if record_path.exists() {
+                return bind_stamped(root, id);
+            }
+
             // Criterion 4: a valid stamp, but no home records it at all —
             // either the directory itself is gone, or it exists but nobody
             // has ever bound a checkout to it. `--adopt {id}` is not

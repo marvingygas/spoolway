@@ -33,6 +33,128 @@ use crate::pipeline::{Pipeline, Step};
 const PIPELINES_SUBDIR: &str = "pipelines";
 const PROMPTS_SUBDIR: &str = "prompts";
 
+/// One override left out of the merge because it no longer fits the
+/// checkout — a stale pipeline-step entry, a config key the tracked file
+/// would refuse, or a prompt replacement whose tracked prompt is gone. See
+/// the group's own `d-skip-stale` decision: every other entry in the same
+/// file, and every other file, still applies; only this one is left as if
+/// it had never been written.
+#[derive(Debug, Clone)]
+pub(crate) struct Ignored {
+    /// Where this entry lives and what it names, e.g. "pipelines/release.yml
+    /// step `publish`", "config.toml", or "prompts/reviewer" — the part of
+    /// the Mockup's stderr line before the colon.
+    pub(crate) target: String,
+    /// The keys this one entry set, joined with `, ` — `publish.agent,
+    /// publish.model` for a step, a dotted key for a config entry, empty for
+    /// a prompt, which has none to name.
+    pub(crate) fields: String,
+    /// Why the merge left it out, phrased as `validate()`'s own errors are:
+    /// no leading capital, no trailing period, so it reads naturally after
+    /// the colon on the stderr line and after the em dash in `override
+    /// list`'s own row.
+    pub(crate) reason: String,
+}
+
+impl Ignored {
+    /// A whole pipeline patch left out because the checkout no longer has a
+    /// pipeline by that name — shared by [`crate::pipeline::Pipelines::load`]
+    /// (which never even reaches the file, since it only iterates the
+    /// tracked ones) and `commands::override::collect_override_rows` (which
+    /// has to say the same thing about a patch it finds sitting in the
+    /// layer), so the wording cannot drift between what load skips and what
+    /// `override list` shows for it.
+    pub(crate) fn missing_pipeline(name: &str) -> Ignored {
+        Ignored {
+            target: format!("pipelines/{name}.yml"),
+            fields: String::new(),
+            reason: format!("names pipeline `{name}`, which the checkout does not have"),
+        }
+    }
+
+    /// A whole prompt override left out because the checkout no longer has a
+    /// tracked prompt by that name — shared by [`crate::prompt::path_for`]
+    /// and `commands::override::collect_override_rows`, for the same reason
+    /// as [`Ignored::missing_pipeline`].
+    pub(crate) fn missing_prompt(name: &str) -> Ignored {
+        Ignored {
+            target: format!("prompts/{name}"),
+            fields: String::new(),
+            reason: format!("names prompt `{name}`, which the checkout does not have"),
+        }
+    }
+
+    /// The Mockup's own stderr line.
+    pub(crate) fn notice(&self) -> String {
+        format!(
+            "spoolway: override ignored — {}: {}",
+            self.target, self.reason
+        )
+    }
+
+    /// `reason`, cut to its first clause — `override list`'s row has no room
+    /// for a validation error's own trailing explanation, only for which
+    /// rule it broke.
+    pub(crate) fn short_reason(&self) -> &str {
+        self.reason.split(" — ").next().unwrap_or(&self.reason)
+    }
+}
+
+/// Whether this process should say anything about an ignored override at
+/// all — `false` inside a lane, per `commands::TASK_ENV`'s own doc: a lane's
+/// prompt never carries a notice a person did not ask to see, and bare
+/// `spoolway`'s own "override ignored" popup —
+/// [`crate::commands::ignored_popup`] — is the screen's way of saying the
+/// same thing to a person watching it instead. Its own function,
+/// pulled out of [`print_ignored_notices`], so a test can drive the decision
+/// directly rather than trying to catch a real `eprintln!` on the way past.
+pub(crate) fn should_announce_ignored_overrides() -> bool {
+    crate::platform::env_var(crate::commands::TASK_ENV).is_err()
+}
+
+/// Every [`Ignored::notice`] line already printed this process — a plain
+/// command reads its pipelines and its config more than once on the way to
+/// answering (`main.rs` loads a `Pipelines` ahead of its own dispatch match,
+/// and most commands read their own copy again right after), and every one
+/// of those loads runs the same merge and hands the same ignored list to
+/// [`print_ignored_notices`]. Without this, `spoolway pipeline check` says
+/// the identical line twice. Process-wide rather than threaded through every
+/// load call, for the same reason `commands::TASK_ENV` is read once at the
+/// CLI boundary would not fit here: nothing between the several loads a
+/// single command makes carries a value all of them see.
+fn printed_notices() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static PRINTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    PRINTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Whether `line` — one rendered [`Ignored::notice`] — has not yet been
+/// printed this process, marking it printed as a side effect. Pulled out of
+/// [`print_ignored_notices`] so a test can drive the dedup directly, without
+/// trying to catch a real `eprintln!` on the way past.
+pub(crate) fn first_time_this_process(line: &str) -> bool {
+    printed_notices()
+        .lock()
+        .expect("the notice-dedup lock is never held across a panic")
+        .insert(line.to_string())
+}
+
+/// Print one stderr line per entry in `ignored`, in the Mockup's wording —
+/// unless [`should_announce_ignored_overrides`] says this process is a
+/// lane's own, and at most once per exact line per process, per
+/// [`first_time_this_process`]'s own doc.
+pub(crate) fn print_ignored_notices(ignored: &[Ignored]) {
+    if !should_announce_ignored_overrides() {
+        return;
+    }
+    for item in ignored {
+        let line = item.notice();
+        if first_time_this_process(&line) {
+            eprintln!("{line}");
+        }
+    }
+}
+
 /// Where `spoolway dispatch`'s standing consent gate remembers a fingerprint
 /// it has already shown — directly under `Repo::home`, never inside
 /// [`dir_for`]'s own directory: that one is removed once it holds nothing
@@ -94,20 +216,31 @@ pub(crate) struct PipelinePatch {
 }
 
 /// Apply `overrides/pipelines/<name>.yml`, if there is one, onto a pipeline
-/// already parsed from the tracked file.
+/// already parsed from the tracked file, and return each step entry left
+/// out because it no longer fits — see [`Ignored`].
 ///
 /// Called from [`crate::pipeline::Pipelines::load`] before
 /// [`crate::pipeline::Pipelines::assemble`] runs, per `d-merge-at-load`:
 /// assembling first would materialise a `blocked` step that a pipeline
 /// declaring none of its own never had in the file, letting a patch reach a
 /// step that, from the file's own perspective, does not exist.
-pub(crate) fn apply_pipeline_patch(pipeline: &mut Pipeline, overrides: &Path) -> Result<()> {
+///
+/// A step entry is stale one of two ways: it names a step id the pipeline no
+/// longer has, or applying it (validated here against the *whole* pipeline,
+/// not the step alone, since a value change can break a transition) leaves
+/// the pipeline invalid. Either way the entry is skipped and the step left
+/// exactly as the tracked file declared it — never partially patched — so
+/// every other entry, in this file and every other, still applies.
+pub(crate) fn apply_pipeline_patch(
+    pipeline: &mut Pipeline,
+    overrides: &Path,
+) -> Result<Vec<Ignored>> {
     let path = overrides
         .join(PIPELINES_SUBDIR)
         .join(format!("{}.yml", pipeline.name));
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let patch: PipelinePatch =
@@ -119,23 +252,52 @@ pub(crate) fn apply_pipeline_patch(pipeline: &mut Pipeline, overrides: &Path) ->
     if let Some(task_template) = patch.task_template {
         pipeline.task_template = Some(task_template);
     }
+    let target_file = format!("pipelines/{}.yml", pipeline.name);
+    let mut ignored = Vec::new();
     for (id, fields) in patch.steps {
-        let step = pipeline
-            .steps
-            .iter_mut()
-            .find(|s| s.id == id)
-            .with_context(|| {
-                format!(
-                    "{} names step `{id}`, which pipeline `{}` does not have — a patch may \
-                     only set keys on a step that already exists",
-                    path.display(),
-                    pipeline.name,
-                )
-            })?;
-        apply_step_patch(step, &fields)
-            .with_context(|| format!("step `{id}` in {}", path.display()))?;
+        let fields_named = fields
+            .keys()
+            .filter_map(|k| k.as_str())
+            .map(|k| format!("{id}.{k}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let Some(index) = pipeline.steps.iter().position(|s| s.id == id) else {
+            ignored.push(Ignored {
+                target: format!("{target_file} step `{id}`"),
+                fields: fields_named,
+                reason: format!(
+                    "names step `{id}`, which pipeline `{}` does not have",
+                    pipeline.name
+                ),
+            });
+            continue;
+        };
+
+        let original = pipeline.steps[index].clone();
+        if let Err(err) = apply_step_patch(&mut pipeline.steps[index], &fields) {
+            pipeline.steps[index] = original;
+            ignored.push(Ignored {
+                target: format!("{target_file} step `{id}`"),
+                fields: fields_named,
+                reason: format!("{err:#}"),
+            });
+            continue;
+        }
+        if let Err(err) = pipeline.validate() {
+            pipeline.steps[index] = original;
+            let message = format!("{err:#}");
+            let reason = message
+                .strip_prefix(&format!("step `{id}` "))
+                .unwrap_or(&message)
+                .to_string();
+            ignored.push(Ignored {
+                target: format!("{target_file} step `{id}`"),
+                fields: fields_named,
+                reason,
+            });
+        }
     }
-    Ok(())
+    Ok(ignored)
 }
 
 /// Merge `fields` onto `step`, keeping every key it does not name.
@@ -186,12 +348,17 @@ pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) 
 /// Apply `overrides/config.toml`, if there is one, onto an already-parsed
 /// config — merged by dotted key through [`crate::confkv::set`], the same
 /// validated path `spoolway config set` writes through, so a patch cannot
-/// produce a config that command would have refused.
-pub(crate) fn apply_config_patch(config: Config, overrides: &Path) -> Result<Config> {
+/// produce a config that command would have refused. A key the tracked
+/// config would refuse is skipped, reported in the returned [`Ignored`]
+/// list, and every other key still applies.
+pub(crate) fn apply_config_patch(
+    config: Config,
+    overrides: &Path,
+) -> Result<(Config, Vec<Ignored>)> {
     let path = config_patch_path(overrides);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(config),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((config, Vec::new())),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let parsed: toml::Value = raw
@@ -200,14 +367,17 @@ pub(crate) fn apply_config_patch(config: Config, overrides: &Path) -> Result<Con
     let toml::Value::Table(table) = parsed else {
         bail!("{} must be a table of settings", path.display());
     };
-    apply_config_table(config, &table, &mut String::new())
-        .with_context(|| format!("in {}", path.display()))
+    let mut ignored = Vec::new();
+    let config = apply_config_table(config, &table, &mut String::new(), &mut ignored)
+        .with_context(|| format!("in {}", path.display()))?;
+    Ok((config, ignored))
 }
 
 fn apply_config_table(
     mut config: Config,
     table: &toml::value::Table,
     prefix: &mut String,
+    ignored: &mut Vec<Ignored>,
 ) -> Result<Config> {
     for (key, value) in table {
         let mark = prefix.len();
@@ -216,11 +386,20 @@ fn apply_config_table(
         }
         prefix.push_str(key);
         config = match value {
-            toml::Value::Table(nested) => apply_config_table(config, nested, prefix)?,
-            other => {
-                let input = render_config_leaf(other).with_context(|| format!("`{prefix}`"))?;
-                crate::confkv::set(&config, prefix, &input)?
-            }
+            toml::Value::Table(nested) => apply_config_table(config, nested, prefix, ignored)?,
+            other => match render_config_leaf(other)
+                .and_then(|input| crate::confkv::set(&config, prefix, &input))
+            {
+                Ok(updated) => updated,
+                Err(err) => {
+                    ignored.push(Ignored {
+                        target: crate::config::CONFIG_FILE.to_string(),
+                        fields: prefix.clone(),
+                        reason: format!("{err:#}"),
+                    });
+                    config
+                }
+            },
         };
         prefix.truncate(mark);
     }
@@ -758,6 +937,99 @@ fn promote_config_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mockup's own stderr line, built from `target` and `reason`.
+    #[test]
+    fn ignored_notice_reads_as_the_mockup_shows_it() {
+        let ignored = Ignored {
+            target: "pipelines/release.yml step `publish`".to_string(),
+            fields: "publish.agent, publish.model".to_string(),
+            reason: "names both `run:` and `agent:` — a step runs a process or a model, not both"
+                .to_string(),
+        };
+        assert_eq!(
+            ignored.notice(),
+            "spoolway: override ignored — pipelines/release.yml step `publish`: names both \
+             `run:` and `agent:` — a step runs a process or a model, not both"
+        );
+        assert_eq!(ignored.short_reason(), "names both `run:` and `agent:`");
+    }
+
+    /// A given exact notice line is printed at most once per process — a
+    /// plain command loads its pipelines and its config more than once on
+    /// the way to answering, and every load hands the same ignored list to
+    /// `print_ignored_notices`, so the underlying dedup this delegates to
+    /// has to say "already said" the second time it is asked about the
+    /// identical line. A distinctive line of its own, so a neighbour test
+    /// asking about some other line can never collide with this one.
+    #[test]
+    fn a_notice_line_is_first_time_only_once_per_process() {
+        let line = "spoolway: override ignored — pipelines/dedup-test-9f3c1e.yml step \
+                    `only_this_test_names`: a reason nothing else in this suite ever writes"
+            .to_string();
+        assert!(
+            first_time_this_process(&line),
+            "the first ever mention of this exact line"
+        );
+        assert!(
+            !first_time_this_process(&line),
+            "a second mention of the identical line must not repeat"
+        );
+    }
+
+    /// The Mockup's own shape names the pipeline and the missing prompt the
+    /// same way — a single constructor each, so `Pipelines::load`,
+    /// `prompt::path_for` and `commands::override::collect_override_rows`
+    /// can never drift apart on the wording.
+    #[test]
+    fn missing_pipeline_and_missing_prompt_read_as_the_mockups_own_wording() {
+        let pipeline = Ignored::missing_pipeline("gone");
+        assert_eq!(pipeline.target, "pipelines/gone.yml");
+        assert_eq!(
+            pipeline.reason,
+            "names pipeline `gone`, which the checkout does not have"
+        );
+
+        let prompt = Ignored::missing_prompt("retired");
+        assert_eq!(prompt.target, "prompts/retired");
+        assert_eq!(
+            prompt.reason,
+            "names prompt `retired`, which the checkout does not have"
+        );
+    }
+
+    /// A reason with no em dash of its own has nothing to cut — the short
+    /// form is the whole thing.
+    #[test]
+    fn short_reason_with_no_em_dash_is_the_whole_reason() {
+        let ignored = Ignored {
+            target: "pipelines/impl.yml step `nonesuch`".to_string(),
+            fields: "nonesuch.model".to_string(),
+            reason: "names step `nonesuch`, which pipeline `impl` does not have".to_string(),
+        };
+        assert_eq!(
+            ignored.short_reason(),
+            "names step `nonesuch`, which pipeline `impl` does not have"
+        );
+    }
+
+    /// Outside a lane — no `SPOOLWAY_TASK` in the environment — an ignored
+    /// override is announced. Inside one, it never is: a lane's prompt never
+    /// carries a notice a person did not ask to see.
+    #[test]
+    fn announcing_ignored_overrides_is_gated_on_the_lane_environment() {
+        crate::platform::test_env::with_env(crate::commands::TASK_ENV, "some-task", || {
+            assert!(!should_announce_ignored_overrides(), "a lane stays quiet");
+        });
+        // `test_env::with_env` restores whatever this thread had before —
+        // a real spoolway session, `SPOOLWAY_TASK` is never set at all.
+        if crate::platform::env_var(crate::commands::TASK_ENV).is_err() {
+            assert!(
+                should_announce_ignored_overrides(),
+                "a plain command outside a lane still announces"
+            );
+        }
+    }
 
     /// No acknowledgement on disk at all is the ordinary starting state: the
     /// gate owes a question about any real fingerprint.

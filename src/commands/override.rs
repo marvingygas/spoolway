@@ -142,12 +142,14 @@ pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Resul
             Config::path_in(&repo.checkout).display()
         )
     })?;
-    crate::overrides::apply_config_patch(tracked, &repo.overrides_dir()).with_context(|| {
-        format!(
-            "{} no longer merges — reopen it with `spoolway config override`",
-            path.display()
-        )
-    })?;
+    crate::overrides::apply_config_patch(tracked, &repo.overrides_dir())
+        .map(|_| ())
+        .with_context(|| {
+            format!(
+                "{} no longer merges — reopen it with `spoolway config override`",
+                path.display()
+            )
+        })?;
 
     println!("{} — parses", path.display());
     Ok(())
@@ -165,15 +167,31 @@ pub(crate) struct OverrideRow {
     pub(crate) target: String,
     pub(crate) kind: &'static str,
     pub(crate) overrides: String,
+    /// Entries this row's file holds that were left out of the merge — see
+    /// [`crate::overrides::Ignored`]. Empty for every row where nothing in
+    /// the layer is stale.
+    pub(crate) ignored: Vec<crate::overrides::Ignored>,
 }
 
-/// Every entry the layer under `dir` currently holds, in the order `override
-/// list` prints them: pipelines, then prompts, then config.
-pub(crate) fn collect_override_rows(dir: &Path) -> Result<Vec<OverrideRow>> {
+/// Every entry the layer under `repo.overrides_dir()` currently holds, in the
+/// order `override list` prints them: pipelines, then prompts, then config.
+///
+/// A pipeline patch's staleness is worked out against the *tracked*
+/// pipelines — [`crate::pipeline::Pipelines::load_tracked`] — the same check
+/// [`crate::pipeline::Pipelines::load`] runs at every ordinary load, run
+/// again here rather than threaded through it, so `override list` sees the
+/// same answer whether or not anything has loaded the merged set yet this
+/// process. A tracked pipeline that will not even parse leaves staleness
+/// undetermined rather than failing the whole row: that tracked file is its
+/// own problem, `spoolway pipeline check`'s to report, not a reason to go
+/// blind about what the layer holds.
+pub(crate) fn collect_override_rows(repo: &Repo) -> Result<Vec<OverrideRow>> {
+    let dir = repo.overrides_dir();
+    let tracked = Pipelines::load_tracked(&repo.checkout, &repo.config).ok();
     let mut rows = Vec::new();
 
-    for name in crate::overrides::list_pipeline_patches(dir)? {
-        let patch = crate::overrides::read_pipeline_patch(dir, &name)?.unwrap_or_default();
+    for name in crate::overrides::list_pipeline_patches(&dir)? {
+        let patch = crate::overrides::read_pipeline_patch(&dir, &name)?.unwrap_or_default();
         let mut keys = Vec::new();
         if patch.description.is_some() {
             keys.push("description".to_string());
@@ -181,37 +199,234 @@ pub(crate) fn collect_override_rows(dir: &Path) -> Result<Vec<OverrideRow>> {
         if patch.task_template.is_some() {
             keys.push("task_template".to_string());
         }
-        for (step_id, fields) in &patch.steps {
-            for key in fields.keys() {
-                if let Some(key) = key.as_str() {
-                    keys.push(format!("{step_id}.{key}"));
+
+        // Three answers, not two: the tracked pipelines failed to load at
+        // all (`None` — that tracked file's own problem, not this patch's to
+        // report, so staleness here is undetermined rather than assumed),
+        // they loaded and have this pipeline (dry-run the patch against it,
+        // step by step, same as `Pipelines::load` does for real), or they
+        // loaded and do not — the whole patch is stale, by the identical
+        // reason `Pipelines::load` would have skipped it for, from
+        // [`Ignored::missing_pipeline`].
+        let ignored = match &tracked {
+            None => Vec::new(),
+            Some(tracked) => match tracked.pipelines.get(&name) {
+                Some(pipeline) => {
+                    let mut probe = pipeline.clone();
+                    crate::overrides::apply_pipeline_patch(&mut probe, &dir)?
+                }
+                None => vec![crate::overrides::Ignored::missing_pipeline(&name)],
+            },
+        };
+        // A whole-file entry (no step of its own — `fields` names none)
+        // means nothing in this patch applies at all, whatever keys it
+        // otherwise names; every other ignored entry names one step's own
+        // fields, which the main column leaves out by name.
+        if ignored.iter().any(|i| i.fields.is_empty()) {
+            keys.clear();
+        } else {
+            let ignored_fields: std::collections::HashSet<&str> =
+                ignored.iter().flat_map(|i| i.fields.split(", ")).collect();
+            for (step_id, fields) in &patch.steps {
+                for key in fields.keys() {
+                    if let Some(key) = key.as_str() {
+                        let dotted = format!("{step_id}.{key}");
+                        if !ignored_fields.contains(dotted.as_str()) {
+                            keys.push(dotted);
+                        }
+                    }
                 }
             }
         }
+
         rows.push(OverrideRow {
             target: format!("pipelines/{name}.yml"),
             kind: "patch",
             overrides: keys.join(", "),
+            ignored,
         });
     }
 
-    for name in crate::overrides::list_prompt_overrides(dir)? {
+    for name in crate::overrides::list_prompt_overrides(&dir)? {
+        let ignored = if crate::prompt::path_for_tracked(repo, &name).is_file() {
+            Vec::new()
+        } else {
+            vec![crate::overrides::Ignored::missing_prompt(&name)]
+        };
         rows.push(OverrideRow {
             target: format!("prompts/{name}"),
             kind: "whole file",
             overrides: "—".to_string(),
+            ignored,
         });
     }
 
-    if let Some(keys) = crate::overrides::config_patch_keys(dir)? {
+    if let Some(keys) = crate::overrides::config_patch_keys(&dir)? {
+        let ignored = match Config::load_tracked(&repo.checkout).ok() {
+            Some(tracked) => crate::overrides::apply_config_patch(tracked, &dir)?.1,
+            None => Vec::new(),
+        };
+        let ignored_keys: std::collections::HashSet<&str> =
+            ignored.iter().map(|i| i.fields.as_str()).collect();
+        let keys: Vec<String> = keys
+            .into_iter()
+            .filter(|k| !ignored_keys.contains(k.as_str()))
+            .collect();
         rows.push(OverrideRow {
             target: crate::config::CONFIG_FILE.to_string(),
             kind: "patch",
             overrides: keys.join(", "),
+            ignored,
         });
     }
 
     Ok(rows)
+}
+
+/// How wide [`IgnoredPopup::panel`] wraps a row at most: wider than
+/// [`crate::screen::NOTICE_WRAP`], because a validation error's reason is
+/// one sentence with its own trailing explanation — the Mockup draws
+/// `names both `run:` and `agent:` — a step runs a process or a model, not
+/// both` on one row — and the box it makes still fits inside the 100
+/// columns every tab is drawn to.
+pub(crate) const IGNORED_POPUP_WRAP: usize = 80;
+
+/// The narrowest the keys column is ever wrapped to. A file and a step
+/// wider than the whole popup would otherwise leave it no room at all, and
+/// [`crate::screen::wrap`] would stack the keys one character to a row.
+const IGNORED_KEYS_MIN: usize = 12;
+
+/// The "override ignored" popup bare `spoolway` opens on — see
+/// [`crate::screen::shell::OnOpen`] and [`ignored_popup`]. It holds the
+/// entries rather than a drawn panel, so the tab under it can wrap them to
+/// the width its own frame has on the draw that shows them.
+#[derive(Debug, Clone)]
+pub(crate) struct IgnoredPopup {
+    entries: Vec<IgnoredEntry>,
+}
+
+/// One ignored override, as [`IgnoredPopup`] draws it.
+#[derive(Debug, Clone)]
+struct IgnoredEntry {
+    file: String,
+    step: String,
+    keys: String,
+    reason: String,
+}
+
+/// The "override ignored" popup, or `None` with nothing in the layer left
+/// out of the merge.
+///
+/// Asked on every open and never acknowledged, unlike the before-start
+/// overrides popup's `[x]`: a skipped override changes what lanes run, and
+/// a person who silenced that popup for an older layer would otherwise
+/// start dispatching without ever learning an entry stopped fitting.
+pub(crate) fn ignored_popup(repo: &Repo) -> Result<Option<IgnoredPopup>> {
+    Ok(IgnoredPopup::from_rows(&collect_override_rows(repo)?))
+}
+
+impl IgnoredPopup {
+    /// Every ignored entry across `rows`, or `None` with none — `rows` as
+    /// [`collect_override_rows`] returns them.
+    pub(crate) fn from_rows(rows: &[OverrideRow]) -> Option<IgnoredPopup> {
+        let entries: Vec<IgnoredEntry> = rows
+            .iter()
+            .flat_map(|row| {
+                row.ignored.iter().map(move |item| {
+                    let (step, keys) = ignored_columns(row, item);
+                    IgnoredEntry {
+                        file: row.target.clone(),
+                        step,
+                        keys,
+                        reason: item.reason.clone(),
+                    }
+                })
+            })
+            .collect();
+        (!entries.is_empty()).then_some(IgnoredPopup { entries })
+    }
+
+    /// The boxed popup, its rows wrapped to `width`, over `[enter] close`.
+    pub(crate) fn panel(&self, width: usize) -> Vec<String> {
+        let mut body = vec![String::new()];
+        body.extend(self.lines(width));
+        crate::screen::panel(
+            "override ignored",
+            &body,
+            &crate::screen::keys(&[("enter", "close")]),
+        )
+    }
+
+    /// One pair of rows per ignored override: the file, the step and the
+    /// keys it sets, then the full reason under them — the whole reason
+    /// rather than [`crate::overrides::Ignored::short_reason`], since this
+    /// popup is the one place with the room to say why.
+    fn lines(&self, width: usize) -> Vec<String> {
+        let file_w = self.entries.iter().map(|e| e.file.len()).max().unwrap_or(0);
+        let step_w = self
+            .entries
+            .iter()
+            .map(|e| e.step.chars().count())
+            .max()
+            .unwrap_or(0);
+
+        let mut lines = Vec::new();
+        for IgnoredEntry {
+            file,
+            step,
+            keys,
+            reason,
+        } in &self.entries
+        {
+            // A config key or a whole file has no step to name; the column
+            // is left out altogether when no entry has one, rather than
+            // drawn as a run of blanks between the file and its keys.
+            let head = match step_w {
+                0 => format!("{file:<file_w$}   "),
+                _ => format!("{file:<file_w$}   {step:<step_w$}   "),
+            };
+            // `wrap` collapses runs of spaces, so only the keys go through
+            // it — the columns before them are padded by hand — and a long
+            // list of keys continues under its own column rather than under
+            // the file.
+            let lead = head.chars().count();
+            let room = width.saturating_sub(lead).max(IGNORED_KEYS_MIN);
+            for (i, part) in crate::screen::wrap(keys, room).into_iter().enumerate() {
+                match i {
+                    0 => lines.push(format!("{head}{part}")),
+                    _ => lines.push(format!("{}{part}", " ".repeat(lead))),
+                }
+            }
+            lines.extend(crate::screen::wrap(&format!("  {reason}"), width));
+        }
+        lines
+    }
+}
+
+/// The step and keys columns for one ignored entry: `step publish` and
+/// `agent, model` for a pipeline step's entry — its `fields` are dotted
+/// under the step, `publish.agent, publish.model` — no step and the dotted
+/// key itself for a config entry, and `the whole file` for an entry that
+/// names no field at all, the same words `override list` uses for it.
+/// Shared with `commands::dispatch`'s before-start overrides popup, which
+/// labels its own `ignored` row the same way.
+pub(crate) fn ignored_columns(
+    row: &OverrideRow,
+    item: &crate::overrides::Ignored,
+) -> (String, String) {
+    if item.fields.is_empty() {
+        return (String::new(), "the whole file".to_string());
+    }
+    if !row.target.starts_with("pipelines/") {
+        return (String::new(), item.fields.clone());
+    }
+    let step = item.fields.split('.').next().unwrap_or_default();
+    let keys: Vec<&str> = item
+        .fields
+        .split(", ")
+        .map(|field| field.split_once('.').map_or(field, |(_, key)| key))
+        .collect();
+    (format!("step {step}"), keys.join(", "))
 }
 
 /// `--json override list`'s payload, rendered as a string so a test can
@@ -225,6 +440,10 @@ fn render_override_rows_json(rows: &[OverrideRow]) -> Result<String> {
                 "target": r.target,
                 "kind": r.kind,
                 "overrides": r.overrides,
+                "ignored": r.ignored.iter().map(|i| serde_json::json!({
+                    "fields": i.fields,
+                    "reason": i.reason,
+                })).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -299,7 +518,7 @@ fn render_override_contract() -> String {
 /// `spoolway override list`.
 pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
     let dir = repo.overrides_dir();
-    let rows = collect_override_rows(&dir)?;
+    let rows = collect_override_rows(repo)?;
 
     // Before the empty check, not after: an empty layer is still a valid
     // answer to `--json`, `[]`, and a script parsing it must never be handed
@@ -331,6 +550,19 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
             "{:<target_w$}  {:<kind_w$}  {}",
             row.target, row.kind, row.overrides
         );
+        for item in &row.ignored {
+            let fields = if item.fields.is_empty() {
+                "the whole file"
+            } else {
+                &item.fields
+            };
+            println!(
+                "{:<target_w$}  {:<kind_w$}  ignored  {fields} — {}",
+                "",
+                "",
+                item.short_reason()
+            );
+        }
     }
     println!();
     // `layer_fingerprint`, never `stamp`'s combined one: this line is about
@@ -576,7 +808,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = collect_override_rows(&dir).unwrap();
+            let rows = collect_override_rows(repo).unwrap();
             let targets: Vec<&str> = rows.iter().map(|r| r.target.as_str()).collect();
             assert_eq!(
                 targets,
@@ -584,6 +816,7 @@ mod tests {
             );
             assert_eq!(rows[0].kind, "patch");
             assert_eq!(rows[0].overrides, "implement.model");
+            assert!(rows[0].ignored.is_empty(), "nothing here is stale");
             assert_eq!(rows[1].kind, "whole file");
             assert_eq!(rows[1].overrides, "—");
             assert_eq!(rows[2].kind, "patch");
@@ -591,14 +824,212 @@ mod tests {
         });
     }
 
+    /// Where `with_repo`'s tracked pipelines live, for a test that rewrites
+    /// `demo.yml` after the fixture wrote its own single-step version.
+    fn root_pipelines_dir(repo: &Repo) -> std::path::PathBuf {
+        repo.checkout.join(".spoolway/pipelines")
+    }
+
     #[test]
     fn override_list_is_empty_with_no_layer_at_all() {
         with_repo("list-empty", |repo| {
-            assert!(
-                collect_override_rows(&repo.overrides_dir())
-                    .unwrap()
-                    .is_empty()
+            assert!(collect_override_rows(repo).unwrap().is_empty());
+        });
+    }
+
+    /// The Mockup's own row: one step's whole patch entry left stale by a
+    /// later tracked edit moves out of the main `OVERRIDES` column and into
+    /// its own `ignored` line, with the reason — a *different* step's entry
+    /// in the same file stays right where it was. One override is one
+    /// step's entry, never one field of it: `implement.model` and
+    /// `implement.run` above would roll back together were they on the same
+    /// step, exactly as the Mockup's own `publish.agent, publish.model` do.
+    #[test]
+    fn override_list_moves_a_stale_step_entry_into_its_own_ignored_line() {
+        with_repo("list-stale-step", |repo| {
+            std::fs::write(
+                root_pipelines_dir(repo).join("demo.yml"),
+                "steps:\n  - id: implement\n    agent: pi\n    model: claude-sonnet-5\n    \
+                 on_pass: review\n  - id: review\n    agent: pi\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let dir = repo.overrides_dir();
+            let mut implement = serde_norway::Mapping::new();
+            implement.insert(
+                serde_norway::Value::String("model".to_string()),
+                serde_norway::Value::String("claude-opus-5".to_string()),
             );
+            let mut review = serde_norway::Mapping::new();
+            review.insert(
+                serde_norway::Value::String("run".to_string()),
+                serde_norway::Value::String("echo hi".to_string()),
+            );
+            let mut steps = std::collections::BTreeMap::new();
+            steps.insert("implement".to_string(), implement);
+            steps.insert("review".to_string(), review);
+            crate::overrides::write_pipeline_patch(
+                &dir,
+                "demo",
+                &crate::overrides::PipelinePatch {
+                    description: None,
+                    task_template: None,
+                    steps,
+                },
+            )
+            .unwrap();
+
+            let rows = collect_override_rows(repo).unwrap();
+            let row = rows
+                .iter()
+                .find(|r| r.target == "pipelines/demo.yml")
+                .unwrap();
+            assert_eq!(
+                row.overrides, "implement.model",
+                "the untouched step's entry stays in the main column"
+            );
+            assert_eq!(row.ignored.len(), 1, "{:?}", row.ignored);
+            assert_eq!(row.ignored[0].fields, "review.run");
+            assert_eq!(
+                row.ignored[0].short_reason(),
+                "names both `run:` and `agent:`"
+            );
+            assert_eq!(
+                row.ignored[0].notice(),
+                "spoolway: override ignored — pipelines/demo.yml step `review`: names both \
+                 `run:` and `agent:` — a step runs a process or a model, not both"
+            );
+        });
+    }
+
+    /// The Mockup's "override ignored" popup: the file, the step and the
+    /// keys it sets on one row, the whole reason under it — and no popup
+    /// at all once nothing in the layer is ignored.
+    #[test]
+    fn ignored_popup_names_each_ignored_override_with_its_whole_reason() {
+        with_repo("ignored-popup", |repo| {
+            assert!(ignored_popup(repo).unwrap().is_none(), "no layer at all");
+
+            let dir = repo.overrides_dir();
+            write_atomic(
+                &crate::overrides::pipeline_patch_path(&dir, "demo"),
+                "steps:\n  implement:\n    run: echo hi\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            let panel = ignored_popup(repo)
+                .unwrap()
+                .expect("one override is ignored")
+                .panel(IGNORED_POPUP_WRAP);
+            let drawn = panel.join("\n");
+            assert!(panel[0].starts_with("┌─ override ignored "), "{drawn}");
+            assert!(
+                drawn.contains("  pipelines/demo.yml   step implement   run, model "),
+                "{drawn}"
+            );
+            assert!(
+                drawn.contains(
+                    "    names both `run:` and `agent:` — a step runs a process or a model, not \
+                     both"
+                ),
+                "{drawn}"
+            );
+            assert!(drawn.contains("  [enter] close "), "{drawn}");
+
+            std::fs::remove_file(crate::overrides::pipeline_patch_path(&dir, "demo")).unwrap();
+            assert!(ignored_popup(repo).unwrap().is_none(), "nothing ignored");
+        });
+    }
+
+    /// A config key names no step, so the step column is left out; an entry
+    /// with no field of its own — a prompt the checkout no longer has —
+    /// reads `the whole file`, the way `override list` says it.
+    #[test]
+    fn ignored_lines_name_a_config_key_and_a_whole_file() {
+        let rows = vec![
+            OverrideRow {
+                target: "prompts/retired".into(),
+                kind: "whole file",
+                overrides: "—".into(),
+                ignored: vec![crate::overrides::Ignored::missing_prompt("retired")],
+            },
+            OverrideRow {
+                target: crate::config::CONFIG_FILE.into(),
+                kind: "patch",
+                overrides: String::new(),
+                ignored: vec![crate::overrides::Ignored {
+                    target: crate::config::CONFIG_FILE.into(),
+                    fields: "dispatch.nonesuch".into(),
+                    reason: "unknown key `dispatch.nonesuch`".into(),
+                }],
+            },
+        ];
+        assert_eq!(
+            IgnoredPopup::from_rows(&rows)
+                .unwrap()
+                .lines(IGNORED_POPUP_WRAP),
+            vec![
+                "prompts/retired   the whole file",
+                "  names prompt `retired`, which the checkout does not have",
+                "config.toml       dispatch.nonesuch",
+                "  unknown key `dispatch.nonesuch`",
+            ]
+        );
+    }
+
+    /// A patch for a pipeline the checkout no longer has at all — renamed or
+    /// removed since the patch was written — is the whole-file case: it must
+    /// not read as an active override with its raw keys still listed, the
+    /// way a tracked pipeline load failure does; the tracked pipelines here
+    /// load fine, they just do not have this name, which `Pipelines::load`
+    /// itself already treats as stale — see
+    /// `pipeline::tests::an_override_naming_a_pipeline_the_checkout_lacks_is_skipped_with_a_notice`.
+    #[test]
+    fn override_list_marks_a_patch_for_a_pipeline_the_checkout_no_longer_has() {
+        with_repo("list-missing-pipeline", |repo| {
+            let dir = repo.overrides_dir();
+            let mut fields = serde_norway::Mapping::new();
+            fields.insert(
+                serde_norway::Value::String("model".to_string()),
+                serde_norway::Value::String("claude-opus-5".to_string()),
+            );
+            let mut steps = std::collections::BTreeMap::new();
+            steps.insert("implement".to_string(), fields);
+            crate::overrides::write_pipeline_patch(
+                &dir,
+                "gone",
+                &crate::overrides::PipelinePatch {
+                    description: None,
+                    task_template: None,
+                    steps,
+                },
+            )
+            .unwrap();
+
+            let rows = collect_override_rows(repo).unwrap();
+            let row = rows
+                .iter()
+                .find(|r| r.target == "pipelines/gone.yml")
+                .unwrap();
+            assert_eq!(
+                row.overrides, "",
+                "nothing in a patch for a pipeline that does not exist applies"
+            );
+            assert_eq!(row.ignored.len(), 1, "{:?}", row.ignored);
+            assert_eq!(
+                row.ignored[0].reason,
+                "names pipeline `gone`, which the checkout does not have"
+            );
+
+            let rendered = render_override_rows_json(&rows).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            let json_row = value
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["target"] == "pipelines/gone.yml")
+                .unwrap();
+            assert_eq!(json_row["ignored"].as_array().unwrap().len(), 1);
         });
     }
 
@@ -617,6 +1048,37 @@ mod tests {
             override_list(repo, true).unwrap();
             override_list(repo, false).unwrap();
         });
+    }
+
+    /// `--json`'s own row carries `ignored` too — each entry's fields and
+    /// reason — so a script reading the layer never has to fall back to
+    /// scraping the plain form's own prose.
+    #[test]
+    fn override_list_json_marks_an_ignored_entry() {
+        let rows = vec![OverrideRow {
+            target: "pipelines/release.yml".to_string(),
+            kind: "patch",
+            overrides: "fix.agent".to_string(),
+            ignored: vec![crate::overrides::Ignored {
+                target: "pipelines/release.yml step `publish`".to_string(),
+                fields: "publish.agent, publish.model".to_string(),
+                reason: "names both `run:` and `agent:` — a step runs a process or a model, \
+                         not both"
+                    .to_string(),
+            }],
+        }];
+        let rendered = render_override_rows_json(&rows).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(
+            value[0]["ignored"][0]["fields"],
+            serde_json::json!("publish.agent, publish.model")
+        );
+        assert_eq!(
+            value[0]["ignored"][0]["reason"],
+            serde_json::json!(
+                "names both `run:` and `agent:` — a step runs a process or a model, not both"
+            )
+        );
     }
 
     #[test]

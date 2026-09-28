@@ -3252,6 +3252,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines {
             pipelines: [("impl_ui".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
         add(&repo, "login", &[], Some("implement"));
         let mut login = repo.task("login").unwrap();
