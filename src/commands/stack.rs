@@ -432,15 +432,22 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
 ///
 /// The body is everything after the task file's frontmatter fence, verbatim
 /// — the only mode `spoolway stack` has now that its optional model summary
-/// turn is gone.
+/// turn is gone — except that `## Status Log`, `## Handoff` and `## Blocker`
+/// are lifted out into one closed `<details>` fold just above the tag; see
+/// `extract_run_history` below.
 ///
-/// Nothing rides under it but the tag. Which open `parallel: true` task this
-/// branch is predicted to conflict with is reported on the console by
-/// `spoolway stack` as it runs; it is not repeated in the pull request a
-/// reviewer opens.
+/// Which open `parallel: true` task this branch is predicted to conflict
+/// with is reported on the console by `spoolway stack` as it runs; it is
+/// not repeated in the pull request a reviewer opens.
 fn compose_body(task_body: &str) -> String {
     let mut body = String::new();
     body.push_str(task_body.trim_end());
+    body.push('\n');
+
+    // Lift the run's own sections out before anything else, so the size
+    // budget below sees only the plan the reviewer opens on.
+    let fold = extract_run_history(&mut body);
+    body = body.trim_end().to_string();
     body.push('\n');
 
     // The tag is the whole trailer and a fixed width, so what it leaves the
@@ -457,10 +464,105 @@ fn compose_body(task_body: &str) -> String {
         body.push('\n');
     }
 
+    // The plan sections claimed the budget first; the fold gets whatever is
+    // left over, whole or not at all — never split by the cut above, since a
+    // `<details>` with no `</details>` breaks the rest of the page.
+    if let Some(fold) = fold {
+        let remaining = MAX_BODY.saturating_sub(body.len() + CO_AUTHOR.len() + 2);
+        if fold.len() < remaining {
+            body.push('\n');
+            body.push_str(&fold);
+        }
+    }
+
     body.push('\n');
     body.push_str(CO_AUTHOR);
     body.push('\n');
     body
+}
+
+/// The three sections `extract_run_history` folds, if present. This says
+/// only which headings fold — the order they end up in the fold is the
+/// order the task file has them, decided by sorting on where each one is
+/// found, not by this list's own order.
+const RUN_HISTORY_HEADINGS: [&str; 3] = ["## Status Log", "## Handoff", "## Blocker"];
+
+/// Pull `## Status Log`, `## Handoff` and `## Blocker` out of `body` in
+/// place and hand back a closed `<details>` fold holding them, in the order
+/// the file had them — or `None` if the body has none of the three, so a
+/// task with no run yet gets no fold at all.
+///
+/// GitHub only renders markdown inside `<details>` when a blank line
+/// follows `</summary>`; without it the headings and list items show up as
+/// raw text.
+fn extract_run_history(body: &mut String) -> Option<String> {
+    let mut ranges: Vec<(usize, usize)> = RUN_HISTORY_HEADINGS
+        .iter()
+        .filter_map(|heading| section_range(body, heading))
+        .collect();
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_by_key(|&(start, _)| start);
+
+    let sections: Vec<String> = ranges
+        .iter()
+        .map(|&(start, end)| body[start..end].trim_end().to_string())
+        .collect();
+
+    // Remove the furthest-back range first so an earlier range's offsets
+    // stay valid as later ones are cut away. Each range runs from a
+    // heading through to the byte before whatever follows it (the next
+    // heading, or the end of the body), so removing it can only rejoin
+    // the blank line already above the heading to what already followed
+    // the section — never a new run of blank lines, and never a touch on
+    // text outside the three sections, such as a fenced code block
+    // elsewhere in the plan.
+    for &(start, end) in ranges.iter().rev() {
+        body.replace_range(start..end, "");
+    }
+
+    let mut fold = String::from("<details>\n<summary>Run history</summary>\n\n");
+    for (i, section) in sections.iter().enumerate() {
+        if i > 0 {
+            fold.push('\n');
+        }
+        fold.push_str(section);
+        fold.push('\n');
+    }
+    fold.push_str("</details>\n");
+    Some(fold)
+}
+
+/// The byte range of a section — its heading line through its content, up
+/// to the next heading of the same or higher level, or the end of `body`.
+///
+/// Mirrors `Task::find_section` in `src/task.rs`, which returns only the
+/// content, not the heading line a caller here needs to move too.
+fn section_range(body: &str, heading: &str) -> Option<(usize, usize)> {
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let mut start = None;
+    let mut offset = 0usize;
+
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        match start {
+            None => {
+                if trimmed.eq_ignore_ascii_case(heading) {
+                    start = Some(offset);
+                }
+            }
+            Some(s) => {
+                let this_level = trimmed.chars().take_while(|c| *c == '#').count();
+                if this_level > 0 && this_level <= level {
+                    return Some((s, offset));
+                }
+            }
+        }
+        offset += line.len();
+    }
+
+    start.map(|s| (s, body.len()))
 }
 
 /// The largest byte offset at or before `at` that lands on a UTF-8 character
@@ -1131,5 +1233,125 @@ mod tests {
         // a paragraph, never mid-heading or mid-sentence.
         let before_tag = body.trim_end().strip_suffix(CO_AUTHOR).unwrap();
         assert!(before_tag.trim_end().ends_with('.'));
+    }
+
+    /// `## Status Log` and `## Handoff` move into one closed fold, in the
+    /// order the task file had them, with the blank line after `</summary>`
+    /// GitHub needs to render the markdown inside rather than show it raw.
+    #[test]
+    fn compose_body_folds_status_log_and_handoff() {
+        let body = compose_body(
+            "## Context\n- a thing\n\n\
+             ## Status Log\n- 2026-09-27 14:02 implement: pass\n\n\
+             ## Handoff\n- review: check the thing\n",
+        );
+        assert_eq!(
+            body,
+            "## Context\n- a thing\n\n\
+             <details>\n<summary>Run history</summary>\n\n\
+             ## Status Log\n- 2026-09-27 14:02 implement: pass\n\n\
+             ## Handoff\n- review: check the thing\n\
+             </details>\n\n\
+             Co-Authored-By: Claude Code\n"
+        );
+    }
+
+    /// A section that sits between two plan sections in the task file still
+    /// moves whole into the fold — its position in the body does not decide
+    /// whether it folds, only its heading does.
+    #[test]
+    fn compose_body_folds_a_section_from_the_middle_of_the_body() {
+        let body = compose_body(
+            "## Context\n- a thing\n\n\
+             ## Handoff\n- review: check the thing\n\n\
+             ## Acceptance criteria\n- it works\n",
+        );
+        assert_eq!(
+            body,
+            "## Context\n- a thing\n\n\
+             ## Acceptance criteria\n- it works\n\n\
+             <details>\n<summary>Run history</summary>\n\n\
+             ## Handoff\n- review: check the thing\n\
+             </details>\n\n\
+             Co-Authored-By: Claude Code\n"
+        );
+    }
+
+    /// The fold's order is where each heading sits in the file, not
+    /// `RUN_HISTORY_HEADINGS`'s own order: `## Handoff` comes before
+    /// `## Blocker` and `## Status Log` here, the reverse of that constant,
+    /// and each is pulled out of the middle of the plan.
+    #[test]
+    fn compose_body_folds_in_file_order_not_constant_order() {
+        let body = compose_body(
+            "## Context\n- a thing\n\n\
+             ## Handoff\n- review: check the thing\n\n\
+             ## Acceptance criteria\n- it works\n\n\
+             ## Blocker\n- stuck on x\n\n\
+             ## Non-goals\n- out of scope\n\n\
+             ## Status Log\n- did stuff\n",
+        );
+        assert_eq!(
+            body,
+            "## Context\n- a thing\n\n\
+             ## Acceptance criteria\n- it works\n\n\
+             ## Non-goals\n- out of scope\n\n\
+             <details>\n<summary>Run history</summary>\n\n\
+             ## Handoff\n- review: check the thing\n\n\
+             ## Blocker\n- stuck on x\n\n\
+             ## Status Log\n- did stuff\n\
+             </details>\n\n\
+             Co-Authored-By: Claude Code\n"
+        );
+    }
+
+    /// Extraction only ever removes the three named sections' own ranges —
+    /// plan text elsewhere, including a blank-line run inside a fenced code
+    /// block, comes through byte for byte rather than being swept up by a
+    /// global normalizing pass.
+    #[test]
+    fn compose_body_leaves_plan_text_outside_the_fold_untouched() {
+        let body = compose_body("## Context\n```\nline a\n\n\nline b\n```\n\n## Status Log\n- x\n");
+        assert!(
+            body.contains("line a\n\n\nline b"),
+            "a code block's own blank lines are not the fold's to collapse: {body:?}"
+        );
+    }
+
+    /// A body with none of the three sections gets no fold at all — the
+    /// body is the task body and the tag, same as before this change.
+    #[test]
+    fn compose_body_has_no_fold_when_no_run_history_sections_exist() {
+        let body = compose_body("## Context\n- a thing\n\n## Acceptance criteria\n- it works\n");
+        assert!(!body.contains("<details>"));
+        assert!(!body.contains("Run history"));
+        assert_eq!(
+            body,
+            "## Context\n- a thing\n\n## Acceptance criteria\n- it works\n\n\
+             Co-Authored-By: Claude Code\n"
+        );
+    }
+
+    /// Once the plan sections alone are too long for the fold to fit
+    /// alongside them, the fold is dropped whole rather than split by the
+    /// cut — no output ever has a `<details>` without its `</details>`.
+    #[test]
+    fn compose_body_never_splits_the_fold_when_the_cut_drops_it() {
+        let mut long_body = String::new();
+        for i in 0..2000 {
+            long_body.push_str(&format!(
+                "## Section {i}\n\nSome text about section {i}.\n\n"
+            ));
+        }
+        long_body.push_str("## Status Log\n- 2026-09-27 14:02 implement: pass\n");
+
+        let body = compose_body(&long_body);
+        assert!(body.len() <= MAX_BODY, "{} bytes", body.len());
+        assert!(body.trim_end().ends_with(CO_AUTHOR));
+        assert!(
+            !body.contains("<details>"),
+            "the fold has no room left once the plan sections alone fill the budget"
+        );
+        assert!(!body.contains("</details>"));
     }
 }
