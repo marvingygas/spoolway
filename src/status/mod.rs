@@ -101,6 +101,12 @@ pub enum State {
     /// Something is working the task right now: a live lane, or the run of a
     /// command step, which has no lane at all.
     Running,
+    /// A step whose agent has settled its turn, or whose command run has
+    /// exited, while no dispatcher holds the lock — so nothing will route it
+    /// until dispatching starts again. Only [`finish_settled`] reaches this
+    /// state: with a dispatcher up, a finished step moves on within a pass
+    /// and reads `Running` for that moment, exactly as it always has.
+    Finished,
     /// At the pipeline's blocked step, carrying its reason.
     Blocked,
     /// A live lane's pane is holding a permission prompt — herdr's own
@@ -230,7 +236,8 @@ pub struct Row {
     /// — busy time only, banked as a delta the same way tokens are — at the
     /// step it is on once it is not live, every round of it, the same as OUT
     /// and COST. `None` where neither answers: no live lane and nothing
-    /// banked.
+    /// banked. A [`State::Finished`] row holds the figure it read when the
+    /// board first saw it finish instead — see [`finish_settled`].
     ///
     /// A paused row reads the ledger at [`ledger_stage`] rather than
     /// `task.stage()`: `paused` itself is not a step any pipeline declares
@@ -315,6 +322,10 @@ pub struct Board {
     /// from one that has genuinely run out of workers to pick it up: the two
     /// look identical on disk, and only this clock tells them apart.
     arrived: BTreeMap<String, Instant>,
+    /// Lane name → the TIME a finished step read when this board first saw
+    /// it finish, while no dispatcher is up — see [`finish_settled`]. Empty
+    /// whenever one is.
+    frozen: BTreeMap<String, Option<i64>>,
     recent: VecDeque<RecentEvent>,
     /// Whether the queue as it stood at the first frame has been taken as the
     /// starting point. Without this every task already in flight is announced
@@ -368,6 +379,7 @@ impl Board {
         Board {
             stages: BTreeMap::new(),
             arrived: BTreeMap::new(),
+            frozen: BTreeMap::new(),
             recent: VecDeque::new(),
             adopted: false,
             _term: term,
@@ -454,6 +466,7 @@ impl Board {
             phase,
             &mut self.stages,
             &mut self.arrived,
+            &mut self.frozen,
             &mut self.recent,
             &mut self.cursor,
             &mut self.jobs_next,
@@ -1598,6 +1611,7 @@ fn render(
     phase: Phase,
     stages: &mut BTreeMap<String, String>,
     arrived: &mut BTreeMap<String, Instant>,
+    frozen: &mut BTreeMap<String, Option<i64>>,
     recent: &mut VecDeque<RecentEvent>,
     cursor: &mut Option<String>,
     jobs_next: &mut Option<crate::jobs::ActiveJobsMemo>,
@@ -1648,7 +1662,7 @@ fn render(
     // Read once and shared: the rows want it for the OUT column and the footer
     // wants it for the spend, and it is the largest file the board opens.
     let ledger = crate::usage::read_cached(repo);
-    let active_rows = build_rows(
+    let mut active_rows = build_rows(
         repo,
         &tasks,
         pipelines,
@@ -1657,6 +1671,20 @@ fn render(
         &ledger,
         Some(&*arrived),
     )?;
+    // How many steps are still working with no dispatcher up to move them on
+    // — `None` while one holds the lock, whose rows read exactly as they
+    // always have. See `finish_settled`.
+    let finishing = match phase {
+        Phase::Watching { holder: None, .. } => {
+            Some(finish_settled(repo, &mut active_rows, &lanes, frozen))
+        }
+        Phase::Watching {
+            holder: Some(_), ..
+        } => {
+            frozen.clear();
+            None
+        }
+    };
 
     // Archived tasks stay on the board, dimmed, only as long as their group
     // still has something in the queue — so the groups worth pulling from the
@@ -1704,24 +1732,12 @@ fn render(
     // can act on: when the next pass is due changes nothing they would do,
     // and how long the run has been up only ever said the board was alive —
     // which is not worth the room the version now takes. The spool beside
-    // the wordmark turns while a lane is running; with nothing running the
+    // the wordmark turns while a lane is running — with no dispatcher up,
+    // while a step is still working; with nothing running the
     // board holds still, and a still board over a still queue is the truth
     // rather than something to animate over.
     let version = version_label(crate::release::installed_newer().as_deref());
-    let header = match phase {
-        Phase::Watching {
-            holder: Some(pid), ..
-        } => {
-            vec![
-                "dispatcher running".to_string(),
-                format!("pid {pid}"),
-                version,
-            ]
-        }
-        // Nothing is dispatching, so there is no pid to name — this
-        // process's own would read as a dispatcher that is not there.
-        Phase::Watching { holder: None, .. } => vec!["dispatcher stopped".to_string(), version],
-    };
+    let header = header_cells(phase, finishing, version);
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. `masthead`
@@ -1739,7 +1755,13 @@ fn render(
     // the still mark instead. A mid-handoff row turning the spool with
     // neither a lane nor a command step behind it is that third case working
     // as the mockup intends, not an animation with nothing behind it.
-    let running = rows.iter().any(|row| row.state == State::Running);
+    //
+    // With no dispatcher up it turns on the steps still working instead, the
+    // same count the header gives, so it stops once the last of them does.
+    let running = match finishing {
+        Some(n) => n > 0,
+        None => rows.iter().any(|row| row.state == State::Running),
+    };
     frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
     frame.push('\n');
 
@@ -2469,6 +2491,105 @@ fn lane_busy(lanes: &[crate::mux::Lane], step_ids: &[&str], task_id: &str) -> bo
                 crate::mux::LaneStatus::Working | crate::mux::LaneStatus::Blocked
             )
     })
+}
+
+/// The masthead's header cells, joined with ` · ` by [`render`]: who is
+/// dispatching and which build this is. `finishing` is [`finish_settled`]'s
+/// count, `Some` exactly while no dispatcher holds the lock.
+fn header_cells(phase: Phase, finishing: Option<usize>, version: String) -> Vec<String> {
+    match phase {
+        Phase::Watching {
+            holder: Some(pid), ..
+        } => {
+            vec![
+                "dispatcher running".to_string(),
+                format!("pid {pid}"),
+                version,
+            ]
+        }
+        // Nothing is dispatching, so there is no pid to name — this
+        // process's own would read as a dispatcher that is not there.
+        Phase::Watching { holder: None, .. } => {
+            let mut header = vec!["dispatcher stopped".to_string()];
+            // Left out at zero: a stopped board with nothing still working
+            // has nothing to count down.
+            match finishing {
+                Some(1) => header.push("1 step finishing".to_string()),
+                Some(n) if n > 1 => header.push(format!("{n} steps finishing")),
+                _ => {}
+            }
+            header.push(version);
+            header
+        }
+    }
+}
+
+/// What a stopped board makes of the rows [`build_rows`] drew: every step
+/// still working is counted, and every one that has finished reads
+/// [`State::Finished`] instead. Returns the count, which is what the header's
+/// `N steps finishing` and the spool's turning both read.
+///
+/// Only called while no dispatcher holds the lock. With one up a finished
+/// step moves on within a pass, so the `Running` it reads for that moment is
+/// honest; with none up it would read `Running` until someone started one,
+/// with its clock still counting and the spool still turning over a board on
+/// which nothing is working at all.
+///
+/// Working is herdr's own read of the lane — anything not settled, so
+/// `Working`, a `Blocked` prompt and an `Unknown` all count — or a command
+/// run still in flight. A lane that has settled, or a command run that has
+/// exited, has finished: an exited run already reads `Queued` off
+/// [`build_rows`], since no lane or running run backs it, so that state is
+/// taken here too.
+///
+/// `frozen` is the board's memory of the TIME each finished step read the
+/// first frame it was seen finished, by lane name, so its clock stops there
+/// rather than going on counting from `launched_at` — the same kind of
+/// memory `Board::arrived` keeps for the handoff grace. A lane that starts
+/// working again, or leaves the board, drops its entry, so it counts live
+/// once more.
+fn finish_settled(
+    repo: &Repo,
+    rows: &mut [Row],
+    lanes: &[crate::mux::Lane],
+    frozen: &mut BTreeMap<String, Option<i64>>,
+) -> usize {
+    let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    let mut working = 0;
+    let mut finished: BTreeSet<String> = BTreeSet::new();
+    for row in rows.iter_mut() {
+        if !matches!(row.state, State::Running | State::Prompt | State::Queued) {
+            continue;
+        }
+        let lane = crate::mux::lane_name(&row.stage, &row.id);
+        // The TIME this row reads if it has finished, before any frozen
+        // figure: a lane's own `now - launched_at`, already on the row, or an
+        // exited run's time since it started, which `build_rows` never put
+        // there because it only times a run still in flight.
+        let time = match lanes.iter().find(|l| l.name == lane) {
+            Some(live) if live.status.is_settled() => row.lane_time,
+            Some(_) => {
+                working += 1;
+                continue;
+            }
+            None => match runs.state(&lane) {
+                crate::command_step::RunState::Running => {
+                    working += 1;
+                    continue;
+                }
+                crate::command_step::RunState::Exited(_) => {
+                    runs.elapsed(&lane).map(|ran| ran.as_secs() as i64)
+                }
+                _ => continue,
+            },
+        };
+        row.state = State::Finished;
+        row.next = "moves on when dispatching starts".to_string();
+        row.lane_time = *frozen.entry(lane.clone()).or_insert(time);
+        finished.insert(lane);
+    }
+    frozen.retain(|lane, _| finished.contains(lane));
+    working
 }
 
 /// What [`cached_archive`] last read, and the archive directory's own mtime
@@ -3654,6 +3775,158 @@ mod tests {
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[answered], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
+    }
+
+    /// With no dispatcher up, a lane still in its turn counts — `Working`, a
+    /// `Blocked` prompt and an `Unknown` alike — and one that has settled,
+    /// `Done` or `Idle`, reads `✓ finished` with what moves it on.
+    #[test]
+    fn a_stopped_board_counts_working_lanes_and_finishes_settled_ones() {
+        let repo = fixture("stopped-board-lanes");
+        let pipelines = Pipelines::builtin();
+        let statuses = [
+            ("working", crate::mux::LaneStatus::Working),
+            ("prompting", crate::mux::LaneStatus::Blocked),
+            ("unknown", crate::mux::LaneStatus::Unknown),
+            ("done", crate::mux::LaneStatus::Done),
+            ("idle", crate::mux::LaneStatus::Idle),
+        ];
+        let mut lanes = Vec::new();
+        for (id, status) in statuses {
+            add(&repo, id, &[], Some("implement"));
+            let mut l = lane(&format!("{id} · implement"), &repo.root);
+            l.status = status;
+            lanes.push(l);
+        }
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
+        let mut frozen = BTreeMap::new();
+        let working = finish_settled(&repo, &mut rows, &lanes, &mut frozen);
+
+        assert_eq!(working, 3);
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        assert!(matches!(row("working").state, State::Running));
+        assert!(matches!(row("prompting").state, State::Prompt));
+        assert!(matches!(row("unknown").state, State::Running));
+        for id in ["done", "idle"] {
+            assert!(matches!(row(id).state, State::Finished), "{id}");
+            assert_eq!(row(id).next, "moves on when dispatching starts");
+        }
+    }
+
+    /// A finished step's TIME is the figure the board read the first frame
+    /// it saw it finished, however long it then sits there — and it counts
+    /// live again the moment the lane goes back to work.
+    #[test]
+    fn a_finished_steps_clock_stops_where_the_board_first_saw_it_settle() {
+        let repo = fixture("stopped-board-clock");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 90);
+        task.save().unwrap();
+
+        let mut settled = lane("login · implement", &repo.root);
+        settled.status = crate::mux::LaneStatus::Done;
+        let lanes = [settled];
+        let mut frozen = BTreeMap::new();
+        let frame = |frozen: &mut BTreeMap<String, Option<i64>>, lanes: &[crate::mux::Lane]| {
+            let tasks = repo.tasks().unwrap();
+            let graph = Graph::build(&tasks, &repo.archive_dir());
+            let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, lanes, &[], None).unwrap();
+            let working = finish_settled(&repo, &mut rows, lanes, frozen);
+            (working, rows.into_iter().find(|r| r.id == "login").unwrap())
+        };
+
+        let (working, first) = frame(&mut frozen, &lanes);
+        assert_eq!(working, 0);
+        let stopped_at = first.lane_time.unwrap();
+        assert!((90..95).contains(&stopped_at), "{stopped_at}");
+
+        // Later frames: the launch now reads ten minutes back, which a live
+        // clock would count from. The finished row keeps its first figure.
+        let mut task = repo.task("login").unwrap();
+        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 600);
+        task.save().unwrap();
+        let (_, later) = frame(&mut frozen, &lanes);
+        assert!(matches!(later.state, State::Finished));
+        assert_eq!(later.lane_time, Some(stopped_at));
+
+        // Back to work: counted, `Running`, on its own live clock, and the
+        // frozen figure forgotten.
+        let mut busy = lanes[0].clone();
+        busy.status = crate::mux::LaneStatus::Working;
+        let (working, again) = frame(&mut frozen, &[busy]);
+        assert_eq!(working, 1);
+        assert!(matches!(again.state, State::Running));
+        assert!(again.lane_time.unwrap() >= 600);
+        assert!(frozen.is_empty());
+    }
+
+    /// A command step counts while its run is in flight and reads finished
+    /// once the run has written its exit code — the row `build_rows` alone
+    /// draws `queued`, since nothing running backs it any more.
+    #[test]
+    fn a_stopped_board_counts_a_running_command_and_finishes_an_exited_one() {
+        let repo = fixture("stopped-board-command");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("handover"));
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{key}.pid")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let mut frozen = BTreeMap::new();
+        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        assert_eq!(finish_settled(&repo, &mut rows, &[], &mut frozen), 1);
+        assert!(matches!(rows[0].state, State::Running));
+
+        std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
+        let mut rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        assert!(matches!(rows[0].state, State::Queued), "the premise");
+        assert_eq!(finish_settled(&repo, &mut rows, &[], &mut frozen), 0);
+        assert!(matches!(rows[0].state, State::Finished));
+        assert_eq!(rows[0].next, "moves on when dispatching starts");
+        assert!(rows[0].lane_time.is_some(), "an exited run keeps its time");
+    }
+
+    /// A stopped header counts the steps still working, singular for one and
+    /// left out at none; a running one reads exactly as it did.
+    #[test]
+    fn a_stopped_header_counts_the_steps_still_finishing() {
+        let stopped = Phase::Watching {
+            holder: None,
+            dispatching: false,
+        };
+        let header = |finishing| header_cells(stopped, finishing, "v1".to_string()).join(" · ");
+        assert_eq!(header(Some(0)), "dispatcher stopped · v1");
+        assert_eq!(
+            header(Some(1)),
+            "dispatcher stopped · 1 step finishing · v1"
+        );
+        assert_eq!(
+            header(Some(3)),
+            "dispatcher stopped · 3 steps finishing · v1"
+        );
+
+        let running = Phase::Watching {
+            holder: Some(1234),
+            dispatching: true,
+        };
+        assert_eq!(
+            header_cells(running, None, "v1".to_string()).join(" · "),
+            "dispatcher running · pid 1234 · v1"
+        );
     }
 
     /// A dependency whose id happens to contain one of the words the state

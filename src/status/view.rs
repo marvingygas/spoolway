@@ -140,6 +140,7 @@ impl State {
         match self {
             State::Paused => "● paused",
             State::Running => "● running",
+            State::Finished => "✓ finished",
             State::Blocked => "● blocked",
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
@@ -156,6 +157,9 @@ impl State {
             // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
+            // Dim, not `Running`'s green: nothing is working this step any
+            // more, and the board's green means something is.
+            State::Finished => format!("{DIM}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
             // A live lane, not a stop, so it takes `Running`'s own colour —
             // the task has not left its step, only paused for a keystroke.
@@ -1657,6 +1661,7 @@ mod tests {
         for state in [
             State::Paused,
             State::Running,
+            State::Finished,
             State::Blocked,
             State::Prompt,
             State::Queued,

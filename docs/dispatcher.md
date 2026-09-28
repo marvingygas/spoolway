@@ -147,7 +147,9 @@ installed version)`.
 Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
 dispatch` child the tab starts on `enter` and stops behind a popup the next `enter` opens — the
 tab runs no pass itself. Its header names the pid of that child, or reads `dispatcher stopped`
-with no pid once it has stopped. See [`spoolway`](cli-reference.md#spoolway).
+with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
+· 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
+turns while that count is above zero. See [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher always opens the stop popup, even with nothing running:
 
@@ -221,6 +223,7 @@ stateDiagram-v2
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
 | `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
+| `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
 `RECENT` lists the last task moves. Errors from a pass go to `~/.spoolway/logs/<project>.log`.
 

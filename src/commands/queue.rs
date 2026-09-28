@@ -111,6 +111,7 @@ fn state_label(state: crate::status::State) -> &'static str {
     match state {
         Paused => "paused",
         Running => "running",
+        Finished => "finished",
         Blocked => "blocked",
         Prompt => "prompt",
         Queued => "queued",
