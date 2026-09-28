@@ -839,14 +839,18 @@ impl<'a> Dispatcher<'a> {
     /// `tick` is called between this pass's own units of work — after the
     /// anchor-tab sweep, after each task `collect_candidates` settles or
     /// turns into a candidate, after each lane `start_lanes` starts or
-    /// skips, and after each task `clean_up` archives — and, inside a lane
-    /// start itself, once every `VACATE_POLL` for as long as
-    /// `Mux::start_lane`'s own herdr call is waiting on a spawned child, up
-    /// to the two minutes `agent start` is bounded at. That last one is not
-    /// a checkpoint between units of work the way the others are; it is
-    /// `Mux::start_lane`'s own wait handing `tick` back mid-launch, so the
-    /// keyboard is never dead for the one stretch of a pass that can run
-    /// the longest.
+    /// skips, and after each task `clean_up` archives — and, while every
+    /// lane a pass claims this round boots at once, once every `VACATE_POLL`
+    /// for as long as any of their `Mux::start_lane` or `Mux::prompt` calls
+    /// is still running on its own thread, up to the two minutes `agent
+    /// start` is bounded at. That last one is not a checkpoint between
+    /// units of work the way the others are; `tick` cannot itself cross onto
+    /// those threads — it is `&mut dyn FnMut()`, and more than one thread
+    /// calling it at once would be more than one mutable borrow of whatever
+    /// it closes over — so `start_lanes` calls it itself, on this thread,
+    /// while it waits for them, and the keyboard is never dead for the one
+    /// stretch of a pass that can run the longest. See
+    /// [`Dispatcher::start_lanes`] and [`join_all_ticking`].
     ///
     /// This is `commands::dispatch`'s run loop's own hook: a pass moving a
     /// handful of tasks used to hold the keyboard dead for its whole
@@ -877,6 +881,11 @@ impl<'a> Dispatcher<'a> {
 
     fn run_pass(&mut self, tick: &mut dyn FnMut()) -> Result<Report> {
         let mut report = Report::default();
+        // Any boot mark still on disk is one a dispatcher killed mid-boot
+        // left behind — this pass's own are set and cleared inside
+        // `start_lanes` — so it goes before anything here could set a new
+        // one. See [`crate::claim`].
+        crate::claim::clear(self.repo);
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
 
@@ -1514,8 +1523,8 @@ impl<'a> Dispatcher<'a> {
                             // this step, and that turn is what is running.
                             // Spending `parked_from` (and the one-shot
                             // `resume` it travels with) here is what
-                            // `start_one` would otherwise do on the launch
-                            // this lane no longer needs; sending it the
+                            // `finish_launch_bookkeeping` would otherwise do
+                            // on the launch this lane no longer needs; sending it the
                             // report contract on top of what the person just
                             // asked for is exactly what `park_prompt`'s own
                             // doc warns a busy lane must never get.
@@ -2795,8 +2804,9 @@ impl<'a> Dispatcher<'a> {
 
     /// Spend a still-live `parked_from` (and the one-shot `resume` it
     /// travels with) without ever launching anything — the other half of a
-    /// resume racing a lane the person restarted by hand. `start_one` is
-    /// what ordinarily spends both, on the launch a resume queues for; a
+    /// resume racing a lane the person restarted by hand.
+    /// `finish_launch_bookkeeping` is what ordinarily spends both, on the
+    /// launch a resume queues for; a
     /// lane already busy again needs no launch, so this is what finishes the
     /// unpark in its place. A no-op for any task not actually mid-resume on
     /// this exact step, so it costs nothing to call from every busy lane
@@ -3244,8 +3254,9 @@ impl<'a> Dispatcher<'a> {
     /// A launch refused because its pane is still busy — [`crate::mux::
     /// PaneBusy`] — never spends one of [`MAX_LAUNCH_FAILURES`]'s strikes:
     /// the refusal is transient by construction (see [`crate::mux::Herdr::
-    /// start_lane`]'s own poll ahead of `agent start`). `start_one`'s own
-    /// take-back closes the pane and splits a fresh one on every attempt,
+    /// start_lane`]'s own poll ahead of `agent start`). `boot_start_lane`'s
+    /// own take-back closes the pane, and a fresh one is split on every
+    /// attempt,
     /// exactly as it does for any other launch failure — see its own doc
     /// comment — so three of these in a row are three different panes
     /// caught by the same race, not the same pane refusing three times over;
@@ -3380,6 +3391,19 @@ impl<'a> Dispatcher<'a> {
             })
             .map(|(model, _)| model.clone());
 
+        // Every candidate whose prep succeeded this pass, in rank order —
+        // what the two rounds of threads below boot, and what the bookkeeping
+        // after each round walks to record its results in that same order.
+        // See [`Dispatcher::pass`]'s own doc on `tick` for why the boot
+        // itself, and not the prep ahead of it, is what moves onto threads.
+        let mut pending: Vec<PendingLane> = Vec::new();
+        // Each candidate that clears the caps below is marked as booting
+        // from that moment until its boot returns, so the board reads it as
+        // `starting` instead of `queued` meanwhile — see [`crate::claim`].
+        // Dropped at the end of this call, which clears whatever a `?` out
+        // of the bookkeeping below left marked.
+        let mut claims = crate::claim::Claims::new(self.repo);
+
         for candidate in candidates {
             // Between each lane start — see [`Dispatcher::pass`]'s
             // own doc.
@@ -3511,8 +3535,9 @@ impl<'a> Dispatcher<'a> {
                     // finds the mark already waiting and picks the countdown
                     // back up rather than restarting it or skipping it.
                     //
-                    // Gated on `launched_at` being set at all: `start_one`
-                    // never bumps `attempts` without setting it in the same
+                    // Gated on `launched_at` being set at all:
+                    // `finish_launch_bookkeeping` never bumps `attempts`
+                    // without setting it in the same
                     // breath, so a task that has one is, in practice, one
                     // this dispatcher genuinely tried to launch — the case
                     // the grace exists for. Without that gate, a task that
@@ -3618,6 +3643,7 @@ impl<'a> Dispatcher<'a> {
             }
 
             let task = &mut tasks[candidate.task_index];
+            claims.claim(task.id(), &step.id);
 
             // A retry reuses the lane name, so the previous attempt's record is
             // about to be overwritten. Bank what it spent first: those tokens
@@ -3640,9 +3666,9 @@ impl<'a> Dispatcher<'a> {
             // `ready` pane is standing empty at its shell, so the lane starts
             // in it and the task carries the same `pane_id` across the step
             // change instead of churning a pane per step. Anything else is a
-            // pane with an agent still in it: `start_one` splits a fresh one,
-            // and the stuck pane is closed below — after that split, never
-            // before, or a tab whose last pane it was would go with it.
+            // pane with an agent still in it: `prepare_boot` splits a fresh
+            // one, and the stuck pane is closed below — after that split,
+            // never before, or a tab whose last pane it was would go with it.
             let handover = handovers.remove(task.id()).or_else(|| {
                 retired_pane.map(|pane| PaneHandover {
                     lane: lane_name(&step.id, task.id()),
@@ -3656,11 +3682,18 @@ impl<'a> Dispatcher<'a> {
                 .map(|handover| handover.pane_id.clone());
 
             // The pass's one ledger snapshot, built on first use here and
-            // reused for every later candidate — `start_one`'s session
+            // reused for every later candidate — `prepare_boot`'s session
             // lookups answer from it rather than each parsing `usage.jsonl`
             // (review finding 33). A pass with no candidates never builds it.
             let ledger = self.ledger();
-            let outcome = start_one(
+            // Everything a lane needs before the two mux calls that actually
+            // boot it — the worktree cut, the workspace, the pane split —
+            // stays right here, one candidate at a time, for the reason
+            // [`Dispatcher::pass`]'s own doc gives: those touch git's and
+            // herdr's shared state and cannot be handed to a thread of their
+            // own. What comes back is everything `Mux::start_lane` and
+            // `Mux::prompt` need, with nothing left to decide.
+            match prepare_boot(
                 self.repo,
                 &pipeline,
                 self.mux,
@@ -3670,31 +3703,164 @@ impl<'a> Dispatcher<'a> {
                 inherited.as_deref(),
                 &mut self.file_seen,
                 &ledger,
-                tick,
-            );
-            if let Some(stuck) = handover.filter(|handover| !handover.ready) {
-                match outcome.is_ok() {
-                    true => self.close_handover(&stuck, report),
-                    // Nothing replaced it, so it is not closed here. Handed
-                    // back instead, and closed with the rest of what this pass
-                    // did not place — a stuck pane left for the next pass is a
-                    // lane it would count as live.
-                    false => {
+            ) {
+                Ok(boot) => {
+                    // Counted the moment this candidate is decided, not once
+                    // its boot is confirmed — `start_lanes`' own cap check,
+                    // above, has to see this lane already occupying its slot
+                    // before it reaches the next candidate in this same pass,
+                    // and with the boot itself deferred to threads below,
+                    // "confirmed" would not arrive until every candidate here
+                    // has already been decided. The one behaviour this
+                    // changes from before: a lane whose boot goes on to fail
+                    // still holds its slot for the rest of this pass, instead
+                    // of freeing it for a candidate ranked behind it. Caps,
+                    // ranking and slot counting are not this task's to
+                    // rework — see its own non-goals — so that edge is left
+                    // as this restructuring finds it rather than chased.
+                    *in_flight.entry(agent_name.clone()).or_insert(0) += 1;
+                    *model_in_flight.entry(model_name.clone()).or_insert(0) += 1;
+                    if model_price.is_some_and(|p| p.exclusive) {
+                        resident_exclusive.get_or_insert(model_name.clone());
+                    }
+                    pending.push(PendingLane {
+                        candidate,
+                        step,
+                        agent_name,
+                        kind: profile.kind.clone(),
+                        pipeline_version: pipeline.version.clone(),
+                        handover,
+                        boot,
+                        persisted: None,
+                    });
+                }
+                Err(err) => {
+                    claims.release(task.id());
+                    if let Some(stuck) = handover.filter(|handover| !handover.ready) {
+                        // Nothing replaced it, so it is not closed here.
+                        // Handed back instead, and closed with the rest of
+                        // what this pass did not place — a stuck pane left
+                        // for the next pass is a lane it would count as
+                        // live.
                         handovers.insert(task.id().to_string(), stuck);
                     }
+                    self.handle_boot_failure(
+                        task,
+                        &step,
+                        err,
+                        false,
+                        candidate.command_forget,
+                        report,
+                    )?;
                 }
             }
-            match outcome {
+        }
+
+        // Every prepared lane's `Mux::start_lane`, at once — one thread per
+        // lane, sharing `self.mux` across them (see [`crate::mux::Mux`]'s own
+        // doc on why it is `Sync`). `tick` cannot cross with them: it is
+        // `&mut dyn FnMut()`, and more than one thread calling it at once
+        // would be more than one mutable borrow of whatever it closes over.
+        // So each thread gets nothing to call, and this thread calls `tick`
+        // itself, at the same [`crate::mux::VACATE_POLL`] rate `Mux::
+        // start_lane`'s own wait used to hand it back at — see
+        // [`Dispatcher::pass`]'s own doc on `tick`.
+        let start_results: Vec<Result<()>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = pending
+                .iter()
+                .map(|lane| {
+                    let mux = self.mux;
+                    let boot = &lane.boot;
+                    scope.spawn(move || boot_start_lane(mux, boot))
+                })
+                .collect();
+            join_all_ticking(handles, tick)
+        });
+
+        // The bookkeeping a successful `start_lane` earns — the stage move,
+        // `bank_launch`, `attempts`, `launched_at`, `persist_task` — walked
+        // in the same rank order the candidates were ranked in, on this
+        // thread and no other: see the acceptance criteria this task was cut
+        // to meet. A lane whose `start_lane` failed is settled here too,
+        // exactly as it would have been before this pass could boot more
+        // than one at once.
+        let mut ready: Vec<usize> = Vec::new();
+        for (i, start_result) in start_results.into_iter().enumerate() {
+            match start_result {
+                Ok(()) => {
+                    let task = &mut tasks[pending[i].candidate.task_index];
+                    let persisted = finish_launch_bookkeeping(
+                        self.repo,
+                        task,
+                        &pending[i].step,
+                        &mut self.file_seen,
+                        &pending[i].boot,
+                    )?;
+                    pending[i].persisted = Some(persisted);
+                    ready.push(i);
+                }
+                Err(err) => {
+                    let task = &mut tasks[pending[i].candidate.task_index];
+                    claims.release(task.id());
+                    // Handed back rather than closed — see the matching
+                    // arm above, where a stuck pane first gets this
+                    // treatment.
+                    if let Some(stuck) = pending[i].handover.take().filter(|h| !h.ready) {
+                        handovers.insert(task.id().to_string(), stuck);
+                    }
+                    let command_forget = pending[i].candidate.command_forget.clone();
+                    self.handle_boot_failure(
+                        task,
+                        &pending[i].step,
+                        err,
+                        false,
+                        command_forget,
+                        report,
+                    )?;
+                }
+            }
+        }
+
+        // Every lane whose `start_lane` succeeded gets its `Mux::prompt`, the
+        // same way and for the same reason as the round above.
+        let prompt_results: Vec<Result<Started>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ready
+                .iter()
+                .map(|&i| {
+                    let mux = self.mux;
+                    let boot = &pending[i].boot;
+                    let persisted = pending[i]
+                        .persisted
+                        .expect("only a lane whose start_lane succeeded reaches this round");
+                    scope.spawn(move || boot_prompt(mux, boot, persisted))
+                })
+                .collect();
+            join_all_ticking(handles, tick)
+        });
+
+        // And the results of *that*, walked in the same rank order once
+        // more.
+        for (&i, prompt_result) in ready.iter().zip(prompt_results) {
+            let task = &mut tasks[pending[i].candidate.task_index];
+            // Its boot has returned, whichever way — the lane is up and
+            // listed, or the failure below settles the task.
+            claims.release(task.id());
+            let handover = pending[i].handover.take();
+            match prompt_result {
                 Ok(started) => {
+                    if let Some(stuck) = handover.filter(|h| !h.ready) {
+                        self.close_handover(&stuck, report);
+                    }
                     // The launch actually started, so whatever this step's
                     // last few could-not-start attempts counted is over — a
                     // busy-pane wait included, see [`Task::launch_busy_since`].
-                    // Its own persist already ran, inside `start_one`, so
-                    // clearing here needs one of its own — but only when
-                    // there is a count to clear, the same way every other
-                    // pass-that-changed-nothing here skips its write.
-                    let cleared_failures = task.clear_launch_failures(&step.id);
-                    let cleared_busy = task.clear_launch_busy(&step.id);
+                    // Its own persist already ran, inside
+                    // `finish_launch_bookkeeping`, so clearing here needs one
+                    // of its own — but only when there is a count to clear,
+                    // the same way every other pass-that-changed-nothing here
+                    // skips its write.
+                    let cleared_failures = task.clear_launch_failures(&pending[i].step.id);
+                    let cleared_busy = task.clear_launch_busy(&pending[i].step.id);
                     if cleared_failures || cleared_busy {
                         self.persist(task)?;
                     }
@@ -3714,10 +3880,10 @@ impl<'a> Dispatcher<'a> {
                             reminded_at: None,
                             reminders: 0,
                             session: started.session,
-                            kind: profile.kind.clone(),
-                            agent: agent_name.clone(),
+                            kind: pending[i].kind.clone(),
+                            agent: pending[i].agent_name.clone(),
                             model: started.model,
-                            pipeline_version: pipeline.version.clone(),
+                            pipeline_version: pending[i].pipeline_version.clone(),
                             head: started.head,
                             held_for_block: false,
                             person_turn_busy: false,
@@ -3727,104 +3893,124 @@ impl<'a> Dispatcher<'a> {
                             launch_grace_since: None,
                         },
                     );
-                    *in_flight.entry(agent_name).or_insert(0) += 1;
-                    *model_in_flight.entry(model_name.clone()).or_insert(0) += 1;
-                    if model_price.is_some_and(|p| p.exclusive) {
-                        resident_exclusive.get_or_insert(model_name);
-                    }
                     report.actions.push(action);
                     // `Ok(Started)` alone does not say the stage move
-                    // landed — `start_one`'s own `persist_task` answers
-                    // `false`, not an error, when something (a `spoolway
-                    // report`, a board keypress) landed mid-pass and
-                    // dropped it. `started.persisted`
-                    // is that answer, carried out for exactly this: a
-                    // command run's exit code is only safe to clear once
-                    // the move it produced is actually on disk. See the
-                    // note on `Candidate::command_forget`.
+                    // landed — `finish_launch_bookkeeping`'s own
+                    // `persist_task` answers `false`, not an error, when
+                    // something (a `spoolway report`, a board keypress)
+                    // landed mid-pass and dropped it. `started.persisted` is
+                    // that answer, carried out for exactly this: a command
+                    // run's exit code is only safe to clear once the move it
+                    // produced is actually on disk. See the note on
+                    // [`Candidate::command_forget`].
                     if started.persisted
-                        && let Some(key) = candidate.command_forget
+                        && let Some(key) = pending[i].candidate.command_forget.clone()
                     {
                         crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
                     }
                 }
                 Err(err) => {
-                    // `start_one` can fail after its own stage move already
+                    // Handed back rather than closed — see the note on the
+                    // first of the three arms in this function that takes a
+                    // stuck handover this way, above in the prep loop.
+                    if let Some(stuck) = handover.filter(|h| !h.ready) {
+                        handovers.insert(task.id().to_string(), stuck);
+                    }
+                    // `boot_prompt` can fail after its own stage move already
                     // landed on disk — see [`StageMovedBeforeFailure`]: a
                     // `mux.prompt` refusal is the one error it returns once
-                    // that write has happened, and every earlier failure
-                    // returns before it. When that write really landed, the
-                    // command run this candidate carries must be forgotten
-                    // here whatever this arm goes on to decide about the
-                    // launch — the task has already left the command step on
-                    // disk either way, and a later arrival back at it must
-                    // not read this run's code as its own.
+                    // that write has happened. When that write really landed,
+                    // the command run this candidate carries must be
+                    // forgotten here whatever this arm goes on to decide
+                    // about the launch — the task has already left the
+                    // command step on disk either way, and a later arrival
+                    // back at it must not read this run's code as its own.
                     let moved_and_persisted = err
                         .downcast_ref::<StageMovedBeforeFailure>()
                         .is_some_and(|marker| marker.persisted);
-                    // A launch that never got going at all — see
-                    // [`Dispatcher::note_launch_failure`] — unless the pane it
-                    // was asked to start in was merely busy for a moment, see
-                    // [`Dispatcher::note_pane_busy`]: that refusal is
-                    // transient by construction and costs the task a pass,
-                    // never one of `note_launch_failure`'s three strikes.
-                    // Below either ceiling the task stays a candidate for the
-                    // next pass; at it, `run_command`'s `Fresh` arm has an
-                    // outer `StepKind::Command` match to fall through to for
-                    // this — an agent lane's start has none, so `blocked_from`
-                    // and the stage move are this arm's own to make.
-                    let destination = match err.downcast_ref::<crate::mux::PaneBusy>() {
-                        Some(busy) => self.note_pane_busy(task, &step, &busy.pane_id, report),
-                        None => self.note_launch_failure(task, &step, "start", &err, report),
-                    };
-                    if let Some(destination) = destination {
-                        // Final as computed — nothing downstream of this arm
-                        // redirects it further, unlike a command step's own
-                        // destination, which still has `apply_loop_budget`
-                        // ahead of it — so this is the one caller that can
-                        // print where the task is going and be sure it is
-                        // right.
-                        report.actions.push(format!(
-                            "{}: `{}` could not be started — moving to `{destination}`",
-                            task.id(),
-                            step.id
-                        ));
-                        if destination == crate::pipeline::BLOCKED {
-                            crate::commands::set_blocked_from(task, &step.id);
-                        }
-                        task.set_stage(&destination, None);
-                        // Gated on `persist`'s own answer, not assumed from
-                        // reaching this line — same reasoning as the `Ok`
-                        // arm above and the immediate-destination branch in
-                        // the `StepKind::Command` match: a dropped write
-                        // here is the agent lane never having started *and*
-                        // the move never landing, so the exit code must
-                        // stay on disk for the next pass to find.
-                        if self.persist(task)?
-                            && let Some(key) = candidate.command_forget
-                        {
-                            crate::command_step::Runs::new(&self.repo.commands_dir())
-                                .forget(&key)?;
-                        }
-                    } else {
-                        // Ordinarily transient — the task never left the
-                        // command step, so its exit code must stay right
-                        // where it is for the next pass to route on. Except
-                        // when `start_one` already moved it before its
-                        // prompt failed: that move is on disk regardless of
-                        // whether this attempt earned a retry or a strike,
-                        // so the run it came from must be forgotten here
-                        // too.
-                        self.persist(task)?;
-                        if moved_and_persisted && let Some(key) = candidate.command_forget {
-                            crate::command_step::Runs::new(&self.repo.commands_dir())
-                                .forget(&key)?;
-                        }
-                    }
+                    let command_forget = pending[i].candidate.command_forget.clone();
+                    self.handle_boot_failure(
+                        task,
+                        &pending[i].step,
+                        err,
+                        moved_and_persisted,
+                        command_forget,
+                        report,
+                    )?;
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// A launch that never got going at all — see
+    /// [`Dispatcher::note_launch_failure`] — unless the pane it was asked to
+    /// start in was merely busy for a moment, see [`Dispatcher::
+    /// note_pane_busy`]: that refusal is transient by construction and costs
+    /// the task a pass, never one of `note_launch_failure`'s three strikes.
+    /// Below either ceiling the task stays a candidate for the next pass; at
+    /// it, `run_command`'s `Fresh` arm has an outer `StepKind::Command` match
+    /// to fall through to for this — an agent lane's start has none, so
+    /// `blocked_from` and the stage move are this call's own to make.
+    ///
+    /// `moved_and_persisted` is whether `finish_launch_bookkeeping`'s own
+    /// stage-move write already reached disk before this failure — true only
+    /// for a `Mux::prompt` refusal wrapped in [`StageMovedBeforeFailure`],
+    /// never for a `Mux::start_lane` refusal, which returns before that write
+    /// — and decides which of the two branches below forgets
+    /// `command_forget`.
+    fn handle_boot_failure(
+        &mut self,
+        task: &mut Task,
+        step: &Step,
+        err: anyhow::Error,
+        moved_and_persisted: bool,
+        command_forget: Option<String>,
+        report: &mut Report,
+    ) -> Result<()> {
+        let destination = match err.downcast_ref::<crate::mux::PaneBusy>() {
+            Some(busy) => self.note_pane_busy(task, step, &busy.pane_id, report),
+            None => self.note_launch_failure(task, step, "start", &err, report),
+        };
+        if let Some(destination) = destination {
+            // Final as computed — nothing downstream of this arm redirects
+            // it further, unlike a command step's own destination, which
+            // still has `apply_loop_budget` ahead of it — so this is the one
+            // caller that can print where the task is going and be sure it
+            // is right.
+            report.actions.push(format!(
+                "{}: `{}` could not be started — moving to `{destination}`",
+                task.id(),
+                step.id
+            ));
+            if destination == crate::pipeline::BLOCKED {
+                crate::commands::set_blocked_from(task, &step.id);
+            }
+            task.set_stage(&destination, None);
+            // Gated on `persist`'s own answer, not assumed from reaching this
+            // line — same reasoning as the success path and the immediate-
+            // destination branch in the `StepKind::Command` match: a dropped
+            // write here is the agent lane never having started *and* the
+            // move never landing, so the exit code must stay on disk for the
+            // next pass to find.
+            if self.persist(task)?
+                && let Some(key) = command_forget
+            {
+                crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
+            }
+        } else {
+            // Ordinarily transient — the task never left the command step,
+            // so its exit code must stay right where it is for the next pass
+            // to route on. Except when the boot already moved it before its
+            // prompt failed: that move is on disk regardless of whether this
+            // attempt earned a retry or a strike, so the run it came from
+            // must be forgotten here too.
+            self.persist(task)?;
+            if moved_and_persisted && let Some(key) = command_forget {
+                crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
+            }
+        }
         Ok(())
     }
 
@@ -4073,7 +4259,7 @@ impl<'a> Dispatcher<'a> {
                         // comment in `start_lanes`'s own `Ok` arm.
                         //
                         // Banked here too, not only for an agent lane's own
-                        // `start_one`: without this a command step never
+                        // `finish_launch_bookkeeping`: without this a command step never
                         // appeared in `steps:` at all, so a `--stage` bounded
                         // by that record could never name `test`, `suite` or
                         // `handover` even after they had genuinely run — see
@@ -4144,7 +4330,7 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Start a command step's run where a person can watch it: a pane split
-    /// off the task's own tab, the same one `start_one` splits an agent
+    /// off the task's own tab, the same one `prepare_boot` splits an agent
     /// lane's pane from — `task.front.tab_id`, falling back to
     /// `task.front.pane_id` for a backend with no tabs.
     ///
@@ -4186,10 +4372,10 @@ impl<'a> Dispatcher<'a> {
             .clone()
             .or_else(|| task.front.pane_id.clone())
             .context("task has a workspace but no recorded tab or pane")?;
-        // Same split as an agent lane's own pane label — see `start_one` —
-        // for the same reason: under `split` the task's tab already says
+        // Same split as an agent lane's own pane label — see `prepare_boot`
+        // — for the same reason: under `split` the task's tab already says
         // which task this is, so the pane says only the step. No need for
-        // `start_one`'s extra `task.front.tab_id.is_some()` gate against
+        // `prepare_boot`'s extra `task.front.tab_id.is_some()` gate against
         // headless: headless's own `run_in_pane` is the trait default, which
         // answers `None` and never looks at `label` at all.
         let label = match self.mux.task_owns_workspace() {
@@ -4783,7 +4969,7 @@ fn ensure_workspace(
     // The directory can survive a restart of the multiplexer fronting it even
     // though every id it ever handed out did not — a reboot, herdr
     // restarted. Believing `workspace_id` and `tab_id`
-    // then means `start_one` splits into a tab nothing answers to, on this
+    // then means `prepare_boot` splits into a tab nothing answers to, on this
     // pass and on every pass after it, so they are checked against the live
     // multiplexer rather than trusted outright.
     //
@@ -4796,7 +4982,7 @@ fn ensure_workspace(
     // itself.
 
     // A pane this call has just now handed the task exclusively — nobody
-    // else's lane is in it, so `start_one` uses it directly as the task's
+    // else's lane is in it, so `prepare_boot` uses it directly as the task's
     // very first pane instead of splitting one off it. Set only in a branch
     // below that establishes the task's placement from scratch; `None` on a
     // call that finds it already alive and does nothing here at all.
@@ -5010,10 +5196,10 @@ fn ensure_workspace(
     // once its own process restarts — so this runs every pass a split task
     // still owns its tab, fresh open and every resume alike, rather than
     // once at creation. Every caller of this function reaches a task's tab
-    // this way — an agent lane's own `start_one` and a command step's
+    // this way — an agent lane's own `prepare_boot` and a command step's
     // `run_command` alike — so a task whose steps are all commands gets its
     // tab named too, not only one that happens to run an agent first.
-    // `task.front.tab_id` specifically, never the pane fallback `start_one`
+    // `task.front.tab_id` specifically, never the pane fallback `prepare_boot`
     // and `start_command_in_pane` split from: a backend with no tab, like
     // headless, has nothing here to rename.
     if mux.task_owns_workspace()
@@ -5111,8 +5297,243 @@ pub struct ProjectTab {
     pub opened_pane: Option<String>,
 }
 
+/// Everything [`Dispatcher::start_lanes`]' two threaded rounds need to boot a
+/// lane — what to hand `Mux::start_lane` and `Mux::prompt` — plus the few
+/// task-file facts [`finish_launch_bookkeeping`] spends once `start_lane` has
+/// actually succeeded. Built by [`prepare_boot`], which is everything
+/// `start_lanes` used to call `start_one` for, minus the two `Mux` calls
+/// those threads make instead — see [`Dispatcher::pass`]'s own doc on why
+/// only those two, and not the prep ahead of them, move onto threads.
+struct Boot {
+    name: String,
+    label: String,
+    kind: String,
+    pane_id: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    prompt: String,
+    session: String,
+    model: String,
+    /// Where the lane's branch stood when it started — see [`Started::head`].
+    head: String,
+    note: Option<String>,
+    /// Whether `task.front.resume` named this step — spent by
+    /// [`finish_launch_bookkeeping`], never here: a boot whose `start_lane`
+    /// goes on to fail must find the flag exactly as it left it, for the
+    /// next pass's retry to read.
+    resuming: bool,
+    /// Whether `task.front.parked_from` named this step — spent the same way
+    /// and for the same reason.
+    parked: bool,
+    /// Whether this park carried an existing session over, in which case the
+    /// launch below is not a fresh prompt to bank — see `bank_launch`'s own
+    /// call in `finish_launch_bookkeeping`.
+    parked_with_session: bool,
+}
+
+impl Boot {
+    fn lane_spec(&self) -> LaneSpec<'_> {
+        LaneSpec {
+            name: &self.name,
+            label: &self.label,
+            kind: &self.kind,
+            pane_id: &self.pane_id,
+            args: &self.args,
+            env: &self.env,
+            path_prefix: None,
+        }
+    }
+}
+
+/// A candidate whose prep succeeded this pass, carrying everything
+/// [`Dispatcher::start_lanes`]' two threaded rounds and their own bookkeeping
+/// need once the candidate itself — and the pipeline and step it came with —
+/// are no longer at hand.
+struct PendingLane {
+    candidate: Candidate,
+    step: Step,
+    agent_name: String,
+    /// `profile.kind`, for the lane record — carried apart from `boot.kind`,
+    /// which is the same string, because `Boot` is about what a lane is
+    /// booted with and this is about what gets recorded once it has.
+    kind: String,
+    pipeline_version: String,
+    handover: Option<PaneHandover>,
+    boot: Boot,
+    /// Whether `finish_launch_bookkeeping`'s own stage-move write reached
+    /// disk — `None` until that call has run, `Some` from then on. Read by
+    /// the `Mux::prompt` round below it and by a prompt failure's own
+    /// [`StageMovedBeforeFailure`].
+    persisted: Option<bool>,
+}
+
+/// Blocks until every one of `handles` has finished, calling `tick` and
+/// sleeping [`crate::mux::VACATE_POLL`] between checks — the same rate
+/// `Mux::start_lane`'s own wait used to hand `tick` back at before its call
+/// moved onto a thread of its own; see [`Dispatcher::pass`]'s doc on `tick`.
+/// `is_finished` never blocks, so this thread's own `tick` calls land on
+/// schedule whatever the boots underneath are doing.
+fn join_all_ticking<'scope, T>(
+    handles: Vec<std::thread::ScopedJoinHandle<'scope, T>>,
+    tick: &mut dyn FnMut(),
+) -> Vec<T> {
+    while handles.iter().any(|h| !h.is_finished()) {
+        tick();
+        std::thread::sleep(crate::mux::VACATE_POLL);
+    }
+    handles
+        .into_iter()
+        .map(|h| h.join().expect("a lane's boot thread panicked"))
+        .collect()
+}
+
+/// `Mux::start_lane`, plus the take-back a refusal earns — see
+/// [`prepare_boot`]'s own doc on why this and [`boot_prompt`] are the only
+/// two calls [`Dispatcher::start_lanes`] runs on a thread of their own.
+fn boot_start_lane(mux: &dyn Mux, boot: &Boot) -> Result<()> {
+    if let Err(err) = mux.start_lane(&boot.lane_spec(), &mut || {}) {
+        // Taking a pane back rather than leaving it behind means the same
+        // step retries into a fresh one instead of the tab filling up over a
+        // few dispatch passes. Under `split`, on the very first step of a
+        // task, this pane is the *only* thing in its workspace — the one
+        // `Mux::create_workspace` opened — so closing it takes the tab and
+        // the workspace with it, exactly what `Mux::close_pane`'s own doc
+        // warns against. That is meant here, not a bug: the next pass's
+        // `Mux::workspace_alive` check reads the now-gone workspace as an
+        // ordinary stale placement and reopens one, the same recovery a
+        // worktree deleted by hand gets.
+        let _ = mux.close_pane(&boot.pane_id);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// What a successful `Mux::start_lane` earns — the stage move, the spent
+/// `resume`/`parked_from`, `bank_launch`, `attempts`, `launched_at`, and the
+/// `persist_task` that writes all of it down — run on
+/// [`Dispatcher::start_lanes`]' own thread, in rank order, once that round's
+/// threads have all rejoined it. Answers whether the write actually reached
+/// disk, exactly as `persist_task` does, for [`boot_prompt`] to carry into
+/// [`StageMovedBeforeFailure`] if the briefing that follows refuses to land.
+fn finish_launch_bookkeeping(
+    repo: &Repo,
+    task: &mut Task,
+    step: &Step,
+    file_seen: &mut HashMap<String, u64>,
+    boot: &Boot,
+) -> Result<bool> {
+    // Only record a transition when this is genuinely a new step. A retry of
+    // the same step arrived by the route that is already recorded.
+    if task.stage() != step.id {
+        task.set_stage(&step.id, None);
+    }
+    // Spent, whether or not a session was found to continue: a resume that
+    // could not find one has still had its go, and leaving the flag set would
+    // make the next ordinary retry of this step reopen a conversation that a
+    // retry is meant to start again.
+    if boot.resuming {
+        task.front.resume = None;
+    }
+    // Spent the same way, and for the same reason: whether or not this park
+    // found a session to carry, its one launch has now happened, and leaving
+    // the flag set would make the next ordinary retry of this step read as
+    // one more park nobody asked for.
+    if boot.parked {
+        task.front.parked_from = None;
+        task.front.escalated = false;
+    }
+    // `steps` is banked here, unconditionally — a prompt is a launch, so a
+    // retry banks a second one, it was a second prompt and it was paid for —
+    // except for a park whose session was actually carried: that lane never
+    // stopped being the one already counted, so continuing it costs nothing
+    // new. A park that opened fresh instead is a second prompt like any
+    // other and is banked below like any other.
+    // `rounds` is not banked here at all any more — that is `set_stage`
+    // above's, once per arrival, whatever a lane here goes on to do.
+    //
+    // Never before the `set_stage` above, which is what writes the route this
+    // is banked against.
+    // `set_stage` above writes `arrived_from` for every task the dispatcher
+    // moves, including the first move off `queued` — so the fallback is only
+    // ever reached by a task file that was written already sitting on the step
+    // its first lane runs, and `queued` is where such a task came from.
+    if !(boot.parked && boot.parked_with_session) {
+        let from = task
+            .front
+            .arrived_from
+            .clone()
+            .unwrap_or_else(|| crate::pipeline::QUEUED.to_string());
+        task.bank_launch(&from, &step.id);
+    }
+    // Counted here, and never before the `set_stage` above: that call zeroes the
+    // counter, so a start banked first would be wiped by the very transition it
+    // belongs to and the budget would never bite. Arriving at a step is what
+    // resets it; starting a lane there is what spends it.
+    task.front.attempts += 1;
+    task.front.launched_at = Some(now_secs());
+    // Why a `session:` step opened fresh, written down rather than only said.
+    //
+    // It is also handed back as the pass's own note, and that is where it used
+    // to end: a plain log line, or, under bare `spoolway`'s dispatch tab, a
+    // line in `RECENT` that scrolls away within a pass or two. So the
+    // question `session_reuse_ctx` exists to be asked about, *why did my
+    // expensive review conversation not get reused*, had no answer available
+    // afterwards at all. One line per fresh session, in the place somebody
+    // auditing a task already looks.
+    if let Some(note) = &boot.note {
+        task.log_status(&format!("`{}`: {note}", step.id));
+    }
+    // Answers `false` rather than erroring when something — a `spoolway
+    // report`, a board keypress — landed mid-pass and this write was
+    // dropped in its favour — see `persist_task`'s own doc. Carried out for
+    // exactly this: a caller that forgets a command run's exit code on the
+    // strength of this stage move having landed needs to know whether it
+    // actually did.
+    persist_task(repo, task, file_seen)
+}
+
+/// `Mux::prompt`, plus the take-back a refusal earns — see [`prepare_boot`]'s
+/// own doc. `persisted` is [`finish_launch_bookkeeping`]'s own answer, for
+/// [`StageMovedBeforeFailure`] to carry if the briefing refuses to land.
+fn boot_prompt(mux: &dyn Mux, boot: &Boot, persisted: bool) -> Result<Started> {
+    // Take the lane back when its briefing does not land, exactly as
+    // `boot_start_lane` takes its pane back — and for a sharper reason. A
+    // lane that was started but never prompted is a live session sitting at
+    // an empty input box, and every check the dispatcher makes afterwards
+    // reads it as a lane hard at work: it is in `herdr agent list`, so no
+    // pass re-staffs the step, and the board draws the task as `running`.
+    // Nothing corrects that until `dispatch.lane_quiet` runs out — fifteen
+    // minutes, shipped — and what arrives then is three reminders to report,
+    // sent to a session that was never told what to do, followed by an
+    // escalation to `paused`. The better part of an hour, and then a stop
+    // for a person, over a prompt the very next pass would have delivered.
+    //
+    // Torn down here instead, so the step is simply unstaffed again. The
+    // task keeps the `attempts` and `launched_at` `finish_launch_bookkeeping`
+    // already wrote, which is what paces the retry through
+    // `relaunch_backoff` and stops it at `MAX_LAUNCHES` — a prompt that fails
+    // every time still ends up in front of a person, just not an hour late
+    // and not disguised as a lane that was working.
+    if let Err(err) = mux.prompt(&boot.name, &boot.prompt) {
+        let _ = mux.stop_lane(&boot.name, &boot.pane_id);
+        // The one boot failure that can happen after its own stage move
+        // already landed — see [`StageMovedBeforeFailure`]'s own doc. Every
+        // earlier failure — `prepare_boot`'s and `boot_start_lane`'s both —
+        // returns before that write.
+        return Err(anyhow::Error::new(StageMovedBeforeFailure { persisted }).context(err));
+    }
+    Ok(Started {
+        name: boot.name.clone(),
+        session: boot.session.clone(),
+        model: boot.model.clone(),
+        head: boot.head.clone(),
+        note: boot.note.clone(),
+        persisted,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
-fn start_one(
+fn prepare_boot(
     repo: &Repo,
     pipeline: &Pipeline,
     mux: &dyn Mux,
@@ -5128,12 +5549,7 @@ fn start_one(
     // The pass's one usage-ledger snapshot, for the session lookups below —
     // see [`Dispatcher::ledger`] and review finding 33.
     ledger: &[crate::usage::Entry],
-    // Handed straight to `Mux::start_lane` — see its own doc. `agent start`
-    // is the one call in this function that can run for the whole two
-    // minutes herdr bounds it at, and this is what keeps a busy pass's
-    // keyboard-reading callback reaching the board through that span.
-    tick: &mut dyn FnMut(),
-) -> Result<Started> {
+) -> Result<Boot> {
     let name = lane_name(&step.id, task.id());
 
     // Read before `ensure_workspace`, which is the one thing here that can cut
@@ -5410,161 +5826,51 @@ fn start_one(
             }
         },
     };
-    let launched = mux.start_lane(
-        &LaneSpec {
-            name: &name,
-            // The lane's own name, on its own pane — a grid of panes is only
-            // readable if each says what it is.
-            label: &label,
-            kind: &profile.kind,
-            pane_id: &pane_id,
-            args: &args,
-            env: &env,
-            path_prefix: None,
-        },
-        tick,
-    );
-    if let Err(err) = launched {
-        // Taking a pane back rather than leaving it behind means the same
-        // step retries into a fresh one instead of the tab filling up over a
-        // few dispatch passes. Under `split`, on the very first step of a
-        // task, this pane is the *only* thing in its workspace — the one
-        // `Mux::create_workspace` opened — so closing it takes the tab and
-        // the workspace with it, exactly what `Mux::close_pane`'s own doc
-        // warns against. That is meant here, not a bug: the next pass's
-        // `Mux::workspace_alive` check reads the now-gone workspace as an
-        // ordinary stale placement and reopens one, the same recovery a
-        // worktree deleted by hand gets.
-        let _ = mux.close_pane(&pane_id);
-        return Err(err);
-    }
-
-    // Only record a transition when this is genuinely a new step. A retry of
-    // the same step arrived by the route that is already recorded.
-    if task.stage() != step.id {
-        task.set_stage(&step.id, None);
-    }
-    // Spent, whether or not a session was found to continue: a resume that
-    // could not find one has still had its go, and leaving the flag set would
-    // make the next ordinary retry of this step reopen a conversation that a
-    // retry is meant to start again.
-    if resuming {
-        task.front.resume = None;
-    }
-    // Spent the same way, and for the same reason: whether or not this park
-    // found a session to carry, its one launch has now happened, and leaving
-    // the flag set would make the next ordinary retry of this step read as
-    // one more park nobody asked for.
-    if parked {
-        task.front.parked_from = None;
-        task.front.escalated = false;
-    }
-    // `steps` is banked here, unconditionally — a prompt is a launch, so a
-    // retry banks a second one, it was a second prompt and it was paid for —
-    // except for a park whose session was actually carried: that lane never
-    // stopped being the one already counted, so continuing it costs nothing
-    // new. A park that opened fresh instead (`previous` came back empty) is
-    // a second prompt like any other and is banked below like any other.
-    // `rounds` is not banked here at all any more — that is `set_stage`
-    // above's, once per arrival, whatever a lane here goes on to do.
-    //
-    // Never before the `set_stage` above, which is what writes the route this
-    // is banked against.
-    // `set_stage` above writes `arrived_from` for every task the dispatcher
-    // moves, including the first move off `queued` — so the fallback is only
-    // ever reached by a task file that was written already sitting on the step
-    // its first lane runs, and `queued` is where such a task came from.
-    if !(parked && previous.is_some()) {
-        let from = task
-            .front
-            .arrived_from
-            .clone()
-            .unwrap_or_else(|| crate::pipeline::QUEUED.to_string());
-        task.bank_launch(&from, &step.id);
-    }
-    // Counted here, and never before the `set_stage` above: that call zeroes the
-    // counter, so a start banked first would be wiped by the very transition it
-    // belongs to and the budget would never bite. Arriving at a step is what
-    // resets it; starting a lane there is what spends it.
-    task.front.attempts += 1;
-    task.front.launched_at = Some(now_secs());
-    // Why a `session:` step opened fresh, written down rather than only said.
-    //
-    // It is also handed back as the pass's own note, and that is where it used
-    // to end: a plain log line, or, under bare `spoolway`'s dispatch tab, a
-    // line in `RECENT` that scrolls away within a pass or two. So the
-    // question `session_reuse_ctx` exists to be asked about, *why did my
-    // expensive review conversation not get reused*, had no answer available
-    // afterwards at all. One line per fresh session, in the place somebody
-    // auditing a task already looks.
-    if let Some(note) = &session_miss {
-        task.log_status(&format!("`{}`: {note}", step.id));
-    }
-    // Answers `false` rather than erroring when something — a `spoolway
-    // report`, a board keypress — landed mid-pass and this write was
-    // dropped in its favour — see `persist_task`'s own doc. Carried out to
-    // `Started` rather than swallowed by a bare `?`
-    // here: a caller that forgets a command run's exit code on the strength
-    // of this stage move having landed needs to know whether it actually did.
-    let persisted = persist_task(repo, task, file_seen)?;
-
     // `parked` takes the match before `via_session` gets a say: `resuming` is
     // always true for a park (see the note beside it above), so without this
     // a continued park would read `via_session == false` and fall into
     // `resume_prompt` — the one prompt that must never reach a lane nothing
-    // ever blocked.
+    // ever blocked. Built here, ahead of `Mux::start_lane` and `Mux::prompt`
+    // both — every input it reads (`previous`, `via_session`, `parked`,
+    // `escalated`, `task`, `pipeline`, `step`, `repo.unattended()`) is
+    // already settled above and none of it changes on the strength of
+    // whether the boot that follows succeeds, so there is nothing here a
+    // deferred stage move or a deferred `resume`/`parked_from` spend could
+    // change the answer to.
     let prompt = match (previous.is_some(), via_session, parked) {
         (true, _, true) => crate::compose::park_prompt(task, pipeline, escalated),
         (true, true, false) => crate::compose::carry_prompt(task, pipeline),
         (true, false, false) => crate::compose::resume_prompt(task, pipeline, repo.unattended()),
         (false, _, _) => crate::compose::opening_prompt(task, pipeline, step),
     };
-    // Take the lane back when its briefing does not land, exactly as the
-    // `start_lane` failure above takes its pane back — and for a sharper
-    // reason. A lane that was started but never prompted is a live session
-    // sitting at an empty input box, and every check the dispatcher makes
-    // afterwards reads it as a lane hard at work: it is in `herdr agent
-    // list`, so no pass re-staffs the step, and the board draws the task as
-    // `running`. Nothing corrects that until `dispatch.lane_quiet` runs out
-    // — fifteen minutes, shipped — and what arrives then is three reminders
-    // to report, sent to a session that was never told what to do, followed
-    // by an escalation to `paused`. The better part of an hour, and then a
-    // stop for a person, over a prompt the very next pass would have
-    // delivered.
-    //
-    // Torn down here instead, so the step is simply unstaffed again. The
-    // task keeps the `attempts` and `launched_at` written just above, which
-    // is what paces the retry through `relaunch_backoff` and stops it at
-    // `MAX_LAUNCHES` — a prompt that fails every time still ends up in front
-    // of a person, just not an hour late and not disguised as a lane that
-    // was working.
-    if let Err(err) = mux.prompt(&name, &prompt) {
-        let _ = mux.stop_lane(&name, &pane_id);
-        // The one `start_one` failure that can happen after its own stage
-        // move already landed — see `StageMovedBeforeFailure`'s own doc.
-        // Every earlier `return Err` above this point is before that write.
-        return Err(anyhow::Error::new(StageMovedBeforeFailure { persisted }).context(err));
-    }
-    Ok(Started {
+
+    Ok(Boot {
         name,
+        label,
+        kind: profile.kind.clone(),
+        pane_id,
+        args,
+        env,
+        prompt,
         session,
         model,
         head,
-        // Only worth a word when `session:` tried and missed — an ordinary
-        // step, and a hit either way, need nothing said about it.
         note: session_miss,
-        persisted,
+        resuming,
+        parked,
+        parked_with_session: previous.is_some(),
     })
 }
 
-/// Marks a `start_one` `Err` as the one failure that can happen after its own
-/// stage move already landed: `mux.prompt` refusing the briefing, the one
-/// return past `persist_task`'s call above. Every earlier `start_one` failure
+/// Marks a `boot_prompt` `Err` as the one failure that can happen after its
+/// lane's stage move already landed: `finish_launch_bookkeeping`'s own
+/// `persist_task` call, run once `boot_start_lane` has already succeeded.
+/// Every earlier failure — `prepare_boot`'s and `boot_start_lane`'s both —
 /// returns before that write, so only this one needs to say so.
 ///
 /// The dispatcher asks for this by downcasting the `anyhow::Error`, the same
 /// way it already does for [`crate::mux::PaneBusy`] — a second return type
-/// for one caller's one question is not worth `start_one` growing a
+/// for one caller's one question is not worth `boot_prompt` growing a
 /// different shape than every other launch path. Carries whether that write
 /// actually reached disk, not just whether it was attempted:
 /// [`Dispatcher::persist`] can drop a write the same as `persist_task` can,
@@ -5597,7 +5903,7 @@ struct Started {
     /// conversation over — `None` on an ordinary step, and on a hit either
     /// way, because neither is worth a person's attention.
     note: Option<String>,
-    /// Whether `start_one`'s own stage-move write actually landed, or was
+    /// Whether `finish_launch_bookkeeping`'s own stage-move write actually landed, or was
     /// dropped in favour of something — a `spoolway report`, a board
     /// keypress — that beat it to the task — see `persist_task`.
     /// A caller cannot tell an `Ok(Started)`
@@ -5643,7 +5949,7 @@ fn write_system_prompt(repo: &Repo, lane: &str, body: &str) -> Result<PathBuf> {
 /// a later pass has already retired.
 ///
 /// One-shot callers (the board, `spoolway lane`) read the ledger here;
-/// [`start_one`], inside a pass, passes the pass's one snapshot to
+/// [`prepare_boot`], inside a pass, passes the pass's one snapshot to
 /// [`lane_session_in`] so the ledger is not parsed again per resume (review
 /// finding 33).
 pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
@@ -6018,19 +6324,19 @@ mod tests {
     use crate::config::Config;
     use crate::mux::{LaneStatus, Workspace};
     use crate::task::Frontmatter;
-    use std::cell::RefCell;
     use std::path::Path;
+    use std::sync::Mutex;
 
     /// Records what the dispatcher asked of the multiplexer, and answers from a
     /// scripted lane list.
     struct FakeMux {
         lanes: Vec<Lane>,
-        calls: RefCell<Vec<String>>,
+        calls: Mutex<Vec<String>>,
         /// A tab the multiplexer will refuse to close, being its workspace's
         /// only one.
         last_tab: Option<String>,
         /// Hands each split a distinct pane id, the way a real one does.
-        splits: RefCell<usize>,
+        splits: Mutex<usize>,
         /// Make `agent start` refuse, the way a multiplexer does when the
         /// agent binary is missing.
         refuse_start: bool,
@@ -6043,6 +6349,19 @@ mod tests {
         /// a freshly started session never begins its turn — the lane is up,
         /// and `Mux::prompt` still comes back an error.
         refuse_prompt: bool,
+        /// Make `agent start` refuse for this one lane's name alone, the
+        /// other candidates a pass claims alongside it none the wiser — for
+        /// a test that wants to see a boot failure recorded on its own lane
+        /// without disturbing the rest of the same pass's batch.
+        refuse_start_named: Option<String>,
+        /// The same, for `Mux::prompt`.
+        refuse_prompt_named: Option<String>,
+        /// How long `start_lane` sleeps before answering — a fixed stand-in
+        /// for the real boot herdr's own `agent start` blocks on, so a test
+        /// can measure whether several lanes' boots actually overlap rather
+        /// than running one after another. Zero, the ordinary case, sleeps
+        /// nothing.
+        boot_delay: Duration,
         /// Whether a waiting lane keeps a process alive, as a multiplexer's
         /// does and a headless lane's does not.
         resident: bool,
@@ -6050,7 +6369,7 @@ mod tests {
         /// was asked to. A backend with no workspaces leaves it `None`, which
         /// is what headless does.
         workspace: Option<String>,
-        workspace_calls: RefCell<usize>,
+        workspace_calls: Mutex<usize>,
         /// Whether a task's recorded workspace is the task's own. False is a
         /// herdr run laid out as `workspace`, where every task is a tab of the
         /// one workspace the run opened.
@@ -6058,12 +6377,12 @@ mod tests {
         /// The tabs `open_tab` has opened, by label — what `find_tab` answers
         /// from, exactly as a real backend answers from the multiplexer's own
         /// listing rather than from anything the queue recorded.
-        tabs: RefCell<HashMap<String, Workspace>>,
+        tabs: Mutex<HashMap<String, Workspace>>,
         /// What `read` answers for a lane, mutated by `prompt` the way a real
         /// pane's screen is: typing a message into it changes what is on it.
         /// Absent for a lane nothing has prompted, which is most of them —
         /// `read` falls back to empty exactly as it always did.
-        screen: RefCell<HashMap<String, String>>,
+        screen: Mutex<HashMap<String, String>>,
         /// Whether a session asked to leave its pane refuses to go — the one
         /// failure [`Vacated::StillOccupied`] exists for. False is the
         /// ordinary case, where a kind with a gesture leaves and the pane
@@ -6074,7 +6393,7 @@ mod tests {
         /// recorded id. Empty by default: a fake that remembers everything is
         /// what every other test wants, and `workspace_alive` answers `true`
         /// for anything not named here.
-        forgotten: RefCell<HashSet<String>>,
+        forgotten: Mutex<HashSet<String>>,
         /// Whether `remove_workspace` refuses, the way herdr refuses a
         /// workspace it is no longer holding a worktree against —
         /// `not_linked_worktree`. False is the ordinary case, where the one
@@ -6091,7 +6410,7 @@ mod tests {
         /// running in the process table, independent of whatever
         /// [`LaneStatus`] its screen reads. Every other lane gets nothing to
         /// say here, the same as `Herdr` today.
-        busy_children: RefCell<HashSet<String>>,
+        busy_children: Mutex<HashSet<String>>,
         /// What `tabs_for_sweep` answers with — empty by default, the same as
         /// every backend but `Herdr` answers for real.
         sweep_tabs: Vec<SweepTab>,
@@ -6101,23 +6420,26 @@ mod tests {
         fn new(lanes: Vec<Lane>) -> FakeMux {
             FakeMux {
                 lanes,
-                calls: RefCell::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
                 last_tab: None,
-                splits: RefCell::new(0),
+                splits: Mutex::new(0),
                 refuse_start: false,
                 refuse_start_pane_busy: false,
                 refuse_prompt: false,
+                refuse_start_named: None,
+                refuse_prompt_named: None,
+                boot_delay: Duration::ZERO,
                 resident: true,
                 workspace: Some("wD".into()),
-                workspace_calls: RefCell::new(0),
+                workspace_calls: Mutex::new(0),
                 task_owns_workspace: true,
-                tabs: RefCell::new(HashMap::new()),
-                screen: RefCell::new(HashMap::new()),
+                tabs: Mutex::new(HashMap::new()),
+                screen: Mutex::new(HashMap::new()),
                 stubborn: false,
-                forgotten: RefCell::new(HashSet::new()),
+                forgotten: Mutex::new(HashSet::new()),
                 unbound_workspace: false,
                 run_commands_in_pane: false,
-                busy_children: RefCell::new(HashSet::new()),
+                busy_children: Mutex::new(HashSet::new()),
                 sweep_tabs: Vec::new(),
             }
         }
@@ -6130,7 +6452,7 @@ mod tests {
         /// Mark `name` as still holding a process it started, from now until
         /// the test says otherwise.
         fn with_busy_child(&self, name: &str) {
-            self.busy_children.borrow_mut().insert(name.to_string());
+            self.busy_children.lock().unwrap().insert(name.to_string());
         }
         /// A backend whose agents are asked to leave their pane and stay put —
         /// the modal sitting there with nobody to answer it.
@@ -6176,6 +6498,13 @@ mod tests {
             self.refuse_start = true;
             self
         }
+        /// A backend whose `agent start` blocks for `delay` before answering
+        /// — what a real boot's own wait looks like, timing-wise, to a test
+        /// that wants to tell an overlapped boot from a serial one.
+        fn with_boot_delay(mut self, delay: Duration) -> FakeMux {
+            self.boot_delay = delay;
+            self
+        }
         /// A backend whose `agent start` always answers the way herdr does
         /// when the pane it was handed has not yet reached its shell prompt —
         /// `agent_pane_busy`, transient by construction.
@@ -6190,18 +6519,29 @@ mod tests {
             self.refuse_prompt = true;
             self
         }
+        /// A backend whose `agent start` refuses for `name` alone — every
+        /// other lane a pass boots alongside it starts normally.
+        fn refusing_to_start_named(mut self, name: &str) -> FakeMux {
+            self.refuse_start_named = Some(name.to_string());
+            self
+        }
+        /// The same, for `Mux::prompt`.
+        fn refusing_to_prompt_named(mut self, name: &str) -> FakeMux {
+            self.refuse_prompt_named = Some(name.to_string());
+            self
+        }
         /// A multiplexer that has forgotten `id` — a workspace or tab a
         /// restart wiped out from under a worktree that survived it. See
         /// `workspace_alive`.
         fn forgetting(self, id: &str) -> FakeMux {
-            self.forgotten.borrow_mut().insert(id.to_string());
+            self.forgotten.lock().unwrap().insert(id.to_string());
             self
         }
         fn log(&self, call: String) {
-            self.calls.borrow_mut().push(call);
+            self.calls.lock().unwrap().push(call);
         }
         fn calls(&self) -> Vec<String> {
-            self.calls.borrow().clone()
+            self.calls.lock().unwrap().clone()
         }
         fn did(&self, prefix: &str) -> Vec<String> {
             self.calls()
@@ -6214,7 +6554,7 @@ mod tests {
         /// pane has to persist; the log of one pass's calls should not bleed
         /// into the next one's assertions).
         fn clear_calls(&self) {
-            self.calls.borrow_mut().clear();
+            self.calls.lock().unwrap().clear();
         }
     }
 
@@ -6244,7 +6584,11 @@ mod tests {
         /// comment in `mux.rs` for why `pane process-info` cannot actually
         /// answer this for an agent's own tool calls.
         fn lane_process_alive(&self, name: &str) -> Option<bool> {
-            self.busy_children.borrow().contains(name).then_some(true)
+            self.busy_children
+                .lock()
+                .unwrap()
+                .contains(name)
+                .then_some(true)
         }
         fn workspace_alive(&self, workspace_id: &str, tab_id: Option<&str>) -> Result<bool> {
             // Never `workspace ...`: `did("workspace")` is how other tests
@@ -6252,7 +6596,7 @@ mod tests {
             // workspace, and a verification call logged under that prefix
             // would fail them for asking a question, not changing anything.
             self.log(format!("verify_workspace {workspace_id}"));
-            let forgotten = self.forgotten.borrow();
+            let forgotten = self.forgotten.lock().unwrap();
             if forgotten.contains(workspace_id) {
                 return Ok(false);
             }
@@ -6264,7 +6608,7 @@ mod tests {
             Ok(true)
         }
         fn dispatch_workspace(&self, _root: &Path, create: bool) -> Result<Option<String>> {
-            *self.workspace_calls.borrow_mut() += 1;
+            *self.workspace_calls.lock().unwrap() += 1;
             self.log(match create {
                 true => "dispatch_workspace find-or-create".to_string(),
                 false => "dispatch_workspace find-only".to_string(),
@@ -6277,7 +6621,7 @@ mod tests {
         /// same tab again. Remembered so `find_tab` can answer with it.
         fn open_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<Workspace> {
             self.log(format!("open_tab {workspace_id} {label}"));
-            let mut tabs = self.tabs.borrow_mut();
+            let mut tabs = self.tabs.lock().unwrap();
             let n = tabs.len() + 1;
             let opened = Workspace {
                 workspace_id: workspace_id.to_string(),
@@ -6293,7 +6637,8 @@ mod tests {
             self.log(format!("find_tab {label}"));
             Ok(self
                 .tabs
-                .borrow()
+                .lock()
+                .unwrap()
                 .get(label)
                 .and_then(|tab| tab.tab_id.clone()))
         }
@@ -6368,7 +6713,7 @@ mod tests {
             })
         }
         fn split_pane(&self, tab_id: &str, _cwd: &Path) -> Result<String> {
-            let mut splits = self.splits.borrow_mut();
+            let mut splits = self.splits.lock().unwrap();
             *splits += 1;
             let pane = format!("{tab_id}.s{splits}");
             self.log(format!("split_pane {tab_id} -> {pane}"));
@@ -6386,7 +6731,7 @@ mod tests {
             if !self.run_commands_in_pane {
                 return Ok(None);
             }
-            let mut splits = self.splits.borrow_mut();
+            let mut splits = self.splits.lock().unwrap();
             *splits += 1;
             let pane = format!("{tab_id}.s{splits}");
             self.log(format!("run_in_pane {tab_id} -> {pane} ({key}) ({label})"));
@@ -6411,6 +6756,9 @@ mod tests {
             Ok(())
         }
         fn start_lane(&self, spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
+            if !self.boot_delay.is_zero() {
+                std::thread::sleep(self.boot_delay);
+            }
             self.log(format!("start {}", spec.name));
             // The real backend labels the pane as the last thing `start_lane`
             // does; mirroring it here keeps the label assertable.
@@ -6429,6 +6777,9 @@ mod tests {
             if self.refuse_start {
                 anyhow::bail!("agent_start_failed");
             }
+            if self.refuse_start_named.as_deref() == Some(spec.name) {
+                anyhow::bail!("agent_start_failed");
+            }
             if self.refuse_start_pane_busy {
                 return Err(anyhow::Error::new(crate::mux::PaneBusy {
                     pane_id: spec.pane_id.to_string(),
@@ -6445,10 +6796,14 @@ mod tests {
             if self.refuse_prompt {
                 anyhow::bail!("submission stalled even after Enter");
             }
+            if self.refuse_prompt_named.as_deref() == Some(name) {
+                anyhow::bail!("submission stalled even after Enter");
+            }
             // A real pane's screen changes the moment the text lands on it —
             // see `screen`'s own doc comment for why that matters.
             self.screen
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .entry(name.to_string())
                 .and_modify(|s| {
                     s.push('\n');
@@ -6458,7 +6813,13 @@ mod tests {
             Ok(())
         }
         fn read(&self, name: &str, _lines: usize) -> Result<String> {
-            Ok(self.screen.borrow().get(name).cloned().unwrap_or_default())
+            Ok(self
+                .screen
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .unwrap_or_default())
         }
         fn interrupt_lane(&self, name: &str) -> Result<()> {
             self.log(format!("interrupt {name}"));
@@ -8521,7 +8882,7 @@ mod tests {
 
     /// `headless` records a pane for a task and never a tab — its
     /// `create_workspace`/`create_pane` both answer `tab_id: None` — so
-    /// `start_one` must fall back to the recorded pane rather than demand a
+    /// `prepare_boot` must fall back to the recorded pane rather than demand a
     /// tab that will never come. Before this fell back, every headless lane
     /// failed to start with "task has a workspace but no recorded tab or
     /// pane", which hung the dispatcher retrying forever; 621 other unit
@@ -8601,6 +8962,287 @@ mod tests {
             report.actions
         );
         assert!(mux.did("launch demo · implement").is_empty());
+    }
+
+    /// Three free slots, three candidates, each lane's own boot standing in
+    /// for herdr's own blocking `agent start` — see `FakeMux::with_boot_delay`.
+    /// Booted one after another, this pass takes three boot times; booted
+    /// together, about one. gh-464.
+    ///
+    /// `boot_time` is seconds, not milliseconds: this pass's own prep for
+    /// three candidates — a real `git rev-parse HEAD` and a real
+    /// `create_workspace`'s `git init` apiece, see `fixture` — already costs
+    /// several hundred milliseconds serially, whatever the boot itself
+    /// costs. A `boot_time` that small next to that fixed prep cost would
+    /// make a fully serial pass and a fully concurrent one look alike; a
+    /// `boot_time` this much larger than it is what actually tells them
+    /// apart.
+    #[test]
+    fn three_claimed_slots_boot_their_lanes_at_once() {
+        let repo = fixture("boot-together");
+        for id in ["a", "b", "c"] {
+            add_task(&repo, id, crate::pipeline::QUEUED);
+        }
+        let boot_time = Duration::from_secs(2);
+        let mux = FakeMux::new(vec![]).with_boot_delay(boot_time);
+
+        let started = std::time::Instant::now();
+        let report = run_pass(&repo, &mux);
+        let elapsed = started.elapsed();
+
+        assert_eq!(mux.did("start").len(), 3, "started: {:?}", mux.did("start"));
+        assert_eq!(
+            mux.did("prompt").len(),
+            3,
+            "prompted: {:?}",
+            mux.did("prompt")
+        );
+        assert!(
+            elapsed < boot_time * 2,
+            "three lanes booted one after another would take about {:?}; this pass took \
+             {elapsed:?}, which is not close to the one boot time {boot_time:?} concurrent \
+             boots should cost",
+            boot_time * 3,
+        );
+        assert_eq!(
+            report.problems,
+            Vec::<String>::new(),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    /// Every claimed candidate carries a boot mark naming its step for as
+    /// long as its boot runs, and none is left once the pass returns — the
+    /// mark the board reads as `◌ starting`. See [`crate::claim`].
+    #[test]
+    fn a_claimed_lane_is_marked_while_it_boots_and_cleared_after() {
+        let repo = fixture("claim-mark-while-booting");
+        for id in ["a", "b"] {
+            add_task(&repo, id, crate::pipeline::QUEUED);
+        }
+        let mux = FakeMux::new(vec![]).with_boot_delay(Duration::from_millis(800));
+
+        let seen = std::thread::scope(|scope| {
+            let pass = scope.spawn(|| run_pass(&repo, &mux));
+            let mut seen: BTreeMap<String, String> = BTreeMap::new();
+            while !pass.is_finished() {
+                for id in ["a", "b"] {
+                    if let Ok(step) = std::fs::read_to_string(repo.claims_dir().join(id)) {
+                        seen.insert(id.to_string(), step);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            pass.join().unwrap();
+            seen
+        });
+
+        assert_eq!(
+            seen.get("a").map(String::as_str),
+            Some("implement"),
+            "{seen:?}"
+        );
+        assert_eq!(
+            seen.get("b").map(String::as_str),
+            Some("implement"),
+            "{seen:?}"
+        );
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// A boot that fails clears its mark the same as one that succeeds, and
+    /// a mark a killed dispatcher left behind is swept by the next pass.
+    #[test]
+    fn a_failed_boot_and_a_leftover_mark_both_leave_no_mark() {
+        let repo = fixture("claim-mark-failed-boot");
+        add_task(&repo, "a", crate::pipeline::QUEUED);
+        crate::task::write_atomic(&repo.claims_dir().join("gone"), "review").unwrap();
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+
+        run_pass(&repo, &mux);
+
+        assert!(!mux.did("start").is_empty(), "{:?}", mux.did("start"));
+        let left: Vec<_> = std::fs::read_dir(repo.claims_dir())
+            .map(|dir| dir.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "marks left after the pass: {left:?}");
+    }
+
+    /// `tick` keeps the keyboard alive while a lane's boot runs — see
+    /// [`Dispatcher::pass`]'s own doc. Moving `Mux::start_lane` onto a
+    /// thread of its own must not lose that: `Dispatcher::start_lanes` calls
+    /// `tick` itself now, on this thread, once every `VACATE_POLL` for as
+    /// long as any thread it is waiting on is still booting. gh-464.
+    #[test]
+    fn tick_runs_at_vacate_poll_rate_while_a_lane_boots() {
+        let repo = fixture("boot-together-ticks");
+        add_task(&repo, "a", crate::pipeline::QUEUED);
+        let boot_time = Duration::from_millis(650);
+        let mux = FakeMux::new(vec![]).with_boot_delay(boot_time);
+
+        let ticks = std::sync::atomic::AtomicUsize::new(0);
+        let mut tick = || {
+            ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        };
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .pass(&mut tick)
+            .unwrap();
+
+        // `VACATE_POLL` is 250ms; a 650ms boot crosses it at least twice.
+        // Generously bounded below rather than pinned exactly, since this
+        // thread's own scheduling (not the boot) decides the count.
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "expected at least 2 ticks across a {boot_time:?} boot polled every 250ms, got {}",
+            ticks.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    /// One candidate's `start_lane` refuses in a pass that claims three —
+    /// the failure lands on that lane alone: a strike, a take-back
+    /// (`close_pane`), and nothing else about it recorded, while the other
+    /// two still start and are prompted. gh-464.
+    #[test]
+    fn a_start_lane_failure_in_a_claimed_batch_is_recorded_on_that_lane_alone() {
+        let repo = fixture("boot-together-fails-to-start");
+        for id in ["a", "b", "c"] {
+            add_task(&repo, id, crate::pipeline::QUEUED);
+        }
+        let mux = FakeMux::new(vec![]).refusing_to_start_named("b · implement");
+
+        let report = run_pass(&repo, &mux);
+
+        // `start_lane` is attempted for every candidate — the refusal is
+        // read off its own reply, not skipped ahead of — so `b`'s own
+        // attempt still shows up in the log; it is `prompt` that never
+        // follows it.
+        let mut started: Vec<String> = mux
+            .did("start")
+            .into_iter()
+            .map(|c| c.split_whitespace().nth(1).unwrap().to_string())
+            .collect();
+        started.sort();
+        assert_eq!(started, ["a", "b", "c"], "{:?}", mux.did("start"));
+        let mut prompted: Vec<String> = mux
+            .did("prompt")
+            .into_iter()
+            .map(|c| c.split_whitespace().nth(1).unwrap().to_string())
+            .collect();
+        prompted.sort();
+        assert_eq!(
+            prompted,
+            ["a", "c"],
+            "b never got as far as a briefing: {:?}",
+            mux.did("prompt")
+        );
+        assert_eq!(
+            mux.did("close_pane").len(),
+            1,
+            "b's own pane was taken back, and only b's: {:?}",
+            mux.calls()
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("b") && a.contains("could not start")),
+            "b's own failure is reported: {:?}",
+            report.actions
+        );
+        let tasks = repo.tasks().unwrap();
+        let a = tasks.iter().find(|t| t.id() == "a").unwrap();
+        let b = tasks.iter().find(|t| t.id() == "b").unwrap();
+        let c = tasks.iter().find(|t| t.id() == "c").unwrap();
+        assert_eq!(a.stage(), "implement", "a's lane started and moved on");
+        assert_eq!(c.stage(), "implement", "c's lane started and moved on");
+        assert_eq!(
+            b.stage(),
+            crate::pipeline::QUEUED,
+            "below MAX_LAUNCH_FAILURES, b stays a candidate for the next pass rather than \
+             being moved off its step"
+        );
+        assert_eq!(
+            b.front.attempts, 0,
+            "a launch that never started spends no attempt"
+        );
+    }
+
+    /// The one failure that can land after `finish_launch_bookkeeping`'s own
+    /// stage move has already reached disk: `Mux::prompt` refusing the
+    /// briefing. `StageMovedBeforeFailure` carries that fact through
+    /// [`Dispatcher::handle_boot_failure`], and it is what tells this lane's
+    /// own strike apart from an ordinary retry that never left `queued` —
+    /// same as it did before this pass could boot more than one lane at
+    /// once. gh-464.
+    #[test]
+    fn a_prompt_failure_in_a_claimed_batch_is_recorded_on_that_lane_alone() {
+        let repo = fixture("boot-together-fails-to-prompt");
+        for id in ["a", "b", "c"] {
+            add_task(&repo, id, crate::pipeline::QUEUED);
+        }
+        let mux = FakeMux::new(vec![]).refusing_to_prompt_named("b · implement");
+
+        let report = run_pass(&repo, &mux);
+
+        let mut started = mux.did("start");
+        started.sort();
+        assert_eq!(
+            started,
+            [
+                "start a · implement",
+                "start b · implement",
+                "start c · implement"
+            ],
+            "every lane's `start_lane` succeeded — only the briefing refused"
+        );
+        let mut prompted = mux.did("prompt");
+        prompted.sort();
+        assert_eq!(
+            prompted,
+            [
+                "prompt a · implement",
+                "prompt b · implement",
+                "prompt c · implement"
+            ],
+            "b's own prompt was attempted and refused"
+        );
+        assert!(
+            mux.did("stop").iter().any(|c| c.contains("b · implement")),
+            "a lane started but never prompted is torn down rather than left looking busy: \
+             {:?}",
+            mux.calls()
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("b") && a.contains("could not start")),
+            "b's own failure is reported: {:?}",
+            report.actions
+        );
+        let tasks = repo.tasks().unwrap();
+        let a = tasks.iter().find(|t| t.id() == "a").unwrap();
+        let b = tasks.iter().find(|t| t.id() == "b").unwrap();
+        let c = tasks.iter().find(|t| t.id() == "c").unwrap();
+        assert_eq!(a.stage(), "implement");
+        assert_eq!(c.stage(), "implement");
+        // `finish_launch_bookkeeping` already moved and persisted `b` onto
+        // `implement` before its prompt failed — `StageMovedBeforeFailure`
+        // says so, and nothing here moves it back. What a stalled prompt
+        // costs it is the lane itself, not the stage.
+        assert_eq!(
+            b.stage(),
+            "implement",
+            "the stage move landed before the prompt refused it, and stays"
+        );
+        assert_eq!(
+            b.front.attempts, 1,
+            "the launch that started counts, whether or not its briefing landed"
+        );
     }
 
     /// Set here rather than taken from the shipped profile: `pi` ships
@@ -9703,8 +10345,8 @@ mod tests {
             // The one waiting line the mockup draws, and the fourth
             // acceptance criterion names outright — naming the pane and the
             // elapsed time, not just silence on `report.problems`. The pane
-            // id itself is not pinned here: `start_one`'s own take-back
-            // closes it and splits a fresh one on every attempt, so it
+            // id itself is not pinned here: `boot_start_lane`'s own take-back
+            // closes it and a fresh one is split on every attempt, so it
             // differs pass to pass — see `note_pane_busy`'s own doc comment.
             //
             // The elapsed field is not pinned to a value either: it is wall
@@ -13081,7 +13723,7 @@ mod tests {
 
     /// The same resume, but for a lane `escalate_clock` gave up on rather
     /// than a person's own keypress: `escalated` on the task file has to
-    /// reach `start_one`'s choice of prompt before it is spent, the same
+    /// reach `prepare_boot`'s choice of prompt before it is spent, the same
     /// pass `parked_from` and `resume` are.
     #[test]
     fn resuming_an_escalated_park_gets_the_escalated_prompt() {
@@ -15045,7 +15687,7 @@ mod tests {
     }
 
     /// A command step banks a launch the same way an agent lane's own
-    /// `start_one` does — see the `Ok(_)` arm of `run_command`'s `Fresh`
+    /// `finish_launch_bookkeeping` does — see the `Ok(_)` arm of `run_command`'s `Fresh`
     /// case. Without this a task that only ever ran command steps had an
     /// empty `steps:`, so `--stage`'s bound (`report::steps_run`) could
     /// never name one of them even after it genuinely ran.
@@ -15199,9 +15841,10 @@ mod tests {
         );
     }
 
-    /// A third way a destination can "land": `start_one` writes its own
-    /// stage move and persists it before ever prompting the lane it just
-    /// started — so a `mux.prompt` refusal past that point is a launch that
+    /// A third way a destination can "land": `finish_launch_bookkeeping`
+    /// writes its own stage move and persists it before `boot_prompt` ever
+    /// prompts the lane `boot_start_lane` just started — so a `mux.prompt`
+    /// refusal past that point is a launch that
     /// failed with the move already on disk, not a task that never left the
     /// command step. See `StageMovedBeforeFailure`.
     #[test]
@@ -15225,8 +15868,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // One more pass: `review` has a free slot, so `start_one` gets far
-        // enough to write and persist the task's move onto it before
+        // One more pass: `review` has a free slot, so `finish_launch_bookkeeping`
+        // gets far enough to write and persist the task's move onto it before
         // `mux.prompt` refuses the briefing — attempt 1 of `MAX_LAUNCH_
         // FAILURES`, well below the ceiling that would make this arm move
         // the stage a second time itself.
@@ -15237,7 +15880,7 @@ mod tests {
         assert_eq!(
             reload(&path).stage(),
             "review",
-            "start_one's own stage move lands even though the prompt that follows it fails"
+            "finish_launch_bookkeeping's own stage move lands even though the prompt that follows it fails"
         );
         assert_eq!(
             runs.state(&key),
@@ -15299,7 +15942,7 @@ mod tests {
             mux.calls()
         );
         // A task whose steps are all commands still gets its own tab named —
-        // `ensure_workspace` renames it, not `start_one`, so a task that
+        // `ensure_workspace` renames it, not `prepare_boot`, so a task that
         // never runs an agent step is not left with a numbered tab. `drive`
         // runs more than one pass here, each re-asserting the label, so this
         // checks every call it logged rather than an exact count.

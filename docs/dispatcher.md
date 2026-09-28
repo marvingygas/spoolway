@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/runfiles.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/runfiles.rs", "src/claim.rs"]
 ---
 
 # The dispatcher
@@ -146,8 +146,9 @@ installed version)`.
 
 Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
 dispatch` child the tab starts and stops on `enter` — the tab runs no pass itself. Its header
-names the pid of that child, or reads `dispatcher stopped` with no pid once it has stopped. See
-[`spoolway`](cli-reference.md#spoolway).
+names the pid of that child, or reads `dispatcher stopped` with no pid once it has stopped. On
+`enter`, before the child's first pass has claimed anything, the tab covers the board with a
+keyless `Starting dispatcher` popup. See [`spoolway`](cli-reference.md#spoolway).
 
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
 The total is the group's banked spend: every step that has settled, across every task in the
@@ -163,13 +164,13 @@ task id marks `parallel: true`.
 |---|---|
 | TASK | The task id. |
 | PIPELINE | The pipeline the task runs on. |
-| STEP | The current step. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
+| STEP | The current step. For a starting task, the step the dispatcher is booting a lane for, ahead of the task file's own stage. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
 | STATE | One of the states below. |
 | CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -178,8 +179,10 @@ task id marks `parallel: true`.
 ```mermaid
 stateDiagram-v2
   [*] --> queued
-  queued --> running: dependencies done, slot free
-  running --> running: step passes or fails, next step starts
+  queued --> starting: dependencies done, slot free
+  starting --> running: the lane comes up
+  starting --> queued: the boot fails
+  running --> starting: step passes or fails, the next lane starts
   running --> prompt: a permission prompt in its pane
   prompt --> running: the prompt is answered
   running --> paused: gate, or p on the board
@@ -193,7 +196,8 @@ stateDiagram-v2
 | State | Meaning |
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
-| `running` | A lane is working the current step, or the next lane is about to start. |
+| `starting` | The dispatcher has claimed a slot and is booting the lane. herdr does not list it until the boot is well along. The logo turns the same as it does for `running`. |
+| `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p`. |
 | `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |

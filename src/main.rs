@@ -8,6 +8,7 @@
 mod agent;
 mod ask;
 mod assets;
+mod claim;
 mod cli;
 mod command_step;
 mod commands;

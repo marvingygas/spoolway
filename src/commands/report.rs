@@ -1192,7 +1192,7 @@ fn stop_choices(id: &str, step: &str) -> String {
 ///
 /// `blocked` itself is excluded, whatever `steps:` says. A staffed
 /// `blocked` bank a launch under its own arrival route the instant an
-/// unblocker's lane starts (`start_one`, the same as any other step), so
+/// unblocker's lane starts (`finish_launch_bookkeeping`, the same as any other step), so
 /// `blocked` is in that record on every real run this flag exists for — the
 /// one where a lane is actually sitting on `blocked` to type `--stage` at
 /// all. Left in the bound, `--stage blocked` would be accepted:
@@ -1456,8 +1456,8 @@ fn back_onto_its_step(
     task.front.paused_by = None;
     // A `--stage` reroute past a park leaves this ordinary road instead of
     // `unpark`'s, but the park is answered all the same — left set, this
-    // would still name the step on a later, ordinary retry, and `start_one`
-    // would read that retry as a continued park rather than what it is.
+    // would still name the step on a later, ordinary retry, and
+    // `finish_launch_bookkeeping` would read that retry as a continued park rather than what it is.
     task.front.parked_from = None;
     task.front.escalated = false;
     task.set_stage(&target, Some(&message));
@@ -1479,7 +1479,7 @@ fn back_onto_its_step(
 ///
 /// `parked_from` (and `escalated` beside it) are left in the task file rather
 /// than cleared here — the launch that actually continues this step is what
-/// learns whether a session was there to carry, and `Dispatcher::start_one`
+/// learns whether a session was there to carry, and `finish_launch_bookkeeping`
 /// in `src/dispatch.rs` is what spends both once that answer is known, the
 /// same moment it spends `resume`.
 fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task) -> Result<()> {
@@ -2820,7 +2820,7 @@ mod tests {
         task.set_stage(crate::pipeline::BLOCKED, None);
         task.front.blocked_from = Some("look".into());
         // The staffed unblocker's own lane banking its own arrival — exactly
-        // what `start_one` does for any staffed step, `blocked` included.
+        // what `finish_launch_bookkeeping` does for any staffed step, `blocked` included.
         task.bank_launch("look", crate::pipeline::BLOCKED);
         task.save().unwrap();
 
@@ -4702,8 +4702,8 @@ mod tests {
         assert_eq!(
             task.front.parked_from, None,
             "a reroute past a park has answered it just as much as putting it \
-             back would — left set, `start_one` would read the step's next \
-             ordinary retry as a continued park"
+             back would — left set, `finish_launch_bookkeeping` would read the step's \
+             next ordinary retry as a continued park"
         );
     }
 

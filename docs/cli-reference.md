@@ -81,15 +81,19 @@ their tables instead.
 
 The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
 says, asking the overrides and warnings gates as popups first, each only when it has something
-to say, then spawns a `spoolway dispatch` child. `enter` again stops that child straight away,
-with no question: nothing is torn down, and every lane keeps running. The header reads
-`dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once it has
-stopped. `r`/`R`, `p`/`P` and `u`/`U` work whether or not a child is running. `q` or `ctrl-c`
-quits the whole screen and stops dispatching too.
+to say, then spawns a `spoolway dispatch` child. The moment the child starts, a `Starting
+dispatcher` popup covers the board, naming no key: `enter`, the arrow keys and every other key
+on this page still reach the board underneath it. It closes once the child's first pass has
+claimed a slot or found nothing to claim, and does not open again on a later pass. `enter`
+again stops that child straight away, with no question: nothing is torn down, and every lane
+keeps running. The header reads `dispatcher running` and the child's pid, or `dispatcher
+stopped` with no pid once it has stopped. `r`/`R`, `p`/`P` and `u`/`U` work whether or not a
+child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
-a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`.
+a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`. Ending before
+its first pass, including under the `Starting dispatcher` popup, shows that reason there instead.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 

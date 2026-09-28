@@ -56,7 +56,7 @@ impl Dispatcher {
     /// Apart from [`Dispatcher::start`] so a test can stand a plain shell
     /// command in for `spoolway dispatch` — under `cargo test`,
     /// `current_exe` is the test binary itself.
-    fn spawn(mut command: Command) -> Result<Dispatcher> {
+    pub(super) fn spawn(mut command: Command) -> Result<Dispatcher> {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -189,7 +189,7 @@ pub struct Frontmatter {
     /// resumes here. Read back by [`crate::commands::resume`], which puts the
     /// task back on this step rather than treating the stop as a block to
     /// clear, and cleared once the continuing lane has actually launched, in
-    /// `Dispatcher::start_one` in `src/dispatch.rs` — the same moment
+    /// `finish_launch_bookkeeping` in `src/dispatch.rs` — the same moment
     /// `resume` is spent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_from: Option<String>,
@@ -197,7 +197,7 @@ pub struct Frontmatter {
     /// Whether [`Self::parked_from`] names a step `escalate_clock` gave up
     /// on, rather than a person's own keypress or Escape.
     ///
-    /// The one fact `start_one` cannot otherwise recover once a lane resumes:
+    /// The one fact `prepare_boot` cannot otherwise recover once a lane resumes:
     /// `parked_from` alone reads the same for all three gestures that set it.
     /// A person's interrupt genuinely changed nothing, and the resumed lane
     /// is told so by `park_prompt`; an escalation reminded the lane three
@@ -392,7 +392,7 @@ pub struct Frontmatter {
     /// kind with no quit gesture ends its session by closing the pane
     /// outright (`Vacated::PaneClosed`), and a lane that has not let go of it
     /// by `HANDOVER_WAIT` is stashed and replaced rather than waited on
-    /// forever. Either way `start_one` splits a fresh pane for the next step,
+    /// forever. Either way `prepare_boot` splits a fresh pane for the next step,
     /// so from that point on this field names a pane that is gone.
     ///
     /// `None` under `grouped` for a task that joined a project tab an earlier
@@ -674,7 +674,7 @@ impl Task {
     /// conversation, or a command step's `run:` process starting.
     ///
     /// The dispatcher calls this at launch, from exactly two places: an
-    /// agent lane's own `start_one`, and a command step's `Fresh` arm in
+    /// agent lane's own `finish_launch_bookkeeping`, and a command step's `Fresh` arm in
     /// `run_command`. Nothing else may — a counter banked from a third
     /// place is one that can double-count the moment it disagrees with
     /// these two about what a launch is — and the two that do call it

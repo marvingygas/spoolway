@@ -7,7 +7,9 @@
 //! adds only the strip on the top row and the keys that move between tabs.
 //! The one exception is the dispatch tab's `enter`, which starts and stops a
 //! `spoolway dispatch` child ([`super::dispatcher`]) behind the gates that
-//! command asks, drawn here as popups over the board.
+//! command asks, drawn here as popups over the board — and, once it has
+//! started, a keyless popup over the dispatcher's own first checks, which
+//! hands every key through to the board and the shell as if it were not up.
 //!
 //! A tab's screen keeps its own loop. When it reads `←`, `→` or `q` with no
 //! popup or sub-mode of its own open — [`leave_on`] — it hands a [`Leave`]
@@ -335,8 +337,9 @@ struct DispatchTab {
     popup: Option<Popup>,
 }
 
-/// A popup the dispatch tab draws over the board. Each one reads every key
-/// until it is answered, the same as the board's own confirm panels.
+/// A popup the dispatch tab draws over the board. Each one but `Starting`
+/// reads every key until it is answered, the same as the board's own
+/// confirm panels.
 enum Popup {
     /// The overrides gate `enter` asks first, when there is a layer to name.
     Overrides(crate::commands::GatePopup),
@@ -344,15 +347,54 @@ enum Popup {
     Warnings(crate::commands::GatePopup),
     /// Why the dispatcher ended, or never started. `enter` closes it.
     Ended(Vec<String>),
+    /// The dispatcher just started and has not yet claimed anything: its own
+    /// checks — herdr, git, the queue — run before its first pass, and the
+    /// board has nothing to show for them. Takes no key and names none;
+    /// [`DispatchTab::reap`] closes it once the first pass has claimed a
+    /// slot or found nothing to claim. `since` is when the child was
+    /// started, which is what that pass's files are timed against.
+    Starting {
+        panel: Vec<String>,
+        since: std::time::SystemTime,
+    },
 }
 
 impl Popup {
     fn panel(&self) -> &[String] {
         match self {
             Popup::Overrides(gate) | Popup::Warnings(gate) => &gate.panel,
-            Popup::Ended(panel) => panel,
+            Popup::Ended(panel) | Popup::Starting { panel, .. } => panel,
         }
     }
+
+    /// Whether this popup reads keys. `Starting` does not: the board's
+    /// keys, `←`, `→` and `q` all work under it, and it closes on its own.
+    fn reads_keys(&self) -> bool {
+        !matches!(self, Popup::Starting { .. })
+    }
+}
+
+/// The popup [`Popup::Starting`] draws: a title and one line, and no key
+/// line, since nothing answers it.
+fn starting_panel() -> Vec<String> {
+    super::boxed(
+        "Starting dispatcher",
+        &["checking herdr, git, queue…".to_string()],
+    )
+}
+
+/// Whether the dispatcher started at `since` has finished its first pass's
+/// claims: a boot mark written since — see [`crate::claim`] — or, for a pass
+/// that found nothing to claim, `lanes.json`, which every pass writes on its
+/// way out. The child's stdout goes nowhere, so its files are all the tab
+/// has to go on. Both are written well after `since`, past the child's own
+/// start checks, so a filesystem clock a few milliseconds coarse cannot
+/// date either ahead of it.
+fn first_pass_seen(repo: &Repo, since: std::time::SystemTime) -> bool {
+    crate::claim::marked_since(repo, since)
+        || std::fs::metadata(repo.lanes_file())
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at >= since)
 }
 
 impl DispatchTab {
@@ -365,23 +407,41 @@ impl DispatchTab {
     }
 
     /// Forget a child that has exited, and open the popup saying why if it
-    /// ended without being asked to.
+    /// ended without being asked to — over `Starting`, if the child ended
+    /// before its first pass. A child still running closes `Starting` once
+    /// its first pass has claimed.
     fn reap(&mut self, repo: &Repo) {
         let Some(child) = self.child.as_mut() else {
             return;
         };
         if let Some(ended) = child.ended(&repo.lock_file()) {
             self.child = None;
-            if let Some(panel) = ended {
-                self.popup = Some(Popup::Ended(panel));
+            match ended {
+                Some(panel) => self.popup = Some(Popup::Ended(panel)),
+                // Stopped on `enter` before its first pass: nothing is
+                // starting any more.
+                None => {
+                    if matches!(self.popup, Some(Popup::Starting { .. })) {
+                        self.popup = None;
+                    }
+                }
             }
+            return;
+        }
+        if let Some(Popup::Starting { since, .. }) = &self.popup
+            && first_pass_seen(repo, *since)
+        {
+            self.popup = None;
         }
     }
 
-    /// `enter` with no popup open: stop the child straight away, with no
-    /// question, or — with none running — ask the start gates, each only
-    /// when it has something to say, and start one. A child already asked
-    /// to stop is left to finish going: `stop` asks once.
+    /// `enter` with no key-reading popup open: stop the child straight
+    /// away, with no question, or — with none running — ask the start
+    /// gates, each only when it has something to say, and start one. A
+    /// child already asked to stop is left to finish going: `stop` asks
+    /// once. Stopped under the keyless `Starting` popup, the child is gone
+    /// before its first pass, and [`DispatchTab::reap`] clears the popup
+    /// once it has exited.
     fn enter(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
         match self.child.as_mut() {
             Some(child) => child.stop(),
@@ -410,8 +470,28 @@ impl DispatchTab {
     }
 
     fn start(&mut self, cwd: &Path) {
-        match super::dispatcher::Dispatcher::start(cwd) {
-            Ok(child) => self.child = Some(child),
+        let since = std::time::SystemTime::now();
+        self.started(super::dispatcher::Dispatcher::start(cwd), since);
+    }
+
+    /// What [`DispatchTab::start`] got back from starting the child at
+    /// `since`: the child and `Starting` over the board — the popup is up on
+    /// the very frame after the keypress, before the child has done
+    /// anything — or the popup saying why it did not start. Apart from
+    /// `start` so a test can hand it a stand-in child.
+    fn started(
+        &mut self,
+        child: Result<super::dispatcher::Dispatcher>,
+        since: std::time::SystemTime,
+    ) {
+        match child {
+            Ok(child) => {
+                self.child = Some(child);
+                self.popup = Some(Popup::Starting {
+                    panel: starting_panel(),
+                    since,
+                });
+            }
             Err(err) => {
                 self.popup = Some(Popup::Ended(super::dispatcher::popup(
                     false,
@@ -478,8 +558,9 @@ fn dispatch_tab(
         // The board's own panel is drawn over the tab's popup — see
         // `Board::hosted_frame` — so it answers first. A child that exits
         // while a pause panel is open waits its turn rather than taking
-        // keys meant for the panel on screen.
-        if board.at_rest() && tab.popup.is_some() {
+        // keys meant for the panel on screen. A popup that reads no key —
+        // `Starting` — leaves every key to the board and the shell below.
+        if board.at_rest() && tab.popup.as_ref().is_some_and(Popup::reads_keys) {
             tab.answer(repo, pipelines, cwd, key);
             continue;
         }
@@ -814,6 +895,110 @@ mod tests {
         tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         assert!(tab.popup.is_none());
         assert!(!tab.dispatching());
+    }
+
+    /// How long a stand-in first pass waits after the start before writing
+    /// anything. A real one comes after the child's own start checks; one
+    /// written the same instant can be dated a few milliseconds *before*
+    /// `since`, by the kernel's coarse file clock, and would not count.
+    const FIRST_PASS_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// A shell command standing in for the tab's `spoolway dispatch` child.
+    fn stand_in(script: &str) -> super::super::dispatcher::Dispatcher {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        super::super::dispatcher::Dispatcher::spawn(command).unwrap()
+    }
+
+    // A started child puts the keyless `Starting dispatcher` popup up at
+    // once, drawn as the mockup draws it, and it reads no key.
+    #[test]
+    fn a_start_opens_the_keyless_starting_popup() {
+        let repo = crate::status::testutil::fixture("shell-starting-opens");
+        let mut tab = DispatchTab::default();
+        tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
+        let popup = tab.popup.as_ref().expect("the popup is up");
+        assert!(matches!(popup, Popup::Starting { .. }));
+        assert!(!popup.reads_keys());
+        assert_eq!(
+            popup.panel(),
+            [
+                "┌─ Starting dispatcher ─────────┐",
+                "│  checking herdr, git, queue…  │",
+                "└───────────────────────────────┘",
+            ]
+        );
+        // Nothing has claimed yet, so a redraw leaves it up.
+        tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
+    }
+
+    // The first pass claiming a slot closes the popup, and the child keeps
+    // running under the board.
+    #[test]
+    fn the_starting_popup_closes_on_the_first_claim() {
+        let repo = crate::status::testutil::fixture("shell-starting-claim");
+        let mut tab = DispatchTab::default();
+        tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
+        std::thread::sleep(FIRST_PASS_GAP);
+        let mut claims = crate::claim::Claims::new(&repo);
+        claims.claim("wire", "implement");
+        tab.reap(&repo);
+        assert!(tab.popup.is_none());
+        assert!(tab.dispatching());
+    }
+
+    // A first pass with nothing to claim still writes `lanes.json` on its
+    // way out, and that closes the popup too. A mark or a `lanes.json` from
+    // before the start does not.
+    #[test]
+    fn the_starting_popup_closes_on_a_first_pass_that_claimed_nothing() {
+        let repo = crate::status::testutil::fixture("shell-starting-empty");
+        crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
+        crate::task::write_atomic(&repo.claims_dir().join("gone"), "review").unwrap();
+        std::thread::sleep(FIRST_PASS_GAP);
+        let mut tab = DispatchTab::default();
+        tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
+        tab.reap(&repo);
+        assert!(matches!(tab.popup, Some(Popup::Starting { .. })));
+
+        std::thread::sleep(FIRST_PASS_GAP);
+        crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
+        tab.reap(&repo);
+        assert!(tab.popup.is_none());
+    }
+
+    // A child that ends before its first pass puts `Ended` in the popup's
+    // place; one stopped on `enter` just takes the popup away.
+    #[test]
+    fn a_child_ending_first_replaces_the_starting_popup() {
+        let repo = crate::status::testutil::fixture("shell-starting-ended");
+        let mut tab = DispatchTab::default();
+        tab.started(
+            Ok(stand_in("echo refused >&2; exit 1")),
+            std::time::SystemTime::now(),
+        );
+        for _ in 0..500 {
+            tab.reap(&repo);
+            if tab.child.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(tab.popup, Some(Popup::Ended(_))));
+
+        let mut tab = DispatchTab::default();
+        tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
+        tab.enter(&repo, &Pipelines::builtin(), &repo.root);
+        for _ in 0..500 {
+            tab.reap(&repo);
+            if tab.child.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(tab.child.is_none());
+        assert!(tab.popup.is_none());
     }
 
     // While a board confirm panel is open it reads every key: `→` there is

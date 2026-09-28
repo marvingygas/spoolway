@@ -239,6 +239,50 @@ mod tests {
         );
     }
 
+    /// `reserve` is a plain load-modify-save over one file, with nothing of
+    /// its own to keep two calls from interleaving — its own doc says so.
+    /// Orchestrated by hand rather than by racing real threads, which would
+    /// make this test's own result depend on how the scheduler happens to
+    /// land rather than on the bug: two callers both load before either
+    /// saves, exactly what running `reserve` for two different long lanes on
+    /// two threads with no lock around it would risk, and the second save
+    /// still overwrites the first's record outright rather than merging with
+    /// it. [`crate::mux::Herdr::alias_reservation`] is what a real boot holds
+    /// across the loads and the saves alike so this can never happen there;
+    /// see `alias_reservation_serialises_two_long_names_booting_at_once` in
+    /// `mux.rs` for the locked, still-two-callers version of this.
+    #[test]
+    fn two_unsynchronised_reserves_lose_the_first_ones_record() {
+        let dir = tempdir();
+        let path = alias_store_path(dir.path());
+
+        let mut first = load(&path);
+        first.entries.retain(|r| r.lane != "a");
+        first.entries.push(AliasRecord {
+            alias: candidate_alias("a", 0),
+            lane: "a".to_string(),
+            pane_id: "w1:p1".to_string(),
+        });
+
+        // `second`'s own load happens before `first`'s save below — the read
+        // half of the race: it sees the same empty file `first` did.
+        let mut second = load(&path);
+        second.entries.retain(|r| r.lane != "b");
+        second.entries.push(AliasRecord {
+            alias: candidate_alias("b", 0),
+            lane: "b".to_string(),
+            pane_id: "w1:p2".to_string(),
+        });
+
+        save(&path, &first).unwrap();
+        save(&path, &second).unwrap();
+
+        // `a`'s record, written first, is gone — `second`'s save carried no
+        // knowledge of it and overwrote the whole file.
+        assert_eq!(alias_for(dir.path(), "a"), None, "a's record was lost");
+        assert!(alias_for(dir.path(), "b").is_some());
+    }
+
     /// A candidate that collides with a name already live must never be
     /// handed out — that agent is somebody else's, or this project's own
     /// session under a different lane, and either way herdr would refuse a

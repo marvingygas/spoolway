@@ -148,7 +148,8 @@ Every task on the board is in one of a few states:
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
 | `waiting` | Held at a `serial:` step while another task's run of it finishes. |
-| `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
+| `starting` | A slot is claimed and the lane is booting. |
+| `running` | An agent is working the task's current step. |
 | `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
 | `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
 | `blocked` | A step reported a block and needs help. An unattended run hands it to the unblocker prompt. |

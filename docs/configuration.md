@@ -58,7 +58,7 @@ project](dispatcher.md#one-home-for-every-run-in-every-project).
 
 | Directory | Holds | Swept by `retention_days` |
 |---|---|---|
-| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/` | Work in flight | No |
+| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `claims/` | Work in flight | No |
 | `archive/`, `scratch/`, `headless/`, `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | Yes |
 | `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
 

@@ -4,9 +4,9 @@
 //! taken over by hand. herdr is the only multiplexer backend; headless, also
 //! behind this trait, runs no multiplexer at all.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -187,7 +187,16 @@ pub struct LaneSpec<'a> {
 }
 
 /// The operations spoolway needs from a multiplexer.
-pub trait Mux {
+///
+/// `Sync`: [`crate::dispatch::Dispatcher::start_lanes`] boots several
+/// claimed lanes' `start_lane`/`prompt` at once, each on its own thread,
+/// sharing this one `&dyn Mux` across them — see its own doc. A supertrait
+/// bound binds every implementor, test fakes included, whether or not a
+/// given test ever reaches the dispatcher's own boot path: `Herdr` and
+/// `Headless` hold nothing that is not already `Sync`, and the fakes in
+/// `dispatch.rs` and this module's own tests moved their interior mutability
+/// from `RefCell` to `Mutex` to satisfy it.
+pub trait Mux: Sync {
     /// What to call this backend in a message a person reads.
     fn name(&self) -> &'static str;
 
@@ -261,7 +270,7 @@ pub trait Mux {
     /// [`crate::dispatch::ensure_workspace`] — because a multiplexer that
     /// restarts while the worktrees survive (a reboot, herdr being
     /// restarted) forgets every workspace and tab id it ever handed out.
-    /// Reusing one blindly means `start_one` reads a `tab_id` nothing
+    /// Reusing one blindly means `prepare_boot` reads a `tab_id` nothing
     /// answers to any more, so the pane split fails on that pass and on
     /// every pass after it.
     ///
@@ -656,7 +665,7 @@ const VACATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// spawned herdr child on — the one wait [`Herdr::start_agent`],
 /// [`Herdr::call_watching_for_stall`] and [`Herdr::wait_for_pane_shell`] now
 /// all share, in place of each making its own.
-const VACATE_POLL: Duration = Duration::from_millis(250);
+pub(crate) const VACATE_POLL: Duration = Duration::from_millis(250);
 
 /// Sleep for [`VACATE_POLL`], having called `tick` first — the wait
 /// [`Herdr::wait_for_pane_shell`] steps on directly, and the one
@@ -800,7 +809,7 @@ impl std::error::Error for PaneBusy {}
 
 /// The herdr backend. Shells out to the `herdr` CLI, which speaks to its server
 /// over a socket and answers in JSON.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Herdr {
     /// Where `herdr` is invoked from, and the repository every worktree of a
     /// `MuxMode::Split` task is cut from: the project root.
@@ -871,7 +880,7 @@ pub struct Herdr {
     /// own tab exists to replace it, and remembering it rather than guessing
     /// is what keeps a second project — or a second run of this one — from
     /// closing a tab it never opened.
-    root_tab: RefCell<Option<String>>,
+    root_tab: Mutex<Option<String>>,
 
     /// Where this project's [`crate::lane_alias`] records live — read and
     /// written whenever a lane's full name outgrows herdr's own 32-character
@@ -881,6 +890,22 @@ pub struct Herdr {
     /// file, and every lane whose name already fits never touches this path
     /// at all.
     project_home: PathBuf,
+
+    /// Held across [`Herdr::live_wire_names`] and [`crate::lane_alias::
+    /// reserve`] in [`Herdr::start_lane`] — the one stretch of a lane's boot
+    /// that is not safe on the several threads
+    /// [`crate::dispatch::Dispatcher::start_lanes`] now calls `start_lane`
+    /// from at once. `reserve` is an unlocked load-modify-save over the same
+    /// alias file (see its own doc), and `live_wire_names` is what decides
+    /// the candidate it picks: two lanes with a long name booting together
+    /// would otherwise both read the file — and the same `agent list` —
+    /// before either had written its own record, so both could pick the same
+    /// short alias, and whichever saved last would silently drop the other's
+    /// record. Only the two calls together are guarded, never the rest of
+    /// `start_lane`: nothing else in it touches this file, and serialising
+    /// the whole boot would put back exactly the wait this task exists to
+    /// remove.
+    alias_reservation: Mutex<()>,
 }
 
 impl Herdr {
@@ -895,8 +920,9 @@ impl Herdr {
             anchor: checkout.to_path_buf(),
             mode: config.herdr_mode,
             worktree_root: worktree_root(cwd, config)?,
-            root_tab: RefCell::new(None),
+            root_tab: Mutex::new(None),
             project_home: project_home_lenient(cwd).0,
+            alias_reservation: Mutex::new(()),
         })
     }
 
@@ -1129,6 +1155,30 @@ impl Herdr {
     fn live_wire_names(&self) -> Result<HashSet<String>> {
         let list: AgentList = self.call(&["agent", "list"])?;
         Ok(list.agents.into_iter().filter_map(|raw| raw.name).collect())
+    }
+
+    /// A lane's short opaque alias for a name too long for herdr's own wire
+    /// rule — [`Self::live_wire_names`] plus [`crate::lane_alias::reserve`],
+    /// under [`Self::alias_reservation`].
+    fn reserve_alias(&self, lane: &str, pane_id: &str) -> Result<String> {
+        self.reserve_alias_with(lane, pane_id, || self.live_wire_names())
+    }
+
+    /// [`Self::reserve_alias`] with the `agent list` call handed in, so a
+    /// test with no `herdr` can drive the same locked path `start_lane`
+    /// takes — `live_wire_names` shells out to a real `herdr`.
+    fn reserve_alias_with(
+        &self,
+        lane: &str,
+        pane_id: &str,
+        taken: impl FnOnce() -> Result<HashSet<String>>,
+    ) -> Result<String> {
+        // Held across both calls — see [`Self::alias_reservation`]'s own
+        // doc — so two lanes booting on their own threads never read the
+        // same "taken" picture and reserve the same short alias.
+        let _reserving = self.alias_reservation.lock().unwrap();
+        let taken = taken()?;
+        crate::lane_alias::reserve(&self.project_home, lane, pane_id, &taken)
     }
 
     /// The workspace already open on this checkout, if one is.
@@ -1706,7 +1756,7 @@ impl Mux for Herdr {
         // The bare shell it had to be created with. Remembered so
         // [`Herdr::open_tab`] can close exactly that tab, once a project's own
         // tab replaces it, and no other.
-        *self.root_tab.borrow_mut() = created.root_pane.tab_id.clone();
+        *self.root_tab.lock().unwrap() = created.root_pane.tab_id.clone();
         Ok(Some(created.workspace.workspace_id))
     }
 
@@ -1730,7 +1780,7 @@ impl Mux for Herdr {
         // nobody typed into. Only ever the tab *this instance* opened: a
         // second project finding the workspace already there recorded no
         // root tab and closes nothing of another project's.
-        if let Some(tab) = self.root_tab.borrow_mut().take() {
+        if let Some(tab) = self.root_tab.lock().unwrap().take() {
             let _ = self.close_tab(&tab);
         }
 
@@ -2110,8 +2160,7 @@ impl Mux for Herdr {
         let handle = if readable.chars().count() <= AGENT_NAME_MAX {
             readable
         } else {
-            let taken = self.live_wire_names()?;
-            crate::lane_alias::reserve(&self.project_home, spec.name, spec.pane_id, &taken)?
+            self.reserve_alias(spec.name, spec.pane_id)?
         };
         let mut args: Vec<&str> = vec![
             "agent",
@@ -3941,7 +3990,7 @@ mod tests {
     /// the pane — and say so truthfully, rather than claim the pane came back
     /// to a shell when nothing made that happen.
     struct BareMux {
-        closed: RefCell<Vec<String>>,
+        closed: Mutex<Vec<String>>,
     }
 
     impl Mux for BareMux {
@@ -3985,7 +4034,7 @@ mod tests {
             unimplemented!()
         }
         fn close_pane(&self, pane_id: &str) -> Result<()> {
-            self.closed.borrow_mut().push(pane_id.to_string());
+            self.closed.lock().unwrap().push(pane_id.to_string());
             Ok(())
         }
         fn start_lane(&self, _spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
@@ -4014,7 +4063,7 @@ mod tests {
     #[test]
     fn a_backend_with_no_gesture_still_closes_the_pane_when_asked_to_vacate() {
         let mux = BareMux {
-            closed: RefCell::new(Vec::new()),
+            closed: Mutex::new(Vec::new()),
         };
 
         let left = mux
@@ -4027,7 +4076,7 @@ mod tests {
             "nothing typed a gesture into the pane, so it cannot have come back to a shell"
         );
         assert_eq!(
-            mux.closed.borrow().as_slice(),
+            mux.closed.lock().unwrap().as_slice(),
             ["pane-1"],
             "the default has to close the pane exactly as `stop_lane` does"
         );
@@ -4041,7 +4090,7 @@ mod tests {
     #[test]
     fn a_kind_with_a_gesture_gains_nothing_from_a_backend_that_cannot_send_it() {
         let mux = BareMux {
-            closed: RefCell::new(Vec::new()),
+            closed: Mutex::new(Vec::new()),
         };
 
         let left = mux
@@ -4053,7 +4102,7 @@ mod tests {
             Vacated::PaneClosed,
             "a backend with nothing to type at cannot use a gesture, whatever kind carries one"
         );
-        assert_eq!(mux.closed.borrow().as_slice(), ["pane-1"]);
+        assert_eq!(mux.closed.lock().unwrap().as_slice(), ["pane-1"]);
     }
 
     /// Fixed, and the same for every project: two projects dispatching at
@@ -4113,8 +4162,95 @@ mod tests {
         );
     }
 
+    /// Two lanes with names too long for herdr's own wire rule, booting on
+    /// their own threads under [`crate::dispatch::Dispatcher::start_lanes`],
+    /// both reach [`Herdr::reserve_alias`] — a load-modify-save over the
+    /// same alias file with no lock of its own, see [`crate::lane_alias::
+    /// reserve`]'s doc. This drives [`Herdr::reserve_alias_with`], the path
+    /// `start_lane` takes, from two threads lined up on a
+    /// [`std::sync::Barrier`]. The stand-in `agent list` waits for the other
+    /// thread to arrive too, and counts how many are ever inside at once:
+    /// with `alias_reservation` held that is one, and the wait times out;
+    /// without it both are inside together and the test fails.
+    #[test]
+    fn alias_reservation_serialises_two_long_names_booting_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = crate::scratch::root("mux-alias-reservation-race");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // `project_home` is resolved once, here, off this thread's home —
+        // see [`crate::platform::test_home`] — so the alias file lands under
+        // `root`, never the real `~/.spoolway`.
+        let herdr = crate::platform::test_home::with_home(&root, || {
+            Herdr::new(&root, &root, &DispatchConfig::default()).unwrap()
+        });
+
+        let lanes = [
+            ("task-a · a-step-name-longer-than-herdrs-own-rule", "pane-a"),
+            ("task-b · a-step-name-longer-than-herdrs-own-rule", "pane-b"),
+        ];
+        let barrier = std::sync::Barrier::new(lanes.len());
+        let arrived = AtomicUsize::new(0);
+        let inside = AtomicUsize::new(0);
+        let most_inside = AtomicUsize::new(0);
+        let aliases: Vec<String> = std::thread::scope(|scope| {
+            lanes
+                .iter()
+                .map(|&(lane, pane)| {
+                    let (herdr, barrier) = (&herdr, &barrier);
+                    let (arrived, inside, most_inside) = (&arrived, &inside, &most_inside);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        herdr
+                            .reserve_alias_with(lane, pane, || {
+                                let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                                most_inside.fetch_max(now, Ordering::SeqCst);
+                                arrived.fetch_add(1, Ordering::SeqCst);
+                                let deadline = Instant::now() + Duration::from_millis(200);
+                                while arrived.load(Ordering::SeqCst) < 2
+                                    && Instant::now() < deadline
+                                {
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                inside.fetch_sub(1, Ordering::SeqCst);
+                                Ok(HashSet::new())
+                            })
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+
+        assert_eq!(
+            most_inside.load(Ordering::SeqCst),
+            1,
+            "the two reservations never overlapped — `alias_reservation` held them apart"
+        );
+        assert_ne!(
+            aliases[0], aliases[1],
+            "each lane got its own alias rather than colliding on the same one"
+        );
+        for (&(lane, pane), alias) in lanes.iter().zip(&aliases) {
+            assert_eq!(
+                crate::lane_alias::alias_for(&herdr.project_home, lane),
+                Some(alias.clone()),
+                "`{lane}`'s own record still resolves — the other lane's save did not clobber it"
+            );
+            assert_eq!(
+                crate::lane_alias::lane_for(&herdr.project_home, alias, pane),
+                Some(lane.to_string())
+            );
+        }
+        assert!(herdr.project_home.starts_with(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// `MuxMode::Grouped`'s own per-task route is `project_tab`, in
-    /// `src/dispatch.rs`: every branch of `start_one`'s dispatch match —
+    /// `src/dispatch.rs`: every branch of `prepare_boot`'s dispatch match —
     /// borrowed, freshly cut, or a healed stale pane — takes the
     /// `task_owns_workspace == false` arm into `project_tab`
     /// unconditionally. `Mux::dispatch_workspace` opens the run's one shared
