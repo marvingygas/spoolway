@@ -140,6 +140,10 @@ says which way it moved, not which arm is better.
 directory included, even one with no sessions yet. It opens on `by dir`, one row per watched
 directory.
 
+A session run by hand in one of the project's own worktrees counts here too, on the project
+root's own row. A session in a worktree a task owns counts on the lanes table instead. See
+[Worktree spend](cost.md#worktree-spend).
+
 | Column | What it is |
 |---|---|
 | `SESSIONS` | Sessions run in that directory |
@@ -161,6 +165,10 @@ directory.
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | That session's own token counts |
 | `USD` | That session's own cost |
 | `TIME` | That session's own wall time |
+
+A skill counts whether a session typed its command or ran it through the Skill tool; either
+way names the same skill. A subagent's tokens, cost and skills count on the session that ran
+it, not on a row of its own.
 
 A `Total` line closes the table: the session count and `USD` under `by dir`, and every token
 class, `USD` and `TIME` under `by session`.

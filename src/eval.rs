@@ -1244,12 +1244,22 @@ fn skill_cell(markers: Option<&BTreeSet<String>>) -> String {
     let mut names = markers
         .into_iter()
         .flatten()
-        .map(|m| m.trim_start_matches('/'));
+        .map(|m| normalize_skill(m))
+        .collect::<BTreeSet<_>>()
+        .into_iter();
     match (names.next(), names.count()) {
         (None, _) => "—".to_string(),
         (Some(first), 0) => first.to_string(),
         (Some(first), more) => format!("{first} +{more}"),
     }
+}
+
+/// A skill's name as the `skill` filter and the `SKILL` cell both key on it —
+/// a `<command-name>` marker keeps the leading slash a typed command was
+/// written with, while a Skill `tool_use` marker never had one, so the two
+/// forms of the same skill would otherwise read as two distinct values.
+fn normalize_skill(marker: &str) -> &str {
+    marker.trim_start_matches('/')
 }
 
 /// Every distinct session in `entries`, oldest first.
@@ -1930,12 +1940,14 @@ struct Loaded {
     /// Empty when the screen reads another project's ledger, or every
     /// project's: their roots are their own configs' to name, not this one's.
     roots: Vec<String>,
-    /// Every `<command-name>` marker each of `dirs`' own sessions' transcripts
-    /// holds, keyed by session id — read once here rather than on every draw,
-    /// since a transcript scan is a file read `draw` cannot afford to repeat
-    /// on every keypress. What the `skill` filter row cycles over, what a
-    /// chosen `skill` narrows `dirs` by — see [`scoped_dirs`] — and what the
-    /// `SKILL` column names.
+    /// Every skill each of `dirs`' own sessions ran, whether a
+    /// `<command-name>` marker or a Skill `tool_use` named it, keyed by
+    /// session id — read once here rather than on every draw, since a
+    /// transcript scan is a file read `draw` cannot afford to repeat on every
+    /// keypress. A subagent's own markers are folded onto its parent's set
+    /// here in `load`, so this never holds an `agent-<id>` key. What the
+    /// `skill` filter row cycles over, what a chosen `skill` narrows `dirs`
+    /// by — see [`scoped_dirs`] — and what the `SKILL` column names.
     skills_by_session: HashMap<String, BTreeSet<String>>,
     /// Each of `dirs`' own sessions' transcript span — see
     /// [`crate::usage::session_span`] — keyed by session id, read once here
@@ -1975,6 +1987,33 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
     dirs.retain(|entry| window.contains(&entry.ts));
     dirs.sort_by(|a, b| a.ts.cmp(&b.ts));
 
+    // A subagent has no session of its own to show: `agent-<id>` is only the
+    // filename Claude Code happened to write its transcript under, next to
+    // the parent session that actually ran it — see `usage::parent_session`.
+    // Folded here, before anything groups `dirs` by session at all, so every
+    // later read of this table — the row itself, its skill markers, its span
+    // — already sees one session, not two. A subagent whose transcript has
+    // since been swept off disk keeps its own `agent-<id>` row instead: there
+    // is no path left to read its parent's name off of.
+    let subagents: Vec<(String, String, String)> = dirs
+        .iter()
+        .map(|e| (e.session.clone(), e.kind.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|(session, kind)| {
+            let parent = crate::usage::parent_session(&kind, &session)?;
+            Some((session, kind, parent))
+        })
+        .collect();
+    for entry in &mut dirs {
+        if let Some((_, _, parent)) = subagents
+            .iter()
+            .find(|(session, ..)| *session == entry.session)
+        {
+            entry.session = parent.clone();
+        }
+    }
+
     let mut skills_by_session: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut spans_by_session = HashMap::new();
     for session in dirs
@@ -1994,6 +2033,16 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         if let Some(span) = crate::usage::session_span(kind, session) {
             spans_by_session.insert(session.to_string(), span);
         }
+    }
+    // A subagent's own skills belong on its parent's row too — its transcript
+    // is never one of `dirs`' sessions any more after the fold above, so the
+    // loop over `dirs` just ran can never have read it.
+    for (subagent, kind, parent) in &subagents {
+        let markers = crate::usage::skill_markers(kind, subagent);
+        skills_by_session
+            .entry(parent.clone())
+            .or_default()
+            .extend(markers);
     }
 
     // The same `to_string_lossy` spelling `usage::sweep_dirs` banks a root
@@ -2050,7 +2099,11 @@ fn scoped_dirs<'a>(loaded: &'a Loaded, filters: &Filters) -> Vec<&'a Entry> {
                 loaded
                     .skills_by_session
                     .get(&e.session)
-                    .is_some_and(|markers| markers.contains(skill))
+                    .is_some_and(|markers| {
+                        markers
+                            .iter()
+                            .any(|m| normalize_skill(m) == normalize_skill(skill))
+                    })
             })
         })
         .collect()
@@ -2120,18 +2173,25 @@ fn dir_candidates(loaded: &Loaded) -> Vec<String> {
         .collect()
 }
 
-/// Every `<command-name>` marker held by any of `loaded.dirs`' own sessions —
-/// the candidate list the `skill` row cycles over. Built from the watched
-/// transcripts themselves, never from a configured list.
+/// Every skill any of `loaded.dirs`' own sessions ran, whether a
+/// `<command-name>` marker or a Skill `tool_use` named it — the candidate
+/// list the `skill` row cycles over. Built from the watched transcripts
+/// themselves, never from a configured list.
+///
+/// One candidate per [`normalize_skill`] key, not one per marker spelling:
+/// a `<command-name>`'s own leading slash is kept as that skill's candidate
+/// wherever any session's marker carries one, so a skill only ever named
+/// through the Skill tool is the one case this shows without it.
 fn skill_candidates(loaded: &Loaded) -> Vec<String> {
-    loaded
-        .skills_by_session
-        .values()
-        .flatten()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    let mut by_key: BTreeMap<&str, &str> = BTreeMap::new();
+    for marker in loaded.skills_by_session.values().flatten() {
+        let key = normalize_skill(marker);
+        let slot = by_key.entry(key).or_insert(marker);
+        if marker.starts_with('/') {
+            *slot = marker;
+        }
+    }
+    by_key.into_values().map(String::from).collect()
 }
 
 /// Move an "all" filter to the next or previous entry of the conceptual list
@@ -3591,6 +3651,7 @@ mod tests {
             run: Some(format!("r-{task}")),
             trial: None,
             dir: None,
+            hand: false,
             project: "demo".into(),
         }
     }
@@ -4289,6 +4350,7 @@ mod tests {
             run: None,
             trial: None,
             dir: Some(dir.into()),
+            hand: false,
             project: "demo".into(),
         }
     }
@@ -4517,6 +4579,7 @@ mod screen_tests {
                 run: Some(format!("r-{task}")),
                 trial: None,
                 dir: None,
+                hand: false,
                 project: String::new(),
             },
         )
@@ -4609,6 +4672,7 @@ mod screen_tests {
                 run: None,
                 trial: None,
                 dir: None,
+                hand: false,
                 project: String::new(),
             },
         )
@@ -5044,6 +5108,7 @@ mod screen_tests {
             run: None,
             trial: None,
             dir: None,
+            hand: false,
             project: "demo".into(),
         }
     }
@@ -5441,6 +5506,7 @@ mod screen_tests {
                 run: None,
                 trial: None,
                 dir: Some(dir.to_string()),
+                hand: false,
                 project: String::new(),
             },
         )
@@ -5506,6 +5572,185 @@ mod screen_tests {
         assert!(!filtered.contains("/w/notes"), "{filtered}");
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A skill named through the Skill tool writes no leading slash, unlike
+    /// a typed `<command-name>` — see `normalize_skill`. The `skill` filter
+    /// must still keep the session that ran it, and the candidate the `→` key
+    /// cycles to must be the one already on screen, not a second value next
+    /// to it.
+    #[test]
+    fn a_skill_run_through_the_skill_tool_is_kept_by_the_same_filter_a_typed_command_is() {
+        let repo = fixture("screen-dirs-and-skill-tool");
+        bank_dir(
+            &repo,
+            "2026-09-01T09:00:00+00:00",
+            "/w/spoolway",
+            "s1",
+            0.70,
+        );
+        bank_dir(&repo, "2026-09-02T09:00:00+00:00", "/w/notes", "s2", 0.18);
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-09-01T09:05:00.000Z",
+                "message": {
+                    "model": "claude-opus-5",
+                    "usage": {"input_tokens": 2, "output_tokens": 10},
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "Skill", "input": {"skill": "spoolway-plan"}}
+                    ]
+                }
+            }),
+            serde_json::json!({
+                "type": "user",
+                "isMeta": true,
+                "timestamp": "2026-09-01T09:05:01.000Z",
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1"}]},
+                "sourceToolUseID": "toolu_1"
+            }),
+        );
+        let home = claude_home_with("skill-tool-filter", "s1", &lines);
+
+        let text = crate::platform::test_home::with_home(&home, || {
+            screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
+        });
+        let filtered = last_frame(&text);
+        assert!(filtered.contains("┌─ eval · by dir "), "{filtered}");
+        assert!(filtered.contains("skill spoolway-plan ─┐"), "{filtered}");
+        assert!(filtered.contains("/w/spoolway"), "{filtered}");
+        assert!(!filtered.contains("/w/notes"), "{filtered}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The same skill named both ways on one session — a typed `/spoolway-plan`
+    /// and a Skill `tool_use` for `spoolway-plan` — must read as one skill
+    /// throughout: one candidate for the `skill` row to cycle to, and one
+    /// name in the `SKILL` cell, not a `+1` for a "second" skill that is
+    /// really the same one spelled without its slash.
+    #[test]
+    fn a_skill_named_both_ways_on_one_session_is_one_skill_everywhere() {
+        let repo = fixture("screen-dirs-skill-both-forms");
+        bank_dir(
+            &repo,
+            "2026-09-01T09:00:00+00:00",
+            "/w/spoolway",
+            "s1",
+            0.70,
+        );
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-09-01T09:00:00.000Z",
+                "message": {"role": "user", "content":
+                    "<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"},
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-09-01T09:05:00.000Z",
+                "message": {
+                    "model": "claude-opus-5",
+                    "usage": {"input_tokens": 2, "output_tokens": 10},
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "Skill", "input": {"skill": "spoolway-plan"}}
+                    ]
+                }
+            }),
+        );
+        let home = claude_home_with("both-forms", "s1", &lines);
+
+        // `tab`, `f`, `→` on `by` to `session`.
+        let text = crate::platform::test_home::with_home(&home, || {
+            screen(&repo, &format!("\tf{RIGHT}\rq"))
+        });
+        let sessions = last_frame(&text);
+        assert!(sessions.contains("SKILL"), "{sessions}");
+        assert!(sessions.contains("spoolway-plan"), "{sessions}");
+        assert!(
+            !sessions.contains("spoolway-plan +1"),
+            "one skill named two ways must not count as two: {sessions}"
+        );
+
+        // `tab`, `f`, down twice to `skill`: exactly one candidate to cycle to.
+        let text = crate::platform::test_home::with_home(&home, || {
+            screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}{RIGHT}\rq"))
+        });
+        let filtered = last_frame(&text);
+        assert!(filtered.contains("skill /spoolway-plan ─┐"), "{filtered}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A subagent's transcript sits under `<parent-session>/subagents/`, with
+    /// no session of its own on screen — see `usage::parent_session`. Its
+    /// spend must land on the parent's own row, not a separate `agent-<id>`
+    /// one with no skill and no time, and the parent's `SKILL` cell must
+    /// include what the subagent ran.
+    #[test]
+    fn a_subagents_spend_and_skills_land_on_its_parents_row() {
+        let repo = fixture("screen-dirs-and-subagent");
+        let parent = "0198e2c0-3333-4000-8000-00000000d020";
+        let subagent = "agent-9988aabb";
+        bank_dir(
+            &repo,
+            "2026-09-01T09:00:00+00:00",
+            "/w/spoolway",
+            parent,
+            0.50,
+        );
+        bank_dir(
+            &repo,
+            "2026-09-01T09:05:00+00:00",
+            "/w/spoolway",
+            subagent,
+            0.20,
+        );
+
+        let root = crate::scratch::root("eval-subagent-fold");
+        let project = root.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{parent}.jsonl")), skill_transcript()).unwrap();
+        let subagents_dir = project.join(parent).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        let subagent_lines = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-09-01T09:05:10.000Z",
+                "message": {
+                    "model": "claude-opus-5",
+                    "usage": {"input_tokens": 2, "output_tokens": 10},
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_2", "name": "Skill", "input": {"skill": "spoolway-tasks"}}
+                    ]
+                }
+            }),
+        );
+        std::fs::write(
+            subagents_dir.join(format!("{subagent}.jsonl")),
+            &subagent_lines,
+        )
+        .unwrap();
+
+        let text = crate::platform::test_home::with_home(&root, || {
+            screen(&repo, &format!("\tf{RIGHT}\rq"))
+        });
+        let sessions = last_frame(&text);
+        assert!(sessions.contains("┌─ eval · by session "), "{sessions}");
+        assert!(!sessions.contains(subagent), "{sessions}");
+        assert!(
+            sessions.contains("0.70"),
+            "the subagent's cost must be on its parent's row: {sessions}"
+        );
+        assert!(
+            sessions.contains("spoolway-plan +1"),
+            "the parent's SKILL cell must fold in what its subagent ran: {sessions}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A notice's own overlay must never draw wider than the frame it sits

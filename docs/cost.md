@@ -55,8 +55,30 @@ A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run
 A session already banked as a lane is never banked again under `dir`. A transcript that has not
 changed since its last banked line is not read again.
 
+A subagent's transcript is banked as its own session line, under its own id. `spoolway eval`
+folds that line onto the session that ran it, so the directory table never shows a row for a
+subagent on its own. See [The directory table](eval.md#the-directory-table).
+
 codex sessions are not swept. Its session store records no working directory, so there is
 nothing to match against a watched root.
+
+### Worktree spend
+
+A session run by hand inside one of the project's own worktrees is swept the same way as a
+watched directory's own sessions. Where it lands depends on whose worktree it is.
+
+Inside a task's own worktree, the session is not a directory line. It joins the lanes table
+instead, on the step the task was on when the session started. Its tokens and cost add to that
+step's row. No run, pass or block of its own is added. A held task's worktree still counts this
+way, on the step it was held from.
+
+Inside a worktree no task owns, the session is banked as a directory line on the project root's
+own row, the same row the checkout itself banks under. Neither table has a row for a worktree
+on its own.
+
+A subagent started inside that session follows it: onto the same lanes row for a session in a
+task's own worktree, or folded onto the same directory row otherwise. A subagent of a dispatched
+lane's own session is never banked this way. That spend is the lane's own.
 
 ## Reading it
 
