@@ -151,16 +151,18 @@ queued; `enter` closes it back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements. A requirement this machine does not meet draws a gate naming what is unmet:
-`enter` queues the group with issue tracking switched off, and `esc` returns to the queue
-screen with nothing queued. See [the shipped hook
+`enter` queues the group with `tracking: off` written onto every task, and `esc` returns to
+the queue screen with nothing queued. A task queued with `tracking: off` fires no
+`[issue_tracking]` hook event and is never held waiting on one. See [the shipped hook
 scripts](configuration.md#the-shipped-hook-scripts).
 
 When every requirement is met and the batch still has a task with no `ticket:`, `enter` asks
 before it opens any ticket. The question names the tracker and lists every task in the batch.
-`enter` opens the tickets and queues, `n` queues the batch with no hook call, and `esc` returns
-to the queue screen with nothing queued. Once the hook runs, a popup fills in each task's row
-as the hook answers it and takes `enter` only once every row is done. Queueing a routine from
-the routines pane asks the same question. A trial never asks and opens no ticket. See
+`enter` opens the tickets and queues, `n` queues the batch with `tracking: off` written onto
+every task instead, and `esc` returns to the queue screen with nothing queued. Once the hook
+runs, a popup fills in each task's row as the hook answers it and takes `enter` only once every
+row is done. Queueing a routine from the routines pane asks the same question. A trial never
+asks and opens no ticket. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue add`
@@ -189,8 +191,9 @@ A `--from` path under this project's own pending directory is deleted once the b
 written. A `--from` path anywhere else, including `-`, is read and left alone.
 
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
-unmet one prints the same gate the queue screen draws and proceeds without a ticket, since
-there is no key to wait on. Otherwise it opens a ticket per task. See
+unmet one prints the same gate the queue screen draws and proceeds without a ticket, writing
+`tracking: off` onto every task instead, since there is no key to wait on. Otherwise it opens a
+ticket per task. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue list`

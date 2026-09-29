@@ -383,6 +383,55 @@ has "whose ticket landed on the task" "ticket: acme/app#" \
   "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
 has "and the result popup names what was created" "┌─ issues created " "$ASK_YES"
 
+# -------------------------------------------- tracking off: no hook, ever
+# `n` above proved the hook never runs at `open`. This is this task's own
+# acceptance criterion: `n` also stamps `tracking: off` onto the queued task
+# (`commands::queue::open_and_prefix`), and the dispatcher reads that back —
+# the same way it already reads a trial arm's `trial:` — to fire no
+# `[issue_tracking]` event for it on `queued` or `done` either, all the way
+# through a real run to the archive. Switched to `record.sh` for this one
+# case, which marks every event `queued`/`blocked`/`paused`/`done`/`open`/
+# `fetch` alike beside the task file itself; `open.sh`, left in place above,
+# is silent on every event but `open` and so cannot prove a `queued` or
+# `done` hook call never happened.
+must "the hook is switched to the one that marks every event, for this case" \
+  "$SPOOLWAY" config set issue_tracking.hook record.sh
+pending_doc declined-tracking "$BODY" "group: declined-tracking" \
+  "group_description: a task queued with tracking declined, driven to done"
+DECLINED_OUT="$LIVE/declined-tracking.out"
+on_screen ' \rn' "$DECLINED_OUT"; sed -i 's/\x1b\[[0-9;]*m//g' "$DECLINED_OUT"
+has "the question, answered n, queues the task" "queued 1 task" "$DECLINED_OUT"
+has "with tracking: off stamped onto it" "tracking: off" \
+  "$SPOOLWAY_PROJECT_HOME/queue/declined-tracking.md"
+
+if drive declined-tracking gone 180; then
+  ok "the declined task reaches done with the dispatcher running the whole way"
+else
+  bad "the declined task reaches done with the dispatcher running the whole way \
+(at \`$(stage_of declined-tracking)\`)"
+fi
+
+works "no queued event ever ran the hook for it" \
+  bash -c '[ ! -e "$1/queue/declined-tracking.md.env.queued" ]' _ "$SPOOLWAY_PROJECT_HOME"
+works "no done event ran the hook for it either" \
+  bash -c '[ ! -e "$1/queue/declined-tracking.md.env.done" ]' _ "$SPOOLWAY_PROJECT_HOME"
+works "and no tracking/ bookkeeping file exists for it at all" \
+  bash -c '! ls "$1/declined-tracking · "* >/dev/null 2>&1' _ "$TRACKING"
+# The control that keeps the three checks above from passing on a hook that
+# never ran for anyone: `asked-yes`, queued above through `enter` with its
+# ticket opened, sat at `queued` with the dispatcher stopped until the
+# `drive` above started one reading `record.sh`. Same dispatcher, same hook,
+# tracking on — so its `queued` marker is what the declined task's missing
+# one is measured against. `asked-a`, declined through the same `n`, is the
+# screen's two-task batch getting the same treatment.
+works "the control: a tracking-on task in the same run did fire the queued hook" \
+  test -e "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md.env.queued"
+works "while asked-a, declined through the same n, fired none" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/asked-a.md.env.queued"
+
+must "the hook is switched back to the one that only answers open" \
+  "$SPOOLWAY" config set issue_tracking.hook open.sh
+
 # ------------------------------------------------- on_fail = "pause"
 # A hook that always fails, on each of the four events by hand: `pause` holds
 # a task on `queued` and out of the archive on `done`, and only records the

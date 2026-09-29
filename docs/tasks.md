@@ -55,6 +55,7 @@ as JSON.
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
+| `tracking` | the queue screen, or you | `off` is the only value accepted. Fires no `[issue_tracking]` hook event for this task and never holds it waiting on one. See [Issue tracking](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
 | `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. Once that branch is gone, it opens against the branch its own pull request merged into instead. See [`spoolway stack`](pipelines.md#spoolway-stack). A branch only `origin` has is cut from directly, with no local branch made for it. |

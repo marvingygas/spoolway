@@ -324,6 +324,9 @@ restart.
 | `paused` | A task arrives on the persisted `paused` stage | No |
 | `done` | A task finishes | No |
 
+A task queued with `tracking: off` fires none of `queued`, `blocked`, `paused` or `done`, and
+is never held waiting on one of them. See [`tracking`](tasks.md#the-frontmatter-is-spoolways).
+
 ```mermaid
 flowchart LR
   A[dispatcher pass] -->|task reaches queued, blocked, paused or done| B[.spoolway/hooks/hook]
@@ -360,10 +363,11 @@ The submission is refused, naming the group, when no task in a group sets
 
 On the queue screen, `enter` asks before any of this runs. The question names the tracker,
 the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
-every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with no
-hook call, and `esc` goes back with nothing queued. Queueing a routine asks the same question.
-A trial never asks and opens no ticket. See [`spoolway
-queue`](cli-reference.md#spoolway-queue).
+every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with
+`tracking: off` written onto every task instead, and `esc` goes back with nothing queued.
+Queueing a routine asks the same question. A trial never asks and opens no ticket. See
+[`spoolway queue`](cli-reference.md#spoolway-queue) and
+[`tracking`](tasks.md#the-frontmatter-is-spoolways).
 
 A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
 holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
@@ -406,9 +410,10 @@ shape in the line is reported as unreadable rather than interpreted.
 Every submit route — the queue screen's `enter`, the jobs screen's `r`, `spoolway queue add
 --from`, `spoolway jobs run` and a job the dispatcher fires — checks the same lines before it
 opens any ticket. A tool below its floor, or missing from PATH, gates the submission. On a
-screen it shows what is unmet as a popup: `enter` queues without issue tracking, `esc` backs
-out. From the CLI or the dispatcher, where there is no key to wait on, it prints the same
-notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written onto
+every task, `esc` backs out. From the CLI or the dispatcher, where there is no key to wait on,
+it prints the same notice and proceeds the same way. See
+[`spoolway queue`](cli-reference.md#spoolway-queue).
 
 | Script | Needs | What it does |
 |---|---|---|

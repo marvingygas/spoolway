@@ -720,6 +720,14 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     if front.pipeline.as_deref().unwrap_or("").trim().is_empty() {
         bail!("{name}: a task must set `pipeline:` — spoolway routes a task on nothing else");
     }
+    // `off` is the only value this key ever means anything for — see
+    // `Task::tracking_off` — so a task hand-writing anything else is a typo
+    // that would otherwise queue with tracking silently left on.
+    if let Some(value) = front.extra.get("tracking")
+        && value != &serde_norway::Value::String("off".to_string())
+    {
+        bail!("{name}: `tracking:` may only be set to `off`");
+    }
 
     // Everything spoolway itself decides, whatever the task said —
     // exactly the fields `queue_add` always built by hand rather than trusted
@@ -1188,6 +1196,15 @@ fn open_and_prefix(
         ToolGate::Answered { tracking_off } => tracking_off,
     };
     if tracking_off {
+        // Every route that can switch tracking off for a batch — the queue
+        // screen's `n`, the tool gate's `enter`, and a routine's `jobs run`
+        // — funnels through here, so this is the one place that needs to
+        // stamp it: `dispatch::route_reserved_stage` and `tracking_gate`
+        // read `Task::tracking_off` back to fire no hook for these tasks and
+        // never hold them waiting on one.
+        for task in tasks.iter_mut() {
+            task.set_extra_str("tracking", "off");
+        }
         return Ok(());
     }
 
@@ -7365,6 +7382,32 @@ mod tests {
         assert!(err.to_string().contains("must set `pipeline:`"), "{err:#}");
     }
 
+    /// `tracking: off` is the one value this key ever means anything for —
+    /// a task hand-writing anything else is refused the same validation
+    /// `queue add --from` runs, rather than silently queuing with tracking
+    /// left on.
+    #[test]
+    fn a_task_setting_tracking_to_anything_but_off_is_refused() {
+        let text = task_text("demo", "group: demo\ntracking: paused\n", BODY);
+        let err = parse_submission("bad-tracking.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(err.to_string().contains("bad-tracking.md"), "{err:#}");
+        assert!(
+            err.to_string()
+                .contains("`tracking:` may only be set to `off`"),
+            "{err:#}"
+        );
+    }
+
+    /// The value this whole key exists for is accepted, and round-trips
+    /// through `Task::tracking_off` the same way a batch [`open_and_prefix`]
+    /// stamped it on would.
+    #[test]
+    fn a_task_setting_tracking_off_by_hand_is_accepted() {
+        let text = task_text("demo", "group: demo\ntracking: off\n", BODY);
+        let task = parse_submission("hand-tracking-off.md", &text, Some("plan/demo")).unwrap();
+        assert!(task.tracking_off());
+    }
+
     /// The retired quota-and-usage-limit park fields have no struct home any
     /// more — a submission that still carries one from an earlier run has it
     /// dropped on parse, the same as any other task `Task::parse` refuses
@@ -12771,6 +12814,59 @@ group_description: audit
                     .unwrap_or(true),
                 "the hook must never have been called"
             );
+        }
+
+        /// The same unmet-requirement gate, but checked for what this task's
+        /// acceptance criteria actually asks: every task in the batch comes
+        /// out carrying `tracking: off`, the key `dispatch::route_reserved_stage`
+        /// and `tracking_gate` read back through `Task::tracking_off` to fire
+        /// no hook for it and never hold it waiting on one.
+        #[test]
+        fn open_and_prefix_stamps_tracking_off_when_a_requirement_is_unmet() {
+            let mut repo = fixture("tool-gate-stamps-tracking-off");
+            with_versioned_hook(&mut repo, "999.0.0");
+            let doc = task_text(
+                "solo",
+                "group: solo\ngroup_description: a solo task\n",
+                BODY,
+            );
+            let mut tasks = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("solo.md".to_string(), doc)],
+            )
+            .unwrap();
+
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+
+            assert!(tasks[0].tracking_off());
+            assert_eq!(tasks[0].extra_str("tracking"), "off");
+        }
+
+        /// The counterpart: a batch whose tickets opened cleanly carries no
+        /// `tracking:` key at all — the acceptance criterion this task set
+        /// alongside the one above.
+        #[test]
+        fn open_and_prefix_writes_no_tracking_key_when_tickets_open() {
+            let repo = fixture("tool-gate-no-tracking-key-when-open");
+            let doc = task_text("solo", "group: solo\n", BODY);
+            let mut tasks = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("solo.md".to_string(), doc)],
+            )
+            .unwrap();
+
+            let gate = ToolGate::Answered {
+                tracking_off: false,
+            };
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+
+            assert!(!tasks[0].tracking_off());
+            assert_eq!(tasks[0].extra_str("tracking"), "");
         }
     }
 

@@ -674,8 +674,9 @@ enum Routed {
 /// sitting on a stage a hook was fired for — see
 /// [`Dispatcher::tracking_gate`].
 enum TrackingGate {
-    /// No hook is configured to hold this stage, or this is a trial arm
-    /// `fire` never ran for — proceed as if nothing were asked.
+    /// No hook is configured to hold this stage, or this is a trial arm or
+    /// a `tracking: off` task `fire` never ran for — proceed as if nothing
+    /// were asked.
     Inactive,
     /// The hook fired but has not exited yet.
     Pending,
@@ -1705,8 +1706,11 @@ impl<'a> Dispatcher<'a> {
         // own issue tracker should hear about: the arm is a disposable copy,
         // not real work, and the trial runtime boundary makes that
         // invariant rather than something a person has to remember to skip
-        // — see `Frontmatter::trial`.
-        if task.front.trial.is_none() {
+        // — see `Frontmatter::trial`. A task queued with `tracking: off`
+        // gets the same treatment: the batch it came from declined issue
+        // creation, so there is no ticket for a hook to act on — see
+        // `Task::tracking_off`.
+        if task.front.trial.is_none() && !task.tracking_off() {
             let group_open = graph.group_open(task.id());
             if let Err(err) = crate::tracking::fire(self.repo, task, stage, group_open) {
                 report.problems.push(format!(
@@ -1864,11 +1868,15 @@ impl<'a> Dispatcher<'a> {
     /// differently, which they do: `queued` pauses the task on a failing
     /// hook, `done` retries it.
     fn tracking_gate(&self, task: &Task, stage: &str) -> TrackingGate {
-        // A trial arm: `route_reserved_stage` never calls `fire` for one
-        // (see its own trial check just above its call site), so there is
-        // never a code here to read, and holding on `Pending` forever would
-        // deadlock every trial arm at `queued`.
-        if task.front.trial.is_some() || !crate::tracking::holds_on_fail(self.repo) {
+        // A trial arm, or a task queued with `tracking: off`:
+        // `route_reserved_stage` never calls `fire` for either (see its own
+        // check just above its call site), so there is never a code here to
+        // read, and holding on `Pending` forever would deadlock every one of
+        // them at `queued`.
+        if task.front.trial.is_some()
+            || task.tracking_off()
+            || !crate::tracking::holds_on_fail(self.repo)
+        {
             return TrackingGate::Inactive;
         }
         match crate::tracking::exit_code(self.repo, task, stage) {
@@ -18114,6 +18122,66 @@ mod tests {
         // see `Dispatcher::settle_trial_if_last_arm` — so its archive
         // task is removed again immediately rather than left standing.
         assert!(!repo.archive_dir().join("demo.md").exists());
+    }
+
+    /// The same boundary as the trial arm tests above, for a task queued
+    /// with `tracking: off` instead — see `Task::tracking_off`. A hook that
+    /// would fail this task under `on_fail = "pause"` is proof `fire` was
+    /// never called for it.
+    #[test]
+    fn a_tracking_off_task_never_fires_the_queued_issue_tracking_hook() {
+        let mut repo = fixture("hook-queued-tracking-off-suppressed");
+        write_hook(&repo, "fail.sh", "exit 1");
+        repo.config.issue_tracking.hook = "fail.sh".into();
+        repo.config.issue_tracking.on_fail = "pause".into();
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |front| {
+            front
+                .extra
+                .insert("tracking".into(), serde_norway::Value::String("off".into()));
+        });
+        let mux = FakeMux::new(vec![]);
+
+        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::QUEUED);
+        assert_eq!(
+            stage, "implement",
+            "a `tracking: off` task must never be held on a hook it never fired"
+        );
+    }
+
+    /// The `done` half of the same boundary: a hook that would hold an
+    /// ordinary task out of the archive under `on_fail = "pause"` must never
+    /// run for a `tracking: off` task, so it archives straight through, and
+    /// no run file appears under the tracking directory for it at all.
+    #[test]
+    fn a_tracking_off_task_never_fires_the_done_issue_tracking_hook() {
+        let mut repo = fixture("hook-done-tracking-off-suppressed");
+        write_hook(&repo, "fail.sh", "exit 1");
+        repo.config.issue_tracking.hook = "fail.sh".into();
+        repo.config.issue_tracking.on_fail = "pause".into();
+        let path = add_task_with(&repo, "demo", crate::pipeline::DONE, |front| {
+            front
+                .extra
+                .insert("tracking".into(), serde_norway::Value::String("off".into()));
+        });
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..50 {
+            run_pass(&repo, &mux);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !path.exists(),
+            "a `tracking: off` task must never be held out of the archive by a hook it \
+             never fired"
+        );
+        assert!(
+            !repo.tracking_dir().exists()
+                || std::fs::read_dir(repo.tracking_dir())
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "no hook run file may exist for a `tracking: off` task"
+        );
     }
 
     /// The bug a first pass at this task left in: a hook slower than

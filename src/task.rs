@@ -1066,10 +1066,11 @@ impl Task {
     /// absent or not a string.
     ///
     /// The `[issue_tracking]` `open` hook's four answers — `epic:`, `ticket:`,
-    /// `slug:` and `url:` — are the callers. None carries a typed field on
-    /// [`Frontmatter`] — see [`Task::set_extra_str`]'s own doc comment for
-    /// why — so all four are read back through the same `extra` catch-all any
-    /// other unknown key already round-trips through.
+    /// `slug:` and `url:` — are the main callers, alongside [`Task::
+    /// tracking_off`] reading `tracking:` the same way. None carries a typed
+    /// field on [`Frontmatter`] — see [`Task::set_extra_str`]'s own doc
+    /// comment for why — so all five are read back through the same `extra`
+    /// catch-all any other unknown key already round-trips through.
     pub fn extra_str(&self, key: &str) -> &str {
         match self.front.extra.get(key) {
             Some(serde_norway::Value::String(s)) => s.as_str(),
@@ -1087,12 +1088,27 @@ impl Task {
     /// [`crate::config::check_id`]'s alphabet, a url for an absolute
     /// `http`/`https` scheme — and then carried the same verbatim way. The
     /// catch-all every other hand-added key survives a rewrite through is
-    /// enough for all four.
+    /// enough for all four — and for the fifth caller,
+    /// `commands::queue::open_and_prefix`, which sets `tracking:` to `off`
+    /// on every task in a batch that declined issue creation.
     pub fn set_extra_str(&mut self, key: &str, value: &str) {
         self.front.extra.insert(
             key.to_string(),
             serde_norway::Value::String(value.to_string()),
         );
+    }
+
+    /// Whether this task was queued — or hand-written — with `tracking:
+    /// off`. `commands::queue::open_and_prefix` stamps this on every task
+    /// in a batch whose issue creation was declined, at the queue screen's
+    /// `n`, the tool-requirements gate's `enter`, or a routine's `jobs run`;
+    /// a person may also write it by hand, since `tracking` is one of
+    /// `OPTIONAL_KEYS`. `dispatch::route_reserved_stage` and `tracking_gate`
+    /// both read this the same way they already read [`Frontmatter::trial`],
+    /// so a task with tracking off starts no hook run and is never held
+    /// waiting on one.
+    pub fn tracking_off(&self) -> bool {
+        self.extra_str("tracking") == "off"
     }
 }
 
