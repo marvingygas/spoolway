@@ -3611,7 +3611,10 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 /// `tab` is the one key that moves focus between the two panes. `←` and `→`
 /// used to as well, but inside bare `spoolway` they move between tabs, and
 /// one screen reading them two ways depending on where it was opened would
-/// be one more thing to remember — so they do nothing here.
+/// be one more thing to remember — so they do nothing here. `esc` is the
+/// other way back from the tasks pane to the groups pane, the same "back" it
+/// means on the routines pane's key line; over the groups pane there is
+/// nowhere further back to go, so it does nothing there.
 fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     match key {
         Key::Char('h') => {
@@ -3625,6 +3628,9 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
                 Focus::Tasks => Focus::Groups,
             };
         }
+        // Only the focus moves: `group_cursor` stays on the group whose
+        // tasks were just being read, as it does when `tab` goes back.
+        Key::Esc => state.focus = Focus::Groups,
         Key::Up | Key::Char('k') => match state.focus {
             Focus::Groups => {
                 state.group_cursor = state.group_cursor.saturating_sub(1);
@@ -4789,6 +4795,12 @@ pub(super) fn two_pane_frame(
 /// either. Inside bare `spoolway`'s queue tab it does quit, while browsing
 /// and over the routines pane, and those two lines name it there.
 ///
+/// The ordinary line follows focus. `g` and `o` act only on a task under
+/// the tasks pane's cursor, so they are named only while that pane has
+/// focus, first, since they are what the pane is for. `tab` is named in
+/// both panes as the pane it leads to — the one way into the tasks pane
+/// inside bare `spoolway`, where `←`/`→` switch tabs instead.
+///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`] — none of the ordinary line's keys is read, so this
 /// draws the picker's own key row instead, the same keys its popup names. A
@@ -4843,12 +4855,19 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
             };
             // `q` only inside bare `spoolway`'s queue tab, the one place it
             // quits — see `crate::screen::shell::quit_hint`.
-            let keys = [
-                [
-                    ("space", "select"),
-                    ("f", "find"),
+            let pane: &[(&str, &str)] = match state.focus {
+                Focus::Groups => &[("space", "select"), ("f", "find"), ("tab", "tasks")],
+                Focus::Tasks => &[
                     ("g", "gate"),
                     ("o", "open task"),
+                    ("tab", "groups"),
+                    ("space", "select"),
+                    ("f", "find"),
+                ],
+            };
+            let keys = [
+                pane,
+                [
                     ("t", "trial"),
                     ("r", "routines"),
                     ("s", "save routine"),
@@ -7763,6 +7782,81 @@ mod tests {
         assert_eq!(state.focus, Focus::Tasks);
     }
 
+    /// `esc` over the tasks pane goes back to the groups pane and leaves the
+    /// group cursor where it was; over the groups pane it does nothing.
+    #[test]
+    fn esc_returns_focus_from_the_tasks_pane_and_keeps_the_group_cursor() {
+        let repo = fixture("screen-focus-esc");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        write_pending(&repo, "gate", &task_text("gate", "group: b\n", BODY));
+        let groups = listed(&repo);
+        let mut state = ScreenState::new();
+
+        handle_browse_key(&groups, &mut state, Key::Down);
+        assert_eq!(state.group_cursor, 1);
+        handle_browse_key(&groups, &mut state, Key::Esc);
+        assert_eq!(state.focus, Focus::Groups);
+        assert_eq!(state.group_cursor, 1);
+        assert!(matches!(state.mode, Mode::Browsing));
+
+        handle_browse_key(&groups, &mut state, Key::Tab);
+        assert_eq!(state.focus, Focus::Tasks);
+        handle_browse_key(&groups, &mut state, Key::Esc);
+        assert_eq!(state.focus, Focus::Groups);
+        assert_eq!(state.group_cursor, 1);
+    }
+
+    /// The key line follows focus: hosted, the groups pane's line names the
+    /// way into the tasks pane and no `g` or `o`; the tasks pane's line
+    /// leads with them and names the way back; `esc` brings the first line
+    /// back.
+    #[test]
+    fn hosted_the_key_line_follows_focus_between_the_two_panes() {
+        use crate::screen::shell::{Hosting, Tab};
+        let repo = fixture("screen-hosted-footer-focus");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+        let groups_line = "[space] select   [f] find   [tab] tasks   [t] trial   [r] routines   \
+                           [s] save routine   [enter] queue   [h] show queued   [q] quit";
+        let tasks_line = "[g] gate   [o] open task   [tab] groups   [space] select   [f] find   \
+                          [t] trial   [r] routines   [s] save routine   [enter] queue   \
+                          [h] show queued   [q] quit";
+
+        // `key_hint` opens every key line on one column of indent.
+        let mut state = ScreenState::new();
+        let line = crate::status::strip_ansi(&footer(&[], &state));
+        assert_eq!(line, format!(" {groups_line}"));
+        state.focus = Focus::Tasks;
+        let line = crate::status::strip_ansi(&footer(&[], &state));
+        assert_eq!(line, format!(" {tasks_line}"));
+
+        let drawn = screen(&repo, listed(&repo), "\t");
+        let last = crate::status::strip_ansi(last_frame(&drawn));
+        assert!(
+            last.contains("[g] gate   [o] open task   [tab] groups"),
+            "{last}"
+        );
+        let drawn = screen(&repo, listed(&repo), "\t\x1b");
+        let last = crate::status::strip_ansi(last_frame(&drawn));
+        assert!(last.contains("[f] find   [tab] tasks"), "{last}");
+        assert!(!last.contains("[g] gate"), "{last}");
+    }
+
+    /// Hosted, the arrows leave for the neighbouring tab from the tasks pane
+    /// too — `tab` moving focus there does not hand them to the screen.
+    #[test]
+    fn hosted_the_arrows_leave_the_tab_from_the_tasks_pane_too() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("screen-hosted-leave-tasks");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\t\x1b[D");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\t\x1b[C");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+    }
+
     /// Hosted as bare `spoolway`'s queue tab, `←`, `→` and `q` while
     /// browsing hand the screen back to the shell, and the frame opens under
     /// the strip.
@@ -9707,9 +9801,12 @@ mod tests {
         // `groups_pane_lines` rather than through a real frame.
         assert!(opening.contains("nothing to queue"), "{opening}");
         assert!(
-            opening.contains("[space] select   [f] find   [g] gate   [o] open task"),
-            "`[f] find` and `[o] open task` must sit between `[space] select` and \
-             `[enter] queue`:\n{opening}"
+            opening.contains("[space] select   [f] find   [tab] tasks   [t] trial"),
+            "the groups pane's line must name `tab` after `[f] find`:\n{opening}"
+        );
+        assert!(
+            !opening.contains("[g] gate") && !opening.contains("[o] open task"),
+            "`g` and `o` do nothing over the groups pane, so its line names neither:\n{opening}"
         );
         assert!(
             opening.contains("[h] show queued"),

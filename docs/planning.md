@@ -87,10 +87,12 @@ pending directory. The right pane lists the highlighted group's tasks and what e
 
 | Key | What it does |
 |---|---|
+| `tab` | Switch focus between the groups and tasks panes. |
+| `esc` | With the tasks pane focused, return focus to the groups pane. |
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
-| `g` | Set or clear a gate on the highlighted task. |
-| `o` | Open the highlighted task in your editor. |
+| `g` | With the tasks pane focused, set or clear a gate on the highlighted task. |
+| `o` | With the tasks pane focused, open the highlighted task in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
 | `t` | Fork the group as a trial. See [Trials](#trials). |
 | `r` | Show the routines pane. See [Routines](#routines). |

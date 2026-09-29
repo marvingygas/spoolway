@@ -132,10 +132,11 @@ tasks.
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
 | `tab` | Switch focus between the groups and tasks panes |
+| `esc` | With the tasks pane focused, return focus to the groups pane |
 | `space` | Select a group. A group is queued whole |
 | `enter` | Check the selection, queue it, and show what queued |
-| `g` | Set or clear a `gate_at` on the highlighted task |
-| `o` | Open the highlighted task in your editor |
+| `g` | With the tasks pane focused, set or clear a `gate_at` on the highlighted task |
+| `o` | With the tasks pane focused, open the highlighted task in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show hidden groups: first the queued ones, then the finished ones |
 | `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
