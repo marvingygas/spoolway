@@ -5495,7 +5495,7 @@ mod tests {
             Some(crate::screen::panel(
                 "a popup",
                 &["over it".into()],
-                "[enter] close",
+                &crate::screen::confirm(),
             )),
         ] {
             let frame = board

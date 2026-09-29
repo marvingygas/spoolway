@@ -184,7 +184,7 @@ pub(crate) fn popup(ran: bool, reason: &str) -> Vec<String> {
         true => "the dispatcher stopped",
         false => "the dispatcher did not start",
     };
-    super::notice(title, reason, "[enter] close", super::NOTICE_WRAP)
+    super::notice(title, reason, &super::confirm(), super::NOTICE_WRAP)
 }
 
 /// The popup `enter` opens over a running dispatcher: whether its running
@@ -235,7 +235,7 @@ mod tests {
                 "herdr",
                 "spoolway",
                 "",
-                "[enter] close"
+                "[enter] confirm"
             ],
             "{panel:?}"
         );

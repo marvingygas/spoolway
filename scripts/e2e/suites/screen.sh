@@ -9,8 +9,9 @@
 # tab, and `←` from there draws the dispatch tab's board, where `enter` starts
 # a dispatcher and, behind a popup asking how, stops it. While one screen is open, a second `spoolway` or
 # `spoolway dispatch` in the same project refuses. A refusal on the queue tab
-# is drawn in a popup over the tab. Off a terminal, bare `spoolway` still
-# prints the grouped help.
+# is drawn in a popup over the tab, and so is what a clean submission queued,
+# ending on whether a dispatcher will pick it up. Off a terminal, bare
+# `spoolway` still prints the grouped help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -189,10 +190,29 @@ awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$REFU
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
-has "closed by enter" "[enter] close" "$LAST"
+has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
 has "under the strip" "dispatch       [queue]       jobs        eval" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
+
+# A clean submission lands on the queued popup, which ends by saying whether a
+# dispatcher will pick the work up. The dispatcher started above has stopped,
+# so nothing holds its lock and the popup asks for one to be started. The
+# refused group is cleared first so the new one is the only group written
+# since `cart`, and the one the cursor opens on.
+rm -f "$SPOOLWAY_PROJECT_HOME/pending/bad-stage.md"
+pending_doc billing-export "$BODY" "group: billing"
+QUEUED="$LIVE/queued.txt"
+works "a clean submission on the queue tab ends when its keys run out" \
+  script -qec "printf ' \\r' | '$SPOOLWAY'" "$QUEUED"
+awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$QUEUED" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the queued popup is drawn over the tab" "┌─ queued " "$LAST"
+has "naming the task it queued" "billing-export" "$LAST"
+has "saying no dispatcher will pick it up yet" "Start the dispatcher to begin working" "$LAST"
+lacks "never that one is running" "Dispatcher is running" "$LAST"
+has "answered by enter" "[enter] confirm" "$LAST"
+works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"
