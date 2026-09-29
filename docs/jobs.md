@@ -72,7 +72,7 @@ schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
 `n` and `e` walk three panels. `esc` on any of them writes nothing.
 
-1. The routine. This is the same routines browser as the queue screen's `r` pane, listing one
+1. The routine. This is the same routines browser as the routines tab, listing one
    row per routine. `space` ticks a routine and `enter` picks it. `tab` moves focus onto the
    tasks pane, where `space` picks the highlighted task and `o` opens it in your editor. `esc`
    cancels the picker from either pane.

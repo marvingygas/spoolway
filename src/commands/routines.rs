@@ -2,8 +2,8 @@
 //! project likes and tracked in git — the counterpart to [`super::pending`]'s
 //! read of the single flat pending directory.
 //!
-//! Read only, and just as shallow as `pending.rs`'s own read: the queue
-//! screen's `r` pane only needs enough to draw one row per routine and the
+//! Read only, and just as shallow as `pending.rs`'s own read: the routines
+//! tab only needs enough to draw one row per routine and the
 //! tasks under it, and `super::queue::validate_batch` is still what
 //! actually validates a task once a person queues one, exactly as it is
 //! for a pending group.

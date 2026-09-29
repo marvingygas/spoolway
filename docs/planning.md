@@ -96,8 +96,7 @@ pending directory. The right pane lists the highlighted group's tasks and what e
 | `o` | With the tasks pane focused, open the highlighted task in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
 | `t` | Fork the group as a trial. See [Trials](#trials). |
-| `r` | Show the routines pane. See [Routines](#routines). |
-| `s` | Save the highlighted group as a routine. |
+| `s` | Save the highlighted group as a routine. See [Routines](#routines). |
 | `h` | Show or hide done groups. A queued group never appears. |
 | `ctrl-c` | Leave the screen. |
 
@@ -139,8 +138,8 @@ A routine is one folder directly under `.spoolway/routines/`, tracked in git. A 
 subfolder still belongs to the routine above it: it shows and queues with that routine.
 Nothing creates the directory for you.
 
-Press `r` on the queue screen to browse routines. The left pane lists one row per routine, and
-the right pane lists the highlighted routine's tasks.
+Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane lists one
+row per routine, and its right pane lists the highlighted routine's tasks.
 
 | Key | What it does |
 |---|---|
@@ -148,7 +147,10 @@ the right pane lists the highlighted routine's tasks.
 | `enter` | Queue every task under every ticked routine as one batch. |
 | `tab` | Switch focus between the routine list and the tasks pane. |
 | `o` | Over the tasks pane, open the highlighted task in your editor. |
-| `esc` | Over the list, leave the view for the queue screen. Over the tasks pane, return focus to the list. |
+| `esc` | Over the tasks pane, return focus to the list. Over the list, do nothing. |
+
+The tab reads the routine folders again each time you switch to it, so a routine saved with `s`
+a moment ago is already listed. It starts each visit fresh, with nothing ticked.
 
 Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.

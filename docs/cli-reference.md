@@ -41,8 +41,8 @@ override`, `prompt contract`, `prompt list`, `prompt override`, `config show`, `
 
 ### `spoolway`
 
-At a terminal, with no other command typed, opens one screen: four tabs, dispatch, queue,
-jobs and eval, in that order. It opens on the queue tab.
+At a terminal, with no other command typed, opens one screen: five tabs, dispatch, queue,
+routines, jobs and eval, in that order. It opens on the queue tab.
 
 ```
 spoolway
@@ -74,15 +74,16 @@ above the strip and one below it.
 | `←` `→` | Move to the neighbouring tab, when no popup or sub-mode of the tab's own is open |
 | `q` | Quit the whole screen, when no popup or sub-mode of the tab's own is open |
 
-Inside the eval tab's filter panel and the queue tab's routines view, `←` and `→` keep their
-own meaning instead.
+Inside the eval tab's filter panel and any popup drawn over a tab, `←` and `→` keep their own
+meaning instead.
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
 titled `dispatch`, as wide and as tall as the terminal allows, from a `spoolway dispatch` child
-it starts and stops. The key line draws under the box, the same as under the queue, jobs and
-eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens described
-below. Typed bare, `spoolway queue`, `spoolway jobs` and `spoolway eval` print their usage or
-their tables instead.
+it starts and stops. The key line draws under the box, the same as under the queue, routines,
+jobs and eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens
+described below; the routines tab draws the routine list, see
+[Routines](planning.md#routines). Typed bare, `spoolway queue`, `spoolway jobs` and `spoolway
+eval` print their usage or their tables instead.
 
 The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
 says, asking the overrides and warnings gates as popups first, each only when it has something
@@ -140,8 +141,7 @@ queued never appears. The right pane lists the highlighted group's tasks.
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show or hide done groups. A queued group never appears |
 | `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
-| `r` | Switch to the routines pane. See [Routines](planning.md#routines) |
-| `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
+| `s` | Save the highlighted group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that
@@ -160,7 +160,7 @@ before it opens any ticket. The question names the tracker and lists every task 
 `enter` opens the tickets and queues, `n` queues the batch with no hook call, and `esc` returns
 to the queue screen with nothing queued. Once the hook runs, a popup fills in each task's row
 as the hook answers it and takes `enter` only once every row is done. Queueing a routine from
-the routines pane asks the same question. A trial never asks and opens no ticket. See
+the routines tab asks the same question. A trial never asks and opens no ticket. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue add`

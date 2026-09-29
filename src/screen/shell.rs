@@ -1,8 +1,10 @@
-//! Bare `spoolway`: one screen holding four tabs — dispatch, queue, jobs and
-//! eval, in that order — with one terminal guard, one key reader and one quit.
+//! Bare `spoolway`: one screen holding five tabs — dispatch, queue, routines,
+//! jobs and eval, in that order — with one terminal guard, one key reader and
+//! one quit.
 //!
 //! A tab carries no logic of its own. Each one calls the code its CLI command
-//! already draws with — `commands::queue_tab`, `commands::jobs_tab`,
+//! already draws with — `commands::queue_tab`, `commands::routines_tab`,
+//! `commands::jobs_tab`,
 //! `eval::tab` and the board's own [`crate::status::Board`] — and this module
 //! adds only the strip across the top and the keys that move between tabs.
 //! The one exception is the dispatch tab's `enter`, which starts a
@@ -17,10 +19,8 @@
 //! popup or sub-mode of its own open — [`leave_on`] — it hands a [`Leave`]
 //! back here and returns, and this loop opens the neighbouring tab. That is
 //! what lets every key the tab's screen already reads, inside its filters or
-//! its routines view, keep its own meaning without this module knowing what
-//! any of them are. A sub-mode that reads nothing of its own on a key may
-//! still hand that one key over — the queue tab's routines view does for
-//! `q`, and its key line says so.
+//! its popups, keep its own meaning without this module knowing what any of
+//! them are.
 //!
 //! What the screen has to say the moment it opens — the sync notice, any
 //! override the load left out and the update notice, which every other
@@ -65,19 +65,27 @@ pub(crate) struct OnOpen {
 pub(crate) enum Tab {
     Dispatch,
     Queue,
+    Routines,
     Jobs,
     Eval,
 }
 
 /// Every tab, left to right — the order the strip draws them and `←`/`→`
-/// walk them in.
-const TABS: [Tab; 4] = [Tab::Dispatch, Tab::Queue, Tab::Jobs, Tab::Eval];
+/// walk them in. Routines sit beside queue, the tab `s` saves them from.
+const TABS: [Tab; 5] = [
+    Tab::Dispatch,
+    Tab::Queue,
+    Tab::Routines,
+    Tab::Jobs,
+    Tab::Eval,
+];
 
 impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Dispatch => "dispatch",
             Tab::Queue => "queue",
+            Tab::Routines => "routines",
             Tab::Jobs => "jobs",
             Tab::Eval => "eval",
         }
@@ -211,7 +219,7 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: the four tabs centred, each in a
+/// The strip itself, `width` columns wide: the five tabs centred, each in a
 /// slot one column wider than its label on either side, and `←` and `→`
 /// one space outside the first and last slot. The open tab fills its slot's
 /// spare columns with `[` and `]`, the same mark the key line gives a key;
@@ -333,6 +341,9 @@ fn host(
                     input,
                     out,
                 )?,
+                // Its routine folders are read again on every visit, so a
+                // routine saved with `s` on the queue tab is already listed.
+                Tab::Routines => crate::commands::routines_tab(repo, pipelines, cwd, input, out)?,
                 Tab::Jobs => crate::commands::jobs_tab(repo, pipelines, cwd, input, out)?,
                 Tab::Eval => crate::eval::tab(repo, pipelines, input, out)?,
             }
@@ -760,19 +771,22 @@ mod tests {
         assert!(!crate::commands::already_running(&repo, false).unwrap());
     }
 
-    // The mockup's own strip for each open tab, drawn to 100 columns, column
-    // for column: every label in the column it held before the brackets. The
-    // bold takes no column, so it is taken out before the columns are read.
+    // The mockup's own strip for each open tab, drawn to the 80 columns the
+    // routines tab's mockup is drawn to, column for column: every label in
+    // the column it held before the brackets, routines between queue and
+    // jobs. The bold takes no column, so it is taken out before the columns
+    // are read.
     #[test]
     fn the_strip_lands_every_label_where_the_mockup_draws_it() {
-        let lines = TABS.map(|tab| plain(&strip_line(tab, 100)));
+        let lines = TABS.map(|tab| plain(&strip_line(tab, 80)));
         assert_eq!(
             lines,
             [
-                "                        ← [dispatch]       queue        jobs        eval  →",
-                "                        ←  dispatch       [queue]       jobs        eval  →",
-                "                        ←  dispatch        queue       [jobs]       eval  →",
-                "                        ←  dispatch        queue        jobs       [eval] →",
+                "      ← [dispatch]       queue        routines        jobs        eval  →",
+                "      ←  dispatch       [queue]       routines        jobs        eval  →",
+                "      ←  dispatch        queue       [routines]       jobs        eval  →",
+                "      ←  dispatch        queue        routines       [jobs]       eval  →",
+                "      ←  dispatch        queue        routines        jobs       [eval] →",
             ]
         );
     }
@@ -802,7 +816,10 @@ mod tests {
     #[test]
     fn left_and_right_walk_the_tabs_in_strip_order_and_stop_at_either_end() {
         assert_eq!(Tab::Queue.toward(Toward::Left), Tab::Dispatch);
-        assert_eq!(Tab::Queue.toward(Toward::Right), Tab::Jobs);
+        assert_eq!(Tab::Queue.toward(Toward::Right), Tab::Routines);
+        assert_eq!(Tab::Routines.toward(Toward::Left), Tab::Queue);
+        assert_eq!(Tab::Routines.toward(Toward::Right), Tab::Jobs);
+        assert_eq!(Tab::Jobs.toward(Toward::Left), Tab::Routines);
         assert_eq!(Tab::Jobs.toward(Toward::Right), Tab::Eval);
         assert_eq!(Tab::Dispatch.toward(Toward::Left), Tab::Dispatch);
         assert_eq!(Tab::Eval.toward(Toward::Right), Tab::Eval);
@@ -839,7 +856,7 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
-            first.contains("dispatch       [queue]       jobs        eval"),
+            first.contains("dispatch       [queue]       routines        jobs        eval"),
             "{first}"
         );
         assert!(first.contains("─ groups"), "{first}");
@@ -852,6 +869,41 @@ mod tests {
                 "[enter] start dispatching   [o] open task   [p] pause task   \
                  [r/R] resume / all   [u/U] unqueue / all   [q] quit"
             ),
+            "{last}"
+        );
+    }
+
+    // `→` from the queue tab opens routines, reading the routine folders on
+    // that visit: a routine saved with `s` a moment earlier on the queue tab
+    // is already listed. `→` again moves on to jobs.
+    #[test]
+    fn right_from_queue_opens_routines_with_a_routine_just_saved_then_jobs() {
+        let repo = crate::status::testutil::fixture("shell-host-routines");
+        std::fs::write(
+            repo.pending_dir().join("audit-deps.md"),
+            "---\nid: audit-deps\ntitle: audit-deps\npipeline: default\ngroup: nightly\n---\nbody\n",
+        )
+        .unwrap();
+
+        // `s` opens the save panel named after the group, `enter` saves it,
+        // `enter` closes the notice, `→` opens routines.
+        let frames = drive_host(&repo, "s\r\r\x1b[C");
+        let last = frames.last().unwrap();
+        assert!(
+            last.contains("dispatch        queue       [routines]       jobs        eval"),
+            "{last}"
+        );
+        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("> [ ] nightly"), "{last}");
+        assert!(
+            last.contains(" [space] select   [enter] queue   [tab] tasks   [q] quit"),
+            "{last}"
+        );
+
+        let frames = drive_host(&repo, "\x1b[C\x1b[C");
+        let last = frames.last().unwrap();
+        assert!(
+            last.contains("dispatch        queue        routines       [jobs]       eval"),
             "{last}"
         );
     }

@@ -1145,8 +1145,8 @@ fn readable_task_files(tasks: &[(String, String)]) -> Vec<String> {
 /// [`validate_batch`] and its writes: open the batch's tickets, then apply
 /// the prefix `issue_tracking.key_in_names` asks for. One place for the
 /// pair, so a batch is named the same way however it arrived — `queue add
-/// --from`, the queue screen's `enter`, or a routine fired from the `r` pane
-/// or by a job. Only `--from` ran it once, and with the flag on one queue
+/// --from`, the queue screen's `enter`, or a routine fired from the routines
+/// tab or by a job. Only `--from` ran it once, and with the flag on one queue
 /// mixed prefixed and bare names by the route each batch had taken (jobs
 /// review finding 6).
 ///
@@ -2392,7 +2392,14 @@ enum Mode {
     /// What a screen submit queued — [`queued_panel`]'s popup, the tickets
     /// the hook opened when it opened any. `enter` closes it, the same as
     /// [`Mode::Outcome`].
-    Queued(Vec<String>),
+    ///
+    /// `routines` is the routines pane the submit came from, when it did:
+    /// the routines tab has no pending screen to fall back to, so that pane
+    /// stays drawn under the popup and closing it goes back there.
+    Queued {
+        panel: Vec<String>,
+        routines: Option<RoutineNav>,
+    },
     /// The notice bare `spoolway` opens on once an update is installed but
     /// not yet synced — [`crate::gate::sync_popup`]'s panel. `enter`
     /// dismisses it, the only key it reads, and writes nothing: only
@@ -2402,11 +2409,14 @@ enum Mode {
     /// [`crate::commands::ignored_popup`]. `enter` closes it, the only key
     /// it reads, the same as [`Mode::Queued`].
     Ignored(crate::commands::IgnoredPopup),
-    /// `r`'s own screen: the left pane swapped for the routines under
-    /// `.spoolway/routines/`, one row each — see [`RoutineNav`] for what it tracks between
-    /// keys. The folders and tasks themselves live in `run_screen`'s own
-    /// `routines`, read fresh every time this mode is entered, the same way
-    /// `groups` is read once up front rather than carried on the mode.
+    /// The routines tab's own screen: the left pane swapped for the routines
+    /// under `.spoolway/routines/`, one row each — see [`RoutineNav`] for
+    /// what it tracks between keys. Only [`routines_tab`] opens it, and no
+    /// key leaves it for [`Mode::Browsing`]: the queue tab has no way in, so
+    /// the two tabs never share a visit. The folders and tasks themselves
+    /// live in `run_screen`'s own `routines`, read fresh on every visit to
+    /// the tab, the same way `groups` is read once up front rather than
+    /// carried on the mode.
     Routines(RoutineNav),
     /// `s`'s own panel, over the pending screen: saving the named group's
     /// tasks into `.spoolway/routines/<name>/`, `name` typed and edited
@@ -2639,8 +2649,10 @@ impl TicketLog for PopupTickets<'_> {
 
 /// [`Mode::Queued`] for a batch that queued `ids`: the tickets the hook
 /// answered with, when it was asked, over the count queued; or, with no
-/// ticket to show, the count over every task it queued.
-fn queued_panel(ids: &[String], tickets: &[String]) -> Mode {
+/// ticket to show, the count over every task it queued. `routines` is the
+/// routines pane the batch was queued from, or `None` over the pending
+/// screen.
+fn queued_panel(ids: &[String], tickets: &[String], routines: Option<RoutineNav>) -> Mode {
     let queued = format!("queued {}", plural(ids.len(), "task"));
     let (title, body) = if tickets.is_empty() {
         let ids = ids.iter().map(|id| format!("  {id}"));
@@ -2650,17 +2662,21 @@ fn queued_panel(ids: &[String], tickets: &[String]) -> Mode {
         lines.extend([String::new(), queued]);
         ("issues created", issue_body(lines))
     };
-    Mode::Queued(panel(title, &body, &keys(&[("enter", "close")])))
+    Mode::Queued {
+        panel: panel(title, &body, &keys(&[("enter", "close")])),
+        routines,
+    }
 }
 
-/// How the screen ended: on its own, or — inside bare `spoolway`'s queue tab
-/// — handing a key back to the shell around it.
+/// How the screen ended: on its own, or — inside bare `spoolway`'s queue or
+/// routines tab — handing a key back to the shell around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenExit {
     Quit,
-    /// `←`, `→` or `q` while browsing, inside bare `spoolway`'s queue tab —
-    /// see [`crate::screen::shell::leave_on`]. Never reached outside that
-    /// tab, where nothing is hosting the screen to hand a key back to.
+    /// `←`, `→` or `q` on a tab's home screen with no popup open, inside
+    /// bare `spoolway`'s queue or routines tab — see
+    /// [`crate::screen::shell::leave_on`]. Never reached outside those tabs,
+    /// where nothing is hosting the screen to hand a key back to.
     Leave(crate::screen::shell::Leave),
 }
 
@@ -2702,7 +2718,7 @@ fn selectable(group: &Group) -> bool {
 /// queue with it.
 ///
 /// The folders themselves are not here — it lives in `run_screen`'s own
-/// `routines`, read fresh every time `r` opens this mode, the same read
+/// `routines`, read fresh on every visit to the routines tab, the same read
 /// [`super::routines::list_routines`] gives the empty-directory case no
 /// error over.
 ///
@@ -3035,7 +3051,7 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
 /// it.
 ///
 /// Where the old standalone screen printed its opening message and ended,
-/// the tab has a strip and three other tabs to keep drawing, so the message
+/// the tab has a strip and four other tabs to keep drawing, so the message
 /// is held on the tab as its [`Mode::Outcome`] instead, closed like any
 /// other.
 ///
@@ -3068,6 +3084,47 @@ pub(crate) fn queue_tab(
     }
     state.mode = state.after_popup(Mode::Browsing);
     let exit = run_screen_from(repo, pipelines, cwd, (groups, routines), state, input, out)?;
+    Ok(match exit {
+        ScreenExit::Quit => Leave::Quit,
+        ScreenExit::Leave(leave) => leave,
+    })
+}
+
+/// Bare `spoolway`'s routines tab: the queue screen opened straight onto its
+/// [`Mode::Routines`] pane, over the terminal the shell around it already
+/// holds. Answers the [`Leave`] that ended it.
+///
+/// The routine folders are read here, once per visit, so a routine saved
+/// with `s` on the queue tab is listed the moment `→` reaches this one. Each
+/// visit also starts on a fresh [`RoutineNav`], with nothing ticked and both
+/// cursors at the top, the same as the queue tab starts each visit fresh.
+///
+/// The pending groups are not read: nothing on this tab draws or queues
+/// them, and the screen's own poll fills them in anyway — see
+/// `wait_for_key`.
+///
+/// [`Leave`]: crate::screen::shell::Leave
+pub(crate) fn routines_tab(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &std::path::Path,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<crate::screen::shell::Leave> {
+    use crate::screen::shell::Leave;
+
+    let routines = super::routines::list_routines(repo)?;
+    let mut state = ScreenState::new();
+    state.mode = Mode::Routines(RoutineNav::new());
+    let exit = run_screen_from(
+        repo,
+        pipelines,
+        cwd,
+        (Vec::new(), routines),
+        state,
+        input,
+        out,
+    )?;
     Ok(match exit {
         ScreenExit::Quit => Leave::Quit,
         ScreenExit::Leave(leave) => leave,
@@ -3112,7 +3169,7 @@ fn run_screen_from(
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<ScreenExit> {
-    let (mut groups, mut routines) = lists;
+    let (mut groups, routines) = lists;
     let mut last = None;
     let routines_dir = repo.routines_dir();
 
@@ -3138,23 +3195,13 @@ fn run_screen_from(
             break;
         };
 
-        // Inside bare `spoolway`'s queue tab, `←`, `→` and `q` belong to the
-        // shell while browsing — the one mode with no popup or sub-mode
-        // open. Every other mode keeps them: the routines pane, where the
-        // arrows do nothing, the trial picker's arrows, the filter's `q`
-        // typed into its query.
-        if matches!(state.mode, Mode::Browsing)
-            && let Some(leave) = crate::screen::shell::leave_on(key)
-        {
-            return Ok(ScreenExit::Leave(leave));
-        }
-        // The routines pane reads nothing of its own on `q`, so there `q`
-        // alone is the shell's, as the pane's own key line says. Its arrows
-        // stay with the pane, which does nothing with them: `r` still opens
-        // it from this tab, and an arrow that switched tabs from inside it
-        // would leave the pane half-closed behind the strip.
-        if matches!(state.mode, Mode::Routines(_))
-            && key == Key::Char('q')
+        // Inside bare `spoolway`, `←`, `→` and `q` belong to the shell on
+        // each tab's own home screen — browsing on the queue tab, the
+        // routines pane on the routines tab — the two modes with no popup
+        // or sub-mode open. Every other mode keeps them: a popup over
+        // either tab, the trial picker's arrows, the filter's `q` typed
+        // into its query.
+        if matches!(state.mode, Mode::Browsing | Mode::Routines(_))
             && let Some(leave) = crate::screen::shell::leave_on(key)
         {
             return Ok(ScreenExit::Leave(leave));
@@ -3218,7 +3265,7 @@ fn run_screen_from(
             // already drawn on the frame that preceded this key — holding it
             // in `state` rather than writing it straight to `out` is what let
             // it survive that draw at all.
-            Mode::Outcome { routines, .. } => {
+            Mode::Outcome { routines, .. } | Mode::Queued { routines, .. } => {
                 if key == Key::Enter {
                     let closed = match routines {
                         Some(nav) => Mode::Routines(nav.clone()),
@@ -3227,7 +3274,7 @@ fn run_screen_from(
                     state.mode = state.after_popup(closed);
                 }
             }
-            Mode::Queued(_) | Mode::Ignored(_) => {
+            Mode::Ignored(_) => {
                 if key == Key::Enter {
                     state.mode = state.after_popup(Mode::Browsing);
                 }
@@ -3339,11 +3386,9 @@ fn run_screen_from(
                     nav.focus = Focus::Groups;
                     state.mode = Mode::Routines(nav);
                 }
-                // `esc` over the list is what leaves this pane — `r` does
-                // not, since `r` inside `Mode::Browsing` is what opens it,
-                // and a key that both opens and closes the same pane is one
-                // key too many to remember.
-                Key::Esc => state.mode = Mode::Browsing,
+                // `esc` over the list falls through to `handle_routine_key`,
+                // which reads nothing on it: the pane is the routines tab's
+                // whole screen, with nothing behind it to go back to.
                 // `enter` over a ticked folder — ignored with nothing ticked,
                 // the same way `Mode::Browsing`'s own `enter` does nothing
                 // over an empty `state.selected`.
@@ -3426,18 +3471,11 @@ fn run_screen_from(
                 // sits on — see `trial_target`. Needs `pipelines`, which
                 // `handle_browse_key` is not handed, so this is the one key
                 // `run_screen` reads before falling through to it, the same
-                // way `o` and `r` already do.
+                // way `o` already does.
                 Key::Char('t') => {
                     if let Some(group) = trial_target(&groups, &state) {
                         state.mode = Mode::Trial(TrialState::new(pipelines, group));
                     }
-                }
-                // `r` swaps this screen for the routines pane — read fresh
-                // every time, so a `s` save made earlier this same session
-                // is already there the moment a person switches to it.
-                Key::Char('r') => {
-                    routines = super::routines::list_routines(repo)?;
-                    state.mode = Mode::Routines(RoutineNav::new());
                 }
                 _ => handle_browse_key(&groups, &mut state, key),
             },
@@ -3731,18 +3769,18 @@ pub(super) fn highlighted_routine_task<'a>(
         .get(nav.task_cursor)
 }
 
-/// One key over the routines pane — everything but `esc`, `enter` on a
-/// selected folder, `space` over the tasks pane and `o` over a highlighted
-/// task, which all need the repo to act on or leave this mode outright,
-/// so `run_screen` reads those first and only falls through to this for the
+/// One key over the routines pane — everything but `esc` over the tasks
+/// pane, `enter` on a selected folder, `space` over the tasks pane and `o`
+/// over a highlighted task, which all need the repo to act on or change
+/// this mode outright, so `run_screen` reads those first and only falls through to this for the
 /// rest, the same split it makes for `handle_browse_key`. `q` is part of
 /// that rest, and does nothing here either.
 ///
 /// `tab` is the only key that moves between the two panes. `←` and `→`
-/// read nothing here: they belong to the tab strip, which the queue screen
+/// read nothing here: they belong to the tab strip, which the routines tab
 /// and the jobs picker both sit under. `esc` is not read here either, since
-/// it means "back to the list" in the queue screen and "cancel" in the jobs
-/// picker, so each caller reads it itself.
+/// it means "back to the list" over the routines tab's tasks pane and
+/// "cancel" in the jobs picker, so each caller reads it itself.
 pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
     match key {
         Key::Up | Key::Char('k') => match nav.focus {
@@ -4760,8 +4798,8 @@ pub(super) fn two_pane_frame(
 /// `q` is not named outside bare `spoolway`, where no mode reads it as
 /// anything special, so there is nothing about it to say; `ctrl-c` is the
 /// way out, and a footer line has no key of its own to name for that
-/// either. Inside bare `spoolway`'s queue tab it does quit, while browsing
-/// and over the routines pane, and those two lines name it there.
+/// either. Inside bare `spoolway` it does quit, while browsing on the queue
+/// tab and over the routines tab's pane, and those two lines name it there.
 ///
 /// The ordinary line follows focus. It always leads with `space select`
 /// then `enter queue`, and the pane's own keys come after them. `g` and `o`
@@ -4803,13 +4841,14 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
         // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
         // which apply here. One line per pane, as the pending screen's is:
-        // `o` only where a task is under the cursor, and `esc` only over the
-        // list, where it leaves the pane — over the tasks pane it goes back
-        // to the list, which `tab` already names. The same line under a
-        // notice drawn over the pane.
+        // `o` only where a task is under the cursor. No `esc`: over the list
+        // it does nothing, since this pane is the routines tab's whole
+        // screen, and over the tasks pane it goes back to the list, which
+        // `tab` already names. The same line under a notice drawn over the
+        // pane.
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
-                Focus::Groups => &[("tab", "tasks"), ("esc", "back")],
+                Focus::Groups => &[("tab", "tasks")],
                 Focus::Tasks => &[("o", "open task"), ("tab", "routines")],
             };
             key_hint(
@@ -4840,13 +4879,7 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
             let keys = [
                 [("space", "select"), ("enter", "queue")].as_slice(),
                 pane,
-                [
-                    ("t", "trial"),
-                    ("r", "routines"),
-                    ("s", "save as routine"),
-                    ("h", hide),
-                ]
-                .as_slice(),
+                [("t", "trial"), ("s", "save as routine"), ("h", hide)].as_slice(),
                 crate::screen::shell::quit_hint(),
             ]
             .concat();
@@ -4924,6 +4957,10 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
     match mode {
         Mode::Routines(nav)
         | Mode::Outcome {
+            routines: Some(nav),
+            ..
+        }
+        | Mode::Queued {
             routines: Some(nav),
             ..
         }
@@ -5020,7 +5057,7 @@ fn popup(
         }
         Mode::ToolGate { panel, .. }
         | Mode::IssueQuestion { panel, .. }
-        | Mode::Queued(panel)
+        | Mode::Queued { panel, .. }
         | Mode::SyncGate(panel) => Some(panel.clone()),
         // Wrapped to the frame the same way as `Mode::Outcome` above.
         Mode::Ignored(popup) => {
@@ -5553,7 +5590,7 @@ fn begin_submission(
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            queued_panel(&ids, &tickets.rows)
+            queued_panel(&ids, &tickets.rows, None)
         }
         Err(err) => outcome("queue refused", format!("{err:#}")),
     }
@@ -6006,7 +6043,7 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
     // The name is typed, so it is refused before it is joined onto
     // anything: `join` on a `..` or an absolute path walks straight out of
     // the routines directory, and a name carrying a separator would write a
-    // routine somewhere no `r` pane ever reads it back from. One plain
+    // routine somewhere the routines tab never reads it back from. One plain
     // folder name, and nothing else.
     if std::path::Path::new(name).components().count() != 1
         || !matches!(
@@ -6143,7 +6180,7 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
         .collect()
 }
 
-/// Queue a routine target the way the `r` pane does, but driven by a job
+/// Queue a routine target the way the routines tab does, but driven by a job
 /// rather than the screen's nav. `target` is an absolute path under
 /// [`Repo::routines_dir`]: a folder queues every task at or below it as
 /// one batch, exactly as `enter` does, and a single `.md` file queues that
@@ -6285,9 +6322,11 @@ fn begin_routine_queue(
     tracking: Tracking,
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
+    // Nothing to queue leaves the pane as it stands: the routines tab has
+    // no pending screen behind it to drop back to.
     let tasks = routine_batch_tasks(repo, routines, nav);
     if tasks.is_empty() {
-        return Mode::Browsing;
+        return Mode::Routines(nav.clone());
     }
     let task_files = readable_task_files(&tasks);
     finish_routine_mode(
@@ -6306,8 +6345,8 @@ fn begin_routine_queue(
 /// the issue question when each has something to ask, and queue it. `nav`
 /// is the routines pane it came from: a refusal is drawn over it, and the
 /// gate and the question name it as the place `esc` goes back to. A landed
-/// batch says what it queued over the pending screen, the one closing it
-/// goes back to.
+/// batch says what it queued over it too, and closing that goes back to it
+/// with nothing ticked.
 fn finish_routine_mode(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -6338,7 +6377,14 @@ fn finish_routine_mode(
     let mut tickets = PopupTickets::new(&tasks, redraw);
     let tracking_off = tracking == Tracking::Off;
     match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
-        Ok(()) => queued_panel(&ids, &tickets.rows),
+        Ok(()) => {
+            // Back onto the pane with nothing ticked: the batch is queued,
+            // and a tick left standing is one `enter` away from queuing the
+            // same routine a second time.
+            let mut after = nav.clone();
+            after.selected.clear();
+            queued_panel(&ids, &tickets.rows, Some(after))
+        }
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
 }
@@ -6359,11 +6405,13 @@ fn begin_routine_solo(
     tracking: Tracking,
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
+    // No task under the cursor leaves the pane as it stands, the same as
+    // `begin_routine_queue` with nothing ticked.
     let Some(folder) = highlighted_routine_folder(routines, nav) else {
-        return Mode::Browsing;
+        return Mode::Routines(nav.clone());
     };
     let Some(task) = folder.tasks.get(nav.task_cursor) else {
-        return Mode::Browsing;
+        return Mode::Routines(nav.clone());
     };
 
     let id = mint_id(repo, &task.id, &Default::default());
@@ -7736,6 +7784,33 @@ mod tests {
         (exit, String::from_utf8(out).unwrap())
     }
 
+    /// The routines tab's screen driven over `input`, opened the way
+    /// [`routines_tab`] opens it — straight onto the routine list with
+    /// nothing ticked — keeping the exit and everything it drew.
+    fn routines_exit(repo: &Repo, input: &str) -> (ScreenExit, String) {
+        let routines = super::super::routines::list_routines(repo).unwrap();
+        let mut state = ScreenState::new();
+        state.mode = Mode::Routines(RoutineNav::new());
+        let mut input = keys(input);
+        let mut out = Vec::new();
+        let exit = run_screen_from(
+            repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            (Vec::new(), routines),
+            state,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        (exit, String::from_utf8(out).unwrap())
+    }
+
+    /// The same, keeping only what it drew.
+    fn routines_screen(repo: &Repo, input: &str) -> String {
+        routines_exit(repo, input).1
+    }
+
     /// The frame that was actually on screen when the input ran out — every
     /// draw opens on a clear-screen, so a captured transcript holds every
     /// frame the screen ever drew, back to back.
@@ -7796,9 +7871,9 @@ mod tests {
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
         let groups_line = "[space] select   [enter] queue   [f] find   [tab] tasks   [t] trial   \
-                           [r] routines   [s] save as routine   [h] show done tasks   [q] quit";
+                           [s] save as routine   [h] show done tasks   [q] quit";
         let tasks_line = "[space] select   [enter] queue   [g] gate   [o] open task   [tab] groups   \
-                          [f] find   [t] trial   [r] routines   [s] save as routine   \
+                          [f] find   [t] trial   [s] save as routine   \
                           [h] show done tasks   [q] quit";
 
         // `key_hint` opens every key line on one column of indent.
@@ -7857,28 +7932,61 @@ mod tests {
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
     }
 
-    /// The routines pane reads nothing of its own on `q`, so hosted it
-    /// quits there as it does while browsing — and its key line says so, as
-    /// step 9 of the screen's mockup draws it.
+    /// Hosted as bare `spoolway`'s routines tab, `←`, `→` and `q` over the
+    /// routine list hand the screen back to the shell, from either pane —
+    /// and the list's key line names `q` and no `esc`, as the routines tab's
+    /// mockup draws it.
     #[test]
-    fn hosted_q_quits_from_the_routines_pane_and_its_line_names_it() {
-        use crate::screen::shell::{Hosting, Leave, Tab};
-        let repo = fixture("screen-hosted-routines-q");
-        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
-        let _hosting = Hosting::open(Tab::Queue);
+    fn hosted_the_arrows_and_q_leave_the_routines_tab_and_its_line_names_q() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("screen-hosted-routines-leave");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let _hosting = Hosting::open(Tab::Routines);
 
-        let (exit, drawn) = screen_exit(&repo, listed(&repo), "rq");
+        let (exit, drawn) = routines_exit(&repo, "q");
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
-            last_frame(&drawn)
-                .contains(" [space] select   [enter] queue   [tab] tasks   [esc] back   [q] quit"),
+            last_frame(&drawn).contains(" [space] select   [enter] queue   [tab] tasks   [q] quit"),
             "{drawn}"
         );
+        assert!(last_frame(&drawn).contains("[routines]"), "{drawn}");
+        let (exit, _) = routines_exit(&repo, "\x1b[D");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
+        let (exit, _) = routines_exit(&repo, "\x1b[C");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+        let (exit, _) = routines_exit(&repo, "\t\x1b[C");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+    }
+
+    /// A popup over the routines tab keeps `←`, `→` and `q` for itself, the
+    /// rule the queue tab keeps: here the headless refusal `o` opens over
+    /// the tasks pane, which reads nothing but `enter`.
+    #[test]
+    fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
+        use crate::screen::shell::{Hosting, Tab};
+        let mut repo = fixture("screen-hosted-routines-popup");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let _hosting = Hosting::open(Tab::Routines);
+
+        let (exit, drawn) = routines_exit(&repo, "\to\x1b[C\x1b[Dq");
+        assert_eq!(exit, ScreenExit::Quit, "the input ran out under the popup");
+        assert!(last_frame(&drawn).contains("┌─ open task "), "{drawn}");
     }
 
     /// Inside a sub-mode the arrows and `q` stay with it even when hosted:
-    /// the routines view holds the arrows and does nothing with them, and
-    /// the filter reads `q` into its query — neither leaves the tab.
+    /// the filter reads `q` into its query and holds the arrows — it does
+    /// not leave the tab.
     #[test]
     fn hosted_a_sub_mode_keeps_the_arrows_and_q_for_itself() {
         use crate::screen::shell::{Hosting, Tab};
@@ -7886,12 +7994,6 @@ mod tests {
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
-        let (exit, _) = screen_exit(&repo, listed(&repo), "r\x1b[C\x1b[D");
-        assert_eq!(
-            exit,
-            ScreenExit::Quit,
-            "the input ran out inside the routines view"
-        );
         let (exit, _) = screen_exit(&repo, listed(&repo), "fq\x1b[D");
         assert_eq!(
             exit,
@@ -8656,7 +8758,7 @@ mod tests {
             &mut |_| {},
         );
         assert!(
-            matches!(outcome, Mode::Queued(_)),
+            matches!(outcome, Mode::Queued { .. }),
             "expected a clean submission to say what it queued, got {outcome:?}"
         );
 
@@ -10717,11 +10819,11 @@ mod tests {
         path
     }
 
-    /// `r` swaps the left pane for the routine list, and its own footer names
-    /// `space`/`enter`/`tab`/`esc` rather than the pending screen's keys.
+    /// The routines tab opens on the routine list, and its own footer names
+    /// `space`/`enter`/`tab` rather than the pending screen's keys.
     #[test]
-    fn r_swaps_the_left_pane_for_the_routines_tree() {
-        let repo = fixture("routines-r-swap");
+    fn the_routines_tab_opens_on_the_routine_list() {
+        let repo = fixture("routines-tab-opens");
         write_routine(
             &repo,
             "nightly",
@@ -10729,16 +10831,17 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        let drawn = screen(&repo, Vec::new(), "r");
+        let drawn = routines_screen(&repo, "");
         let last = last_frame(&drawn);
 
         assert!(last.contains("routines  1 of 1"), "{last}");
         assert!(last.contains("nightly"), "{last}");
         assert!(last.contains("1 task"), "{last}");
         assert!(
-            last.contains("[space] select   [enter] queue   [tab] tasks   [esc] back"),
+            last.contains("[space] select   [enter] queue   [tab] tasks"),
             "{last}"
         );
+        assert!(!last.contains("[esc] back"), "{last}");
         assert!(
             !last.contains("[o] open task"),
             "no task under the cursor: {last}"
@@ -10759,7 +10862,7 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        let drawn = screen(&repo, Vec::new(), "ro");
+        let drawn = routines_screen(&repo, "o");
 
         assert!(
             !drawn.contains("┌─ open task "),
@@ -10782,9 +10885,9 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        // `r` opens the pane, `tab` focuses the tasks pane on `audit-deps`,
-        // `o` tries to open it.
-        let drawn = screen(&repo, Vec::new(), "r\to");
+        // `tab` focuses the tasks pane on `audit-deps`, `o` tries to open
+        // it.
+        let drawn = routines_screen(&repo, "\to");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -10811,7 +10914,7 @@ mod tests {
             &task_text("prune", "group: maintenance\n", BODY),
         );
 
-        let drawn = screen(&repo, Vec::new(), "r");
+        let drawn = routines_screen(&repo, "");
         let last = last_frame(&drawn);
 
         assert!(last.contains("routines  1 of 1"), "{last}");
@@ -10869,8 +10972,7 @@ mod tests {
     }
 
     /// Over the tasks pane the key line names `o` and `tab` back to the
-    /// routines, and `esc` moves the cursor back to the list rather than
-    /// leaving the view.
+    /// routines, and `esc` moves the cursor back to the list.
     #[test]
     fn esc_over_the_tasks_pane_goes_back_to_the_list() {
         use crate::screen::shell::{Hosting, Tab};
@@ -10881,9 +10983,9 @@ mod tests {
             "audit-deps",
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
-        let _hosting = Hosting::open(Tab::Queue);
+        let _hosting = Hosting::open(Tab::Routines);
 
-        let tasks = last_frame(&screen(&repo, Vec::new(), "r\t")).to_string();
+        let tasks = last_frame(&routines_screen(&repo, "\t")).to_string();
         assert!(
             tasks.contains(
                 " [space] select   [enter] queue   [o] open task   [tab] routines   [q] quit"
@@ -10892,14 +10994,14 @@ mod tests {
         );
         assert!(tasks.contains("> audit-deps"), "{tasks}");
 
-        let back = last_frame(&screen(&repo, Vec::new(), "r\t\x1b")).to_string();
+        let back = last_frame(&routines_screen(&repo, "\t\x1b")).to_string();
         assert!(
             back.contains("routines  1 of 1"),
             "still in the view: {back}"
         );
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
-            back.contains(" [space] select   [enter] queue   [tab] tasks   [esc] back   [q] quit"),
+            back.contains(" [space] select   [enter] queue   [tab] tasks   [q] quit"),
             "{back}"
         );
     }
@@ -10921,7 +11023,7 @@ mod tests {
             &task_text("prune", "group: maintenance\n", BODY),
         );
 
-        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r \r");
+        let (exit, drawn) = routines_exit(&repo, " \r");
         assert_eq!(exit, ScreenExit::Quit);
 
         let mut queued_files: Vec<String> = std::fs::read_dir(repo.queue_dir())
@@ -10938,27 +11040,12 @@ mod tests {
         );
     }
 
-    /// `esc` returns to the pending screen — `r` no longer does, since `r`
-    /// is what opens this pane from `Mode::Browsing` in the first place.
+    /// `esc` over the routine list does nothing: the pane is the routines
+    /// tab's whole screen, with no pending screen behind it to go back to.
     #[test]
-    fn esc_returns_to_the_pending_screen() {
+    fn esc_over_the_routine_list_does_nothing() {
         let repo = fixture("routines-esc-back");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
-        let groups = listed(&repo);
-
-        let drawn = screen(&repo, groups, "r\x1b");
-        let last = last_frame(&drawn);
-
-        assert!(last.contains("groups  1 of 1"), "{last}");
-        assert!(last.contains("[space] select"), "{last}");
-    }
-
-    /// `r` no longer leaves the routines pane — it falls through to
-    /// `handle_routine_key`, which reads no character key at all, so the
-    /// pane is left exactly where it was.
-    #[test]
-    fn r_no_longer_leaves_the_routines_pane() {
-        let repo = fixture("routines-r-stays");
         write_routine(
             &repo,
             "nightly",
@@ -10966,15 +11053,63 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        let drawn = screen(&repo, Vec::new(), "rr");
+        let (exit, drawn) = routines_exit(&repo, " \x1b");
+        assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
         assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("> [x] nightly"), "the tick kept: {last}");
+        assert!(!last.contains("─ groups"), "{last}");
     }
 
-    /// The one non-goal this feature draws a hard line at: the empty `r`
-    /// screen names `.spoolway/routines/` rather than opening onto a blank
-    /// pane a person could mistake for a project with no keys to press.
+    /// The queue tab reads nothing on `r`: routines have a tab of their own,
+    /// so the pending screen stays exactly where it was.
+    #[test]
+    fn the_queue_tab_ignores_r() {
+        let repo = fixture("routines-queue-ignores-r");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+
+        let drawn = screen(&repo, listed(&repo), "r");
+        let last = last_frame(&drawn);
+
+        assert!(last.contains("groups  1 of 1"), "{last}");
+        assert!(!last.contains("routines  1 of 1"), "{last}");
+        assert!(!last.contains("[r] routines"), "{last}");
+    }
+
+    /// Closing the popup a queued routine opens goes back to the routine
+    /// list, not the pending screen, with nothing left ticked to queue the
+    /// same routine twice.
+    #[test]
+    fn closing_the_queued_popup_goes_back_to_the_routine_list_unticked() {
+        let repo = fixture("routines-queued-close");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+
+        let under = last_frame(&routines_screen(&repo, " \r")).to_string();
+        assert!(under.contains("queued 1 task"), "{under}");
+        assert!(under.contains("routines  1 of 1"), "over the list: {under}");
+
+        let drawn = routines_screen(&repo, " \r\r");
+        let last = last_frame(&drawn);
+        assert!(last.contains("> [ ] nightly"), "{last}");
+        assert!(!last.contains("queued 1 task"), "{last}");
+        assert!(!last.contains("─ groups"), "{last}");
+    }
+
+    /// The one non-goal this feature draws a hard line at: the empty
+    /// routines tab names `.spoolway/routines/` rather than opening onto a
+    /// blank pane a person could mistake for a project with no keys to press.
     #[test]
     fn the_empty_routines_pane_names_its_own_path() {
         let repo = fixture("routines-empty");
@@ -11014,8 +11149,8 @@ mod tests {
         let deps_text = std::fs::read_to_string(&deps).unwrap();
         let docs_text = std::fs::read_to_string(&docs).unwrap();
 
-        // r (open routines), space (select `nightly`), enter (queue it).
-        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r");
+        // space (select `nightly`), enter (queue it).
+        let (exit, _) = routines_exit(&repo, " \r");
         assert_eq!(exit, ScreenExit::Quit);
 
         assert!(
@@ -11070,7 +11205,7 @@ mod tests {
             ),
         );
 
-        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r");
+        let (exit, _) = routines_exit(&repo, " \r");
         assert_eq!(exit, ScreenExit::Quit);
 
         let scan = queued(&repo, "scan-pending-1");
@@ -11101,10 +11236,9 @@ mod tests {
             ),
         );
 
-        // r (open routines), tab (focus onto its tasks, already on
-        // `scan-pending` — the first one in filename order), space (queue
-        // it alone).
-        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\t ");
+        // tab (focus onto its tasks, already on `scan-pending` — the first
+        // one in filename order), space (queue it alone).
+        let (exit, drawn) = routines_exit(&repo, "\t ");
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
@@ -11195,7 +11329,7 @@ mod tests {
 
     /// The name is typed, so it can be typed as a path — and `join` would
     /// happily follow a `..` straight out of `.spoolway/routines/` and
-    /// write a routine somewhere the `r` pane never reads back. One plain
+    /// write a routine somewhere the routines tab never reads back. One plain
     /// folder name is all `s` accepts.
     #[test]
     fn s_refuses_a_name_that_is_not_a_plain_folder_name() {
@@ -11996,7 +12130,7 @@ mod tests {
                 Tracking::Open,
                 &mut |_| {},
             );
-            assert!(matches!(outcome, Mode::Queued(_)), "{outcome:?}");
+            assert!(matches!(outcome, Mode::Queued { .. }), "{outcome:?}");
 
             let task = queued(&repo, "wire");
             assert_eq!(task.front.group.as_deref(), Some("proj-12-one"));
@@ -12483,7 +12617,7 @@ group_description: audit
                         BODY,
                     ),
                 );
-                let drawn = screen(&repo, listed(&repo), "r \r");
+                let drawn = routines_screen(&repo, " \r");
                 let frame = last_frame(&drawn);
                 assert!(frame.contains("┌─ issue tracking "), "{frame}");
                 assert!(
@@ -12496,7 +12630,7 @@ group_description: audit
                 );
                 assert!(repo.queued_ids().is_empty());
 
-                screen(&repo, listed(&repo), "r \rn");
+                routines_screen(&repo, " \rn");
                 assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
                 assert_eq!(repo.queued_ids().len(), 1, "{:?}", repo.queued_ids());
             }

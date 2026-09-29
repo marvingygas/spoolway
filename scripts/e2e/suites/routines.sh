@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Repeatable tasks under `.spoolway/routines/`, driven end to end
-# through bare `spoolway`'s queue tab, its `r` pane and `s` panel — the one
+# through bare `spoolway`'s routines tab and the queue tab's `s` panel — the one
 # path no unit test can drive, since `run_screen` is exercised headlessly in
 # Rust already, but never as the whole binary reading real keystrokes off a
 # real pipe, under the pty `on_screen` gives it, against a real, tracked
@@ -45,13 +45,13 @@ task_doc .spoolway/routines/nightly/audit-docs.md audit-docs "$BODY" \
   "group: nightly" "depends_on: [audit-deps]"
 task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: maintenance"
 
-# `r` swaps the pending screen for the routine list; `j` moves the cursor off
-# `maintenance` (alphabetically first) onto `nightly`; `space` ticks it;
-# `enter` queues both its documents as one batch and goes back to browsing
+# `→` moves from the queue tab, where the screen opens, to the routines tab;
+# `j` moves the cursor off `maintenance` (alphabetically first) onto
+# `nightly`; `space` ticks it; `enter` queues both its documents as one batch
 # — starting a dispatcher is the dispatch tab's `enter`, not this one's; the
-# trailing `n` is noise it ignores, and the pipe running dry ends the screen,
-# the same way `trials.sh` does.
-on_screen 'rj \rn' /dev/null
+# trailing `n` is noise the popup saying what was queued ignores, and the
+# pipe running dry ends the screen, the same way `trials.sh` does.
+on_screen '\x1b[Cj \rn' /dev/null
 
 works "the first task reaches the queue under a minted id" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
@@ -77,23 +77,22 @@ has "unminted, unmodified" "id: audit-deps" \
   .spoolway/routines/nightly/audit-deps.md
 
 # The whole of `maintenance`, with the cursor already on it (it sorts
-# first): `space` ticks it and `enter` queues it, which takes in `prune` from
-# its nested `weekly/` too — there is no `weekly` row to tick on its own.
-# The trailing `n` is noise it ignores, and the pipe running dry ends the
-# screen.
-on_screen 'r \rn' /dev/null
+# first) once `→` reaches the routines tab: `space` ticks it and `enter`
+# queues it, which takes in `prune` from its nested `weekly/` too — there is
+# no `weekly` row to tick on its own. The trailing `n` is noise it ignores,
+# and the pipe running dry ends the screen.
+on_screen '\x1b[C \rn' /dev/null
 
 works "a nested task queues with its top-level routine" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 has "still carrying that routine's group" "group: maintenance" \
   "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 
-# A second, solo pick: `tab` moves the cursor onto `maintenance`'s tasks
-# pane, already on `prune`, its one task, nested or not; `space` queues it
-# alone and goes back to browsing. `prune-1` is taken by the batch above, so
-# this one mints the next number. The arrows are sent first and must move
-# nothing: they belong to the tab strip, not to this view.
-on_screen 'r\x1b[C\x1b[C\t n' /dev/null
+# A second, solo pick: `→` reaches the routines tab, and `tab` moves the
+# cursor onto `maintenance`'s tasks pane, already on `prune`, its one task,
+# nested or not; `space` queues it alone. `prune-1` is taken by the batch
+# above, so this one mints the next number.
+on_screen '\x1b[C\t n' /dev/null
 
 works "tab reaches a nested task under its routine, and a solo pick queues it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
@@ -157,11 +156,13 @@ lacks "and the ticket that earlier run's own hook opened" "ticket:" \
 lacks "and the epic a fresh run must not inherit" "epic:" \
   .spoolway/routines/archived-reuse/archived-reuse.md
 
-# `r` opens with the routine list's first entry already under the cursor —
-# `archived-reuse` sorts before every routine folder this suite wrote earlier
-# — so `space` ticks it and `enter` queues it straight from there, the same
-# `n`-declines-the-dispatcher shape every other queueing keystroke here uses.
-on_screen 'r \rn' /dev/null
+# The routines tab reads its folders fresh on the `→` that reaches it, so
+# the routine `s` just saved is listed, and it opens with the list's first
+# entry under the cursor. `archived-reuse` sorts before every routine folder
+# this suite wrote earlier, so `space` ticks it and `enter` queues it
+# straight from there, the same `n`-declines-the-dispatcher shape every
+# other queueing keystroke here uses.
+on_screen '\x1b[C \rn' /dev/null
 
 works "the saved routine queues back, past the refusal a stamped copy would hit" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse-1.md"

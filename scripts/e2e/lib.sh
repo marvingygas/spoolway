@@ -270,13 +270,13 @@ wait_for_said() {
 
 # Bare `spoolway` — the one screen — with `keys` typed into it, and every
 # frame it drew written to `out`. It opens on the queue tab; `\033[C` from
-# there is the jobs tab and `\033[D` the dispatch tab. The screen draws only
-# with stdout on a terminal, so `script` gives it a pty for stdout while the
-# keys still arrive on an ordinary pipe, and the screen ends the moment that
-# pipe runs dry. The keys and the binary go in through the environment rather
-# than being spliced into `script`'s command line, so an escape or a quote in
-# them means only what `printf` makes of it. Any `VAR=value` after `out` is
-# set for the screen alone.
+# there is the routines tab, a second one the jobs tab, and `\033[D` the
+# dispatch tab. The screen draws only with stdout on a terminal, so `script`
+# gives it a pty for stdout while the keys still arrive on an ordinary pipe,
+# and the screen ends the moment that pipe runs dry. The keys and the binary
+# go in through the environment rather than being spliced into `script`'s
+# command line, so an escape or a quote in them means only what `printf` makes
+# of it. Any `VAR=value` after `out` is set for the screen alone.
 #
 # Two popups the screen can open on are kept out of the way, since either
 # would take every key sent: the release check is skipped, and the project is

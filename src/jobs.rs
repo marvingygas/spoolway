@@ -1,7 +1,7 @@
 //! A job: a five-field cron expression plus a pipeline, pointed at a routine
 //! target. The dispatcher's own pass fires a job when the local clock crosses
-//! its expression, queueing the routine through the same path the queue
-//! screen's `r` pane runs — a folder as one batch, a single task alone
+//! its expression, queueing the routine through the same path the
+//! routines tab runs — a folder as one batch, a single task alone
 //! with its `depends_on` emptied.
 //!
 //! A job lives in one of two TOML stores: `jobs.toml` in this machine's
