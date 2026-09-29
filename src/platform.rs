@@ -318,11 +318,27 @@ pub struct TermGuard {
 }
 
 impl TermGuard {
+    /// Hide the cursor and put stdin in raw-enough mode: `ECHO` and `ICANON`
+    /// off so a keystroke is discarded rather than echoed under the footer or
+    /// held for a line that never comes, `ISIG` deliberately kept so
+    /// `ctrl-c` still raises `SIGINT` the way [`stop::catch_interrupt`]
+    /// expects to catch it.
+    ///
+    /// For a caller that draws its own panel to the normal screen *before*
+    /// taking a guard — `sync`'s `run_asking_with` and the tool-requirements
+    /// gate — and must not have it cleared out from under them. Touches
+    /// neither the alternate screen nor the panic hook; see [`TermGuard::screen`]
+    /// for the guard that does.
+    pub fn new() -> TermGuard {
+        hide_cursor();
+        TermGuard::take()
+    }
+}
+
+impl TermGuard {
     /// Enter the alternate screen, hide the cursor and put stdin in
-    /// raw-enough mode: `ECHO` and `ICANON` off so a keystroke is discarded
-    /// rather than echoed under the footer or held for a line that never
-    /// comes, `ISIG` deliberately kept so `ctrl-c` still raises `SIGINT` the
-    /// way [`stop::catch_interrupt`] expects to catch it.
+    /// raw-enough mode — see [`TermGuard::new`] for the raw-mode and cursor
+    /// half, which this shares.
     ///
     /// The alternate screen is what keeps a herdr pane from turning every
     /// cleared frame into scrollback — herdr has nothing to scroll to while
@@ -330,7 +346,13 @@ impl TermGuard {
     /// wheel, which herdr turns into arrow presses on the alternate screen,
     /// does not also start moving the board's or queue's cursor — left on,
     /// that is what the wheel would do instead of nothing.
-    pub fn new() -> TermGuard {
+    ///
+    /// For a caller that takes the guard *first* and draws after — bare
+    /// `spoolway` and the three dispatch gates (`overrides_gate`,
+    /// `warnings_gate`, `workspace_open_notice`) — since anything printed
+    /// before the alternate screen is entered would be the thing scrolled
+    /// away from, not drawn on top of.
+    pub fn screen() -> TermGuard {
         enter_alt_screen();
         install_panic_hook();
         hide_cursor();
@@ -355,10 +377,14 @@ impl Drop for TermGuard {
         drain_stdin();
         self.restore();
         show_cursor();
-        // Last, mirroring `new`'s first write: everything above undoes
+        // Last, mirroring `screen`'s first write: everything above undoes
         // something taken after the alternate screen was entered, so it
         // undoes in the opposite order, leaving the alternate screen only
-        // once there is nothing left on it to lose.
+        // once there is nothing left on it to lose. Called unconditionally
+        // here because a `new` guard never set `ALT_SCREEN_ENTERED` in the
+        // first place — `leave_alt_screen` checks that flag and is a no-op
+        // for it, rather than this needing to know which constructor built
+        // the guard it is dropping.
         leave_alt_screen();
     }
 }
@@ -405,7 +431,7 @@ mod term_guard_tests {
     //! reads back rather than the harness's own capture buffer.
     use std::process::Command;
 
-    use super::{ENTER_ALT_SCREEN_AND_STOP_WHEEL, RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN};
+    use super::{ENTER_ALT_SCREEN_AND_STOP_WHEEL, HIDE_CURSOR, RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN};
 
     /// Runs `body` directly when re-invoked under `probe_env`, otherwise
     /// spawns this same test binary to run exactly `test_name` with
@@ -423,26 +449,6 @@ mod term_guard_tests {
             .output()
             .expect("re-exec this test binary");
         String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    /// Before 2026-09-28 nothing ever entered the alternate screen, so a
-    /// herdr pane kept every cleared frame as scrollback. A real guard
-    /// writes the enter bytes (and turns wheel-as-arrows off) when it takes
-    /// the terminal, and reverses that on drop.
-    #[test]
-    fn a_real_term_guard_enters_and_leaves_the_alternate_screen_in_order() {
-        let written = probe(
-            "SPOOLWAY_TERMGUARD_PROBE_REAL",
-            "platform::term_guard_tests::a_real_term_guard_enters_and_leaves_the_alternate_screen_in_order",
-            || drop(super::TermGuard::new()),
-        );
-
-        let enter_at = written.find(ENTER_ALT_SCREEN_AND_STOP_WHEEL);
-        let leave_at = written.find(RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN);
-        assert!(
-            enter_at.is_some() && leave_at.is_some() && enter_at < leave_at,
-            "expected {ENTER_ALT_SCREEN_AND_STOP_WHEEL:?} before {RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN:?} in {written:?}"
-        );
     }
 
     /// [`probe`], but through `sh -c … 2>&1` rather than a direct
@@ -477,13 +483,16 @@ mod term_guard_tests {
     /// position `?1049h` saved, so a second one moves the cursor back onto
     /// the message the first write already made current, and the shell
     /// prompt that follows overwrites it.
+    ///
+    /// Only [`super::TermGuard::screen`] installs the hook now, so the probe
+    /// takes one of those rather than `new`.
     #[test]
     fn a_panic_with_a_live_guard_leaves_the_alternate_screen_once_before_the_message() {
         let written = probe_merged(
             "SPOOLWAY_TERMGUARD_PROBE_PANIC",
             "platform::term_guard_tests::a_panic_with_a_live_guard_leaves_the_alternate_screen_once_before_the_message",
             || {
-                let _term = super::TermGuard::new();
+                let _term = super::TermGuard::screen();
                 panic!("a panic with a live guard");
             },
         );
@@ -519,10 +528,63 @@ mod term_guard_tests {
             "an inert guard wrote an escape sequence: {written:?}"
         );
     }
+
+    /// gh-528: `sync` and the tool-requirements gate print their panel
+    /// first and take a guard after, so a guard that still enters the
+    /// alternate screen on `new` clears that panel to blank before the
+    /// person ever sees it. `TermGuard::new` must go back to touching only
+    /// raw mode and the cursor, the way it did before 522b247 — the
+    /// alternate screen belongs to the new `TermGuard::screen` alone, taken
+    /// by bare `spoolway` and the three dispatch gates.
+    #[test]
+    fn a_real_term_guard_taken_by_new_leaves_the_alternate_screen_alone() {
+        let written = probe(
+            "SPOOLWAY_TERMGUARD_PROBE_NEW_NO_ALT_SCREEN",
+            "platform::term_guard_tests::a_real_term_guard_taken_by_new_leaves_the_alternate_screen_alone",
+            || drop(super::TermGuard::new()),
+        );
+
+        assert!(
+            !written.contains(ENTER_ALT_SCREEN_AND_STOP_WHEEL)
+                && !written.contains(RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN),
+            "TermGuard::new wrote the alternate-screen bytes: {written:?}"
+        );
+    }
+
+    /// The other half of the gh-528 split: bare `spoolway` and the three
+    /// dispatch gates keep the alternate screen, through a `TermGuard::screen`
+    /// that owns exactly what `TermGuard::new` gave up above — the same
+    /// enter-before-drop-leaves-after shape the old, unsplit `new` had.
+    ///
+    /// The enter bytes must lead the hide-cursor write too, not just the
+    /// leave bytes: the acceptance criterion is that `screen` writes
+    /// `?1049h?1007l` before anything else, and a hide-cursor landing first
+    /// would put the cursor move on the normal screen instead of the
+    /// alternate one it is meant for.
+    #[test]
+    fn a_real_term_guard_taken_by_screen_enters_and_leaves_the_alternate_screen_in_order() {
+        let written = probe(
+            "SPOOLWAY_TERMGUARD_PROBE_SCREEN",
+            "platform::term_guard_tests::a_real_term_guard_taken_by_screen_enters_and_leaves_the_alternate_screen_in_order",
+            || drop(super::TermGuard::screen()),
+        );
+
+        let enter_at = written.find(ENTER_ALT_SCREEN_AND_STOP_WHEEL);
+        let hide_cursor_at = written.find(HIDE_CURSOR);
+        let leave_at = written.find(RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN);
+        assert!(
+            enter_at.is_some()
+                && hide_cursor_at.is_some()
+                && leave_at.is_some()
+                && enter_at < hide_cursor_at
+                && enter_at < leave_at,
+            "expected {ENTER_ALT_SCREEN_AND_STOP_WHEEL:?} before both {HIDE_CURSOR:?} and {RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN:?} in {written:?}"
+        );
+    }
 }
 
 /// Enter the alternate screen (`?1049h`) and turn off wheel-as-arrow-keys
-/// (`?1007l`), in one write — a real [`TermGuard::new`] writes them
+/// (`?1007l`), in one write — a real [`TermGuard::screen`] writes them
 /// together so a test reading real stdout back finds them as one
 /// contiguous sequence, never with an unrelated write (a cursor move, say)
 /// landing between them.
@@ -561,19 +623,19 @@ fn leave_alt_screen() {
     }
 }
 
-/// Make sure a panic while a real guard is live leaves the alternate screen
-/// before the panic message prints — otherwise the message lands on the
-/// screen a herdr pane still keeps as scrollback, and is gone the moment
-/// the process exits and the shell's own screen comes back.
+/// Make sure a panic while a real `screen` guard is live leaves the
+/// alternate screen before the panic message prints — otherwise the message
+/// lands on the screen a herdr pane still keeps as scrollback, and is gone
+/// the moment the process exits and the shell's own screen comes back.
 ///
-/// Installed once, the first time a real guard is taken: a panic hook is
-/// process-global, and every later real guard needs the same one, not a
+/// Installed once, the first time a `screen` guard is taken: a panic hook is
+/// process-global, and every later `screen` guard needs the same one, not a
 /// fresh layer wrapping it. Chains to whatever hook was already
 /// installed — the default one, which prints the message — rather than
 /// replacing it. [`leave_alt_screen`]'s own flag is what keeps this quiet
-/// once no guard is left to be live: the hook stays installed for the rest
-/// of the process, but only writes anything when [`enter_alt_screen`] has a
-/// write outstanding for it to undo.
+/// once no `screen` guard is left to be live: the hook stays installed for
+/// the rest of the process, but only writes anything when
+/// [`enter_alt_screen`] has a write outstanding for it to undo.
 fn install_panic_hook() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
@@ -585,8 +647,12 @@ fn install_panic_hook() {
     });
 }
 
+/// Named so [`term_guard_tests`] can check its position relative to the
+/// alternate-screen bytes without duplicating the escape sequence.
+const HIDE_CURSOR: &str = "\x1b[?25l";
+
 fn hide_cursor() {
-    print!("\x1b[?25l");
+    print!("{HIDE_CURSOR}");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 

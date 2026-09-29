@@ -460,8 +460,8 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
 ///
 /// A thin wrapper over [`overrides_gate_with`], which does the real work
 /// against an injected reader, writer and terminal guard — this is the only
-/// thing that touches the process's real stdio. `TermGuard::new` is handed
-/// over as a factory rather than constructed here: raw mode is a
+/// thing that touches the process's real stdio. `TermGuard::screen` is
+/// handed over as a factory rather than constructed here: raw mode is a
 /// presentation detail for the one branch that actually blocks on a
 /// keypress, and building it eagerly printed `hide_cursor`'s escape into
 /// every single dispatch, layered or not, tty or not (finding: `hide_cursor`
@@ -475,7 +475,7 @@ fn overrides_gate(repo: &Repo) -> Result<bool> {
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        Some(crate::platform::TermGuard::screen as fn() -> _),
     )
 }
 
@@ -656,7 +656,7 @@ fn warnings_gate(repo: &Repo, pipelines: &Pipelines) -> Result<bool> {
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        Some(crate::platform::TermGuard::screen as fn() -> _),
     )
 }
 
@@ -850,7 +850,7 @@ fn workspace_open_notice(err: &str) -> Result<()> {
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        Some(crate::platform::TermGuard::screen as fn() -> _),
     )
 }
 

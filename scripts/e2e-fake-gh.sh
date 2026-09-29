@@ -312,8 +312,18 @@ case "$verb" in
       fi
     done
 
+    # Claimed, not just computed. Two `handover` steps run side by side on
+    # separate slots, and both reading `latest` in the same instant got the
+    # same number — the second write replaced the first pull request whole,
+    # and its task's own `gh pr view` then found nothing for its branch and
+    # blocked. `set -C` makes the claim an `O_EXCL` create, so a number
+    # somebody else took first is skipped rather than overwritten. The record
+    # is written beside it and renamed in, so a reader never sees it half
+    # written; the `.part` name is not all digits, so `latest` skips it.
     last=$(latest || true)
     n=$(( ${last:-0} + 1 ))
+    until ( set -C; : > "$PRS/$n" ) 2>/dev/null; do n=$((n + 1)); done
+    printf '%s\n' "$body" > "$PRS/$n.body"
     {
       echo "number=$n"
       echo "base=$base"
@@ -322,8 +332,8 @@ case "$verb" in
       echo "state=OPEN"
       echo "head_sha=$head_sha"
       echo "base_sha=$base_sha"
-    } > "$PRS/$n"
-    printf '%s\n' "$body" > "$PRS/$n.body"
+    } > "$PRS/$n.part"
+    mv -f "$PRS/$n.part" "$PRS/$n"
     echo "file://$ORIGIN/pull/$n"
     ;;
 

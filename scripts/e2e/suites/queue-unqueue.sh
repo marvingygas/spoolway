@@ -241,4 +241,28 @@ lacks "with the hook never invoked — no ticket written" \
   "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
 lacks "and no epic either" "epic:" "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
 
+# The same gate, reached the other way it is reached: `queue add --from`
+# itself, run over a real pty rather than the queue screen's own `on_screen`
+# fixed key script above. `write_pty_driver` (`lib.sh`) gives the process a
+# real terminal without needing one behind this suite's own process — the
+# same way `commands.sh` proves `spoolway sync`'s panel (gh-528). The driver
+# waits for the gate's own text to land before sending `esc`, since a key
+# sent before the guard takes raw mode still waits in the tty's buffer
+# until the read.
+PTY_DRIVER="$LIVE/gate-from-pty.py"
+write_pty_driver "$PTY_DRIVER"
+
+pending_doc gate-from "$BODY" "group: gate-from"
+GATE_FROM_OUT="$LIVE/gate-from.out"
+PATH="$LOWVER_BIN:$PATH" python3 "$PTY_DRIVER" \
+  --after "issue tracking is not supported." --keys $'\033' \
+  "$SPOOLWAY" queue add --from "$SPOOLWAY_PROJECT_HOME/pending/gate-from.md" \
+  >"$GATE_FROM_OUT" 2>&1
+has "the gate's popup reaches the terminal over \`--from\` too" \
+  "[enter] queue anyway, without issue tracking   [esc] back" "$GATE_FROM_OUT"
+lacks "and \`--from\` never enters the alternate screen either" \
+  $'\033[?1049h' "$GATE_FROM_OUT"
+works "esc leaves that task in pending too, unqueued" \
+  test -f "$SPOOLWAY_PROJECT_HOME/pending/gate-from.md"
+
 finish

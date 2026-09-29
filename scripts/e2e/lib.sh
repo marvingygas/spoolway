@@ -299,6 +299,118 @@ _screen_ready() {
   "$SPOOLWAY" sync >/dev/null 2>&1 || true
 }
 
+# write_pty_driver <path>
+#
+# Writes a small Python driver to `<path>` that runs a command under a real
+# pty and hands its combined stdout/stderr back on this process's own
+# stdout — what a suite needs for a prompt that waits on a key `on_screen`'s
+# `script`-based drive cannot reach, or where a suite wants to read the
+# child's own exit status rather than trust `script`'s. `python3`'s `pty`
+# module gives the process a real terminal without needing one behind this
+# suite's own process.
+#
+# `--after <text> --keys <bytes>`, read off the front of argv before the
+# command itself, let a caller wait for a prompt's own text to land before
+# writing a key — a byte sent before the guard has taken raw mode still
+# waits in the tty's buffer until the read, so sending blind would race
+# whatever the prompt takes to draw. Omitted, the driver runs the command
+# and sends no key at all, same as before either option existed (gh-528).
+write_pty_driver() {
+  cat >"$1" <<'PY'
+import os, pty, select, sys, time
+
+argv = sys.argv[1:]
+after = None
+keys = None
+while len(argv) >= 2 and argv[0] in ("--after", "--keys"):
+    if argv[0] == "--after":
+        after = argv[1]
+    else:
+        keys = argv[1]
+    argv = argv[2:]
+
+pid, master = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+    os._exit(127)
+
+out = b""
+status = None
+sent = False
+deadline = time.time() + 10
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if master in ready:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            break
+        out += chunk
+    if after is not None and not sent and after.encode() in out:
+        os.write(master, keys.encode())
+        sent = True
+    wpid, status = os.waitpid(pid, os.WNOHANG)
+    if wpid != 0:
+        break
+    status = None
+
+if status is None:
+    # The process has exited (or the pty closed) but a last chunk may still
+    # be sitting in the kernel buffer — drained briefly rather than trusted
+    # to have already arrived in the loop above.
+    end = time.time() + 1
+    while time.time() < end:
+        ready, _, _ = select.select([master], [], [], 0.1)
+        if master not in ready:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    # `WNOHANG` on a child that has not exited yet returns `(0, 0)`, not
+    # `(0, None)` — trusted straight off that call, a `status` of `0` reads
+    # as `WIFEXITED` true and `WEXITSTATUS` 0, so a genuinely hung child
+    # would report a clean exit and every assertion a caller makes about
+    # something NOT happening would pass against a process still sitting
+    # there. `wpid` is what
+    # actually says whether the child exited; `status` from the same call is
+    # only trustworthy once `wpid` says so.
+    #
+    # One `WNOHANG` is not enough to ask, though: the loop above leaves here
+    # on the pty reaching EOF, and the kernel closes a dying process's fds
+    # before it makes the process reapable, so on a loaded machine the child
+    # is regularly still running at this instant — measured at 236 false
+    # timeouts in 400 runs with every core busy, against 0 on an idle one.
+    # Asked once, that reads back as a hang and kills a process that had
+    # already finished. So it is asked repeatedly until the same deadline
+    # the loop above used, which leaves the timeout branch reachable for a
+    # child that really never exits while costing a genuine exit only the
+    # sleep below.
+    reaped = None
+    while True:
+        wpid, st = os.waitpid(pid, os.WNOHANG)
+        if wpid != 0:
+            reaped = st
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.02)
+    status = reaped
+
+sys.stdout.buffer.write(out)
+if status is None:
+    print("pty-driver: timed out waiting for the process", file=sys.stderr)
+    os.kill(pid, 9)
+    sys.exit(124)
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
+PY
+}
+
 # ------------------------------------------------ a screen left open
 #
 # `on_screen` types its keys and is gone. A suite that has to watch the

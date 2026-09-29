@@ -376,6 +376,13 @@ as soon as any line differs from it.
 as popups of its own before it starts a dispatcher — see [`spoolway`](#spoolway) — so `x` there
 quiets this screen too, and the other way round.
 
+The overrides screen, the warnings screen and the workspace notice below each take the alternate
+screen before drawing, the same way bare `spoolway`'s screen does: that is what keeps a herdr pane
+from turning a cleared frame into scrollback. Bare `spoolway`'s dispatch tab skips the overrides
+and warnings screens — it already asked those two as popups of its own, on the one alternate
+screen it holds. Its child dispatch run still reaches the workspace notice, but that child owns no
+terminal, so the notice only prints there, without a screen, rather than waiting for a key.
+
 Once the lock is taken, a last checklist row, `workspace`, prints once the run's own workspace
 is found or opened. A failure to find or open it is shown instead, on its own notice with only
 `[enter] continue` to press.
