@@ -193,6 +193,9 @@ listed in the kinds table above. `spoolway install` writes a project's skills th
 `pipeline check` refuses `skills:` on a command step and on a kind that loads none. Skill
 names are not checked on disk; the agent resolves them at launch.
 
+Every listed skill receives the briefing sentence, `Read <task> before anything else.`, as
+its argument.
+
 ## Concurrency and the model server
 
 `concurrency` caps how many lanes of one profile run at once. No shipped profile sets it.

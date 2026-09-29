@@ -340,7 +340,11 @@ pub struct Step {
     pub effort: Option<String>,
 
     /// Skills invoked at the top of this step's opening prompt, one `/name`
-    /// line per skill, in declaration order — see [`crate::compose::opening_prompt`].
+    /// invocation per skill, in declaration order, all on the prompt's one
+    /// line — see [`crate::compose::opening_prompt`]. A newline between
+    /// invocations would make herdr send the message as a paste instead of
+    /// typed text, and Claude Code never expands a slash command inside a
+    /// paste.
     ///
     /// Written as one comma-separated line rather than a YAML list, because
     /// that is how it reads once turned into slash invocations: `skills:

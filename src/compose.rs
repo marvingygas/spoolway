@@ -765,23 +765,18 @@ pub(crate) const STATES: &[&str] = &[
 /// needs less. The day a fact about the step belongs in the typed message
 /// again, it is already here.
 ///
-/// A step naming `skills:` gets one `/name` line per skill first, in
-/// declaration order, then a blank line, then the task file's own line. It
-/// has to lead: a harness only expands a slash command where it opens a
-/// message, so an invocation appended after it would just be read as text
-/// about a skill rather than a command to run one.
+/// A step naming `skills:` gets one `/name` invocation per skill first, in
+/// declaration order, then the task file's own sentence — all on the one
+/// line herdr types as a single message. It has to lead, and it has to stay
+/// one line: Claude Code only expands a slash command where it opens a
+/// message, and only when that message arrives as typed text rather than a
+/// paste. A message spanning more than one line is sent as a paste — wrapped
+/// in `<pasted_content>` — where no slash command is ever expanded, so a
+/// newline anywhere in this string would silently turn every invocation back
+/// into inert text.
 pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, step: &Step) -> String {
-    let skills: String = step
-        .skills
-        .iter()
-        .map(|name| format!("/{name}\n"))
-        .collect();
-    format!(
-        "{skills}\nRead {} before anything else.",
-        task.path.display()
-    )
-    .trim()
-    .to_string()
+    let skills: String = step.skills.iter().map(|name| format!("/{name} ")).collect();
+    format!("{skills}Read {} before anything else.", task.path.display())
 }
 
 /// What a resumed lane is told, instead of the opening briefing.
