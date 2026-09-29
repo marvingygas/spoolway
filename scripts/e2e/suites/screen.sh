@@ -52,6 +52,30 @@ DRAWN="$LIVE/drawn.txt"
 works "bare spoolway opens and ends when its keys run out" \
   script -qec "printf '\\033[D' | '$SPOOLWAY'" "$DRAWN"
 
+# The real `TermGuard` the screen holds across its whole life enters the
+# alternate screen and turns wheel-as-arrows off before drawing a thing, and
+# reverses both on the way out — the one thing standing between a herdr pane
+# and turning every cleared frame into scrollback (see platform.rs). `has`
+# only checks that a string is somewhere in the file, so opening and closing
+# are checked against the program's own output: `script`'s own "Script
+# started"/"Script done" lines bookend it, one full line each, however `-q`
+# is documented.
+ENTER_ALT_SCREEN_AND_STOP_WHEEL=$'\033[?1049h\033[?1007l'
+RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN=$'\033[?1007h\033[?1049l'
+PROGRAM_OUTPUT=$(sed -e '1d' -e '$d' "$DRAWN")
+if [[ "$PROGRAM_OUTPUT" == "$ENTER_ALT_SCREEN_AND_STOP_WHEEL"* ]]; then
+  ok "opens by entering the alternate screen and stopping the wheel"
+else
+  bad "opens by entering the alternate screen and stopping the wheel"
+  head -c 40 "$DRAWN" | cat -v
+fi
+if [[ "$PROGRAM_OUTPUT" == *"$RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN" ]]; then
+  ok "ends by restoring the wheel and leaving the alternate screen"
+else
+  bad "ends by restoring the wheel and leaving the alternate screen"
+  tail -c 40 "$DRAWN" | cat -v
+fi
+
 # Every frame opens on a clear-screen, so the transcript splits into frames on
 # it. The first one drawn is the queue tab's, its label bracketed on the
 # strip. Colour codes are taken out of each frame — the strip's own bold and

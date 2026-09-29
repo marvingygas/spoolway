@@ -60,6 +60,10 @@ Dispatcher already running
 A project is `-C <DIR>` or the current directory's repository. A screen open in one project
 never refuses one opened in another.
 
+The screen draws on the terminal's alternate screen for as long as it is open, so scrolling up
+finds nothing older than the current frame and the mouse wheel does nothing. `q` puts the
+terminal back exactly as it was before spoolway started.
+
 The strip is drawn bold, with no colour. The open tab's label is marked with brackets, the
 same mark the key line gives a key: `[queue]`, `[dispatch]`. `←` sits one space outside
 `dispatch`, the first tab, and `→` sits one space outside `eval`, the last. One blank row sits
