@@ -315,14 +315,30 @@ fn host(
     let mut board = crate::status::Board::hosted();
     let mut dispatch = DispatchTab::default();
     let mut tab = Tab::Queue;
+    // One writer for the whole hosted session, not one per tab, so the idle
+    // skip it gives every screen (see `frame_writer`'s own doc) also covers
+    // the moment of switching between them: whichever tab is about to
+    // redraw calls `forget` below on every entry, so its own first frame is
+    // never skipped as "already on screen" against whatever a different
+    // tab, or a one-shot popup drawn outside this writer entirely, last
+    // left there instead.
+    let mut writer = crate::screen::frame_writer::FrameWriter::new();
 
     loop {
         let leave = {
             let _hosting = Hosting::open(tab);
+            writer.forget();
             match tab {
-                Tab::Dispatch => {
-                    dispatch_tab(repo, pipelines, cwd, &mut board, &mut dispatch, input, out)?
-                }
+                Tab::Dispatch => dispatch_tab(
+                    repo,
+                    pipelines,
+                    cwd,
+                    &mut board,
+                    &mut dispatch,
+                    &mut writer,
+                    input,
+                    out,
+                )?,
                 // Taken on the first visit, so a notice is shown once and
                 // not again on every return to the tab.
                 Tab::Queue => crate::commands::queue_tab(
@@ -330,11 +346,14 @@ fn host(
                     pipelines,
                     cwd,
                     std::mem::take(&mut on_open),
+                    &mut writer,
                     input,
                     out,
                 )?,
-                Tab::Jobs => crate::commands::jobs_tab(repo, pipelines, cwd, input, out)?,
-                Tab::Eval => crate::eval::tab(repo, pipelines, input, out)?,
+                Tab::Jobs => {
+                    crate::commands::jobs_tab(repo, pipelines, cwd, &mut writer, input, out)?
+                }
+                Tab::Eval => crate::eval::tab(repo, pipelines, &mut writer, input, out)?,
             }
         };
         // A caught `ctrl-c` ends every tab's own wait with `None` — see
@@ -589,21 +608,43 @@ impl DispatchTab {
 /// [`crate::status::POLL`] while no key is typed, the same wait the board
 /// keeps under a dispatcher, and that redraw is also where a child that has
 /// exited is noticed.
+///
+/// `writer` pushes this past clippy's default argument count, but every
+/// argument here is a distinct piece of the tab's own state — see
+/// `status::mod`'s own `too_many_arguments` allow for the same reasoning.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_tab(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &Path,
     board: &mut crate::status::Board,
     tab: &mut DispatchTab,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Result<Leave> {
     loop {
         tab.reap(repo);
-        draw_board(repo, pipelines, board, tab, out);
+        draw_board(
+            repo,
+            pipelines,
+            board,
+            tab,
+            crate::screen::pane_size(),
+            writer,
+            out,
+        );
         let Some(key) = wait_key(input, || {
             tab.reap(repo);
-            draw_board(repo, pipelines, board, tab, out)
+            draw_board(
+                repo,
+                pipelines,
+                board,
+                tab,
+                crate::screen::pane_size(),
+                writer,
+                out,
+            )
         }) else {
             return Ok(Leave::Quit);
         };
@@ -658,23 +699,44 @@ pub(crate) fn wait_key(input: &mut impl PollableRead, mut idle: impl FnMut()) ->
 /// One board frame under the strip. A frame that fails to build — the queue
 /// directory unreadable for an instant — leaves the last one on screen, the
 /// same tolerance the dispatch loop's own `board.draw` gets.
+///
+/// `pane_size` is a parameter rather than read here off the real terminal —
+/// see [`crate::screen::pane_size`] — so a test can hold the board's own
+/// frame steady and vary only the pane size, to prove a resize alone still
+/// forces the idle tab to repaint.
 fn draw_board(
     repo: &Repo,
     pipelines: &Pipelines,
     board: &mut crate::status::Board,
     tab: &DispatchTab,
+    pane_size: (usize, usize),
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl Write,
 ) {
-    let popup = tab.popup.as_ref().map(Popup::panel);
-    let Ok(frame) = board.hosted_frame(repo, pipelines, tab.dispatching(), popup) else {
-        return;
-    };
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in strip() {
-        let _ = writeln!(out, "{line}");
+    if let Some(rows) = board_frame_rows(repo, pipelines, board, tab) {
+        writer.write_frame(&rows, pane_size, out);
     }
-    let _ = write!(out, "{frame}");
-    let _ = out.flush();
+}
+
+/// The rows [`draw_board`] paints, split out so a test can play the very
+/// same rows through today's frozen write and through
+/// [`crate::screen::frame_writer`] and require the same picture. `None`
+/// when the board's own frame fails to build — the queue directory
+/// unreadable for an instant — leaving the last frame on screen, the same
+/// tolerance the dispatch loop's own `board.draw` gets.
+fn board_frame_rows(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    board: &mut crate::status::Board,
+    tab: &DispatchTab,
+) -> Option<Vec<String>> {
+    let popup = tab.popup.as_ref().map(Popup::panel);
+    let frame = board
+        .hosted_frame(repo, pipelines, tab.dispatching(), popup)
+        .ok()?;
+    let mut rows = strip();
+    rows.extend(frame.lines().map(str::to_string));
+    Some(rows)
 }
 
 /// A tab that has nothing to draw but a message — a ledger eval could not
@@ -685,7 +747,11 @@ pub(crate) fn message_tab(
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Leave {
-    message_frame(message, out);
+    // A writer of its own: this is a fresh visit to a screen that has
+    // nothing but this one message to show, not a continuation of whatever
+    // `eval`'s own writer last painted before handing off here.
+    let mut writer = crate::screen::frame_writer::FrameWriter::new();
+    message_frame(message, &mut writer, out);
     loop {
         let Some(key) = wait_key(input, || {}) else {
             return Leave::Quit;
@@ -699,31 +765,55 @@ pub(crate) fn message_tab(
 /// [`message_tab`]'s one frame, on its own: eval draws it from inside a
 /// `wait_key` idle callback, where a load that failed on its thread is
 /// noticed, and that callback cannot also take the keys.
-pub(crate) fn message_frame(message: &str, out: &mut impl Write) {
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in strip() {
-        let _ = writeln!(out, "{line}");
-    }
-    let _ = writeln!(out, " {message}");
-    let _ = writeln!(out);
-    let _ = writeln!(out, "{}", super::key_hint(&[("q", "quit")]));
-    let _ = out.flush();
+pub(crate) fn message_frame(
+    message: &str,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
+    out: &mut impl Write,
+) {
+    writer.write_frame(
+        &message_frame_rows(message),
+        crate::screen::pane_size(),
+        out,
+    );
+}
+
+/// The rows [`message_frame`] paints, split out for the same reason as
+/// [`board_frame_rows`]: a test needs them on their own to prove the shared
+/// writer paints this frame exactly as today's frozen write did.
+fn message_frame_rows(message: &str) -> Vec<String> {
+    let mut rows = strip();
+    rows.push(format!(" {message}"));
+    rows.push(String::new());
+    rows.push(super::key_hint(&[("q", "quit")]));
+    rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `line` with every `\x1b[...` code taken out — the colour a tab's own
-    /// frame paints under the strip, the strip's own bold, and the screen
-    /// clear ahead of it. Ends a code on any letter, not only `m`: the
-    /// clear's `J` and `H` would otherwise run the skip on into the strip.
+    /// `line` with every escape code taken out — the colour a tab's own
+    /// frame paints under the strip, the strip's own bold, and the frame
+    /// writer's own codes around it. A CSI code (`ESC [ ... letter`) ends on
+    /// any letter, not only `m`: the frame writer's `H`, `J` and `K` would
+    /// otherwise run the skip on into real text. `ESC7`/`ESC8` (DECSC/DECRC,
+    /// the frame writer's save and restore around each clear — see
+    /// [`super::frame_writer::CLEAR_TO_END`]) are not CSI at all: `7` and
+    /// `8` are not letters, so hunting for one the way a CSI code is skipped
+    /// would eat every character up to the next stray letter in the frame's
+    /// own text instead of stopping after the one byte the code actually
+    /// spends.
     fn plain(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                chars.by_ref().find(char::is_ascii_alphabetic);
+                match chars.next() {
+                    Some('[') => {
+                        chars.by_ref().find(char::is_ascii_alphabetic);
+                    }
+                    _ => continue,
+                }
             } else {
                 out.push(c);
             }
@@ -827,7 +917,11 @@ mod tests {
         )
         .unwrap();
         let drawn = String::from_utf8(out).unwrap();
-        drawn.split("\x1b[2J\x1b[H").skip(1).map(plain).collect()
+        drawn
+            .split("\x1b[?2026h\x1b[H")
+            .skip(1)
+            .map(plain)
+            .collect()
     }
 
     // The e2e suite's own gesture, at unit level: the screen opens on the
@@ -853,6 +947,257 @@ mod tests {
                  [r/R] resume / all   [u/U] unqueue / all   [q] quit"
             ),
             "{last}"
+        );
+    }
+
+    /// [`drive_host`], keeping each frame's own bytes whole — colour codes,
+    /// cursor moves and all — with its own start code put back on the front
+    /// (`split` throws the delimiter it matched away). A frame's own bytes
+    /// can never hold another frame's text — a fresh write replaces the
+    /// whole picture — so a check for stale text has to read it off the
+    /// *screen* an emulator paints these bytes onto instead, the same way a
+    /// person watching a real terminal would see whatever a skipped write
+    /// left behind.
+    fn drive_host_raw_frames(repo: &Repo, input: &str) -> Vec<String> {
+        let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
+        let mut out = Vec::new();
+        host(
+            repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            OnOpen::default(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        drawn
+            .split("\x1b[?2026h\x1b[H")
+            .skip(1)
+            .map(|body| format!("\x1b[?2026h\x1b[H{body}"))
+            .collect()
+    }
+
+    /// Round every tab both ways and require that, after each switch, no
+    /// marker of the tab just left is still on the *screen* — not merely
+    /// absent from the new frame's own bytes, which a fresh write never
+    /// carries regardless. Every frame is played into one `vt100::Parser`
+    /// kept across the whole walk, exactly as a real terminal accumulates
+    /// what is actually written to it, and each check reads the emulator's
+    /// own screen contents rather than the frame's raw bytes.
+    ///
+    /// This does not prove `host` needs its `forget` on tab entry: with one
+    /// shared writer the last frame is always the previous tab's, whose
+    /// strip marks a different tab, so no entry frame is ever skipped here
+    /// and this test passes with that `forget` removed. The proof that
+    /// `forget` is needed is `frame_writer::tab_switch_leaves_nothing_behind`.
+    #[test]
+    fn every_tab_forgets_the_last_one_going_round_and_back() {
+        let repo = crate::status::testutil::fixture("shell-host-tab-cycle");
+        // Queue (open) → Dispatch → Queue → Jobs → Eval → Jobs → Queue →
+        // Dispatch → Queue: forward through all four, then back through all
+        // four, both with a real switch behind every arrow.
+        let frames =
+            drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[C");
+        const DISPATCH: &str = "┌─ dispatch ─";
+        const QUEUE: &str = "─ groups";
+        const JOBS: &str = "no jobs yet";
+        const EVAL: &str = "┌─ eval ·";
+        let visited = [
+            QUEUE, DISPATCH, QUEUE, JOBS, EVAL, JOBS, QUEUE, DISPATCH, QUEUE,
+        ];
+        assert_eq!(frames.len(), visited.len(), "{frames:?}");
+
+        let (width, height) = crate::screen::pane_size();
+        let mut parser = vt100::Parser::new(height as u16, width as u16, 0);
+        for (i, marker) in visited.iter().enumerate() {
+            parser.process(&crate::screen::frame_writer::as_terminal_would_receive(
+                frames[i].as_bytes(),
+            ));
+            let screen = parser.screen().contents();
+            assert!(
+                screen.contains(marker),
+                "frame {i} should show {marker:?} on the screen:\n{screen}"
+            );
+            if i > 0 && visited[i - 1] != *marker {
+                assert!(
+                    !screen.contains(visited[i - 1]),
+                    "frame {i} still leaves the previous tab's {:?} on the screen:\n{screen}",
+                    visited[i - 1]
+                );
+            }
+        }
+    }
+
+    /// [`draw_board`] with a fresh board and dispatch tab over `repo`, and
+    /// a fixed pane size so a test can hold it steady or change it on
+    /// purpose rather than depending on whatever terminal `cargo test`
+    /// happens to run under.
+    fn draw_idle_board(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        board: &mut crate::status::Board,
+        writer: &mut crate::screen::frame_writer::FrameWriter,
+        pane_size: (usize, usize),
+        out: &mut Vec<u8>,
+    ) {
+        draw_board(
+            repo,
+            pipelines,
+            board,
+            &DispatchTab::default(),
+            pane_size,
+            writer,
+            out,
+        );
+    }
+
+    /// The acceptance criterion this task exists for: the dispatch tab's
+    /// own board frame, painted through the shared
+    /// [`crate::screen::frame_writer`], must look exactly as it did through
+    /// today's frozen erase-then-write — cell for cell, in text, colour and
+    /// bold.
+    #[test]
+    fn dispatch_board_paints_as_before() {
+        let repo = crate::status::testutil::fixture("dispatch-board-paints-as-before");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::hosted();
+        let frame = board_frame_rows(&repo, &pipelines, &mut board, &DispatchTab::default())
+            .expect("the board's own frame must build");
+        // Wide enough that no row here reaches the pane's own edge.
+        let pane_size = (200, 60);
+
+        let mut old = Vec::new();
+        crate::screen::frame_writer::todays_write(&frame, &mut old);
+
+        let mut new = Vec::new();
+        crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
+
+        crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
+    }
+
+    /// The same acceptance criterion for `message_frame`.
+    #[test]
+    fn message_frame_paints_as_before() {
+        let frame = message_frame_rows("spoolway eval: no ledger");
+        let pane_size = (200, 60);
+
+        let mut old = Vec::new();
+        crate::screen::frame_writer::todays_write(&frame, &mut old);
+
+        let mut new = Vec::new();
+        crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
+
+        crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
+    }
+
+    /// The acceptance criterion for the dispatch tab's own idle skip: two
+    /// calls over a board nothing has touched write the same bytes once.
+    #[test]
+    fn an_idle_board_writes_nothing_on_a_second_draw() {
+        let repo = crate::status::testutil::fixture("shell-draw-board-idle");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::hosted();
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        let mut out = Vec::new();
+        draw_idle_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &mut writer,
+            (100, 30),
+            &mut out,
+        );
+        let after_first = out.len();
+        assert!(after_first > 0, "the first draw must write the frame");
+        draw_idle_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &mut writer,
+            (100, 30),
+            &mut out,
+        );
+        assert_eq!(
+            out.len(),
+            after_first,
+            "an unchanged board must not write anything more"
+        );
+    }
+
+    /// The other half of the same criterion: a task moving to a new stage
+    /// changes the board's own frame, so the tab must repaint even though
+    /// nothing asked it to and the pane never moved.
+    #[test]
+    fn a_moved_task_forces_the_idle_board_to_repaint() {
+        let repo = crate::status::testutil::fixture("shell-draw-board-task-moves");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::hosted();
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        let mut out = Vec::new();
+        draw_idle_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &mut writer,
+            (100, 30),
+            &mut out,
+        );
+        let after_first = out.len();
+
+        let mut task = repo.task("wire").unwrap();
+        task.set_stage("implement", None);
+        task.save().unwrap();
+
+        draw_idle_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &mut writer,
+            (100, 30),
+            &mut out,
+        );
+        assert!(
+            out.len() > after_first,
+            "a moved task must repaint the idle board"
+        );
+    }
+
+    /// The pane-size half of the same criterion: an unchanged board still
+    /// repaints once the terminal itself has resized, since a row's own
+    /// clearing and the frame writer's skip both depend on the pane size it
+    /// was drawn for.
+    #[test]
+    fn a_resize_forces_the_idle_board_to_repaint_even_with_the_same_content() {
+        let repo = crate::status::testutil::fixture("shell-draw-board-resize");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::hosted();
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        let mut out = Vec::new();
+        draw_idle_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &mut writer,
+            (100, 30),
+            &mut out,
+        );
+        let after_first = out.len();
+        draw_idle_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &mut writer,
+            (110, 30),
+            &mut out,
+        );
+        assert!(
+            out.len() > after_first,
+            "a pane resize must repaint an unchanged board"
         );
     }
 

@@ -370,6 +370,25 @@ pub(crate) fn read_escape(input: &mut impl PollableRead) -> Option<Key> {
     }
 }
 
+/// The fallback pane size every redrawing screen already falls back to for
+/// its own width alone (`shell::FALLBACK_WIDTH`) or leaves as `None` for its
+/// own height, now given a height too because [`frame_writer::FrameWriter`]
+/// takes both as one argument it cannot leave unset. Only reached with no
+/// terminal to measure at all — a piped run, or `cargo test`'s own stdout —
+/// so nobody ever sees the width or height chosen here.
+const FALLBACK_PANE_SIZE: (usize, usize) = (100, 30);
+
+/// The terminal's own size in columns and rows, for every redrawing screen
+/// to pass to [`frame_writer::FrameWriter::write_frame`] as the pane it
+/// drew for. One call, shared, so a screen switch and the frame it draws
+/// next always measure the same terminal rather than two callers racing a
+/// resize between them.
+pub(crate) fn pane_size() -> (usize, usize) {
+    terminal_size::terminal_size()
+        .map(|(w, h)| (w.0 as usize, h.0 as usize))
+        .unwrap_or(FALLBACK_PANE_SIZE)
+}
+
 /// Pad `s` to exactly `width` visible characters, or cut it to fit — a screen
 /// row has to end at the same column every time for the border on its right
 /// to line up, whatever the content of any one line.

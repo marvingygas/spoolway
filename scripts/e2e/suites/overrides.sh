@@ -297,11 +297,12 @@ says "while the entry beside it in the same file is still listed as applying" \
 
 # Bare `spoolway` says the same thing as a popup over the tab it opens on:
 # the stderr line above is printed ahead of the screen, and its first frame
-# clears it before anybody could read it. `frame N` pulls the Nth frame out
-# of a screen's typescript — every frame opens on a clear-screen — with the
-# colour codes taken out, so a row reads as the plain line the Mockup draws.
+# paints over it before anybody could read it. `frame N` pulls the Nth frame
+# out of a screen's typescript — every frame opens with the shared frame
+# writer's own start code (`\x1b[?2026h\x1b[H`) — with the colour codes taken
+# out, so a row reads as the plain line the Mockup draws.
 frame() {
-  awk -v n="$(($2 + 1))" 'BEGIN { RS = "\033\\[2J\033\\[H" } NR == n { print; exit }' "$1" |
+  awk -v n="$(($2 + 1))" 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == n { print; exit }' "$1" |
     sed 's/\x1b\[[0-9;]*m//g'
 }
 IGNORED_SCREEN="$LIVE/ignored-screen.txt"

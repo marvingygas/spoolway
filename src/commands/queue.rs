@@ -3039,6 +3039,7 @@ pub(crate) fn queue_tab(
     pipelines: &Pipelines,
     cwd: &std::path::Path,
     on_open: crate::screen::shell::OnOpen,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
@@ -3056,7 +3057,16 @@ pub(crate) fn queue_tab(
         state.waiting.push_back(outcome("nothing to queue", msg));
     }
     state.mode = state.after_popup(Mode::Browsing);
-    let exit = run_screen_from(repo, pipelines, cwd, (groups, routines), state, input, out)?;
+    let exit = run_screen_from(
+        repo,
+        pipelines,
+        cwd,
+        (groups, routines),
+        state,
+        writer,
+        input,
+        out,
+    )?;
     Ok(match exit {
         ScreenExit::Quit => Leave::Quit,
         ScreenExit::Leave(leave) => leave,
@@ -3083,6 +3093,7 @@ fn run_screen(
         cwd,
         (groups, routines),
         ScreenState::new(),
+        &mut crate::screen::frame_writer::FrameWriter::new(),
         input,
         out,
     )
@@ -3091,18 +3102,22 @@ fn run_screen(
 /// [`run_screen`], opening on `state` rather than a fresh one — the queue
 /// tab's opening message is the one caller that needs another. `lists` is the
 /// pending groups and the routine folders, paired so this stays inside the
-/// argument count the rest of this module keeps to.
+/// argument count the rest of this module keeps to. `writer` pushed the
+/// count past that anyway — every argument here is a distinct piece of the
+/// screen's own state, so bundling further would only hide that, the same
+/// reasoning `status::mod`'s own `too_many_arguments` allow gives.
+#[allow(clippy::too_many_arguments)]
 fn run_screen_from(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &std::path::Path,
     lists: (Vec<Group>, Vec<RoutineFolder>),
     mut state: ScreenState,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<ScreenExit> {
     let (mut groups, mut routines) = lists;
-    let mut last = None;
     let routines_dir = repo.routines_dir();
 
     loop {
@@ -3115,8 +3130,8 @@ fn run_screen_from(
             routines_dir: &routines_dir,
             pipelines,
         };
-        draw(&groups, &panes, &state, &mut last, out);
-        let Some(key) = wait_for_key(repo, &mut groups, &panes, &mut state, &mut last, input, out)
+        draw(&groups, &panes, &state, writer, out);
+        let Some(key) = wait_for_key(repo, &mut groups, &panes, &mut state, writer, input, out)
         else {
             // No terminal, a script driving this run has finished handing
             // over keys, or `ctrl-c` was caught: `wait_for_key` returns
@@ -3262,7 +3277,7 @@ fn run_screen_from(
                         routines: &routines,
                     };
                     let held = Held::new(&groups, &panes, &state);
-                    let mut redraw = |panel: &[String]| held.draw(panel, &mut last, out);
+                    let mut redraw = |panel: &[String]| held.draw(panel, writer, out);
                     state.mode = resume(
                         &at,
                         &then,
@@ -3488,11 +3503,11 @@ impl Held {
     fn draw(
         &self,
         panel: &[String],
-        last: &mut Option<Vec<String>>,
+        writer: &mut crate::screen::frame_writer::FrameWriter,
         out: &mut impl std::io::Write,
     ) {
         let frame = compose(self.frame.clone(), Some(panel), self.footer.clone());
-        paint(frame, last, out);
+        paint(frame, writer, out);
     }
 }
 
@@ -3538,7 +3553,7 @@ fn wait_for_key(
     groups: &mut Vec<Group>,
     panes: &Panes,
     state: &mut ScreenState,
-    last: &mut Option<Vec<String>>,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
@@ -3550,7 +3565,7 @@ fn wait_for_key(
             return read_key(input);
         }
         reload(repo, groups, state);
-        draw(groups, panes, state, last, out);
+        draw(groups, panes, state, writer, out);
     }
 }
 
@@ -5092,39 +5107,37 @@ fn pending_frame(
     )
 }
 
-/// Redraw the screen, but only when [`render`] actually comes back
-/// different from what `last` already holds — a resize is read fresh every
-/// call through [`layout`], and a poll tick where nothing on screen would
-/// change is the common case once `run_screen`'s wait is a loop rather than
-/// a single blocking read. Writing on every tick regardless would turn an
-/// idle terminal into one that redraws about once a second for no
-/// reason a person watching it could see — exactly what the "idle screen
-/// writes nothing" acceptance criterion rules out.
+/// Redraw the screen through `writer`, which paints only when [`render`]
+/// actually comes back different from the last frame it painted — a resize
+/// is read fresh every call through [`layout`], and a poll tick where
+/// nothing on screen would change is the common case once `run_screen`'s
+/// wait is a loop rather than a single blocking read. Writing on every tick
+/// regardless would turn an idle terminal into one that redraws about once
+/// a second for no reason a person watching it could see — exactly what the
+/// "idle screen writes nothing" acceptance criterion rules out.
 fn draw(
     groups: &[Group],
     panes: &Panes,
     state: &ScreenState,
-    last: &mut Option<Vec<String>>,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl std::io::Write,
 ) {
     // Under the strip when bare `spoolway` hosts this screen as its queue
     // tab, and exactly as before everywhere else — see
     // `crate::screen::shell::under_strip`.
-    paint(render(groups, panes, state), last, out);
+    paint(render(groups, panes, state), writer, out);
 }
 
-/// Write `frame`, unless it is the one `last` already holds — [`draw`]'s own
-/// write, shared with [`Held::draw`].
-fn paint(frame: Vec<String>, last: &mut Option<Vec<String>>, out: &mut impl std::io::Write) {
+/// Write `frame` through `writer`, which paints only when it differs from
+/// the last frame written — [`draw`]'s own write, shared with
+/// [`Held::draw`].
+fn paint(
+    frame: Vec<String>,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
+    out: &mut impl std::io::Write,
+) {
     let frame = crate::screen::shell::under_strip(frame);
-    if last.as_ref() == Some(&frame) {
-        return;
-    }
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in &frame {
-        let _ = writeln!(out, "{line}");
-    }
-    *last = Some(frame);
+    writer.write_frame(&frame, crate::screen::pane_size(), out);
 }
 
 /// The gate picker: the highlighted task's own pipeline, a step at a time,
@@ -7758,10 +7771,11 @@ mod tests {
     }
 
     /// The frame that was actually on screen when the input ran out — every
-    /// draw opens on a clear-screen, so a captured transcript holds every
-    /// frame the screen ever drew, back to back.
+    /// draw opens with the shared frame writer's own start code, so a
+    /// captured transcript holds every frame the screen ever drew, back to
+    /// back.
     fn last_frame(drawn: &str) -> &str {
-        drawn.rsplit("\x1b[2J\x1b[H").next().unwrap_or(drawn)
+        drawn.rsplit("\x1b[?2026h\x1b[H").next().unwrap_or(drawn)
     }
 
     /// `←` and `→` no longer move focus between the two panes — `tab` is the
@@ -7943,13 +7957,14 @@ mod tests {
             &Pipelines::builtin(),
             &repo.root,
             crate::screen::shell::OnOpen::default(),
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
         )
         .unwrap();
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let drawn = String::from_utf8(out).unwrap();
-        let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
+        let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
         assert!(first.contains("┌─ nothing to queue "), "{first}");
         assert!(first.contains("no-group.md"), "{first}");
         assert!(first.contains("[enter] close"), "{first}");
@@ -7985,12 +8000,13 @@ mod tests {
             &Pipelines::builtin(),
             &repo.root,
             on_open,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
         )
         .unwrap();
         let drawn = String::from_utf8(out).unwrap();
-        let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
+        let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
         assert!(frames[0].contains("┌─ update installed "), "{}", frames[0]);
         assert!(frames[0].contains(crate::gate::LINE), "{}", frames[0]);
         assert!(frames[0].contains("[enter] dismiss"), "{}", frames[0]);
@@ -8040,13 +8056,14 @@ mod tests {
             &Pipelines::builtin(),
             &repo.root,
             on_open,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
         )
         .unwrap();
         assert_eq!(leave, Leave::Switch(Toward::Left), "the tab works again");
         let drawn = String::from_utf8(out).unwrap();
-        let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
+        let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
         assert!(frames[0].contains("┌─ override ignored "), "{}", frames[0]);
         assert!(
             frames[0].contains("pipelines/release.yml   step publish   agent, model"),
@@ -9144,7 +9161,7 @@ mod tests {
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
-        let mut last = None;
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
         let mut out = Vec::new();
 
         let routines = Vec::new();
@@ -9154,17 +9171,51 @@ mod tests {
             routines_dir: &routines_dir,
             pipelines: &pipelines,
         };
-        draw(&groups, &panes, &state, &mut last, &mut out);
+        draw(&groups, &panes, &state, &mut writer, &mut out);
         let after_first = out.len();
         assert!(after_first > 0, "the first draw must write the frame");
 
-        draw(&groups, &panes, &state, &mut last, &mut out);
+        draw(&groups, &panes, &state, &mut writer, &mut out);
         assert_eq!(
             out.len(),
             after_first,
             "an unchanged frame must write nothing more:\n{}",
             String::from_utf8_lossy(&out)
         );
+    }
+
+    /// The acceptance criterion this task exists for: the queue tab's own
+    /// frame, painted through the shared [`crate::screen::frame_writer`],
+    /// must look exactly as it did through today's frozen erase-then-write —
+    /// cell for cell, in text, colour and bold — not merely bytes shaped the
+    /// same way.
+    #[test]
+    fn queue_paints_as_before() {
+        let repo = fixture("queue-paints-as-before");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new();
+        let routines = Vec::new();
+        let routines_dir = repo.routines_dir();
+        let panes = Panes {
+            routines: &routines,
+            routines_dir: &routines_dir,
+            pipelines: &pipelines,
+        };
+        let frame = crate::screen::shell::under_strip(render(&groups, &panes, &state));
+        // Wide enough that no row here reaches the pane's own edge, the same
+        // as a real terminal this screen ever draws to — see
+        // `commands::queue`'s own `SPARE_COLUMN`.
+        let pane_size = (200, 60);
+
+        let mut old = Vec::new();
+        crate::screen::frame_writer::todays_write(&frame, &mut old);
+
+        let mut new = Vec::new();
+        crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
+
+        crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
     }
 
     /// A panel is drawn over the frame, not pushed in between its rows: the
@@ -9779,7 +9830,7 @@ mod tests {
         let drawn = screen(&repo, groups, "h");
 
         let frames: Vec<&str> = drawn
-            .split("\x1b[2J\x1b[H")
+            .split("\x1b[?2026h\x1b[H")
             .filter(|f| !f.is_empty())
             .collect();
         assert_eq!(
@@ -10667,8 +10718,11 @@ mod tests {
             .lines()
             .find(|line| line.contains("queue-browse") && line.contains("queued"))
             .unwrap_or_else(|| panic!("the queued group never made it onto the pane:\n{last}"));
+        // Stripped of ANSI first: every row not the pane's own full width now
+        // carries the frame writer's own `ESC[K` clear-to-end, which is a
+        // `[` that has nothing to do with a checkbox.
         assert!(
-            !row.contains('['),
+            !crate::status::strip_ansi(row).contains('['),
             "a queued group draws no checkbox:\n{row}"
         );
     }
@@ -10701,7 +10755,7 @@ mod tests {
         // nothing draws the same frame browsing already had, which `draw`
         // dedups away — a fifth here would mean `q` had reached the filter
         // a second time, or changed browsing state, instead of being inert.
-        let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
+        let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
         assert_eq!(frames.len(), 4, "{frames:?}");
         assert!(frames[2].contains("find: q▏"), "{}", frames[2]);
     }
@@ -12342,7 +12396,7 @@ depends_on: [cart-empty-state]
                 );
                 assert_eq!(queued(&repo, "cart-totals").extra_str("ticket"), "#412");
 
-                let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").collect();
+                let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").collect();
                 let opening: Vec<&&str> = frames
                     .iter()
                     .filter(|frame| frame.contains("┌─ opening issues "))
@@ -12375,9 +12429,10 @@ depends_on: [cart-empty-state]
                 );
                 assert!(frame.contains("queued 2 tasks"), "{frame}");
                 assert!(frame.contains("[enter] close"), "{frame}");
-                // Nothing printed under the frame: every byte went out after a
-                // clear-screen, as part of one frame or another.
-                assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");
+                // Nothing printed under the frame: every byte went out as part
+                // of one frame or another, each opening with the shared frame
+                // writer's own start code.
+                assert!(drawn.starts_with("\x1b[?2026h\x1b[H"), "{drawn}");
                 assert!(
                     !drawn.contains("issue_tracking: opening tickets"),
                     "{drawn}"
@@ -12407,7 +12462,7 @@ depends_on: [cart-empty-state]
                     Some("gh-410-cart")
                 );
 
-                let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").collect();
+                let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").collect();
                 let last_opening = frames
                     .iter()
                     .rposition(|frame| frame.contains("┌─ opening issues "))
@@ -12666,9 +12721,10 @@ group_description: audit
                 "{frame}"
             );
             assert!(frame.contains("─ groups"), "the tab under it: {frame}");
-            // Nothing outside the frame: every byte written went out after
-            // a clear-screen, as part of one frame or another.
-            assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");
+            // Nothing outside the frame: every byte written went out as part
+            // of one frame or another, each opening with the shared frame
+            // writer's own start code.
+            assert!(drawn.starts_with("\x1b[?2026h\x1b[H"), "{drawn}");
             assert!(!repo.queue_dir().join("wire.md").exists());
         }
 

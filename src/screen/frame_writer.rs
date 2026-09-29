@@ -9,12 +9,10 @@
 //! each clear is explained at [`CLEAR_TO_END`]. The `?2026` pair is synchronized
 //! output: a terminal that understands it holds its paint until the closing
 //! code arrives, so even a write a kernel pipe splits into several reads
-//! still paints as one frame. None of the five screens that
-//! still draw their own frame calls this yet — wiring them onto it is the
-//! next task, `frames-onto-writer`. Until that task moves a screen onto it,
-//! nothing outside this module's own tests calls anything here, hence the
-//! blanket allow below rather than one on each item.
-#![allow(dead_code)]
+//! still paints as one frame. Every redrawing screen — `commands::queue`'s
+//! `paint`, `commands::jobs`'s `draw_jobs`, `eval`'s `draw`, and
+//! `screen::shell`'s `draw_board` and `message_frame` — now calls this
+//! instead of erasing and writing its own rows.
 
 /// Moves the cursor home and tells a terminal that understands synchronized
 /// output to hold its paint until [`FRAME_END`] arrives.
@@ -112,92 +110,102 @@ impl FrameWriter {
     }
 }
 
+/// Today's write, frozen exactly as `commands::queue::paint` still did it —
+/// erase the whole screen, then one `writeln!` per row — copied here rather
+/// than called anywhere in production, so nothing outside tests ever runs
+/// the shape this writer replaces. `pub(crate)` and outside `mod tests`
+/// below so every redrawing screen's own test module can hold the same
+/// proof — a frame it builds must paint the same picture through this and
+/// through [`FrameWriter`] — not only the generic cases this module covers
+/// on its own.
+#[cfg(test)]
+pub(crate) fn todays_write(rows: &[String], out: &mut impl std::io::Write) {
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    for row in rows {
+        let _ = writeln!(out, "{row}");
+    }
+}
+
+/// A real terminal, taken raw by [`crate::platform::TermGuard`], still
+/// leaves output processing on — see `platform::raw_mode`, which clears
+/// only `ECHO` and `ICANON` — so the kernel's `ONLCR` translates every
+/// outgoing `\n` into `\r\n` before it ever reaches the terminal.
+/// `vt100::Parser` models the terminal side of that wire, not the
+/// kernel's, so a test feeding it these bytes directly has to make the
+/// same translation a real tty driver already made, or a bare `\n`
+/// reads as "down, same column" instead of "down, column zero" and
+/// every row after the first prints at the wrong indent. `pub(crate)` for
+/// the same reason as [`todays_write`]: a test outside this module that
+/// plays a screen's own captured output through `vt100` needs the same
+/// translation, not only the generic cases this module covers on its own.
+#[cfg(test)]
+pub(crate) fn as_terminal_would_receive(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for &b in bytes {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
+}
+
+/// Plays `old` and `new` into two `vt100` screens sized to `pane_size`
+/// (columns, rows) and requires every cell to agree in text, colour and
+/// bold — a byte comparison alone could pass on writes with the right
+/// shape but the wrong picture, and only an emulator models what a
+/// person watching the terminal would actually see. `pub(crate)` for the
+/// same reason as [`todays_write`]: every redrawing screen's own
+/// `_paints_as_before` test calls this against its own real frame.
+///
+/// Foreground colour and bold are compared only on cells that hold
+/// text, because on a blank cell neither can be seen. Today's `ESC[2J`
+/// erases with whatever rendition the previous frame left open, so its
+/// blank cells can carry a foreground colour no one sees; matching that
+/// would mean tinting the cleared tails instead. Background colour
+/// shows on a blank cell, so it is compared on every cell.
+#[cfg(test)]
+pub(crate) fn assert_same_picture(old: &[u8], new: &[u8], pane_size: (usize, usize)) {
+    let (width, height) = (pane_size.0 as u16, pane_size.1 as u16);
+    let mut old_parser = vt100::Parser::new(height, width, 0);
+    old_parser.process(&as_terminal_would_receive(old));
+    let mut new_parser = vt100::Parser::new(height, width, 0);
+    new_parser.process(&as_terminal_would_receive(new));
+
+    for row in 0..height {
+        for col in 0..width {
+            let old_cell = old_parser.screen().cell(row, col);
+            let new_cell = new_parser.screen().cell(row, col);
+            assert_eq!(
+                old_cell.map(vt100::Cell::contents),
+                new_cell.map(vt100::Cell::contents),
+                "text differs at row {row}, col {col}"
+            );
+            assert_eq!(
+                old_cell.map(vt100::Cell::bgcolor),
+                new_cell.map(vt100::Cell::bgcolor),
+                "background differs at row {row}, col {col}"
+            );
+            if !old_cell.is_some_and(vt100::Cell::has_contents) {
+                continue;
+            }
+            assert_eq!(
+                old_cell.map(vt100::Cell::fgcolor),
+                new_cell.map(vt100::Cell::fgcolor),
+                "colour differs at row {row}, col {col}"
+            );
+            assert_eq!(
+                old_cell.map(vt100::Cell::bold),
+                new_cell.map(vt100::Cell::bold),
+                "bold differs at row {row}, col {col}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Today's write, frozen exactly as `commands::queue::paint` still does
-    /// it — erase the whole screen, then one `writeln!` per row — copied
-    /// here rather than called there, so nothing outside these tests ever
-    /// runs the shape this writer replaces. Only tests call it, to prove the
-    /// new writer paints the identical picture, cell for cell, through a
-    /// `vt100` emulator.
-    fn todays_write(rows: &[String], out: &mut impl std::io::Write) {
-        let _ = write!(out, "\x1b[2J\x1b[H");
-        for row in rows {
-            let _ = writeln!(out, "{row}");
-        }
-    }
-
-    /// A real terminal, taken raw by [`crate::platform::TermGuard`], still
-    /// leaves output processing on — see `platform::raw_mode`, which clears
-    /// only `ECHO` and `ICANON` — so the kernel's `ONLCR` translates every
-    /// outgoing `\n` into `\r\n` before it ever reaches the terminal.
-    /// `vt100::Parser` models the terminal side of that wire, not the
-    /// kernel's, so a test feeding it these bytes directly has to make the
-    /// same translation a real tty driver already made, or a bare `\n`
-    /// reads as "down, same column" instead of "down, column zero" and
-    /// every row after the first prints at the wrong indent.
-    fn as_terminal_would_receive(bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(bytes.len());
-        for &b in bytes {
-            if b == b'\n' {
-                out.push(b'\r');
-            }
-            out.push(b);
-        }
-        out
-    }
-
-    /// Plays `old` and `new` into two `vt100` screens sized to `pane_size`
-    /// (columns, rows) and requires every cell to agree in text, colour and
-    /// bold — a byte comparison alone could pass on writes with the right
-    /// shape but the wrong picture, and only an emulator models what a
-    /// person watching the terminal would actually see.
-    ///
-    /// Foreground colour and bold are compared only on cells that hold
-    /// text, because on a blank cell neither can be seen. Today's `ESC[2J`
-    /// erases with whatever rendition the previous frame left open, so its
-    /// blank cells can carry a foreground colour no one sees; matching that
-    /// would mean tinting the cleared tails instead. Background colour
-    /// shows on a blank cell, so it is compared on every cell.
-    fn assert_same_picture(old: &[u8], new: &[u8], pane_size: (usize, usize)) {
-        let (width, height) = (pane_size.0 as u16, pane_size.1 as u16);
-        let mut old_parser = vt100::Parser::new(height, width, 0);
-        old_parser.process(&as_terminal_would_receive(old));
-        let mut new_parser = vt100::Parser::new(height, width, 0);
-        new_parser.process(&as_terminal_would_receive(new));
-
-        for row in 0..height {
-            for col in 0..width {
-                let old_cell = old_parser.screen().cell(row, col);
-                let new_cell = new_parser.screen().cell(row, col);
-                assert_eq!(
-                    old_cell.map(vt100::Cell::contents),
-                    new_cell.map(vt100::Cell::contents),
-                    "text differs at row {row}, col {col}"
-                );
-                assert_eq!(
-                    old_cell.map(vt100::Cell::bgcolor),
-                    new_cell.map(vt100::Cell::bgcolor),
-                    "background differs at row {row}, col {col}"
-                );
-                if !old_cell.is_some_and(vt100::Cell::has_contents) {
-                    continue;
-                }
-                assert_eq!(
-                    old_cell.map(vt100::Cell::fgcolor),
-                    new_cell.map(vt100::Cell::fgcolor),
-                    "colour differs at row {row}, col {col}"
-                );
-                assert_eq!(
-                    old_cell.map(vt100::Cell::bold),
-                    new_cell.map(vt100::Cell::bold),
-                    "bold differs at row {row}, col {col}"
-                );
-            }
-        }
-    }
 
     /// Runs `rows` through both [`todays_write`] and [`FrameWriter`] at
     /// `pane_size` and requires the two pictures to match — the shared shape
@@ -398,6 +406,53 @@ mod tests {
         assert!(
             out.len() > after_first,
             "forget must make the next identical frame write again"
+        );
+    }
+
+    /// The scenario `forget` exists for, made concrete: a tab's own frame is
+    /// painted, then something draws over it *outside* this writer's own
+    /// accounting — a one-shot popup, or another tab entirely, neither of
+    /// which updates what this writer remembers as "the last frame" — and
+    /// then the very same tab draws its own frame again, unchanged from what
+    /// it drew before the outside draw. Without `forget`, this writer still
+    /// believes that frame is already on screen and skips the write,
+    /// leaving whatever drew outside it in view; `forget` between the two is
+    /// what makes the second draw repaint over it regardless. Proven two
+    /// ways: the second `write_frame` call must actually emit bytes, and
+    /// `vt100` must show the final screen as the tab's own frame alone, with
+    /// nothing the outside draw left still showing.
+    #[test]
+    fn tab_switch_leaves_nothing_behind() {
+        let pane_size = (20, 5);
+        let tab_rows = vec!["tab A, row one".to_string(), "tab A, row two".to_string()];
+        let mut writer = FrameWriter::new();
+        let mut out = Vec::new();
+
+        writer.write_frame(&tab_rows, pane_size, &mut out);
+        let after_first = out.len();
+
+        // Something drawn outside this writer's own accounting — a one-shot
+        // popup or another tab's own frame — landing over the same rows,
+        // the way a real switch would.
+        let _ = std::io::Write::write_all(&mut out, b"\x1b[Hsomething else entirely");
+
+        writer.forget();
+        writer.write_frame(&tab_rows, pane_size, &mut out);
+        assert!(
+            out.len() > after_first,
+            "forget must make the tab's own frame repaint over whatever drew outside it"
+        );
+
+        let mut parser = vt100::Parser::new(pane_size.1 as u16, pane_size.0 as u16, 0);
+        parser.process(&as_terminal_would_receive(&out));
+        let screen = parser.screen().contents();
+        assert!(
+            screen.contains("tab A, row one") && screen.contains("tab A, row two"),
+            "the tab's own frame must be back on screen:\n{screen}"
+        );
+        assert!(
+            !screen.contains("something else entirely"),
+            "nothing the outside draw left must still show:\n{screen}"
         );
     }
 

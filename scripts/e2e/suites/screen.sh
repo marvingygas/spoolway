@@ -78,15 +78,16 @@ else
   tail -c 40 "$DRAWN" | cat -v
 fi
 
-# Every frame opens on a clear-screen, so the transcript splits into frames on
-# it. The first one drawn is the queue tab's, its label bracketed on the
-# strip. Colour codes are taken out of each frame — the strip's own bold and
-# the colour of the tab drawn under it.
+# Every frame opens with the shared frame writer's own start code
+# (`\x1b[?2026h\x1b[H` — see `src/screen/frame_writer.rs`), so the transcript
+# splits into frames on it. The first one drawn is the queue tab's, its label
+# bracketed on the strip. Colour codes are taken out of each frame — the
+# strip's own bold and the colour of the tab drawn under it.
 FIRST="$LIVE/first.txt"
 LAST="$LIVE/last.txt"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$FIRST"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "the strip names all four tabs in order" \
@@ -114,7 +115,7 @@ RUN="$LIVE/run.txt"
 works "enter on the dispatch tab starts dispatching, and enter then enter stops it" \
   script -qec "{ printf '\\033[D\\r'; sleep 1; printf x; sleep 5; printf '\\r'; sleep 1; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$RUN" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$RUN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "enter asks the warnings gate first, as a popup" "─ before dispatching " "$RUN.plain"
@@ -187,7 +188,7 @@ pending_doc bad-stage "$BODY" "group: refused" "stage: taken"
 REFUSED="$LIVE/refused.txt"
 works "a refused submission on the queue tab ends when its keys run out" \
   script -qec "printf ' \\r' | '$SPOOLWAY'" "$REFUSED"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
@@ -195,6 +196,32 @@ has "closed by enter" "[enter] close" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
 has "under the strip" "dispatch       [queue]       jobs        eval" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
+
+# Every tab, both directions, on a real pty — the acceptance criterion the
+# task `frames-onto-writer` exists for: no redrawing screen erases the whole
+# terminal any more, all five of them painting through the shared frame
+# writer instead (`src/screen/frame_writer.rs`). `←` from the queue tab
+# reaches dispatch, `→` three times walks back through queue, jobs and eval,
+# and `←` three times walks all the way back — every tab this screen has,
+# both ways, with no `enter` anywhere so nothing is started or queued.
+ALL_TABS="$LIVE/all-tabs.txt"
+works "cycling every tab does not crash the screen" \
+  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
+  bad "no frame drawn while cycling every tab still erases the whole screen"
+  tail -30 "$ALL_TABS" | cat -v
+else
+  ok "no frame drawn while cycling every tab still erases the whole screen"
+fi
+sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
+# The check above passes on an empty capture too — a screen that crashed or
+# quit before drawing a single tab has no `ESC[2J` in it either. These four
+# require every tab this walk visits actually drew, so the check above is
+# proof about frames that were really there.
+has "the walk actually reached the dispatch tab" "┌─ dispatch ─" "$ALL_TABS.plain"
+has "and the queue tab" "─ groups" "$ALL_TABS.plain"
+has "and the jobs tab" "no jobs yet" "$ALL_TABS.plain"
+has "and the eval tab" "┌─ eval ·" "$ALL_TABS.plain"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"
