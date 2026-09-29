@@ -184,8 +184,23 @@ reading the file whole.
      step 1's `base` unless a note changed it. A dependency and its dependent must share one.
    - `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate fan.
 
-   The body's `## Mockup` copies in the steps that task owns, from the calling record's own
-   Mockup, only when the task changes something a person opens. Never paste a task's
+   **Link a source; never redraw it.** Whatever the shape came from as a file — the calling
+   page, a screenshot, anything the person named or pasted — is linked from the task, never
+   copied or translated into Markdown. A lane reads nothing outside its worktree and the
+   project home, so a file anywhere else is first copied into
+   `~/.spoolway/<project>/plans/<group>/` and linked there.
+
+   The body's `## Mockup`, only when the task changes something a person opens, starts on
+   this line, word for word:
+
+       Open each link and build what it draws. If it cannot be built as drawn, say so in
+       your report rather than improvising something near it.
+
+   then one line per step or file the task builds: the page's absolute path and the step's
+   own id, `<page>#m-<slug>`, and the step's heading. `## References` links each decision
+   record the task implements the same way, `<page>#d-<slug>`. The ids are on the page:
+   `grep -n 'id="[dm]-' <page>`. Panels are written into the body only when no file draws
+   them — a shape settled out loud and drawn only in the chat. Never paste a task's
    contents into the body — name the path instead. Include an end-to-end coverage line naming
    a test reached, or "none, and why". Never write an instruction to *run* anything — a lane
    reading it will try to.
@@ -230,6 +245,10 @@ reading the file whole.
 - Never invent a goal, criterion or reference the shape it came from doesn't support, and
   never leave a task as the unfilled skeleton.
 - Never write a task anywhere but the pending directory, and never write anything else
-  there — it is a queue of tasks, not a scratch directory.
+  there — it is a queue of tasks, not a scratch directory. The one other place this skill
+  writes is `~/.spoolway/<project>/plans/<group>/`, and only a source file copied in
+  to be linked.
+- Never redraw a source in a task. A figure, a panel or a screenshot that exists as a file
+  is linked; only what exists nowhere else is written out.
 - Never call `spoolway queue add` or start a dispatcher here — writing a task is not
   queueing it; that is the screen's job, done separately by a human.

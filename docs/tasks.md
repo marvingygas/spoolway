@@ -127,7 +127,7 @@ spoolway never reads the body. It is written once, from the skeleton in
 |---|---|
 | `## Context` | Three to five facts about the system today and the decision this task implements. |
 | `## Intend` | What the task achieves, in one or two sentences. |
-| `## Mockup` | What the result looks like, drawn as the thing itself. Delete the heading when nothing a person opens changes. The reviewer checks the change against it. |
+| `## Mockup` | What the result looks like, linked to the plan step or file that draws it, never redrawn. Delete the heading when nothing a person opens changes. The reviewer checks the change against it. |
 | `## Non-goals` | What the task must not do. |
 | `## Acceptance criteria` | Statements that are true or false when the task is done. |
 | `## End-to-end coverage` | The end-to-end test the change adds or updates, or "none" and why. |

@@ -1,9 +1,9 @@
 ## Context
 
-Three to five facts, one line each. You cannot read the plan this came from, so
-this is where its ground goes: what the surrounding code is for, and what is already
-known about where the bug lives. Facts and names, not argument, and no theory of the
-cause — that is what reproducing is for.
+Three to five facts, one line each. The plan and every file behind this task are
+linked below, so this is only the ground a lane needs before opening them: what the
+surrounding code is for, and what is already known about where the bug lives. Facts and
+names, not argument, and no theory of the cause — that is what reproducing is for.
 
 - [[what the affected code is responsible for]]
 - [[what is already ruled in or out]]
@@ -17,18 +17,22 @@ cause — that is what reproducing is for.
 The reproduce step turns this into a failing test or script; give it enough to
 start from.
 
-- observed: [[what actually happens, verbatim where possible]]
+- observed: [[what actually happens, verbatim where possible, or a link to the
+  screenshot or log that shows it]]
 - expected: [[what should happen instead]]
 - since / where: [[a version, commit, or condition that narrows it, if known]]
 
 ## Mockup
 
-What this looks like when it is done, drawn as the thing itself. Build what
-is here. If it cannot be built as drawn, say so in your report rather than
-improvising something near it.
+What this looks like when it is done, linked and never redrawn: one line per
+plan step or file that draws it. Panels are written out here only when no
+file draws them.
 
-    [[the panels this task has to match, copied from the plan — delete this
-    whole heading if the task does not change anything a person opens]]
+Open each link and build what it draws. If it cannot be built as drawn, say
+so in your report rather than improvising something near it.
+
+- [[`/abs/path/to/plan.html#m-step` — the step's own heading; delete this
+  whole heading if the task does not change anything a person opens]]
 
 ## Non-goals
 
@@ -48,4 +52,5 @@ Read these before you start. They describe the system as it is; work from them
 rather than restating them — a path here replaces a paragraph above, and stays
 true after the code moves.
 
+- [[`/abs/path/to/plan.html#d-record` — the decision record this task implements]]
 - [[path — why it matters]]
