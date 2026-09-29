@@ -98,7 +98,7 @@ pending directory. The right pane lists the highlighted group's tasks and what e
 | `t` | Fork the group as a trial. See [Trials](#trials). |
 | `r` | Show the routines pane. See [Routines](#routines). |
 | `s` | Save the highlighted group as a routine. |
-| `h` | Show hidden groups, such as ones already queued. |
+| `h` | Show or hide done groups. A queued group never appears. |
 | `ctrl-c` | Leave the screen. |
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task

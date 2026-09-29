@@ -2687,7 +2687,7 @@ fn group_key(group: &Group) -> GroupKey {
 
 /// Whether a group can be submitted at all: it has to have tasks, and at
 /// least one of them must still be waiting in the pending directory — see
-/// [`GroupState`], which is what `h`'s first widening hides on.
+/// [`GroupState`], which is what `h` hides on.
 fn selectable(group: &Group) -> bool {
     group.state == GroupState::Queueable && !group.tasks.is_empty()
 }
@@ -2804,28 +2804,28 @@ fn trial_fully_assigned(group: &Group, trial: &TrialState) -> bool {
         .all(|task| trial.pipeline.contains_key(&task_key(task)))
 }
 
-/// `h`'s own three-way state: how far the left pane has widened past the
-/// opening, queueable-only view. [`HideScope::next`] is the cycle `h` steps
-/// through, one widening at a time, wrapping back to [`HideScope::Pending`]
-/// once every group is on screen.
+/// `h`'s own two-way switch: whether the left pane shows the done groups
+/// beside the opening, queueable-only view. [`HideScope::next`] flips
+/// between the two.
+///
+/// A group the queue holds even in part is never one of them, at either
+/// setting — see [`reachable`]. Nothing on this screen can act on it, and
+/// the dispatch tab is where running work is watched; a three-step cycle
+/// that also reached it made a person remember which step they were on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HideScope {
     /// The opening state, unchanged: only groups something is still
     /// queueable in.
     Pending,
-    /// Plus every group the queue holds in full.
-    PlusQueued,
-    /// Plus every group the archive holds in full — everything there is.
+    /// Plus every group the archive holds in full.
     PlusDone,
 }
 
 impl HideScope {
-    /// The widening one more `h` press moves to, wrapping from the widest
-    /// scope back to the narrowest rather than getting stuck there.
+    /// The other setting — what one more `h` press moves to.
     fn next(self) -> HideScope {
         match self {
-            HideScope::Pending => HideScope::PlusQueued,
-            HideScope::PlusQueued => HideScope::PlusDone,
+            HideScope::Pending => HideScope::PlusDone,
             HideScope::PlusDone => HideScope::Pending,
         }
     }
@@ -2866,11 +2866,10 @@ impl ScreenState {
         ScreenState {
             focus: Focus::Groups,
             mode: Mode::Browsing,
-            // A group the queue or the archive already holds is one that
-            // can only be scrolled past — see `selectable` — so the screen
-            // opens on the groups a person can actually act on, with the
-            // rest a key or two away rather than crowding the list from the
-            // first frame.
+            // A group the archive already holds is one that can only be
+            // scrolled past — see `selectable` — so the screen opens on the
+            // groups a person can actually act on, with the done ones one
+            // key away rather than crowding the list from the first frame.
             hide_scope: HideScope::Pending,
             filter: String::new(),
             group_cursor: 0,
@@ -2889,6 +2888,14 @@ impl ScreenState {
     }
 }
 
+/// Whether `group` is one this screen lists at all, under any [`HideScope`]
+/// or filter: queueable or done, never [`GroupState::Queued`]. The pane
+/// title's total and the "nothing to queue — N hidden" count are both taken
+/// over these alone, so neither counts a group no key here can bring back.
+fn reachable(group: &Group) -> bool {
+    group.state != GroupState::Queued
+}
+
 /// The groups currently on screen at this [`HideScope`] — `h`'s whole
 /// effect, computed fresh each frame rather than stored, so nothing has to
 /// be reconciled when a group leaves the list entirely.
@@ -2897,8 +2904,7 @@ fn visible(groups: &[Group], scope: HideScope) -> Vec<&Group> {
         .iter()
         .filter(|group| match scope {
             HideScope::Pending => group.state == GroupState::Queueable,
-            HideScope::PlusQueued => group.state != GroupState::Done,
-            HideScope::PlusDone => true,
+            HideScope::PlusDone => reachable(group),
         })
         .collect()
 }
@@ -2906,8 +2912,9 @@ fn visible(groups: &[Group], scope: HideScope) -> Vec<&Group> {
 /// The groups currently on screen, in the order they are drawn: `h`'s
 /// ordinary hide/show list when there is no filter, or every group that
 /// clears [`group_score`] against the filter's own query, ranked best score
-/// first, when there is — reaching a group `h` is hiding, since that is the
-/// one acceptance criterion `visible` alone could never satisfy. A tie in
+/// first, when there is — reaching a done group `h` is hiding, since that is
+/// the one acceptance criterion `visible` alone could never satisfy, but
+/// never a queued one, which [`reachable`] keeps off this screen. A tie in
 /// score falls back to name order, the same tie-break
 /// [`super::pending::list_groups`] itself uses, so the list does not
 /// reshuffle between two draws that score identically.
@@ -2917,6 +2924,7 @@ fn shown<'a>(groups: &'a [Group], state: &ScreenState) -> Vec<&'a Group> {
     }
     let mut ranked: Vec<(i64, &Group)> = groups
         .iter()
+        .filter(|group| reachable(group))
         .filter_map(|group| group_score(group, &state.filter).map(|score| (score, group)))
         .collect();
     ranked.sort_by(|(sa, ga), (sb, gb)| sb.cmp(sa).then_with(|| ga.name.cmp(&gb.name)));
@@ -4305,8 +4313,8 @@ fn group_tail(group: &Group) -> String {
 
 /// The indices in `shown` where [`groups_pane_lines`] draws a blank
 /// separator row — one for every point [`Group::state`] actually changes
-/// between one row and the next, so a list holding only two of the three
-/// states draws one, and a list holding all three draws two.
+/// between one row and the next. [`reachable`] keeps queued groups off the
+/// screen, so a list holding both queueable and done groups draws one.
 ///
 /// `shown` is already in `list_groups`' own order — queueable groups, then
 /// queued ones, then done ones — so a single left-to-right scan is enough:
@@ -4332,7 +4340,7 @@ fn group_boundaries(shown: &[&Group]) -> Vec<usize> {
 /// — the halves [`group_boundaries`] assumes are contiguous can end up
 /// interleaved, or in either order, once a query is in effect. The mockup's
 /// own filtered example draws both its matches back to back with no blank
-/// row between them, queued or not, which is what this returning no
+/// row between them, done or not, which is what this returning no
 /// boundaries at all produces.
 fn boundary_for(shown: &[&Group], state: &ScreenState) -> Vec<usize> {
     if state.filter.is_empty() {
@@ -4345,27 +4353,27 @@ fn boundary_for(shown: &[&Group], state: &ScreenState) -> Vec<usize> {
 /// Where `group_cursor` — an index into groups, which never counts a
 /// separator [`groups_pane_lines`] draws — lands in the pane's own lines,
 /// which do. `cursor` shifts one row for every separator ahead of it: none,
-/// one, or the two drawn once every state is on screen at once.
+/// or the one drawn once `h` shows done groups beside queueable ones.
 fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
     cursor + boundaries.iter().filter(|&&b| cursor >= b).count()
 }
 
 /// The left pane's rows: one per distinct `group:` across the pending
-/// tasks, its checkbox, and whether the queue already holds it — or,
+/// tasks, its checkbox, and whether the archive already holds it — or,
 /// once `h` has hidden every one of them, a single line saying so rather
 /// than an empty pane a person could mistake for a project with nothing
 /// pending at all.
 ///
 /// The checkbox is here and nowhere else, because a group is what gets
 /// submitted. A group not still [`GroupState::Queueable`] has no box at all
-/// — at least one of its tasks is no longer waiting in `pending/`, and that
-/// is what `h`'s first widening hides on.
+/// — at least one of its tasks is no longer waiting in `pending/`. A done
+/// group is what `h` hides on; a queued one never shows at all.
 ///
 /// No task count: the pane beside this one is the group's tasks, so a number
 /// here says the same thing twice and costs the names the room to be read.
 ///
-/// When two or three states are on screen at once, a blank row separates
-/// each pair of them — see [`group_boundaries`]. That row is never a group:
+/// When queueable and done groups are on screen at once, a blank row
+/// separates them — see [`group_boundaries`]. That row is never a group:
 /// `group_cursor` skips straight from one state's last group to the next
 /// state's first in a single key press, because it addresses `shown`
 /// directly and every separator lives only in these lines, not in that
@@ -4388,21 +4396,26 @@ fn groups_pane_lines(
     }
 
     if shown.is_empty() {
+        let reachable_count = groups.iter().filter(|group| reachable(group)).count();
         lines.push(if !state.filter.is_empty() {
             "  no groups match this filter".to_string()
-        } else if groups.is_empty() {
-            // Nothing anywhere, so there is nothing behind `h` either and
-            // no count to give. This is the whole of what an empty pending
-            // directory draws — the screen opens onto it rather than
-            // refusing, see `opening_message`.
+        } else if reachable_count == 0 {
+            // Nothing this screen lists, so there is nothing behind `h`
+            // either and no count to give. This is the whole of what an
+            // empty pending directory draws — the screen opens onto it
+            // rather than refusing, see `opening_message` — and what a
+            // project whose every group is queued draws too, since a
+            // queued group is never one `h` brings back.
             "  nothing to queue".to_string()
         } else {
-            // Only ever `groups.len()` — nothing is visible, so everything
-            // hidden is everything there is — but spelled out from the
-            // hidden count rather than `groups.len()` directly, so the
-            // message keeps meaning the same thing if `visible()` ever
-            // grows a second reason to hide a group.
-            let hidden = groups.len() - shown.len();
+            // Only ever the done groups — nothing is visible, so everything
+            // `h` could bring back is hidden — counted over `reachable`
+            // groups alone, so a queued group, which no key here brings
+            // back, never inflates it. Spelled out as a difference rather
+            // than a count of done groups so the message keeps meaning the
+            // same thing if `visible()` ever grows a second reason to hide
+            // a group.
+            let hidden = reachable_count - shown.len();
             format!("  nothing to queue — {} hidden", plural(hidden, "group"))
         });
         return lines;
@@ -4795,11 +4808,13 @@ pub(super) fn two_pane_frame(
 /// either. Inside bare `spoolway`'s queue tab it does quit, while browsing
 /// and over the routines pane, and those two lines name it there.
 ///
-/// The ordinary line follows focus. `g` and `o` act only on a task under
-/// the tasks pane's cursor, so they are named only while that pane has
-/// focus, first, since they are what the pane is for. `tab` is named in
-/// both panes as the pane it leads to — the one way into the tasks pane
-/// inside bare `spoolway`, where `←`/`→` switch tabs instead.
+/// The ordinary line follows focus. It always leads with `space select`
+/// then `enter queue`, and the pane's own keys come after them. `g` and `o`
+/// act only on a task under the tasks pane's cursor, so they are named only
+/// while that pane has focus, first among the pane's own keys, since they
+/// are what the pane is for. `tab` is named in both panes as the pane it
+/// leads to — the one way into the tasks pane inside bare `spoolway`, where
+/// `←`/`→` switch tabs instead.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`] — none of the ordinary line's keys is read, so this
@@ -4809,10 +4824,10 @@ pub(super) fn two_pane_frame(
 /// read again once it is closed.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
-/// none of `space select` through `enter queue` reads a key while the filter
-/// box has focus — so this draws the filter's own line instead, naming
-/// exactly the one key [`handle_filter_key`] does not simply append to the
-/// query: `enter`, which leaves it.
+/// none of the ordinary line's keys is read while the filter box has
+/// focus — so this draws the filter's own line instead, naming exactly the
+/// one key [`handle_filter_key`] does not simply append to the query:
+/// `enter`, which leaves it.
 fn footer(groups: &[Group], state: &ScreenState) -> String {
     match &state.mode {
         Mode::Filter => key_hint(&[("enter", "leave search")]),
@@ -4849,29 +4864,27 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         ),
         _ => {
             let hide = match state.hide_scope {
-                HideScope::Pending => "show queued",
-                HideScope::PlusQueued => "show done",
-                HideScope::PlusDone => "hide all",
+                HideScope::Pending => "show done tasks",
+                HideScope::PlusDone => "hide done tasks",
             };
             // `q` only inside bare `spoolway`'s queue tab, the one place it
             // quits — see `crate::screen::shell::quit_hint`.
             let pane: &[(&str, &str)] = match state.focus {
-                Focus::Groups => &[("space", "select"), ("f", "find"), ("tab", "tasks")],
+                Focus::Groups => &[("f", "find"), ("tab", "tasks")],
                 Focus::Tasks => &[
                     ("g", "gate"),
                     ("o", "open task"),
                     ("tab", "groups"),
-                    ("space", "select"),
                     ("f", "find"),
                 ],
             };
             let keys = [
+                [("space", "select"), ("enter", "queue")].as_slice(),
                 pane,
                 [
                     ("t", "trial"),
                     ("r", "routines"),
-                    ("s", "save routine"),
-                    ("enter", "queue"),
+                    ("s", "save as routine"),
                     ("h", hide),
                 ]
                 .as_slice(),
@@ -5069,7 +5082,10 @@ fn pending_frame(
     let shown = shown(groups, state);
     let left = groups_pane_lines(groups, &shown, state, layout.left);
     let (right, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
-    let left_title = format!("groups  {} of {}", shown.len(), groups.len());
+    // The total counts only what `h` and `f` can reach — a queued group is
+    // never on this screen, so counting it would promise a row no key shows.
+    let total = groups.iter().filter(|group| reachable(group)).count();
+    let left_title = format!("groups  {} of {}", shown.len(), total);
     let title = shown
         .get(state.group_cursor)
         .map(|group| group.name.as_str())
@@ -7733,6 +7749,18 @@ mod tests {
         .unwrap();
     }
 
+    /// Put a task in the archive with its own `group:`, which is what makes a
+    /// group whose every task is there read as done — see
+    /// [`super::pending::GroupState`].
+    fn already_done(repo: &Repo, id: &str, group: &str) {
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join(format!("{id}.md")),
+            format!("---\nid: {id}\ntitle: {id}\ngroup: {group}\nstage: done\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
     /// Plays `input` through `run_screen` against the repo's own root and
     /// the builtin pipelines, and hands back everything it drew.
     fn screen(repo: &Repo, groups: Vec<Group>, input: &str) -> String {
@@ -7806,21 +7834,21 @@ mod tests {
         assert_eq!(state.group_cursor, 1);
     }
 
-    /// The key line follows focus: hosted, the groups pane's line names the
-    /// way into the tasks pane and no `g` or `o`; the tasks pane's line
-    /// leads with them and names the way back; `esc` brings the first line
-    /// back.
+    /// The key line follows focus: hosted, both lines lead with `space` then
+    /// `enter`; the groups pane's line names the way into the tasks pane and
+    /// no `g` or `o`; the tasks pane's line puts them first among its own
+    /// keys and names the way back; `esc` brings the first line back.
     #[test]
     fn hosted_the_key_line_follows_focus_between_the_two_panes() {
         use crate::screen::shell::{Hosting, Tab};
         let repo = fixture("screen-hosted-footer-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
-        let groups_line = "[space] select   [f] find   [tab] tasks   [t] trial   [r] routines   \
-                           [s] save routine   [enter] queue   [h] show queued   [q] quit";
-        let tasks_line = "[g] gate   [o] open task   [tab] groups   [space] select   [f] find   \
-                          [t] trial   [r] routines   [s] save routine   [enter] queue   \
-                          [h] show queued   [q] quit";
+        let groups_line = "[space] select   [enter] queue   [f] find   [tab] tasks   [t] trial   \
+                           [r] routines   [s] save as routine   [h] show done tasks   [q] quit";
+        let tasks_line = "[space] select   [enter] queue   [g] gate   [o] open task   [tab] groups   \
+                          [f] find   [t] trial   [r] routines   [s] save as routine   \
+                          [h] show done tasks   [q] quit";
 
         // `key_hint` opens every key line on one column of indent.
         let mut state = ScreenState::new();
@@ -8384,9 +8412,9 @@ mod tests {
         assert!(repo.queue_dir().join("second.md").exists(), "second task");
     }
 
-    /// A group the queue already holds has no checkbox and cannot be
-    /// selected again: its tasks are already queued, and `h` is what takes it
-    /// off the screen.
+    /// A group the queue already holds is never on the screen, at either
+    /// setting of `h`, so there is no row for `space` to select: its tasks
+    /// are already queued, and the dispatch tab is where they are watched.
     #[test]
     fn a_queued_group_cannot_be_selected_again() {
         let repo = fixture("screen-queued-group");
@@ -8394,47 +8422,45 @@ mod tests {
         already_queued(&repo, "wire");
         let groups = listed(&repo);
         let mut state = ScreenState::new();
-        // `h` shows it: this test is about the row a queued group draws, not
-        // about the default that now hides it.
-        state.hide_scope = HideScope::PlusQueued;
 
-        handle_browse_key(&groups, &mut state, Key::Char(' '));
-        assert!(
-            state.selected.is_empty(),
-            "a queued group must not be selectable"
-        );
-
-        let shown = visible(&groups, state.hide_scope);
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
-        assert!(
-            !rows[0].contains('[') && rows[0].contains("queued"),
-            "a queued group shows the mark and no box, got {rows:?}"
-        );
+        for scope in [HideScope::Pending, HideScope::PlusDone] {
+            state.hide_scope = scope;
+            assert!(
+                visible(&groups, state.hide_scope).is_empty(),
+                "a queued group must not be on screen at {scope:?}"
+            );
+            handle_browse_key(&groups, &mut state, Key::Char(' '));
+            assert!(
+                state.selected.is_empty(),
+                "a queued group must not be selectable"
+            );
+            let rows = groups_pane_lines(&groups, &[], &state, 30);
+            assert_eq!(
+                rows,
+                vec!["  nothing to queue".to_string()],
+                "a queued group is not counted as hidden either: {rows:?}"
+            );
+        }
     }
 
-    /// The blank row between the queueable and queued halves: drawn once,
+    /// The blank row between the queueable and done halves: drawn once,
     /// exactly at the boundary, never carrying the cursor marker whichever
     /// group it is on — and gone entirely once only one half is on screen,
-    /// so a project with nothing queued yet gets no dangling blank line at
+    /// so a project with nothing done yet gets no dangling blank line at
     /// the bottom of the pane.
     #[test]
     fn groups_pane_lines_draws_one_unmarked_separator_between_the_two_groups() {
         let repo = fixture("screen-separator-row");
         write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
-        // A birth time has no `set_*` the way a modification time does —
-        // see `pending::list_groups`' own tests — so this sleeps to
-        // guarantee the second task really is the later-written one.
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
-        already_queued(&repo, "cook");
+        already_done(&repo, "cook", "cook");
         let groups = listed(&repo);
 
         let mut state = ScreenState::new();
-        state.hide_scope = HideScope::PlusQueued;
+        state.hide_scope = HideScope::PlusDone;
         let shown = visible(&groups, state.hide_scope);
         assert_eq!(shown.len(), 2, "both groups have to be on screen for this");
 
-        // The cursor is on the queued group (`group_cursor` addresses
+        // The cursor is on the done group (`group_cursor` addresses
         // `shown`, index 1) — proving the marker still lands past the
         // separator, on the row it belongs to, not on the blank one ahead
         // of it.
@@ -8448,10 +8474,10 @@ mod tests {
         assert_eq!(rows[1], "", "the separator itself is a blank row: {rows:?}");
         assert!(
             rows[2].starts_with('>'),
-            "the cursor on the queued group must land past the separator: {rows:?}"
+            "the cursor on the done group must land past the separator: {rows:?}"
         );
 
-        // With only one half on screen — `h` back on, hiding the queued
+        // With only one half on screen — `h` pressed again, hiding the done
         // group — there is no boundary left to draw a row for at all.
         state.hide_scope = HideScope::Pending;
         state.group_cursor = 0;
@@ -8465,46 +8491,39 @@ mod tests {
         assert!(!rows[0].is_empty(), "{rows:?}");
     }
 
-    /// Widen all the way to `done` and every state draws its own separator:
-    /// two blank rows, not one, and `group_cursor` shifts by however many of
-    /// them sit ahead of it — the acceptance criterion a single boundary
-    /// could never exercise.
+    /// With one group in each of the three states and done groups shown, the
+    /// queued group is still left out — so the pane draws one separator, not
+    /// two, and `group_cursor` on the done group shifts past just that one.
     #[test]
-    fn two_separators_are_drawn_once_every_state_is_on_screen() {
+    fn a_queued_group_leaves_no_separator_of_its_own_once_done_groups_show() {
         let repo = fixture("screen-two-separators");
         write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
-        std::thread::sleep(std::time::Duration::from_millis(5));
         write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
         already_queued(&repo, "cook");
-        std::fs::create_dir_all(repo.archive_dir()).unwrap();
-        std::fs::write(
-            repo.archive_dir().join("shipped.md"),
-            "---\nid: shipped\ntitle: shipped\ngroup: shipped\nstage: done\n---\nbody\n",
-        )
-        .unwrap();
+        already_done(&repo, "shipped", "shipped");
         let groups = listed(&repo);
+        assert_eq!(groups.len(), 3, "one group per state");
 
         let mut state = ScreenState::new();
         state.hide_scope = HideScope::PlusDone;
         let shown = visible(&groups, state.hide_scope);
-        assert_eq!(shown.len(), 3, "one group per state");
+        assert_eq!(shown.len(), 2, "the queued group is never on screen");
 
         let rows = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows.len(),
-            5,
-            "three groups plus two blank separators: {rows:?}"
+            3,
+            "two groups plus one blank separator: {rows:?}"
         );
-        assert_eq!(rows[1], "", "the first separator: {rows:?}");
-        assert_eq!(rows[3], "", "the second separator: {rows:?}");
+        assert_eq!(rows[1], "", "the one separator: {rows:?}");
+        assert!(rows[2].contains("shipped"), "{rows:?}");
 
-        // `group_cursor` addresses `shown` directly (index 2, the done
-        // group), never a separator — so it has to land on the fifth line,
-        // shifted past both blank rows ahead of it.
-        state.group_cursor = 2;
+        // `group_cursor` addresses `shown` directly (index 1, the done
+        // group), never a separator — so it lands on the third line.
+        state.group_cursor = 1;
         assert_eq!(
             group_line_index(state.group_cursor, &boundary_for(&shown, &state)),
-            4
+            2
         );
     }
 
@@ -8516,9 +8535,11 @@ mod tests {
         already_queued(&repo, "wire");
         let groups = listed(&repo);
 
-        let mut state = ScreenState::new();
-        state.hide_scope = HideScope::PlusQueued;
-        let shown = visible(&groups, state.hide_scope);
+        let state = ScreenState::new();
+        // No setting of `h` puts a queued group on screen, but the pane is
+        // still sized for `group_tail`'s widest tail — see
+        // `QUEUED_TAIL_COLUMNS` — so the row is drawn from every group here.
+        let shown: Vec<&Group> = groups.iter().collect();
         let rows = groups_pane_lines(&groups, &shown, &state, 40);
         assert!(
             rows[0].ends_with(" queued"),
@@ -8545,9 +8566,11 @@ mod tests {
             already_queued(&repo, name);
         }
         let groups = listed(&repo);
-        let mut state = ScreenState::new();
-        state.hide_scope = HideScope::PlusQueued;
-        let shown = visible(&groups, state.hide_scope);
+        let state = ScreenState::new();
+        // No setting of `h` puts a queued group on screen, but the pane is
+        // still sized for `group_tail`'s widest tail — see
+        // `QUEUED_TAIL_COLUMNS` — so the row is drawn from every group here.
+        let shown: Vec<&Group> = groups.iter().collect();
 
         let layout = layout_for(74, 24);
         let rows = groups_pane_lines(&groups, &shown, &state, layout.left);
@@ -8578,9 +8601,11 @@ mod tests {
         );
         already_queued(&repo, &name);
         let groups = listed(&repo);
-        let mut state = ScreenState::new();
-        state.hide_scope = HideScope::PlusQueued;
-        let shown = visible(&groups, state.hide_scope);
+        let state = ScreenState::new();
+        // No setting of `h` puts a queued group on screen, but the pane is
+        // still sized for `group_tail`'s widest tail — see
+        // `QUEUED_TAIL_COLUMNS` — so the row is drawn from every group here.
+        let shown: Vec<&Group> = groups.iter().collect();
 
         let rows = groups_pane_lines(&groups, &shown, &state, MAX_LEFT_PANE);
         assert!(
@@ -8604,9 +8629,11 @@ mod tests {
         already_queued(&repo, "wire");
         let groups = listed(&repo);
 
-        let mut state = ScreenState::new();
-        state.hide_scope = HideScope::PlusQueued;
-        let shown = visible(&groups, state.hide_scope);
+        let state = ScreenState::new();
+        // No setting of `h` puts a queued group on screen, but the pane is
+        // still sized for `group_tail`'s widest tail — see
+        // `QUEUED_TAIL_COLUMNS` — so the row is drawn from every group here.
+        let shown: Vec<&Group> = groups.iter().collect();
         for width in [MIN_LEFT_PANE, MIN_LEFT_PANE + 20, MAX_LEFT_PANE] {
             let rows = groups_pane_lines(&groups, &shown, &state, width);
             assert!(
@@ -8630,9 +8657,11 @@ mod tests {
         already_queued(&repo, "bound-loops");
         let groups = listed(&repo);
 
-        let mut state = ScreenState::new();
-        state.hide_scope = HideScope::PlusQueued;
-        let shown = visible(&groups, state.hide_scope);
+        let state = ScreenState::new();
+        // No setting of `h` puts a queued group on screen, but the pane is
+        // still sized for `group_tail`'s widest tail — see
+        // `QUEUED_TAIL_COLUMNS` — so the row is drawn from every group here.
+        let shown: Vec<&Group> = groups.iter().collect();
         for total_columns in [74usize, 99] {
             let layout = layout_for(total_columns, 24);
             let rows = groups_pane_lines(&groups, &shown, &state, layout.left);
@@ -9688,81 +9717,80 @@ mod tests {
         );
     }
 
-    /// The screen opens with every already-queued group hidden — the mockup's
-    /// own "0 of 5" frame — and `h` brings them straight back.
+    /// The screen opens on queueable groups only: a done group is hidden
+    /// until `h`, and the one line left says how many `h` would bring back —
+    /// counting the done group alone, never a queued one beside it.
     #[test]
-    fn the_screen_opens_with_queued_groups_hidden_and_h_brings_them_back() {
+    fn the_screen_opens_with_done_groups_hidden_and_h_brings_them_back() {
         let repo = fixture("screen-opens-hidden");
+        already_done(&repo, "finished", "finished");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
+        assert_eq!(groups.len(), 2, "one done group, one queued group");
 
         let state = ScreenState::new();
         assert_eq!(
             state.hide_scope,
             HideScope::Pending,
-            "the screen must open with queued groups hidden"
+            "the screen must open with done groups hidden"
         );
         let shown = visible(&groups, state.hide_scope);
-        assert!(shown.is_empty(), "the one group here is already queued");
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        assert!(shown.is_empty(), "neither group here is queueable");
+        let rows = groups_pane_lines(&groups, &shown, &state, 40);
         assert_eq!(
             rows,
             vec!["  nothing to queue — 1 group hidden".to_string()],
-            "{rows:?}"
+            "only the done group counts as hidden: {rows:?}"
         );
 
         let mut state = state;
         handle_browse_key(&groups, &mut state, Key::Char('h'));
         let shown = visible(&groups, state.hide_scope);
-        assert_eq!(shown.len(), 1, "`h` brings the queued group back");
+        assert_eq!(shown.len(), 1, "`h` brings the done group back");
+        assert_eq!(shown[0].name, "finished");
     }
 
-    /// `h` cycles pending-only, plus queued, plus done, then wraps — three
-    /// presses widen a group that started wholly archived into view and a
-    /// fourth hides it again, the exact shape the mockup draws.
+    /// `h` is a two-way switch: one press adds the done groups, the next
+    /// takes them away again. A queued group is on screen at neither
+    /// setting, and the filter does not reach it either.
     #[test]
-    fn h_cycles_three_scopes_and_wraps() {
-        let repo = fixture("screen-h-cycle");
-        std::fs::create_dir_all(repo.archive_dir()).unwrap();
-        std::fs::write(
-            repo.archive_dir().join("finished.md"),
-            "---\nid: finished\ntitle: finished\ngroup: finished\nstage: done\n---\nbody\n",
-        )
-        .unwrap();
+    fn h_toggles_done_groups_and_never_shows_a_queued_one() {
+        let repo = fixture("screen-h-toggle");
+        already_done(&repo, "finished", "finished");
+        write_pending(&repo, "wire", &task_text("wire", "group: sent\n", BODY));
+        already_queued(&repo, "wire");
+        write_pending(&repo, "cook", &task_text("cook", "group: open\n", BODY));
         let groups = listed(&repo);
+        let names = |shown: Vec<&Group>| -> Vec<String> {
+            shown.iter().map(|group| group.name.clone()).collect()
+        };
         let mut state = ScreenState::new();
 
-        assert!(
-            visible(&groups, state.hide_scope).is_empty(),
-            "the opening scope shows nothing but what is still queueable"
-        );
-
-        handle_browse_key(&groups, &mut state, Key::Char('h'));
-        assert_eq!(state.hide_scope, HideScope::PlusQueued);
-        assert!(
-            visible(&groups, state.hide_scope).is_empty(),
-            "an archived-only group is not `queued` either"
-        );
+        assert_eq!(names(shown(&groups, &state)), vec!["open"]);
 
         handle_browse_key(&groups, &mut state, Key::Char('h'));
         assert_eq!(state.hide_scope, HideScope::PlusDone);
-        assert_eq!(
-            visible(&groups, state.hide_scope).len(),
-            1,
-            "the third widening is the one that reaches `done`"
-        );
+        assert_eq!(names(shown(&groups, &state)), vec!["open", "finished"]);
 
         handle_browse_key(&groups, &mut state, Key::Char('h'));
         assert_eq!(
             state.hide_scope,
             HideScope::Pending,
-            "the third press wraps"
+            "the second press switches back"
         );
+        assert_eq!(names(shown(&groups, &state)), vec!["open"]);
+
+        // The filter reaches a done group `h` is hiding, but a queued group
+        // matching the query exactly stays off the screen.
+        state.filter = "sent".to_string();
         assert!(
-            visible(&groups, state.hide_scope).is_empty(),
-            "and the archived group is hidden again"
+            shown(&groups, &state).is_empty(),
+            "{:?}",
+            names(shown(&groups, &state))
         );
+        state.filter = "finished".to_string();
+        assert_eq!(names(shown(&groups, &state)), vec!["finished"]);
     }
 
     /// The same story as the test above, but through `run_screen` itself: the
@@ -9770,8 +9798,9 @@ mod tests {
     /// `h` draws next — every one of those is an acceptance criterion, and
     /// none of them is reachable by calling `groups_pane_lines` alone.
     #[test]
-    fn the_first_drawn_frame_hides_queued_groups_and_h_shows_them() {
+    fn the_first_drawn_frame_hides_done_groups_and_h_shows_them() {
         let repo = fixture("screen-first-frame-hidden");
+        already_done(&repo, "finished", "finished");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
@@ -9791,58 +9820,55 @@ mod tests {
 
         assert!(
             opening.contains("groups  0 of 1"),
-            "the opening title must count the hidden group as not shown:\n{opening}"
+            "the opening title must count the done group as not shown, and \
+             the queued one not at all:\n{opening}"
         );
         // Not the full sentence: the fallback (no-terminal) width this test
         // runs at is now the narrower `MIN_LEFT_PANE`, and `two_pane_frame`'s
         // own `pad_to` cuts this row off there the same as any other line too
-        // long for its pane. `the_screen_opens_with_queued_groups_hidden_...`
-        // below checks the untruncated string directly, off
+        // long for its pane. `the_screen_opens_with_done_groups_hidden_...`
+        // above checks the untruncated string directly, off
         // `groups_pane_lines` rather than through a real frame.
         assert!(opening.contains("nothing to queue"), "{opening}");
         assert!(
-            opening.contains("[space] select   [f] find   [tab] tasks   [t] trial"),
-            "the groups pane's line must name `tab` after `[f] find`:\n{opening}"
+            opening.contains("[space] select   [enter] queue   [f] find   [tab] tasks   [t] trial"),
+            "the groups pane's line must lead with `space` and `enter`:\n{opening}"
         );
         assert!(
             !opening.contains("[g] gate") && !opening.contains("[o] open task"),
             "`g` and `o` do nothing over the groups pane, so its line names neither:\n{opening}"
         );
         assert!(
-            opening.contains("[h] show queued"),
-            "the footer must offer to show the hidden groups:\n{opening}"
+            opening.contains("[h] show done tasks"),
+            "the footer must offer to show the done groups:\n{opening}"
         );
 
         assert!(
             after_h.contains("groups  1 of 1"),
-            "`h` must bring the group into the shown count:\n{after_h}"
+            "`h` must bring the done group into the shown count:\n{after_h}"
         );
-        assert!(after_h.contains("wire"), "{after_h}");
+        assert!(after_h.contains("finished"), "{after_h}");
+        assert!(!after_h.contains("queued"), "{after_h}");
         assert!(
-            after_h.contains("[h] show done"),
-            "the footer must name the next widening once queued groups are shown:\n{after_h}"
+            after_h.contains("[h] hide done tasks"),
+            "the footer must offer to hide the done groups again:\n{after_h}"
         );
     }
 
     /// Pressing down from the last queueable group lands straight on the
-    /// first queued one — the separator between the two halves is a drawn
+    /// first done one — the separator between the two halves is a drawn
     /// row, not a group `group_cursor` ever points at, so crossing it costs
     /// exactly the one key press an ordinary move between two groups would.
     #[test]
-    fn pressing_down_across_the_separator_lands_on_the_first_queued_group() {
+    fn pressing_down_across_the_separator_lands_on_the_first_done_group() {
         let repo = fixture("screen-cross-separator");
         write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
-        // Written after the group above, so it is not already the newest —
-        // being in the queue does not move a group inside its own half of
-        // the list, only across the boundary between the two halves.
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
-        already_queued(&repo, "cook");
+        already_done(&repo, "cook", "cook");
         let groups = listed(&repo);
 
-        // `h` first, to bring the queued group back on screen at all — the
-        // screen opens with it hidden — then one `Down` to cross from the
-        // one queueable group onto it.
+        // `h` first, to bring the done group on screen at all — the screen
+        // opens with it hidden — then one `Down` to cross from the one
+        // queueable group onto it.
         let drawn = screen(&repo, groups, "h\x1b[B");
 
         let last = last_frame(&drawn);
@@ -9851,9 +9877,9 @@ mod tests {
             .find(|line| line.contains("│ >"))
             .unwrap_or_else(|| panic!("no cursor row in the final frame:\n{last}"));
         assert!(
-            cursor_row.contains("cook") && cursor_row.contains("queued"),
+            cursor_row.contains("cook") && cursor_row.contains("done"),
             "one `Down` past the last queueable group must land on the \
-             queued one, not the blank separator between them:\n{cursor_row}"
+             done one, not the blank separator between them:\n{cursor_row}"
         );
     }
 
@@ -10170,10 +10196,10 @@ mod tests {
         .unwrap();
         let groups = listed(&repo);
 
-        // `h` twice widens the scope all the way to `done`, where the
-        // archived group actually lists; `t` opens the picker on it, `enter`
-        // twice past both screens.
-        screen(&repo, groups, "hht\r\r");
+        // `h` shows the done groups, where the archived group actually
+        // lists; `t` opens the picker on it, `enter` twice past both
+        // screens.
+        screen(&repo, groups, "ht\r\r");
 
         let arm = queued(&repo, "finished-1");
         assert_eq!(
@@ -10407,7 +10433,7 @@ mod tests {
         );
         assert!(drawn.contains("nothing to queue"), "{drawn}");
         assert!(
-            drawn.contains("[h] show queued"),
+            drawn.contains("[h] show done tasks"),
             "the footer must draw too:\n{drawn}"
         );
         assert!(
@@ -10516,13 +10542,13 @@ mod tests {
         let shown = visible(&groups, state.hide_scope);
         assert!(
             shown.is_empty(),
-            "hidden by default behind `h`, same as any other queued group"
+            "never on screen, same as any other queued group"
         );
         let rows = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows,
-            vec!["  nothing to queue — 1 group hidden".to_string()],
-            "{rows:?}"
+            vec!["  nothing to queue".to_string()],
+            "no key here brings a queued group back, so none counts as hidden: {rows:?}"
         );
     }
 
@@ -10640,12 +10666,11 @@ mod tests {
         assert!(!last.contains("enter keep filter"), "{last}");
     }
 
-    /// `h` hides a queued group from ordinary browsing, but a filter reaches
-    /// it anyway — the acceptance criterion this task exists for. The
-    /// matched group still draws its `queued` tail and no checkbox, exactly
-    /// as it does when `h` is the one showing it.
+    /// A filter reaches a done group `h` is hiding, but never a queued one:
+    /// no key on this screen can act on a queued group, so a query naming
+    /// it exactly still leaves the pane empty.
     #[test]
-    fn a_filter_reaches_a_queued_group_that_h_is_hiding() {
+    fn a_filter_never_reaches_a_queued_group() {
         let repo = fixture("screen-filter-reaches-queued");
         write_pending(
             &repo,
@@ -10653,24 +10678,23 @@ mod tests {
             &task_text("wire", "group: queue-browse\n", BODY),
         );
         already_queued(&repo, "wire");
+        already_done(&repo, "shipped", "queue-shipped");
         let groups = listed(&repo);
 
         // `hide_scope` starts at `HideScope::Pending` — see `ScreenState::new`
-        // — so without the filter this group would not be drawn at all.
+        // — so without the filter neither group would be drawn at all.
         let drawn = screen(&repo, groups, "fqueue");
 
         let last = last_frame(&drawn);
-        // The pane's own title (`┬─ queue-browse ─…`) also carries the name,
-        // so the row is picked out by carrying both the name and the
-        // `queued` tail together — the title never carries the tail.
+        assert!(
+            !last.contains("queue-browse"),
+            "the queued group must stay off the pane:\n{last}"
+        );
         let row = last
             .lines()
-            .find(|line| line.contains("queue-browse") && line.contains("queued"))
-            .unwrap_or_else(|| panic!("the queued group never made it onto the pane:\n{last}"));
-        assert!(
-            !row.contains('['),
-            "a queued group draws no checkbox:\n{row}"
-        );
+            .find(|line| line.contains("queue-shipped") && line.contains("done"))
+            .unwrap_or_else(|| panic!("the done group never made it onto the pane:\n{last}"));
+        assert!(!row.contains('['), "a done group draws no checkbox:\n{row}");
     }
 
     /// `q` typed while the filter box has focus is kept as an ordinary

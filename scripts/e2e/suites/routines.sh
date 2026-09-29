@@ -98,20 +98,21 @@ has "under its own bare id, untouched" "id: release-notes" \
 has "and its own group" "group: release" \
   .spoolway/routines/release/release-notes.md
 
-# A group whose one document lives only in the queue directory — the shape a
-# task already run once through a pipeline has, carrying every key spoolway
-# stamped on that run. `list_groups` reads it straight out of `queue/`,
-# verbatim, so this is `s` over exactly what a finished or archived task
-# looks like, not a fresh producer's document. `f` narrows the picker to it
-# by name, since `h` alone would still need this to be told apart from
-# `nightly` and `maintenance`, already queued too.
+# A group whose one document lives only in the archive — the shape a task
+# already run once through a pipeline has, carrying every key spoolway
+# stamped on that run. `list_groups` reads it straight out of `archive/`,
+# verbatim, so this is `s` over exactly what a finished task looks like, not
+# a fresh producer's document. Not `queue/`: the queue tab never lists a
+# queued group, and its filter never reaches one. `f` narrows the picker to
+# it by name, which reaches a done group without `h`.
 #
 # The query is `archived-` rather than the whole group name — narrower than
 # it needs to be, but it still matches only this group, and every letter of
 # it reaches the filter as ordinary text: `s` no longer fires the save panel
 # mid-query the way it once did, so nothing here has to dodge a letter to
 # keep from triggering an action early.
-task_doc "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse.md" archived-reuse "$BODY" \
+mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
+task_doc "$SPOOLWAY_PROJECT_HOME/archive/archived-reuse.md" archived-reuse "$BODY" \
   "group: archived-reuse" \
   "stage: done" \
   "run: r00000000000000ar" \
