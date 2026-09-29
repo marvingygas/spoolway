@@ -65,4 +65,13 @@ lacks "space again resumes it" "enabled" "$STORE"
 on_screen '\033[Cxy' /dev/null
 lacks "x then y deletes the job" "[jobs.nightly]" "$STORE"
 
+# One task on its own: `→` opens the jobs tab; n opens the routines browser;
+# `tab` moves the cursor onto `nightly`'s tasks pane, on `audit-deps`; space
+# picks that task; the expression is typed and accepted, and the pipeline
+# picker's own first entry chosen, as above.
+on_screen '\033[Cn\t 0 4 * * *\r\r' /dev/null
+
+has "tab reaches the tasks pane, and space picks one task" \
+  'routine = "nightly/audit-deps.md"' "$STORE"
+
 finish

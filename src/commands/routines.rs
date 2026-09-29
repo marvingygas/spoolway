@@ -3,7 +3,7 @@
 //! read of the single flat pending directory.
 //!
 //! Read only, and just as shallow as `pending.rs`'s own read: the queue
-//! screen's `r` pane only needs enough to draw a folder tree and the
+//! screen's `r` pane only needs enough to draw one row per routine and the
 //! tasks under it, and `super::queue::validate_batch` is still what
 //! actually validates a task once a person queues one, exactly as it is
 //! for a pending group.
@@ -29,28 +29,21 @@ pub(crate) struct RoutineTask {
 }
 
 /// One folder under `.spoolway/routines/`, and everything nested under it.
+///
+/// A routine is a top-level folder. A subfolder inside one has no row of its
+/// own anywhere: it is read only so its tasks fold into [`Self::tasks`].
 pub(crate) struct RoutineFolder {
     /// This folder's own base name — what the left pane draws and what a
     /// selection is keyed by, alongside its own `path`.
     pub(crate) name: String,
     /// The folder's own absolute path, and the identity a selection is made
-    /// under: two folders of the same name in different parents are two
-    /// different rows.
+    /// under.
     pub(crate) path: PathBuf,
-    /// This folder's own immediate subfolders, name order — what `→`
-    /// descends into.
-    pub(crate) folders: Vec<RoutineFolder>,
     /// Every `*.md` at or below this folder — its own tasks first, then
     /// each subfolder's, recursively depth-first. What the left pane's own
     /// "N tasks" tail counts, what the right pane lists for the highlighted
     /// folder, and what `enter` queues whole.
     pub(crate) tasks: Vec<RoutineTask>,
-    /// How many of `tasks` sit directly in this folder, rather than folded
-    /// in from a subfolder — the first `own` entries of `tasks`, by
-    /// construction. What decides `→`'s own choice for a folder holding
-    /// both: a task of its own to focus, or nothing here but subfolders
-    /// left to descend into. See `queue::handle_routine_key`.
-    pub(crate) own: usize,
 }
 
 /// Every top-level folder under [`Repo::routines_dir`], recursively read.
@@ -99,8 +92,8 @@ pub(crate) fn read_task_at(path: &Path) -> Result<RoutineTask> {
     })
 }
 
-/// One folder, read recursively: its own subfolders and its own tasks,
-/// then every task any of those subfolders hold, folded in after.
+/// One folder, read recursively: its own tasks, then every task any of its
+/// subfolders hold, folded in after.
 fn read_folder(path: &Path) -> Result<RoutineFolder> {
     let name = path
         .file_name()
@@ -125,9 +118,6 @@ fn read_folder(path: &Path) -> Result<RoutineFolder> {
             tasks.push(task);
         }
     }
-    // Taken before folding a subfolder's tasks in below, so `own` counts
-    // only what actually sits directly in this folder.
-    let own = tasks.len();
     // A subfolder's own tasks are already gathered into its `tasks` by
     // this same recursion, so folding them in here — after this folder's
     // own — is what makes a parent's count and listing cover everything at
@@ -139,9 +129,7 @@ fn read_folder(path: &Path) -> Result<RoutineFolder> {
     Ok(RoutineFolder {
         name,
         path: path.to_path_buf(),
-        folders,
         tasks,
-        own,
     })
 }
 
@@ -211,7 +199,6 @@ mod tests {
         let routines = list_routines(&repo).unwrap();
         assert_eq!(routines.len(), 1);
         assert_eq!(routines[0].name, "nightly");
-        assert!(routines[0].folders.is_empty());
         let ids: Vec<&str> = routines[0].tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["audit-deps", "audit-docs"]);
     }
@@ -228,13 +215,13 @@ mod tests {
         write(&sub, "prune.md", "prune", "");
 
         let routines = list_routines(&repo).unwrap();
-        assert_eq!(routines.len(), 1);
-        assert_eq!(routines[0].tasks.len(), 3, "one of its own, two nested");
-        assert_eq!(routines[0].own, 1, "only `sweep` sits directly in it");
-        assert_eq!(routines[0].folders.len(), 1);
-        assert_eq!(routines[0].folders[0].name, "weekly");
-        assert_eq!(routines[0].folders[0].tasks.len(), 2);
-        assert_eq!(routines[0].folders[0].own, 2, "both of `weekly`'s own");
+        assert_eq!(routines.len(), 1, "`weekly` is no routine of its own");
+        let ids: Vec<&str> = routines[0].tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["sweep", "prune", "rotate"],
+            "its own first, then the nested ones"
+        );
     }
 
     /// A task with no readable `id:` is skipped, the same tolerance

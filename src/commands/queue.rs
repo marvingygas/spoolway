@@ -2402,8 +2402,8 @@ enum Mode {
     /// [`crate::commands::ignored_popup`]. `enter` closes it, the only key
     /// it reads, the same as [`Mode::Queued`].
     Ignored(crate::commands::IgnoredPopup),
-    /// `r`'s own screen: the left pane swapped for the folder tree under
-    /// `.spoolway/routines/` — see [`RoutineNav`] for what it tracks between
+    /// `r`'s own screen: the left pane swapped for the routines under
+    /// `.spoolway/routines/`, one row each — see [`RoutineNav`] for what it tracks between
     /// keys. The folders and tasks themselves live in `run_screen`'s own
     /// `routines`, read fresh every time this mode is entered, the same way
     /// `groups` is read once up front rather than carried on the mode.
@@ -2692,11 +2692,16 @@ fn selectable(group: &Group) -> bool {
     group.state == GroupState::Queueable && !group.tasks.is_empty()
 }
 
-/// [`Mode::Routines`]'s own state: the breadcrumb of folder names browsed
-/// into so far, which pane has focus, where each pane's own cursor sits, and
-/// which folders at the current level are ticked for `enter` to queue.
+/// [`Mode::Routines`]'s own state: which pane has focus, where each pane's
+/// own cursor sits, and which routines are ticked for `enter` to queue.
 ///
-/// The folder tree itself is not here — it lives in `run_screen`'s own
+/// There is no breadcrumb: a routine is one folder directly under
+/// `.spoolway/routines/`, and the list is only ever those. A subfolder
+/// inside one is never a row of its own — its tasks are already folded into
+/// the routine it sits in (see [`RoutineFolder::tasks`]), so they show and
+/// queue with it.
+///
+/// The folders themselves are not here — it lives in `run_screen`'s own
 /// `routines`, read fresh every time `r` opens this mode, the same read
 /// [`super::routines::list_routines`] gives the empty-directory case no
 /// error over.
@@ -2705,7 +2710,6 @@ fn selectable(group: &Group) -> bool {
 /// the same browser and then read back which folder or task was picked.
 #[derive(Debug, Clone)]
 pub(super) struct RoutineNav {
-    pub(super) path: Vec<String>,
     pub(super) focus: Focus,
     pub(super) folder_cursor: usize,
     pub(super) task_cursor: usize,
@@ -2718,7 +2722,6 @@ pub(super) struct RoutineNav {
 impl RoutineNav {
     pub(super) fn new() -> RoutineNav {
         RoutineNav {
-            path: Vec::new(),
             focus: Focus::Groups,
             folder_cursor: 0,
             task_cursor: 0,
@@ -3137,16 +3140,19 @@ fn run_screen_from(
 
         // Inside bare `spoolway`'s queue tab, `←`, `→` and `q` belong to the
         // shell while browsing — the one mode with no popup or sub-mode
-        // open. Every other mode keeps them: the routines pane's own arrows,
-        // the trial picker's, the filter's `q` typed into its query.
+        // open. Every other mode keeps them: the routines pane, where the
+        // arrows do nothing, the trial picker's arrows, the filter's `q`
+        // typed into its query.
         if matches!(state.mode, Mode::Browsing)
             && let Some(leave) = crate::screen::shell::leave_on(key)
         {
             return Ok(ScreenExit::Leave(leave));
         }
-        // The routines pane reads the arrows itself, to move between its
-        // own two panes, but nothing of its own on `q` — so there `q` alone
-        // is the shell's, as the pane's own key line says.
+        // The routines pane reads nothing of its own on `q`, so there `q`
+        // alone is the shell's, as the pane's own key line says. Its arrows
+        // stay with the pane, which does nothing with them: `r` still opens
+        // it from this tab, and an arrow that switched tabs from inside it
+        // would leave the pane half-closed behind the strip.
         if matches!(state.mode, Mode::Routines(_))
             && key == Key::Char('q')
             && let Some(leave) = crate::screen::shell::leave_on(key)
@@ -3325,11 +3331,18 @@ fn run_screen_from(
                 _ => {}
             },
             Mode::Routines(nav) => match key {
-                // `esc` is what leaves this pane now — `r` no longer does,
-                // since `r` inside `Mode::Browsing` is what opens it, and a
-                // key that both opens and closes the same pane is one key
-                // too many to remember. See `handle_routine_key`'s own doc
-                // comment for why `→`/`←` still move between the two panes.
+                // `esc` over the tasks pane goes back to the list, the way
+                // it does on the pending screen, keeping the list's cursor
+                // on the routine whose tasks were shown.
+                Key::Esc if nav.focus == Focus::Tasks => {
+                    let mut nav = nav.clone();
+                    nav.focus = Focus::Groups;
+                    state.mode = Mode::Routines(nav);
+                }
+                // `esc` over the list is what leaves this pane — `r` does
+                // not, since `r` inside `Mode::Browsing` is what opens it,
+                // and a key that both opens and closes the same pane is one
+                // key too many to remember.
                 Key::Esc => state.mode = Mode::Browsing,
                 // `enter` over a ticked folder — ignored with nothing ticked,
                 // the same way `Mode::Browsing`'s own `enter` does nothing
@@ -3698,35 +3711,16 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     }
 }
 
-/// The folders shown at `path`'s own breadcrumb: `routines` itself at the
-/// root, or whichever folder's own subfolders `path` names. An empty slice
-/// for a breadcrumb naming a folder that is no longer there — read fresh
-/// only when `r` opens this mode, so nothing here has to reload mid-browse —
-/// rather than a panic.
-pub(super) fn routine_level<'a>(
-    routines: &'a [RoutineFolder],
-    path: &[String],
-) -> &'a [RoutineFolder] {
-    let mut level = routines;
-    for name in path {
-        match level.iter().find(|folder| &folder.name == name) {
-            Some(folder) => level = &folder.folders,
-            None => return &[],
-        }
-    }
-    level
-}
-
-/// The folder the left pane's cursor sits on, at the current breadcrumb.
+/// The routine the left pane's cursor sits on.
 pub(super) fn highlighted_routine_folder<'a>(
     routines: &'a [RoutineFolder],
     nav: &RoutineNav,
 ) -> Option<&'a RoutineFolder> {
-    routine_level(routines, &nav.path).get(nav.folder_cursor)
+    routines.get(nav.folder_cursor)
 }
 
-/// The task the right pane's cursor sits on, at the current breadcrumb —
-/// `None` with no folder highlighted, or a folder with fewer tasks than
+/// The task the right pane's cursor sits on — `None` with no routine
+/// highlighted, or a folder with fewer tasks than
 /// `nav.task_cursor` names.
 pub(super) fn highlighted_routine_task<'a>(
     routines: &'a [RoutineFolder],
@@ -3743,6 +3737,12 @@ pub(super) fn highlighted_routine_task<'a>(
 /// so `run_screen` reads those first and only falls through to this for the
 /// rest, the same split it makes for `handle_browse_key`. `q` is part of
 /// that rest, and does nothing here either.
+///
+/// `tab` is the only key that moves between the two panes. `←` and `→`
+/// read nothing here: they belong to the tab strip, which the queue screen
+/// and the jobs picker both sit under. `esc` is not read here either, since
+/// it means "back to the list" in the queue screen and "cancel" in the jobs
+/// picker, so each caller reads it itself.
 pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
     match key {
         Key::Up | Key::Char('k') => match nav.focus {
@@ -3754,7 +3754,7 @@ pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNa
         },
         Key::Down | Key::Char('j') => match nav.focus {
             Focus::Groups => {
-                let last = routine_level(routines, &nav.path).len().saturating_sub(1);
+                let last = routines.len().saturating_sub(1);
                 nav.folder_cursor = (nav.folder_cursor + 1).min(last);
                 nav.task_cursor = 0;
             }
@@ -3765,52 +3765,15 @@ pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNa
                 nav.task_cursor = (nav.task_cursor + 1).min(last);
             }
         },
-        // Opens whatever is highlighted, one step at a time so both a
-        // folder's own tasks and its subfolders stay reachable — a
-        // folder holding both is not rare enough to make either side
-        // permanently unreachable behind the other. From the folders pane:
-        // focus this folder's own tasks pane if it has any tasks of its
-        // own (see `RoutineFolder::own`), or descend into its subfolders if
-        // it has none. From the tasks pane: descend into the same folder's
-        // subfolders, if it has any — the second step for a folder that had
-        // both — dropping back to the folders pane to draw them; a leaf
-        // folder's tasks pane, with nothing further down, does nothing at
-        // all rather than reset the cursor it is already sitting on.
-        Key::Right => {
-            if let Some(folder) = highlighted_routine_folder(routines, nav) {
-                match nav.focus {
-                    Focus::Groups => {
-                        if folder.own > 0 {
-                            nav.focus = Focus::Tasks;
-                            nav.task_cursor = 0;
-                        } else if !folder.folders.is_empty() {
-                            nav.path.push(folder.name.clone());
-                            nav.folder_cursor = 0;
-                            nav.task_cursor = 0;
-                        }
-                    }
-                    Focus::Tasks if !folder.folders.is_empty() => {
-                        nav.path.push(folder.name.clone());
-                        nav.focus = Focus::Groups;
-                        nav.folder_cursor = 0;
-                        nav.task_cursor = 0;
-                    }
-                    Focus::Tasks => {}
-                }
-            }
+        // Only the focus moves, as `tab` on the pending screen does: the
+        // list's cursor stays on the routine whose tasks are shown, and
+        // coming back to the tasks pane finds its cursor where it was left.
+        Key::Tab => {
+            nav.focus = match nav.focus {
+                Focus::Groups => Focus::Tasks,
+                Focus::Tasks => Focus::Groups,
+            };
         }
-        // The reverse of `→`, unwinding the same two steps in the same
-        // order: out of the tasks pane first — back to the folders pane,
-        // on the very folder whose tasks it was showing — and only then up
-        // a level.
-        Key::Left => match nav.focus {
-            Focus::Tasks => nav.focus = Focus::Groups,
-            Focus::Groups => {
-                nav.path.pop();
-                nav.folder_cursor = 0;
-                nav.task_cursor = 0;
-            }
-        },
         // Selecting a task alone is `space` over the tasks pane instead —
         // handled by `run_screen`, which is what needs the repo to queue it.
         Key::Char(' ') if nav.focus == Focus::Groups => {
@@ -4579,32 +4542,25 @@ fn tasks_pane_lines(
     (lines, focus)
 }
 
-/// The routines pane's own left-hand rows: the current level's folders, each
-/// with its checkbox and how many tasks sit at or below it — the same
-/// `N tasks` tail the mockup draws, and what `enter` on a ticked one queues
-/// whole.
+/// The routines pane's own left-hand rows: one per routine, each with its
+/// checkbox and how many tasks sit at or below it — the same `N tasks` tail
+/// the mockup draws, and what `enter` on a ticked one queues whole.
 ///
-/// An empty level at the root names `routines_dir` directly rather than
-/// drawing an empty pane a person could mistake for a project with nothing
-/// under it read wrong — see [`Repo::routines_dir`] on why nothing creates
-/// that directory for this to find. An empty level anywhere else is simply a
-/// folder with no subfolders of its own, which [`handle_routine_key`]'s own
-/// `→` already refused to descend into.
+/// No routines at all names `routines_dir` directly rather than drawing an
+/// empty pane a person could mistake for a project with nothing under it
+/// read wrong — see [`Repo::routines_dir`] on why nothing creates that
+/// directory for this to find.
 fn routine_folder_lines(
     routines_dir: &std::path::Path,
-    level: &[RoutineFolder],
+    routines: &[RoutineFolder],
     nav: &RoutineNav,
     width: usize,
 ) -> Vec<String> {
-    if level.is_empty() {
-        return vec![if nav.path.is_empty() {
-            format!("  nothing under {}", routines_dir.display())
-        } else {
-            "  nothing here".to_string()
-        }];
+    if routines.is_empty() {
+        return vec![format!("  nothing under {}", routines_dir.display())];
     }
 
-    level
+    routines
         .iter()
         .enumerate()
         .map(|(i, folder)| {
@@ -4693,14 +4649,13 @@ fn render_routines(
     footer: &str,
 ) -> Vec<String> {
     let layout = layout(footer);
-    let level = routine_level(routines, &nav.path);
-    let left = routine_folder_lines(routines_dir, level, nav, layout.left);
-    let highlighted = level.get(nav.folder_cursor);
+    let left = routine_folder_lines(routines_dir, routines, nav, layout.left);
+    let highlighted = routines.get(nav.folder_cursor);
     let (right, focus) = routine_task_lines(highlighted, pipelines, nav, layout.right);
 
-    let left_title = format!("routines  {} of {}", level.len(), level.len());
+    let left_title = format!("routines  {} of {}", routines.len(), routines.len());
     let right_title = highlighted.map_or("no folder", |folder| folder.name.as_str());
-    let folder_line = nav.folder_cursor.min(level.len().saturating_sub(1));
+    let folder_line = nav.folder_cursor.min(routines.len().saturating_sub(1));
     two_pane_frame(
         &window(&left, (folder_line, folder_line), layout.rows),
         &window(&right, focus, layout.rows),
@@ -4847,21 +4802,25 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         // line, naming exactly the keys `handle_routine_key`,
         // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
         // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
-        // which apply here. `esc` is what leaves the pane now, not `r`. The
-        // same line under a notice drawn over the pane.
-        _ if routines_beneath(&state.mode).is_some() => key_hint(
-            &[
-                [
-                    ("o", "open task"),
-                    ("space", "select"),
-                    ("enter", "queue"),
-                    ("esc", "back"),
+        // which apply here. One line per pane, as the pending screen's is:
+        // `o` only where a task is under the cursor, and `esc` only over the
+        // list, where it leaves the pane — over the tasks pane it goes back
+        // to the list, which `tab` already names. The same line under a
+        // notice drawn over the pane.
+        _ if let Some(nav) = routines_beneath(&state.mode) => {
+            let pane: &[(&str, &str)] = match nav.focus {
+                Focus::Groups => &[("tab", "tasks"), ("esc", "back")],
+                Focus::Tasks => &[("o", "open task"), ("tab", "routines")],
+            };
+            key_hint(
+                &[
+                    [("space", "select"), ("enter", "queue")].as_slice(),
+                    pane,
+                    crate::screen::shell::quit_hint(),
                 ]
-                .as_slice(),
-                crate::screen::shell::quit_hint(),
-            ]
-            .concat(),
-        ),
+                .concat(),
+            )
+        }
         _ => {
             let hide = match state.hide_scope {
                 HideScope::Pending => "show done tasks",
@@ -6122,8 +6081,9 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
     )
 }
 
-/// Every task at or below the ticked folders at the routines pane's
-/// current level, each minted a fresh id — never the bare one a routine's
+/// Every task in the ticked routines — each one's nested subfolders
+/// included, since [`RoutineFolder::tasks`] already folds those in — each
+/// minted a fresh id — never the bare one a routine's
 /// own task carries, since a routine exists to be queued more than
 /// once, and the second run would collide with the first at the id the
 /// task itself always names. `group:` and the body travel unchanged;
@@ -6131,27 +6091,18 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
 /// rewritten, to the same minted ids, so a chain saved together still
 /// resolves once every id in it has changed.
 ///
-/// A folder appearing under more than one ticked ancestor — ticking both a
-/// folder and one it already contains — is not doubled: each task's own
-/// path is only ever queued once.
+/// Only top-level routines can be ticked, and no two of them share a task
+/// file, so no task is ever gathered twice.
 fn routine_batch_tasks(
     repo: &Repo,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
 ) -> Vec<(String, String)> {
-    let level = routine_level(routines, &nav.path);
-    let mut tasks: Vec<&RoutineTask> = Vec::new();
-    let mut seen: std::collections::BTreeSet<&std::path::Path> = Default::default();
-    for folder in level {
-        if !nav.selected.contains(&folder.path) {
-            continue;
-        }
-        for task in &folder.tasks {
-            if seen.insert(task.path.as_path()) {
-                tasks.push(task);
-            }
-        }
-    }
+    let tasks: Vec<&RoutineTask> = routines
+        .iter()
+        .filter(|folder| nav.selected.contains(&folder.path))
+        .flat_map(|folder| &folder.tasks)
+        .collect();
 
     mint_routine_batch(repo, &tasks)
 }
@@ -7920,14 +7871,14 @@ mod tests {
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
             last_frame(&drawn)
-                .contains("[o] open task   [space] select   [enter] queue   [esc] back   [q] quit"),
+                .contains(" [space] select   [enter] queue   [tab] tasks   [esc] back   [q] quit"),
             "{drawn}"
         );
     }
 
-    /// Inside a sub-mode the arrows keep their own meaning even when hosted:
-    /// the routines view reads `→` itself, and the filter reads `q` into its
-    /// query — neither leaves the tab.
+    /// Inside a sub-mode the arrows and `q` stay with it even when hosted:
+    /// the routines view holds the arrows and does nothing with them, and
+    /// the filter reads `q` into its query — neither leaves the tab.
     #[test]
     fn hosted_a_sub_mode_keeps_the_arrows_and_q_for_itself() {
         use crate::screen::shell::{Hosting, Tab};
@@ -10766,9 +10717,8 @@ mod tests {
         path
     }
 
-    /// `r` swaps the left pane for the folder tree, and its own footer names
-    /// `o`/`space`/`enter`/`esc` rather than the pending screen's keys or the
-    /// arrows `→`/`←` still move by.
+    /// `r` swaps the left pane for the routine list, and its own footer names
+    /// `space`/`enter`/`tab`/`esc` rather than the pending screen's keys.
     #[test]
     fn r_swaps_the_left_pane_for_the_routines_tree() {
         let repo = fixture("routines-r-swap");
@@ -10785,9 +10735,14 @@ mod tests {
         assert!(last.contains("routines  1 of 1"), "{last}");
         assert!(last.contains("nightly"), "{last}");
         assert!(last.contains("1 task"), "{last}");
-        assert!(last.contains("[o] open task"), "{last}");
-        assert!(last.contains("[esc] back"), "{last}");
-        assert!(!last.contains("→ open"), "{last}");
+        assert!(
+            last.contains("[space] select   [enter] queue   [tab] tasks   [esc] back"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("[o] open task"),
+            "no task under the cursor: {last}"
+        );
         assert!(!last.contains("r pending"), "{last}");
     }
 
@@ -10827,9 +10782,9 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        // `r` opens the pane, `→` focuses the tasks pane on `audit-deps`,
+        // `r` opens the pane, `tab` focuses the tasks pane on `audit-deps`,
         // `o` tries to open it.
-        let drawn = screen(&repo, Vec::new(), "r\x1b[Co");
+        let drawn = screen(&repo, Vec::new(), "r\to");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -10837,48 +10792,12 @@ mod tests {
         assert!(last.contains("─ routines"), "over the pane: {last}");
     }
 
-    /// `→` descends into a folder holding subfolders of its own, and `←`
-    /// climbs back up out of it — `handle_routine_key` directly, since a
-    /// nested descent is easier to state as a sequence of states than to
-    /// read back off a rendered frame.
+    /// A subfolder inside a routine is never a row of its own: the list is
+    /// one row per folder directly under `.spoolway/routines/`, and the
+    /// nested task shows in its routine's tasks pane instead.
     #[test]
-    fn arrow_right_descends_and_arrow_left_climbs_back_up() {
-        let repo = fixture("routines-arrow-nav");
-        // `maintenance` holds nothing of its own — only `weekly` — so `→`
-        // has nothing to focus tasks on and descends instead.
-        write_routine(
-            &repo,
-            "maintenance/weekly",
-            "prune",
-            &task_text("prune", "group: maintenance\n", BODY),
-        );
-        let routines = super::routines::list_routines(&repo).unwrap();
-
-        let mut nav = RoutineNav::new();
-        handle_routine_key(&routines, &mut nav, Key::Right);
-        assert_eq!(nav.path, vec!["maintenance".to_string()]);
-        assert_eq!(nav.focus, Focus::Groups);
-        assert_eq!(
-            routine_level(&routines, &nav.path).len(),
-            1,
-            "`weekly` is `maintenance`'s only subfolder"
-        );
-
-        handle_routine_key(&routines, &mut nav, Key::Left);
-        assert!(nav.path.is_empty(), "back at the root");
-    }
-
-    /// A folder holding both its own tasks and a subfolder must not
-    /// have either shadowed by the other: the first `→` focuses this
-    /// folder's own tasks pane rather than descending, and a second `→`
-    /// from there descends into its subfolders — `→` is a two-step for
-    /// exactly this shape, never a choice between the two. This is the
-    /// shape a review round caught twice: first a fix that only ever
-    /// descended, shadowing a folder's own tasks; then a fix that only
-    /// ever focused tasks, shadowing its subfolders in the other direction.
-    #[test]
-    fn a_folder_with_both_its_own_tasks_and_a_subfolder_reaches_both() {
-        let repo = fixture("routines-mixed-folder");
+    fn a_subfolder_is_no_row_and_its_tasks_show_under_its_routine() {
+        let repo = fixture("routines-flat-list");
         write_routine(
             &repo,
             "maintenance",
@@ -10891,40 +10810,23 @@ mod tests {
             "prune",
             &task_text("prune", "group: maintenance\n", BODY),
         );
-        let routines = super::routines::list_routines(&repo).unwrap();
-        assert_eq!(routines[0].own, 1, "only `sweep` sits directly in it");
-        assert_eq!(
-            routines[0].tasks.len(),
-            2,
-            "`prune` still counts at or below it"
-        );
 
-        let mut nav = RoutineNav::new();
-        handle_routine_key(&routines, &mut nav, Key::Right);
-        assert!(nav.path.is_empty(), "the first → never descends");
-        assert_eq!(nav.focus, Focus::Tasks);
-        assert_eq!(
-            highlighted_routine_folder(&routines, &nav).unwrap().tasks[nav.task_cursor].id,
-            "sweep"
-        );
+        let drawn = screen(&repo, Vec::new(), "r");
+        let last = last_frame(&drawn);
 
-        handle_routine_key(&routines, &mut nav, Key::Right);
-        assert_eq!(
-            nav.path,
-            vec!["maintenance".to_string()],
-            "the second → descends into its subfolders"
-        );
-        assert_eq!(nav.focus, Focus::Groups);
-        assert_eq!(routine_level(&routines, &nav.path).len(), 1, "`weekly`");
+        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("> [ ] maintenance"), "{last}");
+        assert!(!last.contains("weekly"), "a subfolder is no row: {last}");
+        assert!(last.contains("  sweep"), "{last}");
+        assert!(last.contains("  prune"), "{last}");
     }
 
-    /// `→` over a leaf folder's own tasks pane — nothing further down to
-    /// open — must leave the cursor exactly where it was, not reset it back
-    /// to the first task the way it would if this reused the same
-    /// unconditional `task_cursor = 0` the first `→` into the pane sets.
+    /// `tab` moves between the two panes and back again, keeping each
+    /// pane's cursor where it was, and the arrows move nothing at all —
+    /// they belong to the tab strip.
     #[test]
-    fn arrow_right_over_a_leaf_tasks_pane_moves_nothing() {
-        let repo = fixture("routines-arrow-leaf-tasks");
+    fn tab_moves_between_the_panes_and_the_arrows_do_nothing() {
+        let repo = fixture("routines-tab-nav");
         write_routine(
             &repo,
             "nightly",
@@ -10937,16 +10839,103 @@ mod tests {
             "audit-docs",
             &task_text("audit-docs", "group: nightly\n", BODY),
         );
+        write_routine(
+            &repo,
+            "release",
+            "tag",
+            &task_text("tag", "group: release\n", BODY),
+        );
         let routines = super::routines::list_routines(&repo).unwrap();
 
         let mut nav = RoutineNav::new();
-        handle_routine_key(&routines, &mut nav, Key::Right); // into the tasks pane
-        handle_routine_key(&routines, &mut nav, Key::Down); // off the first task
-        assert_eq!(nav.task_cursor, 1);
+        for key in [Key::Right, Key::Left, Key::Right] {
+            handle_routine_key(&routines, &mut nav, key);
+        }
+        assert_eq!(nav.focus, Focus::Groups, "the arrows move no focus");
+        assert_eq!(nav.folder_cursor, 0, "nor the cursor");
 
-        handle_routine_key(&routines, &mut nav, Key::Right); // nothing further down
-        assert_eq!(nav.task_cursor, 1, "the cursor must not jump back to 0");
-        assert_eq!(nav.focus, Focus::Tasks, "and focus must not move either");
+        handle_routine_key(&routines, &mut nav, Key::Tab);
+        assert_eq!(nav.focus, Focus::Tasks);
+        handle_routine_key(&routines, &mut nav, Key::Down);
+        assert_eq!(nav.task_cursor, 1);
+        handle_routine_key(&routines, &mut nav, Key::Left);
+        assert_eq!(nav.focus, Focus::Tasks, "`←` does not go back either");
+
+        handle_routine_key(&routines, &mut nav, Key::Tab);
+        assert_eq!(nav.focus, Focus::Groups);
+        assert_eq!(nav.folder_cursor, 0, "still on `nightly`");
+        handle_routine_key(&routines, &mut nav, Key::Tab);
+        assert_eq!(nav.task_cursor, 1, "the tasks pane's cursor kept");
+    }
+
+    /// Over the tasks pane the key line names `o` and `tab` back to the
+    /// routines, and `esc` moves the cursor back to the list rather than
+    /// leaving the view.
+    #[test]
+    fn esc_over_the_tasks_pane_goes_back_to_the_list() {
+        use crate::screen::shell::{Hosting, Tab};
+        let repo = fixture("routines-esc-tasks");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let tasks = last_frame(&screen(&repo, Vec::new(), "r\t")).to_string();
+        assert!(
+            tasks.contains(
+                " [space] select   [enter] queue   [o] open task   [tab] routines   [q] quit"
+            ),
+            "{tasks}"
+        );
+        assert!(tasks.contains("> audit-deps"), "{tasks}");
+
+        let back = last_frame(&screen(&repo, Vec::new(), "r\t\x1b")).to_string();
+        assert!(
+            back.contains("routines  1 of 1"),
+            "still in the view: {back}"
+        );
+        assert!(back.contains("> [ ] nightly"), "{back}");
+        assert!(
+            back.contains(" [space] select   [enter] queue   [tab] tasks   [esc] back   [q] quit"),
+            "{back}"
+        );
+    }
+
+    /// Ticking a routine queues its nested subfolder's tasks with it.
+    #[test]
+    fn enter_on_a_routine_queues_its_nested_tasks_with_it() {
+        let repo = fixture("routines-enter-nested");
+        write_routine(
+            &repo,
+            "maintenance",
+            "sweep",
+            &task_text("sweep", "group: maintenance\n", BODY),
+        );
+        write_routine(
+            &repo,
+            "maintenance/weekly",
+            "prune",
+            &task_text("prune", "group: maintenance\n", BODY),
+        );
+
+        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r \r");
+        assert_eq!(exit, ScreenExit::Quit);
+
+        let mut queued_files: Vec<String> = std::fs::read_dir(repo.queue_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        queued_files.sort();
+        assert_eq!(
+            queued_files,
+            vec!["prune-1.md".to_string(), "sweep-1.md".to_string()],
+            "{}",
+            last_frame(&drawn)
+        );
     }
 
     /// `esc` returns to the pending screen — `r` no longer does, since `r`
@@ -11112,10 +11101,10 @@ mod tests {
             ),
         );
 
-        // r (open routines), → (the folder has no subfolders, so this moves
-        // focus onto its own tasks, already on `scan-pending` — the first
-        // one in filename order), space (queue it alone).
-        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\x1b[C ");
+        // r (open routines), tab (focus onto its tasks, already on
+        // `scan-pending` — the first one in filename order), space (queue
+        // it alone).
+        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\t ");
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 

@@ -33,8 +33,10 @@ configure_project plan/live
 # under the project's own runtime home: `nightly/` holds two documents
 # straight in it, one depending on the other, so queueing the whole folder
 # has to remap that `depends_on` onto the ids it actually mints —
-# `maintenance/weekly/` is one folder deep besides, so the left pane's own
-# "N tasks" tail has something recursive to count.
+# `maintenance/weekly/` is one folder deep besides. A routine is only ever a
+# folder directly under `.spoolway/routines/`, so `weekly` is no row of its
+# own: its task counts toward `maintenance`, shows under it and queues with
+# it.
 BODY="$LIVE/body.md"
 task_body "$BODY"
 mkdir -p .spoolway/routines/nightly .spoolway/routines/maintenance/weekly
@@ -43,7 +45,7 @@ task_doc .spoolway/routines/nightly/audit-docs.md audit-docs "$BODY" \
   "group: nightly" "depends_on: [audit-deps]"
 task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: maintenance"
 
-# `r` swaps the pending screen for the folder tree; `j` moves the cursor off
+# `r` swaps the pending screen for the routine list; `j` moves the cursor off
 # `maintenance` (alphabetically first) onto `nightly`; `space` ticks it;
 # `enter` queues both its documents as one batch and goes back to browsing
 # — starting a dispatcher is the dispatch tab's `enter`, not this one's; the
@@ -74,15 +76,27 @@ works "the routines tree is left exactly where it was" \
 has "unminted, unmodified" "id: audit-deps" \
   .spoolway/routines/nightly/audit-deps.md
 
-# A second, solo pick: `→` opens `maintenance` (it holds a subfolder, so this
-# descends rather than focusing its own tasks pane, which it has none of
-# directly); `→` again opens `weekly`, a leaf, which focuses its one task;
-# `space` queues it alone and goes back to browsing; the trailing `n` is
-# noise it ignores, and the pipe running dry ends the screen.
-on_screen 'r\x1b[C\x1b[C n' /dev/null
+# The whole of `maintenance`, with the cursor already on it (it sorts
+# first): `space` ticks it and `enter` queues it, which takes in `prune` from
+# its nested `weekly/` too — there is no `weekly` row to tick on its own.
+# The trailing `n` is noise it ignores, and the pipe running dry ends the
+# screen.
+on_screen 'r \rn' /dev/null
 
-works "a solo pick under a nested folder reaches the queue too" \
+works "a nested task queues with its top-level routine" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
+has "still carrying that routine's group" "group: maintenance" \
+  "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
+
+# A second, solo pick: `tab` moves the cursor onto `maintenance`'s tasks
+# pane, already on `prune`, its one task, nested or not; `space` queues it
+# alone and goes back to browsing. `prune-1` is taken by the batch above, so
+# this one mints the next number. The arrows are sent first and must move
+# nothing: they belong to the tab strip, not to this view.
+on_screen 'r\x1b[C\x1b[C\t n' /dev/null
+
+works "tab reaches a nested task under its routine, and a solo pick queues it" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
 
 # A pending group, saved as a routine: `s` opens the panel over `release`,
 # already named after the group; `enter` accepts that name and copies its
@@ -143,7 +157,7 @@ lacks "and the ticket that earlier run's own hook opened" "ticket:" \
 lacks "and the epic a fresh run must not inherit" "epic:" \
   .spoolway/routines/archived-reuse/archived-reuse.md
 
-# `r` opens with the folder tree's first entry already under the cursor —
+# `r` opens with the routine list's first entry already under the cursor —
 # `archived-reuse` sorts before every routine folder this suite wrote earlier
 # — so `space` ticks it and `enter` queues it straight from there, the same
 # `n`-declines-the-dispatcher shape every other queueing keystroke here uses.
