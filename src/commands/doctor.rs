@@ -2411,20 +2411,26 @@ mod tests {
         assert!(labels.contains(&"`acli` is on PATH"), "{labels:?}");
         assert!(labels.contains(&"`jq` is on PATH"), "{labels:?}");
 
-        // `acli` is an Atlassian CLI nothing in this project's own toolchain
-        // installs, so it is reliably absent wherever this test runs —
-        // unlike `jq`, common enough on a build image that asserting its
-        // presence or absence here would make the test depend on the
-        // machine rather than on `issue_tracking_checks`'s own logic.
-        let acli = findings
-            .iter()
-            .find_map(|f| match f {
-                Finding::Check(label, outcome) if label == "`acli` is on PATH" => Some(outcome),
-                _ => None,
-            })
-            .unwrap();
-        let err = acli.as_ref().unwrap_err();
-        assert!(err.to_string().contains("jira.sh"), "{err}");
+        // Whether `acli` and `jq` are installed depends on the machine, so each
+        // row is held to what PATH actually holds here: the path it resolves
+        // to when found, and a failure naming `jira.sh` when not.
+        for binary in ["acli", "jq"] {
+            let label = format!("`{binary}` is on PATH");
+            let outcome = findings
+                .iter()
+                .find_map(|f| match f {
+                    Finding::Check(l, outcome) if *l == label => Some(outcome),
+                    _ => None,
+                })
+                .unwrap();
+            match which(binary) {
+                Some(path) => assert_eq!(outcome.as_ref().unwrap(), &Some(path)),
+                None => {
+                    let err = outcome.as_ref().unwrap_err();
+                    assert!(err.to_string().contains("jira.sh"), "{err}");
+                }
+            }
+        }
     }
 
     /// `parse_version` finds the first run of digits and dots in whatever a

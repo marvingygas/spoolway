@@ -59,9 +59,11 @@ works "bare spoolway opens and ends when its keys run out" \
 # only checks that a string is somewhere in the file, so opening and closing
 # are checked against the program's own output: `script`'s own "Script
 # started"/"Script done" lines bookend it, one full line each, however `-q`
-# is documented.
+# is documented. Leaving first ends synchronized output (`ESC[?2026l`), so a
+# terminal holding its paint for a frame cut off mid-write lets go of it
+# before the screen is restored.
 ENTER_ALT_SCREEN_AND_STOP_WHEEL=$'\033[?1049h\033[?1007l'
-RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN=$'\033[?1007h\033[?1049l'
+END_SYNC_RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN=$'\033[?2026l\033[?1007h\033[?1049l'
 PROGRAM_OUTPUT=$(sed -e '1d' -e '$d' "$DRAWN")
 if [[ "$PROGRAM_OUTPUT" == "$ENTER_ALT_SCREEN_AND_STOP_WHEEL"* ]]; then
   ok "opens by entering the alternate screen and stopping the wheel"
@@ -69,10 +71,10 @@ else
   bad "opens by entering the alternate screen and stopping the wheel"
   head -c 40 "$DRAWN" | cat -v
 fi
-if [[ "$PROGRAM_OUTPUT" == *"$RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN" ]]; then
-  ok "ends by restoring the wheel and leaving the alternate screen"
+if [[ "$PROGRAM_OUTPUT" == *"$END_SYNC_RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN" ]]; then
+  ok "ends by ending synchronized output, restoring the wheel and leaving the alternate screen"
 else
-  bad "ends by restoring the wheel and leaving the alternate screen"
+  bad "ends by ending synchronized output, restoring the wheel and leaving the alternate screen"
   tail -c 40 "$DRAWN" | cat -v
 fi
 

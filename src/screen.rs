@@ -15,6 +15,7 @@
 //! `spoolway dispatch` child its dispatch tab starts and stops.
 
 pub(crate) mod dispatcher;
+pub(crate) mod frame_writer;
 pub(crate) mod shell;
 
 /// One key a screen reads, decoded from however many bytes it took.

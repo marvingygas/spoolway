@@ -45,3 +45,6 @@ libc = "0.2"
 # than a first attempt here would be.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+vt100 = "0.16.2"
