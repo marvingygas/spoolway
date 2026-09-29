@@ -258,13 +258,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         println!("  ! {problem}");
     }
 
-    // Wakes the wait below the moment a lane's own `spoolway report` or a
-    // finished background command lands, instead of it being found up to
-    // `interval` later — see `crate::screen::DirWatch`. `None` on a target
-    // with nothing to watch with, or if opening the watch failed for some
-    // other reason; either way the wait below falls back to the plain
-    // interval alone, exactly as it behaved before this task.
-    let watch = crate::screen::open_dir_watch(&repo.queue_dir(), &repo.commands_dir());
+    // Wakes the wait below the moment a finished background command lands,
+    // instead of it being found up to `interval` later — see
+    // `crate::screen::DirWatch`. `None` on a target with nothing to watch
+    // with, or if opening the watch failed for some other reason; either way
+    // the wait below falls back to the plain interval alone, exactly as it
+    // behaved before this task.
+    let watch = crate::screen::open_dir_watch(&repo.commands_dir());
 
     loop {
         let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
@@ -403,7 +403,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 continue;
             };
             let ready = crate::screen::poll_ready(&[watch.fd()], left);
-            if ready[0] && watch.drain().contains(&crate::screen::Changed::Commands) {
+            if ready[0] && watch.drain() {
                 break;
             }
         }
