@@ -291,7 +291,7 @@ pub(crate) fn run(
     };
 
     crate::platform::stop::catch_interrupt();
-    let _term = crate::platform::TermGuard::new();
+    let _term = crate::platform::TermGuard::screen();
     let mut stdin = RawStdin;
     let mut stdout = std::io::stdout();
     host(repo, pipelines, cwd, on_open, &mut stdin, &mut stdout)
