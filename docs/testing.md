@@ -81,7 +81,7 @@ with a `// covers:` line.
 | Suite | Covers |
 |---|---|
 | `flow` | A task's whole life: queued, agent steps, command steps, archived |
-| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, the sync notice over a real pty |
+| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, the sync notice over a real pty, `spoolway sync`'s confirm panel over a real pty with esc after its title, checking the panel reaches the terminal, no alternate screen, and the cancel message |
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `blocked`, `paused`, `done` and `open`, the shipped `github.sh` against the `gh` double, and `key_in_names` |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |
@@ -96,7 +96,7 @@ with a `// covers:` line.
 | `jobs-screen` | Bare `spoolway`'s jobs tab writing, pausing and deleting a job |
 | `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting a dispatcher and, behind the stop popup, `enter` stopping it, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, the grouped help off a terminal, and its raw output opening and closing on the alternate screen |
 | `board-pause` | The board's confirm panels: `p` and the dispatch tab's stop popup's `i`, and `U`, over a live lane |
-| `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
+| `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, `--force` over a live lane, and the tool-requirements gate over `queue add --from` on a real pty, checking no alternate screen and the task left in pending |
 | `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one |
 | `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway sync`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |

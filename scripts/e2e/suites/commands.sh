@@ -1205,93 +1205,13 @@ works "and nothing was written back" \
   test ! -e "$STALE_SKILL"
 
 # At a terminal, the line prints and the command runs straight after it, with
-# no key sent. `python3`'s `pty` module gives the process a real terminal on
-# stdout and stderr without needing one behind this suite's own process —
-# already how `warmth.sh`, `jobs.sh` and `disaster.sh` drive a check no shell
-# built-in reaches. A process that still waited on a key would hang here
-# until the driver's own deadline and report a timeout.
+# no key sent. `write_pty_driver` (`lib.sh`) gives the process a real
+# terminal on stdout and stderr without needing one behind this suite's own
+# process — already how `warmth.sh`, `jobs.sh` and `disaster.sh` drive a
+# check no shell built-in reaches. A process that still waited on a key
+# would hang here until the driver's own deadline and report a timeout.
 PTY_DRIVER="$LIVE/sync-notice-pty.py"
-cat >"$PTY_DRIVER" <<'PY'
-import os, pty, select, sys, time
-
-argv = sys.argv[1:]
-
-pid, master = pty.fork()
-if pid == 0:
-    os.execvp(argv[0], argv)
-    os._exit(127)
-
-out = b""
-status = None
-deadline = time.time() + 10
-while time.time() < deadline:
-    ready, _, _ = select.select([master], [], [], 0.2)
-    if master in ready:
-        try:
-            chunk = os.read(master, 4096)
-        except OSError:
-            chunk = b""
-        if not chunk:
-            break
-        out += chunk
-    wpid, status = os.waitpid(pid, os.WNOHANG)
-    if wpid != 0:
-        break
-    status = None
-
-if status is None:
-    # The process has exited (or the pty closed) but a last chunk may still
-    # be sitting in the kernel buffer — drained briefly rather than trusted
-    # to have already arrived in the loop above.
-    end = time.time() + 1
-    while time.time() < end:
-        ready, _, _ = select.select([master], [], [], 0.1)
-        if master not in ready:
-            break
-        try:
-            chunk = os.read(master, 4096)
-        except OSError:
-            break
-        if not chunk:
-            break
-        out += chunk
-    # `WNOHANG` on a child that has not exited yet returns `(0, 0)`, not
-    # `(0, None)` — trusting `status` straight off that call is exactly the
-    # bug review found: a `status` of `0` reads as `WIFEXITED` true and
-    # `WEXITSTATUS` 0, so a genuinely hung child reported a clean exit and
-    # every assertion the ctrl-c case makes about something NOT happening
-    # passed against a process that was still sitting there. `wpid` is what
-    # actually says whether the child exited; `status` from the same call is
-    # only trustworthy once `wpid` says so.
-    #
-    # One `WNOHANG` is not enough to ask, though: the loop above leaves here
-    # on the pty reaching EOF, and the kernel closes a dying process's fds
-    # before it makes the process reapable, so on a loaded machine the child
-    # is regularly still running at this instant — measured at 236 false
-    # timeouts in 400 runs with every core busy, against 0 on an idle one.
-    # Asked once, that reads back as a hang and kills a process that had
-    # already finished. So it is asked repeatedly until the same deadline
-    # the loop above used, which leaves the timeout branch reachable for a
-    # child that really never exits while costing a genuine exit only the
-    # sleep below.
-    reaped = None
-    while True:
-        wpid, st = os.waitpid(pid, os.WNOHANG)
-        if wpid != 0:
-            reaped = st
-            break
-        if time.time() >= deadline:
-            break
-        time.sleep(0.02)
-    status = reaped
-
-sys.stdout.buffer.write(out)
-if status is None:
-    print("sync-notice-pty.py: timed out waiting for the process", file=sys.stderr)
-    os.kill(pid, 9)
-    sys.exit(124)
-sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
-PY
+write_pty_driver "$PTY_DRIVER"
 
 behind_checkout
 TTY_OUT=$(python3 "$PTY_DRIVER" "$SPOOLWAY" override list 2>&1)
@@ -1326,5 +1246,20 @@ if grep -q "0.0.0-behind-e2e" "$PROJECT_STAMP"; then
 else
   bad "the stamp was left alone"; sed 's/^/        /' "$PROJECT_STAMP"
 fi
+
+# `spoolway sync`'s own confirm panel, proven the same way: 522b247 put it
+# behind a blank alternate screen because it draws first and takes the
+# guard after, and nothing here ran it on a pty until now (gh-528). The
+# driver waits for the panel's title before sending `esc`, so the read is
+# of what a person would actually see, not a blind key into an empty
+# screen.
+behind_checkout
+SYNC_OUT="$LIVE/sync-panel.out"
+python3 "$PTY_DRIVER" --after "apply updates" --keys $'\033' \
+  "$SPOOLWAY" sync >"$SYNC_OUT" 2>&1
+has   "sync's panel reaches the terminal" \
+      "new version installed, apply updates" "$SYNC_OUT"
+lacks "and sync never enters the alternate screen" $'\033[?1049h' "$SYNC_OUT"
+has   "esc under it writes nothing" "Nothing was changed." "$SYNC_OUT"
 
 finish
