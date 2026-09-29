@@ -4,7 +4,7 @@
 //! A tab carries no logic of its own. Each one calls the code its CLI command
 //! already draws with — `commands::queue_tab`, `commands::jobs_tab`,
 //! `eval::tab` and the board's own [`crate::status::Board`] — and this module
-//! adds only the strip on the top row and the keys that move between tabs.
+//! adds only the strip across the top and the keys that move between tabs.
 //! The one exception is the dispatch tab's `enter`, which starts a
 //! `spoolway dispatch` child ([`super::dispatcher`]) behind the gates that
 //! command asks, and stops it behind a popup asking whether running steps
@@ -30,7 +30,7 @@
 //! before anybody could read it. See [`OnOpen`].
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
-//! through every screen's own `render`: the strip and the two rows it takes
+//! through every screen's own `render`: the strip and the three rows it takes
 //! off the terminal's height are read deep inside each screen's own layout
 //! code — `commands::queue::layout`, `eval::frame_rows`, the board's own
 //! `pane_height` — and a screen drawn with no shell around it, from its CLI
@@ -139,12 +139,13 @@ pub(crate) fn hosted() -> Option<Tab> {
     HOSTED.with(Cell::get)
 }
 
-/// The rows the strip takes off the top of the terminal: the strip itself and
-/// one blank row under it, as the mockup draws. Zero with no shell around the
-/// screen, so a screen drawn by its own CLI command keeps every row it had.
+/// The rows the strip takes off the top of the terminal: one blank row above
+/// it, the strip itself and one blank row under it, as the mockup draws —
+/// always [`strip`]'s own length. Zero with no shell around the screen, so a
+/// screen drawn by its own CLI command keeps every row it had.
 pub(crate) fn strip_rows() -> usize {
     match hosted() {
-        Some(_) => 2,
+        Some(_) => 3,
         None => 0,
     }
 }
@@ -184,15 +185,20 @@ const FALLBACK_WIDTH: usize = 100;
 /// marked the open tab by colour and spaced its labels eight apart.
 const SLOT_GAP: &str = "      ";
 
-/// The strip and the blank row under it, for a screen to put above its own
-/// frame — or nothing at all with no shell hosting one.
+/// The strip with one blank row above it and one under it, for a screen to
+/// put above its own frame — or nothing at all with no shell hosting one. The
+/// row above keeps the strip off the terminal's top edge.
+///
+/// Three rows, the count [`strip_rows`] takes off every tab's height: a line
+/// added or dropped here without it pushes each tab's frame past the
+/// terminal's last row, or leaves a row unused under it.
 pub(crate) fn strip() -> Vec<String> {
     match hosted() {
         Some(open) => {
             let width = terminal_size::terminal_size()
                 .map(|(w, _)| w.0 as usize)
                 .unwrap_or(FALLBACK_WIDTH);
-            vec![strip_line(open, width), String::new()]
+            vec![String::new(), strip_line(open, width), String::new()]
         }
         None => Vec::new(),
     }
@@ -209,14 +215,20 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
 /// slot one column wider than its label on either side, and `←` and `→`
 /// one space outside the first and last slot. The open tab fills its slot's
 /// spare columns with `[` and `]`, the same mark the key line gives a key;
-/// every other slot leaves them blank. Nothing is coloured or dim — the
-/// brackets alone say which tab is open.
+/// every other slot leaves them blank. The whole line is bold, the weight the
+/// wordmark is drawn in, and reset on the same line so the bold never runs
+/// into the row under it. Nothing is coloured or dim, and the open tab is not
+/// bolder than the rest — the brackets alone say which tab is open.
 ///
 /// At least two columns stay before `←` however narrow the terminal, and
 /// nothing is written past the `→`: a row that reaches the terminal's last
 /// column is followed by a newline the terminal has already wrapped for, and
-/// the frame under it comes out one row lower than it was measured for.
+/// the frame under it comes out one row lower than it was measured for. The
+/// bold and reset codes take no column, so they are left out of every width
+/// measured here.
 fn strip_line(open: Tab, width: usize) -> String {
+    use crate::status::{BOLD, RESET};
+
     let slots: Vec<String> = TABS
         .iter()
         .map(|tab| match *tab == open {
@@ -228,7 +240,11 @@ fn strip_line(open: Tab, width: usize) -> String {
         slots.iter().map(|s| s.chars().count()).sum::<usize>() + SLOT_GAP.len() * (slots.len() - 1);
     // Two columns of margin, the arrow, and one space before the first slot.
     let start = (width.saturating_sub(span) / 2).max(4);
-    format!("{}← {} →", " ".repeat(start - 2), slots.join(SLOT_GAP))
+    format!(
+        "{BOLD}{}← {} →{RESET}",
+        " ".repeat(start - 2),
+        slots.join(SLOT_GAP)
+    )
 }
 
 /// Open the screen: bare `spoolway` in a terminal.
@@ -699,8 +715,8 @@ mod tests {
     use super::*;
 
     /// `line` with every `\x1b[...` code taken out — the colour a tab's own
-    /// frame paints under the strip, which itself paints none, and the
-    /// screen clear ahead of it. Ends a code on any letter, not only `m`: the
+    /// frame paints under the strip, the strip's own bold, and the screen
+    /// clear ahead of it. Ends a code on any letter, not only `m`: the
     /// clear's `J` and `H` would otherwise run the skip on into the strip.
     fn plain(line: &str) -> String {
         let mut out = String::new();
@@ -745,10 +761,11 @@ mod tests {
     }
 
     // The mockup's own strip for each open tab, drawn to 100 columns, column
-    // for column: every label in the column it held before the brackets.
+    // for column: every label in the column it held before the brackets. The
+    // bold takes no column, so it is taken out before the columns are read.
     #[test]
     fn the_strip_lands_every_label_where_the_mockup_draws_it() {
-        let lines = TABS.map(|tab| strip_line(tab, 100));
+        let lines = TABS.map(|tab| plain(&strip_line(tab, 100)));
         assert_eq!(
             lines,
             [
@@ -760,19 +777,24 @@ mod tests {
         );
     }
 
-    // Brackets are the only mark: no label or arrow carries a colour code,
-    // open or closed.
+    // The whole line is bold and reset on the same line, and nothing else:
+    // no colour, no dim, and no second bold marking the open tab — brackets
+    // are still the only mark of which one is open.
     #[test]
-    fn the_strip_draws_no_colour_code_on_any_tab() {
+    fn the_strip_is_bold_from_its_first_column_to_its_last_and_nothing_else() {
         for tab in TABS {
             let line = strip_line(tab, 100);
-            assert!(!line.contains('\x1b'), "{line:?}");
+            let inner = line
+                .strip_prefix("\x1b[1m")
+                .and_then(|l| l.strip_suffix("\x1b[0m"))
+                .unwrap_or_else(|| panic!("not wrapped in bold and reset: {line:?}"));
+            assert!(!inner.contains('\x1b'), "{line:?}");
         }
     }
 
     #[test]
     fn a_narrow_terminal_still_keeps_a_space_between_each_arrow_and_the_labels() {
-        let line = strip_line(Tab::Queue, 20);
+        let line = plain(&strip_line(Tab::Queue, 20));
         assert!(line.starts_with("  ←  dispatch"), "{line:?}");
         assert!(line.ends_with("eval  →"), "{line:?}");
     }
@@ -1198,8 +1220,12 @@ mod tests {
             assert_eq!(leave_on(Key::Right), Some(Leave::Switch(Toward::Right)));
             assert_eq!(leave_on(Key::Char('q')), Some(Leave::Quit));
             assert_eq!(leave_on(Key::Tab), None);
-            assert_eq!(strip_rows(), 2);
-            assert_eq!(strip().len(), 2);
+            assert_eq!(strip_rows(), 3);
+            let strip = strip();
+            assert_eq!(strip.len(), 3);
+            assert_eq!(strip[0], "");
+            assert!(plain(&strip[1]).contains("[jobs]"), "{:?}", strip[1]);
+            assert_eq!(strip[2], "");
         }
         assert_eq!(hosted(), None);
     }

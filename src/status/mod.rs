@@ -36,13 +36,14 @@ pub use view::{banner, plain_table};
 
 // Re-exported, not just imported: `screen::key_hint` reads the same dim and
 // gutter the board paints its own key line with, rather than spelling either
-// out a second time — see `screen::key_hint`.
+// out a second time — see `screen::key_hint` — and bare `spoolway`'s tab strip
+// the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
     AMBER, RecentEvent, Style, Verdict, boxed, clamp_rows, footer, group_totals, masthead,
     pane_height, pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, table, ticker,
     unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
-pub(crate) use view::{DIM, GUTTER, RESET, strip_ansi};
+pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
 /// The redraw rate every screen's own wait polls stdin at — the jobs screen,
 /// the queue screen, and the dispatcher board, whose wait slices its whole

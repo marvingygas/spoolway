@@ -60,9 +60,10 @@ Dispatcher already running
 A project is `-C <DIR>` or the current directory's repository. A screen open in one project
 never refuses one opened in another.
 
-Every label and both arrows are in plain ink, with no colour. The open tab's label is marked
-with brackets, the same mark the key line gives a key: `[queue]`, `[dispatch]`. `←` sits one
-space outside `dispatch`, the first tab, and `→` sits one space outside `eval`, the last.
+The strip is drawn bold, with no colour. The open tab's label is marked with brackets, the
+same mark the key line gives a key: `[queue]`, `[dispatch]`. `←` sits one space outside
+`dispatch`, the first tab, and `→` sits one space outside `eval`, the last. One blank row sits
+above the strip and one below it.
 
 | Key | What it does |
 |---|---|
