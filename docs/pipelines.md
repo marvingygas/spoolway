@@ -338,8 +338,11 @@ flowchart LR
 ```
 
 - The pull request's title is the task's `title:`. Its body is the task file's body plus a
-  co-authorship tag. Which open `parallel: true` task this branch is predicted to conflict with
-  is printed to the console as `spoolway stack` runs, not repeated in the pull request.
+  co-authorship tag. `## Status Log`, `## Handoff` and `## Blocker` move out of the plan and
+  into one closed "Run history" section at the foot of the body, above the tag, so a reviewer
+  opens on the plan sections alone. A body with none of the three gets no such section. Which
+  open `parallel: true` task this branch is predicted to conflict with is printed to the
+  console as `spoolway stack` runs, not repeated in the pull request.
 - A base branch that exists locally but not on `origin` is pushed to `origin` before the pull
   request is opened. A base that cannot be published refuses before the task's own branch is
   force-pushed, so a failed run leaves nothing published.
