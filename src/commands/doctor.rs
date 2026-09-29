@@ -2411,11 +2411,10 @@ mod tests {
         assert!(labels.contains(&"`acli` is on PATH"), "{labels:?}");
         assert!(labels.contains(&"`jq` is on PATH"), "{labels:?}");
 
-        // `acli` is an Atlassian CLI nothing in this project's own toolchain
-        // installs, so it is reliably absent wherever this test runs —
-        // unlike `jq`, common enough on a build image that asserting its
-        // presence or absence here would make the test depend on the
-        // machine rather than on `issue_tracking_checks`'s own logic.
+        // Whether `acli` is installed is the machine's business, not this
+        // test's — a developer who uses the jira hook has it — so the row is
+        // checked against what PATH actually holds: present passes with its
+        // path, absent fails naming the hook that needs it.
         let acli = findings
             .iter()
             .find_map(|f| match f {
@@ -2423,8 +2422,13 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let err = acli.as_ref().unwrap_err();
-        assert!(err.to_string().contains("jira.sh"), "{err}");
+        match which("acli") {
+            Some(path) => assert_eq!(acli.as_ref().unwrap(), &Some(path)),
+            None => {
+                let err = acli.as_ref().unwrap_err();
+                assert!(err.to_string().contains("jira.sh"), "{err}");
+            }
+        }
     }
 
     /// `parse_version` finds the first run of digits and dots in whatever a
