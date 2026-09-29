@@ -24,6 +24,9 @@ or both.
   figures where they help; do not make them a gate for findings.
 - Read the pipelines, prompts, templates and settings involved in those runs. Compare what the
   agents did with what the control plane asked them to do.
+- Read every skill named in `skills:` on a step those runs passed through. A skill lives in the
+  project's own skills directory for the step's agent kind (`.claude/skills`, `.agents/skills` or
+  `.pi/skills`), in the user's home, or in a plugin.
 
 ## Form findings
 
@@ -32,20 +35,21 @@ lane-written record to explain why it happened. Look for repeated waste and for 
 in a single run. Check instructions, step ownership, routing, information passed between steps,
 gates, task shape, model fit, context pressure, timeouts and concurrency.
 
-Trace each finding from the task record to the prompt or setting that caused or failed to
-prevent it. Separate evidence from inference. Cite the task and the relevant lane-written text.
+Trace each finding from the task record to the prompt, the setting, or a skill a step named that
+caused or failed to prevent it. Separate evidence from inference. Cite the task and the relevant
+lane-written text.
 Use counts and spend when they add meaning, but do not invent precision or drop a sound finding
 only because it has no useful number.
 
 Keep the report short. Present every grounded finding, ranked by likely value. For each one,
-state the problem, the evidence, the likely cause, and a recommended prompt or pipeline fix.
-Say when the evidence is limited or another cause is still possible.
+state the problem, the evidence, the likely cause, and a recommended prompt, pipeline or skill
+fix. Say when the evidence is limited or another cause is still possible.
 
 Put the findings in a table, one row each, ranked: the problem, the fix you propose, and the
-files that fix would touch with the size of each edit in lines. Whoever reads this is deciding
-what to apply, and the cost of a change belongs beside the case for it. Keep the evidence — the
-task name and the lane's own words — in prose around the table, not inside a cell where it will
-not fit.
+files that fix would touch with the size of each edit in lines. A step's skill may be the file
+named there, alongside a prompt, pipeline or template. Whoever reads this is deciding what to
+apply, and the cost of a change belongs beside the case for it. Keep the evidence — the task name
+and the lane's own words — in prose around the table, not inside a cell where it will not fit.
 
 | # | Finding | Proposed fix | Files & edit size |
 |---|---------|--------------|-------------------|
@@ -65,12 +69,17 @@ the exact step, route or setting to change.
 
 Calibration includes updating the control plane. Walk the useful findings with the person. Once
 they choose a change, edit the relevant prompt, pipeline, template or config directly. Use an
-override for a trial and a tracked edit for a change meant to stay. Do not turn the change into
-a task or hand it to another skill unless the person asks.
+override for a trial and a tracked edit for a change meant to stay. A chosen skill fix is a
+direct, tracked edit to that skill's own file instead: it sits outside the control plane, so it
+carries no override and no binary contract. Do not turn the change into a task or hand it to
+another skill unless the person asks.
 
-Before writing, read the matching contract from the spoolway binary. After writing, run the
-relevant check, including `spoolway pipeline check` for prompt or pipeline changes. Report what
-changed, what evidence led to it, and how to undo an override.
+Before writing a control-plane file, read its matching contract from the spoolway binary — a
+skill file has none. After writing, run the relevant check, including `spoolway pipeline check`
+for prompt or pipeline changes. Report what changed, what evidence led to it, and how to undo an
+override.
 
-Stay inside spoolway's control plane. Report product or source-code problems when the run
-reveals them, but do not change them as part of calibration. Do not edit archived task records.
+Stay inside spoolway's control plane. A skill a step named in the runs under review is in scope
+even though it lives outside `.spoolway/`; a skill no step names stays out of scope. Report
+product or source-code problems when the run reveals them, but do not change them as part of
+calibration. Do not edit archived task records.
