@@ -17501,10 +17501,10 @@ mod tests {
         );
     }
 
-    /// A step naming `skills:` gets one `/name` line per skill, in
-    /// declaration order, above everything else — a leading slash invocation
-    /// only expands where it opens the message, so it cannot go after the
-    /// briefing. The two paragraphs behind it are unchanged.
+    /// A step naming `skills:` gets one `/name` invocation per skill, in
+    /// declaration order, leading the briefing on the prompt's one line — a
+    /// leading slash invocation only expands where it opens the message, so
+    /// it cannot go after the briefing. The sentence behind it is unchanged.
     // covers: step.skills — opening_prompt emits one leading `/name` per skill, in order
     #[test]
     fn the_opening_prompt_leads_with_one_slash_invocation_per_skill() {
@@ -17525,15 +17525,49 @@ mod tests {
 
         let prompt = crate::compose::opening_prompt(&task, &pipeline, step);
         assert!(
-            prompt.starts_with("/code-review\n/spoolway-doctor\n\n"),
+            prompt.starts_with("/code-review /spoolway-doctor "),
             "got: {prompt}"
         );
         assert_eq!(
             prompt
-                .strip_prefix("/code-review\n/spoolway-doctor\n\n")
+                .strip_prefix("/code-review /spoolway-doctor ")
                 .unwrap(),
             plain_prompt,
-            "the two paragraphs after the skills should be untouched: {prompt}"
+            "the sentence after the skills should be untouched: {prompt}"
+        );
+    }
+
+    /// herdr types a multi-line message into Claude Code as one paste, and a
+    /// harness never expands a slash command inside a paste — only one that
+    /// opens a typed message. A step's skills must therefore lead the
+    /// briefing on its own line, with no newline anywhere in the prompt, or
+    /// the skill never loads as a real command.
+    // covers: step.skills — opening_prompt puts every skill and the briefing on one line
+    #[test]
+    fn a_step_with_skills_produces_one_line_with_no_newline() {
+        let repo = fixture("prompt-skills");
+        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .skills = vec!["code-review".to_string(), "spoolway-doctor".to_string()];
+        let step = pipeline.step("implement").unwrap();
+        let task = reload(&add_task(&repo, "demo", "implement"));
+
+        let prompt = crate::compose::opening_prompt(&task, &pipeline, step);
+        assert_eq!(
+            prompt,
+            format!(
+                "/code-review /spoolway-doctor Read {} before anything else.",
+                task.path.display()
+            ),
+            "got: {prompt}"
+        );
+        assert!(
+            !prompt.contains('\n'),
+            "the briefing must arrive as typed text, not a multi-line paste: {prompt}"
         );
     }
 
