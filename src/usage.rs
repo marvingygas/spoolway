@@ -2052,9 +2052,13 @@ pub mod registry {
     }
 
     /// Known project roots that still look like projects, oldest
-    /// registration order aside — a root whose `.spoolway` is gone was
-    /// moved or deleted, and silently skipping it is better than reporting
-    /// a total that omits it without saying so.
+    /// registration order aside — a root [`crate::config::setup_dir_in`]
+    /// can no longer find a tracked setup for was moved or deleted, and
+    /// silently skipping it is better than reporting a total that omits it
+    /// without saying so. A home-mode root is not this case even though it
+    /// carries no `.spoolway/` of its own: `setup_dir_in` still finds its
+    /// setup, in its workspace's `config/`, so it stays listed exactly like
+    /// an ordinary repo-mode root does.
     ///
     /// Each entry's root is read fresh off its own home's `project.toml`
     /// when it has one — the binding [`crate::repo::bind`] keeps current
@@ -4589,6 +4593,55 @@ mod tests {
             None => crate::platform::remove_test_env("XDG_STATE_HOME"),
         }
         std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&scratch_home).ok();
+    }
+
+    /// `registry::list`'s own filter drops a root whose tracked `.spoolway/`
+    /// is gone — see its doc — and a home-mode project never had one to
+    /// begin with. It must not be read as the same thing: a checkout a
+    /// workspace lists by path stays listed, because `setup_dir_in` finds
+    /// its `config/` the same way every other setup reader does.
+    #[test]
+    fn a_home_mode_project_survives_the_registrys_own_filter() {
+        let _guard = registry_env_lock();
+        let scratch_home = crate::scratch::root("registry-home-mode-home");
+        std::fs::remove_dir_all(&scratch_home).ok();
+        std::fs::create_dir_all(&scratch_home).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &scratch_home);
+
+        let clone = crate::scratch::root("registry-home-mode-clone");
+        std::fs::remove_dir_all(&clone).ok();
+        std::fs::create_dir_all(&clone).unwrap();
+        crate::scratch::git_init(&clone, &["-b", "plan/demo"]);
+        let canon = clone.canonical().unwrap();
+
+        let workspace = scratch_home.join(".spoolway").join("ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"ws\"\nclones = [{{ root = \"{}\", dispatcher = \"api\" }}]\n",
+                canon.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&scratch_home, || {
+            registry::register(&canon);
+            let listed = registry::list();
+            assert_eq!(
+                listed,
+                vec![canon.clone()],
+                "a home-mode project's root was dropped by the registry filter: {listed:?}"
+            );
+        });
+
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        std::fs::remove_dir_all(&clone).ok();
         std::fs::remove_dir_all(&scratch_home).ok();
     }
 

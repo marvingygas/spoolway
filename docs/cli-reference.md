@@ -869,6 +869,12 @@ spoolway init --yes --provider codex --tracker github --project-key owner/repo
 | `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
 | `--take-over` | | Accepted and ignored |
 
+`NAME` in the form `<workspace>/<dispatcher>` re-attaches a home-mode clone instead of binding
+a repo-mode home: it rewrites that `dispatcher` clone entry's path, in the named workspace's
+`project.toml`, to this checkout, and keeps that dispatcher's queue, archive and worktrees.
+Nothing is stamped into `.git` either way. This is the exact command the "no spoolway project
+found" error prints for a clone whose folder moved. See [Home mode](concepts.md#home-mode).
+
 Run again in a project that already has a config, it installs skills, restores any example file
 that went missing, and otherwise changes nothing. Hook scripts are written only when a tracker
 is chosen, whichever one, so switching trackers later is a `spoolway config set
@@ -984,7 +990,8 @@ $ spoolway doctor
 | `--no-live` | | Skip the throwaway-pane check |
 
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
-`--json` prints the findings as one object.
+`--json` prints the findings as one object. The `bound to its home` check, under `-v`, names
+whether the project runs in repo mode or home mode. See [Home mode](concepts.md#home-mode).
 
 ### `spoolway herdr bind`
 

@@ -2409,12 +2409,19 @@ pub fn project_label(root: &Path) -> String {
         .unwrap_or_else(|| "project".to_string())
 }
 
-/// Where a project's own runtime state lives: `~/.spoolway/<label>-<id>/`,
-/// `<label>` and `<id>` both read out of `root`'s own common git directory
-/// via [`crate::repo::project_identity`] — the same directory for every
-/// branch, subdirectory and linked worktree of one clone, so all four
-/// resolve here identically, and never shared between two clones of the
-/// same repository.
+/// Where a project's own runtime state lives.
+///
+/// Home mode, checked first: a checkout some workspace's `project.toml`
+/// lists by path has its state at that workspace's own
+/// `dispatchers/<dispatcher>/` — see [`crate::repo::workspace_clone`] — with
+/// no `.git` stamp read or written at all.
+///
+/// Every other checkout resolves the stamp-keyed way this always has:
+/// `~/.spoolway/<label>-<id>/`, `<label>` and `<id>` both read out of
+/// `root`'s own common git directory via [`crate::repo::project_identity`]
+/// — the same directory for every branch, subdirectory and linked worktree
+/// of one clone, so all four resolve here identically, and never shared
+/// between two clones of the same repository.
 ///
 /// The one directory a project's queue, archive, plans, lane bookkeeping and
 /// dispatched worktrees all sit under — see [`crate::repo::Repo::home`] for
@@ -2452,6 +2459,14 @@ pub fn project_label(root: &Path) -> String {
 /// the wrong directory on a resolution failure is a worse outcome than the
 /// command refusing to run at all.
 pub fn project_home(root: &Path) -> Result<PathBuf> {
+    // Home mode, checked first and ahead of the stamp entirely: a checkout
+    // a workspace's `project.toml` lists by path has its home right there —
+    // `dispatchers/<name>/` — with no `.git` stamp to read at all. See
+    // `crate::repo::bind`, which reaches the same answer through this same
+    // call for the whole of `Repo::discover`.
+    if let Some(clone) = crate::repo::workspace_clone(root) {
+        return Ok(clone.home_dir());
+    }
     match crate::repo::project_identity(root)? {
         Some((_checkout, label, id)) => Ok(state_root().join(format!("{label}-{id}"))),
         None => Ok(state_root().join(project_label(root))),
@@ -3716,6 +3731,43 @@ mod tests {
         );
         assert!(path.starts_with(project_home(&root).unwrap()), "{path:?}");
         assert!(!path.starts_with(home().join(".herdr")), "{path:?}");
+    }
+
+    /// The default worktree root for a home-mode checkout is the
+    /// workspace's own dispatcher folder, not a stamp-keyed home — the same
+    /// `dispatchers/<name>/worktrees/` [`crate::repo::Repo::home`] answers,
+    /// so a dispatch pass cuts a lane's worktree in the right place without
+    /// `dispatch.worktree_root` needing to name it by hand.
+    #[test]
+    fn a_home_mode_checkouts_worktree_root_is_its_dispatcher_folder() {
+        let scratch_home = crate::scratch::root("mux-home-mode-worktree-root");
+        std::fs::remove_dir_all(&scratch_home).ok();
+        let clone = crate::scratch::root("mux-home-mode-worktree-root-clone");
+        std::fs::remove_dir_all(&clone).ok();
+        std::fs::create_dir_all(&clone).unwrap();
+        crate::repo::run(&clone, "git", &["init", "-q", "-b", "main"]).unwrap();
+        let canon = clone.canonical().unwrap();
+
+        let workspace = scratch_home.join(".spoolway").join("ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"ws\"\nclones = [{{ root = \"{}\", dispatcher = \"api\" }}]\n",
+                canon.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&scratch_home, || {
+            let path = worktree_root(&canon, &DispatchConfig::default()).unwrap();
+            assert_eq!(
+                path,
+                workspace.join("dispatchers").join("api").join("worktrees")
+            );
+        });
+        std::fs::remove_dir_all(&clone).ok();
+        std::fs::remove_dir_all(&scratch_home).ok();
     }
 
     /// A branch is a path with a `/` in it, and every backend flattens it to

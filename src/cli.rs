@@ -635,6 +635,13 @@ pub struct InitArgs {
     /// name, `<label>-<id>` (for example `api-8w4r2c`), not the bare id
     /// alone. One of the only two ways (with `--new-id`) to write a
     /// binding over one that already exists.
+    ///
+    /// `NAME` in the form `<workspace>/<dispatcher>` re-attaches a
+    /// home-mode clone instead: the workspace's own `project.toml` has its
+    /// `dispatcher` clone entry rewritten to this checkout's current path,
+    /// keeping that dispatcher's queue, archive and worktrees — nothing
+    /// stamped into `.git` either way. This is the line the "no spoolway
+    /// project found" error prints for a clone whose folder moved.
     #[arg(long, value_name = "NAME", conflicts_with = "new_id")]
     pub adopt: Option<String>,
 

@@ -1249,8 +1249,12 @@ mod tests {
             )
         })
         .expect_err("a name that could escape ~/.spoolway/ must be refused");
+        // `../../evil` carries a `/`, so this is refused by
+        // `adopt_workspace_clone`'s own check now — the `<workspace>/
+        // <dispatcher>` route `home-mode-discovery` added, tried before the
+        // single-component repo-mode form below ever sees it.
         assert!(
-            format!("{err:#}").contains("not a plain directory name"),
+            format!("{err:#}").contains("not a plain `<workspace>/<dispatcher>` name"),
             "{err:#}"
         );
         // And nothing was built from it: no directory escaping the scratch

@@ -7828,11 +7828,7 @@ mod tests {
     #[test]
     fn a_base_only_origin_has_is_accepted() {
         let repo = fixture("remote-only-base");
-        let origin = repo
-            .root
-            .parent()
-            .unwrap()
-            .join("remote-only-base-origin.git");
+        let origin = crate::scratch::root("remote-only-base-origin.git");
         let _ = std::fs::remove_dir_all(&origin);
         std::fs::create_dir_all(&origin).unwrap();
         crate::repo::run(&origin, "git", &["init", "-q", "--bare", "-b", "main"]).unwrap();

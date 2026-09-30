@@ -31,6 +31,10 @@ a linked worktree the command refuses and prints the `-C` form to run instead.
 
 ## Runtime state
 
+This section describes repo mode, where the checkout itself holds the tracked files. A
+checkout with no `.spoolway/` can run in home mode instead, reading its config from a
+workspace elsewhere on the machine. See [Home mode](concepts.md#home-mode).
+
 The checkout holds the tracked files: `config.toml`, `.spoolway/pipelines/` and
 `.spoolway/prompts/`. Everything spoolway writes while it runs lives at
 `~/.spoolway/<label>-<id>/`. The `<id>` is a short id stamped into the project's `.git`

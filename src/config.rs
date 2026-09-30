@@ -67,15 +67,42 @@ pub const SCRATCH_DIR: &str = "scratch";
 /// cannot reach a whole `Repo`.
 pub const OVERRIDES_DIR: &str = "overrides";
 
-/// `.spoolway/` under `checkout` — the tracked control plane's own
-/// directory, and the one place [`STATE_DIR`] is ever joined onto a checkout
-/// or root. Every reader of a setup file goes through this (for the handful
-/// of callers, like [`Config::load`] and [`crate::pipeline::Pipelines::load`],
-/// that only have a bare path) or through [`crate::repo::Repo::setup_dir`],
-/// its `Repo`-typed twin — see the `setup-dir-accessor` task. Moving the
-/// tracked setup somewhere else, the reason this exists, is a change to this
-/// one function and nothing else.
+/// The tracked control plane's own directory for `checkout`: `.spoolway/`
+/// under it in the ordinary, repo-mode case, or a home-mode workspace's own
+/// `config/` when `checkout` carries no `.spoolway/` of its own but some
+/// workspace's `project.toml` lists it by path instead — see
+/// [`crate::repo::workspace_clone`]. Every reader of a setup file goes
+/// through this (for the handful of callers, like [`Config::load`] and
+/// [`crate::pipeline::Pipelines::load`], that only have a bare path) or
+/// through [`crate::repo::Repo::setup_dir`], its `Repo`-typed twin — see the
+/// `setup-dir-accessor` task. Moving the tracked setup somewhere else, the
+/// reason this exists, is a change to this one function and nothing else —
+/// this is what makes "the setup accessor returns the workspace's `config/`"
+/// true for every one of the dozens of callers above without each of them
+/// having to ask; a checkout that does carry a real `.spoolway/` never pays
+/// for the workspace check at all, since [`tracked_setup_dir_in`]'s own
+/// `is_dir` short-circuits it.
 pub fn setup_dir_in(checkout: &Path) -> PathBuf {
+    let tracked = tracked_setup_dir_in(checkout);
+    if tracked.is_dir() {
+        return tracked;
+    }
+    match crate::repo::workspace_clone(checkout) {
+        Some(clone) => clone.config_dir(),
+        None => tracked,
+    }
+}
+
+/// `.spoolway/` under `checkout`, the join itself and nothing past it — what
+/// [`setup_dir_in`] checks before it ever asks whether a workspace lists
+/// `checkout` instead. Also `crate::repo::bind`'s own way of asking the
+/// identical question, for the one case it has to answer that
+/// `setup_dir_in` cannot: a checkout carrying both a tracked `.spoolway/`
+/// and a workspace's clone entry is a conflict `setup_dir_in` would just
+/// silently resolve by preferring the tracked directory, never reporting
+/// that a workspace was in the running at all — `bind` has to see the
+/// tracked directory's existence directly to refuse on it instead.
+pub(crate) fn tracked_setup_dir_in(checkout: &Path) -> PathBuf {
     checkout.join(STATE_DIR)
 }
 

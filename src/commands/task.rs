@@ -569,7 +569,7 @@ mod tests {
         };
         assert_eq!(json(&repo.root)["base"], "plan/demo");
 
-        let worktree = repo.root.with_file_name("commands-contract-base-wt");
+        let worktree = crate::scratch::root("commands-contract-base-wt");
         let _ = std::fs::remove_dir_all(&worktree);
         let path = worktree.display().to_string();
         crate::repo::run(

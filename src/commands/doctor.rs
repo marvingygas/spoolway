@@ -621,11 +621,27 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
         "bound to its home".into(),
         match home_error {
             Some(err) => Err(anyhow::anyhow!("{err:#}")),
-            None => Ok(Some(match crate::repo::binding_at(&repo.home) {
-                Some((id, root)) => {
-                    format!("{} — id {id}, root {}", repo.home.display(), root.display())
-                }
-                None => repo.home.display().to_string(),
+            // The mode is named here, not as a row of its own, so it reads
+            // exactly where a person already looks to see what this
+            // checkout is bound to — see the `home-mode-discovery` task's
+            // "doctor says which mode the project is in", which names both
+            // modes, not only home mode.
+            None => Ok(Some(match crate::repo::workspace_clone(&repo.checkout) {
+                Some(_) => format!(
+                    "{} — home mode, setup read from {}",
+                    repo.home.display(),
+                    repo.setup_dir().display()
+                ),
+                None => match crate::repo::binding_at(&repo.home) {
+                    Some((id, root)) => {
+                        format!(
+                            "{} — repo mode, id {id}, root {}",
+                            repo.home.display(),
+                            root.display()
+                        )
+                    }
+                    None => format!("{} — repo mode", repo.home.display()),
+                },
             })),
         },
     )
@@ -3220,12 +3236,16 @@ exit 0
             home: root.join(".home"),
         };
 
-        // No record yet — the plain home path is all there is to say.
+        // No record yet — the plain home path and the mode are all there
+        // is to say.
         let Finding::Check(label, outcome) = registration_check(&repo, None) else {
             panic!("registration is a check, not a note");
         };
         assert_eq!(label, "bound to its home");
-        assert_eq!(outcome.unwrap(), Some(repo.home.display().to_string()));
+        assert_eq!(
+            outcome.unwrap(),
+            Some(format!("{} — repo mode", repo.home.display()))
+        );
 
         // A home that actually carries a binding reports what it settled
         // on, not only that the directory exists.
@@ -3244,6 +3264,48 @@ exit 0
         let note = outcome.unwrap().unwrap();
         assert!(note.contains("id a1b2c3"), "{note}");
         assert!(note.contains(&root.display().to_string()), "{note}");
+    }
+
+    /// A home-mode checkout's registration names the mode, not an id and a
+    /// root nothing stamped — "doctor says which mode the project is in",
+    /// answered right where a person already looks for what this checkout
+    /// is bound to.
+    #[test]
+    fn a_home_mode_project_is_an_ok_check_naming_the_mode() {
+        let root = crate::scratch::root("doctor-home-mode");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("doctor-home-mode-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let workspace = home.join(".spoolway").join("ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"ws\"\nclones = [{{ root = \"{}\", dispatcher = \"api\" }}]\n",
+                root.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: workspace.join("dispatchers").join("api"),
+        };
+
+        let note = crate::platform::test_home::with_home(&home, || {
+            let Finding::Check(label, outcome) = registration_check(&repo, None) else {
+                panic!("registration is a check, not a note");
+            };
+            assert_eq!(label, "bound to its home");
+            outcome.unwrap().unwrap()
+        });
+        assert!(note.contains("home mode"), "{note}");
+        assert!(
+            note.contains(&workspace.join("config").display().to_string()),
+            "{note}"
+        );
     }
 
     /// Whatever `bind` could not settle — every one of the seven states the
