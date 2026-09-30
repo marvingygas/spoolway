@@ -95,7 +95,23 @@ case "${1:-}" in
   # doctor run against this double reads the same as one against the real,
   # tested `gh`.
   --version) echo "gh version 2.97.0 (2024-06-03)"; exit 0 ;;
-  auth) exit 0 ;;
+  # `github.sh`'s `check` branch asks both of these: `auth status` for the
+  # login and `repo view <project_key>` for the repository. Each answers
+  # yes unless a suite sets GH_STUB_LOGGED_OUT or GH_STUB_NO_REPO, so the
+  # branch can be shown to fail on each one, not just to pass.
+  auth)
+    [ -z "${GH_STUB_LOGGED_OUT:-}" ] || { echo "You are not logged into any GitHub hosts." >&2; exit 1; }
+    exit 0
+    ;;
+  repo)
+    case "${2:-}" in
+      view)
+        [ -z "${GH_STUB_NO_REPO:-}" ] || { echo "GraphQL: Could not resolve to a Repository with the name '${3:-}'." >&2; exit 1; }
+        echo "name: ${3:-}"
+        ;;
+      *) echo "gh repo ${2:-<nothing>}: not implemented by this stub" >&2; exit 1 ;;
+    esac
+    ;;
   pr)
     case "${2:-}" in
       checks)

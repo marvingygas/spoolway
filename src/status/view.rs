@@ -565,9 +565,9 @@ pub(super) fn footer(
 
     // One line, only when something has actually failed — absent entirely
     // otherwise, the same as every other figure this footer only prints when
-    // there is something to say. Every hook failure counts here, whether
-    // `on_fail` is `"ignore"` or `"pause"`: a person still wants to see it,
-    // even when nothing else changed for the task it ran against.
+    // there is something to say. Every hook failure counts here — whether or
+    // not it paused a task, a `blocked`/`paused` one only ever recorded —
+    // since a person still wants to see it.
     let failures = crate::tracking::failure_count(repo);
     if failures > 0 {
         lines.push(format!(

@@ -23,8 +23,12 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: issue_tracking.on_fail — a non-zero exit under "pause" holds the task on `queued` and `done`, and only records the failure on `blocked` and `paused`
+# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) pauses the task, naming the hook's own log under tracking/; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
+# covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
+# covers: the shipped github.sh's `check` branch passes with gh logged in and the repository visible, and fails on each of the two alone
+# covers: `spoolway doctor` runs the hook with SPOOLWAY_EVENT=check, synchronously; a non-zero exit is one FAIL row carrying the hook's own stderr, not the merged stdout+stderr log a detached run leaves under tracking/
+# covers: a task's `labels:` reaches every event with a task behind it as SPOOLWAY_LABELS, comma-joined and empty when the task has none; `queue add` refuses a label holding whitespace or a comma, naming the task and the label
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -52,6 +56,21 @@ publish plan/live
 BODY="$LIVE/body.md"
 task_body "$BODY"
 
+# --------------------------------------------------------------- labels:
+# `queue add` refuses a label holding whitespace before a hook ever sees it
+# — checked with no hook configured at all, since the refusal is
+# `parse_submission`'s own, not anything the tracker does.
+task_doc "$LIVE/spaced-label.md" spaced-label "$BODY" "group: spaced-label-group" \
+  'labels: ["has space"]'
+refuses "a label holding a space is refused, naming the task" \
+  "spaced-label" \
+  "$SPOOLWAY" queue add --from "$LIVE/spaced-label.md"
+refuses "a label holding a space is refused, naming the label" \
+  "has space" \
+  "$SPOOLWAY" queue add --from "$LIVE/spaced-label.md"
+works "nothing was queued for the refused label" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/spaced-label.md"
+
 # ------------------------------------------------------- issue_tracking hook
 # `[issue_tracking]` fires a project's own script once per task on each of the
 # four states nothing inside a pipeline file can already put a `run:` step on
@@ -68,9 +87,28 @@ mkdir -p .spoolway/hooks
 # the hook, not about a failure.
 cat > .spoolway/hooks/record.sh <<'EOF'
 #!/bin/sh
-# Handles every event the same way, queued/blocked/paused/done/open/fetch
-# alike — there is no branch here to miss.
-env | sort > "$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT"
+# Handles every event the same way, queued/started/blocked/paused/done/
+# open/fetch alike — there is no branch here to miss. `check` gets one
+# real, no-op `case` arm below: `has_check_branch` matches the actual
+# shapes a branch is spelled in (`check)`, `= check`, ...), not the bare
+# word, so a comment naming the event is not enough any more — and this
+# hook is meant to prove `spoolway doctor` really runs `check` against a
+# script that has grown the branch. `check` carries no task and so no
+# $SPOOLWAY_TASK_FILE — guarded rather than left to write a stray
+# "$PWD/.env.check" on every doctor run in this suite's own checkout.
+case "$SPOOLWAY_EVENT" in
+  check) : ;;
+esac
+[ -n "$SPOOLWAY_TASK_FILE" ] && env | sort > "$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT"
+# On `started`, also the stage every task still in the queue stands at, as
+# the hook saw it: what a dependency had reached when its dependent started
+# is read straight off this, rather than off which of two hooks running at
+# once happened to write its file first.
+if [ "$SPOOLWAY_EVENT" = started ] && [ -n "$SPOOLWAY_TASK_FILE" ]; then
+  for f in "$(dirname "$SPOOLWAY_TASK_FILE")"/*.md; do
+    [ -e "$f" ] && echo "$(basename "$f" .md) $(sed -n 's/^stage: //p' "$f")"
+  done > "$SPOOLWAY_TASK_FILE.stages.started"
+fi
 exit 0
 EOF
 chmod +x .spoolway/hooks/record.sh
@@ -101,6 +139,27 @@ says "doctor refuses a hook name that is not a bare filename" \
 must "hook is restored to the bare name" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 
+# `check` proves the hook works before any task can ever pause on it —
+# `doctor` runs it synchronously, once, and a non-zero exit is one FAIL row
+# carrying the hook's own stderr, not the merged stdout+stderr log a
+# detached run under `tracking/` would leave.
+cat > .spoolway/hooks/check-fails.sh <<'EOF'
+#!/bin/sh
+if [ "$SPOOLWAY_EVENT" = check ]; then
+  echo 'status "Review" does not exist in project KAN' >&2
+  exit 1
+fi
+exit 0
+EOF
+chmod +x .spoolway/hooks/check-fails.sh
+must "the hook is switched to one whose check branch fails" \
+  "$SPOOLWAY" config set issue_tracking.hook check-fails.sh
+says "doctor reports the failing check as one FAIL row carrying its own stderr" \
+  'FAIL  check-fails.sh check: status "Review" does not exist in project KAN' \
+  "$SPOOLWAY" doctor
+must "the hook is restored to the recording one" \
+  "$SPOOLWAY" config set issue_tracking.hook record.sh
+
 # `handover` is `spoolway stack`, and the second task of a group is the second
 # pull request of a stack — one `gh api` call that needs a remote reading as
 # `github.com` and a `gh` that tracks stack membership. This suite's forge is
@@ -127,11 +186,13 @@ export GH_STUB_URL="file://$ORIGIN"
 dispatcher_restart
 
 # A dependent pair rather than two independent tasks: `tracked-b` cannot even
-# start until `tracked-a` has archived, which is what keeps `SPOOLWAY_GROUP_LAST`
-# deterministic below — the two can never reach `done` in the same pass, so
-# `tracked-a`'s own hook always sees `tracked-b` still open.
+# start until `tracked-a` has reached `done`, which is what keeps
+# `SPOOLWAY_GROUP_LAST` deterministic below — the two can never reach `done`
+# in the same pass, so `tracked-a`'s own hook always sees `tracked-b` still
+# open.
 task_doc "$LIVE/tracked-a.md" tracked-a "$BODY" "group: tracked-pair" \
-  "group_description: a dependent pair, tracked end to end"
+  "group_description: a dependent pair, tracked end to end" \
+  "labels: [gh, tracked]"
 task_doc "$LIVE/tracked-b.md" tracked-b "$BODY" "group: tracked-pair" \
   "depends_on: [tracked-a]"
 must "the first of a dependent pair queues" "$SPOOLWAY" queue add --from "$LIVE/tracked-a.md"
@@ -149,6 +210,13 @@ has "the event it fired for" "SPOOLWAY_EVENT=queued" "$ENV_A_QUEUED"
 has "the project key from config" "SPOOLWAY_PROJECT_KEY=acme/app" "$ENV_A_QUEUED"
 has "the task's own group" "SPOOLWAY_GROUP=tracked-pair" "$ENV_A_QUEUED"
 has "the task file's own absolute path" "SPOOLWAY_TASK_FILE=" "$ENV_A_QUEUED"
+has "its own labels, comma-joined" "SPOOLWAY_LABELS=gh,tracked" "$ENV_A_QUEUED"
+
+ENV_B_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.env.queued"
+# The whole line, not a prefix: `has` would pass on any value at all, and the
+# promise is that a task with no `labels:` hands the hook an empty one.
+works "a task with no labels: carries the variable, empty" \
+  grep -qx 'SPOOLWAY_LABELS=' "$ENV_B_QUEUED"
 
 ENV_A_DONE="$SPOOLWAY_PROJECT_HOME/queue/tracked-a.md.env.done"
 ENV_B_DONE="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.env.done"
@@ -156,6 +224,31 @@ silent_about "the first of the pair's done event is not the group's last" \
   "SPOOLWAY_GROUP_LAST" cat "$ENV_A_DONE"
 has "the second's done event is — it is the group's last open task" \
   "SPOOLWAY_GROUP_LAST=1" "$ENV_B_DONE"
+
+# `started` fires once a task actually leaves `queued` for its entry step,
+# not merely once it is queued — the moment `queued` itself already fires
+# on. `tracked-b` depends on `tracked-a`, so it cannot leave `queued` until
+# `tracked-a` has reached `done`, which is exactly what a `started` event for
+# `tracked-b` seeing `tracked-a` at any other stage would contradict.
+ENV_A_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-a.md.env.started"
+has "the first of the pair's started event fired with its own identity" \
+  "SPOOLWAY_TASK=tracked-a" "$ENV_A_STARTED"
+has "the event it fired for" "SPOOLWAY_EVENT=started" "$ENV_A_STARTED"
+# Read off the stages `record.sh` snapshots on `started`, not off file times.
+# `tracked-a` counts as finished once it stands at `done`, so `tracked-b` may
+# start in the very pass `tracked-a`'s own `done` hook is still running — the
+# two hooks run at once, and which writes its file first is a race. What the
+# gate does promise is that `tracked-a` is at `done`, or already archived out
+# of the queue, by the time `tracked-b`'s `started` fires.
+STAGES_B_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.stages.started"
+has "the second's started event saw itself still queued" \
+  "tracked-b queued" "$STAGES_B_STARTED"
+if ! grep -q '^tracked-a ' "$STAGES_B_STARTED" 2>/dev/null \
+  || grep -qx 'tracked-a done' "$STAGES_B_STARTED"; then
+  ok "tracked-b's started event fired only once tracked-a had already reached done"
+else
+  bad "tracked-b's started event saw tracked-a at \`$(sed -n 's/^tracked-a //p' "$STAGES_B_STARTED")\` ($STAGES_B_STARTED) — the dependency gate did not hold started back"
+fi
 
 # Undone: everything past here is meant to see the same not-github forge the
 # rest of this suite was written against.
@@ -388,12 +481,12 @@ has "and the result popup names what was created" "┌─ issues created " "$ASK
 # acceptance criterion: `n` also stamps `tracking: off` onto the queued task
 # (`commands::queue::open_and_prefix`), and the dispatcher reads that back —
 # the same way it already reads a trial arm's `trial:` — to fire no
-# `[issue_tracking]` event for it on `queued` or `done` either, all the way
-# through a real run to the archive. Switched to `record.sh` for this one
-# case, which marks every event `queued`/`blocked`/`paused`/`done`/`open`/
-# `fetch` alike beside the task file itself; `open.sh`, left in place above,
-# is silent on every event but `open` and so cannot prove a `queued` or
-# `done` hook call never happened.
+# `[issue_tracking]` event for it on `queued`, `started` or `done` either,
+# all the way through a real run to the archive. Switched to `record.sh` for
+# this one case, which marks every event `queued`/`started`/`blocked`/
+# `paused`/`done`/`open`/`fetch` alike beside the task file itself;
+# `open.sh`, left in place above, is silent on every event but `open` and so
+# cannot prove a `queued`, `started` or `done` hook call never happened.
 must "the hook is switched to the one that marks every event, for this case" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 pending_doc declined-tracking "$BODY" "group: declined-tracking" \
@@ -413,6 +506,8 @@ fi
 
 works "no queued event ever ran the hook for it" \
   bash -c '[ ! -e "$1/queue/declined-tracking.md.env.queued" ]' _ "$SPOOLWAY_PROJECT_HOME"
+works "no started event ran the hook for it" \
+  bash -c '[ ! -e "$1/queue/declined-tracking.md.env.started" ]' _ "$SPOOLWAY_PROJECT_HOME"
 works "no done event ran the hook for it either" \
   bash -c '[ ! -e "$1/queue/declined-tracking.md.env.done" ]' _ "$SPOOLWAY_PROJECT_HOME"
 works "and no tracking/ bookkeeping file exists for it at all" \
@@ -432,11 +527,12 @@ works "while asked-a, declined through the same n, fired none" \
 must "the hook is switched back to the one that only answers open" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 
-# ------------------------------------------------- on_fail = "pause"
-# A hook that always fails, on each of the four events by hand: `pause` holds
-# a task on `queued` and out of the archive on `done`, and only records the
-# failure on `blocked` and `paused` — both already stopped for a person, so
-# nothing about pausing them again would mean anything.
+# ------------------------------------------------- a failing hook pauses
+# A hook that always fails, on each of the four events by hand: a non-zero
+# exit on `queued` or `done` pauses the task now, naming the hook's own log
+# under tracking/ in the reason, and only records the failure on `blocked`
+# and `paused` — both already stopped for a person, so nothing about pausing
+# them again would mean anything.
 #
 # `open` is the one event it lets through, and the exemption is the point:
 # a failing `open` refuses the whole `queue add` outright — the block right
@@ -449,7 +545,6 @@ exit 1
 EOF
 chmod +x .spoolway/hooks/fail.sh
 must "the hook now always fails" "$SPOOLWAY" config set issue_tracking.hook fail.sh
-must "and on_fail pauses the task" "$SPOOLWAY" config set issue_tracking.on_fail pause
 
 task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
   "group_description: a task under an always-failing hook"
@@ -457,11 +552,12 @@ must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
 if drive hook-queued paused 60; then
-  ok "a failing queued hook under on_fail=pause lands the task on paused"
+  ok "a failing queued hook lands the task on paused"
 else
-  bad "a failing queued hook under on_fail=pause lands the task on paused \
-(at \`$(stage_of hook-queued)\`)"
+  bad "a failing queued hook lands the task on paused (at \`$(stage_of hook-queued)\`)"
 fi
+has "the reason names the hook's own log under tracking/" "tracking/hook-queued" \
+  "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
 
 # Placed by hand at the other three stages, the same way flow.sh's own
 # hand-blocked scenario proves a road through `blocked` without spending a
@@ -487,25 +583,17 @@ fi
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md"
 
 dispatcher_start
-TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
 for _ in $(seq 1 150); do
   [ -f "$TRACKING/hook-blocked · blocked.exit" ] \
     && [ -f "$TRACKING/hook-paused · paused.exit" ] \
-    && [ -f "$TRACKING/hook-done · done.failed" ] \
+    && [ -f "$TRACKING/hook-done · done.exit" ] \
     && break
   sleep 0.2
 done
 
 has "the blocked event's hook ran and failed" "1" "$TRACKING/hook-blocked · blocked.exit"
 has "the paused event's hook ran and failed" "1" "$TRACKING/hook-paused · paused.exit"
-# `done` is the one event a failure is retried on, and `retry_if_failed`
-# forgets the run — `.exit` file and all — once the ladder's own next-attempt
-# time (`hook_backoff` in src/tracking.rs) has passed, not on every pass that
-# finds it still failing — see the ladder scenario below for the pacing
-# itself. The `.failed` marker it leaves first is the evidence that survives;
-# see `failure_count` in src/tracking.rs, which reads both for the same reason.
-works "the done event's hook ran and failed" \
-  test -f "$TRACKING/hook-done · done.failed"
+has "the done event's hook ran and failed" "1" "$TRACKING/hook-done · done.exit"
 
 if [ "$(stage_of hook-blocked)" = blocked ]; then
   ok "a failing hook on blocked only records the failure"
@@ -517,86 +605,52 @@ if [ "$(stage_of hook-paused)" = paused ]; then
 else
   bad "a failing hook on paused only records the failure (at \`$(stage_of hook-paused)\`)"
 fi
-if [ -f "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md" ] && [ "$(stage_of hook-done)" = done ]; then
-  ok "a failing done hook under on_fail=pause holds the task out of the archive"
+if drive hook-done paused 60; then
+  ok "a failing done hook pauses the task, out of the archive"
 else
-  bad "a failing done hook under on_fail=pause holds the task out of the archive \
-(queue file present: $([ -f "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md" ] && echo yes || echo no), \
-stage: $(stage_of hook-done))"
+  bad "a failing done hook pauses the task, out of the archive (at \`$(stage_of hook-done)\`)"
 fi
 
-# --------------------------------------------------- done hook: the ladder
-# `on_fail = "pause"` above proved the hold; this proves the *pace* of its
-# retry — the whole reason it was given a ladder. The hook counts every time
-# it actually runs a real `done` event for this one task, filtered by
-# `SPOOLWAY_TASK` so the still-failing `hook-done` task above — sharing this
-# same global `issue_tracking.hook` from the moment it is switched — cannot
-# add to the count. If a failed hook retried every pass, this harness's own
-# one-second interval would show a dozen runs in as many seconds; the ladder
-# says the first ten seconds see exactly one retry, not one per pass.
-LADDER_COUNT="$LIVE/ladder-runs.txt"
-rm -f "$LADDER_COUNT"
-cat > .spoolway/hooks/fail-counted.sh <<EOF
-#!/bin/sh
-[ "\$SPOOLWAY_EVENT" = open ] && exit 0
-[ "\$SPOOLWAY_TASK" = "ladder-demo" ] && echo run >> "$LADDER_COUNT"
-exit 1
-EOF
-chmod +x .spoolway/hooks/fail-counted.sh
-must "the ladder hook is named" "$SPOOLWAY" config set issue_tracking.hook fail-counted.sh
-dispatcher_restart   # a new hook name only takes effect on the next start
+# --------------------------------------------------- resume re-runs the hook
+# The road out of a hook pause: fixing whatever the hook's own log named,
+# then `spoolway resume` — it forgets the failed run, so the very next pass's
+# `fire` starts it over rather than reading the same stale exit code and
+# pausing the task right back. A `queued` pause resumes onto `queued`, where
+# it is gated like any other; a `done` pause resumes straight back to `done`,
+# not to `queued` or a step.
+must "the hook is fixed" "$SPOOLWAY" config set issue_tracking.hook record.sh
+dispatcher_restart   # a new hook name only takes effect on the next start —
+                      # a pass landing between the config set and the first
+                      # resume, still holding fail.sh in memory, would
+                      # otherwise re-fire it and pause the task right back.
 
-{
-  echo "---"; echo "id: ladder-demo"; echo "title: ladder-demo, done"
-  echo "stage: done"; echo "group: live"
-  echo "base: plan/live"; echo "pipeline: default"
-  echo "---"; cat "$BODY"
-} > "$SPOOLWAY_PROJECT_HOME/queue/ladder-demo.md"
-
-for _ in $(seq 1 100); do
-  [ -s "$LADDER_COUNT" ] && break
-  sleep 0.2
-done
-FIRST_COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-if [ "$FIRST_COUNT" = "1" ]; then
-  ok "the failing done hook ran once, right away"
+# Held at `implement` for a while. A stand-in's whole turn fits inside a poll
+# interval, so without this the task can run on through every step to the
+# archive between two of `drive`'s looks, and the check fails on a task that
+# did exactly what it should. Step-scoped, so it governs this one turn.
+echo linger:15 > "$CTL/hook-queued.implement"
+must "resume clears the queued pause" "$SPOOLWAY" resume hook-queued
+if drive hook-queued implement 60; then
+  ok "resuming a queued hook pause re-runs the hook and lets the task start"
 else
-  bad "the failing done hook ran once, right away (ran $FIRST_COUNT times)"
+  bad "resuming a queued hook pause re-runs the hook and lets the task start \
+(at \`$(stage_of hook-queued)\`)"
 fi
+# The task moving on is the effect; this is the cause. `record.sh` leaves
+# its own mark beside the task file only when it actually runs, so a pass
+# that let the task through without firing the fixed hook again leaves none.
+has "and the fixed hook really ran for the resumed queued event" \
+  "SPOOLWAY_EVENT=queued" "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md.env.queued"
 
-# Well inside the ladder's own ten seconds, so the retry cannot have come due
-# yet however many passes have gone by. It used to be worth saying "at a
-# one-second pass rate" here, because four seconds then held four passes and a
-# per-pass retry would already have shown; a fixed ten-second probe may hold
-# none at all, so what this pins now is only that the ladder is not skipped.
-# The count settling at exactly two below is what still says "one retry, not
-# one per pass".
-sleep 4
-COUNT_AFTER_4S=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-if [ "$COUNT_AFTER_4S" = "1" ]; then
-  ok "four seconds in, inside the ladder's own ten, it still has not retried"
+must "resume clears the done pause" "$SPOOLWAY" resume hook-done
+if drive hook-done gone 60; then
+  ok "resuming a done hook pause re-runs the hook and lets the task archive"
 else
-  bad "four seconds in, inside the ladder's own ten, it still has not retried \
-(ran $COUNT_AFTER_4S times — a retry before the ladder is due)"
+  bad "resuming a done hook pause re-runs the hook and lets the task archive \
+(still at \`$(stage_of hook-done)\`)"
 fi
-
-# The retry fires on the first pass *after* the ladder comes due, and the
-# ladder's ten seconds and the probe's ten are unrelated clocks that do not
-# line up — so the wait has to cover the ladder plus a whole
-# `dispatch::PROBE_INTERVAL` behind it, not the twelve seconds that sufficed
-# when a pass came round every second.
-for _ in $(seq 1 300); do
-  COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-  [ "$COUNT" -ge 2 ] && break
-  sleep 0.2
-done
-COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-if [ "$COUNT" = "2" ]; then
-  ok "the ladder's own ten-second step fired exactly one retry, not one per pass"
-else
-  bad "the ladder's own ten-second step fired exactly one retry, not one per pass \
-(ran $COUNT times)"
-fi
+has "and the fixed hook really ran for the resumed done event" \
+  "SPOOLWAY_EVENT=done" "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md.env.done"
 
 must "the hook is put back so it stops holding tasks" \
   "$SPOOLWAY" config set issue_tracking.hook ""
@@ -630,6 +684,20 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 # show up here and nowhere else.
 silent_about "doctor is quiet about the shipped github.sh's own declared gh version" \
   "requires gh >=" "$SPOOLWAY" doctor
+
+# The shipped script's own `check` branch, run by `doctor` against the same
+# double: it passes while `gh` is logged in and can see `acme/app`, and each
+# of the two things it tests fails it on its own, with the script's own
+# stderr as the row. A branch that only ever said yes would pass the first
+# of these three and neither of the others.
+says "doctor runs the shipped github.sh's check branch, and it passes" \
+  "ok    github.sh check" "$SPOOLWAY" doctor --verbose
+says "a logged-out gh fails github.sh's check, naming the login" \
+  "FAIL  github.sh check: github.sh check: gh is not logged in" \
+  env GH_STUB_LOGGED_OUT=1 "$SPOOLWAY" doctor
+says "a repository gh cannot see fails github.sh's check, naming the repository" \
+  "FAIL  github.sh check: github.sh check: repository acme/app not found" \
+  env GH_STUB_NO_REPO=1 "$SPOOLWAY" doctor
 
 # ------------------------------------------- gh below the floor: the submit gate
 # `queue add --from` is the non-interactive route the gate's own mockup
@@ -790,7 +858,7 @@ has "the second ticket names the first as blocking it" \
 
 dispatcher_start
 # Waits for the comment this task's own hook posts, not merely for a file at
-# that name. `github-open-check` holds the same ticket, so its own `queued`
+# that name. `github-open-check` holds the same ticket, so its own `started`
 # label edit or blocked comment can land first; polling on the content
 # asserts against the right one whichever arrives first.
 for _ in $(seq 1 150); do

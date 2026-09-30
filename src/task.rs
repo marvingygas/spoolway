@@ -276,6 +276,17 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_description: Option<String>,
 
+    /// Plain words carried onto this task's own tracker issue, and its
+    /// group's, beside whatever `spoolway:*` labels the hook adds itself —
+    /// see `assets/hooks/github.sh`'s own `open` branch. `queue add`'s
+    /// `parse_submission` refuses a batch where any one of them holds
+    /// whitespace or a comma, naming the task and the label: a comma is the
+    /// join character [`crate::tracking::build_env`] and [`crate::tracking::
+    /// open_env`] hand a hook in `SPOOLWAY_LABELS`, and Jira's own labels
+    /// cannot hold a space at all, so neither is ever safe inside one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+
     /// A reference to where this task came from — an issue URL, a plan page
     /// path, a bare name. Nothing in spoolway parses it; it is carried for a
     /// person to follow back, and for nothing else.
@@ -466,6 +477,25 @@ pub struct Frontmatter {
     /// arrival, so it never outlives the pause it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_by: Option<String>,
+
+    /// `"queued"` or `"done"` — which reserved stage's issue-tracking hook
+    /// paused this task, set the moment [`crate::dispatch::Dispatcher::
+    /// tracking_gate`] finds one exited non-zero. Unlike [`paused_by`] this
+    /// is not one of a gate's two roads — a hook pause answers no question a
+    /// person releases past, it stops the task until the hook itself is
+    /// made to run again — so it needs its own field rather than a third
+    /// value squeezed into that one.
+    ///
+    /// `spoolway resume` reads this before anything else in
+    /// `commands::report::back_onto_its_step`: it forgets the failed run
+    /// (see [`crate::tracking::forget`]) so the next pass's `fire` starts it
+    /// over, and — for `"done"` — sends the task straight back to `done`
+    /// rather than through [`crate::commands::resume_target`]'s ordinary
+    /// step-shaped roads, neither of which knows a name that is not a
+    /// pipeline step at all. Cleared the moment it is read, so a later,
+    /// ordinary pause never inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_paused: Option<String>,
 
     /// When the last of those lanes was launched, in epoch seconds.
     ///

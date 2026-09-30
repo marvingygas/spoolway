@@ -54,6 +54,7 @@ as JSON.
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
+| `labels` | you | Plain words for a hook to put on this task's own tracker issue and its group's. A label may hold no whitespace and no comma. |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `tracking` | the queue screen, or you | `off` is the only value accepted. Fires no `[issue_tracking]` hook event for this task and never holds it waiting on one. See [Issue tracking](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `stage` | the pipeline | The step the task is on. |
@@ -66,6 +67,7 @@ as JSON.
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
+| `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and paused the task. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. |
 | `parked_by_stop` | the dispatcher | Set when the dispatch tab's stop popup, `i`, is what parked this task. The next start resumes it on its own and clears the flag; `spoolway resume` and `r` clear it too. |
 | `skip`, `trial` | the queue screen's `t` picker | Steps to pass without a lane, and the trial this task is an arm of. See [Trials](planning.md#trials). |
 | `borrowed` | the dispatcher | The checkout already existed and is not removed at cleanup. |
@@ -86,6 +88,16 @@ mine.md sets `run:`, which spoolway sets on every task itself — remove it from
 ```
 
 Every other dispatcher field in a task is dropped.
+
+A label in `labels:` holding whitespace or a comma is refused, naming the task and the label,
+since a hook reads the whole list comma-joined.
+
+```
+$ spoolway queue add --from mine.md
+mine.md: label `has space` may not hold whitespace or a comma — a hook reads every label
+comma-joined in SPOOLWAY_LABELS, and Jira's own labels cannot hold a space at all. Join the
+words with a hyphen instead, for example `needs-triage`.
+```
 
 ### One constraint no key can express
 
@@ -252,6 +264,12 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 `blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT
 column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
 not a plain pass.
+
+A failing [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events)
+also pauses the task, on `queued`, on `started` or on `done`. `spoolway resume` forgets that
+hook's failed run, so the hook fires again. A task paused on `queued` or `started` resumes back
+to `queued`. A task paused on `done` resumes straight back to `done` instead, since a plain
+resume only knows pipeline steps and `queued`.
 
 ### The stop is yours to work in
 

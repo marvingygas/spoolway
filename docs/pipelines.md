@@ -117,6 +117,11 @@ Every pipeline may route to `done` and `blocked` without declaring them.
 | `blocked` | The task needs help. Attended, `spoolway resume <task>` resumes it. Unattended, a lane is started on it. See [Staffing `blocked`](#staffing-blocked). |
 | `paused` | The task passed a `gate:` step and waits for `spoolway resume <task>`. See [Gates](#gates). |
 
+`started` is not one of these four. It is an `[issue_tracking]` hook event, fired the moment a
+task actually leaves `queued` for its entry step — see
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Nothing
+ever writes it to a task's own `stage:`, so a step may still use `started` as its id.
+
 ## Routing
 
 A step names where a task goes on a pass and on a fail. Prompts report an outcome and the
@@ -337,12 +342,14 @@ flowchart LR
   F --> G
 ```
 
-- The pull request's title is the task's `title:`. Its body is the task file's body plus a
-  co-authorship tag. `## Status Log`, `## Handoff` and `## Blocker` move out of the plan and
-  into one closed "Run history" section at the foot of the body, above the tag, so a reviewer
-  opens on the plan sections alone. A body with none of the three gets no such section. Which
-  open `parallel: true` task this branch is predicted to conflict with is printed to the
-  console as `spoolway stack` runs, not repeated in the pull request.
+- The pull request's title is the task's `title:`, with its `ticket:` put in front when
+  `ticket:` is a bare tracker key such as `KAN-11` rather than a GitHub URL. Its body is the
+  task file's body plus a co-authorship tag. `## Status Log`, `## Handoff` and `## Blocker`
+  move out of the plan and into one closed "Run history" section at the foot of the body,
+  above the tag, so a reviewer opens on the plan sections alone. A body with none of the
+  three gets no such section. Which open `parallel: true` task this branch is predicted to
+  conflict with is printed to the console as `spoolway stack` runs, not repeated in the pull
+  request.
 - A base branch that exists locally but not on `origin` is pushed to `origin` before the pull
   request is opened. A base that cannot be published refuses before the task's own branch is
   force-pushed, so a failed run leaves nothing published.

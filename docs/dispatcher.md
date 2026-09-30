@@ -79,7 +79,7 @@ flowchart TD
   B --> B3[A silent lane: remind or escalate]
   B1 & B2 & B3 --> C[Sort the ready tasks]
   C --> D[Start lanes while slots are free]
-  D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done]
+  D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done, and started for a queued task about to launch]
   E --> F{Draw the board. Did this pass move a task?}
   F -->|yes| A
   F -->|no| G[Wait for the next pass]
@@ -291,12 +291,18 @@ Other things put a task on `paused`:
 | The dispatch tab's stop popup, `i` | `parked_from: <step>` and `parked_by_stop: true` |
 | Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
 | A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
+| A failing `[issue_tracking]` hook on `queued`, `started` or `done` | `hook_paused: queued`, `hook_paused: started` or `hook_paused: done` |
 
 `spoolway resume` on any of these puts the task back on its step, and so does `r` on the board.
 A task the stop popup parked also resumes on its own, back onto the step it was on, the next
 time dispatching starts — from the tab or from `spoolway dispatch` — and its NEXT column reads
 `→ <step> — resumes when dispatching starts` until then. A paused task's pane survives a stop of
 the dispatcher.
+
+A hook pause is the one exception: nothing inside the pipeline failed, so there is no step to
+go back to. `spoolway resume` forgets the hook's failed run, so it fires again. A task paused on
+`queued` or `started` resumes to `queued`. A task paused on `started` never actually left
+`queued`. A task paused on `done` resumes straight back to `done`.
 
 ## A lane that settles without reporting
 
@@ -347,7 +353,6 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | A step's `loop:` | How many times a task may arrive at the step, by any route. | Never. A person's resume counts too, and refunds nothing. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
-| Issue-tracking hook retry | A failing `[issue_tracking]` hook retries on a doubling delay from ten seconds, capped at an hour. | The hook succeeding. |
 
 When a loop budget runs out, the task parks on `blocked`.
 
@@ -451,7 +456,7 @@ When a task reaches `done`:
 A trial forks a group into one arm per task under one `trial:` id. See
 [Trials](planning.md#trials). An arm is a disposable copy:
 
-- Its `queued` and `done` events never fire the `[issue_tracking]` hook.
+- Its `queued`, `started` and `done` events never fire the `[issue_tracking]` hook.
 - `spoolway stack` is a no-op for it, so it opens no pull request.
 - Its branch is deleted at cleanup whether or not a remote has it.
 

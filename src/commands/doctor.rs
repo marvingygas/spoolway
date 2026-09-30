@@ -224,7 +224,14 @@ pub(crate) enum Warning {
 /// reach the network or open a pane — the same rows [`doctor`] itself would
 /// print, minus the two that shell out to `git ls-remote`/`gh auth status`
 /// and the live pane check, and minus every passing [`Row::Ok`], which the
-/// warnings screen has no room for.
+/// warnings screen has no room for. One exception, on purpose: the hook's
+/// own `check` branch, run inside [`issue_tracking_checks`], does reach the
+/// network — `github.sh`'s calls `gh auth status` and `gh repo view`, and a
+/// project on Jira calls out to `acli` the same way. That is not an
+/// oversight; it is what lets the acceptance criterion "the dispatcher runs
+/// `check` once as it starts" hold true, since this function is the one
+/// `commands::dispatch::dispatch` calls to say what a run would find before
+/// it starts.
 ///
 /// Called by `commands::dispatch::warnings_gate_with` so a run says before it
 /// starts what `spoolway doctor` would have said anyway — see
@@ -696,8 +703,15 @@ fn price_table_age_note(max_age_days: u64, age_days: u64) -> Option<String> {
 /// Everything `[issue_tracking]` can get wrong on its own, independent of the
 /// pipeline or the branch: a hook named with nothing to hand it, a hook that
 /// cannot resolve to a real file, a hook file that was never written, a hook
-/// script too old to have a `fetch` branch, and — for the one hook that shells
-/// out — the binaries it needs beside it.
+/// script too old to have a `fetch` or a `check` branch, a `check` branch
+/// that runs but fails, and — for the one hook that shells out — the
+/// binaries it needs beside it.
+///
+/// Also what `commands::dispatch::dispatch` runs once as it starts, through
+/// `cheap_findings` — the one caller that turns this function's own `FAIL`
+/// rows into a warning read before the run rather than doctor's own
+/// refusal, so a broken `check` is seen and never stops a dispatch from
+/// starting.
 fn issue_tracking_checks(
     repo: &Repo,
     tracking: &crate::config::IssueTrackingConfig,
@@ -709,7 +723,7 @@ fn issue_tracking_checks(
     // nothing to hand it. `hook` blank means no issue tracking, whatever
     // `project_key` holds — that combination is fine and reported nowhere —
     // but a hook that runs with a blank `project_key` opens no ticket ever,
-    // silently, on every one of a task's four events.
+    // silently, on every one of a task's five events.
     findings.push(Finding::Check(
         "`[issue_tracking]` is fully configured or fully off".into(),
         match !tracking.hook.trim().is_empty() && tracking.project_key.trim().is_empty() {
@@ -726,7 +740,7 @@ fn issue_tracking_checks(
     // what actually enforces that at the point the value is read, and a
     // config naming something else silently runs no hook at all. Worth
     // saying here rather than only failing quietly on every one of a task's
-    // four events.
+    // five events.
     findings.push(Finding::Check(
         "`issue_tracking.hook` is a bare filename".into(),
         match !tracking.hook.trim().is_empty()
@@ -742,7 +756,7 @@ fn issue_tracking_checks(
         },
     ));
     // A bare, well-formed name still fails silently on every one of a task's
-    // four events if the file behind it was never written — `init` scaffolds
+    // five events if the file behind it was never written — `init` scaffolds
     // both shipped hooks, but nothing stops a hand-edited config naming one
     // that was renamed or never copied in.
     if let Some(path) = crate::tracking::hook_path_in(&repo.checkout, &tracking.hook) {
@@ -778,6 +792,61 @@ fn issue_tracking_checks(
             None => Ok(None),
         },
     ));
+    // The same gap as the `fetch` branch above, on the event every failing
+    // hook pause now depends on being trustworthy: a script written before
+    // `check` existed has no branch for it, and doctor should say so rather
+    // than let every task's `queued` hold pause on a hook that was never
+    // asked to prove itself. A note, not a `FAIL` row — the acceptance
+    // criterion's own word, and unlike the `fetch` branch above this is the
+    // only row the presence or absence of the branch ever produces: a
+    // script that already has it prints nothing extra here, only the
+    // `<hook> check` run itself below, which is the one new counted row
+    // the mockup draws for a hook that already proves itself (40 checks
+    // becomes 41, not 42).
+    if let Some(name) = crate::tracking::missing_check_branch(&repo.checkout, &tracking.hook) {
+        findings.push(Finding::Note(format!(
+            "{config_path}: [issue_tracking] names `{name}`, whose script has no `check` \
+             branch — nothing proves the hook actually works before a task can pause on it. \
+             Add a case for `SPOOLWAY_EVENT=check` the way the shipped samples do, or \
+             regenerate one with `spoolway init` into a fresh directory to copy the branch \
+             across by hand."
+        )));
+    }
+    // The hook proves itself before any task can ever pause on it: run it
+    // once with `SPOOLWAY_EVENT=check`, synchronously — the same call
+    // `commands::dispatch::dispatch` makes through this very function (see
+    // `cheap_findings`) as it starts, so a break shows up here, in a warning
+    // read before the run starts, rather than mid-run on the first task that
+    // reaches `queued`. Skipped when there's nothing to run at all: a blank
+    // or malformed hook, a missing script, or one with no `check` branch
+    // each already have their own row above, and running it anyway would
+    // only repeat one of those findings under a different label.
+    let hook_name = tracking.hook.trim();
+    if !hook_name.is_empty()
+        && crate::tracking::is_bare_filename(hook_name)
+        && crate::tracking::hook_path_in(&repo.checkout, hook_name).is_some_and(|p| p.exists())
+        && crate::tracking::missing_check_branch(&repo.checkout, hook_name).is_none()
+    {
+        use crate::tracking::CheckResult;
+        findings.push(Finding::Check(
+            format!("{hook_name} check"),
+            match crate::tracking::check_hook(&repo.checkout, hook_name, &tracking.project_key) {
+                CheckResult::Passed => Ok(None),
+                CheckResult::Failed { stderr, .. } if !stderr.is_empty() => {
+                    Err(anyhow::anyhow!("{stderr}"))
+                }
+                CheckResult::Failed { exit_code, .. } => Err(anyhow::anyhow!(
+                    "exited{} with nothing on stderr",
+                    exit_code.map(|c| format!(" {c}")).unwrap_or_default()
+                )),
+                // Neither reachable here — the guard just above already
+                // ruled both out — but kept rather than a wildcard, so a
+                // loosened guard cannot silently start reading one of these
+                // as a pass.
+                CheckResult::NoHook | CheckResult::NoCheckBranch => Ok(None),
+            },
+        ));
+    }
     // A hook declares the tools it needs with its own `# spoolway-requires:`
     // lines — see `crate::tracking::required_tools` — and this is where each
     // one is actually checked against the machine doctor runs on. Grouped
@@ -2389,6 +2458,101 @@ mod tests {
         assert!(err.to_string().contains("does not exist"), "{err}");
     }
 
+    /// A script written before `check` existed has no branch for it — the
+    /// same gap `missing_fetch_branch` already reports, and read here the
+    /// same way.
+    #[test]
+    fn issue_tracking_checks_reports_a_missing_check_branch() {
+        let repo = scratch_repo("missing-check-branch");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        // Has a `fetch` branch (so that row stays quiet) but never mentions
+        // `check` at all.
+        std::fs::write(
+            hooks_dir.join("old.sh"),
+            "#!/bin/sh\ncase \"$SPOOLWAY_EVENT\" in fetch) ;; esac\n",
+        )
+        .unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("old.sh"));
+
+        // A note, not a `FAIL` row — the acceptance criterion's own word —
+        // so it changes nothing about whether `doctor` exits non-zero.
+        let text = findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::Note(text) if text.contains("no `check` branch") => Some(text),
+                _ => None,
+            })
+            .expect("no note for the missing `check` branch");
+        assert!(text.contains("old.sh"), "{text}");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, Finding::Check(label, _) if label.contains("check"))),
+            "a missing `check` branch must not also produce a counted row: {findings:#?}"
+        );
+
+        // And no attempt was made to actually run a hook with no branch to
+        // run: nothing under `check` (there is no run) for a script that
+        // was never asked to prove itself.
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, Finding::Check(label, _) if label == "old.sh check")),
+            "{findings:#?}"
+        );
+    }
+
+    /// The hook proves itself with a real, synchronous run — a non-zero
+    /// exit is one FAIL row carrying the hook's own stderr, kept apart from
+    /// stdout the way a merged `tracking/` log never could.
+    #[test]
+    fn issue_tracking_checks_runs_check_and_reports_a_failure() {
+        let repo = scratch_repo("check-fails");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let script = hooks_dir.join("jira.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$SPOOLWAY_EVENT" in
+  check)
+    echo "status \"Review\" does not exist in project KAN" >&2
+    exit 1
+    ;;
+esac
+exit 0
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let findings = issue_tracking_checks(&repo, &tracking("jira.sh"));
+        let outcome = findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::Check(label, outcome) if label == "jira.sh check" => Some(outcome),
+                _ => None,
+            })
+            .expect("no row for the check run itself");
+        let err = outcome.as_ref().unwrap_err().to_string();
+        assert_eq!(err, "status \"Review\" does not exist in project KAN");
+
+        // The mockup draws exactly one new counted row for a hook that
+        // already has the branch — the check run above — not a second one
+        // just for having grown it, and no note either, since the branch
+        // is right there.
+        assert!(
+            !findings.iter().any(|f| matches!(f,
+                Finding::Check(label, _) | Finding::Note(label)
+                if label.contains("check") && label != "jira.sh check"
+            )),
+            "{findings:#?}"
+        );
+    }
+
     /// `jira.sh` is the one shipped hook that shells out to binaries this
     /// project does not otherwise need — checked only when the hook actually
     /// names it, unlike the three checks above, which run for any hook.
@@ -2695,7 +2859,6 @@ mod tests {
             hook: "jira.sh".into(),
             project_key: "PROJ".into(),
             key_in_names: true,
-            ..Default::default()
         };
         let findings = issue_tracking_checks(&repo, &on);
         let gap = findings.iter().find_map(|f| match f {

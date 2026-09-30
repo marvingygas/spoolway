@@ -39,6 +39,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "tracking",
     "base",
     "group_description",
+    "labels",
 ];
 
 /// The keys spoolway's own dispatcher machinery throws away unconditionally
@@ -71,6 +72,7 @@ const IGNORED_KEYS: &[&str] = &[
     "tab_id",
     "paused_at",
     "paused_by",
+    "hook_paused",
     "launched_at",
     "steps",
     "rounds",
@@ -188,6 +190,14 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          task of a group needs to set it; a submission is refused, naming \
          the group, when a hook is configured and none of the group's tasks \
          set it. Never required when no hook is configured.",
+    ),
+    (
+        "labels",
+        "Plain words for a hook to put on this task's own tracker issue and \
+         its group's, beside whatever labels the hook adds itself. A label \
+         may hold no whitespace and no comma — refused, naming the task and \
+         the label — since a hook reads the whole list comma-joined in \
+         `SPOOLWAY_LABELS`.",
     ),
 ];
 

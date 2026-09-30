@@ -1,15 +1,19 @@
-//! The `[issue_tracking]` hook: one script a project names, run once per task
-//! on each of the four events a task can come to rest on — `queued`,
-//! `blocked`, `paused` and `done` — plus two more that are not task events at
-//! all: `open`, which [`open_ticket`] runs synchronously from `queue add`
-//! itself, before any of those four could ever fire, and `fetch`, which
-//! [`fetch_issue`] runs synchronously from `spoolway issue show`, before any
-//! task tied to the issue it names even exists. See `crate::pipeline::RESERVED`
-//! for why the first four and no others: they are the states nothing inside a
-//! pipeline file can already put a `run:` step on, since none of them is a
-//! step a pipeline may declare. `open` and `fetch` need no such reservation —
-//! neither is a task stage, so nothing in a pipeline could ever collide with
-//! either.
+//! The `[issue_tracking]` hook: one script a project names, run on eight
+//! events. Four are stages a task can come to rest on — `queued`, `blocked`,
+//! `paused` and `done` — see `crate::pipeline::RESERVED`, which lists exactly
+//! them: they are the states nothing inside a pipeline file can already put a
+//! `run:` step on, since none of them is a step a pipeline may declare. The
+//! other four are not task stages at all: `open`, which [`open_ticket`] runs
+//! synchronously from `queue add` itself, before any of the four could ever
+//! fire; `fetch`, which [`fetch_issue`] runs synchronously from `spoolway
+//! issue show`, before any task tied to the issue it names even exists;
+//! `started`, which [`fire`] runs once a task actually leaves `queued` for
+//! its entry step — see `crate::pipeline::STARTED` for why this is not a
+//! fifth reserved stage, only ever fired and gated from inside the `queued`
+//! arm of `crate::dispatch::Dispatcher::route_reserved_stage`; and `check`,
+//! which [`check_hook`] runs synchronously from `spoolway doctor` and once
+//! more as the dispatcher starts, proving the hook works before any task can
+//! ever pause on it.
 //!
 //! This reuses [`crate::command_step::Runs`] rather than reinventing a second
 //! way to spawn something detached and read its exit code back on a later
@@ -22,12 +26,15 @@
 //! `blocked` are stages a task can sit on for many passes in a row, which is
 //! exactly what that guards: without it every pass sitting on `blocked`
 //! would open a second ticket. The one caller that ever calls
-//! [`Runs::forget`] is [`retry_if_failed`] — see there for why a `done` hold
-//! is the one event this must not be true of forever. [`open_ticket`] needs
-//! none of that: `queue add` is the only caller there ever is, and it means
-//! "run this now" every time it calls at all — a task already naming a
-//! `ticket:` is what its own caller, `queue::open_tickets`, reads as
-//! "already open" and skips before this is ever reached.
+//! [`Runs::forget`] is [`forget`] — a non-zero exit on `queued`, `started` or
+//! `done` pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
+//! [`forget`] is what `spoolway resume` calls to undo that hold, so the very
+//! next pass's [`fire`] starts the hook over rather than reading the same
+//! stale exit code forever. [`open_ticket`] needs none of that: `queue add`
+//! is the only caller there ever is, and it means "run this now" every time
+//! it calls at all — a task already naming a `ticket:` is what its own
+//! caller, `queue::open_tickets`, reads as "already open" and skips before
+//! this is ever reached.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -234,7 +241,7 @@ pub fn open_ticket(
 /// Every variable every event carries — `spoolway hook contract` prints this
 /// table first, before any event's own.
 pub(crate) const COMMON_EVENT_VARS: &[(&str, &str)] = &[
-    ("SPOOLWAY_EVENT", "which of the six events this run is"),
+    ("SPOOLWAY_EVENT", "which of the eight events this run is"),
     (
         "SPOOLWAY_PROJECT_KEY",
         "`issue_tracking.project_key`, verbatim, opaque to spoolway",
@@ -265,6 +272,10 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
     (
         "SPOOLWAY_GROUP_SIZE",
         "how many tasks this group is opening at once",
+    ),
+    (
+        "SPOOLWAY_LABELS",
+        "its `labels:`, comma-joined, empty when it has none",
     ),
     (
         "SPOOLWAY_EPIC",
@@ -343,6 +354,7 @@ fn open_env(
             repo.config.issue_tracking.project_key.clone(),
         ),
         ("SPOOLWAY_GROUP_SIZE".to_string(), group_size.to_string()),
+        ("SPOOLWAY_LABELS".to_string(), front.labels.join(",")),
         ("SPOOLWAY_EPIC".to_string(), group_epic.to_string()),
         (
             "SPOOLWAY_DEPENDS_TICKETS".to_string(),
@@ -632,6 +644,113 @@ pub(crate) fn missing_fetch_branch(checkout: &Path, hook_name: &str) -> Option<S
     (!has_fetch_branch(&script)).then(|| name.to_string())
 }
 
+/// Whether `script`'s own text names the `check` event anywhere at all —
+/// matched against the actual shapes a branch is spelled in, not the bare
+/// word [`has_fetch_branch`] scans for. `fetch` is rare enough in ordinary
+/// prose that a bare substring search never sees a false hit; `check` is
+/// not — the shipped `jira.sh` says "every `acli` command below was
+/// **checked** against that version" nowhere near a `check` branch at all,
+/// and a bare scan would read that comment as proof one exists. So this
+/// matches the shapes a real branch actually takes: `= check`, a `case`
+/// arm's `check)` or `check|`, or the event quoted as `'check'`/`"check"`.
+pub(crate) fn has_check_branch(script: &str) -> bool {
+    const PATTERNS: &[&str] = &["= check", "check)", "check|", "'check'", "\"check\""];
+    PATTERNS.iter().any(|pattern| script.contains(pattern))
+}
+
+/// `hook_name`, when the script it names has no `check` branch — the same
+/// shape as [`missing_fetch_branch`], and read by the same caller,
+/// `doctor`'s `issue_tracking_checks`, right beside it: a script written
+/// before this event existed has neither branch, and a project should hear
+/// about both gaps the same way.
+pub(crate) fn missing_check_branch(checkout: &Path, hook_name: &str) -> Option<String> {
+    let name = hook_name.trim();
+    if name.is_empty() || !is_bare_filename(name) {
+        return None;
+    }
+    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    (!has_check_branch(&script)).then(|| name.to_string())
+}
+
+/// What one synchronous `check` hook call came back with — see
+/// [`check_hook`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckResult {
+    /// No hook is configured at all.
+    NoHook,
+    /// The configured script's own text never mentions `check` — see
+    /// [`has_check_branch`]. Caught before the hook is ever run, the same
+    /// way [`fetch_issue`] catches a missing `fetch` branch: running an
+    /// unmodified script anyway would read as "checked out fine" rather
+    /// than "never implemented".
+    NoCheckBranch,
+    /// The hook exited zero.
+    Passed,
+    /// The hook exited non-zero, carrying whatever it wrote to stderr — the
+    /// text a `doctor` `FAIL` row reports verbatim, since the hook is the
+    /// one thing that knows what it just failed to confirm. Blank when the
+    /// hook wrote nothing there, or ended with no exit code at all.
+    Failed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+}
+
+/// Run the `check` hook, synchronously, and say whether it proves the hook
+/// works — `spoolway doctor` and the dispatcher's own start each call this
+/// once, straight off `SPOOLWAY_EVENT=check`.
+///
+/// Unlike any of [`fire`]'s own events, this never touches `tracking/` at
+/// all: nothing here has to persist across a dispatch pass the way a
+/// detached run does, since both callers block on the answer on the spot —
+/// the same reason [`fetch_issue`] runs synchronously rather than through
+/// [`crate::command_step::Runs`]. It still cannot reuse `fetch_issue`'s own
+/// machinery, though: [`crate::command_step::Runs::start`] always redirects a run's
+/// stdout and stderr together (`2>&1`), which is right for a log a person
+/// reads whole, but wrong here — a `doctor` `FAIL` row wants the hook's
+/// stderr on its own, not padded with whatever it printed to stdout. So this
+/// runs the hook directly through the platform's own shell, exactly the way
+/// [`crate::command_step`]'s wrapper does, and keeps the two streams apart
+/// by reading them back separately.
+///
+/// No timeout of its own, the same as [`fetch_issue`] — the acceptance
+/// criterion asking for "the timeout `fetch` has" is this: neither call
+/// bounds how long the hook may run, so a check against a slow tracker is
+/// exactly as patient as `spoolway issue show` already is against the same
+/// one.
+pub fn check_hook(checkout: &Path, hook_name: &str, project_key: &str) -> CheckResult {
+    let Some(hook) = hook_path_in(checkout, hook_name) else {
+        return CheckResult::NoHook;
+    };
+    let Ok(script) = std::fs::read_to_string(&hook) else {
+        return CheckResult::NoHook;
+    };
+    if !has_check_branch(&script) {
+        return CheckResult::NoCheckBranch;
+    }
+
+    let run_line = crate::platform::quote(&hook.display().to_string());
+    let output = crate::platform::shell_command(&run_line)
+        .current_dir(checkout)
+        .env("SPOOLWAY_EVENT", "check")
+        .env("SPOOLWAY_PROJECT_KEY", project_key)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => CheckResult::Passed,
+        Ok(out) => CheckResult::Failed {
+            exit_code: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        },
+        // The shell itself could not even be spawned — no `sh` on PATH, say.
+        // Not a hook failure to blame the script for, but still nothing to
+        // route as a pass.
+        Err(err) => CheckResult::Failed {
+            exit_code: None,
+            stderr: err.to_string(),
+        },
+    }
+}
+
 /// Whether a hook is configured at all — what lets `queue add` skip
 /// [`open_ticket`] and its own report entirely rather than call it once per
 /// task only to have every call answer [`OpenResult::NoHook`].
@@ -650,25 +769,6 @@ pub(crate) fn tracker(repo: &Repo) -> String {
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| hook.to_string())
-}
-
-/// Whether `config.toml`'s `on_fail` asks a failed hook to hold the task
-/// rather than only record the failure. Blank reads as `"ignore"`.
-pub fn pauses_on_fail(repo: &Repo) -> bool {
-    repo.config.issue_tracking.on_fail.trim() == "pause"
-}
-
-/// Whether a failed hook should actually hold a task at `queued` or `done` —
-/// `on_fail = "pause"` *and* a hook that resolves to something real.
-///
-/// [`pauses_on_fail`] alone is not enough to gate a hold on: a blank `hook`,
-/// or one [`is_bare_filename`] refuses, means [`fire`] never starts a run at
-/// all, so [`exit_code`] can only ever read `None` for it. Holding on that
-/// would deadlock every task at `queued` (and keep every one out of the
-/// archive at `done`) for a project that asked for no hook at all — the
-/// opposite of "an empty hook produces no hook runs and no behaviour change".
-pub fn holds_on_fail(repo: &Repo) -> bool {
-    pauses_on_fail(repo) && hook_path(repo).is_some()
 }
 
 /// Start this task's hook for `event`, unless it already has —see
@@ -715,131 +815,15 @@ pub fn exit_code(repo: &Repo, task: &Task, event: &str) -> Option<i32> {
     }
 }
 
-/// Where a key's last known failure is recorded once [`retry_if_failed`] has
-/// forgotten the run that produced it — see there, and [`failure_count`],
-/// for why the `.exit` file itself cannot be trusted to still be on disk by
-/// the time anything goes looking for it.
-///
-/// Doubles as the ladder's own record once [`retry_if_failed`] starts writing
-/// to it — see [`HookRetry`] — since both are keyed the same way and a
-/// failing key needs exactly one file on disk, not two that could disagree.
-fn failed_marker(repo: &Repo, key: &str) -> PathBuf {
-    repo.tracking_dir().join(format!("{key}.failed"))
-}
-
-/// How many times this key has been retried, and when it may be retried
-/// again — [`retry_if_failed`]'s own memory of where a key sits on the
-/// ladder, held in [`failed_marker`] so a dispatcher restart reads the same
-/// state back rather than starting the count over.
-///
-/// `pub(crate)` only so [`crate::dispatch`]'s own integration tests can
-/// back-date a record and force the ladder due, rather than a real test
-/// sleeping out ten real seconds to see a retry actually land.
-pub(crate) struct HookRetry {
-    pub(crate) attempts: u32,
-    pub(crate) next_attempt_at: i64,
-}
-
-fn read_hook_retry(repo: &Repo, key: &str) -> Option<HookRetry> {
-    let raw = std::fs::read_to_string(failed_marker(repo, key)).ok()?;
-    let mut lines = raw.lines();
-    let attempts = lines.next()?.trim().parse().ok()?;
-    let next_attempt_at = lines.next()?.trim().parse().ok()?;
-    Some(HookRetry {
-        attempts,
-        next_attempt_at,
-    })
-}
-
-pub(crate) fn write_hook_retry(repo: &Repo, key: &str, retry: &HookRetry) {
-    let _ = std::fs::create_dir_all(repo.tracking_dir());
-    let _ = std::fs::write(
-        failed_marker(repo, key),
-        format!("{}\n{}\n", retry.attempts, retry.next_attempt_at),
-    );
-}
-
-/// Ten seconds, doubling on every attempt, capped at an hour — the same
-/// shape [`crate::dispatch::relaunch_backoff`] gives a dying lane, but its
-/// own function rather than a shared one: a hook's ladder is pinned at ten
-/// seconds by this task's own acceptance criteria, unrelated to the
-/// dispatcher's own fixed poll rate.
-fn hook_backoff(attempts: u32) -> Duration {
-    const BASE_SECS: u64 = 10;
-    const CAP: Duration = Duration::from_secs(3600);
-    let doublings = attempts.saturating_sub(1).min(12);
-    Duration::from_secs(BASE_SECS.saturating_mul(1u64 << doublings)).min(CAP)
-}
-
-/// The road out of a `done` hold: once this task's `done` run has failed,
-/// retries it on [`hook_backoff`]'s ladder rather than the very next pass —
-/// a real hook (a `gh` call, most often) against an endpoint that is already
-/// failing must not turn a faster tick into a call per second. [`fire`]'s
-/// own [`RunState::Fresh`] check is what actually restarts the run, once
-/// this forgets it; this only decides *when* that is allowed to happen.
-///
-/// `done` is not a step a person can resume the way `queued` failing into
-/// `paused` can be — there is no later step to carry the task past, only the
-/// same event to try again. Retrying the hook itself is what stands in for
-/// "hold the task for `spoolway resume`" here: the task stays held, and each
-/// pass checks whether the ladder has come due rather than trusting a code
-/// it read once. A run still in flight — [`RunState::Running`] or
-/// [`RunState::Fresh`] — is left alone; forgetting it here would abandon a
-/// process that might still succeed by dropping the very bookkeeping that
-/// says it is going. `RunState::Interrupted` is retried too: a wrapper gone
-/// without a code is not a verdict, and holding on that forever would be no
-/// better than trusting a stale failure.
-///
-/// The first failure only starts the ladder — it schedules the next attempt
-/// ten seconds out and leaves the run exactly as failed as it found it, so a
-/// tick running every second still only calls out on the ladder's own pace.
-/// A later pass that finds the ladder come due forgets the run, bumps the
-/// attempt count, and schedules the one after — doubling each time, capped
-/// at an hour. [`failed_marker`] survives a dispatcher restart, so the count
-/// and the next-attempt time it carries pick up exactly where they left off.
-pub fn retry_if_failed(repo: &Repo, task: &Task, event: &str) {
+/// Forget this task's `event` hook run, so [`fire`]'s own [`RunState::Fresh`]
+/// check lets it start over on the next pass — what `spoolway resume` calls
+/// on a task a failing hook paused (see [`crate::task::Frontmatter::
+/// hook_paused`]), the road out of a hold now that every failing hook pauses
+/// its task: a person repairs whatever the hook's own log names, then
+/// resumes, rather than a clock retrying an endpoint that may still be down.
+pub fn forget(repo: &Repo, task: &Task, event: &str) {
     let key = Runs::key(event, task.id());
-    let runs = runs(repo);
-    match runs.state(&key) {
-        RunState::Exited(0) | RunState::Running | RunState::Fresh => {}
-        RunState::Exited(_) | RunState::Interrupted => {
-            let now = crate::dispatch::now_secs();
-            let existing = read_hook_retry(repo, &key);
-            let due = existing
-                .as_ref()
-                .is_none_or(|retry| now >= retry.next_attempt_at);
-            if !due {
-                return;
-            }
-            let attempts = existing.map_or(0, |retry| retry.attempts) + 1;
-            // Attempt one only records the ladder's start — the run just
-            // failed this instant, so "due" for it means "ten seconds from
-            // now", not "immediately". Every attempt after the first was
-            // already waiting on a `next_attempt_at` that just elapsed, so
-            // it forgets the run right away and lets `fire` restart it on
-            // the next pass.
-            let next_attempt_at = now + hook_backoff(attempts).as_secs() as i64;
-            write_hook_retry(
-                repo,
-                &key,
-                &HookRetry {
-                    attempts,
-                    next_attempt_at,
-                },
-            );
-            if attempts > 1 {
-                let _ = runs.forget(&key);
-            }
-        }
-    }
-}
-
-/// Clears the marker [`retry_if_failed`] may have left, once a held task's
-/// hook has actually succeeded — called from the `done` arm's own success
-/// path, so the board's count does not go on naming a failure that resolved.
-pub fn clear_retry_marker(repo: &Repo, task: &Task, event: &str) {
-    let key = Runs::key(event, task.id());
-    let _ = std::fs::remove_file(failed_marker(repo, &key));
+    let _ = runs(repo).forget(&key);
 }
 
 /// Drop every hook run file this task left under `tracking/`, once it has
@@ -858,15 +842,10 @@ pub fn reclaim(repo: &Repo, task_id: &str) {
 /// holds, are currently failing. What the board's own
 /// `issue_tracking: N hook failures` line counts.
 ///
-/// Every failing key counts, not only the ones `on_fail = "pause"` is still
-/// holding a task over — `"ignore"` records exactly the same failure, and a
-/// person still wants to see it. Two kinds of evidence are read and merged
-/// by key, since either may be the only one left for a given key: a `.exit`
-/// file reading non-zero is a run [`retry_if_failed`] has not touched, and a
-/// `.failed` marker is what survives one it has — retrying a `done` hold
-/// forgets the run itself, `.exit` file included, on every pass that finds
-/// it still failing, so without the marker that key would drop out of this
-/// count the instant a retry began.
+/// A hook run is left exactly as it exited until `spoolway resume` reads and
+/// forgets it (see [`forget`]), so its `.exit` file staying non-zero is the
+/// count's only evidence now: nothing forgets a run behind the board's back
+/// the way the old retry ladder once did.
 ///
 /// A `<task> · <event>` key whose task is no longer in the queue does not
 /// count. [`reclaim`] already deletes those files when a task is archived;
@@ -900,29 +879,27 @@ pub fn failure_count(repo: &Repo) -> usize {
         {
             continue;
         }
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("failed") => {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("exit") {
+            let failed = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i32>().ok())
+                .is_some_and(|code| code != 0);
+            if failed {
                 failing.insert(key);
             }
-            Some("exit") => {
-                let failed = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|raw| raw.trim().parse::<i32>().ok())
-                    .is_some_and(|code| code != 0);
-                if failed {
-                    failing.insert(key);
-                }
-            }
-            _ => {}
         }
     }
     failing.len()
 }
 
 /// Every variable [`build_env`] adds beyond [`COMMON_EVENT_VARS`], for the
-/// four events that fire once a task settles — see [`OPEN_EVENT_VARS`] for
-/// why this lives beside the function it describes rather than in
-/// `commands::hook`.
+/// four events that fire once a task settles — `queued`, `blocked`, `paused`
+/// and `done` — plus `started`, which reuses this same table even though it
+/// is not itself a settle: it fires from inside the `queued` arm of
+/// `crate::dispatch::Dispatcher::route_reserved_stage`, the moment the task
+/// is actually about to leave `queued` rather than merely arrive there. See
+/// [`OPEN_EVENT_VARS`] for why this lives beside the function it describes
+/// rather than in `commands::hook`.
 pub(crate) const DISPATCH_EVENT_VARS: &[(&str, &str)] = &[
     ("SPOOLWAY_TASK", "the task's id"),
     ("SPOOLWAY_FROM", "the step it arrived from"),
@@ -934,6 +911,10 @@ pub(crate) const DISPATCH_EVENT_VARS: &[(&str, &str)] = &[
     (
         "SPOOLWAY_GROUP_SIZE",
         "how many tasks in its group are still open",
+    ),
+    (
+        "SPOOLWAY_LABELS",
+        "its `labels:`, comma-joined, empty when it has none",
     ),
     ("SPOOLWAY_EPIC", "the epic `open` answered, if any"),
     ("SPOOLWAY_TICKET", "the ticket `open` answered, if any"),
@@ -974,6 +955,7 @@ fn build_env(repo: &Repo, task: &Task, event: &str, group_open: usize) -> BTreeM
             repo.config.issue_tracking.project_key.clone(),
         ),
         ("SPOOLWAY_GROUP_SIZE".to_string(), group_open.to_string()),
+        ("SPOOLWAY_LABELS".to_string(), front.labels.join(",")),
         (
             "SPOOLWAY_EPIC".to_string(),
             task.extra_str("epic").to_string(),
@@ -1041,6 +1023,7 @@ mod tests {
             pipeline: None,
             group: None,
             group_description: None,
+            labels: Vec::new(),
             source: None,
             plan: None,
             gate_at: None,
@@ -1060,6 +1043,7 @@ mod tests {
             attempts: 0,
             paused_at: None,
             paused_by: None,
+            hook_paused: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
@@ -1122,6 +1106,7 @@ mod tests {
             f.group = Some("scanner-rework".into());
             f.source = Some("https://example.com/issues/1".into());
             f.branch = Some("task/demo".into());
+            f.labels = vec!["bug".to_string(), "needs-triage".to_string()];
             f.extra
                 .insert("epic".into(), serde_norway::Value::String("EPIC-1".into()));
             f.extra
@@ -1148,6 +1133,7 @@ mod tests {
             "SPOOLWAY_EPIC=EPIC-1",
             "SPOOLWAY_TICKET=TCK-9",
             "SPOOLWAY_GROUP_SIZE=1",
+            "SPOOLWAY_LABELS=bug,needs-triage",
         ] {
             assert!(log.contains(expected), "missing `{expected}` in:\n{log}");
         }
@@ -1322,18 +1308,6 @@ mod tests {
         );
     }
 
-    /// `on_fail` reads `"pause"` as pausing and anything else — blank
-    /// included — as `"ignore"`, exactly as the acceptance criteria say.
-    #[test]
-    fn on_fail_defaults_to_ignore() {
-        let mut repo = fixture("on-fail");
-        assert!(!pauses_on_fail(&repo));
-        repo.config.issue_tracking.on_fail = "ignore".into();
-        assert!(!pauses_on_fail(&repo));
-        repo.config.issue_tracking.on_fail = "pause".into();
-        assert!(pauses_on_fail(&repo));
-    }
-
     /// One `# spoolway-requires:` line per tool a hook declares, in the order
     /// they appear, alongside a line that does not parse as `<tool> >=
     /// <version>` — reported back as its own raw text rather than dropped or
@@ -1421,14 +1395,12 @@ mod tests {
         );
     }
 
-    /// The road out of a `done` hold: a failed run is eventually forgotten
-    /// so a later pass's `fire` starts it over, and a run still going or
-    /// already clean is left exactly as it is. The first call only starts
-    /// the ladder — see [`hook_backoff`] — so it must not forget the run on
-    /// the spot; only a call that finds the ladder already come due does.
+    /// [`forget`] is the whole road out of a hook pause: a failed run stays
+    /// failed until this clears it, and the next `fire` sees `Fresh` again
+    /// and actually restarts it.
     #[test]
-    fn retry_if_failed_waits_for_the_ladder_before_forgetting() {
-        let mut repo = fixture("retry");
+    fn forget_lets_fire_restart_a_failed_run() {
+        let mut repo = fixture("forget");
         with_hook(&mut repo, "flaky.sh", "exit 1");
         let t = task("demo", |_| {});
 
@@ -1436,48 +1408,17 @@ mod tests {
         settle(&repo, &t, crate::pipeline::DONE);
         assert_eq!(exit_code(&repo, &t, crate::pipeline::DONE), Some(1));
 
-        let key = Runs::key(crate::pipeline::DONE, t.id());
-        retry_if_failed(&repo, &t, crate::pipeline::DONE);
-        assert_eq!(
-            exit_code(&repo, &t, crate::pipeline::DONE),
-            Some(1),
-            "the first failure only starts the ladder — nothing is due yet"
-        );
-
-        // Back-date the ladder's own record so the next call finds it due,
-        // the same way a real one would once ten seconds had actually
-        // passed — see `hook_backoff`.
-        write_hook_retry(
-            &repo,
-            &key,
-            &HookRetry {
-                attempts: 1,
-                next_attempt_at: crate::dispatch::now_secs() - 1,
-            },
-        );
-        retry_if_failed(&repo, &t, crate::pipeline::DONE);
+        forget(&repo, &t, crate::pipeline::DONE);
         assert_eq!(
             exit_code(&repo, &t, crate::pipeline::DONE),
             None,
-            "the ladder came due, so this call forgot the run"
+            "forgetting the run must clear its exit code"
         );
-        // And the next `fire` sees `Fresh` again and actually restarts it.
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(
             settle(&repo, &t, crate::pipeline::DONE),
             RunState::Exited(1)
         );
-    }
-
-    /// The ladder itself: ten seconds, doubling on every attempt, capped at
-    /// an hour — the acceptance criterion's own numbers.
-    #[test]
-    fn hook_backoff_doubles_from_ten_seconds_capped_at_an_hour() {
-        assert_eq!(hook_backoff(1), Duration::from_secs(10));
-        assert_eq!(hook_backoff(2), Duration::from_secs(20));
-        assert_eq!(hook_backoff(3), Duration::from_secs(40));
-        assert_eq!(hook_backoff(4), Duration::from_secs(80));
-        assert_eq!(hook_backoff(20), Duration::from_secs(3600));
     }
 
     /// No hook configured means `open_ticket` starts no process at all —
@@ -1699,6 +1640,157 @@ mod tests {
         assert_eq!(missing_fetch_branch(&repo.checkout, "../escaped"), None);
     }
 
+    /// No hook configured means `check_hook` runs no process at all — the
+    /// same "no configuration, no behaviour" contract every other event
+    /// gives.
+    #[test]
+    fn check_hook_with_no_hook_runs_nothing() {
+        let repo = fixture("check-no-hook");
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, ""),
+            CheckResult::NoHook
+        );
+    }
+
+    /// A hook script that has never heard of `check` — every install's,
+    /// before somebody adds the branch — is caught before it is ever run,
+    /// the same way a missing `fetch` branch is.
+    #[test]
+    fn check_hook_with_no_check_branch_runs_nothing() {
+        let mut repo = fixture("check-unimplemented");
+        with_hook(
+            &mut repo,
+            "old.sh",
+            "case \"$SPOOLWAY_EVENT\" in blocked|paused) ;; *) exit 0 ;; esac",
+        );
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, ""),
+            CheckResult::NoCheckBranch
+        );
+    }
+
+    /// A hook that exits zero on `check` passes.
+    #[test]
+    fn check_hook_passes_on_a_clean_exit() {
+        let mut repo = fixture("check-passes");
+        with_hook(
+            &mut repo,
+            "check.sh",
+            "case \"$SPOOLWAY_EVENT\" in check) exit 0 ;; esac",
+        );
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, "acme/app"),
+            CheckResult::Passed
+        );
+    }
+
+    /// A hook that fails `check` reports its own stderr, kept apart from
+    /// stdout rather than merged the way a detached `tracking/` run always
+    /// is — the whole reason `check_hook` does not go through
+    /// `command_step::Runs`.
+    #[test]
+    fn check_hook_reports_a_failed_exit_with_its_own_stderr() {
+        let mut repo = fixture("check-fails");
+        with_hook(
+            &mut repo,
+            "check.sh",
+            r#"case "$SPOOLWAY_EVENT" in
+                 check)
+                   echo "this line must not appear in the finding"
+                   echo "status not found" >&2
+                   exit 3
+                   ;;
+               esac"#,
+        );
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, ""),
+            CheckResult::Failed {
+                exit_code: Some(3),
+                stderr: "status not found".to_string(),
+            }
+        );
+    }
+
+    /// The static check both `check_hook` and `doctor` run before ever
+    /// invoking a hook — every real shape a branch is spelled in, none of
+    /// which is the bare word `has_fetch_branch` scans for.
+    #[test]
+    fn has_check_branch_matches_every_real_branch_shape() {
+        for real in [
+            "case \"$SPOOLWAY_EVENT\" in check) ... ;; esac",
+            "case \"$SPOOLWAY_EVENT\" in check|other) ... ;; esac",
+            "if [ \"$SPOOLWAY_EVENT\" = check ]; then",
+            "[ \"$SPOOLWAY_EVENT\" -eq 'check' ]",
+        ] {
+            assert!(has_check_branch(real), "should match: {real}");
+        }
+        assert!(!has_check_branch(
+            "case \"$SPOOLWAY_EVENT\" in open) ... ;; esac"
+        ));
+    }
+
+    /// The exact false positive review found: a bare substring search for
+    /// `check` reads the shipped `jira.sh`'s own comment — "every `acli`
+    /// command below was checked against that version" — as if the script
+    /// had grown a `check` branch, when it never mentions the event at all.
+    /// Doctor would then run `SPOOLWAY_EVENT=check` against a script with
+    /// no branch for it, fall through to its trailing `exit 0`, and report
+    /// a passing `check` row for a hook that proves nothing.
+    #[test]
+    fn has_check_branch_is_not_fooled_by_the_word_checked() {
+        assert!(
+            !has_check_branch("# every acli command below was checked against that version"),
+            "the word `checked` must not read as a `check` branch"
+        );
+    }
+
+    /// The shipped `jira.sh` proves itself before any task can ever pause
+    /// on it: `check` logs into `acli`, confirms the project and both work
+    /// item types exist, and proves each status name with a JQL search.
+    /// Pinned here so a change to either `jira.sh` or `has_check_branch`
+    /// that quietly stops seeing the branch is caught immediately, not the
+    /// next time somebody notices `doctor` reporting a hook that was never
+    /// asked to prove itself.
+    #[test]
+    fn the_shipped_jira_sh_has_a_check_branch() {
+        let script = crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(name, _)| *name == "jira.sh")
+            .expect("jira.sh is a shipped hook")
+            .1;
+        assert!(
+            has_check_branch(script),
+            "jira.sh lost its `check` branch — doctor and the dispatcher's own start would \
+             both report it missing again"
+        );
+    }
+
+    /// What `doctor` reports: a configured hook whose own script has no
+    /// `check` branch names the script, and one that does — or no hook at
+    /// all — reports nothing.
+    #[test]
+    fn missing_check_branch_names_a_hook_with_no_check_case() {
+        let repo = fixture("missing-check");
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/old.sh"),
+            "#!/bin/sh\ncase \"$SPOOLWAY_EVENT\" in blocked|paused) ;; *) exit 0 ;; esac\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/current.sh"),
+            "#!/bin/sh\ncase \"$SPOOLWAY_EVENT\" in check) ;; esac\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            missing_check_branch(&repo.checkout, "old.sh"),
+            Some("old.sh".to_string())
+        );
+        assert_eq!(missing_check_branch(&repo.checkout, "current.sh"), None);
+        assert_eq!(missing_check_branch(&repo.checkout, ""), None);
+        assert_eq!(missing_check_branch(&repo.checkout, "../escaped"), None);
+    }
+
     /// `read_answer` picks up the two new optional lines, in any order, and a
     /// hook writing neither reads them back blank — exactly as a missing
     /// `epic=` already does.
@@ -1768,14 +1860,19 @@ mod tests {
     // `fixture`'s own scratch root and nothing here needs a process-global
     // environment variable.
 
-    /// A `gh` stand-in for the `done`-branch tests below: it logs every
-    /// invocation, answers `pr view`'s `--json url` shape from a file the
-    /// test writes first, captures whatever `--body` argument `gh pr
-    /// comment` and `gh issue comment` are each given, and can be told to
-    /// fail any of its four calls independently — `stub/pr_view_fail` for
-    /// the branch lookup, `stub/pr_comment_fail` for the marker comment,
-    /// `stub/issue_edit_fail` for the label swap, `stub/issue_comment_fail`
-    /// for the final "ready for review" comment — which is what the
+    /// A `gh` stand-in for the `done`-branch tests below, and the `open`-
+    /// branch label tests beside them: it logs every invocation, answers
+    /// `pr view`'s `--json url` shape from a file the test writes first,
+    /// captures whatever `--body` argument `gh pr comment` and `gh issue
+    /// comment` are each given, answers `gh label list` from
+    /// `stub/existing_labels` (one name per line, blank when the file is
+    /// absent), mints an increasing `https://github.com/o/r/issues/<n>` for
+    /// every `gh issue create`, and can be told to fail any of its calls
+    /// independently — `stub/pr_view_fail` for the branch lookup,
+    /// `stub/pr_comment_fail` for the marker comment, `stub/issue_edit_fail`
+    /// for the label swap, `stub/issue_comment_fail` for the final "ready
+    /// for review" comment, `stub/label_list_fail` and
+    /// `stub/label_create_fail` for the label tests — which is what the
     /// failure-propagation tests below each need one of.
     fn write_stub_gh(bin_dir: &std::path::Path) {
         std::fs::create_dir_all(bin_dir).unwrap();
@@ -1811,6 +1908,22 @@ case "$1 $2" in
     ;;
   "issue close")
     echo "$*" >> stub/close.log
+    ;;
+  "label list")
+    [ -f stub/label_list_fail ] && exit 1
+    cat stub/existing_labels 2>/dev/null
+    ;;
+  "label create")
+    [ -f stub/label_create_fail ] && exit 1
+    echo "$*" >> stub/label_create.log
+    ;;
+  "issue create")
+    [ -f stub/issue_create_fail ] && exit 1
+    echo "$*" >> stub/issue_create.log
+    n=$(cat stub/issue_counter 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > stub/issue_counter
+    echo "https://github.com/o/r/issues/$n"
     ;;
 esac
 exit 0
@@ -1853,6 +1966,164 @@ exit 0
                 .insert("ticket".into(), serde_norway::Value::String(ticket.into()));
         });
         (repo, t, stub)
+    }
+
+    /// [`github_done_fixture`]'s own counterpart for the `open` branch's
+    /// label tests below: the same real, shipped `github.sh` against the
+    /// same stub `gh`, but with nothing pinned to `ticket:` — `open_ticket`
+    /// is what creates one — and `stub/existing_labels` seeded with the two
+    /// `spoolway:*` labels every group and task already carries, so a test
+    /// naming its own labels beside them proves the hook creates only what
+    /// is actually missing.
+    fn github_open_fixture(name: &str) -> (Repo, PathBuf) {
+        let mut repo = fixture(name);
+        let stub = repo.root.join("stub");
+        write_stub_gh(&stub.join("bin"));
+        std::fs::write(
+            stub.join("existing_labels"),
+            "spoolway:group\nspoolway:task\n",
+        )
+        .unwrap();
+
+        let real = crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(known, _)| *known == "github.sh")
+            .expect("github.sh is a shipped hook")
+            .1;
+        let script = format!("PATH=\"{}:$PATH\"\n{real}", stub.join("bin").display());
+        with_hook(&mut repo, "github.sh", &script);
+        (repo, stub)
+    }
+
+    /// Acceptance criteria: `open` creates only the labels `gh label list`
+    /// does not already show, never with `--force`, and adds every label
+    /// to both the task's own ticket and its group's epic, beside the
+    /// `spoolway:*` labels each already carries.
+    #[test]
+    fn github_sh_open_creates_missing_labels_and_adds_them_to_both_issues() {
+        let (repo, stub) = github_open_fixture("open-labels-new-epic");
+        let t = task("demo", |f| {
+            f.title = "add labels".into();
+            f.group = Some("labelled-group".into());
+            f.labels = vec!["bug".to_string(), "needs-triage".to_string()];
+        });
+
+        let result = open_ticket(&repo, &t, 1, "", "", "a group needing labels", "").unwrap();
+        let OpenResult::Answered { epic, ticket, .. } = result else {
+            panic!("expected an answered open: {result:?}");
+        };
+        assert_eq!(epic, "https://github.com/o/r/issues/1");
+        assert_eq!(ticket, "https://github.com/o/r/issues/2");
+
+        let create_log = std::fs::read_to_string(stub.join("label_create.log")).unwrap();
+        assert!(create_log.contains("bug"), "{create_log}");
+        assert!(create_log.contains("needs-triage"), "{create_log}");
+        assert!(
+            !create_log.contains("spoolway:"),
+            "an already-existing label was created again: {create_log}"
+        );
+
+        let gh_log = std::fs::read_to_string(stub.join("gh.log")).unwrap();
+        assert!(
+            !gh_log.contains("--force"),
+            "an existing label must never be forced: {gh_log}"
+        );
+
+        let issue_log = std::fs::read_to_string(stub.join("issue_create.log")).unwrap();
+        let mut calls = issue_log.lines();
+        let epic_call = calls.next().unwrap();
+        let ticket_call = calls.next().unwrap();
+        for call in [epic_call, ticket_call] {
+            assert!(call.contains("--label bug"), "{call}");
+            assert!(call.contains("--label needs-triage"), "{call}");
+        }
+        assert!(epic_call.contains("--label spoolway:group"), "{epic_call}");
+        assert!(
+            ticket_call.contains("--label spoolway:task"),
+            "{ticket_call}"
+        );
+    }
+
+    /// Review finding, ported: GitHub treats a label's name case-
+    /// insensitively, so a task naming `Bug` where the repository already
+    /// has `bug` must not try to create a second one — that call would fail
+    /// as a duplicate and take the whole `open` event down with it, exactly
+    /// the failure a case-sensitive match let through. This also proves
+    /// `gh label list` is asked for more than its own default 30-row limit
+    /// — a repository with more labels than that would otherwise read an
+    /// older one as missing the same way.
+    #[test]
+    fn github_sh_open_matches_an_existing_label_case_insensitively() {
+        let (repo, stub) = github_open_fixture("open-labels-case-insensitive");
+        std::fs::write(
+            stub.join("existing_labels"),
+            "spoolway:group\nspoolway:task\nBug\n",
+        )
+        .unwrap();
+        let t = task("demo", |f| {
+            f.title = "case-insensitive label".into();
+            f.group = Some("labelled-group".into());
+            f.labels = vec!["bug".to_string()];
+        });
+
+        let result = open_ticket(&repo, &t, 1, "", "", "a group needing labels", "").unwrap();
+        assert!(matches!(result, OpenResult::Answered { .. }), "{result:?}");
+
+        assert!(
+            !stub.join("label_create.log").exists(),
+            "`bug` was created again though `Bug` already existed"
+        );
+
+        let gh_log = std::fs::read_to_string(stub.join("gh.log")).unwrap();
+        assert!(
+            gh_log.contains("label list") && gh_log.contains("-L 1000"),
+            "gh label list must ask past its own 30-row default: {gh_log}"
+        );
+    }
+
+    /// A group's epic already open from an earlier task in the same batch
+    /// still picks up a later task's own labels — added by `gh issue edit
+    /// --add-label`, since `open` never creates the epic a second time —
+    /// the union effect that gives the group issue every task's labels
+    /// rather than only the first one's.
+    #[test]
+    fn github_sh_open_adds_a_later_tasks_labels_onto_an_already_open_epic() {
+        let (repo, stub) = github_open_fixture("open-labels-existing-epic");
+        let t = task("demo", |f| {
+            f.title = "second of the group".into();
+            f.group = Some("labelled-group".into());
+            f.labels = vec!["docs".to_string()];
+        });
+
+        let result = open_ticket(
+            &repo,
+            &t,
+            2,
+            "https://github.com/o/r/issues/9",
+            "",
+            "a group needing labels",
+            "",
+        )
+        .unwrap();
+        let OpenResult::Answered { epic, .. } = result else {
+            panic!("expected an answered open: {result:?}");
+        };
+        assert_eq!(
+            epic, "https://github.com/o/r/issues/9",
+            "the epic was not recreated"
+        );
+
+        let edit_log = std::fs::read_to_string(stub.join("issue_edit.log")).unwrap();
+        assert!(
+            edit_log.contains("https://github.com/o/r/issues/9"),
+            "{edit_log}"
+        );
+        assert!(edit_log.contains("--add-label docs"), "{edit_log}");
+
+        // Only the ticket goes through `issue create` here — the epic
+        // already existed, so it must not appear a second time.
+        let issue_log = std::fs::read_to_string(stub.join("issue_create.log")).unwrap();
+        assert_eq!(issue_log.lines().count(), 1, "{issue_log}");
     }
 
     /// Acceptance criterion: `done` leaves the ticket open, marks the pull

@@ -153,6 +153,60 @@ else
   [ -n "$top_pr" ] && sed 's/^/        /' "$top_pr"
 fi
 
+# --------------------------------- the title, off `ticket:`'s own shape
+# `spoolway stack` starts the pull request title with the ticket key only
+# when `ticket:` is a bare key such as a Jira `KAN-11` — never for a GitHub
+# `ticket:`, always a URL. Two tasks, same shape, off `main` so neither
+# touches the stack `top` and `base` already proved.
+must "jira-ticket's branch, off main" git branch task/jira-ticket main
+must "its worktree" git worktree add -q "$WORKTREES/jira-ticket" task/jira-ticket
+(
+  cd "$WORKTREES/jira-ticket" || exit 1
+  mkdir -p notes
+  echo "# jira-ticket" > notes/jira-ticket.md
+  git add -A
+  git commit -qm "wip(jira-ticket): implement"
+)
+queue_task jira-ticket "base: main" "branch: task/jira-ticket" "ticket: KAN-11"
+
+out_jira_ticket=$(cd "$WORKTREES/jira-ticket" && "$SPOOLWAY" stack jira-ticket 2>&1)
+if [ $? -eq 0 ]; then ok "and for a task naming a bare Jira ticket key"
+else bad "and for a task naming a bare Jira ticket key"; sed 's/^/        /' <<<"$out_jira_ticket"; fi
+
+jira_ticket_pr=$(grep -l '^head=task/jira-ticket$' "$LIVE/prs"/[0-9]* 2>/dev/null | head -1)
+if [ -n "$jira_ticket_pr" ] && \
+   [ "$(sed -n 's/^title=//p' "$jira_ticket_pr")" = "KAN-11 jira-ticket, a change of its own" ]; then
+  ok "its pull request title starts with the bare ticket key"
+else
+  bad "its pull request title starts with the bare ticket key"
+  [ -n "$jira_ticket_pr" ] && sed 's/^/        /' "$jira_ticket_pr"
+fi
+
+must "github-ticket's branch, off main" git branch task/github-ticket main
+must "its worktree" git worktree add -q "$WORKTREES/github-ticket" task/github-ticket
+(
+  cd "$WORKTREES/github-ticket" || exit 1
+  mkdir -p notes
+  echo "# github-ticket" > notes/github-ticket.md
+  git add -A
+  git commit -qm "wip(github-ticket): implement"
+)
+queue_task github-ticket "base: main" "branch: task/github-ticket" \
+  "ticket: https://github.com/e2e/spoolway/issues/9"
+
+out_github_ticket=$(cd "$WORKTREES/github-ticket" && "$SPOOLWAY" stack github-ticket 2>&1)
+if [ $? -eq 0 ]; then ok "and for a task naming a GitHub ticket URL"
+else bad "and for a task naming a GitHub ticket URL"; sed 's/^/        /' <<<"$out_github_ticket"; fi
+
+github_ticket_pr=$(grep -l '^head=task/github-ticket$' "$LIVE/prs"/[0-9]* 2>/dev/null | head -1)
+if [ -n "$github_ticket_pr" ] && \
+   [ "$(sed -n 's/^title=//p' "$github_ticket_pr")" = "github-ticket, a change of its own" ]; then
+  ok "and its title is left untouched, since a GitHub ticket is a URL"
+else
+  bad "and its title is left untouched, since a GitHub ticket is a URL"
+  [ -n "$github_ticket_pr" ] && sed 's/^/        /' "$github_ticket_pr"
+fi
+
 # ------------------------------------------- the fact stack reports itself
 # `rival` — a sibling `parallel: true` task nothing here ever runs `stack`
 # for — sits on a branch that changes the same file `edge` does, differently,

@@ -728,6 +728,27 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     {
         bail!("{name}: `tracking:` may only be set to `off`");
     }
+    // `SPOOLWAY_LABELS` hands a hook every label comma-joined — see
+    // `tracking::build_env` and `tracking::open_env` — and Jira's own
+    // labels cannot hold a space at all, so a label carrying either would
+    // reach a hook already broken. Caught here, at the one gate every task
+    // passes through before it is ever handed to a hook. An empty label
+    // gets its own message, distinct from the whitespace/comma refusal
+    // below it, since it fails neither of those checks but is just as
+    // unusable once joined.
+    for label in &front.labels {
+        if label.is_empty() {
+            bail!("{name}: `labels:` holds an empty label — remove it, or give it a word");
+        }
+        if label.contains(char::is_whitespace) || label.contains(',') {
+            bail!(
+                "{name}: label `{label}` may not hold whitespace or a comma — a hook reads \
+                 every label comma-joined in SPOOLWAY_LABELS, and Jira's own labels cannot \
+                 hold a space at all. Join the words with a hyphen instead, for example \
+                 `needs-triage`."
+            );
+        }
+    }
 
     // Everything spoolway itself decides, whatever the task said —
     // exactly the fields `queue_add` always built by hand rather than trusted
@@ -7528,6 +7549,42 @@ mod tests {
         let err = parse_submission("mine.md", text, Some("plan/demo")).unwrap_err();
         assert!(err.to_string().contains("`title:`"), "{err:#}");
         assert!(err.to_string().contains("mine.md"), "{err:#}");
+    }
+
+    /// A label reaches a hook comma-joined in `SPOOLWAY_LABELS`, and Jira's
+    /// own labels cannot hold a space at all — so a label holding either a
+    /// comma or any whitespace is refused before anything is queued, naming
+    /// the task and the label. A clean batch of labels is kept verbatim.
+    #[test]
+    fn a_label_holding_whitespace_or_a_comma_is_refused_naming_task_and_label() {
+        let text = task_text("demo", "group: demo\nlabels: [\"has space\"]\n", BODY);
+        let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(err.to_string().contains("mine.md"), "{err:#}");
+        assert!(err.to_string().contains("has space"), "{err:#}");
+
+        let text = task_text("demo", "group: demo\nlabels: [\"a,b\"]\n", BODY);
+        let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(err.to_string().contains("a,b"), "{err:#}");
+
+        let text = task_text("demo", "group: demo\nlabels: [bug, needs-triage]\n", BODY);
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+        assert_eq!(
+            task.front.labels,
+            vec!["bug".to_string(), "needs-triage".to_string()]
+        );
+    }
+
+    /// An empty label fails neither the whitespace nor the comma check, so
+    /// it gets its own message rather than the wrong one of those two.
+    #[test]
+    fn an_empty_label_gets_its_own_message() {
+        let text = task_text("demo", "group: demo\nlabels: [\"\"]\n", BODY);
+        let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(err.to_string().contains("empty label"), "{err:#}");
+        assert!(
+            !err.to_string().contains("whitespace"),
+            "an empty label is not a whitespace-or-comma refusal: {err:#}"
+        );
     }
 
     /// The keys spoolway sets on every task itself are refused by name, and

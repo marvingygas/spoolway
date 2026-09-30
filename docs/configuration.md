@@ -218,6 +218,218 @@ dropped, and the rest of the config still loads.
 Set the list with `spoolway config set watch.dirs ~/notes,docs`, comma-separated, the same as
 every other list-valued key. `spoolway sync` keeps whatever a project has put there.
 
+## `[issue_tracking]` — a hook fired on four task events
+
+```toml
+[issue_tracking]
+hook = ""
+project_key = ""
+key_in_names = false
+```
+
+One script in `.spoolway/hooks/` connects spoolway to an issue tracker. No pipeline file
+names a tracker.
+
+| Key | Default | What it controls |
+|---|---|---|
+| `hook` | blank | A bare file name inside `.spoolway/hooks/`, such as `github.sh`. Blank runs no hook. A path is refused. |
+| `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
+| `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
+
+The script is called once per task per event. A non-zero exit on `queued`, `started` or `done`
+pauses the task, with a reason naming the hook's own log under `tracking/`. `spoolway resume`
+forgets that run, so the hook fires again. A non-zero exit on `blocked` or `paused` only
+records the failure, since both stages are already stopped for a person.
+
+| Event | When it fires | Waits for the script | A non-zero exit |
+|---|---|---|---|
+| `fetch` | `spoolway issue show <ref>` reads one issue | Yes | Refuses the command |
+| `open` | `spoolway queue add` opens a ticket per task | Yes | Refuses the whole batch |
+| `queued` | A task arrives in the queue | No | Pauses the task |
+| `started` | A queued task is ready and about to leave `queued` for its entry step | No | Pauses the task |
+| `blocked` | A task comes to rest on `blocked` | No | Records the failure |
+| `paused` | A task arrives on the persisted `paused` stage | No | Records the failure |
+| `done` | A task finishes | No | Pauses the task |
+| `check` | `spoolway doctor`, and once as the dispatcher starts | Yes | A `doctor` `FAIL` row; a warning at dispatch start |
+
+A task queued with `tracking: off` fires none of `queued`, `started`, `blocked`, `paused` or
+`done`, and is never held waiting on one of them. See [`tracking`](tasks.md#the-frontmatter-is-spoolways).
+
+```mermaid
+flowchart LR
+  A[dispatcher pass] -->|task reaches queued, started, blocked, paused or done| B[.spoolway/hooks/hook]
+  B --> C[log in ~/.spoolway/project/tracking/]
+  C -->|non-zero exit| D{queued, started or done?}
+  D -->|yes| E[task paused]
+  D -->|no| F[failure counted on the board]
+```
+
+Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOLWAY_EVENT`,
+`SPOOLWAY_PROJECT_KEY`, `SPOOLWAY_TASK`, `SPOOLWAY_FROM`, `SPOOLWAY_SOURCE`, `SPOOLWAY_GROUP`,
+`SPOOLWAY_BRANCH`, `SPOOLWAY_TITLE`, `SPOOLWAY_TASK_FILE`, `SPOOLWAY_GROUP_SIZE`,
+`SPOOLWAY_LABELS` (its `labels:`, comma-joined, empty when it has none), `SPOOLWAY_EPIC` and
+`SPOOLWAY_TICKET`. The `done` event of a group's last open task also gets
+`SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`. The
+board prints `issue_tracking: N hook failures — see tracking/` while any hook has failed.
+`check` carries only `SPOOLWAY_EVENT` and `SPOOLWAY_PROJECT_KEY`, and writes no log under
+`tracking/`, since both its callers run it synchronously and read its exit and stderr on the
+spot.
+
+`spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
+file name, a script with no `fetch` or `check` branch, `key_in_names` on with a script that
+never writes `slug=`, a tool named in a `# spoolway-requires:` line whose installed version is
+below the line's floor, and a `check` branch that runs but exits non-zero.
+
+### `open` — a fifth event, run by `queue add` itself
+
+`spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no
+`ticket:` yet, in dependency order, before it writes anything. The script also gets
+`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`), `SPOOLWAY_GROUP_DESCRIPTION`
+(the group's `group_description:`, blank if no task set one), `SPOOLWAY_EPIC_BODY` and
+`SPOOLWAY_TICKET_BODY` (rendered from `.spoolway/templates/tracking/epic.md` and `ticket.md`).
+`SPOOLWAY_TASK_FILE` is the task's own path while this hook runs, blank when the task
+has no file of its own, such as a `queue add --from -` stream entry.
+
+The submission is refused, naming the group, when no task in a group sets
+`group_description:`.
+
+On the queue screen, `enter` asks before any of this runs. The question names the tracker,
+the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
+every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with
+`tracking: off` written onto every task instead, and `esc` goes back with nothing queued.
+Queueing a routine asks the same question. A trial never asks and opens no ticket. See
+[`spoolway queue`](cli-reference.md#spoolway-queue) and
+[`tracking`](tasks.md#the-frontmatter-is-spoolways).
+
+A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
+holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
+empty. A line with no placeholder, or one where at least one placeholder resolves to
+something, renders unchanged.
+
+The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
+
+| Line | Stored as | Notes |
+|---|---|---|
+| `epic=` | `epic:` | One epic per group. The first task's answer wins. |
+| `ticket=` | `ticket:` | One ticket per task. |
+| `slug=` | prefix on names | Used only with `key_in_names`. Lowercase letters, digits and hyphens. |
+| `url=` | `url:` | Must be an absolute `http` or `https` URL. |
+
+A non-zero exit refuses the whole batch. Ids already returned are written back into the
+pending tasks first, so running the command again resumes.
+
+### `fetch` — a sixth event, run by `spoolway issue show`
+
+`spoolway issue show <ref>` calls the hook with `SPOOLWAY_EVENT=fetch`, `SPOOLWAY_REF` (the
+reference as typed) and `SPOOLWAY_PROJECT_KEY`. The script writes one JSON object to
+`SPOOLWAY_OUT` with `ref`, `url`, `title`, `state`, `labels`, `body` and `comments`. The
+command prints it. With no hook configured, or a script with no `fetch` branch, the command
+refuses.
+
+### `started` — a seventh event, fired by the dispatcher itself
+
+`queued` fires on a task's first pass through the queue, even while it still waits on a
+dependency. `started` fires once, the moment a task actually leaves `queued` for its entry
+step. It carries the same variables `queued`, `blocked`, `paused` and `done` do. The task
+launches only once this hook exits clean. A non-zero exit pauses the task, exactly as a
+failing `queued` hook does. `spoolway resume` runs the hook again. A trial arm never fires
+`started`, the same as `queued` and `done`.
+
+### `check` — the eighth event, proving the hook works
+
+`spoolway doctor` runs the hook with `SPOOLWAY_EVENT=check`, synchronously, with no timeout of
+its own, the same as `fetch`. The dispatcher runs it once more as it starts. Both read the
+hook's exit code and its stderr, kept apart from stdout.
+
+A script with no `check` branch is never run for this event. `doctor` reports it as a note,
+not a `FAIL` row, since nothing was actually asked to run. A script that has the branch and
+exits zero passes. One that exits non-zero is one `doctor` `FAIL` row carrying its stderr. At
+dispatch start the same failure is a warning, not a refusal, so a tracker that is really down
+still lets tasks reach `queued`, `started` or `done` and pause there.
+
+### The shipped hook scripts
+
+`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`.
+They are project-owned starting points, not required integrations: edit either script, replace
+it with any executable that follows `spoolway hook contract`, or leave `hook` blank. `spoolway
+sync` never changes them. Switch trackers with
+`spoolway config set issue_tracking.hook <file>`.
+
+A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
+comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's
+`--version` output against the floor. Only `<tool> >= <version>` is understood; any other
+shape in the line is reported as unreadable rather than interpreted.
+
+Every submit route — the queue screen's `enter`, the jobs screen's `r`, `spoolway queue add
+--from`, `spoolway jobs run` and a job the dispatcher fires — checks the same lines before it
+opens any ticket. A tool below its floor, or missing from PATH, gates the submission. On a
+screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written onto
+every task, `esc` backs out. From the CLI or the dispatcher, where there is no key to wait on,
+it prints the same notice and proceeds the same way. See
+[`spoolway queue`](cli-reference.md#spoolway-queue).
+
+| Script | Needs | What it does |
+|---|---|---|
+| `github.sh` | `gh` >= 2.97.0, logged in | On `check` confirms `gh` is logged in and the repository named in `SPOOLWAY_PROJECT_KEY` is visible. Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
+| `jira.sh` | `acli` >= 1.3.39 and `jq` >= 1.6 | On `check` confirms `acli` is logged in, the project named in `SPOOLWAY_PROJECT_KEY` exists, its Story and Sub-task work item types both exist, and each of its three status names exists there, by a JQL search. Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. Returns the lowercased Story key as the slug. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Comments name the task without attaching the file. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
+
+### How the sample GitHub workflow works
+
+At a high level, the sample connects four things: a source issue, a group issue, one child
+issue per task, and the pull request that delivers each task. The `open` event creates the
+group and task issues. Later events add progress comments. The `done` event marks a task issue
+ready for review and leaves a marker on its pull request. The sample GitHub Actions workflow
+uses that marker after a merge to close the task issue, then closes the group issue once all
+of its children are closed.
+
+The shipped hook never closes an issue itself. It expects the task's branch to have a pull
+request by the time the task reaches `done`, however that pull request was created. Nobody has
+necessarily merged or reviewed anything at that point, so closing there would mark work as
+delivered before it was. A custom hook can give `done` any behavior that suits its pipeline.
+
+Instead the `done` branch leaves a comment on the pull request carrying a
+`<!-- spoolway-issue: URL -->` marker, and on the issue it swaps the `spoolway:in-progress`
+label for `spoolway:review`. Closing the issue waits for the pull request to merge.
+
+`spoolway init` writes `.github/workflows/spoolway-issues.yml` into the project when the
+tracker is github. The workflow triggers on `pull_request: closed` and runs only when
+`github.event.pull_request.merged` is true. It reads the pull request's comments for a marker
+left by a trusted author — one whose association is OWNER, MEMBER or COLLABORATOR — checks
+that the marked issue carries the `spoolway:task` label, then closes that issue and removes
+its `spoolway:in-progress` and `spoolway:review` labels.
+
+```mermaid
+flowchart LR
+  Task[task issue] -->|done: hook comments a marker on the PR| PR[pull request]
+  PR -->|merges| Workflow[spoolway-issues.yml: pull_request closed, merged]
+  Workflow -->|reads the marker, closes the issue| Closed[issue closed]
+  Closed -->|every child in the group closed| Epic[group epic closed]
+```
+
+The workflow also closes the group's epic. After closing a task's issue it looks up that
+issue's parent. If the parent carries the `spoolway:group` label and every one of its
+sub-issues has closed, the workflow comments on the epic and closes it too.
+
+The shipped Jira hook has no pull request lifecycle to wait on. `jira.sh` moves a Sub-task to
+Review on `done`, and moves its Story to Review too once the group's last task reaches `done`.
+See [Closing tickets on merge](#closing-tickets-on-merge).
+
+### Closing tickets on merge
+
+Neither shipped hook closes anything on `done`. `github.sh` leaves an issue labelled
+`spoolway:review`. `jira.sh` leaves a Sub-task, and its Story on the group's last task, in
+Review. Spoolway's own part ends there.
+
+Every tracker names its own closing status: Resolved on Jira, Closed on GitHub. Setting it is
+left to the user's own merge automation, not a shipped hook. Three ordinary ways to wire it:
+
+- The tracker's own GitHub app, with an automation rule keyed on the pull request title.
+- A pull request workflow the project already runs.
+- A `spoolway jobs` routine polled on a schedule. See [Jobs](jobs.md).
+
+A custom hook should keep the same split: move a ticket toward review on `done`, and leave the
+close for whatever watches the merge.
+
 ## `[agents.*]` — who runs a step
 
 ```toml
@@ -291,175 +503,6 @@ the server yourself.
 `spoolway doctor` notes a row with `slots` or `exclusive` but no `local`, an `exclusive` row
 with no `slots`, and a row no pipeline step uses.
 
-## `[issue_tracking]` — a hook fired on four task events
-
-```toml
-[issue_tracking]
-hook = ""
-project_key = ""
-on_fail = ""
-key_in_names = false
-```
-
-One script in `.spoolway/hooks/` connects spoolway to an issue tracker. No pipeline file
-names a tracker.
-
-| Key | Default | What it controls |
-|---|---|---|
-| `hook` | blank | A bare file name inside `.spoolway/hooks/`, such as `github.sh`. Blank runs no hook. A path is refused. |
-| `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
-| `on_fail` | `ignore` | What a failing hook does to its task. `ignore` records the failure. `pause` also holds the task: on `queued` it lands on `paused`, on `done` it stays out of the archive. |
-| `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
-
-The script is called once per task per event. A failing hook retries on a doubling delay
-from ten seconds, capped at an hour, and the count and next retry time survive a dispatcher
-restart.
-
-| Event | When it fires | Waits for the script |
-|---|---|---|
-| `fetch` | `spoolway issue show <ref>` reads one issue | Yes |
-| `open` | `spoolway queue add` opens a ticket per task | Yes |
-| `queued` | A task arrives in the queue | No |
-| `blocked` | A task comes to rest on `blocked` | No |
-| `paused` | A task arrives on the persisted `paused` stage | No |
-| `done` | A task finishes | No |
-
-A task queued with `tracking: off` fires none of `queued`, `blocked`, `paused` or `done`, and
-is never held waiting on one of them. See [`tracking`](tasks.md#the-frontmatter-is-spoolways).
-
-```mermaid
-flowchart LR
-  A[dispatcher pass] -->|task reaches queued, blocked, paused or done| B[.spoolway/hooks/hook]
-  B --> C[log in ~/.spoolway/project/tracking/]
-  C -->|non-zero exit| D{on_fail}
-  D -->|ignore| E[failure counted on the board]
-  D -->|pause| F[task held]
-```
-
-Every hook run gets `SPOOLWAY_EVENT`, `SPOOLWAY_PROJECT_KEY`, `SPOOLWAY_TASK`,
-`SPOOLWAY_FROM`, `SPOOLWAY_SOURCE`, `SPOOLWAY_GROUP`, `SPOOLWAY_BRANCH`, `SPOOLWAY_TITLE`,
-`SPOOLWAY_TASK_FILE`, `SPOOLWAY_GROUP_SIZE`, `SPOOLWAY_EPIC` and `SPOOLWAY_TICKET`. The `done`
-event of a group's last open task also gets `SPOOLWAY_GROUP_LAST=1`. Output goes to a log
-under `~/.spoolway/<project>/tracking/`. The board prints
-`issue_tracking: N hook failures — see tracking/` while any hook has failed.
-
-`spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
-file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes
-`slug=`, and a tool named in a `# spoolway-requires:` line whose installed version is below
-the line's floor.
-
-### `open` — a fifth event, run by `queue add` itself
-
-`spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no
-`ticket:` yet, in dependency order, before it writes anything. The script also gets
-`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`), `SPOOLWAY_GROUP_DESCRIPTION`
-(the group's `group_description:`, blank if no task set one), `SPOOLWAY_EPIC_BODY` and
-`SPOOLWAY_TICKET_BODY` (rendered from `.spoolway/templates/tracking/epic.md` and `ticket.md`).
-`SPOOLWAY_TASK_FILE` is the task's own path while this hook runs, blank when the task
-has no file of its own, such as a `queue add --from -` stream entry.
-
-The submission is refused, naming the group, when no task in a group sets
-`group_description:`.
-
-On the queue screen, `enter` asks before any of this runs. The question names the tracker,
-the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
-every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with
-`tracking: off` written onto every task instead, and `esc` goes back with nothing queued.
-Queueing a routine asks the same question. A trial never asks and opens no ticket. See
-[`spoolway queue`](cli-reference.md#spoolway-queue) and
-[`tracking`](tasks.md#the-frontmatter-is-spoolways).
-
-A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
-holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
-empty. A line with no placeholder, or one where at least one placeholder resolves to
-something, renders unchanged.
-
-The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
-
-| Line | Stored as | Notes |
-|---|---|---|
-| `epic=` | `epic:` | One epic per group. The first task's answer wins. |
-| `ticket=` | `ticket:` | One ticket per task. |
-| `slug=` | prefix on names | Used only with `key_in_names`. Lowercase letters, digits and hyphens. |
-| `url=` | `url:` | Must be an absolute `http` or `https` URL. |
-
-A non-zero exit refuses the whole batch. Ids already returned are written back into the
-pending tasks first, so running the command again resumes.
-
-### `fetch` — a sixth event, run by `spoolway issue show`
-
-`spoolway issue show <ref>` calls the hook with `SPOOLWAY_EVENT=fetch`, `SPOOLWAY_REF` (the
-reference as typed) and `SPOOLWAY_PROJECT_KEY`. The script writes one JSON object to
-`SPOOLWAY_OUT` with `ref`, `url`, `title`, `state`, `labels`, `body` and `comments`. The
-command prints it. With no hook configured, or a script with no `fetch` branch, the command
-refuses.
-
-### The shipped hook scripts
-
-`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`.
-They are project-owned starting points, not required integrations: edit either script, replace
-it with any executable that follows `spoolway hook contract`, or leave `hook` blank. `spoolway
-sync` never changes them. Switch trackers with
-`spoolway config set issue_tracking.hook <file>`.
-
-A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
-comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's
-`--version` output against the floor. Only `<tool> >= <version>` is understood; any other
-shape in the line is reported as unreadable rather than interpreted.
-
-Every submit route — the queue screen's `enter`, the jobs screen's `r`, `spoolway queue add
---from`, `spoolway jobs run` and a job the dispatcher fires — checks the same lines before it
-opens any ticket. A tool below its floor, or missing from PATH, gates the submission. On a
-screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written onto
-every task, `esc` backs out. From the CLI or the dispatcher, where there is no key to wait on,
-it prints the same notice and proceeds the same way. See
-[`spoolway queue`](cli-reference.md#spoolway-queue).
-
-| Script | Needs | What it does |
-|---|---|---|
-| `github.sh` | `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
-| `jira.sh` | `acli` >= 1.3.30 and `jq` >= 1.6 | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
-
-### How the sample GitHub workflow works
-
-At a high level, the sample connects four things: a source issue, a group issue, one child
-issue per task, and the pull request that delivers each task. The `open` event creates the
-group and task issues. Later events add progress comments. The `done` event marks a task issue
-ready for review and leaves a marker on its pull request. The sample GitHub Actions workflow
-uses that marker after a merge to close the task issue, then closes the group issue once all
-of its children are closed.
-
-The shipped hook never closes an issue itself. It expects the task's branch to have a pull
-request by the time the task reaches `done`, however that pull request was created. Nobody has
-necessarily merged or reviewed anything at that point, so closing there would mark work as
-delivered before it was. A custom hook can give `done` any behavior that suits its pipeline.
-
-Instead the `done` branch leaves a comment on the pull request carrying a
-`<!-- spoolway-issue: URL -->` marker, and on the issue it swaps the `spoolway:in-progress`
-label for `spoolway:review`. Closing the issue waits for the pull request to merge.
-
-`spoolway init` writes `.github/workflows/spoolway-issues.yml` into the project when the
-tracker is github. The workflow triggers on `pull_request: closed` and runs only when
-`github.event.pull_request.merged` is true. It reads the pull request's comments for a marker
-left by a trusted author — one whose association is OWNER, MEMBER or COLLABORATOR — checks
-that the marked issue carries the `spoolway:task` label, then closes that issue and removes
-its `spoolway:in-progress` and `spoolway:review` labels.
-
-```mermaid
-flowchart LR
-  Task[task issue] -->|done: hook comments a marker on the PR| PR[pull request]
-  PR -->|merges| Workflow[spoolway-issues.yml: pull_request closed, merged]
-  Workflow -->|reads the marker, closes the issue| Closed[issue closed]
-  Closed -->|every child in the group closed| Epic[group epic closed]
-```
-
-The workflow also closes the group's epic. After closing a task's issue it looks up that
-issue's parent. If the parent carries the `spoolway:group` label and every one of its
-sub-issues has closed, the workflow comments on the epic and closes it too.
-
-The shipped Jira hook is unchanged. Jira has no pull request lifecycle of its own, so
-`jira.sh` still transitions the epic on the group's last `done`.
-
 ## Retired keys
 
 These keys still parse in an older `config.toml` and are dropped on the next save.
@@ -473,6 +516,7 @@ These keys still parse in an older `config.toml` and are dropped on the next sav
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode` | Nothing |
+| `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always pauses its task. |
 | `[pipeline_gen]` | Nothing |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |
 

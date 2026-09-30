@@ -237,6 +237,17 @@ pub const BLOCKED: &str = "blocked";
 /// past.
 pub const PAUSED: &str = "paused";
 
+/// The moment a task leaves [`QUEUED`] for its entry step — an
+/// `[issue_tracking]` hook event, not a stage: nothing ever writes this to a
+/// task's own `stage:` field, so it never joins [`RESERVED`] the way
+/// `QUEUED`, `DONE`, `BLOCKED` and `PAUSED` do. A pipeline step is free to
+/// use this name — there is no stage for it to collide with — because
+/// `on_pass`/`on_fail` never name it as a destination in the first place;
+/// see `crate::dispatch::Dispatcher::route_reserved_stage`, which fires it
+/// once, synchronously gated, at the same moment it already checks
+/// `depends_on` for [`QUEUED`] itself.
+pub const STARTED: &str = "started";
+
 /// Stage names a pipeline may not give a step, because the dispatcher already
 /// means something by them.
 pub const RESERVED: &[&str] = &[QUEUED, DONE, BLOCKED, PAUSED];
