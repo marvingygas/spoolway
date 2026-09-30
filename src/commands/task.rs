@@ -163,11 +163,13 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "base",
-        "The branch this task is cut from and merges back into — by default the \
-         contract's own top-level `base`, the branch the checkout it was printed \
-         in has out. Must name a branch the repository has locally or on \
-         `origin`. Left unset, the submission's own `queue add --base` applies \
-         instead; a submission that sets neither is refused, naming the task.",
+        "The branch the plan lands in, by default the contract's own top-level \
+         `base`, the branch the checkout it was printed in has out. A task with \
+         no dependency is cut from it directly; a dependent is cut from its \
+         first dependency's branch instead and must share that dependency's \
+         `base`. Must name a branch the repository has locally or on `origin`. \
+         Left unset, the submission's own `queue add --base` applies instead; \
+         a submission that sets neither is refused, naming the task.",
     ),
     (
         "group_description",
@@ -560,6 +562,28 @@ mod tests {
 
         crate::repo::run(&worktree, "git", &["checkout", "-q", "--detach"]).unwrap();
         assert!(json(&worktree)["base"].is_null(), "{}", json(&worktree));
+    }
+
+    /// The `base` field's own description says what the field means for
+    /// both kinds of task — a root task is cut from it directly, a
+    /// dependent is cut from its first dependency's branch instead and
+    /// must share its `base` — so a planner reading the contract does not
+    /// take the field as naming where a dependent's worktree came from.
+    #[test]
+    fn base_field_explains_the_dependent_case() {
+        let repo = fixture("contract-base-field-text");
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
+        let base = contract.fields["base"];
+        assert!(
+            base.contains("no dependency is cut from it"),
+            "`base` should say a root task is cut from it directly: {base}"
+        );
+        assert!(
+            base.contains("dependent is cut from its first dependency's branch")
+                && base.contains("share"),
+            "`base` should say a dependent is cut from its dependency's branch \
+             and must share its `base`: {base}"
+        );
     }
 
     /// Every public field [`crate::task::Frontmatter`] declares has to show up

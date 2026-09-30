@@ -4519,8 +4519,10 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 }
 
 /// The right pane's rows: the highlighted group's tasks, each as a labelled
-/// block — its pipeline, what it depends on, the branch it is cut from, any
-/// gate chosen for it, and its own one-sentence description — plus the task's own header row above them.
+/// block — its pipeline, what it depends on, the branch it is cut from (a
+/// root task only — a dependent is cut from its dependency's branch instead,
+/// so it draws no such row), any gate chosen for it, and its own
+/// one-sentence description — plus the task's own header row above them.
 ///
 /// Read-only. Nothing here is picked: the checkbox is on the group, in the
 /// pane to the left, and this is what that group holds.
@@ -4578,14 +4580,20 @@ fn tasks_pane_lines(
         };
         lines.extend(labeled_row("Depends on:", &depends_value, width));
 
-        // A task naming no `base:` of its own is sent on the board
-        // checkout's branch — see `board_branch` — so that is what it
-        // shows, and `-` only when the checkout is detached and `enter`
-        // would refuse it.
-        let base = doc_base(&task.doc)
-            .or_else(|| state.board_branch.clone())
-            .unwrap_or_else(|| "-".to_string());
-        lines.extend(labeled_row("Base:", &base, width));
+        // A dependent task is cut from its first dependency's branch, not
+        // from its own `base:` — that field only names where the whole
+        // chain lands — so a `Base:` row on a dependent would read as
+        // "cut from here" and mislead. Only a root task, one with no
+        // dependency, draws it. A task naming no `base:` of its own is
+        // sent on the board checkout's branch — see `board_branch` — so
+        // that is what it shows, and `-` only when the checkout is
+        // detached and `enter` would refuse it.
+        if depends_on.is_empty() {
+            let base = doc_base(&task.doc)
+                .or_else(|| state.board_branch.clone())
+                .unwrap_or_else(|| "-".to_string());
+            lines.extend(labeled_row("Base:", &base, width));
+        }
 
         if let Some(step) = state.gates.get(&task_key(task)) {
             lines.extend(labeled_row("Gate:", step, width));
@@ -9384,6 +9392,10 @@ mod tests {
     /// depends on, its base, its gate and its description — starts its value at the
     /// same column, in that order, the same as the mockup this task's own
     /// acceptance criterion is drawn from.
+    ///
+    /// This task has no dependency of its own, so it still draws a `Base:`
+    /// row — a dependent draws none at all, see
+    /// `a_dependent_task_draws_no_base_row` below.
     #[test]
     fn every_row_in_a_wide_pane_starts_its_value_at_the_same_column() {
         let repo = fixture("screen-labelled-rows");
@@ -9392,8 +9404,7 @@ mod tests {
             "tracking-open",
             &task_text(
                 "tracking-open",
-                "group: one\npipeline: default\ndepends_on: [tracking-core]\n\
-                 base: task/gh-412-checkout\n",
+                "group: one\npipeline: default\nbase: task/gh-412-checkout\n",
                 BODY,
             ),
         );
@@ -9413,10 +9424,46 @@ mod tests {
                 String::new(),
                 "  tracking-open".to_string(),
                 "    Pipeline:    default".to_string(),
-                "    Depends on:  tracking-core".to_string(),
+                "    Depends on:  -".to_string(),
                 "    Base:        task/gh-412-checkout".to_string(),
                 "    Gate:        review".to_string(),
                 "    Description: tracking-open, done".to_string(),
+            ],
+            "{lines:?}"
+        );
+    }
+
+    /// A dependent is cut from its first dependency's branch, not from its
+    /// own `base:` — that field only names where the whole chain lands — so
+    /// a `Base:` row on it would read as "cut from here" and mislead. It
+    /// draws none, whatever its own `base:` says, even one that disagrees
+    /// with its dependency's.
+    #[test]
+    fn a_dependent_task_draws_no_base_row() {
+        let repo = fixture("screen-dependent-no-base");
+        write_pending(
+            &repo,
+            "cart-discounts",
+            &task_text(
+                "cart-discounts",
+                "group: one\npipeline: default\ndepends_on: [cart-totals]\n\
+                 base: plan/other\n",
+                BODY,
+            ),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new();
+
+        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        assert_eq!(
+            lines,
+            vec![
+                String::new(),
+                "  cart-discounts".to_string(),
+                "    Pipeline:    default".to_string(),
+                "    Depends on:  cart-totals".to_string(),
+                "    Description: cart-discounts, done".to_string(),
             ],
             "{lines:?}"
         );
