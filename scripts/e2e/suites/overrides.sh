@@ -325,7 +325,7 @@ has "naming the file, the step and the keys it set" \
 has "with the whole reason under them" \
   "names both \`run:\` and \`agent:\` — a step runs a process or a model," \
   "$IGNORED_SCREEN.first"
-has "and enter to close it" "[enter] close" "$IGNORED_SCREEN.first"
+has "and enter to confirm it" "[enter] confirm" "$IGNORED_SCREEN.first"
 lacks "enter closes it" "override ignored" "$IGNORED_SCREEN.second"
 has "and the queue tab is drawn again under the strip" \
   "dispatch       [queue]       jobs        eval" "$IGNORED_SCREEN.second"

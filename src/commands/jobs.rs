@@ -1757,7 +1757,7 @@ mod tests {
         let frame = last_frame(&drawn);
         assert!(frame.contains("already exists"), "{frame}");
         assert!(frame.contains("┌─ not saved "), "{frame}");
-        assert!(frame.contains("[enter] close"), "{frame}");
+        assert!(frame.contains("[enter] confirm"), "{frame}");
         assert!(frame.contains("─ jobs"), "the list under it: {frame}");
     }
 

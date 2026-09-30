@@ -569,7 +569,7 @@ impl DispatchTab {
                     self.popup = Some(Popup::Ended(super::notice(
                         "stop dispatching",
                         &format!("Not every running step could be interrupted: {err:#}"),
-                        "[enter] close",
+                        &super::confirm(),
                         super::NOTICE_WRAP,
                     )));
                 }

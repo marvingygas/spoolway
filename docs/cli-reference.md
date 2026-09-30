@@ -147,7 +147,8 @@ Queueing deletes the group's pending tasks from the pending directory. A sibling
 already in the queue or the archive is left where it is. A group that
 fails validation is refused and nothing is deleted. See [Queueing a
 plan](planning.md#queueing-a-plan). Queueing a group or a routine ends on a popup naming what
-queued; `enter` closes it back to the screen.
+queued. Below the list, a line says whether a dispatcher will pick the work up: `Dispatcher is
+running` or `Start the dispatcher to begin working`. `enter` closes it back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements. A requirement this machine does not meet draws a gate naming what is unmet:

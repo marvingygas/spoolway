@@ -460,6 +460,16 @@ pub(crate) fn boxed(title: &str, body: &[String]) -> Vec<String> {
     out
 }
 
+/// The key row every popup that only says something is answered with:
+/// `[enter] confirm`, closing it and doing nothing else.
+///
+/// Defined once so a new popup takes this row rather than typing its own,
+/// and every notice on every tab reads alike — five popups each spelling
+/// the row out by hand is how they came to drift before.
+pub(crate) fn confirm() -> String {
+    keys(&[("enter", "confirm")])
+}
+
 /// A framed box with a line of keys under its body, one blank row apart.
 pub(crate) fn panel(title: &str, body: &[String], keys: &str) -> Vec<String> {
     let mut full = body.to_vec();
@@ -506,9 +516,9 @@ impl Notice {
     }
 
     /// The popup, its text wrapped to `width` — see [`notice`] — over the
-    /// one key that closes it.
+    /// [`confirm`] row, the one key that closes it.
     pub(crate) fn panel(&self, width: usize) -> Vec<String> {
-        notice(&self.title, &self.text, &keys(&[("enter", "close")]), width)
+        notice(&self.title, &self.text, &confirm(), width)
     }
 }
 
@@ -607,16 +617,16 @@ mod tests {
     // refusal is drawn: a blank row, the text, a blank row, the keys.
     #[test]
     fn a_notice_is_its_text_between_blank_rows_over_its_keys() {
-        let panel = notice("trial refused", "a b", "[enter] close", 40);
+        let panel = notice("trial refused", "a b", &confirm(), 40);
         assert_eq!(
             panel,
             [
-                "┌─ trial refused ──┐",
-                "│                  │",
-                "│  a b             │",
-                "│                  │",
-                "│  [enter] close   │",
-                "└──────────────────┘",
+                "┌─ trial refused ───┐",
+                "│                   │",
+                "│  a b              │",
+                "│                   │",
+                "│  [enter] confirm  │",
+                "└───────────────────┘",
             ]
         );
     }

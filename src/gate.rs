@@ -237,7 +237,7 @@ mod tests {
         let flat = panel.join("\n");
         assert!(flat.contains(LINE), "{flat}");
         assert!(flat.contains("[enter] dismiss"), "{flat}");
-        assert!(!flat.contains("[enter] close"), "{flat}");
+        assert!(!flat.contains("[enter] confirm"), "{flat}");
         assert!(!flat.contains("[esc]"), "{flat}");
         assert!(!Config::path_in(&repo.checkout).exists());
         assert_eq!(stamp(&repo), before);

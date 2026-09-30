@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::*;
 use crate::platform::PathExt;
 use crate::screen::{
-    Key, Notice, PollableRead, hint, key_hint, keys, overlay, pad_to, panel, read_key,
+    Key, Notice, PollableRead, confirm, hint, key_hint, keys, overlay, pad_to, panel, read_key,
 };
 
 /// Which dependencies a task on a wait step is still waiting for.
@@ -2639,18 +2639,46 @@ impl TicketLog for PopupTickets<'_> {
 
 /// [`Mode::Queued`] for a batch that queued `ids`: the tickets the hook
 /// answered with, when it was asked, over the count queued; or, with no
-/// ticket to show, the count over every task it queued.
-fn queued_panel(ids: &[String], tickets: &[String]) -> Mode {
+/// ticket to show, the count over every task it queued. Either ends on
+/// `dispatcher` — [`dispatcher_line`] — a blank row below the list, and
+/// then the [`crate::screen::confirm`] row.
+fn queued_panel(ids: &[String], tickets: &[String], dispatcher: Option<&str>) -> Mode {
     let queued = format!("queued {}", plural(ids.len(), "task"));
-    let (title, body) = if tickets.is_empty() {
-        let ids = ids.iter().map(|id| format!("  {id}"));
-        ("queued", issue_body(std::iter::once(queued).chain(ids)))
+    let mut lines = if tickets.is_empty() {
+        std::iter::once(queued)
+            .chain(ids.iter().map(|id| format!("  {id}")))
+            .collect()
     } else {
         let mut lines = tickets.to_vec();
         lines.extend([String::new(), queued]);
-        ("issues created", issue_body(lines))
+        lines
     };
-    Mode::Queued(panel(title, &body, &keys(&[("enter", "close")])))
+    if let Some(dispatcher) = dispatcher {
+        lines.extend([String::new(), dispatcher.to_string()]);
+    }
+    let title = match tickets.is_empty() {
+        true => "queued",
+        false => "issues created",
+    };
+    Mode::Queued(panel(title, &issue_body(lines), &confirm()))
+}
+
+/// The queued popup's last line: whether a dispatcher will pick the batch
+/// up. Read once, as the popup is built, and never again while it is up.
+///
+/// Reads the dispatcher's own lock and nothing else — the same answer
+/// [`queue_list`] prints. [`crate::commands::dispatch::already_running`]
+/// also reads the screen's lock, which the screen drawing this popup always
+/// holds, so it would say "running" every time. A lock left by a dead
+/// process reads as free, since [`crate::lock::Lock::holder`] checks its
+/// process is alive. A lock that cannot be read at all gives `None`, and
+/// the popup leaves the line off rather than claim a state it never read.
+fn dispatcher_line(repo: &Repo) -> Option<&'static str> {
+    match crate::lock::Lock::holder(&repo.lock_file()) {
+        Ok(Some(_)) => Some("Dispatcher is running"),
+        Ok(None) => Some("Start the dispatcher to begin working"),
+        Err(_) => None,
+    }
 }
 
 /// How the screen ended: on its own, or — inside bare `spoolway`'s queue tab
@@ -5578,7 +5606,7 @@ fn begin_submission(
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            queued_panel(&ids, &tickets.rows)
+            queued_panel(&ids, &tickets.rows, dispatcher_line(repo))
         }
         Err(err) => outcome("queue refused", format!("{err:#}")),
     }
@@ -5598,8 +5626,9 @@ struct Submit<'a> {
 /// Open the batch's tickets and name it, save it, clear the tasks it
 /// came from out of the pending directory, and build the per-task report
 /// this function's own return value carries — read back by a test directly
-/// rather than by any caller here: a landed batch's popup names only the
-/// tasks it queued and the tickets opened for them — see [`queued_panel`].
+/// rather than by any caller here: a landed batch's popup names the tasks
+/// it queued, the tickets opened for them and whether a dispatcher is up,
+/// and nothing of this report — see [`queued_panel`].
 ///
 /// The order is the whole guarantee behind "a submission that fails
 /// validation removes nothing". Nothing is deleted until every task file has
@@ -6371,7 +6400,7 @@ fn finish_routine_mode(
     let mut tickets = PopupTickets::new(&tasks, redraw);
     let tracking_off = tracking == Tracking::Off;
     match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
-        Ok(()) => queued_panel(&ids, &tickets.rows),
+        Ok(()) => queued_panel(&ids, &tickets.rows, dispatcher_line(repo)),
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
 }
@@ -7952,7 +7981,7 @@ mod tests {
         let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
         assert!(first.contains("┌─ nothing to queue "), "{first}");
         assert!(first.contains("no-group.md"), "{first}");
-        assert!(first.contains("[enter] close"), "{first}");
+        assert!(first.contains("[enter] confirm"), "{first}");
         assert!(first.contains("─ groups"), "the tab under it: {first}");
         assert!(first.contains("dispatch"), "under the strip: {first}");
     }
@@ -8005,7 +8034,7 @@ mod tests {
             last.contains("Update available: 0.42.0. Run \"spoolway update\""),
             "{last}"
         );
-        assert!(last.contains("[enter] close"), "{last}");
+        assert!(last.contains("[enter] confirm"), "{last}");
     }
 
     /// The "override ignored" popup the screen opens on takes every key
@@ -10319,7 +10348,7 @@ mod tests {
         assert_eq!(exit, ScreenExit::Quit, "the input ran out");
         let frame = last_frame(&drawn);
         assert!(frame.contains("┌─ submission refused "), "{frame}");
-        assert!(frame.contains("[enter] close"), "{frame}");
+        assert!(frame.contains("[enter] confirm"), "{frame}");
         assert!(frame.contains("─ groups"), "the tab under it: {frame}");
     }
 
@@ -10348,6 +10377,122 @@ mod tests {
         assert!(frame.contains("┌─ queued "), "{frame}");
         assert!(frame.contains("queued 1 task"), "{frame}");
         assert!(!drawn.contains("┌─ issue tracking "), "{drawn}");
+        // No dispatcher holds this fixture's lock, so the popup ends by
+        // saying one has to be started.
+        assert!(
+            frame.contains("│  Start the dispatcher to begin working "),
+            "{frame}"
+        );
+        assert!(!frame.contains("Dispatcher is running"), "{frame}");
+    }
+
+    /// The queued popup as the plan's mockup draws it: the task list, a
+    /// blank row, the dispatcher line, a blank row, `[enter] confirm` — in
+    /// the 60 columns [`issue_body`] holds it to.
+    #[test]
+    fn the_queued_popup_ends_on_the_dispatcher_line_over_confirm() {
+        let ids: Vec<String> = [
+            "hook-failure-pauses",
+            "hook-started-and-check",
+            "task-labels",
+            "jira-story-subtasks",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let Mode::Queued(panel) =
+            queued_panel(&ids, &[], Some("Start the dispatcher to begin working"))
+        else {
+            panic!("a landed batch is Mode::Queued");
+        };
+        assert_eq!(
+            panel,
+            [
+                "┌─ queued ─────────────────────────────────────────────────┐",
+                "│                                                          │",
+                "│  queued 4 tasks                                          │",
+                "│    hook-failure-pauses                                   │",
+                "│    hook-started-and-check                                │",
+                "│    task-labels                                           │",
+                "│    jira-story-subtasks                                   │",
+                "│                                                          │",
+                "│  Start the dispatcher to begin working                   │",
+                "│                                                          │",
+                "│  [enter] confirm                                         │",
+                "└──────────────────────────────────────────────────────────┘",
+            ]
+        );
+    }
+
+    /// The `issues created` form carries the same line, under the count
+    /// rather than a task list.
+    #[test]
+    fn the_issues_created_popup_ends_on_the_dispatcher_line_too() {
+        let ids = vec!["wire".to_string()];
+        let tickets = vec!["ticket   created   #7   wire".to_string()];
+        let Mode::Queued(panel) = queued_panel(&ids, &tickets, Some("Dispatcher is running"))
+        else {
+            panic!("a landed batch is Mode::Queued");
+        };
+        let body: Vec<&str> = panel
+            .iter()
+            .map(|line| line.trim_matches(['│', ' ']))
+            .collect();
+        assert!(panel[0].starts_with("┌─ issues created "), "{panel:?}");
+        assert_eq!(
+            body[1..panel.len() - 1],
+            [
+                "",
+                "ticket   created   #7   wire",
+                "",
+                "queued 1 task",
+                "",
+                "Dispatcher is running",
+                "",
+                "[enter] confirm",
+            ],
+            "{panel:?}"
+        );
+    }
+
+    /// A live dispatcher's lock turns the line into `Dispatcher is running`.
+    /// This process takes the dispatcher's own lock, the one a real
+    /// `spoolway dispatch` holds for as long as it runs.
+    #[test]
+    fn a_held_dispatcher_lock_says_the_dispatcher_is_running() {
+        let repo = fixture("queued-popup-dispatcher-running");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        assert_eq!(dispatcher_line(&repo), Some("Dispatcher is running"));
+    }
+
+    /// Only the dispatcher's lock decides the line: the screen's own lock,
+    /// which the screen showing this popup always holds, leaves it saying
+    /// no dispatcher is up.
+    #[test]
+    fn the_screens_own_lock_does_not_count_as_a_dispatcher() {
+        let repo = fixture("queued-popup-screen-lock");
+        let _screen = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
+        assert_eq!(
+            dispatcher_line(&repo),
+            Some("Start the dispatcher to begin working")
+        );
+    }
+
+    /// A lock file that cannot be read leaves the line off: a directory in
+    /// its place fails the read with something other than "not found", and
+    /// the popup must not guess either way.
+    #[test]
+    fn an_unreadable_dispatcher_lock_leaves_the_line_off() {
+        let repo = fixture("queued-popup-lock-unreadable");
+        std::fs::create_dir_all(repo.lock_file()).unwrap();
+        assert_eq!(dispatcher_line(&repo), None);
+        let Mode::Queued(panel) = queued_panel(&["wire".to_string()], &[], dispatcher_line(&repo))
+        else {
+            panic!("a landed batch is Mode::Queued");
+        };
+        let flat = panel.join("\n");
+        assert!(!flat.contains("Dispatcher is running"), "{flat}");
+        assert!(!flat.contains("Start the dispatcher"), "{flat}");
+        assert!(flat.contains("[enter] confirm"), "{flat}");
     }
 
     /// Nothing in the pending directory is not an error — the screen opens
@@ -12311,7 +12456,7 @@ depends_on: [cart-empty-state]
                 assert!(frame.contains("┌─ queued "), "{frame}");
                 assert!(frame.contains("queued 2 tasks"), "{frame}");
                 assert!(frame.contains("    cart-empty-state"), "{frame}");
-                assert!(frame.contains("[enter] close"), "{frame}");
+                assert!(frame.contains("[enter] confirm"), "{frame}");
             }
 
             /// `esc` queues nothing and opens nothing, and leaves the
@@ -12363,7 +12508,9 @@ depends_on: [cart-empty-state]
                     "{opening:?}"
                 );
                 assert!(
-                    !opening.iter().any(|frame| frame.contains("[enter] close")),
+                    !opening
+                        .iter()
+                        .any(|frame| frame.contains("[enter] confirm")),
                     "a popup still filling takes no key: {opening:?}"
                 );
 
@@ -12374,7 +12521,11 @@ depends_on: [cart-empty-state]
                     "{frame}"
                 );
                 assert!(frame.contains("queued 2 tasks"), "{frame}");
-                assert!(frame.contains("[enter] close"), "{frame}");
+                assert!(
+                    frame.contains("Start the dispatcher to begin working"),
+                    "{frame}"
+                );
+                assert!(frame.contains("[enter] confirm"), "{frame}");
                 // Nothing printed under the frame: every byte went out after a
                 // clear-screen, as part of one frame or another.
                 assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");

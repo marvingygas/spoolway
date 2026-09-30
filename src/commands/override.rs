@@ -346,15 +346,12 @@ impl IgnoredPopup {
         (!entries.is_empty()).then_some(IgnoredPopup { entries })
     }
 
-    /// The boxed popup, its rows wrapped to `width`, over `[enter] close`.
+    /// The boxed popup, its rows wrapped to `width`, over
+    /// [`crate::screen::confirm`]'s `[enter] confirm`.
     pub(crate) fn panel(&self, width: usize) -> Vec<String> {
         let mut body = vec![String::new()];
         body.extend(self.lines(width));
-        crate::screen::panel(
-            "override ignored",
-            &body,
-            &crate::screen::keys(&[("enter", "close")]),
-        )
+        crate::screen::panel("override ignored", &body, &crate::screen::confirm())
     }
 
     /// One pair of rows per ignored override: the file, the step and the
@@ -934,7 +931,7 @@ mod tests {
                 ),
                 "{drawn}"
             );
-            assert!(drawn.contains("  [enter] close "), "{drawn}");
+            assert!(drawn.contains("  [enter] confirm "), "{drawn}");
 
             std::fs::remove_file(crate::overrides::pipeline_patch_path(&dir, "demo")).unwrap();
             assert!(ignored_popup(repo).unwrap().is_none(), "nothing ignored");
