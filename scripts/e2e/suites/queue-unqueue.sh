@@ -79,7 +79,9 @@ refuses "unqueuing a task the queue does not have" "no queued task" \
 # A real lane, hung mid-turn, so the checkout the refusal names is a real one
 # and the teardown `--force` runs is a real teardown, not a description of it.
 echo hang > "$CTL/solo"
-task_doc "$LIVE/solo.md" solo "$BODY" "group: unq"
+# A group of its own: `base` and `dependent` are still queued in `unq`, and a
+# group is one chain, so an unrelated task there would be a second root.
+task_doc "$LIVE/solo.md" solo "$BODY" "group: solo"
 must "a task whose lane will hang mid-turn" "$SPOOLWAY" queue add --from "$LIVE/solo.md"
 
 if drive solo implement 120; then ok "it reaches implement and sits there"
@@ -118,7 +120,7 @@ else bad "and the lane is still running"; fi
 # the same hang, so the refusal's other route is proven too without spending
 # the one lane the forced case below still needs.
 echo hang > "$CTL/paused-route"
-task_doc "$LIVE/paused-route.md" paused-route "$BODY" "group: unq"
+task_doc "$LIVE/paused-route.md" paused-route "$BODY" "group: paused-route"
 must "a second task, to prove the other route" \
   "$SPOOLWAY" queue add --from "$LIVE/paused-route.md"
 if drive paused-route implement 120; then ok "it reaches implement too"

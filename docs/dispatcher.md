@@ -179,8 +179,9 @@ The total is the group's banked spend: every step that has settled, across every
 group, added up as soon as each one banks. It does not include a running step's unbanked
 figures, so it can read lower than the row above it. A group with nothing banked yet closes
 with no figures at all.
-When the group has an issue behind it, the group name is a link to that issue. A `∥` after a
-task id marks `parallel: true`.
+When the group has an issue behind it, the group name is a link to that issue. A group whose
+first task stacks onto another group's own last task reads `▌<group>  after <group>`. See
+[Stacking one group on another](tasks.md#stacking-one-group-on-another).
 
 ### Columns
 

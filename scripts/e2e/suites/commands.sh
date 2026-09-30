@@ -626,7 +626,7 @@ NOBASE="$BASECHECK/nobase.md"
   echo "---"
   echo "id: nobase"
   echo "title: nobase, done"
-  echo "group: live"
+  echo "group: nobase"
   echo "pipeline: default"
   echo "---"
   cat "$BODY"
@@ -643,12 +643,15 @@ works "--base covers a submission with no base of its own" \
 says "and the task is cut from the flag's branch" "base: plan/x" \
   env -C "$BASECHECK" "$SPOOLWAY" queue show nobase
 
+# A group of its own: `nobase` above is still queued, and a group is one
+# chain, so a second unrelated task in its group would be refused as a second
+# root before the base rule this case is about was ever asked.
 OWNBASE="$BASECHECK/ownbase.md"
 {
   echo "---"
   echo "id: ownbase"
   echo "title: ownbase, done"
-  echo "group: live"
+  echo "group: ownbase"
   echo "base: plan/x"
   echo "pipeline: default"
   echo "---"

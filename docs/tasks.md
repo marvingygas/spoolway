@@ -47,8 +47,7 @@ as JSON.
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
 | `group` | you | The group of work this task belongs to. Tasks of one group run in one shared tab. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
-| `depends_on` | you | Task ids that must reach `done` before this one starts. |
-| `parallel` | you | `true` marks a deliberate fan: the planner judged this task and another `parallel: true` task of the same group safe to run side by side, rather than a missing `depends_on`. |
+| `depends_on` | you | Task ids that must reach `done` before this one starts. See [Expressing order](#expressing-order). |
 | `gate_at` | you | A step id. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | `spoolway-tasks`, or you | The branch the group lands in. `spoolway-tasks` writes it from `spoolway task contract`'s own `base`, the branch your checkout has out. Otherwise required, here or with `spoolway queue add --base`. Must exist locally or on `origin`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
@@ -112,7 +111,9 @@ outgrow the multiplexer's own limit gets a short internal alias instead of a ref
 
 `depends_on` is checked over the whole submission. It must name a task in the queue, in the
 archive, or in the same batch. It must not name the task itself or close a cycle. A dependency
-and its dependent must share the same `base` and the same `group`.
+and its dependent must share the same `base`. They must also share the same `group`, unless the
+dependent is its own group's first task naming the other group's own last task. See [Stacking
+one group on another](#stacking-one-group-on-another).
 
 `spoolway dispatch` checks the same base rule again before it starts, since a task file can be
 edited by hand, or a base branch deleted, after the batch was sent. A dependent whose `base:` no
@@ -209,11 +210,10 @@ A task file that does not parse is skipped. The board names it in amber.
 
 ## Expressing order
 
-Tasks of different groups are independent. Inside a group, `depends_on` sets the order.
-
-A task stays `queued` until every task it names has reached `done`. A dependency is refused
-when it names a task that does not exist, names itself, closes a cycle, crosses two bases, or
-crosses two groups. If a dependency is blocked, every task behind it stays `queued`.
+A group is one chain: each task depends on the one before it. There is one root, with no
+`depends_on`, and one tail, that nothing depends on. `queue add` and `task contract` refuse
+any other shape, over the queue, the archive and the batch being added together, so a group
+split across two `queue add` calls is still caught.
 
 ```
 TASK       STEP       NOTE
@@ -222,18 +222,40 @@ sessions   queued     waiting on: login
 profile    queued     waiting on: sessions
 ```
 
-## Declaring a fan on purpose
+```
+$ spoolway task contract --from pending/
+group `cart` has two tasks with no dependency in it: cart-totals and cart-empty — a group is
+one chain. Give one a `depends_on`, or move it to a group of its own.
+```
 
-Two tasks of one group may have nothing to do with each other. Whether they are safe to run
-side by side is judged from what each task changes, not from any file both happen to touch.
-Mark both `parallel: true` so that `queue list` shows the missing `depends_on` as chosen on
-purpose, not forgotten.
+A task stays `queued` until every task it names has reached `done`. A dependency is refused
+when it names a task that does not exist, names itself, closes a cycle, or crosses two bases.
+If a dependency is blocked, every task behind it stays `queued`.
+
+Work that has nothing to do with another task goes in a group of its own, not a second root of
+the same group.
+
+## Stacking one group on another
+
+A group's first task, the one with no dependency inside its own group, may name one other
+group's own last task in `depends_on`. That is the only edge allowed between two groups, and a
+group may stack on at most one other group.
 
 ```
-id: left
-group: fan
-parallel: true
+id: auth-form
+group: auth-ui
+depends_on:
+  - auth-sessions    # auth-api's own last task
 ```
+
+The stacked group's first task is cut from the named task's branch, the same way an in-group
+dependent is cut from its dependency's branch. Any other cross-group edge is refused: naming a
+task that is not the other group's own last task, naming more than one other group, or naming
+a cross-group task alongside an in-group one. Queueing a group while the group it names is
+still in the pending directory is refused too, naming that group.
+
+The board reads a stacked group's line as `after <group>`. See [Rows are grouped by
+`group:`](dispatcher.md#reading-the-state).
 
 ## When a task needs a person
 

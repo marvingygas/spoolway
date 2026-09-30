@@ -1017,7 +1017,7 @@ pub struct QueueAddArgs {
     /// queued in the same breath is satisfied with nothing sorted first.
     ///
     /// Each task is `---\n<frontmatter>\n---\n<body>`, the same shape a
-    /// queued task is kept in. `id`, `depends_on`, `parallel`, `group`,
+    /// queued task is kept in. `id`, `depends_on`, `group`,
     /// `source`, `plan`, `pipeline`, `gate_at` and `base` are a
     /// task's to set; `stage`, `run`, `attempts`, `base_commit` and
     /// `cut_from` are spoolway's alone, and a task setting one is

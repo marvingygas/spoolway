@@ -107,31 +107,20 @@ pub struct Frontmatter {
 
     /// Task ids that must finish before this one may start.
     ///
-    /// Every id named here has to belong to this task's own `group` — a
-    /// chain does not cross a group — and, when there is more than one, the
-    /// list has to start with whichever id's own history already reaches
-    /// every other one named beside it: that is the id the worktree is cut
-    /// from, so it is the only one that can carry the rest along for free.
-    /// `queue add --from`'s `check_dependencies_set` refuses a batch that
-    /// breaks either rule and reorders the rest, so a task already on disk
-    /// is trusted to already have both right.
+    /// A group is one chain: every id named here has to belong to this
+    /// task's own `group`, with one exception — a group's first task (the
+    /// one with no dependency inside its own group) may instead name
+    /// exactly one other group's own last task, stacking this group onto
+    /// that one. When there is more than one id and they are all in this
+    /// task's own group, the list has to start with whichever id's own
+    /// history already reaches every other one named beside it: that is the
+    /// id the worktree is cut from, so it is the only one that can carry the
+    /// rest along for free. `queue add --from`'s `check_dependencies_set`
+    /// refuses a batch that breaks any of these rules and reorders the
+    /// rest, so a task already on disk is trusted to already have them
+    /// right.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-
-    /// Marks a deliberate fan the planner judged independent, rather than as
-    /// one somebody forgot a `depends_on` for. A task's own key, written
-    /// by whoever produced it — the two planning skills write `parallel:
-    /// true`, judging from what each task changes whether a group's tasks
-    /// may run side by side, never from any file overlap — not a flag on any
-    /// command.
-    ///
-    /// Read only by `queue list`, `spoolway stack`'s `siblings` line
-    /// (`parallel_conflicts`, which asks `git merge-tree` for a real
-    /// conflict), and the two planning skills. Nothing that schedules or
-    /// bases a task looks at it: the dispatcher already starts every ready
-    /// task at once, so this enables nothing that was not already possible.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub parallel: bool,
 
     /// Whether this task's checkout was already there when its first lane
     /// started, rather than cut for it.
@@ -1819,18 +1808,6 @@ mod tests {
             "a report banked before the lane started is the round before's"
         );
         assert!(task.reported_since(999), "banked after the lane started");
-    }
-
-    #[test]
-    fn parallel_round_trips_and_stays_out_of_the_file_when_false() {
-        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
-        assert!(!task.render().unwrap().contains("parallel:"));
-
-        task.front.parallel = true;
-        let rendered = task.render().unwrap();
-        assert!(rendered.contains("parallel: true"));
-        let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
-        assert!(reparsed.front.parallel);
     }
 
     /// `title:` round-trips like any other plain key, and an older task file

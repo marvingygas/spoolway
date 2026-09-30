@@ -45,11 +45,15 @@ task_body "$BODY"
 # see the stand-in's own comment on which one wins. Named tasks other than
 # `hang` itself need the file; `hang` needs nothing; both go through this one
 # helper so every case reads the same.
+#
+# Each case is a group of its own, named after itself: a group is one chain,
+# and several cases leave a task parked while the next one queues, which a
+# shared group would refuse as a second root.
 queue_hang() {
   local id=$1
   mkdir -p "$CTL"
   [ "$id" = hang ] || echo hang > "$CTL/$id"
-  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: disaster"
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: $id"
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
 
@@ -247,7 +251,7 @@ forget hang
 # so the orphaned lane records its own pass and the task then sits there,
 # because there is no pass to carry it on. That is a state, not a window, and
 # the assertion below is that a dispatcher coming up finds it.
-task_doc "$LIVE/orphan.md" orphan "$BODY" "group: disaster"
+task_doc "$LIVE/orphan.md" orphan "$BODY" "group: orphan"
 mkdir -p "$CTL"
 echo "linger:3" > "$CTL/orphan.implement"
 dispatcher_start
@@ -343,7 +347,7 @@ forget stop-live
 # if the resident dispatcher might answer for `problem-log` before the
 # screen's own does.
 sweep
-task_doc "$LIVE/problem-log.md" problem-log "$BODY" "group: disaster"
+task_doc "$LIVE/problem-log.md" problem-log "$BODY" "group: problem-log"
 must "problem-log queues" "$SPOOLWAY" queue add --from "$LIVE/problem-log.md"
 # A stage no pipeline defines is the cheapest real problem to manufacture:
 # `Dispatcher::pass` hits it on the very first pass, with nothing else to set

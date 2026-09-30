@@ -72,11 +72,15 @@ BOARD_LOG="$LIVE/board.out"
 #
 # A task whose `implement` lane never returns on its own, so the row it draws
 # is genuinely mid-turn for as long as this suite needs it.
+#
+# In a group of its own, named after itself: a group is one chain, and these
+# are unrelated tasks queued while earlier ones still sit parked, so a shared
+# group would make each a second root that `queue add` refuses.
 queue_hang() {
   local id=$1; shift
   mkdir -p "$CTL"
   echo hang > "$CTL/$id"
-  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: board" "$@"
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: $id" "$@"
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
 
@@ -84,9 +88,14 @@ queue_hang() {
 #
 # A task that will never start a lane while the task it depends on is
 # unfinished — a row with nothing live, which a stop's `i` leaves alone.
+#
+# In the group of the task it depends on, read off that task's own file, and
+# always on that group's last task: a group is one chain, so every idle task
+# here extends the one line `busy` starts rather than fanning off it.
 queue_idle() {
-  local id=$1 on=$2
-  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: board" \
+  local id=$1 on=$2 group
+  group=$(sed -n 's/^group: *//p' "$SPOOLWAY_PROJECT_HOME/queue/$on.md")
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: $group" \
     "depends_on: [$on]"
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
@@ -437,7 +446,7 @@ stage_reaches "busy parks" busy paused 25
 lacks "and a park by hand carries no stop mark" "parked_by_stop:" \
   "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
 must "pausing behind by hand" "$SPOOLWAY" queue pause behind
-queue_idle late busy
+queue_idle late behind
 next_frame
 must "pausing late by hand" "$SPOOLWAY" queue pause late
 
@@ -473,7 +482,7 @@ lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 # longer closes it — only `enter` does, the same rule proven above for the
 # pause panel. Two tasks sit on `queued` now: `stalled`, and `never-run`
 # back where its resume put it.
-queue_idle stalled late
+queue_idle stalled never-run
 next_frame
 press U
 draws "\`U\` opens the unqueue-all panel" "2 tasks have not started:"
@@ -497,15 +506,15 @@ has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME
 # longer refuses outright — it lists the whole chain of unstarted tasks that
 # reach it through `depends_on` and carries every one of them back to
 # pending together. Restarted fresh, with its own group sorted ahead of
-# every other row's `board`, so the freshly restarted board's own cursor
+# every other row's, so the freshly restarted board's own cursor
 # opens on it directly — the same trick the blocked-row section below uses
 # for the same reason.
 #
-# `chain-head` depends on `chain-gate`, a `hang`-mode lane of its own — a
-# dependency cannot cross a group (`queue add` refuses it), so gating
-# `chain-head` on something still paused elsewhere in the run, the way
-# `queue_idle` does for every other idle task here, is not available inside
-# a fresh group of its own. A live lane that never returns is: with nothing
+# `chain-head` depends on `chain-gate`, a `hang`-mode lane of its own — only
+# a group's first task may name another group, and only that group's last
+# task, so gating `chain-head` on something still paused elsewhere in the
+# run, the way `queue_idle` does for every other idle task here, is not
+# available inside a fresh group of its own. A live lane that never returns is: with nothing
 # to make it `Done`, `chain-head` never becomes ready, and is still
 # genuinely `queued` — not already off running its own pipeline — when `u`
 # is pressed. The cursor already opens on `chain-gate`, the first row of its
@@ -561,7 +570,7 @@ has "and so does the dependent's" "id: chain-tail" \
 # with `blocked_from` set the way a real block leaves it; `routines.sh` and
 # `trials.sh` write straight into the live queue directory with `task_doc`
 # the same way, for a fixture no dispatcher needs to walk there itself. Its
-# group sorts ahead of every other row's `board`, so the freshly restarted
+# group sorts ahead of every other row's, so the freshly restarted
 # board's own cursor opens directly on it, whatever else in this run is
 # still parked — no `down` needed to reach it.
 #
@@ -627,7 +636,7 @@ stage_reaches "the task lands back on \`blocked\`, not \`resume_target\`'s entry
 # work every other task above got.
 mkdir -p "$SOLUTIONS/pause-fail-catch"
 printf 'not a real patch\n' > "$SOLUTIONS/pause-fail-catch/implement.patch"
-task_doc "$LIVE/pause-fail-catch.md" pause-fail-catch "$BODY" "group: board" \
+task_doc "$LIVE/pause-fail-catch.md" pause-fail-catch "$BODY" "group: pause-fail-catch" \
   "gate_at: implement"
 must "pause-fail-catch queues" "$SPOOLWAY" queue add --from "$LIVE/pause-fail-catch.md"
 
@@ -656,7 +665,7 @@ stage_reaches "and it lands there" pause-fail-catch blocked 25
 # run the way a person — or the lane in that pane, once it is stopped —
 # would run it: from outside the lane entirely, against a task already
 # parked.
-task_doc "$LIVE/gate-edit.md" gate-edit "$BODY" "group: board" \
+task_doc "$LIVE/gate-edit.md" gate-edit "$BODY" "group: gate-edit" \
   "gate_at: implement"
 must "gate-edit queues" "$SPOOLWAY" queue add --from "$LIVE/gate-edit.md"
 
@@ -694,8 +703,9 @@ has "and the stdin content lands on disk" "read from stdin" \
 # `queued` itself exactly as it reaches a real step, and does not hold it for
 # a dependency the way a real step's row still would. `behind` and `late`
 # have sat on `paused` since `queue pause` parked them off `queued`, both
-# still gated by `busy` — paused itself, and never resumed since — so
-# neither dependency has finished. `gate-edit` is still paused too, a real
+# still gated by `busy` — `behind` directly, `late` through `behind` —
+# paused itself, and never resumed since, so neither has a finished
+# dependency. `gate-edit` is still paused too, a real
 # gate, so this also proves `R`'s panel still gates on it the same as ever
 # while the queued parks beside it need no such asking. `mid-turn` and
 # `busy` go past `R`'s own panel back onto `implement` here too, so their

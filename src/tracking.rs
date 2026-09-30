@@ -1012,7 +1012,6 @@ mod tests {
             title: String::new(),
             stage: crate::pipeline::QUEUED.to_string(),
             depends_on: Vec::new(),
-            parallel: false,
             borrowed: false,
             last_report: None,
             blocked_from: None,

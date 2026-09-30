@@ -92,6 +92,17 @@ has "still carrying that routine's group" "group: maintenance" \
 # cursor onto `maintenance`'s tasks pane, already on `prune`, its one task,
 # nested or not; `space` queues it alone. `prune-1` is taken by the batch
 # above, so this one mints the next number.
+#
+# `prune-1` lands first, the way a finished run leaves it: a group is one
+# chain, and `maintenance` still holding `prune-1` in the queue would make a
+# second run of the same routine a second root of it, which `queue add`
+# refuses. Archived, the routine's name is free for the next run, and minting
+# still skips `prune-1`, since it reads the archive as well as the queue.
+sed -i 's/^stage: .*/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
+must "prune-1 lands, as a finished run would" \
+  mv "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md" "$SPOOLWAY_PROJECT_HOME/archive/prune-1.md"
+
 on_screen '\x1b[C\t n' /dev/null
 
 works "tab reaches a nested task under its routine, and a solo pick queues it" \

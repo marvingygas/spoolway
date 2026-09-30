@@ -72,10 +72,25 @@ echo "queueing $selected of $count task(s) from $(basename "$PLAN") (pass $WANT_
 # lets `observer.html`'s `reads-doc` name `writes-doc` in `depends_on:`
 # while both are still in the same breath. The front matter keys are the
 # document's to set
-# (`id`, `pipeline`, `group`, `source`, `depends_on`, `parallel`);
+# (`id`, `pipeline`, `group`, `source`, `depends_on`);
 # `group:` is the plan's own name, the key that groups the
 # board and drains the chain as one, and `source:` carries the page's path
 # for a person to follow back.
+#
+# A group is one chain, and `queue add` refuses a group with two roots. So a
+# plan whose tasks are not one line — `gates.html`'s two independent flags,
+# `escalation.html`'s pass-2 `staffed` — is split here the way a planner
+# would split it: the first root keeps the plan's name, every later root
+# starts a group of its own named `<plan>-<id>`, and a dependent joins the
+# group of the first task it names. Worked out over every task, whatever its
+# pass, so a later pass lands in the same group it would have in one call.
+groups=$(jq -c --arg plan "$group" '
+  reduce .tasks[] as $t ({};
+    . + { ($t.id): (
+      if (($t.depends_on // []) | length) > 0 then .[$t.depends_on[0]] // $plan
+      elif (map(select(. == $plan)) | length) == 0 then $plan
+      else $plan + "-" + $t.id end) })
+' <<<"$json")
 stream=""
 for i in $(seq 0 $((count - 1))); do
   task=$(jq -c ".tasks[$i]" <<<"$json")
@@ -114,7 +129,9 @@ for i in $(seq 0 $((count - 1))); do
 
   # The front matter, from the same JSON. yaml strings are quoted through
   # jq's own @json, so an id or a glob with a quote in it survives.
-  front=$(jq -r --arg source "$PLAN" --arg group "$group" '
+  task_group=""
+  [ -n "$group" ] && task_group=$(jq -r --arg id "$id" '.[$id]' <<<"$groups")
+  front=$(jq -r --arg source "$PLAN" --arg group "$task_group" '
     def list(name; xs): if (xs // []) | length > 0
       then name + ":\n" + ((xs) | map("- " + (. | @json)) | join("\n")) + "\n"
       else "" end;
@@ -124,7 +141,6 @@ for i in $(seq 0 $((count - 1))); do
     + (if $group != "" then "group: " + ($group | @json) + "\n" else "" end)
     + "source: " + ($source | @json) + "\n"
     + list("depends_on"; .depends_on)
-    + (if .parallel == true then "parallel: true\n" else "" end)
   ' <<<"$task")
 
   # `$( )` stripped `front`'s own trailing newline, so the fence adds one.

@@ -3959,7 +3959,10 @@ mod tests {
         .expect_err("a lane must not answer a gate on another task's behalf");
         assert!(format!("{gate:#}").contains("waiting on a gate"));
 
-        add(&repo, "sibling", &[]);
+        // Depends on `ship`: both share `add`'s own `group: demo`, and a
+        // group is one chain now — this test has no stake in the two being
+        // unrelated, only in `sibling` itself being a second, distinct task.
+        add(&repo, "sibling", &["ship"]);
         let mut task = queued(&repo, "sibling");
         task.front.blocked_from = Some("build".into());
         task.set_stage(crate::pipeline::BLOCKED, None);

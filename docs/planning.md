@@ -73,7 +73,7 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 | Mockups from real output | Draw a panel from a real screenshot or real command output. A panel for something that does not exist yet names the bound it was drawn to. |
 | Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `~/.spoolway/<project>/plans/<group>/` first, and the task links the copy. |
 | Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. |
-| Independent, or ordered | Judge from what each task changes whether two tasks may run side by side. A shared file alone is no reason to chain them. Tasks that do run side by side are both marked `parallel: true`. |
+| Independent, or ordered | Judge from what each task changes whether two tasks may run side by side. A shared file alone is no reason to chain them. Work that does not chain goes in a group of its own. |
 
 ## Queueing a plan
 
@@ -173,13 +173,9 @@ A command step with `last:` runs once for the chain. See
 ## Why a plan is a chain
 
 A dependent task's worktree is cut from its dependency's branch. That is what makes a stack of
-pull requests possible.
+pull requests possible. A group is one chain: `queue add` and `task contract` refuse a group
+with two roots, with a fan, or with a join, naming the group and the tasks at fault.
 
-| Shape | Result |
-|---|---|
-| Chain: each task depends on the one before | A stack of pull requests. |
-| Fan: no dependencies | One flat pull request per task. Mark the tasks `parallel: true`. |
-| Join: one task depends on two | Broken. The task is based on one parent only and ships without the other's work. |
-
-`/spoolway-tasks` checks the chain when it writes the tasks. The binary does not check it
-again, so a task file edited afterwards can break the shape.
+Work that would not chain goes in a group of its own. A group's first task may name one other
+group's own last task in `depends_on`, stacking the two groups' pull requests into one line.
+See [Stacking one group on another](tasks.md#stacking-one-group-on-another).

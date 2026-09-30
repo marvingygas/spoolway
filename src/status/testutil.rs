@@ -141,7 +141,7 @@ pub fn row(id: &str) -> Row {
         id: id.into(),
         group: Some("demo".into()),
         issue_url: None,
-        parallel: false,
+        after: None,
         stage: "implement".into(),
         arrivals: 0,
         pipeline: "default".into(),
