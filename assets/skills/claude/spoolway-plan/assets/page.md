@@ -13,9 +13,14 @@ directory — see `SKILL.md`'s step 7 — never markup appended here.
 ## Copy the skeleton
 
 `cp assets/template.html` to the plan file — by default
-`~/.spoolway/<project>/plans/<YYYY-MM-DD>-<slug>.html`, where `<project>` is the basename of the
-repo root, `<YYYY-MM-DD>` is the day the plan is cut, and `<slug>` folds the goal to lowercase,
-digits and hyphens.
+`<home>/plans/<YYYY-MM-DD>-<slug>.html`, where `<YYYY-MM-DD>` is the day the plan is cut, and
+`<slug>` folds the goal to lowercase, digits and hyphens.
+
+**`<home>` is the project's own home, `~/.spoolway/<label>-<id>/`, and never a path built from
+the repo's name.** A folder named after the repo alone is one no lane can read, so every task
+cut from the page would have to copy it in first. Take it off the contract instead: `spoolway
+task contract` prints the pending directory as `output.dir`, and `<home>` is the directory
+above it.
 
 **The date belongs to the filename alone.** The slug is what is left once it comes off —
 `e2e-runtime`, never `2026-09-19-e2e-runtime`. That is the string the page carries and the string

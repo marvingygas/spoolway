@@ -14,7 +14,9 @@ or both.
 ## Inspect the runs
 
 - Read `housekeeping.calibrate_window` and the archived tasks completed in that window under
-  `~/.spoolway/<project>/archive/`.
+  the project home's `archive/`. The home is `~/.spoolway/<label>-<id>/`, never a folder named
+  after the repo alone: it is the directory above the `output.dir` that `spoolway task
+  contract` prints.
 - Read `## Status Log`, `## Handoff` and `## Blocker` — the three fixed sections a lane writes to
   in every archived task — and follow the sequence of events. Work out why review sent work
   back, why a session blocked, what an agent misunderstood, and what later cleared it.
