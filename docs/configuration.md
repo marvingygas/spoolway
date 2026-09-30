@@ -349,11 +349,11 @@ still lets tasks reach `queued`, `started` or `done` and pause there.
 
 ### The shipped hook scripts
 
-`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`.
-They are project-owned starting points, not required integrations: edit either script, replace
-it with any executable that follows `spoolway hook contract`, or leave `hook` blank. `spoolway
-sync` never changes them. Switch trackers with
-`spoolway config set issue_tracking.hook <file>`.
+`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`, but only
+when a tracker is chosen; answering `none` leaves that folder unwritten. They are project-owned
+starting points, not required integrations: edit either script, replace it with any executable
+that follows `spoolway hook contract`, or leave `hook` blank. `spoolway sync` never changes
+them. Switch trackers with `spoolway config set issue_tracking.hook <file>`.
 
 A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
 comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's
@@ -391,8 +391,9 @@ Instead the `done` branch leaves a comment on the pull request carrying a
 `<!-- spoolway-issue: URL -->` marker, and on the issue it swaps the `spoolway:in-progress`
 label for `spoolway:review`. Closing the issue waits for the pull request to merge.
 
-`spoolway init` writes `.github/workflows/spoolway-issues.yml` into the project when the
-tracker is github. The workflow triggers on `pull_request: closed` and runs only when
+spoolway's own repository keeps this workflow at `.github/workflows/spoolway-issues.yml`.
+Neither `init` nor `sync` writes or checks it in a project; copy the file in by hand for the
+same close-on-merge automation. It triggers on `pull_request: closed` and runs only when
 `github.event.pull_request.merged` is true. It reads the pull request's comments for a marker
 left by a trusted author — one whose association is OWNER, MEMBER or COLLABORATOR — checks
 that the marked issue carries the `spoolway:task` label, then closes that issue and removes

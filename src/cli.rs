@@ -597,12 +597,16 @@ pub struct EvalArgs {
         provider's skills, creates its one agent profile, and points every scaffolded lane \
         at it. Model and effort stay blank for each step because spoolway cannot choose \
         either for you. Add or change profiles with `spoolway config set`.\n\n\
+        `--examples` and `--no-examples` answer \"Install the example setup?\", asked after \
+        the agent question on a fresh project and yes when there is nobody to ask. Yes \
+        writes the shipped pipelines, prompts, task templates and ticket templates. No \
+        writes `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders, \
+        for the spoolway-config skill to fill.\n\n\
         `--tracker` names the issue tracker `[issue_tracking]` points at — `github`, `jira` \
-        or `none` — and `--project-key` is the project its tickets open into. Every hook \
-        script is written whichever answer this is, so switching trackers later is a \
-        `spoolway config set issue_tracking.hook` away, not a second `init`. Answering \
-        `github` also writes `.github/workflows/spoolway-issues.yml`, the workflow that \
-        closes a mirrored issue once its pull request merges."
+        or `none` — and `--project-key` is the project its tickets open into. Choosing a \
+        tracker writes `.spoolway/hooks/` with every hook script in it, so switching \
+        between trackers later is a `spoolway config set issue_tracking.hook` away. \
+        Choosing `none` writes no `hooks/` folder at all."
 )]
 pub struct InitArgs {
     /// Answer the opening `Set up this project?` confirmation yes without
@@ -663,6 +667,18 @@ pub struct InitArgs {
     /// `none` or is not given at all.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
+
+    /// Answer `Install the example setup?` yes without asking: write the
+    /// shipped pipelines, prompts, task templates and ticket templates.
+    /// Yes is also the answer when there is nobody to ask.
+    #[arg(long, conflicts_with = "no_examples")]
+    pub examples: bool,
+
+    /// Answer `Install the example setup?` no without asking: write
+    /// `config.toml` and empty `pipelines/`, `prompts/` and `templates/`
+    /// folders instead of the shipped examples.
+    #[arg(long)]
+    pub no_examples: bool,
 }
 
 #[derive(Debug, Args)]
@@ -735,9 +751,8 @@ pub enum Tracker {
     Github,
     /// `.spoolway/hooks/jira.sh`, calling `acli`.
     Jira,
-    /// No hook is named. The scripts are written all the same — see
-    /// `commands::init` — so turning tracking on later is a config edit, not
-    /// a second `init`.
+    /// No hook is named, and `init` writes no `.spoolway/hooks/` folder —
+    /// see `commands::init`.
     None,
 }
 

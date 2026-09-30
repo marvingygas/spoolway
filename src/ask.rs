@@ -30,8 +30,9 @@ pub fn interactive() -> bool {
 /// One question with a fixed set of answers, as an interactive selector.
 ///
 /// `options` are `(value, note)`; the note is what the value means, shown
-/// beside it. The default starts highlighted, arrow keys move the highlight,
-/// and Enter or Space accepts it. Returns the chosen value's index.
+/// beside it, and an empty note shows the value alone. The default starts
+/// highlighted, arrow keys move the highlight, and Enter or Space accepts it.
+/// Returns the chosen value's index.
 pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Result<usize> {
     debug_assert!(default < options.len(), "the default must be on the menu");
     if !interactive() {
@@ -45,7 +46,13 @@ pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Resul
         .unwrap_or(0);
     let items: Vec<String> = options
         .iter()
-        .map(|(value, note)| format!("{value:width$}  {note}"))
+        .map(|(value, note)| {
+            if note.is_empty() {
+                value.to_string()
+            } else {
+                format!("{value:width$}  {note}")
+            }
+        })
         .collect();
     let term = dialoguer::console::Term::stdout();
     Ok(dialoguer::Select::new()

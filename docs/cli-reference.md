@@ -836,8 +836,8 @@ See [Pricing](cost.md#pricing).
 ### `spoolway init`
 
 Scaffold `.spoolway/` in a repository: config, pipelines, prompts, templates, hook scripts and
-skills. At a terminal it asks for the agent, the tracker and the project key. With no terminal
-it takes the defaults.
+skills. At a terminal it asks for the agent, whether to install the example setup, the tracker
+and the project key. With no terminal it takes the defaults.
 
 Before any of that, it prints the project directory it resolved and waits for a yes — a path you
 do not recognise is the whole of the check, and it matters most when `init` was reached from a
@@ -859,6 +859,8 @@ spoolway init --yes --provider codex --tracker github --project-key owner/repo
 | Flag | Default | What it does |
 |---|---|---|
 | `--provider <claude\|codex>` | `claude` | The coding agent whose skills are installed and which becomes the project's agent profile |
+| `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts, task templates and ticket templates. Also the answer with nobody to ask |
+| `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira |
 | `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
@@ -867,9 +869,10 @@ spoolway init --yes --provider codex --tracker github --project-key owner/repo
 | `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
 | `--take-over` | | Accepted and ignored |
 
-Run again in a project that already has a config, it installs skills and changes nothing else.
-Every hook script is written whatever the tracker answer. See [Installation and
-setup](installation.md#scaffolding-a-project).
+Run again in a project that already has a config, it installs skills, restores any example file
+that went missing, and otherwise changes nothing. Hook scripts are written only when a tracker
+is chosen, whichever one, so switching trackers later is a `spoolway config set
+issue_tracking.hook` away. See [Installation and setup](installation.md#scaffolding-a-project).
 
 ### `spoolway install <provider>`
 

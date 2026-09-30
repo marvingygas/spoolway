@@ -155,8 +155,9 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// The two hook scripts `spoolway init` writes into `.spoolway/hooks/`, one
 /// per tracker, each calling the tracker's own command-line tool (`gh` or
 /// `acli`) rather than any tracker's HTTP API directly. Both are written
-/// whatever a project answered the tracker question, or none at all:
-/// switching trackers later is a `spoolway config set issue_tracking.hook`
+/// only when a tracker is chosen, and with `none` there is no `hooks/`
+/// folder at all. Both rather than only the chosen one's, so switching
+/// between trackers later is a `spoolway config set issue_tracking.hook`
 /// away, not a second `init`.
 ///
 /// `spoolway sync` never touches a hook it has already written, the same
@@ -172,11 +173,13 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// opened this task's own pull request, not when it merges — leaves a
 /// `<!-- spoolway-issue: URL -->` marker comment on that pull request and
 /// relabels the ticket for review. Closing the ticket itself is left to
-/// [`GITHUB_ISSUE_WORKFLOW`], the workflow a project writes alongside this
-/// hook: it trusts only a marker left by an owner, member or collaborator,
+/// the project. Spoolway's own repository does it with
+/// `.github/workflows/spoolway-issues.yml`, which `init` no longer ships:
+/// it trusts only a marker left by an owner, member or collaborator,
 /// reads the pull request's `merged` event, and closes the ticket — and,
 /// once every child of a group has closed, the group's own epic — from
-/// there. This whole design, `open` through `done`, was run against a real
+/// there. A project without it closes the ticket by hand after the merge.
+/// This whole design, `open` through `done`, was run against a real
 /// repository: the issues it creates, the parent link, the labels, the
 /// marker comment and the workflow's own close all landed, four times over,
 /// closing a real group and the tasks inside it.
@@ -201,7 +204,7 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// writes read the site back off `acli jira auth status` instead. Spoolway's
 /// own part stops at Review: `jira.sh` never sets Resolved, and closing a
 /// ticket is left to whatever the project wires up on merge, the same way
-/// `github.sh` leaves it to [`GITHUB_ISSUE_WORKFLOW`]. `jq` is a hard
+/// `github.sh` leaves it to the project. `jq` is a hard
 /// dependency of the Jira pair alongside `acli` itself — the only way
 /// `workitem create --json` hands a ticket's key back — and a create call
 /// that comes back with no key exits loudly rather than writing an empty
@@ -228,19 +231,6 @@ pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("github.sh", include_str!("../assets/hooks/github.sh")),
     ("jira.sh", include_str!("../assets/hooks/jira.sh")),
 ];
-
-/// The GitHub Actions workflow that closes a mirrored issue once its pull
-/// request actually merges — `.github/workflows/spoolway-issues.yml` in
-/// this repository, unchanged, and proven there: it closed #159 through
-/// #162 and their group #158 on four real merges. `spoolway init` writes it
-/// into a project's own `.github/workflows/` only when `[issue_tracking]`
-/// names `github`, and — like a hook script — never touches one already
-/// there. It reads the `<!-- spoolway-issue: URL -->` marker `github.sh`'s
-/// `done` branch leaves on the pull request, but only from a comment whose
-/// author is the repository's own owner, a member or a collaborator, so a
-/// marker pasted into a comment by anyone else cannot close a ticket it
-/// does not belong to.
-pub const GITHUB_ISSUE_WORKFLOW: &str = include_str!("../assets/tracking/spoolway-issues.yml");
 
 /// The markers around spoolway's rules in the project's `.gitignore`.
 ///
@@ -303,7 +293,7 @@ mod tests {
     }
 
     /// `hand_off_for_review` — the `done` branch — leaves the marker comment
-    /// [`GITHUB_ISSUE_WORKFLOW`] trusts on the pull request, relabels the
+    /// a close-on-merge workflow trusts on the pull request, relabels the
     /// ticket for review, and tells it where to find the pull request,
     /// checking every `gh` call for failure rather than treating a failed
     /// lookup, comment or edit as nothing to react to. Static substring

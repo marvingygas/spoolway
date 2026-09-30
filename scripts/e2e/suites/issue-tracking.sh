@@ -656,10 +656,10 @@ must "the hook is put back so it stops holding tasks" \
   "$SPOOLWAY" config set issue_tracking.hook ""
 
 # ----------------------------------------------------------- github.sh, real
-# The shipped script itself, not a hand-written stand-in — `configure_project`
-# already ran `spoolway init` with no `--tracker`, which writes
-# `.spoolway/hooks/github.sh` all the same (see the tracker scaffolding
-# above), so this project already has the real file on disk. Pointed at a
+# The shipped script itself, not a hand-written stand-in. `configure_project`
+# ran `spoolway init` with no `--tracker`, which writes no shipped hooks, so
+# `sync --replace` puts the real `.spoolway/hooks/github.sh` on disk first —
+# the same whole-file copy `init` writes for a tracker. Pointed at a
 # `gh` double on `PATH` rather than at a real repository — see
 # `scripts/e2e/gh-stub.sh`'s own header for why that double is shared with
 # `suites/stack.sh`.
@@ -671,6 +671,8 @@ export GH_STUB_ISSUES="$LIVE/gh-issues"
 export GH_STUB_URL="file://$LIVE/gh-forge"
 PATH="$GH_STUBBIN:$PATH"
 
+must "the shipped github.sh is written" \
+  "$SPOOLWAY" sync --replace .spoolway/hooks/github.sh
 must "the hook is switched to the real github.sh" \
   "$SPOOLWAY" config set issue_tracking.hook github.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/app

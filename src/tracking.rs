@@ -2134,10 +2134,10 @@ exit 0
     }
 
     /// Acceptance criterion: `done` leaves the ticket open, marks the pull
-    /// request with the marker `.github/workflows/spoolway-issues.yml`
-    /// trusts, relabels the ticket for review, and closes nothing itself —
-    /// closing is that workflow's job, once the pull request actually
-    /// merges.
+    /// request with the marker a close-on-merge workflow such as spoolway's
+    /// own `.github/workflows/spoolway-issues.yml` trusts, relabels the
+    /// ticket for review, and closes nothing itself — closing is that
+    /// workflow's job, once the pull request actually merges.
     #[test]
     fn github_sh_done_hands_the_ticket_to_its_pull_request_without_closing_it() {
         let (repo, t, stub) =
@@ -2214,7 +2214,7 @@ exit 0
 
     /// A failed marker comment must stop the handoff outright — the ticket
     /// is not yet relabelled or told anything, so nothing here claims a
-    /// handoff `.github/workflows/spoolway-issues.yml` cannot yet see.
+    /// handoff a close-on-merge workflow cannot yet see.
     #[test]
     fn github_sh_done_stops_when_the_marker_comment_fails() {
         let (repo, t, stub) =

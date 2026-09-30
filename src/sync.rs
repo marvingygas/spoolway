@@ -961,13 +961,6 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
             .map(|(_, body)| body.to_string());
     }
 
-    // The workflow `init` writes into `.github/workflows/` only for
-    // `github` — the one shipped asset outside `.spoolway/` entirely, and
-    // still never touched by an ordinary sync.
-    if path == repo.checkout.join(".github/workflows/spoolway-issues.yml") {
-        return Some(crate::assets::GITHUB_ISSUE_WORKFLOW.to_string());
-    }
-
     // The ignore rules are deliberately not here. They are a block in a file the
     // project owns the rest of, so there is no whole-file version of it to write:
     // `ignores` above refreshes the block, on every run, and that is the only way
@@ -2404,10 +2397,6 @@ mod tests {
             (
                 repo.checkout.join(".spoolway/hooks/github.sh"),
                 "hand_off_for_review",
-            ),
-            (
-                repo.checkout.join(".github/workflows/spoolway-issues.yml"),
-                "close-issue",
             ),
         ] {
             let shipped = shipped_for(&repo, &path)

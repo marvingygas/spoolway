@@ -283,7 +283,7 @@ stage() {
 # captured reads `kept` for it rather than `wrote`, and that `nothing to
 # install.` is what it closes with. Every fixture under `scripts/e2e/
 # fixtures/` ships with `issue_tracking.hook` blank, so there is no
-# `.github/workflows/spoolway-issues.yml` row to expect here either — that
+# `.spoolway/hooks/` row to expect here either — that
 # half of acceptance criterion 3 (a `wrote` row for something a fixture
 # actually lacks) is `tests/init_output.rs`'s own job, against a project
 # this binary controls the shape of rather than a fixture frozen at a past

@@ -280,32 +280,53 @@ works "and task contract answers again on the next call" \
 
 # ------------------------------------------------------- tracker scaffolding
 # `--tracker` and `--project-key` answer the same two questions
-# `init`'s menu asks interactively, and land in `[issue_tracking]` — but
-# every hook script is written whichever tracker was named, not only the
-# chosen one, so switching later is a config edit rather than a second
-# `init`.
+# `init`'s menu asks interactively, and land in `[issue_tracking]`. Naming
+# a tracker writes every hook script, not only the chosen one, so switching
+# between trackers later is a config edit rather than a second `init`.
+# `none` writes no `hooks/` folder at all.
 mkdir -p "$INITDIR/github" && (cd "$INITDIR/github" && git init -q -b main .)
-works "init --tracker github --project-key answers both questions with no prompt" \
-  env -C "$INITDIR/github" "$SPOOLWAY" init --yes --tracker github --project-key acme/app
+GITHUB_OUT=$(env -C "$INITDIR/github" "$SPOOLWAY" init --yes --examples --tracker github \
+  --project-key acme/app 2>&1)
+has "init --examples --tracker github answers every question with no prompt" \
+  "Project initialized successfully." <(printf '%s\n' "$GITHUB_OUT")
+has "and closes on the model-and-effort line" \
+  "Set model and effort on every agent step" <(printf '%s\n' "$GITHUB_OUT")
+works "the examples are written" \
+  test -f "$INITDIR/github/.spoolway/pipelines/default.yml" -a \
+       -f "$INITDIR/github/.spoolway/prompts/implementer/PROMPT.md" -a \
+       -f "$INITDIR/github/.spoolway/templates/tasks/default.md" -a \
+       -f "$INITDIR/github/.spoolway/templates/tracking/ticket.md"
 has "the hook it names" 'hook = "github.sh"' "$INITDIR/github/.spoolway/config.toml"
 has "and the project it files into" 'project_key = "acme/app"' \
   "$INITDIR/github/.spoolway/config.toml"
 works "the github hook is written" test -f "$INITDIR/github/.spoolway/hooks/github.sh"
 works "and so is jira's, unchosen or not" test -f "$INITDIR/github/.spoolway/hooks/jira.sh"
 works "a hook is written executable" test -x "$INITDIR/github/.spoolway/hooks/github.sh"
-works "answering github also writes the workflow that closes a mirrored issue" \
-  test -f "$INITDIR/github/.github/workflows/spoolway-issues.yml"
-works "none never gets one" \
-  test ! -e "$INITDIR/unasked/.github/workflows/spoolway-issues.yml"
+works "no close-on-merge workflow ships with github any more" \
+  test ! -e "$INITDIR/github/.github"
 
 # `none` — `unasked`'s own `init` above already took every default with
 # nobody there to ask, which includes the tracker question defaulting to
-# `none`: the table stays empty even though both scripts are on disk.
+# `none`: the table stays empty and there is no `hooks/` folder.
 has "unasked left the hook empty" 'hook = ""' "$INITDIR/unasked/.spoolway/config.toml"
 has "and the project key empty" 'project_key = ""' "$INITDIR/unasked/.spoolway/config.toml"
-works "both hooks are written all the same" \
-  test -f "$INITDIR/unasked/.spoolway/hooks/github.sh"
-works "the jira one too" test -f "$INITDIR/unasked/.spoolway/hooks/jira.sh"
+works "and no hooks folder is written" test ! -e "$INITDIR/unasked/.spoolway/hooks"
+
+# `--no-examples` writes the config and three empty folders for the
+# spoolway-config skill to fill, and closes on the line that names it.
+mkdir -p "$INITDIR/bare" && (cd "$INITDIR/bare" && git init -q -b main .)
+BARE_OUT=$(env -C "$INITDIR/bare" "$SPOOLWAY" init --yes --no-examples --tracker none 2>&1)
+has "init --no-examples closes on the spoolway-config line" \
+  "Use the spoolway-config skill to create pipelines." <(printf '%s\n' "$BARE_OUT")
+has "and reports the folders it made" "made     .spoolway/pipelines/" \
+  <(printf '%s\n' "$BARE_OUT")
+works "config.toml is written" test -f "$INITDIR/bare/.spoolway/config.toml"
+works "pipelines, prompts and templates are empty folders" \
+  test -d "$INITDIR/bare/.spoolway/pipelines" -a -z "$(ls -A "$INITDIR/bare/.spoolway/pipelines")" \
+    -a -d "$INITDIR/bare/.spoolway/prompts" -a -z "$(ls -A "$INITDIR/bare/.spoolway/prompts")" \
+    -a -d "$INITDIR/bare/.spoolway/templates" -a -z "$(ls -A "$INITDIR/bare/.spoolway/templates")"
+works "none writes no hooks folder" test ! -e "$INITDIR/bare/.spoolway/hooks"
+works "and no workflow" test ! -e "$INITDIR/bare/.github"
 
 # `spoolway sync` never touches a hook `init` has already written — the
 # same rule a prompt or a task skeleton already follows once a project has

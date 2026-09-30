@@ -81,18 +81,26 @@ It opens by printing the project directory it resolved and waiting for a yes —
 is the one you meant, especially when `init` was reached from a keybinding rather than typed
 where you were standing. Answering no writes nothing and exits 0.
 
-Then, at a terminal, it asks three more questions. Each one has a flag, and a given flag skips
-its question. Without a terminal, the defaults apply: `claude` and no tracker.
+Then, at a terminal, it asks four more questions. Each one has a flag, and a given flag skips
+its question. Without a terminal, the defaults apply: `claude`, the example setup, and no
+tracker.
 
 | Question | Flag | Default |
 |---|---|---|
 | Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | The coding agent you plan in | `--provider claude\|codex` | `claude` |
+| Install the example setup? | `--examples`/`--no-examples` | yes |
 | The issue tracker | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
 and effort are left blank on every step, and you fill them in before dispatching.
+
+Answering yes to the example setup writes the shipped pipelines, prompts, task templates and
+ticket templates. Answering no writes `.spoolway/config.toml` and empty `pipelines/`, `prompts/`
+and `templates/` folders instead, for the `spoolway-config` skill to fill. An established
+project is not asked again: it keeps whatever its own files already show, and a repeat run
+restores any of its example files that went missing.
 
 ```mermaid
 flowchart LR
@@ -101,7 +109,6 @@ flowchart LR
   I --> R[.spoolway/prompts/&lt;name&gt;/PROMPT.md]
   I --> T[.spoolway/templates/]
   I --> H[.spoolway/hooks/]
-  I --> W[.github/workflows/spoolway-issues.yml]
   I --> S[provider skills directory]
   I --> N[~/.spoolway/&lt;project&gt;/project.toml]
 ```
@@ -109,20 +116,19 @@ flowchart LR
 | Path | What it is |
 |---|---|
 | `.spoolway/config.toml` | Every setting, with defaults and comments. |
-| `.spoolway/pipelines/` | The two sample pipelines. Edit or replace them. |
-| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts. Updates never touch them. |
-| `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills. |
-| `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline. |
-| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
-| `.spoolway/hooks/` | `github.sh` and `jira.sh`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
-| `.github/workflows/spoolway-issues.yml` | Closes an issue once its pull request merges. Written only when the tracker is github. |
+| `.spoolway/pipelines/` | The two sample pipelines, with the example setup. Edit or replace them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts, with the example setup. Updates never touch them. |
+| `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
+| `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
+| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders, with the example setup. |
+| `.spoolway/hooks/` | `github.sh` and `jira.sh`, written only when a tracker is chosen. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
 Existing files are kept. `--force` overwrites them.
 
-Running `init` again in a set-up project installs skills and changes nothing else. To change
-settings later, use `spoolway config set`.
+Running `init` again in a set-up project installs skills, restores any example file that went
+missing, and otherwise changes nothing. To change settings later, use `spoolway config set`.
 
 Everything spoolway writes while it runs lives outside the checkout, at
 `~/.spoolway/<label>-<id>/`: the queue, the archive, plans, lane records and the usage ledger.
