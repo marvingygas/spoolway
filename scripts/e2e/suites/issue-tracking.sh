@@ -100,6 +100,15 @@ case "$SPOOLWAY_EVENT" in
   check) : ;;
 esac
 [ -n "$SPOOLWAY_TASK_FILE" ] && env | sort > "$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT"
+# On `started`, also the stage every task still in the queue stands at, as
+# the hook saw it: what a dependency had reached when its dependent started
+# is read straight off this, rather than off which of two hooks running at
+# once happened to write its file first.
+if [ "$SPOOLWAY_EVENT" = started ] && [ -n "$SPOOLWAY_TASK_FILE" ]; then
+  for f in "$(dirname "$SPOOLWAY_TASK_FILE")"/*.md; do
+    [ -e "$f" ] && echo "$(basename "$f" .md) $(sed -n 's/^stage: //p' "$f")"
+  done > "$SPOOLWAY_TASK_FILE.stages.started"
+fi
 exit 0
 EOF
 chmod +x .spoolway/hooks/record.sh
@@ -177,9 +186,10 @@ export GH_STUB_URL="file://$ORIGIN"
 dispatcher_restart
 
 # A dependent pair rather than two independent tasks: `tracked-b` cannot even
-# start until `tracked-a` has archived, which is what keeps `SPOOLWAY_GROUP_LAST`
-# deterministic below — the two can never reach `done` in the same pass, so
-# `tracked-a`'s own hook always sees `tracked-b` still open.
+# start until `tracked-a` has reached `done`, which is what keeps
+# `SPOOLWAY_GROUP_LAST` deterministic below — the two can never reach `done`
+# in the same pass, so `tracked-a`'s own hook always sees `tracked-b` still
+# open.
 task_doc "$LIVE/tracked-a.md" tracked-a "$BODY" "group: tracked-pair" \
   "group_description: a dependent pair, tracked end to end" \
   "labels: [gh, tracked]"
@@ -218,21 +228,26 @@ has "the second's done event is — it is the group's last open task" \
 # `started` fires once a task actually leaves `queued` for its entry step,
 # not merely once it is queued — the moment `queued` itself already fires
 # on. `tracked-b` depends on `tracked-a`, so it cannot leave `queued` until
-# `tracked-a` has archived, which is exactly what a `started` event for
-# `tracked-b` older than `tracked-a`'s own `done` would contradict.
+# `tracked-a` has reached `done`, which is exactly what a `started` event for
+# `tracked-b` seeing `tracked-a` at any other stage would contradict.
 ENV_A_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-a.md.env.started"
-ENV_B_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.env.started"
 has "the first of the pair's started event fired with its own identity" \
   "SPOOLWAY_TASK=tracked-a" "$ENV_A_STARTED"
 has "the event it fired for" "SPOOLWAY_EVENT=started" "$ENV_A_STARTED"
-# Proved by file order, not a race: `record.sh` writes
-# `$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT` fresh every time it runs, so a
-# `started` file for `tracked-b` that is newer than `tracked-a`'s own `done`
-# file could only have been written after `tracked-a` was already finished.
-if [ "$ENV_B_STARTED" -nt "$ENV_A_DONE" ]; then
+# Read off the stages `record.sh` snapshots on `started`, not off file times.
+# `tracked-a` counts as finished once it stands at `done`, so `tracked-b` may
+# start in the very pass `tracked-a`'s own `done` hook is still running — the
+# two hooks run at once, and which writes its file first is a race. What the
+# gate does promise is that `tracked-a` is at `done`, or already archived out
+# of the queue, by the time `tracked-b`'s `started` fires.
+STAGES_B_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.stages.started"
+has "the second's started event saw itself still queued" \
+  "tracked-b queued" "$STAGES_B_STARTED"
+if ! grep -q '^tracked-a ' "$STAGES_B_STARTED" 2>/dev/null \
+  || grep -qx 'tracked-a done' "$STAGES_B_STARTED"; then
   ok "tracked-b's started event fired only once tracked-a had already reached done"
 else
-  bad "tracked-b's started event ($ENV_B_STARTED) is not newer than tracked-a's done event ($ENV_A_DONE) — the dependency gate did not hold started back"
+  bad "tracked-b's started event saw tracked-a at \`$(sed -n 's/^tracked-a //p' "$STAGES_B_STARTED")\` ($STAGES_B_STARTED) — the dependency gate did not hold started back"
 fi
 
 # Undone: everything past here is meant to see the same not-github forge the
@@ -558,6 +573,11 @@ dispatcher_restart   # a new hook name only takes effect on the next start —
                       # resume, still holding fail.sh in memory, would
                       # otherwise re-fire it and pause the task right back.
 
+# Held at `implement` for a while. A stand-in's whole turn fits inside a poll
+# interval, so without this the task can run on through every step to the
+# archive between two of `drive`'s looks, and the check fails on a task that
+# did exactly what it should. Step-scoped, so it governs this one turn.
+echo linger:15 > "$CTL/hook-queued.implement"
 must "resume clears the queued pause" "$SPOOLWAY" resume hook-queued
 if drive hook-queued implement 60; then
   ok "resuming a queued hook pause re-runs the hook and lets the task start"

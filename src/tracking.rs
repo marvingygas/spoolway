@@ -1744,24 +1744,24 @@ mod tests {
         );
     }
 
-    /// The shipped `jira.sh` genuinely has no `check` branch yet — a later
-    /// task in this group adds one — so `doctor` must report it missing
-    /// rather than silently pass it. Pinned here so a change to either
-    /// `jira.sh` or `has_check_branch` that quietly stops seeing this is
-    /// caught immediately, not the next time somebody notices doctor is
-    /// quiet about a hook that was never asked to prove itself.
+    /// The shipped `jira.sh` proves itself before any task can ever pause
+    /// on it: `check` logs into `acli`, confirms the project and both work
+    /// item types exist, and proves each status name with a JQL search.
+    /// Pinned here so a change to either `jira.sh` or `has_check_branch`
+    /// that quietly stops seeing the branch is caught immediately, not the
+    /// next time somebody notices `doctor` reporting a hook that was never
+    /// asked to prove itself.
     #[test]
-    fn the_shipped_jira_sh_is_missing_its_check_branch() {
+    fn the_shipped_jira_sh_has_a_check_branch() {
         let script = crate::assets::HOOK_SCRIPTS
             .iter()
             .find(|(name, _)| *name == "jira.sh")
             .expect("jira.sh is a shipped hook")
             .1;
         assert!(
-            !has_check_branch(script),
-            "jira.sh has grown a `check` branch — a later task in this group was going to \
-             add one; if it already did, this test (and its own non-goal) is stale and \
-             should be removed"
+            has_check_branch(script),
+            "jira.sh lost its `check` branch — doctor and the dispatcher's own start would \
+             both report it missing again"
         );
     }
 

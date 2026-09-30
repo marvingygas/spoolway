@@ -313,7 +313,20 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         },
     );
 
-    let title = subject.clone();
+    // Jira's own GitHub app looks for the ticket key at the front of a pull
+    // request's title, not its branch — the branch already carries the
+    // group's own slug, from `issue_tracking.key_in_names` prefixing
+    // `queue add`'s generated `group:`, `branch:` and worktree names with
+    // whatever the hook's own `slug=` answer names (`Config::key_in_names`,
+    // `src/config.rs`), not from `cut_from` — so only the title needs the
+    // ticket key added here. A GitHub `ticket:` is a URL, never a bare key,
+    // so this never touches a GitHub-tracked project's title.
+    let ticket = task.extra_str("ticket");
+    let title = if is_bare_ticket_key(ticket) {
+        format!("{ticket} {subject}")
+    } else {
+        subject.clone()
+    };
     let body = compose_body(&task.body);
 
     let (own_number, url) = open_or_reuse_pr(&worktree, &branch, &cut_from, &title, &body)?;
@@ -580,6 +593,14 @@ fn char_boundary_floor(s: &str, at: usize) -> usize {
 /// No address beside the name, deliberately. A trailer here names no email —
 /// not the person who ran the task, and not one for the model either.
 const CO_AUTHOR: &str = "Co-Authored-By: Claude Code";
+
+/// Whether `ticket` is a bare tracker key such as `KAN-11`, rather than a
+/// GitHub `ticket:` URL — what decides whether `spoolway stack` prefixes the
+/// pull request's title with it. Blank when the task named no ticket at all.
+fn is_bare_ticket_key(ticket: &str) -> bool {
+    let ticket = ticket.trim();
+    !ticket.is_empty() && !ticket.starts_with("http://") && !ticket.starts_with("https://")
+}
 
 /// The pull request already open on `branch`, or a freshly opened one.
 ///
@@ -976,6 +997,17 @@ fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare tracker key such as `KAN-11` is what gets prefixed onto a
+    /// pull request's title; a GitHub `ticket:` — always an absolute URL —
+    /// and a task with no ticket at all are both left alone.
+    #[test]
+    fn is_bare_ticket_key_only_true_for_a_bare_key() {
+        assert!(is_bare_ticket_key("KAN-11"));
+        assert!(!is_bare_ticket_key(""));
+        assert!(!is_bare_ticket_key("https://github.com/acme/app/issues/43"));
+        assert!(!is_bare_ticket_key("http://example.com/browse/KAN-11"));
+    }
 
     /// Taken by every test in this module that sets `SPOOLWAY_WORKTREE` —
     /// the same reasoning as `usage::tests::AMBIENT_ENV`: the environment is

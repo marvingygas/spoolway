@@ -179,16 +179,30 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// there. This whole design, `open` through `done`, was run against a real
 /// repository: the issues it creates, the parent link, the labels, the
 /// marker comment and the workflow's own close all landed, four times over,
-/// closing a real group and the tasks inside it. The `fetch` branch, plus
-/// every branch of the Jira pair, are written the same careful way but have
-/// not been run against a live tracker — `jira.sh`'s `acli` commands were
-/// checked flag by
-/// flag against acli 1.3.30-stable, and its header names what still wants a
-/// project's own site to confirm: the field `workitem create --json` puts the
-/// new key in and `workitem view --json` puts an issue's own fields in,
-/// whether a project spells its link type `Blocks` and its status `Done`, and
-/// the link type `fetch`'s own `hang_under` guesses at, `Relates`. `jq` is a
-/// hard dependency of the Jira pair alongside `acli` itself — the only way
+/// closing a real group and the tasks inside it.
+///
+/// `jira.sh` opens one Story per group, a group of one included, and one
+/// Sub-task per task under it — `Blocks` links a Sub-task to the task its
+/// own `depends_on` names, `Relates` links the Story to a `…/browse/<key>`
+/// source. `open`, `started` and `done` were all run live against a real
+/// Jira site: creating the Story and its Sub-tasks, the `Blocks` and
+/// `Relates` links, the label union on the Story, and the Sub-task's and
+/// Story's own moves to Review on `done` all landed there. `started`'s move
+/// to `status_progress` did not — that site's own workflow wires no
+/// transition into its "In Progress" status from Draft at all, on any issue
+/// type, so every `started` attempt there was a proven no-op rather than a
+/// landed move; a site whose workflow does wire that transition in is what
+/// would actually show it moving. That run is also what moved the version
+/// floor to `acli 1.3.39` —
+/// `workitem view` took its key as `--key` at 1.3.30 and takes it
+/// positionally now, a breaking change between the two — and what found
+/// that `.self` on a viewed issue names the API's own backend host, not the
+/// host a browser can reach, so `url=` and every browse link this hook
+/// writes read the site back off `acli jira auth status` instead. Spoolway's
+/// own part stops at Review: `jira.sh` never sets Resolved, and closing a
+/// ticket is left to whatever the project wires up on merge, the same way
+/// `github.sh` leaves it to [`GITHUB_ISSUE_WORKFLOW`]. `jq` is a hard
+/// dependency of the Jira pair alongside `acli` itself — the only way
 /// `workitem create --json` hands a ticket's key back — and a create call
 /// that comes back with no key exits loudly rather than writing an empty
 /// `epic=`/`ticket=` line.
@@ -350,16 +364,21 @@ mod tests {
         );
     }
 
-    /// This task's non-goals rule out touching Jira's own `done` behaviour:
-    /// the shipped Jira hook still transitions the epic to `Done` once a
-    /// group's last task settles there, unlike the GitHub one this task
-    /// changed.
+    /// Spoolway's part ends at Review — `jira.sh` never sets Resolved, and
+    /// the epic no longer moves to Done on a group's last `done` the way it
+    /// once did; it moves to `status_review` instead, the same status the
+    /// Sub-task itself lands on.
     #[test]
-    fn shipped_jira_hook_keeps_transitioning_the_epic_on_done() {
+    fn shipped_jira_hook_never_sets_resolved_or_done() {
         let script = hook_script("jira.sh");
         assert!(
-            script.contains("workitem transition") && script.contains("--status Done"),
-            "jira.sh no longer transitions the epic to Done"
+            !script.contains("--status Done") && !script.contains("--status Resolved"),
+            "jira.sh still sets a closing status itself — that is the user's own merge \
+             automation to wire"
+        );
+        assert!(
+            script.contains("$SPOOLWAY_GROUP_LAST") && script.contains("status_review"),
+            "jira.sh no longer moves the Story to review on a group's last `done`"
         );
     }
 

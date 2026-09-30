@@ -85,7 +85,7 @@ with a `// covers:` line.
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `started`, `blocked`, `paused`, `done`, `open` and `check`, the shipped `github.sh` against the `gh` double, `key_in_names`, `labels:` reaching the hook as `SPOOLWAY_LABELS`, and `queue add` refusing a label with a space |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |
-| `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, a base branch that exists locally and nowhere else, a deleted `cut_from` followed to its merged pull request's base, one closed without merging named instead, and one with no pull request at all |
+| `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, the title prefixed with a bare `ticket:` key and left alone for a GitHub `ticket:` URL, a base branch that exists locally and nowhere else, a deleted `cut_from` followed to its merged pull request's base, one closed without merging named instead, and one with no pull request at all |
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
 | `forge` | The `gh` test double, including an empty change |
 | `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention |

@@ -116,13 +116,20 @@ fn render_hook_contract() -> String {
     );
 
     out.push_str(
-        "GitHub's `done` is a pull request handed off, not a merge: `spoolway stack` has just\n\
-         opened it, and nobody has reviewed anything yet. The shipped `github.sh`\n\
-         hook must not close the GitHub issue on `done` — it hands the issue to that pull\n\
-         request instead, so GitHub's own merge automation is what closes the issue once a\n\
-         person actually merges. A custom GitHub hook should keep that split. This is a\n\
-         GitHub-specific recommendation: other trackers, including the shipped Jira hook, keep\n\
-         whatever `done` behaviour suits their own lifecycle.\n",
+        "Every shipped hook's `done` is a pull request handed off, not a merge — `spoolway \
+         stack` has just opened it, and nobody has reviewed anything yet.\n",
+    );
+    out.push_str(
+        "Neither `github.sh` nor `jira.sh` closes anything on `done`: the GitHub issue moves \
+         to `spoolway:review`, the Jira Sub-task and its Story move to Review, and that is \
+         where spoolway's own part ends.\n",
+    );
+    out.push_str(
+        "Resolved, Done, Closed — whatever a tracker calls it — is the user's own merge \
+         automation to wire, not a shipped hook's. Three ordinary ways to wire it: the \
+         tracker's own GitHub app with an automation rule keyed on the pull request title, a \
+         pull request workflow the project already runs, or a `spoolway jobs` routine polled \
+         on a schedule. A custom hook should keep the same split.\n",
     );
     out
 }
@@ -159,11 +166,11 @@ mod tests {
     }
 
     /// The acceptance criterion behind the whole task this contract text was
-    /// last edited for: GitHub's `done` is a handoff, never a close, and the
-    /// recommendation is scoped to GitHub rather than imposed on every
-    /// tracker a hook might talk to.
+    /// last edited for: `done` is a handoff, never a close, for either
+    /// shipped hook — and closing a ticket is named as the user's own to
+    /// wire, with three ordinary ways to do it.
     #[test]
-    fn hook_contract_scopes_the_done_is_not_merge_guidance_to_github() {
+    fn hook_contract_says_done_is_a_handoff_and_names_three_ways_to_close() {
         let text = render_hook_contract();
         // Each assertion below is a distinct claim the acceptance criteria
         // make: a looser one (just "GitHub" and "Jira" appearing anywhere)
@@ -171,23 +178,14 @@ mod tests {
         // were edited away, which is exactly what a prior version of this
         // test let happen.
         for fact in [
-            "GitHub's `done` is a pull request handed off, not a merge",
-            "must not close the GitHub issue on `done`",
-            "GitHub's own merge automation is what closes the issue",
-            "GitHub-specific recommendation",
+            "Every shipped hook's `done` is a pull request handed off, not a merge",
+            "Neither `github.sh` nor `jira.sh` closes anything on `done`",
+            "the user's own merge automation to wire",
+            "the tracker's own GitHub app with an automation rule keyed",
+            "a pull request workflow the project already runs",
+            "a `spoolway jobs` routine polled on a schedule",
         ] {
             assert!(text.contains(fact), "hook contract drops `{fact}`");
         }
-        // The rule names Jira only to say it is exempt, never to extend the
-        // no-close policy onto it.
-        let jira_sentence = text
-            .split("GitHub-specific recommendation")
-            .nth(1)
-            .expect("the exemption clause follows the phrase naming it");
-        assert!(
-            jira_sentence.contains("Jira")
-                && jira_sentence.contains("whatever `done` behaviour suits their own"),
-            "hook contract does not say Jira keeps its own `done` behaviour"
-        );
     }
 }
