@@ -45,6 +45,12 @@ writing about it.
 into `main` on this machine, verify the result compiles and passes, and push. GitHub then
 marks the pull requests merged on its own, because their head commits are on `main`.
 
+**`main` is protected, so the push goes through a pull request of its own.** Branch
+protection requires `verify / test` and `verify / audit` to have passed on the exact commit
+being pushed, admins included, and `ci.yml` runs on pull requests only. A plain
+`git push origin main` of a fresh merge is refused with `GH006 ... 2 of 2 required status
+checks are expected`. Step 7 is how to satisfy that without touching the protection.
+
 ## Procedure
 
 ### 1. Survey
@@ -138,6 +144,16 @@ log until the job is over. Reproduce it locally instead: `git worktree add` on t
 build, run the one suite under `timeout`, and read the hung process (`ps`, `/proc/<pid>/wchan`)
 while it is still hanging. The last `ok` the suite printed names the line that did not return.
 
+**Point the suites at the branch's own build.** `scripts/e2e/run.sh` runs whatever `spoolway`
+is on `PATH` unless `SPOOLWAY` says otherwise, and the one on `PATH` is the last install, not
+the branch. Run it as `SPOOLWAY=$PWD/target/release/spoolway scripts/e2e/run.sh --suite <name>`,
+or every failure you read is the old binary's.
+
+**A red run leaves its tree behind as an artifact.** The `keep the wreckage` step uploads
+`/tmp/spoolway-e2e-run.*` and `/tmp/spoolway-e2e-fail.*.log` on a failure. Download it with
+`gh run download <id>` before trying to reproduce anything: the dispatcher's own
+`dispatch.log` in the kept tree usually answers what the suite's one-line `FAIL` cannot.
+
 A branch whose checks never started is usually one pushed before the workflow existed. Push an
 empty commit or re-run the workflow and wait; do not merge it unchecked.
 
@@ -198,12 +214,27 @@ installed, so it will happily show you the old layout and tell you nothing.
 
 ### 7. Push, then prove `main` is green
 
+`main` refuses any commit its two required checks have not passed on (see *Merging is
+local* above), so the merged tree goes up as a pull request first and `main` is
+fast-forwarded to it once CI is green:
+
 ```
-git push origin main
+git push origin HEAD:refs/heads/merge/<date>
+gh pr create --base main --head merge/<date> --title "Merge pass <date>: #<first>–#<last>" \
+  --body "<which pull requests, and that this exists only for its checks>"
+gh pr checks <number> --watch
+git fetch origin && git log --oneline HEAD..origin/main   # must print nothing
+git push origin main                                      # the same sha, now checked
 gh pr list --state open
 ```
 
-The second line is the check, not a formality. Every pull request whose head landed should now
+Never `gh pr merge` the helper pull request. That would put a new merge commit on `main` —
+one nothing checked — rather than the commit that just passed. The fast-forward push lands the
+exact sha CI ran on, and the helper closes as merged on its own, along with every pull request
+the pass merged. If `main` moved in the meantime, the fast-forward is no longer possible:
+merge `origin/main` in, run step 6 again, and push the helper branch again for a fresh run.
+
+The last line is the check, not a formality. Every pull request whose head landed should now
 be gone from the open list, the stacked one included. Anything still open did not actually
 merge — find out why before moving on.
 
@@ -231,7 +262,8 @@ that ran on the branches — and step 6's local `cargo test` is smaller still. A
 pull requests is no evidence at all about the run you have just dispatched.
 
 **A red run here is this pass's, on the same terms as a red tip.** Open the failing job, find
-what is actually wrong, fix it on `main`, push, and dispatch again until it is green. What not
+what is actually wrong, fix it on `main`, push it through a helper pull request the same way as
+the merge, and dispatch again until it is green. What not
 to do is stop at the push and call the pile empty: the merges are the reason anybody is looking
 at `main` today, and a red left here sits until the next morning's schedule, where it surfaces
 as a mysterious nightly failure rather than as the thing this pass walked past.
@@ -263,9 +295,11 @@ Only once `main` is green (step 7), the queue is empty and no dispatcher is runn
 cargo build --release
 spoolway queue list                       # confirm again — nothing in flight
 ls -l $(command -v spoolway)              # read this before writing to it
-cp target/release/spoolway ~/.cargo/bin/spoolway.new
-mv -f ~/.cargo/bin/spoolway.new ~/.cargo/bin/spoolway
+dest=$(readlink -f "$(command -v spoolway)")
+cp target/release/spoolway "$dest.new"
+mv -f "$dest.new" "$dest"
 spoolway --version
+cmp "$dest" target/release/spoolway       # the install is the build, byte for byte
 ```
 
 **Never plain-`cp` over the binary.** The `cp` truncates and writes through the inode the
@@ -276,10 +310,11 @@ lanes that start after it pick up a build nobody meant to be running.
 anything already executing keeps the old inode and never sees a partial file. That makes the
 install safe even with a lane live, which the plain `cp` never is.
 
-**Resolve the path first.** `~/.local/bin/spoolway` on this machine is a *symlink* into
-`~/.cargo/bin/`, so `cp target/release/spoolway ~/.local/bin/` follows it and writes straight
-through to the real file — the exact inode the running dispatcher is executing. Write to the
-resolved path, not the link.
+**Resolve the path first.** Where `spoolway` lives on this machine has changed before:
+`~/.local/bin/spoolway` used to be a *symlink* into `~/.cargo/bin/`, and is now a regular file
+with no `~/.cargo/bin` copy at all. Never assume either. A `cp` onto a symlink follows it and
+writes straight through to the real file — the exact inode the running dispatcher is
+executing — so `readlink -f` it, as above, and write beside the resolved path, not the link.
 
 ### 10. Take what the new binary writes
 
@@ -300,14 +335,15 @@ you want to see which one before it lands. Leave `--force-contract` and `--repla
 here: both discard human edits, and neither is a merge's decision to make.
 
 Commit the result if anything changed. It is a change to this repository's control plane and
-belongs in the history with the merge that caused it.
+belongs in the history with the merge that caused it. It reaches `main` the same way the merge
+did — a helper pull request of its own, its checks, then a fast-forward push (step 7).
 
 ### 11. Prune
 
 Clear the branches the merge made dead:
 
 ```
-git push origin --delete <branch> ...
+git push origin --delete <branch> ... merge/<date> sync/<date>
 git branch -d <branch> ...
 ```
 
@@ -492,3 +528,34 @@ ends at the push is claiming something it never checked.
 - **`spoolway sync` was skipped, so `doctor` complains for weeks.** The drift step 10 clears
   looks like something wrong with the project. It is the merge's own doing, and it appears on
   every pass that brings in a new default.
+- **The push to `main` was refused, and the procedure had no answer.** Branch protection
+  began requiring `verify / test` and `verify / audit` on every commit pushed to `main`, admins
+  included, and step 7 still said `git push origin main`. The merged tree had passed every
+  local check and been checked by nobody else, which is exactly what the rule exists to stop.
+  The answer is to satisfy the rule, not to go around it: a helper pull request carries the
+  merged head through CI, and `main` is fast-forwarded to that same sha. Never switch the
+  protection off to make a pass fit, and never `gh pr merge` the helper, which would land a
+  merge commit nothing checked.
+- **A newer feature quietly undid an older one in the combined tree.** #541 made a task
+  queued with `tracking: off` fire no hook at all; #550, written alongside it, added a
+  `started` event whose fire site checked only for a trial arm. Each branch was green on its
+  own and neither conflicted over that line, so the merge compiled, every test passed, and a
+  `tracking: off` task still ran the tracker hook on `started`. #541's own test did not
+  notice, because the tracking gate never *held* the task — it only checked that the task
+  moved on, not that the hook stayed silent. When a pass merges a new event, a new stage or a
+  new call site next to a branch that exempts something from "every X", search the merged
+  tree for every X and check each one honours the exemption.
+- **Two stuck background shells, both from a pattern that matched itself.** A wait loop of
+  `until ! pgrep -f '<pattern>'` never ends, because the shell running it carries the same
+  pattern in its own command line, and a second wait chained on the first hung with it. A
+  `pkill -f '<pattern>'` in the same shape killed the shell issuing it. Wait on a pid, or use
+  `pgrep -x` on a process name; never `-f` on a string your own command also contains.
+- **A unit test failed with "inotify must be available", and the merge had nothing to do
+  with it.** `screen::tests::dir_watch_wakes_on_a_commands_directory_change` needs a free
+  inotify instance, and the machine had used all 128: 1,158 orphaned `dbus-daemon`s held
+  them. WSL here has no user session bus, so every keyring lookup — `acli` alone starts five
+  buses per call — autolaunched a daemon that never exits, and one lane working on the Jira
+  hook made a few hundred calls. `~/.config/shell/dbus-session.sh`, sourced from `~/.zshenv`
+  and `~/.profile`, now hands every shell one shared bus. If this error comes back, run
+  `pgrep -c -x dbus-daemon` before suspecting the code: more than one means something is
+  starting buses outside a shell that sources it.
