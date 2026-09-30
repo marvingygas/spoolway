@@ -2411,22 +2411,24 @@ mod tests {
         assert!(labels.contains(&"`acli` is on PATH"), "{labels:?}");
         assert!(labels.contains(&"`jq` is on PATH"), "{labels:?}");
 
-        // Whether `acli` is installed belongs to the machine, not to
-        // `issue_tracking_checks`, so the row is held to whatever this
-        // machine's PATH actually answers: the path it found, or a refusal
-        // naming `jira.sh` as the hook that needs it.
-        let acli = findings
-            .iter()
-            .find_map(|f| match f {
-                Finding::Check(label, outcome) if label == "`acli` is on PATH" => Some(outcome),
-                _ => None,
-            })
-            .unwrap();
-        match super::which("acli") {
-            Some(path) => assert_eq!(acli.as_ref().unwrap(), &Some(path)),
-            None => {
-                let err = acli.as_ref().unwrap_err();
-                assert!(err.to_string().contains("jira.sh"), "{err}");
+        // Whether `acli` and `jq` are installed depends on the machine, so each
+        // row is held to what PATH actually holds here: the path it resolves
+        // to when found, and a failure naming `jira.sh` when not.
+        for binary in ["acli", "jq"] {
+            let label = format!("`{binary}` is on PATH");
+            let outcome = findings
+                .iter()
+                .find_map(|f| match f {
+                    Finding::Check(l, outcome) if *l == label => Some(outcome),
+                    _ => None,
+                })
+                .unwrap();
+            match which(binary) {
+                Some(path) => assert_eq!(outcome.as_ref().unwrap(), &Some(path)),
+                None => {
+                    let err = outcome.as_ref().unwrap_err();
+                    assert!(err.to_string().contains("jira.sh"), "{err}");
+                }
             }
         }
     }

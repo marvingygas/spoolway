@@ -431,7 +431,9 @@ mod term_guard_tests {
     //! reads back rather than the harness's own capture buffer.
     use std::process::Command;
 
-    use super::{ENTER_ALT_SCREEN_AND_STOP_WHEEL, HIDE_CURSOR, RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN};
+    use super::{
+        END_SYNC, ENTER_ALT_SCREEN_AND_STOP_WHEEL, HIDE_CURSOR, RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN,
+    };
 
     /// Runs `body` directly when re-invoked under `probe_env`, otherwise
     /// spawns this same test binary to run exactly `test_name` with
@@ -581,6 +583,35 @@ mod term_guard_tests {
             "expected {ENTER_ALT_SCREEN_AND_STOP_WHEEL:?} before both {HIDE_CURSOR:?} and {RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN:?} in {written:?}"
         );
     }
+
+    /// A frame writer can leave a supporting terminal holding its paint for
+    /// a frame that never finished — the process ends, or panics, between
+    /// `ESC[?2026h` and the matching `ESC[?2026l` a frame's own write would
+    /// otherwise have sent. Leaving the screen, on a normal exit as on a
+    /// panic, must send that end code too, immediately ahead of
+    /// `RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN` — and, since `leave_alt_screen`
+    /// still only ever fires once per guard (see [`RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN`]'s
+    /// own doc on why a second write is wrong), the end code must be written
+    /// exactly once too.
+    #[test]
+    fn leaving_the_screen_ends_synchronized_output_immediately_before_restoring_it() {
+        let written = probe(
+            "SPOOLWAY_TERMGUARD_PROBE_END_SYNC",
+            "platform::term_guard_tests::leaving_the_screen_ends_synchronized_output_immediately_before_restoring_it",
+            || drop(super::TermGuard::screen()),
+        );
+
+        let expected = format!("{END_SYNC}{RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN}");
+        assert!(
+            written.contains(&expected),
+            "expected {END_SYNC:?} immediately before {RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN:?} in {written:?}"
+        );
+        assert_eq!(
+            written.matches(END_SYNC).count(),
+            1,
+            "the end-sync bytes were written more than once in {written:?}"
+        );
+    }
 }
 
 /// Enter the alternate screen (`?1049h`) and turn off wheel-as-arrow-keys
@@ -618,7 +649,7 @@ fn enter_alt_screen() {
 
 fn leave_alt_screen() {
     if ALT_SCREEN_ENTERED.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        print!("{RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN}");
+        print!("{END_SYNC}{RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN}");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 }
@@ -650,6 +681,16 @@ fn install_panic_hook() {
 /// Named so [`term_guard_tests`] can check its position relative to the
 /// alternate-screen bytes without duplicating the escape sequence.
 const HIDE_CURSOR: &str = "\x1b[?25l";
+
+/// Ends synchronized output — see `screen::frame_writer`'s own `FRAME_START`,
+/// which opens it per frame with `ESC[?2026h`. Written here too, ahead of
+/// [`RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN`], so leaving the screen mid-frame —
+/// a `ctrl-c` or a panic while a supporting terminal is still holding its
+/// paint for a frame that never finished — cannot leave that terminal
+/// holding forever. A terminal that never saw `ESC[?2026h` in the first
+/// place treats a stray `ESC[?2026l` as any other unsupported private mode:
+/// silently dropped, never printed as text.
+const END_SYNC: &str = "\x1b[?2026l";
 
 fn hide_cursor() {
     print!("{HIDE_CURSOR}");

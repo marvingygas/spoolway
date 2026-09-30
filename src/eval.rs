@@ -2694,20 +2694,32 @@ fn footer(table: TableKind) -> String {
     )
 }
 
-/// One frame. `loaded` is `None` only on a visit whose first load has not
-/// landed yet: the frame is drawn empty under the loading popup.
+/// One frame, painted through `writer` — see [`eval_frame_rows`] for the
+/// rows themselves, split out so a test can play the very same rows through
+/// today's frozen write and through [`crate::screen::frame_writer`] and
+/// require the same picture, without duplicating everything this builds.
 fn draw(
     pipelines: &Pipelines,
     loaded: Option<&Loaded>,
     state: &ScreenState,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl std::io::Write,
 ) {
-    let _ = write!(out, "\x1b[2J\x1b[H");
+    let rows = eval_frame_rows(pipelines, loaded, state);
+    writer.write_frame(&rows, crate::screen::pane_size(), out);
+}
+
+/// The eval tab's own frame, as the rows [`draw`] paints — `loaded` is
+/// `None` only on a visit whose first load has not landed yet, when the
+/// frame is drawn empty under the loading popup.
+fn eval_frame_rows(
+    pipelines: &Pipelines,
+    loaded: Option<&Loaded>,
+    state: &ScreenState,
+) -> Vec<String> {
     // Bare `spoolway`'s tab strip, when it hosts this screen as its eval tab,
     // and nothing at all otherwise — see `crate::screen::shell::strip`.
-    for line in crate::screen::shell::strip() {
-        let _ = writeln!(out, "{line}");
-    }
+    let mut rows_out: Vec<String> = crate::screen::shell::strip();
 
     // Computed before `frame_rows`, which has to know how many of these are
     // about to take a row of their own — see `frame_rows`'s own doc comment.
@@ -2799,16 +2811,15 @@ fn draw(
         overlay(&mut frame, overlay_lines);
     }
 
-    for line in &frame {
-        let _ = writeln!(out, "{line}");
-    }
+    rows_out.extend(frame);
     // Between the frame's own bottom border and the keys line, so neither
     // takes a body row and so neither throws off `clip`'s own scroll
     // indicator. Their rows were already reserved above, in `frame_rows`.
     for note in &notes {
-        let _ = writeln!(out, "  {note}");
+        rows_out.push(format!("  {note}"));
     }
-    let _ = writeln!(out, "{}", footer(state.table));
+    rows_out.push(footer(state.table));
+    rows_out
 }
 
 /// The same "Cost is a floor" note the printed table carries, over whichever
@@ -3068,10 +3079,11 @@ impl ScreenState {
 pub(crate) fn tab(
     repo: &Repo,
     pipelines: &Pipelines,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
-    run_screen(repo, pipelines, &bare_args(), input, out)
+    run_screen(repo, pipelines, &bare_args(), writer, input, out)
 }
 
 /// Every flag at its bare default — what bare `spoolway`'s eval tab opens
@@ -3103,6 +3115,7 @@ fn run_screen(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &EvalArgs,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
@@ -3111,6 +3124,7 @@ fn run_screen(
         pipelines,
         args,
         |filters| load_in_background(repo, filters),
+        writer,
         input,
         out,
     )
@@ -3134,6 +3148,7 @@ fn run_screen_with(
     pipelines: &Pipelines,
     args: &EvalArgs,
     mut start: impl FnMut(&Filters) -> Pending,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
@@ -3150,8 +3165,8 @@ fn run_screen_with(
     loop {
         state.settle(&mut loaded, &mut failed);
         match &failed {
-            Some(message) => crate::screen::shell::message_frame(message, out),
-            None => draw(pipelines, loaded.as_ref(), &state, out),
+            Some(message) => crate::screen::shell::message_frame(message, writer, out),
+            None => draw(pipelines, loaded.as_ref(), &state, writer, out),
         }
         // Not a bare `read_key`: inside bare `spoolway` a `ctrl-c` has to end
         // this wait too, and a blocking read never sees one — see
@@ -3161,8 +3176,8 @@ fn run_screen_with(
         let Some(key) = crate::screen::shell::wait_key(input, || {
             if state.settle(&mut loaded, &mut failed) {
                 match &failed {
-                    Some(message) => crate::screen::shell::message_frame(message, out),
-                    None => draw(pipelines, loaded.as_ref(), &state, out),
+                    Some(message) => crate::screen::shell::message_frame(message, writer, out),
+                    None => draw(pipelines, loaded.as_ref(), &state, writer, out),
                 }
             }
         }) else {
@@ -4714,6 +4729,7 @@ mod screen_tests {
             &Pipelines::builtin(),
             args,
             |filters| load_now(repo, filters),
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             input,
             out,
         )
@@ -4767,7 +4783,7 @@ mod screen_tests {
 
         let (leave, drawn) = run("\x1b[D");
         assert_eq!(leave, Leave::Switch(Toward::Left));
-        let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
+        let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
         assert!(first.contains("dispatch"), "{first}");
         assert!(first.contains("─ eval · by pipeline"), "{first}");
         assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
@@ -4777,18 +4793,18 @@ mod screen_tests {
         assert_eq!(run("f\x1b[C\x1b[D").0, Leave::Quit);
     }
 
-    /// Every draw opens on a clear-screen, so a whole captured transcript
-    /// holds every frame the screen ever drew, back to back — a plain
-    /// `text.contains(...)` over it can true positive on a state that has
-    /// since moved on. This is the frame that was actually on screen when
-    /// the input ran out.
+    /// Every draw opens with the shared frame writer's own start code, so a
+    /// whole captured transcript holds every frame the screen ever drew,
+    /// back to back — a plain `text.contains(...)` over it can true
+    /// positive on a state that has since moved on. This is the frame that
+    /// was actually on screen when the input ran out.
     fn last_frame(text: &str) -> &str {
-        text.rsplit("\x1b[2J\x1b[H").next().unwrap_or(text)
+        text.rsplit("\x1b[?2026h\x1b[H").next().unwrap_or(text)
     }
 
     /// Every frame the screen drew, in order.
     fn frames(text: &str) -> Vec<&str> {
-        text.split("\x1b[2J\x1b[H").skip(1).collect()
+        text.split("\x1b[?2026h\x1b[H").skip(1).collect()
     }
 
     /// The loading popup, exactly as the mockup draws it.
@@ -4825,6 +4841,7 @@ mod screen_tests {
             &Pipelines::builtin(),
             &no_args(),
             |_| held(&senders),
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
         )
@@ -4833,7 +4850,12 @@ mod screen_tests {
 
         let drawn = String::from_utf8(out).unwrap();
         let all = frames(&drawn);
-        assert_eq!(all.len(), 3, "one frame, then one per ignored key");
+        // Not one per ignored key any more: `f` and `tab` leave the loading
+        // frame exactly as it was, and the shared frame writer now skips a
+        // frame that matches the last one it painted — the same skip
+        // `commands::queue` and `commands::jobs` already had, extended to
+        // every redrawing screen by this task.
+        assert_eq!(all.len(), 1, "no frame changed, so nothing was repainted");
         for frame in &all {
             assert!(frame.contains("dispatch"), "under the strip: {frame}");
             assert!(frame.contains("┌─ eval · by pipeline "), "{frame}");
@@ -4896,6 +4918,7 @@ mod screen_tests {
             &Pipelines::builtin(),
             &no_args(),
             |_| held(&senders),
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
         )
@@ -4932,6 +4955,7 @@ mod screen_tests {
                         held(&senders)
                     }
                 },
+                &mut crate::screen::frame_writer::FrameWriter::new(),
                 &mut input,
                 &mut out,
             )
@@ -4944,6 +4968,29 @@ mod screen_tests {
             assert!(!last.contains("┌─ filters"), "{script:?}: {last}");
             assert_eq!(senders.borrow().len(), 1, "{script:?}: one reload");
         }
+    }
+
+    /// The acceptance criterion this task exists for: the eval tab's own
+    /// frame, painted through the shared [`crate::screen::frame_writer`],
+    /// must look exactly as it did through today's frozen erase-then-write —
+    /// cell for cell, in text, colour and bold.
+    #[test]
+    fn eval_paints_as_before() {
+        let repo = fixture_with_one_run("eval-paints-as-before");
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new(&repo, &no_args());
+        let loaded = load(&repo, &no_filters()).unwrap();
+        let frame = eval_frame_rows(&pipelines, Some(&loaded), &state);
+        // Wide enough that no row here reaches the pane's own edge.
+        let pane_size = (250, 60);
+
+        let mut old = Vec::new();
+        crate::screen::frame_writer::todays_write(&frame, &mut old);
+
+        let mut new = Vec::new();
+        crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
+
+        crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
     }
 
     /// A reload that fails with a table on screen reaches the person in the

@@ -464,11 +464,12 @@ screen_start() {
 # them the same way off this pipe.
 screen_press() { printf '%s' "$1" >&9; }
 
-# How many frames the open screen has drawn so far. Every frame opens on this
-# clear-and-home, and the dispatch tab draws one every poll slice whether or
-# not it differs from the last — so the count is a clock that runs at the
-# screen's own pace.
-screen_frames() { grep -aoF $'\x1b[2J\x1b[H' "$E2E_SCREEN_LOG" 2>/dev/null | wc -l; }
+# How many frames the open screen has drawn so far. Every frame opens with
+# the shared frame writer's own start code (`src/screen/frame_writer.rs`),
+# written whenever the frame or the pane size differs from the last one
+# painted — a poll slice with nothing new to show writes nothing at all, so
+# this is a count of real changes, not a clock ticking at a fixed pace.
+screen_frames() { grep -aoF $'\x1b[?2026h\x1b[H' "$E2E_SCREEN_LOG" 2>/dev/null | wc -l; }
 
 # What the screen has drawn since line `mark` of its log says `want`.
 screen_drew_since() {

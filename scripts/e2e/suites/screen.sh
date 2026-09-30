@@ -60,9 +60,11 @@ works "bare spoolway opens and ends when its keys run out" \
 # only checks that a string is somewhere in the file, so opening and closing
 # are checked against the program's own output: `script`'s own "Script
 # started"/"Script done" lines bookend it, one full line each, however `-q`
-# is documented.
+# is documented. Leaving first ends synchronized output (`ESC[?2026l`), so a
+# terminal holding its paint for a frame cut off mid-write lets go of it
+# before the screen is restored.
 ENTER_ALT_SCREEN_AND_STOP_WHEEL=$'\033[?1049h\033[?1007l'
-RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN=$'\033[?1007h\033[?1049l'
+END_SYNC_RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN=$'\033[?2026l\033[?1007h\033[?1049l'
 PROGRAM_OUTPUT=$(sed -e '1d' -e '$d' "$DRAWN")
 if [[ "$PROGRAM_OUTPUT" == "$ENTER_ALT_SCREEN_AND_STOP_WHEEL"* ]]; then
   ok "opens by entering the alternate screen and stopping the wheel"
@@ -70,22 +72,23 @@ else
   bad "opens by entering the alternate screen and stopping the wheel"
   head -c 40 "$DRAWN" | cat -v
 fi
-if [[ "$PROGRAM_OUTPUT" == *"$RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN" ]]; then
-  ok "ends by restoring the wheel and leaving the alternate screen"
+if [[ "$PROGRAM_OUTPUT" == *"$END_SYNC_RESTORE_WHEEL_AND_LEAVE_ALT_SCREEN" ]]; then
+  ok "ends by ending synchronized output, restoring the wheel and leaving the alternate screen"
 else
-  bad "ends by restoring the wheel and leaving the alternate screen"
+  bad "ends by ending synchronized output, restoring the wheel and leaving the alternate screen"
   tail -c 40 "$DRAWN" | cat -v
 fi
 
-# Every frame opens on a clear-screen, so the transcript splits into frames on
-# it. The first one drawn is the queue tab's, its label bracketed on the
-# strip. Colour codes are taken out of each frame — the strip's own bold and
-# the colour of the tab drawn under it.
+# Every frame opens with the shared frame writer's own start code
+# (`\x1b[?2026h\x1b[H` — see `src/screen/frame_writer.rs`), so the transcript
+# splits into frames on it. The first one drawn is the queue tab's, its label
+# bracketed on the strip. Colour codes are taken out of each frame — the
+# strip's own bold and the colour of the tab drawn under it.
 FIRST="$LIVE/first.txt"
 LAST="$LIVE/last.txt"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$FIRST"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "the strip names all four tabs in order" \
@@ -113,7 +116,7 @@ RUN="$LIVE/run.txt"
 works "enter on the dispatch tab starts dispatching, and enter then enter stops it" \
   script -qec "{ printf '\\033[D\\r'; sleep 1; printf x; sleep 5; printf '\\r'; sleep 1; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$RUN" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$RUN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "enter asks the warnings gate first, as a popup" "─ before dispatching " "$RUN.plain"
@@ -186,7 +189,7 @@ pending_doc bad-stage "$BODY" "group: refused" "stage: taken"
 REFUSED="$LIVE/refused.txt"
 works "a refused submission on the queue tab ends when its keys run out" \
   script -qec "printf ' \\r' | '$SPOOLWAY'" "$REFUSED"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
@@ -205,7 +208,7 @@ pending_doc billing-export "$BODY" "group: billing"
 QUEUED="$LIVE/queued.txt"
 works "a clean submission on the queue tab ends when its keys run out" \
   script -qec "printf ' \\r' | '$SPOOLWAY'" "$QUEUED"
-awk 'BEGIN { RS = "\033\\[2J\033\\[H" } { last = $0 } END { print last }' "$QUEUED" |
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$QUEUED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queued popup is drawn over the tab" "┌─ queued " "$LAST"
 has "naming the task it queued" "billing-export" "$LAST"
@@ -213,6 +216,32 @@ has "saying no dispatcher will pick it up yet" "Start the dispatcher to begin wo
 lacks "never that one is running" "Dispatcher is running" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
+
+# Every tab, both directions, on a real pty — the acceptance criterion the
+# task `frames-onto-writer` exists for: no redrawing screen erases the whole
+# terminal any more, all five of them painting through the shared frame
+# writer instead (`src/screen/frame_writer.rs`). `←` from the queue tab
+# reaches dispatch, `→` three times walks back through queue, jobs and eval,
+# and `←` three times walks all the way back — every tab this screen has,
+# both ways, with no `enter` anywhere so nothing is started or queued.
+ALL_TABS="$LIVE/all-tabs.txt"
+works "cycling every tab does not crash the screen" \
+  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
+  bad "no frame drawn while cycling every tab still erases the whole screen"
+  tail -30 "$ALL_TABS" | cat -v
+else
+  ok "no frame drawn while cycling every tab still erases the whole screen"
+fi
+sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
+# The check above passes on an empty capture too — a screen that crashed or
+# quit before drawing a single tab has no `ESC[2J` in it either. These four
+# require every tab this walk visits actually drew, so the check above is
+# proof about frames that were really there.
+has "the walk actually reached the dispatch tab" "┌─ dispatch ─" "$ALL_TABS.plain"
+has "and the queue tab" "─ groups" "$ALL_TABS.plain"
+has "and the jobs tab" "no jobs yet" "$ALL_TABS.plain"
+has "and the eval tab" "┌─ eval ·" "$ALL_TABS.plain"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

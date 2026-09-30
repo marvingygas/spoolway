@@ -377,12 +377,13 @@ pub(crate) fn jobs_tab(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &Path,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
     let jobs = jobs::load(repo)?;
     let routines = super::routines::list_routines(repo)?;
-    run_jobs_screen(repo, pipelines, cwd, jobs, routines, input, out)
+    run_jobs_screen(repo, pipelines, cwd, jobs, routines, writer, input, out)
 }
 
 /// Everything a frame needs beside the job list and the screen state —
@@ -401,12 +402,18 @@ struct Ctx<'a> {
 /// this as its jobs tab.
 ///
 /// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
+///
+/// `writer` pushes this past clippy's default argument count, but every
+/// argument here is a distinct piece of the screen's own state — see
+/// `status::mod`'s own `too_many_arguments` allow for the same reasoning.
+#[allow(clippy::too_many_arguments)]
 fn run_jobs_screen(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &Path,
     mut jobs: Vec<Job>,
     routines: Vec<RoutineFolder>,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
@@ -421,12 +428,10 @@ fn run_jobs_screen(
         cursor: 0,
         mode: JobMode::List,
     };
-    let mut last: Option<Vec<String>> = None;
 
     loop {
-        draw_jobs(&ctx, &jobs, &state, &mut last, out);
-        let Some(key) = jobs_wait_for_key(&ctx, &mut jobs, &mut state, &mut last, input, out)
-        else {
+        draw_jobs(&ctx, &jobs, &state, writer, out);
+        let Some(key) = jobs_wait_for_key(&ctx, &mut jobs, &mut state, writer, input, out) else {
             // No terminal, a scripted input ran dry, or `ctrl-c` was caught
             // and noticed by `jobs_wait_for_key`: all three end the screen
             // the same way.
@@ -920,20 +925,13 @@ fn draw_jobs(
     ctx: &Ctx,
     jobs: &[Job],
     state: &JobsState,
-    last: &mut Option<Vec<String>>,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl std::io::Write,
 ) {
     // Under the strip when bare `spoolway` hosts this as its jobs tab — see
     // `crate::screen::shell::under_strip`.
     let frame = crate::screen::shell::under_strip(render_jobs(ctx, jobs, state));
-    if last.as_ref() == Some(&frame) {
-        return;
-    }
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in &frame {
-        let _ = writeln!(out, "{line}");
-    }
-    *last = Some(frame);
+    writer.write_frame(&frame, crate::screen::pane_size(), out);
 }
 
 /// Wait for the next key, redrawing on every idle poll slice so a resize or an
@@ -953,7 +951,7 @@ fn jobs_wait_for_key(
     ctx: &Ctx,
     jobs: &mut Vec<Job>,
     state: &mut JobsState,
-    last: &mut Option<Vec<String>>,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
@@ -968,7 +966,7 @@ fn jobs_wait_for_key(
             reload(ctx.repo, jobs);
             clamp_cursor(jobs, state);
         }
-        draw_jobs(ctx, jobs, state, last, out);
+        draw_jobs(ctx, jobs, state, writer, out);
     }
 }
 
@@ -1456,6 +1454,41 @@ mod tests {
         .unwrap();
     }
 
+    /// The acceptance criterion this task exists for: the jobs tab's own
+    /// frame, painted through the shared [`crate::screen::frame_writer`],
+    /// must look exactly as it did through today's frozen erase-then-write —
+    /// cell for cell, in text, colour and bold.
+    #[test]
+    fn jobs_paints_as_before() {
+        let repo = fixture("jobs-paints-as-before");
+        one_job(&repo);
+        let jobs = jobs::load(&repo).unwrap();
+        let pipelines = Pipelines::builtin();
+        let routines = Vec::new();
+        let routines_dir = repo.routines_dir();
+        let ctx = Ctx {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines: &routines,
+            routines_dir: &routines_dir,
+        };
+        let state = JobsState {
+            cursor: 0,
+            mode: JobMode::List,
+        };
+        let frame = crate::screen::shell::under_strip(render_jobs(&ctx, &jobs, &state));
+        // Wide enough that no row here reaches the pane's own edge.
+        let pane_size = (200, 60);
+
+        let mut old = Vec::new();
+        crate::screen::frame_writer::todays_write(&frame, &mut old);
+
+        let mut new = Vec::new();
+        crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
+
+        crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
+    }
+
     #[test]
     fn jobs_run_queues_the_minted_tasks_and_records_the_firing() {
         let repo = fixture("jobs-run");
@@ -1576,6 +1609,7 @@ mod tests {
             &repo.root,
             jobs,
             routines,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut keys,
             &mut out,
         )
@@ -1584,7 +1618,7 @@ mod tests {
     }
 
     fn last_frame(drawn: &str) -> &str {
-        drawn.rsplit("\x1b[2J\x1b[H").next().unwrap_or(drawn)
+        drawn.rsplit("\x1b[?2026h\x1b[H").next().unwrap_or(drawn)
     }
 
     /// Hosted as bare `spoolway`'s jobs tab, the resting list hands `←`, `→`
@@ -1607,6 +1641,7 @@ mod tests {
                 &repo.root,
                 Vec::new(),
                 routines,
+                &mut crate::screen::frame_writer::FrameWriter::new(),
                 &mut keys,
                 &mut out,
             )
@@ -1835,7 +1870,7 @@ mod tests {
 
         let drawn = drive(&repo, "r");
         assert!(
-            drawn.starts_with("\x1b[2J\x1b[H"),
+            drawn.starts_with("\x1b[?2026h\x1b[H"),
             "nothing outside a frame"
         );
         let frame = last_frame(&drawn);
@@ -2073,6 +2108,7 @@ mod tests {
             &repo.root,
             Vec::new(), // the stale snapshot: empty
             routines,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
         )

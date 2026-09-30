@@ -979,11 +979,12 @@ fi
 works "and landed in the archive" \
   test -f "$SPOOLWAY_PROJECT_HOME/archive/archived-row.md"
 
-# Three key presses of `h`, captured as one session: `draw` writes a fresh
-# `\x1b[2J\x1b[H` before every frame that differs from the last, so the
-# python snippet below splits the raw output back into the four frames this
-# draws — opening, then one per press — rather than grepping the whole file,
-# which could never tell "shown once, then hidden again" from "never shown".
+# Three key presses of `h`, captured as one session: the shared frame writer
+# (`src/screen/frame_writer.rs`) writes a fresh `\x1b[?2026h\x1b[H` before
+# every frame that differs from the last, so the python snippet below splits
+# the raw output back into the four frames this draws — opening, then one
+# per press — rather than grepping the whole file, which could never tell
+# "shown once, then hidden again" from "never shown".
 on_screen 'hhh' "$LIVE/queue-h-cycle.out"
 if python3 - "$LIVE/queue-h-cycle.out" arch-row <<'PY'
 import sys
@@ -991,10 +992,11 @@ import sys
 data = open(sys.argv[1], "rb").read()
 name = sys.argv[2].encode()
 # `draw` writes `\x1b[?25l` (hide the cursor) once, before the first frame,
-# so the piece ahead of the first real `\x1b[2J\x1b[H` is that preamble, not
-# a frame — dropped with `[1:]` rather than filtered for being non-empty,
-# since the preamble is itself a few bytes long and would otherwise pass.
-frames = data.split(b"\x1b[2J\x1b[H")[1:]
+# so the piece ahead of the first real `\x1b[?2026h\x1b[H` is that preamble,
+# not a frame — dropped with `[1:]` rather than filtered for being
+# non-empty, since the preamble is itself a few bytes long and would
+# otherwise pass.
+frames = data.split(b"\x1b[?2026h\x1b[H")[1:]
 # frames[0..3] are the opening frame and the three `h` presses, in order —
 # `done` is the third widening, so the group first appears in frames[2] and
 # the fourth frame (the wrap) must not carry it any more.

@@ -119,13 +119,16 @@ draws() {
 }
 
 # How many frames the board has drawn so far. The dispatch tab's `draw_board`
-# (src/screen/shell.rs) writes this exact clear-and-home sequence,
-# unconditionally, once every poll slice — about once a second — whether or
-# not the frame it drew differs from the last, which is what makes counting
-# them a real clock rather than a sleep of another name: it advances on its
-# own pace, never faster and never slower than the board this suite is
-# actually watching.
-_frame_count() { grep -aoF $'\x1b[2J\x1b[H' "$BOARD_LOG" 2>/dev/null | wc -l; }
+# (src/screen/shell.rs) writes this exact start code once every poll slice —
+# about once a second — whenever the frame it drew differs from the last one
+# painted, or the pane itself resized; a genuinely unchanged tick writes
+# nothing at all (`src/screen/frame_writer.rs`'s own skip). `next_frame` and
+# `settle_frames` below still work either way: a real change — a keystroke,
+# a lane moving — repaints at once, so waiting for the next frame after one
+# is still proof it landed; waiting through a stretch with nothing to show
+# now spends the whole of `poll_until`'s own bound instead of the one frame
+# it used to see, which only costs this suite time, not correctness.
+_frame_count() { grep -aoF $'\x1b[?2026h\x1b[H' "$BOARD_LOG" 2>/dev/null | wc -l; }
 _frame_past()  { [ "$(_frame_count)" -gt "$1" ]; }
 
 # Wait for the board to draw at least one frame after this call started —
@@ -140,7 +143,13 @@ next_frame() {
 
 # `next_frame`, `n` times over — the pacing a case proving *nothing* happened
 # needs: long enough that a change reacting late would still land inside the
-# window, and no longer than the board actually takes to get there.
+# window, and no longer than the board actually takes to get there while
+# something is still moving. A board with nothing left to show does not draw
+# at all any more (see `_frame_count`), so the first `next_frame` to find no
+# new frame spends its whole `secs` and fails, and `settle_frames` returns
+# there rather than trying the rest: `settle_frames 15` on an idle board is
+# one `secs` of waiting (10s by default), not fifteen frames' worth, and
+# returns 1. Callers here ignore that status — the wait itself is the point.
 settle_frames() {
   local n=$1 secs=${2:-10} i
   for ((i = 0; i < n; i++)); do
@@ -148,9 +157,10 @@ settle_frames() {
   done
 }
 
-# The other half: the board is drawing frames continuously, so "it stopped
-# saying that" means the frames drawn *from here on* do not say it. Two real
-# frames' worth of wait, then read only what landed after the first of them.
+# The other half: a real change repaints the board at once, so "it stopped
+# saying that" means the frames drawn *from here on* do not say it — whether
+# or not the board is still drawing anything at all while it waits. Two real
+# waits' worth of pacing, then read only what landed after the first of them.
 stops_drawing() {
   local what=$1 unwanted=$2 mark
   settle_frames 1
@@ -229,19 +239,19 @@ stage_reaches() {
 }
 
 # The board's own log holds every frame it ever drew, back to back, each one
-# opening with the same clear-and-home escape `_frame_count` already counts
-# by. The last one — this suite's whole log, minus every frame before it —
-# is the only one a "TIME held still" comparison should ever read from: an
-# earlier frame is a stale answer, not proof of anything happening now.
-# `python3`, not `awk`: the marker's own `[` and `]` read as an unescaped
-# bracket expression the moment they reach a regex engine, which is exactly
-# what a multi-byte `RS` is to (g)awk — a plain byte split sidesteps that
-# rather than fighting it.
+# opening with the same start code `_frame_count` already counts by. The
+# last one — this suite's whole log, minus every frame before it — is the
+# only one a "TIME held still" comparison should ever read from: an earlier
+# frame is a stale answer, not proof of anything happening now.
+# `python3`, not `awk`: the marker's own `[` and `?` read as an unescaped
+# bracket expression and quantifier the moment they reach a regex engine,
+# which is exactly what a multi-byte `RS` is to (g)awk — a plain byte split
+# sidesteps that rather than fighting it.
 _last_frame() {
   python3 - "$BOARD_LOG" <<'PY'
 import sys
 data = open(sys.argv[1], "rb").read()
-sys.stdout.buffer.write(data.split(b"\x1b[2J\x1b[H")[-1])
+sys.stdout.buffer.write(data.split(b"\x1b[?2026h\x1b[H")[-1])
 PY
 }
 
