@@ -95,7 +95,8 @@ reading the file whole.
 
    ```
    1  <task-id>                  <size>   <pipeline>
-      base  <branch>
+      base    <branch>
+      labels  <label>, <label>
       What this task is, in one or two plain sentences.
 
    2  <task-id>                  <size>   <pipeline>
@@ -114,6 +115,11 @@ reading the file whole.
    until a note changes it. A task that depends on another shares that chain's base and shows
    no `base` line of its own. Never propose any other base yourself: not a pending pull
    request, not the default branch.
+
+   **A task carries a `labels` line when it proposes any.** Comma-separated plain words, drawn
+   from the plan that argued this shape or from the source issue's own labels — `spoolway issue
+   show`'s own `labels` array, when this breakdown started at one — never invented fresh here.
+   Dropped for a task that proposes none, the same way a dependent's own `base` line is.
 
    **A note on the answer changes a chain's base.** The person may add a note after their
    letter, such as `1 from #412, cart-empty from main`: a task's number or id, `from`, then a
@@ -179,6 +185,9 @@ reading the file whole.
    - `base` — on every task, a dependent included: its chain's base from step 2, which is
      step 1's `base` unless a note changed it. A dependency and its dependent must share one.
    - `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate fan.
+   - `labels` — the plain words this task proposed on the ballot, carried through unchanged: the
+     plan's own words, or the source issue's own labels when this breakdown started at one.
+     Dropped for a task that proposed none.
 
    **Link a source; never redraw it.** Whatever the shape came from as a file — the calling
    page, a screenshot, anything the person named or pasted — is linked from the task, never
