@@ -95,23 +95,11 @@ case "${1:-}" in
   # doctor run against this double reads the same as one against the real,
   # tested `gh`.
   --version) echo "gh version 2.97.0 (2024-06-03)"; exit 0 ;;
-  # `github.sh`'s `check` branch asks both of these: `auth status` for the
-  # login and `repo view <project_key>` for the repository. Each answers
-  # yes unless a suite sets GH_STUB_LOGGED_OUT or GH_STUB_NO_REPO, so the
-  # branch can be shown to fail on each one, not just to pass.
-  auth)
-    [ -z "${GH_STUB_LOGGED_OUT:-}" ] || { echo "You are not logged into any GitHub hosts." >&2; exit 1; }
-    exit 0
-    ;;
-  repo)
-    case "${2:-}" in
-      view)
-        [ -z "${GH_STUB_NO_REPO:-}" ] || { echo "GraphQL: Could not resolve to a Repository with the name '${3:-}'." >&2; exit 1; }
-        echo "name: ${3:-}"
-        ;;
-      *) echo "gh repo ${2:-<nothing>}: not implemented by this stub" >&2; exit 1 ;;
-    esac
-    ;;
+  # `spoolway doctor` runs `gh auth status` itself, independent of anything
+  # `github.sh` does — `commands::doctor::gh_status` — so this answers it
+  # unconditionally: the stub is a logged-in `gh`, never asked to prove
+  # anything else about itself.
+  auth) exit 0 ;;
   pr)
     case "${2:-}" in
       checks)
@@ -251,6 +239,16 @@ case "${1:-}" in
         # since GitHub issues have no state past open/closed. Applied in
         # call order, remove before add, the same order `github.sh` itself
         # always passes them in.
+        #
+        # `GH_STUB_FAIL_EDIT` makes this call fail instead, the way a real
+        # `gh` would over a permissions error — what proves `github.sh`'s
+        # own `set -eE`/ERR trap on a real, unaltered `started` call: no
+        # hand-written fixture hook, the shipped script itself, failing on
+        # the one call `mark_in_progress` makes.
+        [ -z "${GH_STUB_FAIL_EDIT:-}" ] || {
+          echo "HTTP 403: Resource not accessible by integration" >&2
+          exit 1
+        }
         shift 2
         ref=$1
         shift

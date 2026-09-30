@@ -237,9 +237,11 @@ names a tracker.
 | `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
 
 The script is called once per task per event. A non-zero exit on `queued`, `started` or `done`
-pauses the task, with a reason naming the hook's own log under `tracking/`. `spoolway resume`
-forgets that run, so the hook fires again. A non-zero exit on `blocked` or `paused` only
-records the failure, since both stages are already stopped for a person.
+pauses the task with the reason `issue_tracking hook exited N`. The task file gains a
+`## Hook error` section holding the run's last 15 log lines under `Last output:`, appended on
+each failure. `spoolway resume` forgets that run, so the hook fires again. A non-zero exit on
+`blocked` or `paused` only records the failure, since both stages are already stopped for a
+person.
 
 | Event | When it fires | Waits for the script | A non-zero exit |
 |---|---|---|---|
@@ -250,7 +252,6 @@ records the failure, since both stages are already stopped for a person.
 | `blocked` | A task comes to rest on `blocked` | No | Records the failure |
 | `paused` | A task arrives on the persisted `paused` stage | No | Records the failure |
 | `done` | A task finishes | No | Pauses the task |
-| `check` | `spoolway doctor`, and once as the dispatcher starts | Yes | A `doctor` `FAIL` row; a warning at dispatch start |
 
 A task queued with `tracking: off` fires none of `queued`, `started`, `blocked`, `paused` or
 `done`, and is never held waiting on one of them. See [`tracking`](tasks.md#the-frontmatter-is-spoolways).
@@ -271,14 +272,11 @@ Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOL
 `SPOOLWAY_TICKET`. The `done` event of a group's last open task also gets
 `SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`. The
 board prints `issue_tracking: N hook failures — see tracking/` while any hook has failed.
-`check` carries only `SPOOLWAY_EVENT` and `SPOOLWAY_PROJECT_KEY`, and writes no log under
-`tracking/`, since both its callers run it synchronously and read its exit and stderr on the
-spot.
 
 `spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
-file name, a script with no `fetch` or `check` branch, `key_in_names` on with a script that
-never writes `slug=`, a tool named in a `# spoolway-requires:` line whose installed version is
-below the line's floor, and a `check` branch that runs but exits non-zero.
+file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes
+`slug=`, and a tool named in a `# spoolway-requires:` line whose installed version is below
+the line's floor.
 
 ### `open` — a fifth event, run by `queue add` itself
 
@@ -335,18 +333,6 @@ launches only once this hook exits clean. A non-zero exit pauses the task, exact
 failing `queued` hook does. `spoolway resume` runs the hook again. A trial arm never fires
 `started`, the same as `queued` and `done`.
 
-### `check` — the eighth event, proving the hook works
-
-`spoolway doctor` runs the hook with `SPOOLWAY_EVENT=check`, synchronously, with no timeout of
-its own, the same as `fetch`. The dispatcher runs it once more as it starts. Both read the
-hook's exit code and its stderr, kept apart from stdout.
-
-A script with no `check` branch is never run for this event. `doctor` reports it as a note,
-not a `FAIL` row, since nothing was actually asked to run. A script that has the branch and
-exits zero passes. One that exits non-zero is one `doctor` `FAIL` row carrying its stderr. At
-dispatch start the same failure is a warning, not a refusal, so a tracker that is really down
-still lets tasks reach `queued`, `started` or `done` and pause there.
-
 ### The shipped hook scripts
 
 `spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`.
@@ -368,10 +354,15 @@ every task, `esc` backs out. From the CLI or the dispatcher, where there is no k
 it prints the same notice and proceeds the same way. See
 [`spoolway queue`](cli-reference.md#spoolway-queue).
 
+Both shipped scripts run under `bash`, with `set -eE` and an ERR trap. A command that fails
+outside an `if`, an `&&`/`||` list, or one marked `|| true` stops the script and writes a trace
+to the run's own log: the command, its line, the case arm it ran in, and the functions that
+called it. That log is what a paused task's `## Hook error` reads its tail from.
+
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` | `gh` >= 2.97.0, logged in | On `check` confirms `gh` is logged in and the repository named in `SPOOLWAY_PROJECT_KEY` is visible. Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
-| `jira.sh` | `acli` >= 1.3.39 and `jq` >= 1.6 | On `check` confirms `acli` is logged in, the project named in `SPOOLWAY_PROJECT_KEY` exists, its Story and Sub-task work item types both exist, and each of its three status names exists there, by a JQL search. Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. Returns the lowercased Story key as the slug. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Comments name the task without attaching the file. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
+| `github.sh` | `bash` >= 3.2, `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
+| `jira.sh` | `bash` >= 3.2, `acli` >= 1.3.39 and `jq` >= 1.6 | Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. Returns the lowercased Story key as the slug. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Comments name the task without attaching the file. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
 
 ### How the sample GitHub workflow works
 
