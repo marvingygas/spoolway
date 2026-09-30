@@ -259,7 +259,7 @@ has "→ reaches the routines tab" \
   "dispatch        queue       [routines]       jobs        eval" "$LAST"
 has "listing the routine" "routines  1 of 1" "$LAST"
 has "under its own key line" \
-  "[space] select   [enter] queue   [x] delete   [tab] tasks   [q] quit" "$LAST"
+  "[space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit" "$LAST"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

@@ -9,9 +9,10 @@
 # Nothing here drives a dispatcher: what is asserted is that `enter` lands
 # the right task files in the queue directory, under minted ids, with their
 # bodies untouched, that `s` copies a pending group's documents back
-# into the checkout, and that `x` removes a routine with the jobs that point
-# into it. No `new_forge`/`install_agents` needed for the same
-# reason `trials.sh` needs none.
+# into the checkout, that `x` removes a routine with the jobs that point
+# into it, and that `n` saves a job for a routine to the user store. No
+# `new_forge`/`install_agents` needed for the same reason `trials.sh` needs
+# none.
 #
 # No `covers:` tag of its own — see `commands.sh`'s own queue-screen block:
 # the map `coverage.sh` builds only enumerates `config.toml` keys and
@@ -223,5 +224,29 @@ has "a job on another routine is left alone" "[jobs.weekly-prune]" "$USER_STORE"
 works "the other routines stay" test -d .spoolway/routines/maintenance
 works "nothing is staged" \
   bash -c '[ -z "$(git diff --cached --name-only -- .spoolway/routines .spoolway/jobs.toml)" ]'
+
+# `n` makes a job of the highlighted routine: a schedule, a pipeline found by
+# typing, `enter` — and the job is in the user store under the routine's own
+# name. The folders now sort `archived-reuse`, `maintenance`, `release`, so
+# `jj` puts the cursor on `release`.
+NEW_JOB="$LIVE/routine-new-job.txt"
+LAST="$LIVE/routine-new-job-saved.txt"
+on_screen '\x1b[Cjjn0 3 * * 1-5\rbug\r' "$NEW_JOB"
+has "n saves the job to the user store" "[jobs.release]" "$USER_STORE"
+has "with the routine it was made on" 'routine = "release"' "$USER_STORE"
+has "with the schedule typed" 'schedule = "0 3 * * 1-5"' "$USER_STORE"
+has "with the pipeline picked" 'pipeline = "bugfix"' "$USER_STORE"
+lacks "never in the project store" "[jobs.release]" "$PROJECT_STORE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /job saved/ { last = $0 } END { print last }' \
+  "$NEW_JOB" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "and says so in a popup" "release runs at 03:00, Monday to Friday, on bugfix." "$LAST"
+
+# A second `n` on the same routine is refused: the name is taken.
+REFUSED="$LIVE/routine-new-job-refused.txt"
+on_screen '\x1b[Cjjn0 4 * * *\r\r' "$REFUSED"
+has "n on a routine whose job exists is refused" "already exists" "$REFUSED"
+works "and the store keeps the one job" \
+  bash -c '[ "$(grep -c "^\[jobs.release\]" "$1")" = 1 ] && grep -qF "schedule = \"0 3 * * 1-5\"" "$1"' \
+  _ "$USER_STORE"
 
 finish

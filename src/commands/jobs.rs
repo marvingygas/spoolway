@@ -1,8 +1,10 @@
 //! `spoolway jobs`: `jobs list` and `jobs run` for scripts, and bare
-//! `spoolway`'s jobs tab, the screen a person writes a job from. The screen
-//! is the only thing that writes a job — it walks the routine, the cron
-//! expression and the pipeline, then saves through [`crate::jobs::write`]. No
-//! `jobs add`, no config key.
+//! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
+//! are the only thing that write a job — the jobs tab walks the routine, the
+//! cron expression and the pipeline, then saves through
+//! [`crate::jobs::write`]; the routines tab's `n` skips the routine and goes
+//! through the same last two and the same save, [`NewJobWalk`]. No `jobs
+//! add`, no config key.
 
 use std::path::{Path, PathBuf};
 
@@ -279,7 +281,7 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 /// a new job takes its name from the routine's own leaf, an edited one keeps
 /// the name it had.
 #[derive(Debug, Clone)]
-struct Draft {
+pub(super) struct Draft {
     editing: Option<String>,
     routine: String,
     schedule: String,
@@ -333,6 +335,207 @@ impl Draft {
     }
 }
 
+/// The schedule popup and then the pipeline popup, and the save at the end
+/// of them — the part of writing a job that both the jobs tab's walk and the
+/// routines tab's `n` go through. Each tab keeps its own way in (the jobs tab
+/// picks a routine first, the routines tab uses the highlighted one) and its
+/// own way out; what happens between the two lives only here, so the two tabs
+/// cannot drift apart on what a schedule or a pipeline accepts, or on which
+/// names a save refuses.
+#[derive(Debug, Clone)]
+pub(super) enum NewJobWalk {
+    /// The cron field: `draft.schedule` is the editable buffer.
+    Schedule(Draft),
+    /// The pipeline picker with fuzzy search; `cursor` indexes the matches.
+    PickPipeline {
+        draft: Draft,
+        query: String,
+        cursor: usize,
+    },
+}
+
+/// Where one key leaves a [`NewJobWalk`].
+pub(super) enum WalkStep {
+    /// Still open, on this popup — the same one for a key it does not read.
+    Walking(NewJobWalk),
+    /// `esc` on either popup. Nothing was written.
+    Cancelled,
+    /// `enter` on the pipeline popup, and the job is in its store: the draft
+    /// as saved, its name [`Draft::name`].
+    Saved(Draft),
+    /// `enter` on the pipeline popup, and the save was refused — a
+    /// full-sentence message for a popup. Nothing was written.
+    Refused(String),
+}
+
+impl NewJobWalk {
+    /// Open on the schedule popup for `draft`, whose routine is already
+    /// chosen.
+    pub(super) fn schedule(draft: Draft) -> NewJobWalk {
+        NewJobWalk::Schedule(draft)
+    }
+
+    /// The routines tab's `n`: a new job over the routine folder at
+    /// `folder`, for the user store, named after the folder's leaf exactly
+    /// as the jobs tab's own `n` names one. `None` for a folder outside
+    /// `routines_dir`, which no job can point at.
+    pub(super) fn for_routine(
+        pipelines: &Pipelines,
+        folder: &Path,
+        routines_dir: &Path,
+    ) -> Option<NewJobWalk> {
+        let mut draft = Draft::new(pipelines);
+        draft.routine = relative_routine(folder, routines_dir)?;
+        Some(NewJobWalk::schedule(draft))
+    }
+
+    /// One key. `enter` on the schedule popup moves on only once the
+    /// expression parses; `enter` on the pipeline popup saves through
+    /// [`commit_draft`].
+    pub(super) fn key(&self, repo: &Repo, pipelines: &Pipelines, key: Key) -> WalkStep {
+        match self {
+            NewJobWalk::Schedule(draft) => match key {
+                Key::Esc => WalkStep::Cancelled,
+                Key::Enter if crate::cron::Cron::parse(draft.schedule.trim()).is_ok() => {
+                    WalkStep::Walking(NewJobWalk::PickPipeline {
+                        draft: draft.clone(),
+                        query: String::new(),
+                        cursor: pipeline_index(pipelines, &draft.pipeline),
+                    })
+                }
+                Key::Backspace | Key::Char('\u{8}') => {
+                    let mut draft = draft.clone();
+                    draft.schedule.pop();
+                    WalkStep::Walking(NewJobWalk::Schedule(draft))
+                }
+                Key::Char(c) if !c.is_control() => {
+                    let mut draft = draft.clone();
+                    draft.schedule.push(c);
+                    WalkStep::Walking(NewJobWalk::Schedule(draft))
+                }
+                _ => WalkStep::Walking(self.clone()),
+            },
+            NewJobWalk::PickPipeline {
+                draft,
+                query,
+                cursor,
+            } => {
+                let matches = pipeline_matches(pipelines, query);
+                let with = |query: String, cursor: usize| {
+                    WalkStep::Walking(NewJobWalk::PickPipeline {
+                        draft: draft.clone(),
+                        query,
+                        cursor,
+                    })
+                };
+                match key {
+                    Key::Esc => WalkStep::Cancelled,
+                    Key::Up | Key::Char('k') => with(query.clone(), cursor.saturating_sub(1)),
+                    Key::Down | Key::Char('j') => with(
+                        query.clone(),
+                        (cursor + 1).min(matches.len().saturating_sub(1)),
+                    ),
+                    Key::Enter => {
+                        // Nothing matches the query: `enter` has no pipeline
+                        // to save with, so the popup stays open.
+                        let Some(name) =
+                            matches.get((*cursor).min(matches.len().saturating_sub(1)))
+                        else {
+                            return WalkStep::Walking(self.clone());
+                        };
+                        let mut draft = draft.clone();
+                        draft.pipeline = name.clone();
+                        match commit_draft(repo, draft.clone()) {
+                            Ok(_) => WalkStep::Saved(draft),
+                            Err(message) => WalkStep::Refused(message),
+                        }
+                    }
+                    Key::Backspace | Key::Char('\u{8}') => {
+                        let mut query = query.clone();
+                        query.pop();
+                        with(query, 0)
+                    }
+                    Key::Char(c) if !c.is_control() => {
+                        let mut query = query.clone();
+                        query.push(c);
+                        with(query, 0)
+                    }
+                    _ => WalkStep::Walking(self.clone()),
+                }
+            }
+        }
+    }
+
+    /// The popup the walk has open.
+    pub(super) fn panel(&self, pipelines: &Pipelines) -> Vec<String> {
+        match self {
+            NewJobWalk::Schedule(draft) => schedule_panel(draft),
+            NewJobWalk::PickPipeline { query, cursor, .. } => {
+                pipeline_panel(pipelines, query, *cursor)
+            }
+        }
+    }
+
+    /// The key line under the frame while the walk is open — the same keys
+    /// its popup names.
+    pub(super) fn footer(&self) -> String {
+        match self {
+            NewJobWalk::Schedule(_) => key_hint(SCHEDULE_KEYS),
+            NewJobWalk::PickPipeline { .. } => key_hint(PIPELINE_KEYS),
+        }
+    }
+}
+
+/// The schedule popup's keys, in the popup and on the line under the frame.
+const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
+
+/// The pipeline popup's keys, in the popup and on the line under the frame.
+const PIPELINE_KEYS: &[(&str, &str)] = &[("enter", "choose"), ("esc", "cancel")];
+
+/// The routines tab's popup once its `n` has saved a job: what it runs, when,
+/// on which pipeline, and where to change it.
+pub(super) fn saved_notice(draft: &Draft) -> Notice {
+    let schedule = draft.schedule.trim();
+    let when = match crate::cron::Cron::parse(schedule) {
+        Ok(cron) => {
+            let words = cron.describe();
+            // `describe` opens with a clock time (`03:00, Monday to Friday`)
+            // or `midnight` for a job that fires once a day, and with a
+            // phrase of its own (`every hour, on the hour`, `5 minutes past
+            // every hour`, `at minute 5 of hour 3`) otherwise — only the
+            // first two read as `runs at …`. A leading digit alone is not
+            // enough: `5 minutes past every hour` starts with one too, so
+            // the clock time is matched by its `HH:` shape.
+            let clock = words.as_bytes();
+            let is_clock = clock.len() >= 3
+                && clock[0].is_ascii_digit()
+                && clock[1].is_ascii_digit()
+                && clock[2] == b':';
+            if is_clock || words.starts_with("midnight") {
+                format!("at {words}")
+            } else {
+                words
+            }
+        }
+        // Unreachable through the walk, whose schedule popup refuses
+        // `enter` until the expression parses — but a notice is no place to
+        // panic, so the expression itself stands in.
+        Err(_) => format!("on `{schedule}`"),
+    };
+    let next = match jobs::next_fire(schedule) {
+        Some(at) => at.format("%a %-d %b %H:%M").to_string(),
+        None => "never".to_string(),
+    };
+    Notice::new(
+        "job saved",
+        format!(
+            "{} runs {when}, on {}.\nNext: {next}.\nEdit, pause or delete it on the jobs tab.",
+            draft.name(),
+            draft.pipeline,
+        ),
+    )
+}
+
 /// What a keystroke means right now.
 enum JobMode {
     /// The list and the highlighted job's detail — the resting state.
@@ -341,14 +544,9 @@ enum JobMode {
     /// reused whole — picking the draft's target, drawn as a popup over the
     /// list: see [`routine_panel`].
     PickRoutine { draft: Draft, nav: RoutineNav },
-    /// The cron field: `draft.schedule` is the editable buffer.
-    Schedule { draft: Draft },
-    /// The pipeline picker with fuzzy search; `cursor` indexes the matches.
-    PickPipeline {
-        draft: Draft,
-        query: String,
-        cursor: usize,
-    },
+    /// The cron field and then the pipeline picker — the half of the walk
+    /// the routines tab's own `n` shares; see [`NewJobWalk`].
+    Walk(NewJobWalk),
     /// `x` waiting on `enter` to delete or `esc` to keep.
     ConfirmDelete(String),
     /// `r` stopped at the tool-requirements gate, asked in a popup over the
@@ -501,14 +699,14 @@ fn run_jobs_screen(
                     if let Some(rel) = picked_folder(&routines, nav, &routines_dir) {
                         let mut draft = draft.clone();
                         draft.routine = rel;
-                        state.mode = JobMode::Schedule { draft };
+                        state.mode = JobMode::Walk(NewJobWalk::schedule(draft));
                     }
                 }
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
                     if let Some(rel) = picked_task(&routines, nav, &routines_dir) {
                         let mut draft = draft.clone();
                         draft.routine = rel;
-                        state.mode = JobMode::Schedule { draft };
+                        state.mode = JobMode::Walk(NewJobWalk::schedule(draft));
                     }
                 }
                 // `o` over the tasks pane: open the highlighted task
@@ -530,95 +728,20 @@ fn run_jobs_screen(
                 }
             },
 
-            JobMode::Schedule { draft } => match key {
-                Key::Esc => state.mode = JobMode::List,
-                Key::Enter => {
-                    if crate::cron::Cron::parse(draft.schedule.trim()).is_ok() {
-                        let cursor = pipeline_index(pipelines, &draft.pipeline);
-                        state.mode = JobMode::PickPipeline {
-                            draft: draft.clone(),
-                            query: String::new(),
-                            cursor,
-                        };
-                    }
+            JobMode::Walk(walk) => match walk.key(repo, pipelines, key) {
+                WalkStep::Walking(walk) => state.mode = JobMode::Walk(walk),
+                WalkStep::Cancelled => state.mode = JobMode::List,
+                WalkStep::Saved(draft) => {
+                    reload(repo, &mut jobs);
+                    let name = draft.name();
+                    state.cursor = jobs.iter().position(|job| job.name == name).unwrap_or(0);
+                    state.mode = JobMode::List;
+                    clamp_cursor(&jobs, &mut state);
                 }
-                Key::Backspace | Key::Char('\u{8}') => {
-                    let mut draft = draft.clone();
-                    draft.schedule.pop();
-                    state.mode = JobMode::Schedule { draft };
+                WalkStep::Refused(message) => {
+                    state.mode = JobMode::Outcome(Notice::new("not saved", message));
                 }
-                Key::Char(c) if !c.is_control() => {
-                    let mut draft = draft.clone();
-                    draft.schedule.push(c);
-                    state.mode = JobMode::Schedule { draft };
-                }
-                _ => {}
             },
-
-            JobMode::PickPipeline {
-                draft,
-                query,
-                cursor,
-            } => {
-                let matches = pipeline_matches(pipelines, query);
-                match key {
-                    Key::Esc => state.mode = JobMode::List,
-                    Key::Up | Key::Char('k') => {
-                        let cursor = cursor.saturating_sub(1);
-                        state.mode = JobMode::PickPipeline {
-                            draft: draft.clone(),
-                            query: query.clone(),
-                            cursor,
-                        };
-                    }
-                    Key::Down | Key::Char('j') => {
-                        let cursor = (cursor + 1).min(matches.len().saturating_sub(1));
-                        state.mode = JobMode::PickPipeline {
-                            draft: draft.clone(),
-                            query: query.clone(),
-                            cursor,
-                        };
-                    }
-                    Key::Enter => {
-                        if let Some(name) =
-                            matches.get((*cursor).min(matches.len().saturating_sub(1)))
-                        {
-                            let mut draft = draft.clone();
-                            draft.pipeline = name.clone();
-                            let saved = commit_draft(repo, draft);
-                            state.mode = match saved {
-                                Ok(name) => {
-                                    reload(repo, &mut jobs);
-                                    state.cursor =
-                                        jobs.iter().position(|job| job.name == name).unwrap_or(0);
-                                    JobMode::List
-                                }
-                                Err(message) => JobMode::Outcome(Notice::new("not saved", message)),
-                            };
-                            clamp_cursor(&jobs, &mut state);
-                        }
-                    }
-                    Key::Backspace | Key::Char('\u{8}') => {
-                        let mut query = query.clone();
-                        query.pop();
-                        state.mode = JobMode::PickPipeline {
-                            draft: draft.clone(),
-                            query,
-                            cursor: 0,
-                        };
-                    }
-                    Key::Char(c) if !c.is_control() => {
-                        let mut query = query.clone();
-                        query.push(c);
-                        state.mode = JobMode::PickPipeline {
-                            draft: draft.clone(),
-                            query,
-                            cursor: 0,
-                        };
-                    }
-                    _ => {}
-                }
-            }
         }
     }
     Ok(crate::screen::shell::Leave::Quit)
@@ -976,10 +1099,7 @@ fn jobs_wait_for_key(
 fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     let footer = jobs_footer(&state.mode);
     let lay = layout(&footer);
-    let in_walk = matches!(
-        state.mode,
-        JobMode::PickRoutine { .. } | JobMode::Schedule { .. } | JobMode::PickPipeline { .. }
-    );
+    let in_walk = matches!(state.mode, JobMode::PickRoutine { .. } | JobMode::Walk(_));
 
     // Build the overlay panel first. The headless frame is only as tall as its
     // own content (`queue::two_pane_frame` with `rows: None`), so both panes
@@ -988,10 +1108,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     // lines, the key line and the bottom border are silently dropped.
     let overlay_panel: Option<Vec<String>> = match &state.mode {
         JobMode::PickRoutine { nav, .. } => Some(routine_panel(ctx, nav)),
-        JobMode::Schedule { draft } => Some(schedule_panel(draft)),
-        JobMode::PickPipeline { query, cursor, .. } => {
-            Some(pipeline_panel(ctx.pipelines, query, *cursor))
-        }
+        JobMode::Walk(walk) => Some(walk.panel(ctx.pipelines)),
         JobMode::ConfirmDelete(name) => Some(panel(
             "delete this job",
             &[
@@ -1099,8 +1216,7 @@ fn jobs_footer(mode: &JobMode) -> String {
         // and `handle_routine_key` read, the same set the queue screen's own
         // routines pane names — `o` included, gated the same way there.
         JobMode::PickRoutine { .. } => key_hint(ROUTINE_KEYS),
-        JobMode::Schedule { .. } => key_hint(&[("enter", "accept"), ("esc", "cancel")]),
-        JobMode::PickPipeline { .. } => key_hint(&[("enter", "choose"), ("esc", "cancel")]),
+        JobMode::Walk(walk) => walk.footer(),
         JobMode::ConfirmDelete(_) => key_hint(&[("enter", "delete"), ("esc", "keep")]),
     }
 }
@@ -1321,7 +1437,7 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
     panel(
         &format!("when does {} run", draft.name()),
         &body,
-        &keys(&[("enter", "accept"), ("esc", "cancel")]),
+        &keys(SCHEDULE_KEYS),
     )
 }
 
@@ -1356,11 +1472,7 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
         }
     }
 
-    panel(
-        "which pipeline",
-        &body,
-        &keys(&[("enter", "choose"), ("esc", "cancel")]),
-    )
+    panel("which pipeline", &body, &keys(PIPELINE_KEYS))
 }
 
 /// The routine picker's keys, in its popup and on the line under the frame.
@@ -1965,6 +2077,48 @@ mod tests {
             "{frame}"
         );
         assert!(frame.contains("─ jobs"), "the list under it: {frame}");
+    }
+
+    /// "job saved" reads `runs at` only before a clock time; any other
+    /// phrase `describe` opens with stands on its own after `runs`.
+    #[test]
+    fn saved_notice_says_at_only_before_a_clock_time() {
+        let mut draft = Draft::new(&Pipelines::builtin());
+        draft.routine = "nightly/audit.md".to_string();
+        draft.pipeline = "bugfix".to_string();
+
+        draft.schedule = "30 2 * * *".to_string();
+        let text = saved_notice(&draft).text;
+        assert!(
+            text.starts_with("audit runs at 02:30, on bugfix.\n"),
+            "{text}"
+        );
+
+        draft.schedule = "0 * * * *".to_string();
+        let text = saved_notice(&draft).text;
+        assert!(
+            text.starts_with("audit runs every hour, on the hour, on bugfix.\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\nEdit, pause or delete it on the jobs tab."),
+            "{text}"
+        );
+
+        // Opens with a digit, but is no clock time.
+        draft.schedule = "5 * * * *".to_string();
+        let text = saved_notice(&draft).text;
+        assert!(
+            text.starts_with("audit runs 5 minutes past every hour, on bugfix.\n"),
+            "{text}"
+        );
+
+        draft.schedule = "0 0 * * *".to_string();
+        let text = saved_notice(&draft).text;
+        assert!(
+            text.starts_with("audit runs at midnight, on bugfix.\n"),
+            "{text}"
+        );
     }
 
     #[test]

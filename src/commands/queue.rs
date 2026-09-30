@@ -2358,6 +2358,7 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
 // drawing helpers below through `crate::screen` rather than each deciding
 // them for itself.
 
+use super::jobs::WalkStep;
 use super::pending::{Group, GroupState, PendingTask, TaskState};
 use super::routines::{RoutineFolder, RoutineTask};
 
@@ -2463,6 +2464,23 @@ enum Mode {
     DeleteRoutine {
         nav: RoutineNav,
         target: RoutineDelete,
+    },
+    /// `n`'s schedule and pipeline popups over the routines pane `nav`
+    /// describes, writing a job for the routine highlighted when `n` was
+    /// pressed. The popups, their keys and the save are the jobs tab's own —
+    /// see [`super::jobs::NewJobWalk`] — so `esc` on either comes back here
+    /// having written nothing.
+    NewJob {
+        nav: RoutineNav,
+        walk: super::jobs::NewJobWalk,
+    },
+    /// What `n` saved, over the routines pane — [`super::jobs::saved_notice`].
+    /// Apart from [`Mode::Outcome`] only in its key line, which names the one
+    /// key the popup reads rather than the pane's under it. `enter` closes it
+    /// back onto the pane.
+    JobSaved {
+        nav: RoutineNav,
+        notice: Notice,
     },
     /// `s`'s own panel, over the pending screen: saving the named group's
     /// tasks into `.spoolway/routines/<name>/`, `name` typed and edited
@@ -3308,9 +3326,11 @@ fn run_screen_from(
         // way out, caught by bare `spoolway`'s own screen and noticed by
         // `wait_for_key` — so every mode's match is just its own keys,
         // with `q` falling to whatever an unrecognised character already
-        // does there. Only `Mode::Filter` gives that character any meaning of
-        // its own, appending it to the query the same as any other letter —
-        // see `handle_filter_key`'s own doc comment.
+        // does there. Only the modes with a text field give that character
+        // any meaning of its own, appending it the same as any other letter:
+        // `Mode::Filter`'s query (see `handle_filter_key`'s own doc comment),
+        // `Mode::SaveRoutine`'s name, and `Mode::NewJob`'s cron expression
+        // and pipeline search.
         match &state.mode {
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
             Mode::Gate(cursor) => {
@@ -3524,6 +3544,23 @@ fn run_screen_from(
                 Key::Char('x') if nav.focus == Focus::Groups => {
                     state.mode = begin_routine_delete(repo, &routines, nav);
                 }
+                // `n` over the list: a job for the highlighted routine,
+                // through the jobs tab's schedule and pipeline popups. Read
+                // only on the list, so the tasks pane does not make one.
+                Key::Char('n') if nav.focus == Focus::Groups => {
+                    if let Some(folder) = highlighted_routine_folder(&routines, nav)
+                        && let Some(walk) = super::jobs::NewJobWalk::for_routine(
+                            pipelines,
+                            &folder.path,
+                            &routines_dir,
+                        )
+                    {
+                        state.mode = Mode::NewJob {
+                            nav: nav.clone(),
+                            walk,
+                        };
+                    }
+                }
                 // `o` over the tasks pane: open the highlighted task
                 // in an editor pane, the same shape `open_highlighted` gives
                 // the pending screen — see `open_highlighted_routine`. Gated
@@ -3541,6 +3578,26 @@ fn run_screen_from(
                     state.mode = Mode::Routines(nav);
                 }
             },
+            Mode::NewJob { nav, walk } => {
+                let nav = nav.clone();
+                state.mode = match walk.key(repo, pipelines, key) {
+                    WalkStep::Walking(walk) => Mode::NewJob { nav, walk },
+                    WalkStep::Cancelled => Mode::Routines(nav),
+                    WalkStep::Saved(draft) => Mode::JobSaved {
+                        nav,
+                        notice: super::jobs::saved_notice(&draft),
+                    },
+                    // The jobs tab's own title and message for a refused
+                    // save, a name already taken among them.
+                    WalkStep::Refused(message) => outcome_over(Some(&nav), "not saved", message),
+                };
+            }
+            Mode::JobSaved { nav, .. } => {
+                if key == Key::Enter {
+                    let closed = Mode::Routines(nav.clone());
+                    state.mode = state.after_popup(closed);
+                }
+            }
             Mode::DeleteRoutine { nav, target } => match key {
                 Key::Enter => {
                     let (nav, target) = (nav.clone(), target.clone());
@@ -5068,11 +5125,12 @@ pub(super) fn two_pane_frame(
 /// `←`/`→` switch tabs instead.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
-/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`] — none of the ordinary line's keys is read, so this
-/// draws the picker's own key row instead, the same keys its popup names. A
+/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::NewJob`] — none of the ordinary line's
+/// keys is read, so this draws the picker's own key row instead, the same keys its popup names. A
 /// notice is different: it reads only `enter` to close it, which its own
 /// popup says, and the line under the frame stays the one the screen will
-/// read again once it is closed.
+/// read again once it is closed — all but [`Mode::JobSaved`], which the
+/// routines tab's mockup draws over its own `[enter] confirm` line.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of the ordinary line's keys is read while the filter box has
@@ -5088,6 +5146,8 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
         Mode::DeleteRoutine { .. } => key_hint(DELETE_ROUTINE_KEYS),
+        Mode::NewJob { walk, .. } => walk.footer(),
+        Mode::JobSaved { .. } => hint(&confirm()),
         Mode::Gate(_) => key_hint(GATE_KEYS),
         Mode::Trial(trial) => match trial.stage {
             TrialStage::AssignPipelines => hint(&assign_keys(
@@ -5100,15 +5160,16 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
         // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
         // which apply here. One line per pane, as the pending screen's is:
-        // `x` only over the list, the one pane it deletes from, and `o`
-        // only where a task is under the cursor. No `esc`: over the list
+        // `n` and `x` only over the list, the one pane that makes a job of
+        // a routine or deletes one, and `o` only where a task is under the
+        // cursor. No `esc`: over the list
         // it does nothing, since this pane is the routines tab's whole
         // screen, and over the tasks pane it goes back to the list, which
         // `tab` already names. The same line under a notice drawn over the
         // pane.
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
-                Focus::Groups => &[("x", "delete"), ("tab", "tasks")],
+                Focus::Groups => &[("n", "new job"), ("x", "delete"), ("tab", "tasks")],
                 Focus::Tasks => &[("o", "open task"), ("tab", "routines")],
             };
             key_hint(
@@ -5214,8 +5275,9 @@ fn fit_keys(row: String, width: usize) -> String {
 }
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
-/// notice opened from it, `x`'s delete popup, or the tool-requirements gate
-/// or the issue question a routine submit stopped at. `None` for everything drawn over
+/// notice opened from it, `x`'s delete popup, `n`'s job popups and the
+/// notice they end on, or the tool-requirements gate or the issue question
+/// a routine submit stopped at. `None` for everything drawn over
 /// the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
     match mode {
@@ -5236,7 +5298,9 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
             then: Resume::Routines(nav) | Resume::RoutineTask(nav),
             ..
         }
-        | Mode::DeleteRoutine { nav, .. } => Some(nav),
+        | Mode::DeleteRoutine { nav, .. }
+        | Mode::NewJob { nav, .. }
+        | Mode::JobSaved { nav, .. } => Some(nav),
         _ => None,
     }
 }
@@ -5315,10 +5379,11 @@ fn popup(
         Mode::Trial(trial) => trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)),
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
         Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
+        Mode::NewJob { walk, .. } => Some(walk.panel(pipelines)),
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border — see
         // `checkbox_row_cap`.
-        Mode::Outcome { notice, .. } => {
+        Mode::Outcome { notice, .. } | Mode::JobSaved { notice, .. } => {
             Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
         }
         Mode::ToolGate { panel, .. }
@@ -8507,7 +8572,7 @@ mod tests {
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
             last_frame(&drawn)
-                .contains(" [space] select   [enter] queue   [x] delete   [tab] tasks   [q] quit"),
+                .contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
             "{drawn}"
         );
         assert!(last_frame(&drawn).contains("[routines]"), "{drawn}");
@@ -11801,7 +11866,9 @@ mod tests {
         assert!(last.contains("nightly"), "{last}");
         assert!(last.contains("1 task"), "{last}");
         assert!(
-            last.contains("[space] select   [enter] queue   [x] delete   [tab] tasks"),
+            last.contains(
+                "[space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks"
+            ),
             "{last}"
         );
         assert!(!last.contains("[esc] back"), "{last}");
@@ -11964,7 +12031,7 @@ mod tests {
         );
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
-            back.contains(" [space] select   [enter] queue   [x] delete   [tab] tasks   [q] quit"),
+            back.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
             "{back}"
         );
     }
@@ -12337,6 +12404,126 @@ mod tests {
         assert!(!last.contains("delete this routine"), "{last}");
         assert!(!last.contains("[x] delete"), "{last}");
         assert!(last.contains("[o] open task"), "{last}");
+    }
+
+    /// `n` over the list opens the jobs tab's schedule popup, titled for
+    /// the highlighted routine, with its keys on the line under the frame —
+    /// and writes nothing yet.
+    #[test]
+    fn n_opens_the_schedule_popup_for_the_highlighted_routine() {
+        let repo = fixture("routine-new-job-open");
+        seed_two_routines(&repo);
+
+        let last = last_frame(&routines_screen(&repo, "jn")).to_string();
+
+        assert!(last.contains("─ when does nightly run "), "{last}");
+        assert_eq!(
+            last.matches("[enter] accept   [esc] cancel").count(),
+            2,
+            "in the popup and on the line under the frame: {last}"
+        );
+        assert!(job_names(&repo).is_empty());
+    }
+
+    /// `n` reads only over the routine list: over the tasks pane it opens
+    /// nothing, and the key line there does not name it.
+    #[test]
+    fn n_over_the_tasks_pane_does_nothing_and_is_not_named() {
+        let repo = fixture("routine-new-job-tasks-pane");
+        seed_two_routines(&repo);
+
+        let last = last_frame(&routines_screen(&repo, "\tn")).to_string();
+
+        assert!(!last.contains("when does"), "{last}");
+        assert!(!last.contains("[n] new job"), "{last}");
+    }
+
+    /// `esc` on either popup goes back to the routine list and writes
+    /// nothing.
+    #[test]
+    fn esc_on_either_job_popup_writes_nothing() {
+        let repo = fixture("routine-new-job-esc");
+        seed_two_routines(&repo);
+
+        for input in ["n0 3 * * *\x1b", "n0 3 * * *\r\x1b"] {
+            let last = last_frame(&routines_screen(&repo, input)).to_string();
+            assert!(!last.contains("when does"), "{input:?}: {last}");
+            assert!(!last.contains("which pipeline"), "{input:?}: {last}");
+            assert!(last.contains("routines  2 of 2"), "{input:?}: {last}");
+            assert!(job_names(&repo).is_empty(), "{input:?}");
+            assert!(!repo.user_jobs_file().exists(), "{input:?}");
+        }
+    }
+
+    /// The walk the mockup draws: a schedule, then a pipeline found by
+    /// typing, then `enter` — a job in the user store named after the
+    /// routine, and the "job saved" popup over its own `[enter] confirm`
+    /// line. `enter` closes it onto the routine list.
+    #[test]
+    fn n_walks_the_schedule_and_pipeline_and_saves_a_user_job() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-new-job-save");
+        seed_two_routines(&repo);
+
+        let saved = last_frame(&routines_screen(&repo, "n0 3 * * 1-5\rbug\r")).to_string();
+
+        let jobs = crate::jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.name, "maintenance");
+        assert_eq!(job.scope, Scope::User);
+        assert_eq!(job.spec.routine, "maintenance");
+        assert_eq!(job.spec.schedule, "0 3 * * 1-5");
+        assert_eq!(job.spec.pipeline, "bugfix");
+        assert!(job.spec.enabled);
+        assert!(!repo.jobs_file().exists(), "nothing in the project store");
+
+        assert!(saved.contains("─ job saved "), "{saved}");
+        assert!(
+            saved.contains("maintenance runs at 03:00, Monday to Friday, on bugfix."),
+            "{saved}"
+        );
+        assert!(saved.contains("Next: "), "{saved}");
+        assert!(
+            saved.contains("Edit, pause or delete it on the jobs tab."),
+            "{saved}"
+        );
+        // The key line under the frame is the popup's own `[enter]
+        // confirm`, not the routine list's.
+        assert!(
+            saved.contains(&key_hint(&[("enter", "confirm")])),
+            "{saved}"
+        );
+        assert!(!saved.contains("[n] new job"), "{saved}");
+
+        std::fs::remove_file(repo.user_jobs_file()).unwrap();
+        let back = last_frame(&routines_screen(&repo, "n0 3 * * 1-5\rbug\r\r")).to_string();
+        assert!(!back.contains("job saved"), "{back}");
+        assert!(back.contains("> [ ] maintenance"), "{back}");
+        assert!(back.contains("[n] new job"), "{back}");
+    }
+
+    /// A routine whose job name is taken is refused at the save with the
+    /// jobs tab's own message, and the job already there is left as it was.
+    #[test]
+    fn n_on_a_routine_whose_job_name_is_taken_is_refused() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-new-job-taken");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "nightly", "maintenance");
+
+        let last = last_frame(&routines_screen(&repo, "jn0 4 * * *\r\r")).to_string();
+
+        assert!(last.contains("─ not saved "), "{last}");
+        assert!(
+            last.contains("A job named `nightly` already exists."),
+            "{last}"
+        );
+        let jobs = crate::jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].spec.routine, "maintenance");
+        assert_eq!(jobs[0].spec.schedule, "0 3 * * *");
+        assert!(!repo.user_jobs_file().exists(), "nothing written");
     }
 
     /// `esc` over the routine list does nothing: the pane is the routines

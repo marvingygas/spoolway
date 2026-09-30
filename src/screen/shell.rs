@@ -1246,7 +1246,7 @@ mod tests {
         assert!(last.contains("routines  1 of 1"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
-            last.contains(" [space] select   [enter] queue   [x] delete   [tab] tasks   [q] quit"),
+            last.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
             "{last}"
         );
 
