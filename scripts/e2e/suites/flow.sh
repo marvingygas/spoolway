@@ -197,6 +197,56 @@ refuses "pipeline check in a worktree misses a private prompt that is gone" \
 
 rm -rf "$SPOOLWAY_PROJECT_HOME/local"
 
+# ------------------------------------------------------ copy, then promote
+# `pipeline copy` and `prompt copy` run from a lane's worktree have to write
+# into the project's home, the one `local/` both sides read — and `pipeline
+# promote` has to tell a real linked worktree from the main checkout, which a
+# unit test only fakes by hand-setting `Repo::checkout`. The whole loop the
+# task promised: copy both, point the copy at the private prompt, promote,
+# and find the files tracked and `local/` empty.
+LOCAL="$SPOOLWAY_PROJECT_HOME/local"
+present() { if [ -e "$2" ]; then ok "$1"; else bad "$1 (no $2)"; fi; }
+says "pipeline copy in a worktree writes the private pipeline" \
+  "default-strict.yml" \
+  "$SPOOLWAY" -C "$WT" pipeline copy default default-strict
+works "prompt copy in a worktree writes the private prompt" \
+  "$SPOOLWAY" -C "$WT" prompt copy builder builder-strict
+has "the copied pipeline lands in the project's home, not the worktree" \
+  "steps:" "$LOCAL/pipelines/default-strict.yml"
+present "so does its task skeleton" "$LOCAL/templates/tasks/default-strict.md"
+present "and the copied prompt" "$LOCAL/prompts/builder-strict/PROMPT.md"
+refuses "pipeline copy refuses a name that is already private" "already exists" \
+  "$SPOOLWAY" pipeline copy default default-strict
+refuses "prompt copy refuses a name that is already tracked" "already exists" \
+  "$SPOOLWAY" prompt copy builder judge
+
+sed -i 's/^\([[:space:]]*prompt:[[:space:]]*\)builder[[:space:]]*$/\1builder-strict/' \
+  "$LOCAL/pipelines/default-strict.yml"
+has "the private pipeline now names the private prompt" \
+  "prompt: builder-strict" "$LOCAL/pipelines/default-strict.yml"
+
+refuses "pipeline promote refuses from a linked worktree" "not this worktree's" \
+  "$SPOOLWAY" -C "$WT" pipeline promote default-strict
+has "and the refusal left the private pipeline where it was" \
+  "prompt: builder-strict" "$LOCAL/pipelines/default-strict.yml"
+
+says "pipeline promote in the main checkout moves the pipeline" \
+  "moved" \
+  "$SPOOLWAY" pipeline promote default-strict
+has "the promoted pipeline is tracked" \
+  "prompt: builder-strict" ".spoolway/pipelines/default-strict.yml"
+present "the private prompt it names came with it" ".spoolway/prompts/builder-strict/PROMPT.md"
+present "so did its skeleton" ".spoolway/templates/tasks/default-strict.md"
+LEFT=$(find "$LOCAL" -type f 2>/dev/null | wc -l)
+if [ "$LEFT" -eq 0 ]; then ok "local/ holds nothing after the promote"
+else bad "local/ holds nothing after the promote"; find "$LOCAL" -type f | sed 's/^/        /'; fi
+works "the promoted pipeline checks clean" "$SPOOLWAY" pipeline check
+# Nothing is committed: the promote is the person's change to stage.
+says "the promote is left uncommitted" "default-strict.yml" git status --porcelain --untracked-files=all
+
+rm -rf .spoolway/pipelines/default-strict.yml .spoolway/prompts/builder-strict \
+  .spoolway/templates/tasks/default-strict.md "$LOCAL"
+
 must "removing the worktree" git worktree remove --force "$WT"
 must "removing its branch" git branch -D task/pipeline-set
 

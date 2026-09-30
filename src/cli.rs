@@ -1267,6 +1267,28 @@ pub enum PipelineCommand {
     /// list` to see what is layered, `override promote` to keep it, `override
     /// drop` to clear it.
     Override(PipelineOverrideArgs),
+
+    /// Copy a pipeline, task skeleton included, into the private layer —
+    /// `local/pipelines/<to>.yml` and `local/templates/tasks/<to>.md`,
+    /// beside the tracked ones rather than in place of them. In home mode,
+    /// where the whole setup is already private, this writes straight into
+    /// the workspace's own `config/` instead.
+    ///
+    /// `<from>` may already be tracked or private; `<to>` is refused, and
+    /// nothing written, when it names a pipeline that already exists either
+    /// way.
+    Copy(PipelineCopyArgs),
+
+    /// Move a private pipeline — the private prompts it names and its
+    /// private skeleton included — into `.spoolway/`, then delete the
+    /// private files. The reverse of `pipeline copy`.
+    ///
+    /// Refused inside a linked worktree, for the same reason `override
+    /// promote` refuses there: the dispatcher reads the project's tracked
+    /// files, never a worktree's own copy. Refused against any clash with a
+    /// tracked file, and refused outright in home mode, where the setup is
+    /// already private and there is nothing to promote into.
+    Promote(PipelinePromoteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1277,6 +1299,22 @@ pub struct PipelineOverrideArgs {
     /// `<step>.<key>=<value>`, e.g. `implement.model=claude-opus-5`.
     #[arg(long = "set", value_name = "STEP.KEY=VALUE")]
     pub set: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelineCopyArgs {
+    /// The pipeline to copy from — tracked or already private.
+    pub from: String,
+
+    /// The new pipeline's name. Refused if it already exists, tracked or
+    /// private.
+    pub to: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelinePromoteArgs {
+    /// The private pipeline to promote.
+    pub name: String,
 }
 
 /// What spoolway can run, and whether it really can.
@@ -1363,6 +1401,27 @@ pub enum PromptCommand {
         /// The prompt to fork.
         name: String,
     },
+
+    /// Copy a prompt into the private layer — `local/prompts/<to>/PROMPT.md`,
+    /// beside the tracked ones rather than in place of them. In home mode,
+    /// where the whole setup is already private, this writes straight into
+    /// the workspace's own `config/prompts/<to>/` instead.
+    ///
+    /// `<from>` may already be tracked or private; `<to>` is refused, and
+    /// nothing written, when it names a prompt that already exists either
+    /// way. See `pipeline promote`, which moves a private prompt a private
+    /// pipeline names into `.spoolway/` too.
+    Copy(PromptCopyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PromptCopyArgs {
+    /// The prompt to copy from — tracked or already private.
+    pub from: String,
+
+    /// The new prompt's name. Refused if it already exists, tracked or
+    /// private.
+    pub to: String,
 }
 
 /// Printing the shapes that are prose, not a pipeline: a task's own body, a
@@ -1782,6 +1841,47 @@ mod tests {
         {
             Command::Prompt(PromptCommand::Override { name }) => assert_eq!(name, "reviewer"),
             other => panic!("expected Command::Prompt(Override), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_copy_reads_from_and_to() {
+        match Cli::try_parse_from(["spoolway", "pipeline", "copy", "impl", "impl-strict"])
+            .unwrap()
+            .command
+        {
+            Command::Pipeline(PipelineCommand::Copy(args)) => {
+                assert_eq!(args.from, "impl");
+                assert_eq!(args.to, "impl-strict");
+            }
+            other => panic!("expected Command::Pipeline(Copy), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_promote_reads_the_name() {
+        match Cli::try_parse_from(["spoolway", "pipeline", "promote", "impl-strict"])
+            .unwrap()
+            .command
+        {
+            Command::Pipeline(PipelineCommand::Promote(args)) => {
+                assert_eq!(args.name, "impl-strict")
+            }
+            other => panic!("expected Command::Pipeline(Promote), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_copy_reads_from_and_to() {
+        match Cli::try_parse_from(["spoolway", "prompt", "copy", "reviewer", "reviewer-strict"])
+            .unwrap()
+            .command
+        {
+            Command::Prompt(PromptCommand::Copy(args)) => {
+                assert_eq!(args.from, "reviewer");
+                assert_eq!(args.to, "reviewer-strict");
+            }
+            other => panic!("expected Command::Prompt(Copy), got {other:?}"),
         }
     }
 

@@ -34,8 +34,9 @@ object:
 ```
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `prompt contract`, `prompt list`, `prompt override`, `config show`, `config list`,
-`config get`, `config path`, `config override`, `doctor` and `sync`.
+override`, `pipeline copy`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
+`config show`, `config list`, `config get`, `config path`, `config override`, `doctor` and
+`sync`.
 
 ## Your work
 
@@ -650,6 +651,42 @@ A step the pipeline does not have, a key the merge refuses, or `id:` set on the 
 out of the merge instead: the command still runs, and prints one stderr line naming what it
 left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
 
+### `spoolway pipeline copy <from> <to>`
+
+Copy a pipeline and its task skeleton into the private layer.
+
+```
+$ spoolway pipeline copy impl impl-strict
+wrote    ~/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
+wrote    ~/.spoolway/proj-ab12cd34/local/templates/tasks/impl-strict.md
+```
+
+`<from>` may already be tracked or private. A `<to>` that already names a pipeline, tracked or
+private, is refused, naming `spoolway pipeline list`. In home mode, where the whole setup is
+already private, this writes into the workspace's own `config/` instead. `--json` prints
+`{"wrote": [<path>, ...]}`, with each path in full. See [Private
+pipelines](pipelines.md#private-pipelines).
+
+### `spoolway pipeline promote <name>`
+
+Move a private pipeline, the private prompts it names, and its private task skeleton into the
+tracked `.spoolway/`, then delete the private files.
+
+```
+$ spoolway pipeline promote impl-strict
+moved    local/pipelines/impl-strict.yml       ->  .spoolway/pipelines/impl-strict.yml
+moved    local/prompts/reviewer-strict/        ->  .spoolway/prompts/reviewer-strict/
+moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/impl-strict.md
+```
+
+Refused inside a linked worktree, naming the command to run in the main checkout instead — the
+dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
+against a clash with any tracked file, naming it. Refused in home mode, where the whole setup
+is already private and there is nothing to promote into. Nothing is committed. `--json` prints
+`{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and `to` relative to
+the checkout, matching the two columns above. See [Private
+pipelines](pipelines.md#private-pipelines).
+
 ### `spoolway prompt contract`
 
 Print the contract a prompt is written against, rendered from the checkout's own pipeline.
@@ -676,6 +713,21 @@ Print one prompt file.
 
 Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md` to edit there. An override
 replaces the whole file. See the [overrides layer](configuration.md#the-overrides-layer).
+
+### `spoolway prompt copy <from> <to>`
+
+Copy a prompt into the private layer.
+
+```
+$ spoolway prompt copy reviewer reviewer-strict
+wrote    ~/.spoolway/proj-ab12cd34/local/prompts/reviewer-strict/PROMPT.md
+```
+
+`<from>` may already be tracked or private. A `<to>` that already names a prompt, tracked or
+private, is refused, naming `spoolway prompt list`. In home mode, where the whole setup is
+already private, this writes into the workspace's own `config/prompts/<to>/` instead. `--json`
+prints `{"wrote": [<path>]}`, with the path in full. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway agent list`
 

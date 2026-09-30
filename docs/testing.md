@@ -80,7 +80,7 @@ with a `// covers:` line.
 
 | Suite | Covers |
 |---|---|
-| `flow` | A task's whole life: queued, agent steps, command steps, archived |
+| `flow` | A task's whole life: queued, agent steps, command steps, archived; copying a pipeline and a prompt into the private layer from a real linked worktree, then promoting the pipeline into the checkout |
 | `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, the sync notice over a real pty, `spoolway sync`'s confirm panel over a real pty with esc after its title, checking the panel reaches the terminal, no alternate screen, and the cancel message |
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `started`, `blocked`, `paused`, `done`, `open` and `check`, the shipped `github.sh` against the `gh` double, `key_in_names`, `labels:` reaching the hook as `SPOOLWAY_LABELS`, and `queue add` refusing a label with a space |

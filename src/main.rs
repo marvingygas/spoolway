@@ -455,6 +455,12 @@ fn run() -> Result<()> {
                 Command::Pipeline(PipelineCommand::Override(args)) => {
                     commands::pipeline_override(&repo, &args.name, &args.set)
                 }
+                Command::Pipeline(PipelineCommand::Copy(args)) => {
+                    commands::pipeline_copy(&repo, &args.from, &args.to, cli.json)
+                }
+                Command::Pipeline(PipelineCommand::Promote(args)) => {
+                    commands::pipeline_promote(&repo, &args.name, cli.json)
+                }
 
                 // Read out of the checkout, like `pipeline show` and the
                 // other file readers below — not `routing(&graph)`. A pipeline
@@ -472,6 +478,9 @@ fn run() -> Result<()> {
                 Command::Prompt(PromptCommand::Show { name }) => prompt::show(&repo, name),
                 Command::Prompt(PromptCommand::Override { name }) => {
                     commands::prompt_override(&repo, name)
+                }
+                Command::Prompt(PromptCommand::Copy(args)) => {
+                    commands::prompt_copy(&repo, &args.from, &args.to, cli.json)
                 }
 
                 Command::Override(OverrideCommand::Contract) => commands::override_contract(),

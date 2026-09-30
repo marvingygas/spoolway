@@ -1,5 +1,11 @@
-//! `spoolway pipeline show`, `pipeline check`, `pipeline contract` and
-//! `pipeline list`.
+//! Everything read or written against the pipeline graph itself, as one
+//! command family in one file:
+//! `pipeline show`, `check`, `contract` and `list` read it; `override`
+//! forks one step's key into the patch layer; `copy` and `promote`, with
+//! `prompt copy` beside them, are the private layer's own write commands —
+//! see [`crate::local`] and the plan's `d-private-pipelines` decision.
+
+use std::path::PathBuf;
 
 use super::*;
 
@@ -1055,6 +1061,441 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// `pipeline copy`, `prompt copy` and `pipeline promote` — the private
+// layer's own write commands, see `crate::local` and the plan's
+// `d-private-pipelines` decision. `copy` starts a private pipeline or
+// prompt from one that already exists, tracked or private; `promote` is its
+// reverse, moving a private pipeline — the private prompts it names and its
+// own private skeleton — into the tracked control plane. Both refuse a
+// clash rather than silently shadow or overwrite a file.
+// ---------------------------------------------------------------------------
+
+/// Extensions [`crate::pipeline::Pipelines::dir_in`]'s own directory accepts
+/// for a pipeline file — `.yml` first, `.yaml` for a project that wrote
+/// that instead — the same two [`crate::pipeline`]'s own `read_pipeline_dir`
+/// reads, so a `.yaml` pipeline is found, and clashed against, the way
+/// `merge_private` already treats it.
+const PIPELINE_EXTS: &[&str] = &["yml", "yaml"];
+
+/// The first of `dir/<name>.yml` and `dir/<name>.yaml` that exists, or
+/// `None` with neither.
+fn pipeline_file_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    PIPELINE_EXTS
+        .iter()
+        .map(|ext| dir.join(format!("{name}.{ext}")))
+        .find(|path| path.is_file())
+}
+
+/// Where `pipeline copy` and `prompt copy` write: `local/pipelines/`,
+/// `local/prompts/` and `local/templates/tasks/` in repo mode, or the
+/// tracked directories themselves in home mode, where
+/// [`crate::config::setup_dir_in`] already resolves those to the
+/// workspace's own `config/` — the whole setup there being private already,
+/// there is no second private layer to add. See [`crate::local`].
+fn copy_target_dirs(repo: &Repo) -> (PathBuf, PathBuf) {
+    if crate::local::is_repo_mode(&repo.checkout) {
+        let local = repo.local_dir();
+        (
+            crate::local::pipelines_dir(&local),
+            crate::local::task_templates_dir(&local),
+        )
+    } else {
+        (Pipelines::dir_in(&repo.checkout), repo.task_templates_dir())
+    }
+}
+
+/// Where `prompt copy <from> <to>` writes: `local/prompts/<to>/PROMPT.md`
+/// in repo mode, or the tracked directory shape itself in home mode —
+/// [`crate::prompt::directory_form`], never `repo.prompts_dir().join(…)`
+/// built by hand, which
+/// `commands::tests::nothing_builds_a_prompt_path_except_the_one_function_that_should`
+/// refuses outright.
+fn prompt_copy_dest(repo: &Repo, to: &str) -> PathBuf {
+    if crate::local::is_repo_mode(&repo.checkout) {
+        crate::local::prompts_dir(&repo.local_dir())
+            .join(to)
+            .join(crate::assets::PROMPT_FILE)
+    } else {
+        crate::prompt::directory_form(repo, to)
+    }
+}
+
+/// Refuse `name` as a `<to>` that already names a pipeline — tracked or
+/// private, `.yml` or `.yaml`.
+fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
+    if let Some(path) = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), name) {
+        bail!(
+            "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
+             different `<to>`",
+            path.display()
+        );
+    }
+    if crate::local::is_repo_mode(&repo.checkout)
+        && let Some(path) = pipeline_file_in(&crate::local::pipelines_dir(&repo.local_dir()), name)
+    {
+        bail!(
+            "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
+             different `<to>`",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Refuse `name` as a `<to>` that already names a prompt — tracked (nested
+/// or the legacy flat shape, same as [`crate::prompt::path_for_tracked`]) or
+/// private.
+fn refuse_prompt_clash(repo: &Repo, name: &str) -> Result<()> {
+    let tracked = crate::prompt::path_for_tracked(repo, name);
+    if tracked.is_file() {
+        bail!(
+            "`{name}` already exists — {} — see `spoolway prompt list` and choose a different \
+             `<to>`",
+            tracked.display()
+        );
+    }
+    if crate::local::is_repo_mode(&repo.checkout) {
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join(name)
+            .join(crate::assets::PROMPT_FILE);
+        if private.is_file() {
+            bail!(
+                "`{name}` already exists — {} — see `spoolway prompt list` and choose a \
+                 different `<to>`",
+                private.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The `wrote    <path>` lines `pipeline copy` and `prompt copy` print, `~`
+/// standing in for home — both write under a project's home (`local/`) or a
+/// home-mode workspace's own folder, never inside the checkout, so
+/// [`crate::fmt::relative`] (repo-relative) would only draw a `../..`
+/// nobody wants to read; [`crate::repo::shorten_home`] is the same shortening
+/// the `checkout:` note itself uses.
+fn print_wrote(json: bool, paths: &[&Path]) -> Result<()> {
+    if json {
+        let payload = serde_json::json!({
+            "wrote": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    for path in paths {
+        println!("{:<9}{}", "wrote", crate::repo::shorten_home(path));
+    }
+    Ok(())
+}
+
+/// `spoolway pipeline copy <from> <to>`.
+///
+/// `from` may be tracked or already private — the tracked directory checked
+/// first, the private one only once that is confirmed absent, the same
+/// order every other private-layer reader in this project uses. The
+/// skeleton copied alongside it is whatever
+/// [`crate::task_template::resolve`] would hand a task queued on `from`
+/// right now, following the identical fallback chain a queued task gets —
+/// `from`'s own file if it has one, down to the built-in — so a pipeline
+/// copied from one with no skeleton of its own still gets a real file to
+/// diverge from, not an empty one.
+pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+    }
+
+    let source = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), from)
+        .or_else(|| {
+            crate::local::is_repo_mode(&repo.checkout)
+                .then(|| pipeline_file_in(&crate::local::pipelines_dir(&repo.local_dir()), from))
+                .flatten()
+        })
+        .with_context(|| format!("no pipeline named `{from}` — see `spoolway pipeline list`"))?;
+    let raw = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+
+    refuse_pipeline_clash(repo, to)?;
+
+    let (pipelines_dir, templates_dir) = copy_target_dirs(repo);
+    let pipeline_dest = pipelines_dir.join(format!("{to}.yml"));
+    write_atomic(&pipeline_dest, &raw)?;
+
+    let skeleton = crate::task_template::resolve(repo, from);
+    let skeleton_dest = templates_dir.join(format!("{to}.md"));
+    write_atomic(&skeleton_dest, &skeleton)?;
+
+    print_wrote(json, &[&pipeline_dest, &skeleton_dest])
+}
+
+/// `spoolway prompt copy <from> <to>`.
+///
+/// Reads the tracked or already-private file whole, the same as
+/// `commands::prompt_override` forking a tracked prompt into the patch
+/// layer — never through [`crate::prompt::path_for`], which would also
+/// consult the override layer, a different question from "what does `from`
+/// name, tracked or private" this command answers.
+pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+    }
+
+    let tracked = crate::prompt::path_for_tracked(repo, from);
+    let source = if tracked.is_file() {
+        tracked
+    } else if crate::local::is_repo_mode(&repo.checkout) {
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join(from)
+            .join(crate::assets::PROMPT_FILE);
+        if !private.is_file() {
+            bail!("no prompt named `{from}` — see `spoolway prompt list`");
+        }
+        private
+    } else {
+        bail!("no prompt named `{from}` — see `spoolway prompt list`");
+    };
+    let body = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+
+    refuse_prompt_clash(repo, to)?;
+
+    let dest = prompt_copy_dest(repo, to);
+    write_atomic(&dest, &body)?;
+
+    print_wrote(json, &[&dest])
+}
+
+/// One file or directory `pipeline promote` moved.
+struct Moved {
+    from: PathBuf,
+    to: PathBuf,
+    dir: bool,
+}
+
+/// Copy `from`'s whole text to `to` and remove `from` — a move built from a
+/// read, an atomic write and a delete rather than [`std::fs::rename`],
+/// because `from` (under a project's home) and `to` (under the checkout)
+/// are not guaranteed to share a filesystem, and `rename` refuses across
+/// one.
+fn move_file(from: &Path, to: &Path) -> Result<()> {
+    let body = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+    write_atomic(to, body)?;
+    std::fs::remove_file(from).with_context(|| format!("removing {}", from.display()))
+}
+
+/// [`move_file`] for a whole directory — a private prompt's own folder,
+/// `PROMPT.md` and whatever else it holds (an `assets/` of its own,
+/// chiefly) — copied recursively then removed, for the same cross-filesystem
+/// reason [`move_file`] does not reach for [`std::fs::rename`].
+fn move_dir(from: &Path, to: &Path) -> Result<()> {
+    copy_dir_all(from, to)?;
+    std::fs::remove_dir_all(from).with_context(|| format!("removing {}", from.display()))
+}
+
+/// A plain recursive copy, every file under `from` landing at the same
+/// relative path under `to`.
+fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    for entry in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", from.display()))?;
+        let dest = to.join(entry.file_name());
+        if entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?
+            .is_dir()
+        {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest).with_context(|| {
+                format!("copying {} to {}", entry.path().display(), dest.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// The `moved    <from>  ->  <to>` lines `pipeline promote` prints.
+///
+/// `from` is shown relative to `repo.home` — `local/pipelines/impl-strict.yml`,
+/// the mockup's own spelling — and `to` relative to `repo.root` —
+/// `.spoolway/pipelines/impl-strict.yml`. The two sides never share a root
+/// to be relative to together: the private layer lives under a project's
+/// home ([`crate::local::dir_for`]), the tracked control plane under the
+/// checkout, and `pipeline_promote` already refuses to run anywhere but the
+/// main checkout, so `repo.root` is exactly the tracked side's own root.
+fn print_moved(repo: &Repo, json: bool, moved: &[Moved]) -> Result<()> {
+    if json {
+        let payload = serde_json::json!({
+            "moved": moved.iter().map(|m| serde_json::json!({
+                "from": crate::fmt::relative(&repo.home, &m.from),
+                "to": crate::fmt::relative(&repo.root, &m.to),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = moved
+        .iter()
+        .map(|m| {
+            let suffix = if m.dir { "/" } else { "" };
+            (
+                format!("{}{suffix}", crate::fmt::relative(&repo.home, &m.from)),
+                format!("{}{suffix}", crate::fmt::relative(&repo.root, &m.to)),
+            )
+        })
+        .collect();
+    let from_w = rows
+        .iter()
+        .map(|(f, _)| f.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (from, to) in &rows {
+        println!("{:<9}{from:<from_w$}  ->  {to}", "moved");
+    }
+    Ok(())
+}
+
+/// `spoolway pipeline promote <name>`.
+///
+/// Moves the private pipeline, every private prompt it names, and its own
+/// private skeleton into the tracked control plane, then deletes the
+/// private files — the reverse of `pipeline copy`.
+///
+/// Refused inside a linked worktree for the same reason `override promote`
+/// refuses there: the dispatcher reads `repo.root`'s tracked files, never a
+/// linked worktree's own copy, and `repo.checkout == repo.root` is what
+/// lets every path below be built from [`Repo`]'s own tracked accessors
+/// rather than a second, root-only copy of each. Refused outright in home
+/// mode, where [`crate::local::is_repo_mode`] is false because the whole
+/// setup is already private and there is nothing to promote into.
+pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
+    if repo.checkout != repo.root {
+        bail!(
+            "the dispatcher reads the project's tracked files, not this worktree's.\n  spoolway \
+             -C {} pipeline promote {name}",
+            repo.root.display()
+        );
+    }
+    if !crate::local::is_repo_mode(&repo.checkout) {
+        bail!(
+            "this setup is already private — there is nothing for `pipeline promote` to move \
+             into"
+        );
+    }
+
+    let local = repo.local_dir();
+    let source =
+        pipeline_file_in(&crate::local::pipelines_dir(&local), name).with_context(|| {
+            format!("no private pipeline named `{name}` — see `spoolway pipeline list`")
+        })?;
+    if let Some(clash) = pipeline_file_in(&Pipelines::dir_in(&repo.root), name) {
+        bail!(
+            "`{name}` already exists in the tracked pipelines — {} — rename one of the two",
+            clash.display()
+        );
+    }
+
+    // Loaded, not merely read off disk: the private prompts this pipeline
+    // names are read off its own parsed steps, the same source
+    // `crate::pipeline::merge_private`'s own refusal reads, and loading
+    // also proves the pipeline is one that would actually work once
+    // promoted, rather than moving a file nothing has ever validated.
+    let pipelines = Pipelines::load(&repo.checkout, &repo.config)?;
+    let pipeline = pipelines
+        .pipelines
+        .get(name)
+        .filter(|p| p.private_file.is_some())
+        .with_context(|| {
+            format!("no private pipeline named `{name}` — see `spoolway pipeline list`")
+        })?;
+
+    // Every destination this promote would touch, clash-checked in full
+    // before anything is moved — see
+    // `pipeline_promote_refuses_a_skeleton_clash_without_moving_anything_first`.
+    // A clash on the private prompt or the skeleton used to surface only
+    // after the pipeline file (and any prompt checked before it) had
+    // already landed under `.spoolway/`, leaving a half-promoted pipeline
+    // behind a refusal and a re-run that could no longer find it privately
+    // either. Building the whole plan first, and moving only once every
+    // entry in it is known to be clash-free, is what keeps a refusal here
+    // exactly as inert as every other refusal in this command.
+    let mut plan = Vec::new();
+
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("yml");
+    let pipeline_dest = Pipelines::dir_in(&repo.root).join(format!("{name}.{ext}"));
+    plan.push(Moved {
+        from: source,
+        to: pipeline_dest,
+        dir: false,
+    });
+
+    let mut prompt_names: Vec<&str> = pipeline
+        .steps
+        .iter()
+        .filter(|s| s.kind() == StepKind::Agent)
+        .map(|s| s.prompt_name())
+        .collect();
+    prompt_names.sort_unstable();
+    prompt_names.dedup();
+
+    for prompt_name in prompt_names {
+        let private_dir = crate::local::prompts_dir(&local).join(prompt_name);
+        if !private_dir.is_dir() {
+            continue;
+        }
+        // `directory_form`'s own parent, not `repo.prompts_dir().join(…)` —
+        // `commands::tests::nothing_builds_a_prompt_path_except_the_one_function_that_should`
+        // refuses that shape outright, `crate::prompt::path_for` being the
+        // one function meant to join a prompt's directory onto its name.
+        let tracked_dir = crate::prompt::directory_form(repo, prompt_name)
+            .parent()
+            .expect("directory_form always nests PROMPT_FILE under a name directory")
+            .to_path_buf();
+        if tracked_dir.is_dir() {
+            bail!(
+                "`{prompt_name}` already exists in the tracked prompts — {} — rename the \
+                 private one first",
+                tracked_dir.display()
+            );
+        }
+        plan.push(Moved {
+            from: private_dir,
+            to: tracked_dir,
+            dir: true,
+        });
+    }
+
+    let skeleton_source = crate::local::task_templates_dir(&local).join(format!("{name}.md"));
+    if skeleton_source.is_file() {
+        let skeleton_dest = repo.task_templates_dir().join(format!("{name}.md"));
+        if skeleton_dest.is_file() {
+            bail!(
+                "`{name}` already has a tracked skeleton — {} — rename the private one first",
+                skeleton_dest.display()
+            );
+        }
+        plan.push(Moved {
+            from: skeleton_source,
+            to: skeleton_dest,
+            dir: false,
+        });
+    }
+
+    // Every destination above is now known clash-free, so nothing past
+    // this point ever refuses — the actual filesystem changes happen only
+    // once the whole plan is settled.
+    for item in &plan {
+        if item.dir {
+            move_dir(&item.from, &item.to)?;
+        } else {
+            move_file(&item.from, &item.to)?;
+        }
+    }
+
+    print_moved(repo, json, &plan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,6 +1544,386 @@ mod tests {
             )
             .expect("init")
         });
+    }
+
+    // -----------------------------------------------------------------
+    // `pipeline copy`, `prompt copy` and `pipeline promote`.
+    // -----------------------------------------------------------------
+
+    /// `pipeline copy` writes both the pipeline and its resolved task
+    /// skeleton under `local/`, byte for byte what the tracked source
+    /// holds — the acceptance shape's first sentence.
+    #[test]
+    fn pipeline_copy_writes_the_pipeline_and_its_skeleton_into_the_private_layer() {
+        let repo = repo_for("copy-writes");
+
+        pipeline_copy(&repo, "default", "default-strict", false).expect("copy");
+
+        let tracked_raw =
+            std::fs::read_to_string(Pipelines::file_in(&repo.checkout, "default")).unwrap();
+        let private_raw = std::fs::read_to_string(
+            crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml"),
+        )
+        .unwrap();
+        assert_eq!(private_raw, tracked_raw);
+
+        let skeleton = std::fs::read_to_string(
+            crate::local::task_templates_dir(&repo.local_dir()).join("default-strict.md"),
+        )
+        .unwrap();
+        assert_eq!(skeleton, crate::task_template::resolve(&repo, "default"));
+    }
+
+    /// Both spellings of a clash are refused: a `<to>` that already names a
+    /// tracked pipeline, and one that already names a private one.
+    #[test]
+    fn pipeline_copy_refuses_a_to_that_already_exists_tracked_or_private() {
+        let repo = repo_for("copy-clash");
+
+        let err = pipeline_copy(&repo, "default", "default", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+
+        pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+        let err = pipeline_copy(&repo, "default", "default-strict", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// A private pipeline may itself be `from` — copying a copy.
+    #[test]
+    fn pipeline_copy_reads_from_an_already_private_pipeline() {
+        let repo = repo_for("copy-from-private");
+        pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+
+        pipeline_copy(&repo, "default-strict", "default-stricter", false).unwrap();
+
+        assert!(
+            crate::local::pipelines_dir(&repo.local_dir())
+                .join("default-stricter.yml")
+                .is_file()
+        );
+    }
+
+    /// `pipeline copy` on a name nothing has is refused by name.
+    #[test]
+    fn pipeline_copy_refuses_an_unknown_from() {
+        let repo = repo_for("copy-unknown");
+        let err = pipeline_copy(&repo, "nosuchpipeline", "x", false).unwrap_err();
+        assert!(format!("{err:#}").contains("no pipeline named"), "{err:#}");
+    }
+
+    /// `prompt copy` writes the tracked prompt's own body under
+    /// `local/prompts/<to>/PROMPT.md`.
+    #[test]
+    fn prompt_copy_writes_the_prompt_into_the_private_layer() {
+        let repo = repo_for("prompt-copy-writes");
+
+        prompt_copy(&repo, "implementer", "implementer-strict", false).expect("copy");
+
+        let tracked =
+            std::fs::read_to_string(crate::prompt::path_for_tracked(&repo, "implementer")).unwrap();
+        let private = std::fs::read_to_string(
+            crate::local::prompts_dir(&repo.local_dir())
+                .join("implementer-strict")
+                .join(crate::assets::PROMPT_FILE),
+        )
+        .unwrap();
+        assert_eq!(private, tracked);
+    }
+
+    /// The same clash refusal `pipeline copy` gives, on the prompt side.
+    #[test]
+    fn prompt_copy_refuses_a_to_that_already_exists_tracked_or_private() {
+        let repo = repo_for("prompt-copy-clash");
+
+        let err = prompt_copy(&repo, "implementer", "implementer", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+
+        prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap();
+        let err = prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// The end-to-end shape the task's own acceptance criteria name: copy a
+    /// pipeline and a prompt, point the copy at the private prompt, promote
+    /// it, and find the pipeline, the prompt and the skeleton under
+    /// `.spoolway/` with `local/` left empty of all three.
+    ///
+    /// `pipeline_promote` reads the private pipeline back through
+    /// `Pipelines::load`, which resolves the project's home path-based
+    /// (`crate::local::dir_for`, through `crate::mux::project_home`) rather
+    /// than off this test's own `Repo::home` field — so the whole body runs
+    /// inside the one `with_home` that both `repo_for`'s `init` and that
+    /// resolution have to agree on, unlike every test above that only ever
+    /// writes and reads through `repo.local_dir()` itself.
+    #[test]
+    fn pipeline_promote_moves_the_pipeline_its_private_prompt_and_its_skeleton() {
+        let (repo, home) = repo_for_home_aware("promote-e2e");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap();
+
+            // Point the private pipeline's `implement` step at the private
+            // prompt, the way a person editing it after `pipeline copy`
+            // would.
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: implementer-strict");
+            // Guard against `default.yml`'s own shape drifting out from
+            // under this rewrite and silently promoting the untouched
+            // tracked prompt.
+            assert!(raw.contains("implementer-strict"), "{raw}");
+            std::fs::write(&pipeline_path, raw).unwrap();
+
+            pipeline_promote(&repo, "default-strict", false).expect("promote");
+
+            assert!(
+                Pipelines::file_in(&repo.root, "default-strict").is_file(),
+                "the pipeline must land in the tracked directory"
+            );
+            assert!(
+                crate::prompt::path_for_tracked(&repo, "implementer-strict").is_file(),
+                "the private prompt it names must move too"
+            );
+            assert!(
+                repo.task_templates_dir()
+                    .join("default-strict.md")
+                    .is_file(),
+                "its own skeleton must move too"
+            );
+
+            assert!(
+                !crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .exists(),
+                "the private pipeline file must be gone"
+            );
+            assert!(
+                !crate::local::prompts_dir(&repo.local_dir())
+                    .join("implementer-strict")
+                    .exists(),
+                "the private prompt directory must be gone"
+            );
+            assert!(
+                !crate::local::task_templates_dir(&repo.local_dir())
+                    .join("default-strict.md")
+                    .exists(),
+                "the private skeleton must be gone"
+            );
+
+            // Nothing else was ever written under `local/` by this test, so
+            // an empty (or absent) directory here is the whole layer gone,
+            // not just these three files.
+            let remaining: Vec<_> = walk_files(&repo.local_dir());
+            assert!(remaining.is_empty(), "{remaining:?}");
+        });
+    }
+
+    /// Every file still under `dir`, recursively — for asserting an
+    /// emptied-out private layer without caring how many nested directories
+    /// `pipeline promote` left behind.
+    fn walk_files(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(walk_files(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// `pipeline promote` on a name with no private pipeline is refused by
+    /// name.
+    #[test]
+    fn pipeline_promote_refuses_an_unknown_name() {
+        let repo = repo_for("promote-unknown");
+        let err = pipeline_promote(&repo, "nosuchpipeline", false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no private pipeline named"),
+            "{err:#}"
+        );
+    }
+
+    /// A private pipeline whose name already belongs to a tracked one is
+    /// refused rather than overwriting it — `pipeline copy` already
+    /// prevents this from `copy`'s own side, but `promote` checks again in
+    /// case the tracked file arrived afterwards.
+    #[test]
+    fn pipeline_promote_refuses_a_clash_with_a_tracked_pipeline() {
+        let repo = repo_for("promote-tracked-clash");
+        pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+        // Land a tracked pipeline by this name after the private copy was
+        // made, so `pipeline copy` itself never got a chance to refuse it.
+        std::fs::write(
+            Pipelines::file_in(&repo.root, "default-strict"),
+            "steps:\n  - id: solo\n    agent: pi\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// A clash found only on the *last* destination `pipeline_promote`
+    /// checks — the skeleton, after the pipeline itself (and any private
+    /// prompt) would already have passed their own checks — must still
+    /// refuse before anything is moved. `default`'s own `implement` step
+    /// names the tracked prompt `implementer`, so nothing here ever reaches
+    /// the prompt loop at all: the whole plan is just the pipeline and its
+    /// skeleton, and the skeleton is the one entry planted to clash.
+    ///
+    /// Like the end-to-end test above, `pipeline_promote` reads the private
+    /// pipeline back through `Pipelines::load`, path-based, so the whole
+    /// body has to run inside the one `with_home` `repo_for_home_aware`
+    /// and that resolution agree on.
+    #[test]
+    fn pipeline_promote_refuses_a_skeleton_clash_without_moving_anything_first() {
+        let (repo, home) = repo_for_home_aware("promote-skeleton-clash");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            // Land a tracked skeleton by this name after the private copy
+            // was made — the pipeline file itself has no tracked
+            // counterpart, so only this last check in the plan ever fires.
+            std::fs::write(
+                repo.task_templates_dir().join("default-strict.md"),
+                "the tracked skeleton\n",
+            )
+            .unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("already has a tracked skeleton"),
+                "{err:#}"
+            );
+
+            assert!(
+                !Pipelines::file_in(&repo.root, "default-strict").exists(),
+                "a later clash must leave the pipeline file exactly where it was, not \
+                 half-moved"
+            );
+            assert!(
+                crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .is_file(),
+                "the private pipeline file must still be there to retry from"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.task_templates_dir().join("default-strict.md"))
+                    .unwrap(),
+                "the tracked skeleton\n",
+                "the tracked skeleton that caused the refusal must be untouched"
+            );
+        });
+    }
+
+    /// The same refusal `override promote` gives from a linked worktree,
+    /// for the identical reason: the dispatcher reads `repo.root`'s tracked
+    /// files, never a worktree's own copy.
+    #[test]
+    fn pipeline_promote_refuses_from_a_linked_worktree() {
+        let repo = repo_for("promote-worktree");
+        pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+
+        let mut worktree = repo.clone();
+        worktree.checkout = repo.root.join("elsewhere");
+
+        let err = pipeline_promote(&worktree, "default-strict", false).unwrap_err();
+        assert!(err.to_string().contains("this worktree's"), "{err}");
+    }
+
+    /// Home mode has no private layer of its own: `pipeline copy` writes
+    /// straight into the workspace's `config/`, and `pipeline promote`
+    /// refuses outright, saying why.
+    #[test]
+    fn home_mode_writes_copies_straight_in_and_refuses_to_promote() {
+        let root = crate::scratch::root("pipeline-cmd-home-mode");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fake_home = root.parent().unwrap().join(format!(
+            "{}-realhome",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&fake_home);
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            let clone = crate::repo::create_workspace(&root).unwrap();
+            let pipelines_dir = clone.config_dir().join("pipelines");
+            std::fs::create_dir_all(&pipelines_dir).unwrap();
+            std::fs::write(
+                pipelines_dir.join("default.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: m\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let home = crate::mux::project_home(&root).unwrap();
+            let repo = Repo {
+                checkout: root.clone(),
+                root: root.clone(),
+                config: Config::default(),
+                home,
+            };
+
+            pipeline_copy(&repo, "default", "default-strict", false).expect("copy");
+            assert!(
+                pipelines_dir.join("default-strict.yml").is_file(),
+                "home mode writes straight into the workspace's config/"
+            );
+            assert!(
+                !repo.local_dir().exists(),
+                "home mode has no private layer to write into"
+            );
+
+            let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
+            assert!(format!("{err:#}").contains("already private"), "{err:#}");
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&fake_home).ok();
+    }
+
+    /// [`repo_for`], but with `Repo::home` resolved the real way — through
+    /// `crate::mux::project_home`, inside the scratch `$HOME` `init` just
+    /// stamped the project under — and that `$HOME` handed back alongside
+    /// it. For a test that goes on to call something, like
+    /// `pipeline_promote`, that resolves the project's home itself,
+    /// path-based, rather than asking this `Repo`'s own field: the caller
+    /// must re-enter the same `crate::platform::test_home::with_home` for
+    /// the two resolutions to agree, since [`repo_for`]'s own placeholder
+    /// `root.join(".home")` never would.
+    fn repo_for_home_aware(name: &str) -> (Repo, PathBuf) {
+        let root = crate::scratch::root(&format!("pipeline-cmd-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        let home = root.parent().unwrap().join(format!(
+            "{}-home",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let repo = crate::platform::test_home::with_home(&home, || {
+            init(
+                &root,
+                &InitArgs {
+                    yes: true,
+                    ..InitArgs::default()
+                },
+            )
+            .expect("init");
+            Repo {
+                checkout: root.clone(),
+                root: root.clone(),
+                config: Config::default(),
+                home: crate::mux::project_home(&root).unwrap(),
+            }
+        });
+        (repo, home)
     }
 
     /// Every pipeline's name and description are printed, and nothing more —
