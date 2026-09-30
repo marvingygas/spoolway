@@ -67,6 +67,36 @@ pub const SCRATCH_DIR: &str = "scratch";
 /// cannot reach a whole `Repo`.
 pub const OVERRIDES_DIR: &str = "overrides";
 
+/// `.spoolway/` under `checkout` — the tracked control plane's own
+/// directory, and the one place [`STATE_DIR`] is ever joined onto a checkout
+/// or root. Every reader of a setup file goes through this (for the handful
+/// of callers, like [`Config::load`] and [`crate::pipeline::Pipelines::load`],
+/// that only have a bare path) or through [`crate::repo::Repo::setup_dir`],
+/// its `Repo`-typed twin — see the `setup-dir-accessor` task. Moving the
+/// tracked setup somewhere else, the reason this exists, is a change to this
+/// one function and nothing else.
+pub fn setup_dir_in(checkout: &Path) -> PathBuf {
+    checkout.join(STATE_DIR)
+}
+
+/// `full` — one of the constants above ([`PROMPTS_DIR`], [`TASK_TEMPLATES_DIR`],
+/// [`TRACKING_TEMPLATES_DIR`], [`ROUTINES_DIR`], [`JOBS_FILE`]), always
+/// spelled whole from the checkout (`.spoolway/prompts`, never bare
+/// `prompts`), because a project's own docs and `commands::init`'s
+/// scaffolding both display it that way — rebased onto `setup_dir`, an
+/// answer [`setup_dir_in`] or [`crate::repo::Repo::setup_dir`] already gave
+/// the caller, by stripping the shared [`STATE_DIR`] prefix back off. Takes
+/// the folder rather than a checkout so a caller that already resolved one
+/// — `commands::init`'s own `state`, [`crate::repo::Repo::under_setup`] — is
+/// never asked to resolve it a second time just to hand it straight back
+/// in.
+pub fn under_setup(setup_dir: &Path, full: &str) -> PathBuf {
+    let relative = Path::new(full)
+        .strip_prefix(STATE_DIR)
+        .unwrap_or_else(|_| panic!("{full} is not under {STATE_DIR}"));
+    setup_dir.join(relative)
+}
+
 /// Is `id` usable as the name of a file under the project's home directory —
 /// see [`crate::repo::Repo::home`]?
 ///
@@ -1534,7 +1564,7 @@ impl Config {
     /// exception: it still hands `repo.root`, and refuses first if a linked
     /// worktree's `checkout` differs from it — see `commands::config_set`.
     pub fn path_in(root: &Path) -> PathBuf {
-        root.join(STATE_DIR).join(CONFIG_FILE)
+        setup_dir_in(root).join(CONFIG_FILE)
     }
 
     /// Load config from a directory holding `.spoolway/`, falling back to

@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::assets;
 use crate::cli::*;
-use crate::config::{Config, STATE_DIR};
+use crate::config::Config;
 use crate::fmt::{first_line, relative};
 use crate::graph::{DepState, Graph};
 use crate::mux::Mux;

@@ -72,7 +72,14 @@ pub fn hook_path_in(checkout: &Path, hook: &str) -> Option<PathBuf> {
     if named.is_empty() || !is_bare_filename(named) {
         return None;
     }
-    Some(checkout.join(".spoolway/hooks").join(named))
+    Some(hooks_dir_in(checkout).join(named))
+}
+
+/// `.spoolway/hooks/` under `checkout` — the one place that subdirectory is
+/// ever joined onto one. Every reader of a specific hook script goes through
+/// [`hook_path_in`], which joins onto this rather than repeating the literal.
+pub(crate) fn hooks_dir_in(checkout: &Path) -> PathBuf {
+    crate::config::setup_dir_in(checkout).join("hooks")
 }
 
 /// Whether `name` is exactly one ordinary path component, which is the whole
@@ -622,7 +629,7 @@ pub(crate) fn missing_slug_line(
     if name.is_empty() || !is_bare_filename(name) {
         return None;
     }
-    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    let script = std::fs::read_to_string(hooks_dir_in(checkout).join(name)).ok()?;
     (!writes_slug_line(&script)).then(|| name.to_string())
 }
 
@@ -640,7 +647,7 @@ pub(crate) fn missing_fetch_branch(checkout: &Path, hook_name: &str) -> Option<S
     if name.is_empty() || !is_bare_filename(name) {
         return None;
     }
-    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    let script = std::fs::read_to_string(hooks_dir_in(checkout).join(name)).ok()?;
     (!has_fetch_branch(&script)).then(|| name.to_string())
 }
 
@@ -668,7 +675,7 @@ pub(crate) fn missing_check_branch(checkout: &Path, hook_name: &str) -> Option<S
     if name.is_empty() || !is_bare_filename(name) {
         return None;
     }
-    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    let script = std::fs::read_to_string(hooks_dir_in(checkout).join(name)).ok()?;
     (!has_check_branch(&script)).then(|| name.to_string())
 }
 

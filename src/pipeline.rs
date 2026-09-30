@@ -2346,7 +2346,7 @@ pub struct Pipelines {
 impl Pipelines {
     /// The directory holding one file per pipeline.
     pub fn dir_in(root: &Path) -> PathBuf {
-        root.join(crate::config::STATE_DIR).join(PIPELINE_DIR)
+        crate::config::setup_dir_in(root).join(PIPELINE_DIR)
     }
 
     /// Where a named pipeline's file lives.
@@ -2471,7 +2471,7 @@ impl Pipelines {
         let files = match read_pipeline_dir(&dir)? {
             Some(files) => files,
             None => {
-                let old = root.join(crate::config::STATE_DIR).join(PIPELINE_FILE);
+                let old = crate::config::setup_dir_in(root).join(PIPELINE_FILE);
                 if old.exists() {
                     bail!(
                         "{} is the old single-file shape, which this spoolway no longer \

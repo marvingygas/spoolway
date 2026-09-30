@@ -150,7 +150,7 @@ impl Repo {
     /// [`checkout_of`], so this makes no `git rev-parse` call that a caller
     /// has not already paid for.
     fn root(start: &Path, main: Option<&Path>) -> Result<PathBuf> {
-        if let Some(main) = main.filter(|dir| dir.join(crate::config::STATE_DIR).is_dir()) {
+        if let Some(main) = main.filter(|dir| crate::config::setup_dir_in(dir).is_dir()) {
             return Ok(main.to_path_buf());
         }
 
@@ -167,8 +167,8 @@ impl Repo {
         let found = start
             .ancestors()
             .take_while(|dir| top.as_deref().is_none_or(|top| dir.starts_with(top)))
-            .filter(|dir| *dir != state_root && dir.join(crate::config::STATE_DIR) != state_root)
-            .find(|dir| dir.join(crate::config::STATE_DIR).is_dir());
+            .filter(|dir| *dir != state_root && crate::config::setup_dir_in(dir) != state_root)
+            .find(|dir| crate::config::setup_dir_in(dir).is_dir());
         if let Some(dir) = found {
             return Ok(dir.to_path_buf());
         }
@@ -381,10 +381,27 @@ impl Repo {
         ]
     }
 
+    /// `.spoolway/` under `checkout` — the branch actually running, not
+    /// necessarily `root`'s. The one accessor every tracked-setup path below
+    /// is built from; [`crate::config::setup_dir_in`] is its free-function
+    /// twin for a caller (`Config::load`, `Pipelines::load`, …) that only has
+    /// a bare checkout path and not yet a `Repo` to ask.
+    pub fn setup_dir(&self) -> PathBuf {
+        crate::config::setup_dir_in(&self.checkout)
+    }
+
+    /// [`crate::config::under_setup`], against this `Repo`'s own
+    /// [`Repo::setup_dir`] — `commands::init` reaches for the free function
+    /// directly instead, against the `setup_dir_in(root)` it already
+    /// resolved, since it has no whole `Repo` yet to ask.
+    pub(crate) fn under_setup(&self, full: &str) -> PathBuf {
+        crate::config::under_setup(&self.setup_dir(), full)
+    }
+
     /// The tracked control plane's own directories, read from `checkout` —
     /// the branch actually running, not necessarily `root`'s.
     pub fn prompts_dir(&self) -> PathBuf {
-        self.checkout.join(crate::config::PROMPTS_DIR)
+        self.under_setup(crate::config::PROMPTS_DIR)
     }
 
     /// The optional patch layer's own directory — see [`crate::overrides`].
@@ -406,24 +423,24 @@ impl Repo {
     /// saved no routine has no directory here at all, and the routines tab
     /// says so by naming this path rather than opening an empty one.
     pub fn routines_dir(&self) -> PathBuf {
-        self.checkout.join(crate::config::ROUTINES_DIR)
+        self.under_setup(crate::config::ROUTINES_DIR)
     }
 
     pub fn task_templates_dir(&self) -> PathBuf {
-        self.checkout.join(crate::config::TASK_TEMPLATES_DIR)
+        self.under_setup(crate::config::TASK_TEMPLATES_DIR)
     }
 
     /// The project-scoped cron-job store, tracked in the checkout — read from
     /// `checkout` like every other tracked file above, so a lane sees its own
     /// branch's jobs. See [`crate::jobs`].
     pub fn jobs_file(&self) -> PathBuf {
-        self.checkout.join(crate::config::JOBS_FILE)
+        self.under_setup(crate::config::JOBS_FILE)
     }
 
     /// Where a project overrides `epic.md` and `ticket.md`, the two bodies
     /// the `open` hook renders — see [`crate::task_template::resolve_tracking`].
     pub fn tracking_templates_dir(&self) -> PathBuf {
-        self.checkout.join(crate::config::TRACKING_TEMPLATES_DIR)
+        self.under_setup(crate::config::TRACKING_TEMPLATES_DIR)
     }
 
     /// Every task's lane state, across every dispatcher this machine has run
@@ -2249,6 +2266,169 @@ pub fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The byte range of `fn <marker>(`'s own body in `text` — from its
+    /// opening `{` to the matching closing `}`, found by counting braces
+    /// rather than indentation, so it survives a reformat. `None` when no
+    /// function by that name is found at all, which the caller treats as
+    /// "nothing to exempt" rather than a silent no-op.
+    fn fn_body_range(text: &str, marker: &str) -> Option<std::ops::Range<usize>> {
+        let start = text.find(marker)?;
+        let open = text[start..].find('{')? + start;
+        let mut depth = 0usize;
+        for (offset, ch) in text[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open..open + offset + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The rule the `setup-dir-accessor` task exists to enforce: nothing
+    /// outside [`crate::config::setup_dir_in`], [`crate::config::under_setup`],
+    /// [`Repo::setup_dir`] and [`Repo::under_setup`] — the four functions this
+    /// folder is ever reached through — joins [`crate::config::STATE_DIR`],
+    /// one of `crate::config`'s other setup-path constants, or a literal
+    /// `.spoolway/…` path straight onto a checkout or root. A behavioural
+    /// test only covers the callers it happens to drive; this reads the
+    /// source instead, the same way
+    /// `commands::tests::nothing_builds_a_prompt_path_except_the_one_function_that_should`
+    /// already does for prompt paths, so a new offender fails here on the
+    /// next `cargo test` rather than being noticed only once the setup
+    /// folder actually needs to move.
+    ///
+    /// Tests are exempt — a fixture planting a `.spoolway/` directory to
+    /// simulate a project is not a reader reaching for the real one — and so
+    /// is prose: a comment or a message's own text saying `.spoolway/hooks`
+    /// is not a join. Both are approximated the same blunt way: a comment
+    /// line is dropped before the search, and everything from a file's own
+    /// top-level `mod tests {` onward is dropped with it, since that is
+    /// where every fixture in this codebase lives. The four functions
+    /// themselves are excised by [`fn_body_range`] rather than by skipping
+    /// their whole file, so a fifth join written anywhere else in
+    /// `config.rs` or `repo.rs` still fails this.
+    #[test]
+    fn nothing_joins_state_dir_except_the_one_accessor() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+
+        let mut pending = vec![src];
+        let mut sources = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("reading src/") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    sources.push(path);
+                }
+            }
+        }
+
+        // The setup-path constants `crate::config` exports, joined onto a
+        // checkout only by [`crate::config::under_setup`]/
+        // [`Repo::under_setup`] — see their own docs.
+        const CONSTANTS: &[&str] = &[
+            "STATE_DIR",
+            "PROMPTS_DIR",
+            "TASK_TEMPLATES_DIR",
+            "TRACKING_TEMPLATES_DIR",
+            "ROUTINES_DIR",
+            "JOBS_FILE",
+        ];
+
+        for path in sources {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+            // `mux.rs` and `models.rs` join a `.spoolway/…` literal onto a
+            // different directory entirely: `crate::mux::home()`, the
+            // machine's own `~/.spoolway/` (project homes, the shared
+            // dispatch workspace, the vendored model-price cache) rather
+            // than a checkout's tracked control plane — see
+            // [`crate::mux::state_root`]. Out of scope for this rule, which
+            // is only about the checkout-relative folder `Repo::setup_dir`
+            // names; changing where runtime state lives is this task's own
+            // non-goal. Nothing else is exempt by filename: `config.rs` and
+            // `repo.rs` are scanned like any other file, with only the four
+            // accessor bodies themselves cut out below.
+            if matches!(name.as_str(), "mux.rs" | "models.rs") {
+                continue;
+            }
+
+            let mut text = std::fs::read_to_string(&path).expect("reading a source file");
+
+            // Everything from a top-level `mod tests {` on is a fixture,
+            // not a reader — see the doc above.
+            if let Some(at) = text.find("\nmod tests {") {
+                text.truncate(at);
+            }
+
+            // Cut the accessor's own body out before scanning, rather than
+            // skipping the whole file that defines it — see the doc above.
+            // `config.rs`'s free `under_setup`/`setup_dir_in` and `repo.rs`'s
+            // methods of the same two names are unambiguous within a single
+            // file's text, so the same four markers find the right one in
+            // whichever file actually defines it.
+            for marker in ["fn setup_dir_in(", "fn under_setup(", "fn setup_dir("] {
+                if let Some(range) = fn_body_range(&text, marker) {
+                    text.replace_range(range, "");
+                }
+            }
+            let body = text;
+
+            // Line by line would miss the shape rustfmt actually produces,
+            // where `.join(` lands on its own line — so this searches the
+            // text with whitespace removed, and recovers the line number
+            // from the offset afterwards, exactly as the prompt-path test
+            // does.
+            let mut flat = String::with_capacity(body.len());
+            let mut lines = Vec::with_capacity(body.len());
+            for (number, line) in body.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for character in line.chars().filter(|c| !c.is_whitespace()) {
+                    flat.push(character);
+                    lines.push(number + 1);
+                }
+            }
+
+            for constant in CONSTANTS {
+                for needle in [
+                    format!(".join({constant})"),
+                    format!(".join(crate::config::{constant})"),
+                ] {
+                    for (at, _) in flat.match_indices(&needle) {
+                        offenders.push(format!("{name}:{}", lines[at]));
+                    }
+                }
+            }
+            // A literal `.spoolway/…` handed straight to `.join(`, rather
+            // than through the constants above — the same offence spelled
+            // without the constant's name. The trailing slash matters: a
+            // name that merely starts with `.spoolway` (`update.rs`'s own
+            // `.spoolway-update-no-project.lock`, named beside a checkout,
+            // never inside one) is a different file, not this directory.
+            for (at, _) in flat.match_indices(".join(\".spoolway/") {
+                offenders.push(format!("{name}:{}", lines[at]));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "join a setup-path constant (or a `.spoolway/` literal) onto a checkout or root \
+             only through `crate::config::setup_dir_in`/`under_setup` (or \
+             `Repo::setup_dir`/`under_setup`):\n  {}",
+            offenders.join("\n  ")
+        );
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         run(dir, "git", args).unwrap_or_else(|e| panic!("git {args:?} in {dir:?}: {e:#}"))

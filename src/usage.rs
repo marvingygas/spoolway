@@ -2075,7 +2075,7 @@ pub mod registry {
                     .map(|(_id, root)| root)
                     .unwrap_or(entry.root)
             })
-            .filter(|root| root.join(crate::config::STATE_DIR).is_dir())
+            .filter(|root| crate::config::setup_dir_in(root).is_dir())
             .collect()
     }
 

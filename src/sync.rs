@@ -818,7 +818,7 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             continue;
         };
 
-        let is_hook = path.starts_with(repo.checkout.join(".spoolway/hooks"));
+        let is_hook = path.starts_with(crate::tracking::hooks_dir_in(&repo.checkout));
 
         let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
         if on_disk == shipped {
@@ -954,7 +954,7 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
 
     // The hook scripts `init` seeds into `.spoolway/hooks/` — same rule:
     // never touched by an ordinary sync, `--replace` only.
-    if path.starts_with(repo.checkout.join(".spoolway/hooks")) {
+    if path.starts_with(crate::tracking::hooks_dir_in(&repo.checkout)) {
         return crate::assets::HOOK_SCRIPTS
             .iter()
             .find(|(known, _)| Path::new(known).file_stem().and_then(|s| s.to_str()) == Some(stem))
@@ -1171,7 +1171,7 @@ fn retired_skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> 
 /// touched.
 fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for (name, why) in crate::install::RETIRED_TEMPLATES {
-        let path = repo.checkout.join(name);
+        let path = crate::config::under_setup(&repo.setup_dir(), name);
         if !path.is_file() {
             continue;
         }

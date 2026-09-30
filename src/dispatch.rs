@@ -5773,8 +5773,7 @@ fn prepare_boot(
         ("repo", repo.root.display().to_string()),
         (
             "state_dir",
-            repo.root
-                .join(crate::config::STATE_DIR)
+            crate::config::setup_dir_in(&repo.root)
                 .display()
                 .to_string(),
         ),

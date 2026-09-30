@@ -388,7 +388,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     let answers = Answers::gather(root, args)?;
 
-    let state = root.join(STATE_DIR);
+    let state = crate::config::setup_dir_in(root);
     let mut config = Config::default();
     let profile = answers.provider.name();
     // A fresh scaffold has one identity, not a menu of hypothetical profiles:
@@ -486,8 +486,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // it. A project adds a pipeline's shape by writing a file beside these, and
     // one that writes nothing takes `default`.
     for (name, skeleton) in assets::TASK_TEMPLATES {
-        let path = root
-            .join(crate::config::TASK_TEMPLATES_DIR)
+        let path = crate::config::under_setup(&state, crate::config::TASK_TEMPLATES_DIR)
             .join(format!("{name}.md"));
         let rel = relative(root, &path);
         wrote_any |= place(path, &rel, skeleton.as_bytes(), false)?;
@@ -498,8 +497,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // a single line naming the task instead of this prose; see
     // `crate::task_template::resolve_tracking`.
     for (name, body) in assets::TRACKING_TEMPLATES {
-        let path = root
-            .join(crate::config::TRACKING_TEMPLATES_DIR)
+        let path = crate::config::under_setup(&state, crate::config::TRACKING_TEMPLATES_DIR)
             .join(format!("{name}.md"));
         let rel = relative(root, &path);
         wrote_any |= place(path, &rel, body.as_bytes(), false)?;
@@ -508,7 +506,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // switching later is a `spoolway config set issue_tracking.hook` away,
     // not a second `init`.
     for (name, body) in assets::HOOK_SCRIPTS {
-        let path = root.join(".spoolway/hooks").join(name);
+        let path = crate::tracking::hooks_dir_in(root).join(name);
         let rel = relative(root, &path);
         wrote_any |= place(path, &rel, body.as_bytes(), true)?;
     }
@@ -708,7 +706,7 @@ mod tests {
     /// the question every test below asks of them, and which file it is in is
     /// not.
     fn pipelines_on_disk(root: &Path) -> String {
-        let dir = root.join(STATE_DIR).join("pipelines");
+        let dir = root.join(crate::config::STATE_DIR).join("pipelines");
         let mut all = String::new();
         for entry in std::fs::read_dir(&dir).expect("pipelines dir").flatten() {
             all.push_str(&std::fs::read_to_string(entry.path()).unwrap());
@@ -1364,7 +1362,10 @@ mod tests {
         run_init(&root, &InitArgs::default()).expect("a declined init is not an error");
 
         assert!(!Config::path_in(&root).exists(), "no config was written");
-        assert!(!root.join(STATE_DIR).exists(), "no .spoolway/ at all");
+        assert!(
+            !root.join(crate::config::STATE_DIR).exists(),
+            "no .spoolway/ at all"
+        );
         assert!(!root.join(".claude").exists(), "no skills were installed");
         assert!(
             !home.join(".spoolway").exists(),
