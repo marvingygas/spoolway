@@ -4404,12 +4404,16 @@ fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
 /// of every row below. `group_cursor` still addresses `shown` alone, never
 /// this line, the same way it never addresses the separator; [`draw`] is
 /// what shifts the row `window()` centres on to account for it.
+///
+/// Comes back with the line each group's row sits on as well — see
+/// [`Items`] — so neither that `find:` row nor a separator is ever counted
+/// as a group out of sight.
 fn groups_pane_lines(
     groups: &[Group],
     shown: &[&Group],
     state: &ScreenState,
     width: usize,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<usize>) {
     let mut lines = Vec::new();
     if matches!(state.mode, Mode::Filter) {
         lines.push(format!("find: {}▏", state.filter));
@@ -4433,11 +4437,12 @@ fn groups_pane_lines(
             let hidden = groups.len() - shown.len();
             format!("  nothing to queue — {} hidden", plural(hidden, "group"))
         });
-        return lines;
+        return (lines, Vec::new());
     }
 
     let boundaries = boundary_for(shown, state);
     lines.reserve(shown.len() + boundaries.len());
+    let mut starts = Vec::with_capacity(shown.len());
     for (i, group) in shown.iter().enumerate() {
         if boundaries.contains(&i) {
             lines.push(String::new());
@@ -4469,9 +4474,10 @@ fn groups_pane_lines(
             .saturating_sub(tail.chars().count() + ROW_PREFIX_COLUMNS)
             .max(MIN_NAME_COLUMN);
         let name = pad_to(&group.name, name_budget);
+        starts.push(lines.len());
         lines.push(format!("{marker} {box_} {name}{tail}"));
     }
-    lines
+    (lines, starts)
 }
 
 /// The characters a tasks-pane row spends before its own name even starts:
@@ -4519,25 +4525,28 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 /// Read-only. Nothing here is picked: the checkbox is on the group, in the
 /// pane to the left, and this is what that group holds.
 ///
-/// Comes back with the line range the highlighted task occupies as well —
-/// its header row and everything drawn under it — which is what [`window`]
-/// keeps in view on a pane taller than the terminal.
+/// Comes back with the line each task's header row sits on — see [`Items`]
+/// — and the line range the highlighted task occupies as well — its header
+/// row and everything drawn under it — which is what [`window`] keeps in
+/// view on a pane taller than the terminal.
 fn tasks_pane_lines(
     groups: &[Group],
     _pipelines: &Pipelines,
     state: &ScreenState,
     width: usize,
-) -> (Vec<String>, (usize, usize)) {
+) -> (Vec<String>, Vec<usize>, (usize, usize)) {
     let Some(group) = shown(groups, state).get(state.group_cursor).copied() else {
-        return (Vec::new(), (0, 0));
+        return (Vec::new(), Vec::new(), (0, 0));
     };
     let tasks = &group.tasks;
 
     let mut lines = Vec::new();
+    let mut starts = Vec::with_capacity(tasks.len());
     let mut focus = (0, 0);
     for (i, task) in tasks.iter().enumerate() {
         lines.push(String::new());
         let opened = lines.len();
+        starts.push(opened);
         let marker = if i == state.task_cursor && state.focus == Focus::Tasks {
             ">"
         } else {
@@ -4591,7 +4600,7 @@ fn tasks_pane_lines(
             focus = (opened, lines.len().saturating_sub(1));
         }
     }
-    (lines, focus)
+    (lines, starts, focus)
 }
 
 /// The routines pane's own left-hand rows: the current level's folders, each
@@ -4605,67 +4614,76 @@ fn tasks_pane_lines(
 /// that directory for this to find. An empty level anywhere else is simply a
 /// folder with no subfolders of its own, which [`handle_routine_key`]'s own
 /// `→` already refused to descend into.
+///
+/// Comes back with the line each folder starts on as well — see [`Items`].
+/// A folder is one line, so that is every line; it is noted in the loop
+/// all the same, where it cannot drift from the rows it points at.
 fn routine_folder_lines(
     routines_dir: &std::path::Path,
     level: &[RoutineFolder],
     nav: &RoutineNav,
     width: usize,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<usize>) {
     if level.is_empty() {
-        return vec![if nav.path.is_empty() {
+        let line = if nav.path.is_empty() {
             format!("  nothing under {}", routines_dir.display())
         } else {
             "  nothing here".to_string()
-        }];
+        };
+        return (vec![line], Vec::new());
     }
 
-    level
-        .iter()
-        .enumerate()
-        .map(|(i, folder)| {
-            let marker = if i == nav.folder_cursor && nav.focus == Focus::Groups {
-                ">"
-            } else {
-                " "
-            };
-            let box_ = if nav.selected.contains(&folder.path) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            // Same tail-then-name budget `groups_pane_lines` gives a queued
-            // group's own row — see that function's own comment on why the
-            // name gets a floor no tail is allowed to shrink it past.
-            let tail = format!(" {}", plural(folder.tasks.len(), "task"));
-            let name_budget = width
-                .saturating_sub(tail.chars().count() + ROW_PREFIX_COLUMNS)
-                .max(MIN_NAME_COLUMN);
-            let name = pad_to(&folder.name, name_budget);
-            format!("{marker} {box_} {name}{tail}")
-        })
-        .collect()
+    let mut lines = Vec::with_capacity(level.len());
+    let mut starts = Vec::with_capacity(level.len());
+    for (i, folder) in level.iter().enumerate() {
+        let marker = if i == nav.folder_cursor && nav.focus == Focus::Groups {
+            ">"
+        } else {
+            " "
+        };
+        let box_ = if nav.selected.contains(&folder.path) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        // Same tail-then-name budget `groups_pane_lines` gives a queued
+        // group's own row — see that function's own comment on why the
+        // name gets a floor no tail is allowed to shrink it past.
+        let tail = format!(" {}", plural(folder.tasks.len(), "task"));
+        let name_budget = width
+            .saturating_sub(tail.chars().count() + ROW_PREFIX_COLUMNS)
+            .max(MIN_NAME_COLUMN);
+        let name = pad_to(&folder.name, name_budget);
+        starts.push(lines.len());
+        lines.push(format!("{marker} {box_} {name}{tail}"));
+    }
+    (lines, starts)
 }
 
 /// The routines pane's own right-hand rows: the highlighted folder's own
 /// tasks — every one at or below it, the same set `enter` would queue —
 /// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
 /// pending task, minus the `Gate:` row a routine has no gate picker to set
-/// and the `Base:` row, which this pane has never drawn.
+/// and the `Base:` row, which this pane has never drawn. Comes back with
+/// each task's start and the highlighted one's range, the same as
+/// [`tasks_pane_lines`].
 fn routine_task_lines(
     folder: Option<&RoutineFolder>,
     _pipelines: &Pipelines,
     nav: &RoutineNav,
     width: usize,
-) -> (Vec<String>, (usize, usize)) {
+) -> (Vec<String>, Vec<usize>, (usize, usize)) {
     let Some(folder) = folder else {
-        return (Vec::new(), (0, 0));
+        return (Vec::new(), Vec::new(), (0, 0));
     };
 
     let mut lines = Vec::new();
+    let mut starts = Vec::with_capacity(folder.tasks.len());
     let mut focus = (0, 0);
     for (i, task) in folder.tasks.iter().enumerate() {
         lines.push(String::new());
         let opened = lines.len();
+        starts.push(opened);
         let marker = if i == nav.task_cursor && nav.focus == Focus::Tasks {
             ">"
         } else {
@@ -4694,7 +4712,7 @@ fn routine_task_lines(
             focus = (opened, lines.len().saturating_sub(1));
         }
     }
-    (lines, focus)
+    (lines, starts, focus)
 }
 
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
@@ -4709,20 +4727,59 @@ fn render_routines(
 ) -> Vec<String> {
     let layout = layout(footer);
     let level = routine_level(routines, &nav.path);
-    let left = routine_folder_lines(routines_dir, level, nav, layout.left);
+    let (left, left_starts) = routine_folder_lines(routines_dir, level, nav, layout.left);
     let highlighted = level.get(nav.folder_cursor);
-    let (right, focus) = routine_task_lines(highlighted, pipelines, nav, layout.right);
+    let (right, right_starts, focus) =
+        routine_task_lines(highlighted, pipelines, nav, layout.right);
 
     let left_title = format!("routines  {} of {}", level.len(), level.len());
     let right_title = highlighted.map_or("no folder", |folder| folder.name.as_str());
     let folder_line = nav.folder_cursor.min(level.len().saturating_sub(1));
     two_pane_frame(
-        &window(&left, (folder_line, folder_line), layout.rows),
-        &window(&right, focus, layout.rows),
+        &window(
+            &left,
+            Items {
+                starts: &left_starts,
+                noun: Some("folder"),
+            },
+            (folder_line, folder_line),
+            layout.rows,
+            layout.left,
+        ),
+        &window(
+            &right,
+            Items {
+                starts: &right_starts,
+                noun: Some("task"),
+            },
+            focus,
+            layout.rows,
+            layout.right,
+        ),
         &left_title,
         right_title,
         layout,
     )
+}
+
+/// Where a pane's items start among its lines, and what to call them, so
+/// [`window`]'s marker row can count what is out of sight in the pane's own
+/// terms rather than in lines.
+///
+/// A task in the tasks pane is six lines, so a count of lines said "21
+/// below" when four tasks were out of sight. Only the builder that draws a
+/// pane knows where one item ends and the next begins, so it notes each
+/// start in the same loop that pushes the item's first line. A line no
+/// start points into ahead of the first item — the filter's `find:` row —
+/// and a blank separator row are never counted.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Items<'a> {
+    /// The line each item starts on, in ascending order.
+    pub(super) starts: &'a [usize],
+    /// The singular noun the marker counts in (`"task"`, `"group"`,
+    /// `"folder"`), or `None` for the jobs screen, which passes one item per
+    /// line and keeps the one-sided `↓ N below` it has always drawn.
+    pub(super) noun: Option<&'static str>,
 }
 
 /// The slice of `lines` a pane `rows` rows tall shows, with the block at
@@ -4731,9 +4788,16 @@ fn render_routines(
 ///
 /// `None` rows is a run with no terminal to measure, where nothing is cut at
 /// all. Where the content does not fit, the pane's bottom row is spent on
-/// saying how much is out of sight rather than on a line that would be
-/// silently the last one a person sees.
-pub(super) fn window(lines: &[String], focus: (usize, usize), rows: Option<usize>) -> Vec<String> {
+/// saying how many of `items` are out of sight rather than on a line that
+/// would be silently the last one a person sees — see [`marker_row`], which
+/// fits that row to `width`.
+pub(super) fn window(
+    lines: &[String],
+    items: Items<'_>,
+    focus: (usize, usize),
+    rows: Option<usize>,
+    width: usize,
+) -> Vec<String> {
     let Some(rows) = rows else {
         return lines.to_vec();
     };
@@ -4747,12 +4811,82 @@ pub(super) fn window(lines: &[String], focus: (usize, usize), rows: Option<usize
         .min(start)
         .min(lines.len() - view);
     let mut shown = lines[offset..offset + view].to_vec();
-    let hidden = lines.len() - (offset + view);
-    shown.push(match hidden {
-        0 => format!("↑ {offset} above"),
-        _ => format!("↓ {hidden} below"),
-    });
+    let (above, below) = hidden_items(lines, items.starts, offset, offset + view);
+    shown.push(marker_row(above, below, items.noun, width));
     shown
+}
+
+/// How many items are not fully in view above and below the lines
+/// `top..bottom`. An item cut in half at either edge counts as out of sight
+/// on that side: part of it is, and the marker is what says so.
+///
+/// An item runs from its start to the last non-blank line before the next
+/// one starts. The blank row the tasks pane draws ahead of every task is a
+/// separator, not the end of the task before it — counting it would call a
+/// task whose own last line is on screen "below" whenever only that blank
+/// row had scrolled off.
+fn hidden_items(lines: &[String], starts: &[usize], top: usize, bottom: usize) -> (usize, usize) {
+    let mut above = 0;
+    let mut below = 0;
+    for (k, &start) in starts.iter().enumerate() {
+        let next = starts.get(k + 1).copied().unwrap_or(lines.len());
+        let last = (start..next)
+            .rev()
+            .find(|&line| !lines[line].is_empty())
+            .unwrap_or(start);
+        if start < top {
+            above += 1;
+        } else if last >= bottom {
+            below += 1;
+        }
+    }
+    (above, below)
+}
+
+/// The marker row under a cut pane: both directions on one row when items
+/// are hidden on both sides, only the one side otherwise.
+///
+/// Named with its noun first — `↑ 11 groups above · ↓ 19 groups below` —
+/// and shortened when the pane is too narrow, first to `↑ 11 above · ↓ 19
+/// below` and then to `↑ 11 · ↓ 19`. The first form that fits `width` is
+/// drawn: [`two_pane_frame`]'s own `pad_to` would otherwise cut a wider row
+/// off mid-word without a sign it had. The last form is drawn whatever the
+/// width, as nothing shorter still says both counts.
+///
+/// With no noun this is the jobs screen's marker exactly as it has always
+/// read: one direction only, below whenever anything is.
+///
+/// Nothing out of sight on either side — every hidden line was a separator
+/// — draws an empty row rather than a `↓ 0 below` that says nothing.
+fn marker_row(above: usize, below: usize, noun: Option<&str>, width: usize) -> String {
+    let Some(noun) = noun else {
+        return match below {
+            0 => format!("↑ {above} above"),
+            _ => format!("↓ {below} below"),
+        };
+    };
+    // 0 is the full row, 1 drops the noun, 2 drops the words as well.
+    let form = |short: u8| {
+        let side = |arrow: &str, n: usize, word: &str| match short {
+            0 => format!("{arrow} {} {word}", plural(n, noun)),
+            1 => format!("{arrow} {n} {word}"),
+            _ => format!("{arrow} {n}"),
+        };
+        let mut sides = Vec::new();
+        if above > 0 {
+            sides.push(side("↑", above, "above"));
+        }
+        if below > 0 {
+            sides.push(side("↓", below, "below"));
+        }
+        sides.join(" · ")
+    };
+    let forms = [form(0), form(1), form(2)];
+    forms
+        .iter()
+        .find(|row| row.chars().count() <= width)
+        .unwrap_or(&forms[2])
+        .clone()
 }
 
 /// Lay two panes of lines side by side, bordered in box-drawing characters —
@@ -5095,8 +5229,8 @@ fn pending_frame(
     layout: Layout,
 ) -> Vec<String> {
     let shown = shown(groups, state);
-    let left = groups_pane_lines(groups, &shown, state, layout.left);
-    let (right, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
+    let (left, left_starts) = groups_pane_lines(groups, &shown, state, layout.left);
+    let (right, right_starts, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
     let left_title = format!("groups  {} of {}", shown.len(), groups.len());
     let title = shown
         .get(state.group_cursor)
@@ -5112,8 +5246,26 @@ fn pending_frame(
     let query_row = usize::from(matches!(state.mode, Mode::Filter));
     let group_line = query_row + group_line_index(state.group_cursor, &boundary_for(&shown, state));
     two_pane_frame(
-        &window(&left, (group_line, group_line), layout.rows),
-        &window(&right, focus, layout.rows),
+        &window(
+            &left,
+            Items {
+                starts: &left_starts,
+                noun: Some("group"),
+            },
+            (group_line, group_line),
+            layout.rows,
+            layout.left,
+        ),
+        &window(
+            &right,
+            Items {
+                starts: &right_starts,
+                noun: Some("task"),
+            },
+            focus,
+            layout.rows,
+            layout.right,
+        ),
         &left_title,
         title,
         layout,
@@ -8238,8 +8390,8 @@ mod tests {
                 rows: Some(40),
             },
         ] {
-            let left = groups_pane_lines(&groups, &shown, &state, layout.left);
-            let (right, _) = tasks_pane_lines(&groups, &pipelines, &state, layout.right);
+            let (left, _) = groups_pane_lines(&groups, &shown, &state, layout.left);
+            let (right, _, _) = tasks_pane_lines(&groups, &pipelines, &state, layout.right);
             assert!(!left.is_empty(), "expected the one group to have a row");
             assert!(
                 right.len() >= 3,
@@ -8356,35 +8508,239 @@ mod tests {
         assert_eq!(wrapped_rows("", 100), 1, "an empty line is still a row");
     }
 
+    /// `Items` for a pane of `len` lines where every line is an item and the
+    /// marker names no noun — what the jobs screen passes to [`window`].
+    fn per_line(len: usize) -> Vec<usize> {
+        (0..len).collect()
+    }
+
     /// A pane taller than the terminal scrolls to the highlighted block and
     /// says how much is out of sight, rather than letting the frame run off
     /// the bottom of the screen.
+    ///
+    /// Passed one item per line and no noun, the way the jobs screen calls
+    /// it, so this also pins that screen's marker text exactly as it was
+    /// before panes counted items: one direction only, below whenever
+    /// anything is, even with lines hidden above as well.
     #[test]
     fn a_pane_taller_than_its_rows_scrolls_to_the_focused_block() {
         let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+        let starts = per_line(lines.len());
+        let items = Items {
+            starts: &starts,
+            noun: None,
+        };
 
-        let top = window(&lines, (0, 0), Some(5));
+        let top = window(&lines, items, (0, 0), Some(5), 40);
         assert_eq!(top.len(), 5);
         assert_eq!(top[0], "line 0");
         assert_eq!(top[4], "↓ 16 below");
 
-        let middle = window(&lines, (11, 12), Some(5));
+        let middle = window(&lines, items, (11, 12), Some(5), 40);
         assert_eq!(middle.len(), 5);
         assert!(
             middle.contains(&"line 11".to_string()) && middle.contains(&"line 12".to_string()),
             "the focused block must stay in view, got {middle:?}"
         );
+        assert_eq!(middle[4], "↓ 7 below", "the jobs screen never shows above");
 
-        let bottom = window(&lines, (19, 19), Some(5));
+        let bottom = window(&lines, items, (19, 19), Some(5), 40);
         assert_eq!(bottom[3], "line 19");
         assert_eq!(bottom[4], "↑ 16 above");
 
         assert_eq!(
-            window(&lines, (0, 0), None).len(),
+            window(&lines, items, (0, 0), None, 40).len(),
             20,
             "no terminal, no cut"
         );
-        assert_eq!(window(&lines[..3], (0, 0), Some(9)).len(), 3);
+        let short = per_line(3);
+        let items = Items {
+            starts: &short,
+            noun: None,
+        };
+        assert_eq!(window(&lines[..3], items, (0, 0), Some(9), 40).len(), 3);
+    }
+
+    /// The tasks pane's marker counts tasks, not lines, at every scroll
+    /// position: a task cut at the bottom edge counts as below, one cut at
+    /// the top edge as above, and the blank row ahead of each task is never
+    /// counted. The truth each marker is checked against is read off where
+    /// each task's header and description rows sit, not off the starts the
+    /// pane handed `window`.
+    #[test]
+    fn the_tasks_pane_marker_counts_tasks_at_every_scroll_position() {
+        let repo = fixture("scroll-counts-tasks");
+        let ids: Vec<String> = (1..=6).map(|i| format!("task-{i}")).collect();
+        for (i, id) in ids.iter().enumerate() {
+            let depends = match i {
+                0 => String::new(),
+                _ => format!("depends_on: [{}]\n", ids[i - 1]),
+            };
+            write_pending(
+                &repo,
+                id,
+                &task_text(id, &format!("group: one\n{depends}"), BODY),
+            );
+        }
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new();
+        let (lines, starts, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        assert_eq!(starts.len(), ids.len(), "one start per task: {lines:?}");
+
+        // Where each task's header and its last row, the description, sit.
+        let header = |id: &str| lines.iter().position(|l| l.trim_end() == format!("  {id}"));
+        let last = |id: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains("Description:") && l.contains(&format!("{id}, done")))
+        };
+        let blocks: Vec<(usize, usize)> = ids
+            .iter()
+            .map(|id| (header(id).unwrap(), last(id).unwrap()))
+            .collect();
+
+        // Every scroll position: a focus on each line in turn walks the
+        // view from the top of the pane to its bottom one line at a time.
+        for rows in [4, 7, 8, 13] {
+            for line in 0..lines.len() {
+                let shown = window(
+                    &lines,
+                    Items {
+                        starts: &starts,
+                        noun: Some("task"),
+                    },
+                    (line, line),
+                    Some(rows),
+                    200,
+                );
+                // Where the view sits, found by matching its own rows
+                // against the pane's, and checked to be the only place
+                // they match so the count below is not read off a guess.
+                let view = &shown[..shown.len() - 1];
+                let at: Vec<usize> = (0..=lines.len() - view.len())
+                    .filter(|&o| lines[o..o + view.len()] == *view)
+                    .collect();
+                assert_eq!(at.len(), 1, "rows {rows}, focus line {line}: {view:?}");
+                let (top, bottom) = (at[0], at[0] + view.len());
+                let above = blocks.iter().filter(|&&(first, _)| first < top).count();
+                let below = blocks
+                    .iter()
+                    .filter(|&&(first, end)| first >= top && end >= bottom)
+                    .count();
+                let marker = shown.last().unwrap();
+                let expected = marker_row(above, below, Some("task"), 200);
+                assert_eq!(
+                    marker, &expected,
+                    "rows {rows}, focus line {line}: view {view:?}"
+                );
+            }
+        }
+    }
+
+    /// The marker names what it counts, singular for one, and shows both
+    /// directions on one row only when both have something hidden.
+    #[test]
+    fn the_marker_row_names_its_items_and_shows_both_directions() {
+        assert_eq!(
+            marker_row(11, 19, Some("group"), 80),
+            "↑ 11 groups above · ↓ 19 groups below"
+        );
+        assert_eq!(marker_row(0, 4, Some("task"), 80), "↓ 4 tasks below");
+        assert_eq!(marker_row(0, 1, Some("task"), 80), "↓ 1 task below");
+        assert_eq!(
+            marker_row(3, 1, Some("task"), 80),
+            "↑ 3 tasks above · ↓ 1 task below"
+        );
+        assert_eq!(marker_row(2, 0, Some("folder"), 80), "↑ 2 folders above");
+        assert_eq!(marker_row(0, 0, Some("group"), 80), "");
+    }
+
+    /// Too narrow for the full row, the marker drops the noun, then the
+    /// words, and draws the first form that fits — never a row wider than
+    /// the narrowest pane the screen ever draws, where `pad_to` would cut
+    /// it off without a sign.
+    #[test]
+    fn the_marker_row_shortens_itself_to_fit_the_pane() {
+        assert_eq!(
+            marker_row(11, 19, Some("group"), MIN_LEFT_PANE),
+            "↑ 11 above · ↓ 19 below"
+        );
+        assert_eq!(marker_row(11, 19, Some("group"), 12), "↑ 11 · ↓ 19");
+        for noun in ["group", "task", "folder"] {
+            for above in [0, 1, 9, 11, 99, 111] {
+                for below in [0, 1, 9, 19, 99, 199] {
+                    let row = marker_row(above, below, Some(noun), MIN_LEFT_PANE);
+                    assert!(
+                        row.chars().count() <= MIN_LEFT_PANE,
+                        "{row:?} is wider than {MIN_LEFT_PANE} columns"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The groups pane counts groups: the blank row between two states and
+    /// the filter's own `find:` row are lines, never groups out of sight.
+    #[test]
+    fn the_groups_pane_marker_never_counts_separators_or_the_find_row() {
+        let repo = fixture("scroll-counts-groups");
+        for i in 0..6 {
+            let id = format!("g{i}");
+            write_pending(&repo, &id, &task_text(&id, &format!("group: {id}\n"), BODY));
+        }
+        // Two of them queued, so a separator splits the list in two.
+        already_queued(&repo, "g4");
+        already_queued(&repo, "g5");
+        let groups = listed(&repo);
+        let mut state = ScreenState::new();
+        state.hide_scope = HideScope::PlusQueued;
+        let shown = visible(&groups, state.hide_scope);
+        assert_eq!(shown.len(), 6, "every group has to be on screen for this");
+        let (lines, starts) = groups_pane_lines(&groups, &shown, &state, 30);
+        assert!(
+            lines.iter().any(String::is_empty),
+            "the fixture must draw a separator: {lines:?}"
+        );
+        assert_eq!(starts.len(), shown.len());
+        assert!(starts.iter().all(|&s| !lines[s].is_empty()));
+
+        // Scrolled to the very bottom: every group but the last two rows'
+        // worth is above, and the separator is not one of them.
+        let rows = 3;
+        let bottom = window(
+            &lines,
+            Items {
+                starts: &starts,
+                noun: Some("group"),
+            },
+            (lines.len() - 1, lines.len() - 1),
+            Some(rows),
+            80,
+        );
+        assert_eq!(
+            bottom[rows - 1],
+            format!("↑ {} groups above", shown.len() - (rows - 1))
+        );
+
+        state.mode = Mode::Filter;
+        let (lines, starts) = groups_pane_lines(&groups, &shown, &state, 30);
+        assert!(lines[0].starts_with("find:"), "{lines:?}");
+        assert!(!starts.contains(&0), "the find: row is not a group");
+        let bottom = window(
+            &lines,
+            Items {
+                starts: &starts,
+                noun: Some("group"),
+            },
+            (lines.len() - 1, lines.len() - 1),
+            Some(rows),
+            80,
+        );
+        assert_eq!(
+            bottom[rows - 1],
+            format!("↑ {} groups above", shown.len() - (rows - 1))
+        );
     }
 
     /// Selecting a group queues every task in it. A group's tasks are
@@ -8434,7 +8790,7 @@ mod tests {
         );
 
         let shown = visible(&groups, state.hide_scope);
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert!(
             !rows[0].contains('[') && rows[0].contains("queued"),
             "a queued group shows the mark and no box, got {rows:?}"
@@ -8468,7 +8824,7 @@ mod tests {
         // separator, on the row it belongs to, not on the blank one ahead
         // of it.
         state.group_cursor = 1;
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows.len(),
             3,
@@ -8485,7 +8841,7 @@ mod tests {
         state.hide_scope = HideScope::Pending;
         state.group_cursor = 0;
         let shown = visible(&groups, state.hide_scope);
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows.len(),
             1,
@@ -8518,7 +8874,7 @@ mod tests {
         let shown = visible(&groups, state.hide_scope);
         assert_eq!(shown.len(), 3, "one group per state");
 
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows.len(),
             5,
@@ -8548,7 +8904,7 @@ mod tests {
         let mut state = ScreenState::new();
         state.hide_scope = HideScope::PlusQueued;
         let shown = visible(&groups, state.hide_scope);
-        let rows = groups_pane_lines(&groups, &shown, &state, 40);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 40);
         assert!(
             rows[0].ends_with(" queued"),
             "expected the pane to show the bare ' queued' tail, got {rows:?}"
@@ -8579,7 +8935,7 @@ mod tests {
         let shown = visible(&groups, state.hide_scope);
 
         let layout = layout_for(74, 24);
-        let rows = groups_pane_lines(&groups, &shown, &state, layout.left);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, layout.left);
         for (group, row) in groups.iter().zip(&rows) {
             assert!(
                 row.contains(&group.name),
@@ -8611,7 +8967,7 @@ mod tests {
         state.hide_scope = HideScope::PlusQueued;
         let shown = visible(&groups, state.hide_scope);
 
-        let rows = groups_pane_lines(&groups, &shown, &state, MAX_LEFT_PANE);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, MAX_LEFT_PANE);
         assert!(
             rows[0].contains(&name),
             "expected the full 33-character name at MAX_LEFT_PANE, got {:?}",
@@ -8637,7 +8993,7 @@ mod tests {
         state.hide_scope = HideScope::PlusQueued;
         let shown = visible(&groups, state.hide_scope);
         for width in [MIN_LEFT_PANE, MIN_LEFT_PANE + 20, MAX_LEFT_PANE] {
-            let rows = groups_pane_lines(&groups, &shown, &state, width);
+            let (rows, _) = groups_pane_lines(&groups, &shown, &state, width);
             assert!(
                 rows[0].ends_with(" queued"),
                 "expected the full tail ' queued' at width {width}, got {rows:?}"
@@ -8664,7 +9020,7 @@ mod tests {
         let shown = visible(&groups, state.hide_scope);
         for total_columns in [74usize, 99] {
             let layout = layout_for(total_columns, 24);
-            let rows = groups_pane_lines(&groups, &shown, &state, layout.left);
+            let (rows, _) = groups_pane_lines(&groups, &shown, &state, layout.left);
             assert!(
                 rows[0].ends_with(" queued"),
                 "expected the full tail at a {total_columns}-column terminal \
@@ -8854,7 +9210,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         assert!(
             !lines.iter().any(|line| line.contains("size")),
             "no size column belongs in the tasks pane any more, got {lines:?}"
@@ -8904,7 +9260,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
         assert!(
             lines.join("\n").contains("ctx_peak"),
             "the title must reach the pane, got {lines:?}"
@@ -8926,7 +9282,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         // Only the blank separator the loop always opens a task with, the
         // task row, its Pipeline:, Depends on: and Base: rows — nothing
         // past it, since this task has no title to draw a Description:
@@ -8979,7 +9335,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         let row_for = |id: &str| {
             lines
                 .iter()
@@ -9017,7 +9373,7 @@ mod tests {
         let mut state = ScreenState::new();
         state.hide_scope = HideScope::PlusDone;
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         assert!(
             lines.iter().all(|line| !line.trim_end().ends_with("done")),
             "{lines:?}"
@@ -9050,7 +9406,7 @@ mod tests {
             .gates
             .insert(task_key(&groups[0].tasks[0]), "review".to_string());
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
         assert_eq!(
             lines,
             vec![
@@ -9087,7 +9443,7 @@ mod tests {
         let mut state = ScreenState::new();
         state.board_branch = Some("feat/checkout".to_string());
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
         let base_rows: Vec<_> = lines
             .iter()
             .filter(|line| line.trim_start().starts_with("Base:"))
@@ -9114,7 +9470,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
 
-        let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 26);
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 26);
         assert_eq!(
             lines,
             vec![
@@ -9668,7 +10024,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
 
-        let (lines, focus) = tasks_pane_lines(&groups, &pipelines, &state, 40);
+        let (lines, _, focus) = tasks_pane_lines(&groups, &pipelines, &state, 40);
         assert!(lines.is_empty(), "{lines:?}");
         assert_eq!(focus, (0, 0));
     }
@@ -9734,7 +10090,7 @@ mod tests {
         );
         let shown = visible(&groups, state.hide_scope);
         assert!(shown.is_empty(), "the one group here is already queued");
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows,
             vec!["  nothing to queue — 1 group hidden".to_string()],
@@ -10527,7 +10883,7 @@ mod tests {
 
         let state = ScreenState::new();
         let shown = visible(&groups, state.hide_scope);
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows,
             vec!["  nothing to queue".to_string()],
@@ -10663,7 +11019,7 @@ mod tests {
             shown.is_empty(),
             "hidden by default behind `h`, same as any other queued group"
         );
-        let rows = groups_pane_lines(&groups, &shown, &state, 30);
+        let (rows, _) = groups_pane_lines(&groups, &shown, &state, 30);
         assert_eq!(
             rows,
             vec!["  nothing to queue — 1 group hidden".to_string()],
@@ -11116,7 +11472,7 @@ mod tests {
         // columns — the same width the mockup itself draws — would truncate
         // a scratch test repo's own long path well before this could tell
         // "named the path" apart from "named nothing at all".
-        let lines = routine_folder_lines(&repo.routines_dir(), &[], &RoutineNav::new(), 200);
+        let (lines, _) = routine_folder_lines(&repo.routines_dir(), &[], &RoutineNav::new(), 200);
         assert_eq!(
             lines,
             vec![format!("  nothing under {}", repo.routines_dir().display())]

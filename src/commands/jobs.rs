@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 
 use super::queue::{
-    Focus, RoutineNav, clip as clip_to, handle_routine_key, highlighted_routine_folder,
+    Focus, Items, RoutineNav, clip as clip_to, handle_routine_key, highlighted_routine_folder,
     highlighted_routine_task, labeled_row, layout, routine_level, two_pane_frame, window,
 };
 use super::routines::RoutineFolder;
@@ -1031,9 +1031,31 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     right.resize(right.len().max(min_rows), String::new());
 
     let left_title = format!("jobs  {} of {}", jobs.len(), jobs.len());
+    // One item per line and no noun: the jobs screen keeps the marker it
+    // has always drawn, counting lines — see `Items::noun`.
+    let left_starts: Vec<usize> = (0..left.len()).collect();
+    let right_starts: Vec<usize> = (0..right.len()).collect();
     let mut frame = two_pane_frame(
-        &window(&left, left_focus, lay.rows),
-        &window(&right, right_focus, lay.rows),
+        &window(
+            &left,
+            Items {
+                starts: &left_starts,
+                noun: None,
+            },
+            left_focus,
+            lay.rows,
+            lay.left,
+        ),
+        &window(
+            &right,
+            Items {
+                starts: &right_starts,
+                noun: None,
+            },
+            right_focus,
+            lay.rows,
+            lay.right,
+        ),
         &left_title,
         &right_title,
         lay,
