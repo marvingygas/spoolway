@@ -247,11 +247,15 @@ jobs:
           SPOOLWAY="$PWD/target/debug/spoolway" \
             scripts/e2e/run.sh --suite upgrade
 
+      # The same two prefixes `verify.yml`'s own wreckage step collects — see
+      # the comment there on why `/tmp/tmp.*` never matched anything.
       - name: keep the wreckage
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: dress-rehearsal-scratch
-          path: /tmp/tmp.*
+          path: |
+            /tmp/spoolway-e2e-run.*
+            /tmp/spoolway-e2e-fail.*.log
           retention-days: 3
           if-no-files-found: ignore
