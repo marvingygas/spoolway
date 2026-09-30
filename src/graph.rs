@@ -523,6 +523,7 @@ mod tests {
                 attempts: 0,
                 paused_at: None,
                 paused_by: None,
+                hook_paused: None,
                 launched_at: None,
                 steps: Default::default(),
                 rounds: Default::default(),

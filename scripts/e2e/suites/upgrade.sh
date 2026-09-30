@@ -325,6 +325,20 @@ lacks "the stale key block's retired \`cleanup\` line is gone, not left alone" \
 has "the key block now reads the way this binary ships it" \
   "on_fail\` routes it later" "$PIPELINE"
 
+# Every fixture's own config.toml carries `[issue_tracking]` after every
+# `[agents.*]`/`[models.*]` table, `on_fail = ""` included — that release's
+# own `spoolway init` always wrote both, since neither was retired yet. Both
+# changes land in the same `sync` this block already ran.
+lacks "the retired issue_tracking.on_fail key is gone" "on_fail" .spoolway/config.toml
+ISSUE_TRACKING_AT=$(grep -n '^\[issue_tracking\]' .spoolway/config.toml | cut -d: -f1)
+AGENTS_AT=$(grep -n '^\[agents\.' .spoolway/config.toml | head -1 | cut -d: -f1)
+if [ -n "$ISSUE_TRACKING_AT" ] && [ -n "$AGENTS_AT" ] && [ "$ISSUE_TRACKING_AT" -lt "$AGENTS_AT" ]; then
+  ok "[issue_tracking] moved directly under [watch], ahead of [agents.*]"
+else
+  bad "[issue_tracking] moved directly under [watch], ahead of [agents.*] \
+(issue_tracking at line $ISSUE_TRACKING_AT, agents at line $AGENTS_AT)"
+fi
+
 # `review`'s own `loop: {implement: 2}` is the retired per-route shape too —
 # present since 0.1.0, migrated the same way at every version that still
 # carries it, not only 0.5.0's own self-routing `checks`.

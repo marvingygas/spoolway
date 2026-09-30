@@ -185,6 +185,29 @@ pub const REFERENCE: &[Reference] = &[
                     ~-relative.",
     },
     Reference {
+        key: "issue_tracking.hook",
+        values: "<filename>",
+        default: "(blank)",
+        sentence: "A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook \
+                    and changes nothing about a task's `queued`, `blocked`, `paused` or \
+                    `done`.",
+    },
+    Reference {
+        key: "issue_tracking.project_key",
+        values: "<string>",
+        default: "(blank)",
+        sentence: "Opaque to spoolway — `owner/repo` on github, a project key on jira — \
+                    handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.",
+    },
+    Reference {
+        key: "issue_tracking.key_in_names",
+        values: "true, false",
+        default: "false",
+        sentence: "Whether a `slug=` the hook answers prefixes the group, branch and \
+                    worktree name `queue add` generates — `task/<slug>-<id>`. Off changes \
+                    nothing.",
+    },
+    Reference {
         key: "agents.<profile>.kind",
         values: "<agent kind>",
         default: "one per shipped profile",
@@ -286,36 +309,6 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Whether this model runs on hardware you own. Setting it on a model that \
                     carries `slots` or `exclusive` silences doctor's note that it should \
                     probably say so; it changes nothing else.",
-    },
-    Reference {
-        key: "issue_tracking.hook",
-        values: "<filename>",
-        default: "(blank)",
-        sentence: "A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook \
-                    and changes nothing about a task's `queued`, `blocked`, `paused` or \
-                    `done`.",
-    },
-    Reference {
-        key: "issue_tracking.project_key",
-        values: "<string>",
-        default: "(blank)",
-        sentence: "Opaque to spoolway — `owner/repo` on github, a project key on jira — \
-                    handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.",
-    },
-    Reference {
-        key: "issue_tracking.on_fail",
-        values: "ignore, pause",
-        default: "ignore",
-        sentence: "What a non-zero hook exit does: `ignore` only records it, `pause` also \
-                    holds the task — on `queued` to `paused`, on `done` out of the archive.",
-    },
-    Reference {
-        key: "issue_tracking.key_in_names",
-        values: "true, false",
-        default: "false",
-        sentence: "Whether a `slug=` the hook answers prefixes the group, branch and \
-                    worktree name `queue add` generates — `task/<slug>-<id>`. Off changes \
-                    nothing.",
     },
 ];
 

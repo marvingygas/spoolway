@@ -1718,15 +1718,13 @@ impl<'a> Dispatcher<'a> {
         if stage == crate::pipeline::QUEUED {
             let id = task.id().to_string();
             // A hook that has not yet exited clean holds the task here
-            // rather than let it start — see
-            // [`crate::config::IssueTrackingConfig::on_fail`]. `Pending`
-            // covers both "still running" and "not started yet" — a real
-            // hook (an HTTP call, say) almost never exits inside the few
-            // milliseconds `fire`'s own `start` waits for a pid, so holding
-            // on anything but a clean exit is what actually stops the task
-            // rather than only reacting to a code this pass happened to
-            // already have. A clean exit falls through to the dependency
-            // gate below, same as `on_fail = "ignore"` always does.
+            // rather than let it start. `Pending` covers both "still
+            // running" and "not started yet" — a real hook (an HTTP call,
+            // say) almost never exits inside the few milliseconds `fire`'s
+            // own `start` waits for a pid, so holding on anything but a
+            // clean exit is what actually stops the task rather than only
+            // reacting to a code this pass happened to already have. A
+            // clean exit falls through to the dependency gate below.
             //
             // `TrackingGate::Inactive` covers a blank `hook` (or one that
             // fails `is_bare_filename`, which never starts a run) — see
@@ -1736,15 +1734,7 @@ impl<'a> Dispatcher<'a> {
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
                 TrackingGate::Failed(code) => {
-                    let key = crate::command_step::Runs::key(stage, task.id());
-                    task.set_stage(
-                        crate::pipeline::PAUSED,
-                        Some(&format!(
-                            "issue_tracking hook exited {code} on `queued` — see \
-                             tracking/{key}"
-                        )),
-                    );
-                    self.persist(task)?;
+                    self.pause_for_hook_failure(task, stage, code)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -1799,30 +1789,26 @@ impl<'a> Dispatcher<'a> {
             return Ok(Routed::NextTask);
         }
         if stage == crate::pipeline::DONE {
-            // A hook still running, or one that failed under
-            // `on_fail = "pause"`, holds the task here rather than let
-            // it archive — see
-            // [`crate::config::IssueTrackingConfig::on_fail`]. `Pending`
-            // covers both "not started yet" and "still running": either
-            // way there is nothing to route on yet, so the task waits
-            // for a pass that can see a code. A clean exit clears whatever
-            // `retry_if_failed` may have left recorded, then falls
-            // through to the ordinary archive below, same as
-            // `on_fail = "ignore"` always does.
+            // A hook still running, or one that failed, holds the task here
+            // rather than let it archive. `Pending` covers both "not started
+            // yet" and "still running": either way there is nothing to
+            // route on yet, so the task waits for a pass that can see a
+            // code. A clean exit falls through to the ordinary archive
+            // below.
             //
             // `done` has no later step to carry a task past the way
-            // `queued` failing into `paused` does, so `retry_if_failed`
-            // is the road out this hold needs instead: a failed run is
-            // forgotten so the next pass's `fire` above starts it over,
-            // rather than this task reading the same stale exit code
-            // forever.
+            // `queued` failing into `paused` does — there is nowhere to
+            // send it but back to `done` itself, which is exactly what
+            // [`crate::commands::resume_target`] cannot do for a name that
+            // is not a pipeline step, so [`Task::hook_paused`] is what tells
+            // `spoolway resume` to send it there directly instead.
             match self.tracking_gate(task, stage) {
-                TrackingGate::Inactive => {}
-                TrackingGate::Clean => crate::tracking::clear_retry_marker(self.repo, task, stage),
-                TrackingGate::Pending | TrackingGate::Failed(_) => {
-                    crate::tracking::retry_if_failed(self.repo, task, stage);
+                TrackingGate::Inactive | TrackingGate::Clean => {}
+                TrackingGate::Failed(code) => {
+                    self.pause_for_hook_failure(task, stage, code)?;
                     return Ok(Routed::NextTask);
                 }
+                TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             // Reaching `done` is what tears the worktree down. It used
             // to be a `cleanup: true` on a declared terminal, which
@@ -1855,20 +1841,26 @@ impl<'a> Dispatcher<'a> {
     /// Reads back what the issue-tracking hook fired for `stage` (see
     /// `crate::tracking::fire`, called once in
     /// [`Dispatcher::route_reserved_stage`] ahead of both places this is
-    /// asked from) said, if anything is configured to hold on it at all.
+    /// asked from) said, if anything is configured to run on it at all.
     ///
     /// `queued` and `done` each wait on a hook the same way — read whether
-    /// one is configured to hold this stage, and if so what it said — and
-    /// used to ask with the same few lines of code typed out twice. Reading
-    /// it here once leaves each call site free to still act on the answer
-    /// differently, which they do: `queued` pauses the task on a failing
-    /// hook, `done` retries it.
+    /// one is configured for this stage, and if so what it said — and used
+    /// to ask with the same few lines of code typed out twice. Reading it
+    /// here once leaves each call site free to still act on the answer
+    /// differently, which they do — `queued` and `done` each name their own
+    /// stage in the reason a failure pauses the task with.
     fn tracking_gate(&self, task: &Task, stage: &str) -> TrackingGate {
         // A trial arm: `route_reserved_stage` never calls `fire` for one
         // (see its own trial check just above its call site), so there is
         // never a code here to read, and holding on `Pending` forever would
-        // deadlock every trial arm at `queued`.
-        if task.front.trial.is_some() || !crate::tracking::holds_on_fail(self.repo) {
+        // deadlock every trial arm at `queued`. `configured` alone — no
+        // `on_fail` to gate on any more, since every failing hook pauses its
+        // task now — is what keeps a project with no hook at all from ever
+        // seeing anything but `Inactive`: `fire` never starts a run for it,
+        // so `exit_code` could only ever read `None`, and holding on that
+        // would deadlock every task at `queued` for a project that asked
+        // for no hook at all.
+        if task.front.trial.is_some() || !crate::tracking::configured(self.repo) {
             return TrackingGate::Inactive;
         }
         match crate::tracking::exit_code(self.repo, task, stage) {
@@ -1876,6 +1868,27 @@ impl<'a> Dispatcher<'a> {
             Some(code) => TrackingGate::Failed(code),
             None => TrackingGate::Pending,
         }
+    }
+
+    /// Pause `task` at `stage` (`queued` or `done`) over a hook that exited
+    /// `code` — the one road both reserved stages take into `paused` now,
+    /// since neither `on_fail` nor a `done`-only retry ladder is left to
+    /// tell them apart. Records which stage's hook did it in
+    /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
+    /// forget the failed run and, for `done`, send the task straight back
+    /// there rather than through [`crate::commands::resume_target`]'s
+    /// ordinary step-shaped roads.
+    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, code: i32) -> Result<()> {
+        let key = crate::command_step::Runs::key(stage, task.id());
+        task.front.hook_paused = Some(stage.to_string());
+        task.set_stage(
+            crate::pipeline::PAUSED,
+            Some(&format!(
+                "issue_tracking hook exited {code} on `{stage}` — see tracking/{key}"
+            )),
+        );
+        self.persist(task)?;
+        Ok(())
     }
 
     /// Turn the raw candidates [`Dispatcher::collect_candidates`] built into
@@ -7282,6 +7295,7 @@ mod tests {
             attempts: 0,
             paused_at: None,
             paused_by: None,
+            hook_paused: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
@@ -18039,16 +18053,16 @@ mod tests {
         panic!("`{}` never left `{from}`", path.display());
     }
 
-    /// Acceptance criterion: a non-zero hook exit under `on_fail = "pause"`
-    /// lands the task on `paused` when the event was `queued` — caught
-    /// before the dependency gate would otherwise have let it straight
-    /// through, since this task has no dependency to wait on at all.
+    /// Acceptance criterion: a non-zero hook exit lands the task on `paused`
+    /// when the event was `queued` — caught before the dependency gate
+    /// would otherwise have let it straight through, since this task has no
+    /// dependency to wait on at all. `hook_paused` is what a later
+    /// `spoolway resume` reads to undo the hold.
     #[test]
-    fn a_failing_queued_hook_under_on_fail_pause_lands_the_task_on_paused() {
+    fn a_failing_queued_hook_lands_the_task_on_paused() {
         let mut repo = fixture("hook-queued-pause");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
         let mux = FakeMux::new(vec![]);
 
@@ -18059,22 +18073,25 @@ mod tests {
             "the task must never have started a lane: {:?}",
             mux.calls()
         );
+        assert_eq!(
+            reload(&path).front.hook_paused.as_deref(),
+            Some(crate::pipeline::QUEUED),
+            "resume needs to know which event's run to forget"
+        );
     }
 
     /// Acceptance criterion: a trial arm never fires `[issue_tracking]` at
     /// all — trial dispatch is a runtime boundary against spoolway-owned
     /// side effects, and the queued/done hook is exactly one, not a skip
-    /// choice a person ticks. A hook that would fail this task under
-    /// `on_fail = "pause"` is proof the hook never ran: an ordinary task
-    /// with the same hook is held at `paused` (see the test above this
-    /// one), so a trial task reaching its first step instead means `fire`
-    /// was never called for it.
+    /// choice a person ticks. A hook that would fail this task is proof the
+    /// hook never ran: an ordinary task with the same hook is held at
+    /// `paused` (see the test above this one), so a trial task reaching its
+    /// first step instead means `fire` was never called for it.
     #[test]
     fn a_trial_arm_never_fires_the_queued_issue_tracking_hook() {
         let mut repo = fixture("hook-queued-trial-suppressed");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |front| {
             front.trial = Some("t1".into());
         });
@@ -18088,15 +18105,14 @@ mod tests {
     }
 
     /// The `done` half of the same boundary: a hook that would hold an
-    /// ordinary task out of the archive under `on_fail = "pause"` (see
-    /// `a_failing_done_hook_under_on_fail_pause_holds_the_task_out_of_the_archive`)
-    /// must never run for a trial arm, so the arm archives straight through.
+    /// ordinary task out of the archive (see
+    /// `a_failing_done_hook_holds_the_task_out_of_the_archive`) must never
+    /// run for a trial arm, so the arm archives straight through.
     #[test]
     fn a_trial_arm_never_fires_the_done_issue_tracking_hook() {
         let mut repo = fixture("hook-done-trial-suppressed");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::DONE, |front| {
             front.trial = Some("t1".into());
         });
@@ -18122,7 +18138,7 @@ mod tests {
     /// never merely because a pass happened not to see one yet. Without the
     /// fix, this task would have started a lane on the very first pass.
     #[test]
-    fn a_slow_failing_queued_hook_under_on_fail_pause_never_starts_the_task() {
+    fn a_slow_failing_queued_hook_never_starts_the_task() {
         let mut repo = fixture("hook-queued-slow-pause");
         // A second, not three tenths of one. The three passes below have to
         // land inside the hook's own run, and on a loaded CI runner a pass
@@ -18131,7 +18147,6 @@ mod tests {
         // third pass, which read as this test's own claim being false.
         write_hook(&repo, "slow-fail.sh", "sleep 1; exit 1");
         repo.config.issue_tracking.hook = "slow-fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
         let mux = FakeMux::new(vec![]);
 
@@ -18150,18 +18165,19 @@ mod tests {
         assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
     }
 
-    /// The bug the second pass at this task left in: `on_fail = "pause"`
-    /// with no `hook` configured — or one that fails `is_bare_filename` —
-    /// must change nothing at all, per "an empty hook produces no hook runs
-    /// and no behaviour change". Gating the hold on `pauses_on_fail` alone
-    /// would deadlock every queued task forever, since `fire` never starts
-    /// anything for either shape and `exit_code` could only ever read `None`.
+    /// No `hook` configured — or one that fails `is_bare_filename` — must
+    /// change nothing at all, per "an empty hook produces no hook runs and
+    /// no behaviour change". `fire` never starts anything for either shape,
+    /// so `exit_code` could only ever read `None`; without the `configured`
+    /// check in `tracking_gate`, that would read as `Pending` forever and
+    /// deadlock every queued task for a project that asked for no hook at
+    /// all — `configured` is what keeps `tracking_gate` answering `Inactive`
+    /// instead.
     #[test]
-    fn on_fail_pause_with_no_hook_configured_never_holds_a_queued_task() {
+    fn no_hook_configured_never_holds_a_queued_task() {
         for hook in ["", "../escapes.sh"] {
             let mut repo = fixture(&format!("hook-queued-unconfigured-{}", hook.len()));
             repo.config.issue_tracking.hook = hook.into();
-            repo.config.issue_tracking.on_fail = "pause".into();
             let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
             let mux = FakeMux::new(vec![]);
 
@@ -18173,167 +18189,35 @@ mod tests {
         }
     }
 
-    /// The same failure with `on_fail` left blank (`"ignore"`) changes
-    /// nothing about where the task goes — it starts exactly as it would
-    /// with no hook at all, and the failure is only ever recorded.
+    /// Acceptance criterion: a non-zero hook exit holds the task out of the
+    /// archive when the event was `done`.
     #[test]
-    fn a_failing_queued_hook_under_on_fail_ignore_still_starts_the_task() {
-        let mut repo = fixture("hook-queued-ignore");
-        write_hook(&repo, "fail.sh", "exit 1");
-        repo.config.issue_tracking.hook = "fail.sh".into();
-        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
-        let mux = FakeMux::new(vec![]);
-
-        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::QUEUED);
-        assert_eq!(stage, "implement");
-
-        // The failure still shows up on the board — see `crate::tracking`.
-        for _ in 0..200 {
-            if crate::tracking::failure_count(&repo) > 0 {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the failed hook was never recorded");
-    }
-
-    /// Acceptance criterion: a non-zero hook exit under `on_fail = "pause"`
-    /// holds the task out of the archive when the event was `done`.
-    #[test]
-    fn a_failing_done_hook_under_on_fail_pause_holds_the_task_out_of_the_archive() {
+    fn a_failing_done_hook_holds_the_task_out_of_the_archive() {
         let mut repo = fixture("hook-done-pause");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task(&repo, "demo", crate::pipeline::DONE);
         let mux = FakeMux::new(vec![]);
 
-        // The hook is given time to actually exit; there is nothing here to
-        // wait *until*, since a held task never changes stage — that is the
-        // whole point of the hold.
-        for _ in 0..50 {
-            run_pass(&repo, &mux);
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::DONE);
+        assert_eq!(stage, crate::pipeline::PAUSED);
         assert!(path.exists(), "held tasks stay in the queue, not archived");
-        assert_eq!(reload(&path).stage(), crate::pipeline::DONE);
         assert!(!repo.archive_dir().join("demo.md").exists());
-    }
-
-    /// The other bug a first pass left in: a `done` hold had no road out —
-    /// once the hook had failed once, its stale exit code held the task
-    /// forever, because nothing ever forgot the run so it could try again.
-    /// The dispatcher must actually retry it, not just leave that
-    /// possibility to `crate::tracking::retry_if_failed`'s own unit test.
-    #[test]
-    fn a_failing_done_hook_under_on_fail_pause_is_retried_not_stuck_forever() {
-        let mut repo = fixture("hook-done-retry");
-        write_hook(&repo, "fail.sh", "exit 1");
-        repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
-        let path = add_task(&repo, "demo", crate::pipeline::DONE);
-        let mux = FakeMux::new(vec![]);
-
-        let key = crate::command_step::Runs::key(crate::pipeline::DONE, "demo");
-        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
-
-        // Wait for the first attempt to actually fail — nothing is due to
-        // retry until `retry_if_failed` has seen that and started the
-        // ladder.
-        for _ in 0..200 {
-            run_pass(&repo, &mux);
-            if crate::tracking::failure_count(&repo) > 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(reload(&path).stage(), crate::pipeline::DONE);
-
-        // Back-date the ladder so the next pass finds it due, rather than a
-        // real test waiting out ten real seconds to see a retry land — see
-        // `tracking::hook_backoff`.
-        crate::tracking::write_hook_retry(
-            &repo,
-            &key,
-            &crate::tracking::HookRetry {
-                attempts: 1,
-                next_attempt_at: crate::dispatch::now_secs() - 1,
-            },
-        );
-
-        // A second attempt rolls the first one's log aside to `.prev.log` —
-        // see `Runs::start` — so its existence is proof a retry actually
-        // happened, without racing the exact moment either attempt exits.
-        for _ in 0..300 {
-            run_pass(&repo, &mux);
-            if runs.prev_log_path(&key).exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            runs.prev_log_path(&key).exists(),
-            "a second attempt never started — the hold has no road out"
-        );
-        assert!(
-            path.exists(),
-            "still held out of the archive while it retries"
-        );
-        assert_eq!(reload(&path).stage(), crate::pipeline::DONE);
-    }
-
-    /// The bug the third pass at this task left in: a `done` hold's own
-    /// retry forgets the run — `.exit` file included — on every pass that
-    /// still finds it failing, so the board's count must not go quiet the
-    /// moment a retry begins. `failure_count` has to keep seeing this key as
-    /// failing across many passes of retrying, not just the first one.
-    #[test]
-    fn the_board_keeps_counting_a_done_hold_while_it_retries() {
-        let mut repo = fixture("hook-done-retry-visible");
-        write_hook(&repo, "fail.sh", "exit 1");
-        repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
-        add_task(&repo, "demo", crate::pipeline::DONE);
-        let mux = FakeMux::new(vec![]);
-
-        // Wait for the first attempt to actually fail before asserting
-        // anything — there is nothing to count yet while it is still
-        // starting.
-        for _ in 0..200 {
-            run_pass(&repo, &mux);
-            if crate::tracking::failure_count(&repo) > 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
         assert_eq!(
-            crate::tracking::failure_count(&repo),
-            1,
-            "the premise: the first attempt actually failed and was counted"
+            reload(&path).front.hook_paused.as_deref(),
+            Some(crate::pipeline::DONE),
+            "resume needs to know this hold is `done`'s, not `queued`'s"
         );
-
-        // Long enough to see several retries land — the count must never
-        // drop to zero across any of them.
-        for _ in 0..40 {
-            run_pass(&repo, &mux);
-            assert_eq!(
-                crate::tracking::failure_count(&repo),
-                1,
-                "the board went quiet about a hook that is still failing"
-            );
-            std::thread::sleep(Duration::from_millis(15));
-        }
     }
 
     /// A hook failing on `blocked` or `paused` only ever records the
     /// failure — those two are already stopped for a person, so nothing
-    /// about the task's stage moves, whatever `on_fail` says.
+    /// about the task's stage moves.
     #[test]
     fn a_failing_hook_on_blocked_only_records_the_failure() {
         let mut repo = fixture("hook-blocked-record");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
             f.blocked_from = Some("implement".into());
         });

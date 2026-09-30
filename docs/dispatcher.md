@@ -291,12 +291,17 @@ Other things put a task on `paused`:
 | The dispatch tab's stop popup, `i` | `parked_from: <step>` and `parked_by_stop: true` |
 | Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
 | A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
+| A failing `[issue_tracking]` hook on `queued` or `done` | `hook_paused: queued` or `hook_paused: done` |
 
 `spoolway resume` on any of these puts the task back on its step, and so does `r` on the board.
 A task the stop popup parked also resumes on its own, back onto the step it was on, the next
 time dispatching starts — from the tab or from `spoolway dispatch` — and its NEXT column reads
 `→ <step> — resumes when dispatching starts` until then. A paused task's pane survives a stop of
 the dispatcher.
+
+A hook pause is the one exception: nothing inside the pipeline failed, so there is no step to
+go back to. `spoolway resume` forgets the hook's failed run, so it fires again. A task paused on
+`queued` resumes to `queued`. A task paused on `done` resumes straight back to `done`.
 
 ## A lane that settles without reporting
 
@@ -347,7 +352,6 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | A step's `loop:` | How many times a task may arrive at the step, by any route. | Never. A person's resume counts too, and refunds nothing. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
-| Issue-tracking hook retry | A failing `[issue_tracking]` hook retries on a doubling delay from ten seconds, capped at an hour. | The hook succeeding. |
 
 When a loop budget runs out, the task parks on `blocked`.
 

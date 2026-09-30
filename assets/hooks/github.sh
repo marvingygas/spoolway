@@ -97,8 +97,11 @@ hand_off_for_review() {
     exit 1
   }
 
-  # Write the merge marker first: if a later cosmetic update fails under the
-  # mirror's non-blocking `on_fail`, GitHub can still close the issue safely.
+  # Write the merge marker first: a later cosmetic update failing here now
+  # pauses the task — every non-zero exit on `done` does, there is no
+  # non-blocking `on_fail` any more — but the marker is already posted, so
+  # GitHub can still close the issue once the pull request merges while this
+  # task waits on `spoolway resume` to run the rest again.
   gh pr comment "$pr" -R "$repo" --body \
     "**spoolway:** tracks $SPOOLWAY_TICKET
 

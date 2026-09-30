@@ -586,11 +586,12 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
     // `checkout` can hold two different files. `current` is always the
     // checkout's own, so a rewrite is sourced from the file it replaces.
     //
-    // `load_dropping_interval` rather than `Config::load`: `dispatch.interval`
-    // is retired hard enough that an ordinary load refuses a file still
-    // naming it, and this is the one place that has to bring such a file
-    // forward instead of rejecting it.
-    let current = match crate::config::Config::load_dropping_interval(&repo.checkout) {
+    // `load_dropping_retired_keys` rather than `Config::load`: `dispatch.
+    // interval` and `issue_tracking.on_fail` are each retired hard enough
+    // that an ordinary load refuses a file still naming either, and this is
+    // the one place that has to bring such a file forward instead of
+    // rejecting it.
+    let current = match crate::config::Config::load_dropping_retired_keys(&repo.checkout) {
         Ok(config) => config,
         Err(err) => {
             outcomes.push(Outcome::blocked(&shown, format!("{err:#}")));
@@ -644,6 +645,29 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                 listed(&refresh.dropped)
             ),
         ));
+        // `on_fail` never drops on its own — it is the one field
+        // `IssueTrackingConfig` retired, and the section it lived in moved
+        // in the same pass: `Config`'s own field order put `[issue_tracking]`
+        // last, below every `[agents.*]` and `[models.*]` table, and now
+        // puts it right after `[watch]` instead (see `Config::render`). A
+        // person reading only the dropped-key line would miss that the
+        // section itself is now somewhere else in the file.
+        //
+        // A `Migrated` rather than a second `Wrote`: an ordinary `Wrote`'s
+        // detail is never printed, and a project that relied on `on_fail =
+        // "ignore"` has to read in the report itself that it is gone.
+        if refresh
+            .dropped
+            .iter()
+            .any(|key| key == "issue_tracking.on_fail")
+        {
+            outcomes.push(Outcome::migrated(
+                &shown,
+                "migrated: issue_tracking.on_fail removed, every failing hook now pauses \
+                 its task; [issue_tracking] moved directly under [watch]",
+                "migrated: on_fail removed; [issue_tracking] moved under [watch]",
+            ));
+        }
     }
     if !refresh.renoted.is_empty() {
         outcomes.push(Outcome::wrote(
@@ -1765,6 +1789,83 @@ mod tests {
                 .any(|line| line.starts_with("wrote") && line.contains("dispatch.interval")),
             "{:?}",
             outcome_lines(&outcomes)
+        );
+    }
+
+    /// `issue_tracking.on_fail` is the other key retired hard enough that an
+    /// ordinary load refuses a file still naming it. Unlike `dispatch.
+    /// interval` this retirement also moves the table it lived in — from
+    /// after every `[agents.*]`/`[models.*]` table to directly under
+    /// `[watch]`, following `Config`'s own field order (see
+    /// `crate::config::Config::render`) — and `sync`'s summary names both
+    /// changes, not only the dropped key.
+    #[test]
+    fn a_config_still_naming_issue_tracking_on_fail_loses_it_and_the_section_moves() {
+        let repo = fixture("config-retired-on-fail");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "[watch]\ndirs = []\n\
+             [agents.claude]\nkind = \"claude\"\n\
+             [issue_tracking]\nhook = \"github.sh\"\nproject_key = \"o/r\"\non_fail = \"pause\"\n\
+             key_in_names = true\n",
+        )
+        .unwrap();
+
+        assert!(
+            crate::config::Config::load(&repo.root).is_err(),
+            "an ordinary load must still refuse the retired key"
+        );
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!after.contains("on_fail"), "{after}");
+        assert!(after.contains("hook = \"github.sh\""), "{after}");
+        assert!(after.contains("project_key = \"o/r\""), "{after}");
+        assert!(after.contains("key_in_names = true"), "{after}");
+        assert!(
+            crate::config::Config::load(&repo.root).is_ok(),
+            "the rewritten file must load cleanly now that the key is gone"
+        );
+
+        // The section moved: `[issue_tracking]` now stands ahead of
+        // `[agents.claude]`, not behind it.
+        let issue_tracking_at = after.find("[issue_tracking]").unwrap();
+        let agents_at = after.find("[agents.claude]").unwrap();
+        assert!(
+            issue_tracking_at < agents_at,
+            "[issue_tracking] must move ahead of [agents.*]:\n{after}"
+        );
+
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("wrote") && line.contains("issue_tracking.on_fail")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[issue_tracking] moved directly under [watch]")),
+            "{lines:?}"
+        );
+
+        // Named where a person reads it: an ordinary `Wrote`'s detail is
+        // never printed, so both changes have to reach the notes `run`'s
+        // report and the confirm panel draw under the config's own line.
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown.iter().any(|(report, panel)| {
+                report.contains("issue_tracking.on_fail removed")
+                    && report.contains("[issue_tracking] moved directly under [watch]")
+                    && panel.contains("on_fail removed")
+                    && panel.contains("[issue_tracking] moved under [watch]")
+            }),
+            "{shown:?}"
         );
     }
 

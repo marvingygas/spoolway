@@ -164,6 +164,18 @@ pub struct Config {
     /// Extra directories whose own agent sessions count beside this
     /// project's lanes. See [`WatchConfig`] and [`Config::watch_roots`].
     pub watch: WatchConfig,
+    /// Where a project's issue tracker lives, so the dispatcher can tell it
+    /// about a task's arrival at `queued`, `blocked`, `paused` or `done` — the
+    /// four states nothing inside a pipeline file can already put a `run:`
+    /// step on, since none of the four is a step a pipeline may declare. See
+    /// [`crate::tracking`] for what actually fires.
+    ///
+    /// Sits directly under `[watch]`, above every `[agents.*]` and
+    /// `[models.*]` table — those lists only grow, and this is the one
+    /// section a project sets once and otherwise ignores. `Config`'s own
+    /// field order is `config.toml`'s section order (see [`Config::render`]),
+    /// so this is declared here rather than after every open-ended table.
+    pub issue_tracking: IssueTrackingConfig,
     /// Where an old `[plans]` table lands so an existing config still
     /// parses. See [`LegacyPlans`]; the binary keeps no notion of a plan
     /// store any more — spoolway-plan writes its page wherever it is told
@@ -208,13 +220,6 @@ pub struct Config {
     #[serde(alias = "pricing")]
     pub models: BTreeMap<String, crate::usage::ModelPrice>,
 
-    /// Where a project's issue tracker lives, so the dispatcher can tell it
-    /// about a task's arrival at `queued`, `blocked`, `paused` or `done` — the
-    /// four states nothing inside a pipeline file can already put a `run:`
-    /// step on, since none of the four is a step a pipeline may declare. See
-    /// [`crate::tracking`] for what actually fires.
-    pub issue_tracking: IssueTrackingConfig,
-
     /// Every top-level key this binary does not know, kept rather than
     /// refused — see `Frontmatter::extra`, which this matches.
     ///
@@ -246,6 +251,7 @@ impl Default for Config {
             retention: LegacyRetention::default(),
             prices: LegacyPrices::default(),
             watch: WatchConfig::default(),
+            issue_tracking: IssueTrackingConfig::default(),
             plans: LegacyPlans::default(),
             docs: LegacyDocs::default(),
             agents: AgentProfile::defaults(),
@@ -258,7 +264,6 @@ impl Default for Config {
             // already covered by the built-in table once it exists — a row
             // here only corrects one, or prices a model nobody publishes.
             models: BTreeMap::new(),
-            issue_tracking: IssueTrackingConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -270,10 +275,10 @@ impl Default for Config {
 /// steps a pipeline may declare — so a project that wants a ticket touched on
 /// one of them has nowhere else to say so.
 ///
-/// The defaults are "no issue tracking": `hook`, `project_key` and `on_fail`
-/// blank, `key_in_names` false. A blank `hook` runs nothing and changes
-/// nothing about a task's four events or about `queue add`'s generated names,
-/// whatever the other three keys hold.
+/// The defaults are "no issue tracking": `hook` and `project_key` blank,
+/// `key_in_names` false. A blank `hook` runs nothing and changes nothing
+/// about a task's four events or about `queue add`'s generated names,
+/// whatever the other two keys hold.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IssueTrackingConfig {
@@ -289,15 +294,6 @@ pub struct IssueTrackingConfig {
     /// it reaches the script exactly as this holds it, as
     /// `SPOOLWAY_PROJECT_KEY`.
     pub project_key: String,
-
-    /// What a non-zero hook exit does to the task it ran for. Blank behaves
-    /// as `"ignore"`: the failure is recorded — see [`crate::tracking`]'s own
-    /// count, which the board's footer prints — and nothing else changes.
-    /// `"pause"` additionally holds the task: on `queued` it lands on
-    /// `paused`, and on `done` it stays out of the archive. A failure on
-    /// `blocked` or `paused` is only ever recorded, whichever this holds —
-    /// both are already stopped for a person.
-    pub on_fail: String,
 
     /// Whether the issue's key rides into every name `queue add` generates.
     /// Off by default: nothing changes, and every group, branch and worktree
@@ -1567,22 +1563,27 @@ impl Config {
         Ok(config)
     }
 
-    /// [`Config::load`], tolerating a file that still names the retired
-    /// `dispatch.interval` key.
+    /// [`Config::load`], tolerating a file that still names a key retired
+    /// hard enough that an ordinary load refuses it outright: `dispatch.
+    /// interval`, or `issue_tracking.on_fail` (see [`crate::tracking`]'s own
+    /// doc for what replaced it — every failing hook pauses its task now,
+    /// so there is nothing left for this to choose between).
     ///
-    /// Every other caller keeps refusing it outright: `DispatchConfig`'s
-    /// `deny_unknown_fields` is what makes the key a hard parse error rather
-    /// than a quietly-dropped one, on purpose, so a project only discovers
-    /// it is gone the moment something tries to read it. `spoolway sync` is
-    /// the one caller that exists to bring a file like that forward rather
-    /// than reject it, so this strips the key from the raw text before
-    /// parsing — the same way [`Config::save_key`] edits a document in
-    /// place — and parses what is left.
-    pub fn load_dropping_interval(root: &Path) -> Result<Config> {
+    /// Every other caller keeps refusing a file naming either key:
+    /// `DispatchConfig` and [`IssueTrackingConfig`]'s own `deny_unknown_fields`
+    /// is what makes each a hard parse error rather than a quietly-dropped
+    /// one, on purpose, so a project only discovers a key is gone the moment
+    /// something tries to read it. `spoolway sync` is the one caller that
+    /// exists to bring a file like that forward rather than reject it, so
+    /// this strips both keys from the raw text before parsing — the same
+    /// way [`Config::save_key`] edits a document in place — and parses what
+    /// is left. Stripping a key this file never had is a no-op.
+    pub fn load_dropping_retired_keys(root: &Path) -> Result<Config> {
         let path = Config::path_in(root);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         let stripped = crate::confdoc::remove(&raw, &["dispatch", "interval"])?;
+        let stripped = crate::confdoc::remove(&stripped, &["issue_tracking", "on_fail"])?;
         let mut config: Config =
             toml::from_str(&stripped).with_context(|| format!("parsing {}", path.display()))?;
         config.migrate();
@@ -2207,6 +2208,26 @@ mod tests {
         // table once it exists; nothing here is a guess spoolway made for you.
         assert!(parsed.models.is_empty());
         assert_eq!(parsed.housekeeping.price_max_age_days, 30);
+    }
+
+    /// `[issue_tracking]` sits directly under `[watch]` now — above every
+    /// open-ended `[agents.*]`/`[models.*]` table, which only ever grow —
+    /// rather than after all of them, where `Config`'s own field order used
+    /// to put it. A fresh `init` writes it there because `render` renders
+    /// straight from that field order.
+    #[test]
+    fn a_fresh_config_puts_issue_tracking_directly_under_watch() {
+        let rendered = Config::default().render().unwrap();
+        // `\n[` rather than a bare `[`, or the reference table's own prose —
+        // `unattended.blocked_agent`'s sentence names `[agents.*]` — would
+        // match first, long before any real table heading does.
+        let watch_at = rendered.find("\n[watch]").unwrap();
+        let issue_tracking_at = rendered.find("\n[issue_tracking]").unwrap();
+        let agents_at = rendered.find("\n[agents.").unwrap();
+        assert!(
+            watch_at < issue_tracking_at && issue_tracking_at < agents_at,
+            "expected [watch] < [issue_tracking] < [agents.*]:\n{rendered}"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: issue_tracking.on_fail — a non-zero exit under "pause" holds the task on `queued` and `done`, and only records the failure on `blocked` and `paused`
+# covers: a non-zero hook exit on `queued` or `done` pauses the task, naming the hook's own log under tracking/; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -383,11 +383,12 @@ has "whose ticket landed on the task" "ticket: acme/app#" \
   "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
 has "and the result popup names what was created" "┌─ issues created " "$ASK_YES"
 
-# ------------------------------------------------- on_fail = "pause"
-# A hook that always fails, on each of the four events by hand: `pause` holds
-# a task on `queued` and out of the archive on `done`, and only records the
-# failure on `blocked` and `paused` — both already stopped for a person, so
-# nothing about pausing them again would mean anything.
+# ------------------------------------------------- a failing hook pauses
+# A hook that always fails, on each of the four events by hand: a non-zero
+# exit on `queued` or `done` pauses the task now, naming the hook's own log
+# under tracking/ in the reason, and only records the failure on `blocked`
+# and `paused` — both already stopped for a person, so nothing about pausing
+# them again would mean anything.
 #
 # `open` is the one event it lets through, and the exemption is the point:
 # a failing `open` refuses the whole `queue add` outright — the block right
@@ -400,7 +401,6 @@ exit 1
 EOF
 chmod +x .spoolway/hooks/fail.sh
 must "the hook now always fails" "$SPOOLWAY" config set issue_tracking.hook fail.sh
-must "and on_fail pauses the task" "$SPOOLWAY" config set issue_tracking.on_fail pause
 
 task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
   "group_description: a task under an always-failing hook"
@@ -408,11 +408,12 @@ must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
 if drive hook-queued paused 60; then
-  ok "a failing queued hook under on_fail=pause lands the task on paused"
+  ok "a failing queued hook lands the task on paused"
 else
-  bad "a failing queued hook under on_fail=pause lands the task on paused \
-(at \`$(stage_of hook-queued)\`)"
+  bad "a failing queued hook lands the task on paused (at \`$(stage_of hook-queued)\`)"
 fi
+has "the reason names the hook's own log under tracking/" "tracking/hook-queued" \
+  "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
 
 # Placed by hand at the other three stages, the same way flow.sh's own
 # hand-blocked scenario proves a road through `blocked` without spending a
@@ -438,25 +439,17 @@ fi
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md"
 
 dispatcher_start
-TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
 for _ in $(seq 1 150); do
   [ -f "$TRACKING/hook-blocked · blocked.exit" ] \
     && [ -f "$TRACKING/hook-paused · paused.exit" ] \
-    && [ -f "$TRACKING/hook-done · done.failed" ] \
+    && [ -f "$TRACKING/hook-done · done.exit" ] \
     && break
   sleep 0.2
 done
 
 has "the blocked event's hook ran and failed" "1" "$TRACKING/hook-blocked · blocked.exit"
 has "the paused event's hook ran and failed" "1" "$TRACKING/hook-paused · paused.exit"
-# `done` is the one event a failure is retried on, and `retry_if_failed`
-# forgets the run — `.exit` file and all — once the ladder's own next-attempt
-# time (`hook_backoff` in src/tracking.rs) has passed, not on every pass that
-# finds it still failing — see the ladder scenario below for the pacing
-# itself. The `.failed` marker it leaves first is the evidence that survives;
-# see `failure_count` in src/tracking.rs, which reads both for the same reason.
-works "the done event's hook ran and failed" \
-  test -f "$TRACKING/hook-done · done.failed"
+has "the done event's hook ran and failed" "1" "$TRACKING/hook-done · done.exit"
 
 if [ "$(stage_of hook-blocked)" = blocked ]; then
   ok "a failing hook on blocked only records the failure"
@@ -468,86 +461,47 @@ if [ "$(stage_of hook-paused)" = paused ]; then
 else
   bad "a failing hook on paused only records the failure (at \`$(stage_of hook-paused)\`)"
 fi
-if [ -f "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md" ] && [ "$(stage_of hook-done)" = done ]; then
-  ok "a failing done hook under on_fail=pause holds the task out of the archive"
+if drive hook-done paused 60; then
+  ok "a failing done hook pauses the task, out of the archive"
 else
-  bad "a failing done hook under on_fail=pause holds the task out of the archive \
-(queue file present: $([ -f "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md" ] && echo yes || echo no), \
-stage: $(stage_of hook-done))"
+  bad "a failing done hook pauses the task, out of the archive (at \`$(stage_of hook-done)\`)"
 fi
 
-# --------------------------------------------------- done hook: the ladder
-# `on_fail = "pause"` above proved the hold; this proves the *pace* of its
-# retry — the whole reason it was given a ladder. The hook counts every time
-# it actually runs a real `done` event for this one task, filtered by
-# `SPOOLWAY_TASK` so the still-failing `hook-done` task above — sharing this
-# same global `issue_tracking.hook` from the moment it is switched — cannot
-# add to the count. If a failed hook retried every pass, this harness's own
-# one-second interval would show a dozen runs in as many seconds; the ladder
-# says the first ten seconds see exactly one retry, not one per pass.
-LADDER_COUNT="$LIVE/ladder-runs.txt"
-rm -f "$LADDER_COUNT"
-cat > .spoolway/hooks/fail-counted.sh <<EOF
-#!/bin/sh
-[ "\$SPOOLWAY_EVENT" = open ] && exit 0
-[ "\$SPOOLWAY_TASK" = "ladder-demo" ] && echo run >> "$LADDER_COUNT"
-exit 1
-EOF
-chmod +x .spoolway/hooks/fail-counted.sh
-must "the ladder hook is named" "$SPOOLWAY" config set issue_tracking.hook fail-counted.sh
-dispatcher_restart   # a new hook name only takes effect on the next start
+# --------------------------------------------------- resume re-runs the hook
+# The road out of a hook pause: fixing whatever the hook's own log named,
+# then `spoolway resume` — it forgets the failed run, so the very next pass's
+# `fire` starts it over rather than reading the same stale exit code and
+# pausing the task right back. A `queued` pause resumes onto `queued`, where
+# it is gated like any other; a `done` pause resumes straight back to `done`,
+# not to `queued` or a step.
+must "the hook is fixed" "$SPOOLWAY" config set issue_tracking.hook record.sh
+dispatcher_restart   # a new hook name only takes effect on the next start —
+                      # a pass landing between the config set and the first
+                      # resume, still holding fail.sh in memory, would
+                      # otherwise re-fire it and pause the task right back.
 
-{
-  echo "---"; echo "id: ladder-demo"; echo "title: ladder-demo, done"
-  echo "stage: done"; echo "group: live"
-  echo "base: plan/live"; echo "pipeline: default"
-  echo "---"; cat "$BODY"
-} > "$SPOOLWAY_PROJECT_HOME/queue/ladder-demo.md"
-
-for _ in $(seq 1 100); do
-  [ -s "$LADDER_COUNT" ] && break
-  sleep 0.2
-done
-FIRST_COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-if [ "$FIRST_COUNT" = "1" ]; then
-  ok "the failing done hook ran once, right away"
+must "resume clears the queued pause" "$SPOOLWAY" resume hook-queued
+if drive hook-queued implement 60; then
+  ok "resuming a queued hook pause re-runs the hook and lets the task start"
 else
-  bad "the failing done hook ran once, right away (ran $FIRST_COUNT times)"
+  bad "resuming a queued hook pause re-runs the hook and lets the task start \
+(at \`$(stage_of hook-queued)\`)"
 fi
+# The task moving on is the effect; this is the cause. `record.sh` leaves
+# its own mark beside the task file only when it actually runs, so a pass
+# that let the task through without firing the fixed hook again leaves none.
+has "and the fixed hook really ran for the resumed queued event" \
+  "SPOOLWAY_EVENT=queued" "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md.env.queued"
 
-# Well inside the ladder's own ten seconds, so the retry cannot have come due
-# yet however many passes have gone by. It used to be worth saying "at a
-# one-second pass rate" here, because four seconds then held four passes and a
-# per-pass retry would already have shown; a fixed ten-second probe may hold
-# none at all, so what this pins now is only that the ladder is not skipped.
-# The count settling at exactly two below is what still says "one retry, not
-# one per pass".
-sleep 4
-COUNT_AFTER_4S=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-if [ "$COUNT_AFTER_4S" = "1" ]; then
-  ok "four seconds in, inside the ladder's own ten, it still has not retried"
+must "resume clears the done pause" "$SPOOLWAY" resume hook-done
+if drive hook-done gone 60; then
+  ok "resuming a done hook pause re-runs the hook and lets the task archive"
 else
-  bad "four seconds in, inside the ladder's own ten, it still has not retried \
-(ran $COUNT_AFTER_4S times — a retry before the ladder is due)"
+  bad "resuming a done hook pause re-runs the hook and lets the task archive \
+(still at \`$(stage_of hook-done)\`)"
 fi
-
-# The retry fires on the first pass *after* the ladder comes due, and the
-# ladder's ten seconds and the probe's ten are unrelated clocks that do not
-# line up — so the wait has to cover the ladder plus a whole
-# `dispatch::PROBE_INTERVAL` behind it, not the twelve seconds that sufficed
-# when a pass came round every second.
-for _ in $(seq 1 300); do
-  COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-  [ "$COUNT" -ge 2 ] && break
-  sleep 0.2
-done
-COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
-if [ "$COUNT" = "2" ]; then
-  ok "the ladder's own ten-second step fired exactly one retry, not one per pass"
-else
-  bad "the ladder's own ten-second step fired exactly one retry, not one per pass \
-(ran $COUNT times)"
-fi
+has "and the fixed hook really ran for the resumed done event" \
+  "SPOOLWAY_EVENT=done" "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md.env.done"
 
 must "the hook is put back so it stops holding tasks" \
   "$SPOOLWAY" config set issue_tracking.hook ""

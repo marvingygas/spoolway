@@ -59,8 +59,10 @@ fn render_hook_contract() -> String {
     render_vars(&mut out, DISPATCH_EVENT_VARS);
     out.push_str(
         "  No SPOOLWAY_OUT: nothing reads an answer back from these four. A non-zero exit is\n  \
-         recorded either way; `issue_tracking.on_fail` decides whether it also pauses the \
-         task.\n\n",
+         always recorded; on `queued` or `done` it also pauses the task, with a reason naming \
+         the hook's own log under tracking/ — `spoolway resume` forgets that run, so the hook \
+         runs again. On `blocked` or `paused`, already stopped for a person, it is only ever \
+         recorded.\n\n",
     );
 
     out.push_str("fetch       — synchronous, from `spoolway issue show <reference>`\n");

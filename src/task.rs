@@ -467,6 +467,25 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_by: Option<String>,
 
+    /// `"queued"` or `"done"` — which reserved stage's issue-tracking hook
+    /// paused this task, set the moment [`crate::dispatch::Dispatcher::
+    /// tracking_gate`] finds one exited non-zero. Unlike [`paused_by`] this
+    /// is not one of a gate's two roads — a hook pause answers no question a
+    /// person releases past, it stops the task until the hook itself is
+    /// made to run again — so it needs its own field rather than a third
+    /// value squeezed into that one.
+    ///
+    /// `spoolway resume` reads this before anything else in
+    /// `commands::report::back_onto_its_step`: it forgets the failed run
+    /// (see [`crate::tracking::forget`]) so the next pass's `fire` starts it
+    /// over, and — for `"done"` — sends the task straight back to `done`
+    /// rather than through [`crate::commands::resume_target`]'s ordinary
+    /// step-shaped roads, neither of which knows a name that is not a
+    /// pipeline step at all. Cleared the moment it is read, so a later,
+    /// ordinary pause never inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_paused: Option<String>,
+
     /// When the last of those lanes was launched, in epoch seconds.
     ///
     /// Only an unattended run reads it for the backoff, and only for the one

@@ -70,6 +70,7 @@ const IGNORED_KEYS: &[&str] = &[
     "tab_id",
     "paused_at",
     "paused_by",
+    "hook_paused",
     "launched_at",
     "steps",
     "rounds",

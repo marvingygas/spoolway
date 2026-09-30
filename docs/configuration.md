@@ -218,86 +218,12 @@ dropped, and the rest of the config still loads.
 Set the list with `spoolway config set watch.dirs ~/notes,docs`, comma-separated, the same as
 every other list-valued key. `spoolway sync` keeps whatever a project has put there.
 
-## `[agents.*]` — who runs a step
-
-```toml
-[agents.pi]
-kind = "pi"
-session_reuse_ctx = 0
-session_blocked_ctx = 0
-
-[agents.claude]
-kind = "claude"
-session_reuse_ctx = 0
-session_blocked_ctx = 0
-permission_mode = "auto"
-```
-
-A profile says which agent binary runs and under what limits. Three ship: `pi`, `codex` and
-`claude`. `spoolway init` keeps only the one you chose. See [Agents and models](agents.md).
-
-| Key | Default | What it controls |
-|---|---|---|
-| `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. |
-| `concurrency` | unset | Most lanes of this profile at once. Absent means no cap. `config set` writes it; setting it to `0` removes it. |
-| `session_reuse_ctx` | `0` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
-| `session_blocked_ctx` | `0` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task sent to `blocked`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
-| `permission_mode` | the kind's first mode | The permission mode the lane starts with. `claude` ships `auto`, `codex` ships `never`. `pi` has no mode and no key. Blank is refused. |
-
-`spoolway doctor` warns when `session_blocked_ctx` is set but the profile's steps run a model
-with no `context_window`.
-
-## `[models."<glob>"]` — what a model costs, and how big its window is
-
-```toml
-[models."claude-opus-5"]
-context_window = 1000000
-input = 5.0
-output = 25.0
-cache_read = 0.5
-cache_write_5m = 6.25
-cache_write_1h = 10.0
-session_reuse_idle = "5m"
-
-[models."Qwen3.6-35B-A3B"]
-context_window = 100096
-slots = 3
-exclusive = true
-local = true
-```
-
-Each row is keyed by a glob over the model name. The most literal match wins. A bare name
-also matches `vendor/name`. Leave a field out to mean zero. `[models]` ships empty: the
-built-in price table covers known models, so a row only corrects a price or describes a local
-model. An unpriced model is reported as unpriced, not counted as free. See
-[Cost accounting](cost.md).
-
-| Key | Default | What it controls |
-|---|---|---|
-| `context_window` | `0` | Tokens one session gets. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of this. For a local model use the server's per-slot window, such as llama.cpp's `--ctx-size` divided by `--parallel`. |
-| `input` | `0` | USD per million input tokens. |
-| `output` | `0` | USD per million output tokens. |
-| `cache_read` | `0` | USD per million cached input tokens read. |
-| `cache_write_5m` | `0` | USD per million tokens written to a five-minute cache. |
-| `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
-| `session_reuse_idle` | unset | How long a carried session may sit idle before it is not resumed. Unset never refuses on age. Do not set it on a local model. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
-| `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
-| `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. |
-| `local` | `false` | The model runs on your own hardware. Only `spoolway doctor` reads it. |
-
-The window here is what spoolway believes, not what the server reports. Keep it in step with
-the server yourself.
-
-`spoolway doctor` notes a row with `slots` or `exclusive` but no `local`, an `exclusive` row
-with no `slots`, and a row no pipeline step uses.
-
 ## `[issue_tracking]` — a hook fired on four task events
 
 ```toml
 [issue_tracking]
 hook = ""
 project_key = ""
-on_fail = ""
 key_in_names = false
 ```
 
@@ -308,29 +234,29 @@ names a tracker.
 |---|---|---|
 | `hook` | blank | A bare file name inside `.spoolway/hooks/`, such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
-| `on_fail` | `ignore` | What a failing hook does to its task. `ignore` records the failure. `pause` also holds the task: on `queued` it lands on `paused`, on `done` it stays out of the archive. |
 | `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
 
-The script is called once per task per event. A failing hook retries on a doubling delay
-from ten seconds, capped at an hour, and the count and next retry time survive a dispatcher
-restart.
+The script is called once per task per event. A non-zero exit on `queued` or `done` pauses the
+task, with a reason naming the hook's own log under `tracking/`. `spoolway resume` forgets that
+run, so the hook fires again. A non-zero exit on `blocked` or `paused` only records the
+failure, since both stages are already stopped for a person.
 
-| Event | When it fires | Waits for the script |
-|---|---|---|
-| `fetch` | `spoolway issue show <ref>` reads one issue | Yes |
-| `open` | `spoolway queue add` opens a ticket per task | Yes |
-| `queued` | A task arrives in the queue | No |
-| `blocked` | A task comes to rest on `blocked` | No |
-| `paused` | A task arrives on the persisted `paused` stage | No |
-| `done` | A task finishes | No |
+| Event | When it fires | Waits for the script | A non-zero exit |
+|---|---|---|---|
+| `fetch` | `spoolway issue show <ref>` reads one issue | Yes | Refuses the command |
+| `open` | `spoolway queue add` opens a ticket per task | Yes | Refuses the whole batch |
+| `queued` | A task arrives in the queue | No | Pauses the task |
+| `blocked` | A task comes to rest on `blocked` | No | Records the failure |
+| `paused` | A task arrives on the persisted `paused` stage | No | Records the failure |
+| `done` | A task finishes | No | Pauses the task |
 
 ```mermaid
 flowchart LR
   A[dispatcher pass] -->|task reaches queued, blocked, paused or done| B[.spoolway/hooks/hook]
   B --> C[log in ~/.spoolway/project/tracking/]
-  C -->|non-zero exit| D{on_fail}
-  D -->|ignore| E[failure counted on the board]
-  D -->|pause| F[task held]
+  C -->|non-zero exit| D{queued or done?}
+  D -->|yes| E[task paused]
+  D -->|no| F[failure counted on the board]
 ```
 
 Every hook run gets `SPOOLWAY_EVENT`, `SPOOLWAY_PROJECT_KEY`, `SPOOLWAY_TASK`,
@@ -455,6 +381,79 @@ sub-issues has closed, the workflow comments on the epic and closes it too.
 The shipped Jira hook is unchanged. Jira has no pull request lifecycle of its own, so
 `jira.sh` still transitions the epic on the group's last `done`.
 
+## `[agents.*]` — who runs a step
+
+```toml
+[agents.pi]
+kind = "pi"
+session_reuse_ctx = 0
+session_blocked_ctx = 0
+
+[agents.claude]
+kind = "claude"
+session_reuse_ctx = 0
+session_blocked_ctx = 0
+permission_mode = "auto"
+```
+
+A profile says which agent binary runs and under what limits. Three ship: `pi`, `codex` and
+`claude`. `spoolway init` keeps only the one you chose. See [Agents and models](agents.md).
+
+| Key | Default | What it controls |
+|---|---|---|
+| `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. |
+| `concurrency` | unset | Most lanes of this profile at once. Absent means no cap. `config set` writes it; setting it to `0` removes it. |
+| `session_reuse_ctx` | `0` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
+| `session_blocked_ctx` | `0` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task sent to `blocked`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
+| `permission_mode` | the kind's first mode | The permission mode the lane starts with. `claude` ships `auto`, `codex` ships `never`. `pi` has no mode and no key. Blank is refused. |
+
+`spoolway doctor` warns when `session_blocked_ctx` is set but the profile's steps run a model
+with no `context_window`.
+
+## `[models."<glob>"]` — what a model costs, and how big its window is
+
+```toml
+[models."claude-opus-5"]
+context_window = 1000000
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write_5m = 6.25
+cache_write_1h = 10.0
+session_reuse_idle = "5m"
+
+[models."Qwen3.6-35B-A3B"]
+context_window = 100096
+slots = 3
+exclusive = true
+local = true
+```
+
+Each row is keyed by a glob over the model name. The most literal match wins. A bare name
+also matches `vendor/name`. Leave a field out to mean zero. `[models]` ships empty: the
+built-in price table covers known models, so a row only corrects a price or describes a local
+model. An unpriced model is reported as unpriced, not counted as free. See
+[Cost accounting](cost.md).
+
+| Key | Default | What it controls |
+|---|---|---|
+| `context_window` | `0` | Tokens one session gets. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of this. For a local model use the server's per-slot window, such as llama.cpp's `--ctx-size` divided by `--parallel`. |
+| `input` | `0` | USD per million input tokens. |
+| `output` | `0` | USD per million output tokens. |
+| `cache_read` | `0` | USD per million cached input tokens read. |
+| `cache_write_5m` | `0` | USD per million tokens written to a five-minute cache. |
+| `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
+| `session_reuse_idle` | unset | How long a carried session may sit idle before it is not resumed. Unset never refuses on age. Do not set it on a local model. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
+| `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
+| `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. |
+| `local` | `false` | The model runs on your own hardware. Only `spoolway doctor` reads it. |
+
+The window here is what spoolway believes, not what the server reports. Keep it in step with
+the server yourself.
+
+`spoolway doctor` notes a row with `slots` or `exclusive` but no `local`, an `exclusive` row
+with no `slots`, and a row no pipeline step uses.
+
 ## Retired keys
 
 These keys still parse in an older `config.toml` and are dropped on the next save.
@@ -468,6 +467,7 @@ These keys still parse in an older `config.toml` and are dropped on the next sav
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode` | Nothing |
+| `issue_tracking.on_fail` | Nothing. A failing `queued` or `done` hook always pauses its task. |
 | `[pipeline_gen]` | Nothing |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |
 

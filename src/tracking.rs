@@ -22,12 +22,15 @@
 //! `blocked` are stages a task can sit on for many passes in a row, which is
 //! exactly what that guards: without it every pass sitting on `blocked`
 //! would open a second ticket. The one caller that ever calls
-//! [`Runs::forget`] is [`retry_if_failed`] — see there for why a `done` hold
-//! is the one event this must not be true of forever. [`open_ticket`] needs
-//! none of that: `queue add` is the only caller there ever is, and it means
-//! "run this now" every time it calls at all — a task already naming a
-//! `ticket:` is what its own caller, `queue::open_tickets`, reads as
-//! "already open" and skips before this is ever reached.
+//! [`Runs::forget`] is [`forget`] — a non-zero exit on `queued` or `done`
+//! pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
+//! [`forget`] is what `spoolway resume` calls to undo that hold, so the very
+//! next pass's [`fire`] starts the hook over rather than reading the same
+//! stale exit code forever. [`open_ticket`] needs none of that: `queue add`
+//! is the only caller there ever is, and it means "run this now" every time
+//! it calls at all — a task already naming a `ticket:` is what its own
+//! caller, `queue::open_tickets`, reads as "already open" and skips before
+//! this is ever reached.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -652,25 +655,6 @@ pub(crate) fn tracker(repo: &Repo) -> String {
         .unwrap_or_else(|| hook.to_string())
 }
 
-/// Whether `config.toml`'s `on_fail` asks a failed hook to hold the task
-/// rather than only record the failure. Blank reads as `"ignore"`.
-pub fn pauses_on_fail(repo: &Repo) -> bool {
-    repo.config.issue_tracking.on_fail.trim() == "pause"
-}
-
-/// Whether a failed hook should actually hold a task at `queued` or `done` —
-/// `on_fail = "pause"` *and* a hook that resolves to something real.
-///
-/// [`pauses_on_fail`] alone is not enough to gate a hold on: a blank `hook`,
-/// or one [`is_bare_filename`] refuses, means [`fire`] never starts a run at
-/// all, so [`exit_code`] can only ever read `None` for it. Holding on that
-/// would deadlock every task at `queued` (and keep every one out of the
-/// archive at `done`) for a project that asked for no hook at all — the
-/// opposite of "an empty hook produces no hook runs and no behaviour change".
-pub fn holds_on_fail(repo: &Repo) -> bool {
-    pauses_on_fail(repo) && hook_path(repo).is_some()
-}
-
 /// Start this task's hook for `event`, unless it already has —see
 /// [`RunState::Fresh`]. A no-op with nothing configured, so a project that
 /// has never touched `[issue_tracking]` pays for none of this: no directory,
@@ -715,131 +699,15 @@ pub fn exit_code(repo: &Repo, task: &Task, event: &str) -> Option<i32> {
     }
 }
 
-/// Where a key's last known failure is recorded once [`retry_if_failed`] has
-/// forgotten the run that produced it — see there, and [`failure_count`],
-/// for why the `.exit` file itself cannot be trusted to still be on disk by
-/// the time anything goes looking for it.
-///
-/// Doubles as the ladder's own record once [`retry_if_failed`] starts writing
-/// to it — see [`HookRetry`] — since both are keyed the same way and a
-/// failing key needs exactly one file on disk, not two that could disagree.
-fn failed_marker(repo: &Repo, key: &str) -> PathBuf {
-    repo.tracking_dir().join(format!("{key}.failed"))
-}
-
-/// How many times this key has been retried, and when it may be retried
-/// again — [`retry_if_failed`]'s own memory of where a key sits on the
-/// ladder, held in [`failed_marker`] so a dispatcher restart reads the same
-/// state back rather than starting the count over.
-///
-/// `pub(crate)` only so [`crate::dispatch`]'s own integration tests can
-/// back-date a record and force the ladder due, rather than a real test
-/// sleeping out ten real seconds to see a retry actually land.
-pub(crate) struct HookRetry {
-    pub(crate) attempts: u32,
-    pub(crate) next_attempt_at: i64,
-}
-
-fn read_hook_retry(repo: &Repo, key: &str) -> Option<HookRetry> {
-    let raw = std::fs::read_to_string(failed_marker(repo, key)).ok()?;
-    let mut lines = raw.lines();
-    let attempts = lines.next()?.trim().parse().ok()?;
-    let next_attempt_at = lines.next()?.trim().parse().ok()?;
-    Some(HookRetry {
-        attempts,
-        next_attempt_at,
-    })
-}
-
-pub(crate) fn write_hook_retry(repo: &Repo, key: &str, retry: &HookRetry) {
-    let _ = std::fs::create_dir_all(repo.tracking_dir());
-    let _ = std::fs::write(
-        failed_marker(repo, key),
-        format!("{}\n{}\n", retry.attempts, retry.next_attempt_at),
-    );
-}
-
-/// Ten seconds, doubling on every attempt, capped at an hour — the same
-/// shape [`crate::dispatch::relaunch_backoff`] gives a dying lane, but its
-/// own function rather than a shared one: a hook's ladder is pinned at ten
-/// seconds by this task's own acceptance criteria, unrelated to the
-/// dispatcher's own fixed poll rate.
-fn hook_backoff(attempts: u32) -> Duration {
-    const BASE_SECS: u64 = 10;
-    const CAP: Duration = Duration::from_secs(3600);
-    let doublings = attempts.saturating_sub(1).min(12);
-    Duration::from_secs(BASE_SECS.saturating_mul(1u64 << doublings)).min(CAP)
-}
-
-/// The road out of a `done` hold: once this task's `done` run has failed,
-/// retries it on [`hook_backoff`]'s ladder rather than the very next pass —
-/// a real hook (a `gh` call, most often) against an endpoint that is already
-/// failing must not turn a faster tick into a call per second. [`fire`]'s
-/// own [`RunState::Fresh`] check is what actually restarts the run, once
-/// this forgets it; this only decides *when* that is allowed to happen.
-///
-/// `done` is not a step a person can resume the way `queued` failing into
-/// `paused` can be — there is no later step to carry the task past, only the
-/// same event to try again. Retrying the hook itself is what stands in for
-/// "hold the task for `spoolway resume`" here: the task stays held, and each
-/// pass checks whether the ladder has come due rather than trusting a code
-/// it read once. A run still in flight — [`RunState::Running`] or
-/// [`RunState::Fresh`] — is left alone; forgetting it here would abandon a
-/// process that might still succeed by dropping the very bookkeeping that
-/// says it is going. `RunState::Interrupted` is retried too: a wrapper gone
-/// without a code is not a verdict, and holding on that forever would be no
-/// better than trusting a stale failure.
-///
-/// The first failure only starts the ladder — it schedules the next attempt
-/// ten seconds out and leaves the run exactly as failed as it found it, so a
-/// tick running every second still only calls out on the ladder's own pace.
-/// A later pass that finds the ladder come due forgets the run, bumps the
-/// attempt count, and schedules the one after — doubling each time, capped
-/// at an hour. [`failed_marker`] survives a dispatcher restart, so the count
-/// and the next-attempt time it carries pick up exactly where they left off.
-pub fn retry_if_failed(repo: &Repo, task: &Task, event: &str) {
+/// Forget this task's `event` hook run, so [`fire`]'s own [`RunState::Fresh`]
+/// check lets it start over on the next pass — what `spoolway resume` calls
+/// on a task a failing hook paused (see [`crate::task::Frontmatter::
+/// hook_paused`]), the road out of a hold now that every failing hook pauses
+/// its task: a person repairs whatever the hook's own log names, then
+/// resumes, rather than a clock retrying an endpoint that may still be down.
+pub fn forget(repo: &Repo, task: &Task, event: &str) {
     let key = Runs::key(event, task.id());
-    let runs = runs(repo);
-    match runs.state(&key) {
-        RunState::Exited(0) | RunState::Running | RunState::Fresh => {}
-        RunState::Exited(_) | RunState::Interrupted => {
-            let now = crate::dispatch::now_secs();
-            let existing = read_hook_retry(repo, &key);
-            let due = existing
-                .as_ref()
-                .is_none_or(|retry| now >= retry.next_attempt_at);
-            if !due {
-                return;
-            }
-            let attempts = existing.map_or(0, |retry| retry.attempts) + 1;
-            // Attempt one only records the ladder's start — the run just
-            // failed this instant, so "due" for it means "ten seconds from
-            // now", not "immediately". Every attempt after the first was
-            // already waiting on a `next_attempt_at` that just elapsed, so
-            // it forgets the run right away and lets `fire` restart it on
-            // the next pass.
-            let next_attempt_at = now + hook_backoff(attempts).as_secs() as i64;
-            write_hook_retry(
-                repo,
-                &key,
-                &HookRetry {
-                    attempts,
-                    next_attempt_at,
-                },
-            );
-            if attempts > 1 {
-                let _ = runs.forget(&key);
-            }
-        }
-    }
-}
-
-/// Clears the marker [`retry_if_failed`] may have left, once a held task's
-/// hook has actually succeeded — called from the `done` arm's own success
-/// path, so the board's count does not go on naming a failure that resolved.
-pub fn clear_retry_marker(repo: &Repo, task: &Task, event: &str) {
-    let key = Runs::key(event, task.id());
-    let _ = std::fs::remove_file(failed_marker(repo, &key));
+    let _ = runs(repo).forget(&key);
 }
 
 /// Drop every hook run file this task left under `tracking/`, once it has
@@ -858,15 +726,10 @@ pub fn reclaim(repo: &Repo, task_id: &str) {
 /// holds, are currently failing. What the board's own
 /// `issue_tracking: N hook failures` line counts.
 ///
-/// Every failing key counts, not only the ones `on_fail = "pause"` is still
-/// holding a task over — `"ignore"` records exactly the same failure, and a
-/// person still wants to see it. Two kinds of evidence are read and merged
-/// by key, since either may be the only one left for a given key: a `.exit`
-/// file reading non-zero is a run [`retry_if_failed`] has not touched, and a
-/// `.failed` marker is what survives one it has — retrying a `done` hold
-/// forgets the run itself, `.exit` file included, on every pass that finds
-/// it still failing, so without the marker that key would drop out of this
-/// count the instant a retry began.
+/// A hook run is left exactly as it exited until `spoolway resume` reads and
+/// forgets it (see [`forget`]), so its `.exit` file staying non-zero is the
+/// count's only evidence now: nothing forgets a run behind the board's back
+/// the way the old retry ladder once did.
 ///
 /// A `<task> · <event>` key whose task is no longer in the queue does not
 /// count. [`reclaim`] already deletes those files when a task is archived;
@@ -900,20 +763,14 @@ pub fn failure_count(repo: &Repo) -> usize {
         {
             continue;
         }
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("failed") => {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("exit") {
+            let failed = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i32>().ok())
+                .is_some_and(|code| code != 0);
+            if failed {
                 failing.insert(key);
             }
-            Some("exit") => {
-                let failed = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|raw| raw.trim().parse::<i32>().ok())
-                    .is_some_and(|code| code != 0);
-                if failed {
-                    failing.insert(key);
-                }
-            }
-            _ => {}
         }
     }
     failing.len()
@@ -1060,6 +917,7 @@ mod tests {
             attempts: 0,
             paused_at: None,
             paused_by: None,
+            hook_paused: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
@@ -1322,18 +1180,6 @@ mod tests {
         );
     }
 
-    /// `on_fail` reads `"pause"` as pausing and anything else — blank
-    /// included — as `"ignore"`, exactly as the acceptance criteria say.
-    #[test]
-    fn on_fail_defaults_to_ignore() {
-        let mut repo = fixture("on-fail");
-        assert!(!pauses_on_fail(&repo));
-        repo.config.issue_tracking.on_fail = "ignore".into();
-        assert!(!pauses_on_fail(&repo));
-        repo.config.issue_tracking.on_fail = "pause".into();
-        assert!(pauses_on_fail(&repo));
-    }
-
     /// One `# spoolway-requires:` line per tool a hook declares, in the order
     /// they appear, alongside a line that does not parse as `<tool> >=
     /// <version>` — reported back as its own raw text rather than dropped or
@@ -1421,14 +1267,12 @@ mod tests {
         );
     }
 
-    /// The road out of a `done` hold: a failed run is eventually forgotten
-    /// so a later pass's `fire` starts it over, and a run still going or
-    /// already clean is left exactly as it is. The first call only starts
-    /// the ladder — see [`hook_backoff`] — so it must not forget the run on
-    /// the spot; only a call that finds the ladder already come due does.
+    /// [`forget`] is the whole road out of a hook pause: a failed run stays
+    /// failed until this clears it, and the next `fire` sees `Fresh` again
+    /// and actually restarts it.
     #[test]
-    fn retry_if_failed_waits_for_the_ladder_before_forgetting() {
-        let mut repo = fixture("retry");
+    fn forget_lets_fire_restart_a_failed_run() {
+        let mut repo = fixture("forget");
         with_hook(&mut repo, "flaky.sh", "exit 1");
         let t = task("demo", |_| {});
 
@@ -1436,48 +1280,17 @@ mod tests {
         settle(&repo, &t, crate::pipeline::DONE);
         assert_eq!(exit_code(&repo, &t, crate::pipeline::DONE), Some(1));
 
-        let key = Runs::key(crate::pipeline::DONE, t.id());
-        retry_if_failed(&repo, &t, crate::pipeline::DONE);
-        assert_eq!(
-            exit_code(&repo, &t, crate::pipeline::DONE),
-            Some(1),
-            "the first failure only starts the ladder — nothing is due yet"
-        );
-
-        // Back-date the ladder's own record so the next call finds it due,
-        // the same way a real one would once ten seconds had actually
-        // passed — see `hook_backoff`.
-        write_hook_retry(
-            &repo,
-            &key,
-            &HookRetry {
-                attempts: 1,
-                next_attempt_at: crate::dispatch::now_secs() - 1,
-            },
-        );
-        retry_if_failed(&repo, &t, crate::pipeline::DONE);
+        forget(&repo, &t, crate::pipeline::DONE);
         assert_eq!(
             exit_code(&repo, &t, crate::pipeline::DONE),
             None,
-            "the ladder came due, so this call forgot the run"
+            "forgetting the run must clear its exit code"
         );
-        // And the next `fire` sees `Fresh` again and actually restarts it.
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(
             settle(&repo, &t, crate::pipeline::DONE),
             RunState::Exited(1)
         );
-    }
-
-    /// The ladder itself: ten seconds, doubling on every attempt, capped at
-    /// an hour — the acceptance criterion's own numbers.
-    #[test]
-    fn hook_backoff_doubles_from_ten_seconds_capped_at_an_hour() {
-        assert_eq!(hook_backoff(1), Duration::from_secs(10));
-        assert_eq!(hook_backoff(2), Duration::from_secs(20));
-        assert_eq!(hook_backoff(3), Duration::from_secs(40));
-        assert_eq!(hook_backoff(4), Duration::from_secs(80));
-        assert_eq!(hook_backoff(20), Duration::from_secs(3600));
     }
 
     /// No hook configured means `open_ticket` starts no process at all —
