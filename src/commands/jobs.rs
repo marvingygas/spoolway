@@ -349,7 +349,7 @@ enum JobMode {
         query: String,
         cursor: usize,
     },
-    /// `x` waiting on a `y`.
+    /// `x` waiting on `enter` to delete or `esc` to keep.
     ConfirmDelete(String),
     /// `r` stopped at the tool-requirements gate, asked in a popup over the
     /// list — `panel` is `queue::tool_gate_popup`'s. `enter` fires the job
@@ -454,7 +454,7 @@ fn run_jobs_screen(
             }
 
             JobMode::ConfirmDelete(name) => match key {
-                Key::Char('y') => {
+                Key::Enter => {
                     let name = name.clone();
                     match jobs::delete(repo, &name) {
                         Ok(()) => {
@@ -473,7 +473,10 @@ fn run_jobs_screen(
                         }
                     }
                 }
-                _ => state.mode = JobMode::List,
+                Key::Esc => state.mode = JobMode::List,
+                // Every other key, `y` and `n` included, leaves the popup open
+                // so a stray keystroke can't delete or dismiss it.
+                _ => {}
             },
 
             JobMode::List => handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)?,
@@ -996,7 +999,7 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
                 clip(&format!("  {name}")),
                 "  its schedule is removed from the store.".to_string(),
             ],
-            &keys(&[("y", "delete"), ("n", "keep")]),
+            &keys(&[("enter", "delete"), ("esc", "keep")]),
         )),
         JobMode::ToolGate { panel, .. } => Some(panel.clone()),
         // Wrapped no wider than the frame has room for, so a narrow
@@ -1098,7 +1101,7 @@ fn jobs_footer(mode: &JobMode) -> String {
         JobMode::PickRoutine { .. } => key_hint(ROUTINE_KEYS),
         JobMode::Schedule { .. } => key_hint(&[("enter", "accept"), ("esc", "cancel")]),
         JobMode::PickPipeline { .. } => key_hint(&[("enter", "choose"), ("esc", "cancel")]),
-        JobMode::ConfirmDelete(_) => key_hint(&[("y", "delete"), ("n", "keep")]),
+        JobMode::ConfirmDelete(_) => key_hint(&[("enter", "delete"), ("esc", "keep")]),
     }
 }
 
@@ -1768,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn x_then_y_deletes_the_highlighted_job() {
+    fn x_then_enter_deletes_the_highlighted_job() {
         let repo = fixture("jobs-screen-delete");
         seed_routines(&repo);
         jobs::write(
@@ -1784,8 +1787,29 @@ mod tests {
         )
         .unwrap();
 
-        drive(&repo, "xy");
+        drive(&repo, "x\r");
         assert!(jobs::load(&repo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn x_then_esc_keeps_the_highlighted_job() {
+        let repo = fixture("jobs-screen-delete-esc");
+        seed_routines(&repo);
+        jobs::write(
+            &repo,
+            Scope::Project,
+            "nightly",
+            &JobSpec {
+                schedule: "@daily".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: "nightly".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        drive(&repo, "x\x1b");
+        assert_eq!(jobs::load(&repo).unwrap().len(), 1);
     }
 
     #[test]

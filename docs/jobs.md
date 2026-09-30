@@ -64,7 +64,7 @@ schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 | `n` | Write a new job. |
 | `e` | Edit the highlighted job. |
 | `space` | Pause or resume it. |
-| `x` | Delete it, after `y`/`n`. |
+| `x` | Delete it, after `enter`/`esc`. |
 | `r` | Fire it now. |
 | `ctrl-c` | Leave the screen. |
 

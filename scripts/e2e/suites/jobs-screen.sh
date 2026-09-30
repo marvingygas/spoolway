@@ -7,9 +7,9 @@
 # installed binary.
 #
 # What is asserted is the TOML the screen writes: a completed walk lands a
-# `[jobs.<name>]` table in the user store, `space` pauses it, `x`+`y` removes
-# it. Nothing here drives a dispatcher — `install_agents`/`new_forge` are not
-# needed, the same reason `routines.sh` needs neither.
+# `[jobs.<name>]` table in the user store, `space` pauses it, `x`+`enter`
+# removes it. Nothing here drives a dispatcher — `install_agents`/`new_forge`
+# are not needed, the same reason `routines.sh` needs neither.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -62,9 +62,13 @@ has "space pauses the job" "enabled = false" "$STORE"
 on_screen '\033[C\033[C ' /dev/null
 lacks "space again resumes it" "enabled" "$STORE"
 
-# x asks, y confirms.
-on_screen '\033[C\033[Cxy' /dev/null
-lacks "x then y deletes the job" "[jobs.nightly]" "$STORE"
+# x asks, esc keeps.
+on_screen '\033[C\033[Cx\033' /dev/null
+has "x then esc keeps the job" "[jobs.nightly]" "$STORE"
+
+# x asks, enter confirms.
+on_screen '\033[C\033[Cx\r' /dev/null
+lacks "x then enter deletes the job" "[jobs.nightly]" "$STORE"
 
 # One task on its own: two `→`s open the jobs tab; n opens the routines
 # browser; `tab` moves the cursor onto `nightly`'s tasks pane, on
