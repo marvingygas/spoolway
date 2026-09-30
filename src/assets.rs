@@ -164,7 +164,9 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// a file its own.
 ///
 /// `github.sh` treats GitHub as a mirror: `open` opens the group's epic (if
-/// any) and the task's own ticket, `queued` labels the ticket in progress,
+/// any) and the task's own ticket, `check` proves the `gh` login and the
+/// repository before doctor or a dispatch run trusts either, `started`
+/// labels the ticket in progress once the task actually leaves `queued`,
 /// `blocked`/`paused` comment a snapshot of the task file's own status log
 /// and handoff, and `done` — reached when `spoolway stack` has already
 /// opened this task's own pull request, not when it merges — leaves a

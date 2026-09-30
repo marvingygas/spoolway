@@ -2,14 +2,17 @@
 //! handed, event by event.
 //!
 //! A hook is one script, named by `issue_tracking.hook`, resolved inside
-//! `.spoolway/hooks/` and run on six events — [`crate::tracking`] is the
+//! `.spoolway/hooks/` and run on eight events — [`crate::tracking`] is the
 //! whole of what calls it. This prints straight from the tables
 //! [`crate::tracking::COMMON_EVENT_VARS`], [`crate::tracking::
 //! OPEN_EVENT_VARS`], [`crate::tracking::DISPATCH_EVENT_VARS`] and
 //! [`crate::tracking::FETCH_EVENT_VARS`] kept beside the functions that
 //! build the real environment, rather than a second copy of the variable
 //! list — `tracking::tests::open_dispatch_and_fetch_vars_match_a_real_environment`
-//! is what checks those tables against a real call.
+//! is what checks those tables against a real call. `started` reuses
+//! [`crate::tracking::DISPATCH_EVENT_VARS`], the same table `queued`,
+//! `blocked`, `paused` and `done` do; `check` carries nothing beyond
+//! [`crate::tracking::COMMON_EVENT_VARS`], so it gets no table of its own.
 
 use super::*;
 
@@ -39,7 +42,7 @@ fn render_hook_contract() -> String {
     out.push_str("=================\n\n");
     out.push_str(
         "One script, named by `issue_tracking.hook`, resolved inside .spoolway/hooks/ — a\n\
-         bare filename only, never a path. Run on six events, `SPOOLWAY_EVENT` naming which.\n\n",
+         bare filename only, never a path. Run on eight events, `SPOOLWAY_EVENT` naming which.\n\n",
     );
 
     out.push_str("EVERY EVENT CARRIES\n");
@@ -65,6 +68,20 @@ fn render_hook_contract() -> String {
          recorded.\n\n",
     );
 
+    out.push_str(
+        "started     — fire-and-forget, once a task actually leaves `queued` for its entry \
+         step\n",
+    );
+    render_vars(&mut out, DISPATCH_EVENT_VARS);
+    out.push_str(
+        "  The same variables `queued`/`blocked`/`paused`/`done` carry — see above. Not a \
+         fifth\n  stage: `queued` still fires on the dispatcher's very first pass over a task, \
+         even while\n  it waits on a dependency; `started` fires once, only when the task is \
+         actually about to\n  launch. The task launches only once this hook exits clean; a \
+         non-zero exit pauses it\n  exactly as a failing `queued` hook does, and `spoolway \
+         resume` runs it again.\n\n",
+    );
+
     out.push_str("fetch       — synchronous, from `spoolway issue show <reference>`\n");
     render_vars(&mut out, FETCH_EVENT_VARS);
     out.push_str(
@@ -73,9 +90,29 @@ fn render_hook_contract() -> String {
          that ran and\n  found nothing.\n\n",
     );
 
-    out.push_str("spoolway doctor  checks the script names `fetch` when the event is used, and\n");
     out.push_str(
-        "                 writes a `slug=` line when `issue_tracking.key_in_names` is on.\n\n",
+        "check       — synchronous, from `spoolway doctor` and once more as the dispatcher \
+         starts\n",
+    );
+    out.push_str(
+        "  Carries nothing beyond SPOOLWAY_EVENT and SPOOLWAY_PROJECT_KEY, above — no \
+         SPOOLWAY_OUT.\n  Never run at all, the same way `fetch` is not, when the script's own \
+         text never\n  mentions `check` — a `doctor` note then, not a FAIL row, since nothing \
+         was actually\n  asked to run. Run and failing is different: a non-zero exit from a \
+         script that does\n  have the branch is one `doctor` FAIL row carrying the hook's own \
+         stderr; from the\n  dispatcher it is a warning read before the run starts, never a \
+         refusal — nothing here\n  ever stops a task pausing on `queued`, `started` or `done` \
+         later if the tracker\n  really is down.\n\n",
+    );
+
+    out.push_str(
+        "spoolway doctor  checks the script names `fetch` and `check` when either event is \
+         used,\n",
+    );
+    out.push_str(
+        "                 writes a `slug=` line when `issue_tracking.key_in_names` is on, and \
+         runs\n                 `check` itself once when the branch exists, reporting a \
+         non-zero exit as a\n                 FAIL row.\n\n",
     );
 
     out.push_str(
@@ -107,8 +144,10 @@ mod tests {
             "SPOOLWAY_DEPENDS_TICKETS",
             "queued, blocked, paused, done",
             "SPOOLWAY_GROUP_LAST",
+            "started     —",
             "fetch       —",
             "SPOOLWAY_REF",
+            "check       —",
         ] {
             assert!(text.contains(fact), "hook contract drops `{fact}`");
         }

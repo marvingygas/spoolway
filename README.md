@@ -288,9 +288,11 @@ Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and 
 | `fetch` | `spoolway issue show <ref>` reads one issue out of the tracker |
 | `open` | `spoolway queue add` opens a ticket per task |
 | `queued` | A task arrives in the queue |
+| `started` | A queued task is ready and about to leave `queued` for its entry step |
 | `blocked` | A task comes to rest on `blocked` |
 | `paused` | A task arrives on the persisted `paused` stage |
 | `done` | A task finishes |
+| `check` | `spoolway doctor`, and once as the dispatcher starts, to prove the hook works |
 
 The sample GitHub flow creates one group issue and one child issue per task, comments when a
 task blocks or pauses, and marks the task issue ready for review when the pipeline hands it to

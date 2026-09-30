@@ -1,15 +1,19 @@
-//! The `[issue_tracking]` hook: one script a project names, run once per task
-//! on each of the four events a task can come to rest on — `queued`,
-//! `blocked`, `paused` and `done` — plus two more that are not task events at
-//! all: `open`, which [`open_ticket`] runs synchronously from `queue add`
-//! itself, before any of those four could ever fire, and `fetch`, which
-//! [`fetch_issue`] runs synchronously from `spoolway issue show`, before any
-//! task tied to the issue it names even exists. See `crate::pipeline::RESERVED`
-//! for why the first four and no others: they are the states nothing inside a
-//! pipeline file can already put a `run:` step on, since none of them is a
-//! step a pipeline may declare. `open` and `fetch` need no such reservation —
-//! neither is a task stage, so nothing in a pipeline could ever collide with
-//! either.
+//! The `[issue_tracking]` hook: one script a project names, run on eight
+//! events. Four are stages a task can come to rest on — `queued`, `blocked`,
+//! `paused` and `done` — see `crate::pipeline::RESERVED`, which lists exactly
+//! them: they are the states nothing inside a pipeline file can already put a
+//! `run:` step on, since none of them is a step a pipeline may declare. The
+//! other four are not task stages at all: `open`, which [`open_ticket`] runs
+//! synchronously from `queue add` itself, before any of the four could ever
+//! fire; `fetch`, which [`fetch_issue`] runs synchronously from `spoolway
+//! issue show`, before any task tied to the issue it names even exists;
+//! `started`, which [`fire`] runs once a task actually leaves `queued` for
+//! its entry step — see `crate::pipeline::STARTED` for why this is not a
+//! fifth reserved stage, only ever fired and gated from inside the `queued`
+//! arm of `crate::dispatch::Dispatcher::route_reserved_stage`; and `check`,
+//! which [`check_hook`] runs synchronously from `spoolway doctor` and once
+//! more as the dispatcher starts, proving the hook works before any task can
+//! ever pause on it.
 //!
 //! This reuses [`crate::command_step::Runs`] rather than reinventing a second
 //! way to spawn something detached and read its exit code back on a later
@@ -22,8 +26,8 @@
 //! `blocked` are stages a task can sit on for many passes in a row, which is
 //! exactly what that guards: without it every pass sitting on `blocked`
 //! would open a second ticket. The one caller that ever calls
-//! [`Runs::forget`] is [`forget`] — a non-zero exit on `queued` or `done`
-//! pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
+//! [`Runs::forget`] is [`forget`] — a non-zero exit on `queued`, `started` or
+//! `done` pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
 //! [`forget`] is what `spoolway resume` calls to undo that hold, so the very
 //! next pass's [`fire`] starts the hook over rather than reading the same
 //! stale exit code forever. [`open_ticket`] needs none of that: `queue add`
@@ -237,7 +241,7 @@ pub fn open_ticket(
 /// Every variable every event carries — `spoolway hook contract` prints this
 /// table first, before any event's own.
 pub(crate) const COMMON_EVENT_VARS: &[(&str, &str)] = &[
-    ("SPOOLWAY_EVENT", "which of the six events this run is"),
+    ("SPOOLWAY_EVENT", "which of the eight events this run is"),
     (
         "SPOOLWAY_PROJECT_KEY",
         "`issue_tracking.project_key`, verbatim, opaque to spoolway",
@@ -635,6 +639,113 @@ pub(crate) fn missing_fetch_branch(checkout: &Path, hook_name: &str) -> Option<S
     (!has_fetch_branch(&script)).then(|| name.to_string())
 }
 
+/// Whether `script`'s own text names the `check` event anywhere at all —
+/// matched against the actual shapes a branch is spelled in, not the bare
+/// word [`has_fetch_branch`] scans for. `fetch` is rare enough in ordinary
+/// prose that a bare substring search never sees a false hit; `check` is
+/// not — the shipped `jira.sh` says "every `acli` command below was
+/// **checked** against that version" nowhere near a `check` branch at all,
+/// and a bare scan would read that comment as proof one exists. So this
+/// matches the shapes a real branch actually takes: `= check`, a `case`
+/// arm's `check)` or `check|`, or the event quoted as `'check'`/`"check"`.
+pub(crate) fn has_check_branch(script: &str) -> bool {
+    const PATTERNS: &[&str] = &["= check", "check)", "check|", "'check'", "\"check\""];
+    PATTERNS.iter().any(|pattern| script.contains(pattern))
+}
+
+/// `hook_name`, when the script it names has no `check` branch — the same
+/// shape as [`missing_fetch_branch`], and read by the same caller,
+/// `doctor`'s `issue_tracking_checks`, right beside it: a script written
+/// before this event existed has neither branch, and a project should hear
+/// about both gaps the same way.
+pub(crate) fn missing_check_branch(checkout: &Path, hook_name: &str) -> Option<String> {
+    let name = hook_name.trim();
+    if name.is_empty() || !is_bare_filename(name) {
+        return None;
+    }
+    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    (!has_check_branch(&script)).then(|| name.to_string())
+}
+
+/// What one synchronous `check` hook call came back with — see
+/// [`check_hook`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckResult {
+    /// No hook is configured at all.
+    NoHook,
+    /// The configured script's own text never mentions `check` — see
+    /// [`has_check_branch`]. Caught before the hook is ever run, the same
+    /// way [`fetch_issue`] catches a missing `fetch` branch: running an
+    /// unmodified script anyway would read as "checked out fine" rather
+    /// than "never implemented".
+    NoCheckBranch,
+    /// The hook exited zero.
+    Passed,
+    /// The hook exited non-zero, carrying whatever it wrote to stderr — the
+    /// text a `doctor` `FAIL` row reports verbatim, since the hook is the
+    /// one thing that knows what it just failed to confirm. Blank when the
+    /// hook wrote nothing there, or ended with no exit code at all.
+    Failed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+}
+
+/// Run the `check` hook, synchronously, and say whether it proves the hook
+/// works — `spoolway doctor` and the dispatcher's own start each call this
+/// once, straight off `SPOOLWAY_EVENT=check`.
+///
+/// Unlike any of [`fire`]'s own events, this never touches `tracking/` at
+/// all: nothing here has to persist across a dispatch pass the way a
+/// detached run does, since both callers block on the answer on the spot —
+/// the same reason [`fetch_issue`] runs synchronously rather than through
+/// [`crate::command_step::Runs`]. It still cannot reuse `fetch_issue`'s own
+/// machinery, though: [`crate::command_step::Runs::start`] always redirects a run's
+/// stdout and stderr together (`2>&1`), which is right for a log a person
+/// reads whole, but wrong here — a `doctor` `FAIL` row wants the hook's
+/// stderr on its own, not padded with whatever it printed to stdout. So this
+/// runs the hook directly through the platform's own shell, exactly the way
+/// [`crate::command_step`]'s wrapper does, and keeps the two streams apart
+/// by reading them back separately.
+///
+/// No timeout of its own, the same as [`fetch_issue`] — the acceptance
+/// criterion asking for "the timeout `fetch` has" is this: neither call
+/// bounds how long the hook may run, so a check against a slow tracker is
+/// exactly as patient as `spoolway issue show` already is against the same
+/// one.
+pub fn check_hook(checkout: &Path, hook_name: &str, project_key: &str) -> CheckResult {
+    let Some(hook) = hook_path_in(checkout, hook_name) else {
+        return CheckResult::NoHook;
+    };
+    let Ok(script) = std::fs::read_to_string(&hook) else {
+        return CheckResult::NoHook;
+    };
+    if !has_check_branch(&script) {
+        return CheckResult::NoCheckBranch;
+    }
+
+    let run_line = crate::platform::quote(&hook.display().to_string());
+    let output = crate::platform::shell_command(&run_line)
+        .current_dir(checkout)
+        .env("SPOOLWAY_EVENT", "check")
+        .env("SPOOLWAY_PROJECT_KEY", project_key)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => CheckResult::Passed,
+        Ok(out) => CheckResult::Failed {
+            exit_code: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        },
+        // The shell itself could not even be spawned — no `sh` on PATH, say.
+        // Not a hook failure to blame the script for, but still nothing to
+        // route as a pass.
+        Err(err) => CheckResult::Failed {
+            exit_code: None,
+            stderr: err.to_string(),
+        },
+    }
+}
+
 /// Whether a hook is configured at all — what lets `queue add` skip
 /// [`open_ticket`] and its own report entirely rather than call it once per
 /// task only to have every call answer [`OpenResult::NoHook`].
@@ -777,9 +888,13 @@ pub fn failure_count(repo: &Repo) -> usize {
 }
 
 /// Every variable [`build_env`] adds beyond [`COMMON_EVENT_VARS`], for the
-/// four events that fire once a task settles — see [`OPEN_EVENT_VARS`] for
-/// why this lives beside the function it describes rather than in
-/// `commands::hook`.
+/// four events that fire once a task settles — `queued`, `blocked`, `paused`
+/// and `done` — plus `started`, which reuses this same table even though it
+/// is not itself a settle: it fires from inside the `queued` arm of
+/// `crate::dispatch::Dispatcher::route_reserved_stage`, the moment the task
+/// is actually about to leave `queued` rather than merely arrive there. See
+/// [`OPEN_EVENT_VARS`] for why this lives beside the function it describes
+/// rather than in `commands::hook`.
 pub(crate) const DISPATCH_EVENT_VARS: &[(&str, &str)] = &[
     ("SPOOLWAY_TASK", "the task's id"),
     ("SPOOLWAY_FROM", "the step it arrived from"),
@@ -1510,6 +1625,157 @@ mod tests {
         assert_eq!(missing_fetch_branch(&repo.checkout, "current.sh"), None);
         assert_eq!(missing_fetch_branch(&repo.checkout, ""), None);
         assert_eq!(missing_fetch_branch(&repo.checkout, "../escaped"), None);
+    }
+
+    /// No hook configured means `check_hook` runs no process at all — the
+    /// same "no configuration, no behaviour" contract every other event
+    /// gives.
+    #[test]
+    fn check_hook_with_no_hook_runs_nothing() {
+        let repo = fixture("check-no-hook");
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, ""),
+            CheckResult::NoHook
+        );
+    }
+
+    /// A hook script that has never heard of `check` — every install's,
+    /// before somebody adds the branch — is caught before it is ever run,
+    /// the same way a missing `fetch` branch is.
+    #[test]
+    fn check_hook_with_no_check_branch_runs_nothing() {
+        let mut repo = fixture("check-unimplemented");
+        with_hook(
+            &mut repo,
+            "old.sh",
+            "case \"$SPOOLWAY_EVENT\" in blocked|paused) ;; *) exit 0 ;; esac",
+        );
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, ""),
+            CheckResult::NoCheckBranch
+        );
+    }
+
+    /// A hook that exits zero on `check` passes.
+    #[test]
+    fn check_hook_passes_on_a_clean_exit() {
+        let mut repo = fixture("check-passes");
+        with_hook(
+            &mut repo,
+            "check.sh",
+            "case \"$SPOOLWAY_EVENT\" in check) exit 0 ;; esac",
+        );
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, "acme/app"),
+            CheckResult::Passed
+        );
+    }
+
+    /// A hook that fails `check` reports its own stderr, kept apart from
+    /// stdout rather than merged the way a detached `tracking/` run always
+    /// is — the whole reason `check_hook` does not go through
+    /// `command_step::Runs`.
+    #[test]
+    fn check_hook_reports_a_failed_exit_with_its_own_stderr() {
+        let mut repo = fixture("check-fails");
+        with_hook(
+            &mut repo,
+            "check.sh",
+            r#"case "$SPOOLWAY_EVENT" in
+                 check)
+                   echo "this line must not appear in the finding"
+                   echo "status not found" >&2
+                   exit 3
+                   ;;
+               esac"#,
+        );
+        assert_eq!(
+            check_hook(&repo.checkout, &repo.config.issue_tracking.hook, ""),
+            CheckResult::Failed {
+                exit_code: Some(3),
+                stderr: "status not found".to_string(),
+            }
+        );
+    }
+
+    /// The static check both `check_hook` and `doctor` run before ever
+    /// invoking a hook — every real shape a branch is spelled in, none of
+    /// which is the bare word `has_fetch_branch` scans for.
+    #[test]
+    fn has_check_branch_matches_every_real_branch_shape() {
+        for real in [
+            "case \"$SPOOLWAY_EVENT\" in check) ... ;; esac",
+            "case \"$SPOOLWAY_EVENT\" in check|other) ... ;; esac",
+            "if [ \"$SPOOLWAY_EVENT\" = check ]; then",
+            "[ \"$SPOOLWAY_EVENT\" -eq 'check' ]",
+        ] {
+            assert!(has_check_branch(real), "should match: {real}");
+        }
+        assert!(!has_check_branch(
+            "case \"$SPOOLWAY_EVENT\" in open) ... ;; esac"
+        ));
+    }
+
+    /// The exact false positive review found: a bare substring search for
+    /// `check` reads the shipped `jira.sh`'s own comment — "every `acli`
+    /// command below was checked against that version" — as if the script
+    /// had grown a `check` branch, when it never mentions the event at all.
+    /// Doctor would then run `SPOOLWAY_EVENT=check` against a script with
+    /// no branch for it, fall through to its trailing `exit 0`, and report
+    /// a passing `check` row for a hook that proves nothing.
+    #[test]
+    fn has_check_branch_is_not_fooled_by_the_word_checked() {
+        assert!(
+            !has_check_branch("# every acli command below was checked against that version"),
+            "the word `checked` must not read as a `check` branch"
+        );
+    }
+
+    /// The shipped `jira.sh` genuinely has no `check` branch yet — a later
+    /// task in this group adds one — so `doctor` must report it missing
+    /// rather than silently pass it. Pinned here so a change to either
+    /// `jira.sh` or `has_check_branch` that quietly stops seeing this is
+    /// caught immediately, not the next time somebody notices doctor is
+    /// quiet about a hook that was never asked to prove itself.
+    #[test]
+    fn the_shipped_jira_sh_is_missing_its_check_branch() {
+        let script = crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(name, _)| *name == "jira.sh")
+            .expect("jira.sh is a shipped hook")
+            .1;
+        assert!(
+            !has_check_branch(script),
+            "jira.sh has grown a `check` branch — a later task in this group was going to \
+             add one; if it already did, this test (and its own non-goal) is stale and \
+             should be removed"
+        );
+    }
+
+    /// What `doctor` reports: a configured hook whose own script has no
+    /// `check` branch names the script, and one that does — or no hook at
+    /// all — reports nothing.
+    #[test]
+    fn missing_check_branch_names_a_hook_with_no_check_case() {
+        let repo = fixture("missing-check");
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/old.sh"),
+            "#!/bin/sh\ncase \"$SPOOLWAY_EVENT\" in blocked|paused) ;; *) exit 0 ;; esac\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/current.sh"),
+            "#!/bin/sh\ncase \"$SPOOLWAY_EVENT\" in check) ;; esac\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            missing_check_branch(&repo.checkout, "old.sh"),
+            Some("old.sh".to_string())
+        );
+        assert_eq!(missing_check_branch(&repo.checkout, "current.sh"), None);
+        assert_eq!(missing_check_branch(&repo.checkout, ""), None);
+        assert_eq!(missing_check_branch(&repo.checkout, "../escaped"), None);
     }
 
     /// `read_answer` picks up the two new optional lines, in any order, and a

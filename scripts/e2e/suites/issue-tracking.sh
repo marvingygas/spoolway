@@ -23,8 +23,11 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: a non-zero hook exit on `queued` or `done` pauses the task, naming the hook's own log under tracking/; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
+# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) pauses the task, naming the hook's own log under tracking/; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
+# covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
+# covers: the shipped github.sh's `check` branch passes with gh logged in and the repository visible, and fails on each of the two alone
+# covers: `spoolway doctor` runs the hook with SPOOLWAY_EVENT=check, synchronously; a non-zero exit is one FAIL row carrying the hook's own stderr, not the merged stdout+stderr log a detached run leaves under tracking/
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -68,9 +71,19 @@ mkdir -p .spoolway/hooks
 # the hook, not about a failure.
 cat > .spoolway/hooks/record.sh <<'EOF'
 #!/bin/sh
-# Handles every event the same way, queued/blocked/paused/done/open/fetch
-# alike — there is no branch here to miss.
-env | sort > "$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT"
+# Handles every event the same way, queued/started/blocked/paused/done/
+# open/fetch alike — there is no branch here to miss. `check` gets one
+# real, no-op `case` arm below: `has_check_branch` matches the actual
+# shapes a branch is spelled in (`check)`, `= check`, ...), not the bare
+# word, so a comment naming the event is not enough any more — and this
+# hook is meant to prove `spoolway doctor` really runs `check` against a
+# script that has grown the branch. `check` carries no task and so no
+# $SPOOLWAY_TASK_FILE — guarded rather than left to write a stray
+# "$PWD/.env.check" on every doctor run in this suite's own checkout.
+case "$SPOOLWAY_EVENT" in
+  check) : ;;
+esac
+[ -n "$SPOOLWAY_TASK_FILE" ] && env | sort > "$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT"
 exit 0
 EOF
 chmod +x .spoolway/hooks/record.sh
@@ -99,6 +112,27 @@ says "doctor refuses a hook name that is not a bare filename" \
   "which is not a bare filename" \
   "$SPOOLWAY" doctor
 must "hook is restored to the bare name" \
+  "$SPOOLWAY" config set issue_tracking.hook record.sh
+
+# `check` proves the hook works before any task can ever pause on it —
+# `doctor` runs it synchronously, once, and a non-zero exit is one FAIL row
+# carrying the hook's own stderr, not the merged stdout+stderr log a
+# detached run under `tracking/` would leave.
+cat > .spoolway/hooks/check-fails.sh <<'EOF'
+#!/bin/sh
+if [ "$SPOOLWAY_EVENT" = check ]; then
+  echo 'status "Review" does not exist in project KAN' >&2
+  exit 1
+fi
+exit 0
+EOF
+chmod +x .spoolway/hooks/check-fails.sh
+must "the hook is switched to one whose check branch fails" \
+  "$SPOOLWAY" config set issue_tracking.hook check-fails.sh
+says "doctor reports the failing check as one FAIL row carrying its own stderr" \
+  'FAIL  check-fails.sh check: status "Review" does not exist in project KAN' \
+  "$SPOOLWAY" doctor
+must "the hook is restored to the recording one" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 
 # `handover` is `spoolway stack`, and the second task of a group is the second
@@ -156,6 +190,26 @@ silent_about "the first of the pair's done event is not the group's last" \
   "SPOOLWAY_GROUP_LAST" cat "$ENV_A_DONE"
 has "the second's done event is — it is the group's last open task" \
   "SPOOLWAY_GROUP_LAST=1" "$ENV_B_DONE"
+
+# `started` fires once a task actually leaves `queued` for its entry step,
+# not merely once it is queued — the moment `queued` itself already fires
+# on. `tracked-b` depends on `tracked-a`, so it cannot leave `queued` until
+# `tracked-a` has archived, which is exactly what a `started` event for
+# `tracked-b` older than `tracked-a`'s own `done` would contradict.
+ENV_A_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-a.md.env.started"
+ENV_B_STARTED="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.env.started"
+has "the first of the pair's started event fired with its own identity" \
+  "SPOOLWAY_TASK=tracked-a" "$ENV_A_STARTED"
+has "the event it fired for" "SPOOLWAY_EVENT=started" "$ENV_A_STARTED"
+# Proved by file order, not a race: `record.sh` writes
+# `$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT` fresh every time it runs, so a
+# `started` file for `tracked-b` that is newer than `tracked-a`'s own `done`
+# file could only have been written after `tracked-a` was already finished.
+if [ "$ENV_B_STARTED" -nt "$ENV_A_DONE" ]; then
+  ok "tracked-b's started event fired only once tracked-a had already reached done"
+else
+  bad "tracked-b's started event ($ENV_B_STARTED) is not newer than tracked-a's done event ($ENV_A_DONE) — the dependency gate did not hold started back"
+fi
 
 # Undone: everything past here is meant to see the same not-github forge the
 # rest of this suite was written against.
@@ -536,6 +590,20 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 silent_about "doctor is quiet about the shipped github.sh's own declared gh version" \
   "requires gh >=" "$SPOOLWAY" doctor
 
+# The shipped script's own `check` branch, run by `doctor` against the same
+# double: it passes while `gh` is logged in and can see `acme/app`, and each
+# of the two things it tests fails it on its own, with the script's own
+# stderr as the row. A branch that only ever said yes would pass the first
+# of these three and neither of the others.
+says "doctor runs the shipped github.sh's check branch, and it passes" \
+  "ok    github.sh check" "$SPOOLWAY" doctor --verbose
+says "a logged-out gh fails github.sh's check, naming the login" \
+  "FAIL  github.sh check: github.sh check: gh is not logged in" \
+  env GH_STUB_LOGGED_OUT=1 "$SPOOLWAY" doctor
+says "a repository gh cannot see fails github.sh's check, naming the repository" \
+  "FAIL  github.sh check: github.sh check: repository acme/app not found" \
+  env GH_STUB_NO_REPO=1 "$SPOOLWAY" doctor
+
 # ------------------------------------------- gh below the floor: the submit gate
 # `queue add --from` is the non-interactive route the gate's own mockup
 # names — printing the same block a person would see and proceeding without
@@ -695,7 +763,7 @@ has "the second ticket names the first as blocking it" \
 
 dispatcher_start
 # Waits for the comment this task's own hook posts, not merely for a file at
-# that name. `github-open-check` holds the same ticket, so its own `queued`
+# that name. `github-open-check` holds the same ticket, so its own `started`
 # label edit or blocked comment can land first; polling on the content
 # asserts against the right one whichever arrives first.
 for _ in $(seq 1 150); do

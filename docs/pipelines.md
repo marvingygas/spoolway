@@ -117,6 +117,11 @@ Every pipeline may route to `done` and `blocked` without declaring them.
 | `blocked` | The task needs help. Attended, `spoolway resume <task>` resumes it. Unattended, a lane is started on it. See [Staffing `blocked`](#staffing-blocked). |
 | `paused` | The task passed a `gate:` step and waits for `spoolway resume <task>`. See [Gates](#gates). |
 
+`started` is not one of these four. It is an `[issue_tracking]` hook event, fired the moment a
+task actually leaves `queued` for its entry step — see
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Nothing
+ever writes it to a task's own `stage:`, so a step may still use `started` as its id.
+
 ## Routing
 
 A step names where a task goes on a pass and on a fail. Prompts report an outcome and the

@@ -1678,12 +1678,19 @@ impl<'a> Dispatcher<'a> {
     /// third declared ending would let downstream work proceed on a task
     /// that never finished.
     ///
-    /// These same four names are `[issue_tracking]`'s own four events, and
-    /// `RESERVED` already lists exactly them — so firing the hook here,
+    /// These same four names are `[issue_tracking]`'s own four rest events,
+    /// and `RESERVED` already lists exactly them — so firing the hook here,
     /// once, ahead of everything below that is specific to one of the four,
     /// covers every arrival at any of them without repeating the check four
     /// times. `fire` is idempotent for the run's whole lifetime, so a task
     /// sitting on one of these across many passes only ever starts it once.
+    ///
+    /// A fifth event, `started`, fires from inside the `queued` arm below
+    /// rather than up here with the other four: it is not a name `RESERVED`
+    /// lists at all — see `crate::pipeline::STARTED` — and it means "the
+    /// task is actually leaving `queued`", not "a pass looked at `queued`",
+    /// so it has to wait for the same `graph.ready` this arm already checks
+    /// rather than firing on every arrival the way the other four do.
     #[allow(clippy::too_many_arguments)]
     fn route_reserved_stage(
         &mut self,
@@ -1740,6 +1747,36 @@ impl<'a> Dispatcher<'a> {
                 TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             if graph.ready(&id) {
+                // The task is actually leaving `queued` now — dependencies
+                // are in, and every wait above has already cleared. This is
+                // the one moment `started` fires: not on the first pass over
+                // a task that still has work to wait on, which is exactly
+                // what made `queued` itself the wrong event for "work has
+                // begun" — see `crate::pipeline::STARTED`. Gated the same
+                // way `queued`'s own hook is, just above: a hook still
+                // running or one that failed holds the task here rather
+                // than let it launch, and a failure pauses it exactly as a
+                // failing `queued` hook does.
+                if task.front.trial.is_none() {
+                    let group_open = graph.group_open(&id);
+                    if let Err(err) =
+                        crate::tracking::fire(self.repo, task, crate::pipeline::STARTED, group_open)
+                    {
+                        report.problems.push(format!(
+                            "{}: issue_tracking hook on `{}`: {err:#}",
+                            task.id(),
+                            crate::pipeline::STARTED
+                        ));
+                    }
+                }
+                match self.tracking_gate(task, crate::pipeline::STARTED) {
+                    TrackingGate::Inactive | TrackingGate::Clean => {}
+                    TrackingGate::Failed(code) => {
+                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, code)?;
+                        return Ok(Routed::NextTask);
+                    }
+                    TrackingGate::Pending => return Ok(Routed::NextTask),
+                }
                 let next = pipeline.entry().to_string();
                 // The same two shapes the Command arm routes into, and
                 // for the same reason: only a step that runs an agent
@@ -1838,17 +1875,19 @@ impl<'a> Dispatcher<'a> {
         Ok(Routed::NotReserved)
     }
 
-    /// Reads back what the issue-tracking hook fired for `stage` (see
-    /// `crate::tracking::fire`, called once in
-    /// [`Dispatcher::route_reserved_stage`] ahead of both places this is
-    /// asked from) said, if anything is configured to run on it at all.
+    /// Reads back what the issue-tracking hook fired for `stage` said, if
+    /// anything is configured to run on it at all — `crate::tracking::fire`
+    /// for `queued`/`done`, called once in
+    /// [`Dispatcher::route_reserved_stage`] ahead of both places that ask
+    /// this of them; `started`'s own `fire` call, further down the same
+    /// `queued` arm, for the third.
     ///
-    /// `queued` and `done` each wait on a hook the same way — read whether
-    /// one is configured for this stage, and if so what it said — and used
-    /// to ask with the same few lines of code typed out twice. Reading it
-    /// here once leaves each call site free to still act on the answer
-    /// differently, which they do — `queued` and `done` each name their own
-    /// stage in the reason a failure pauses the task with.
+    /// `queued`, `started` and `done` each wait on a hook the same way —
+    /// read whether one is configured for this stage, and if so what it
+    /// said — and used to ask with the same few lines of code typed out
+    /// twice. Reading it here once leaves each call site free to still act
+    /// on the answer differently, which they do — each names its own stage
+    /// in the reason a failure pauses the task with.
     fn tracking_gate(&self, task: &Task, stage: &str) -> TrackingGate {
         // A trial arm: `route_reserved_stage` never calls `fire` for one
         // (see its own trial check just above its call site), so there is
@@ -1870,14 +1909,17 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Pause `task` at `stage` (`queued` or `done`) over a hook that exited
-    /// `code` — the one road both reserved stages take into `paused` now,
+    /// Pause `task` at `stage` (`queued`, `started` or `done`) over a hook
+    /// that exited `code` — the one road all three take into `paused` now,
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
     /// forget the failed run and, for `done`, send the task straight back
     /// there rather than through [`crate::commands::resume_target`]'s
-    /// ordinary step-shaped roads.
+    /// ordinary step-shaped roads. `started` needs no equivalent special
+    /// case: the task never left `queued` at all, so it has no worktree, no
+    /// lane and no `last_report` yet either — exactly the shape
+    /// `resume_target` already reads as "back to `queued`" on its own.
     fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, code: i32) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
         task.front.hook_paused = Some(stage.to_string());
@@ -18187,6 +18229,64 @@ mod tests {
                 "hook = {hook:?} must not deadlock the queue"
             );
         }
+    }
+
+    /// Acceptance criterion: `started` fires once a queued task is actually
+    /// ready to launch, carrying `SPOOLWAY_TASK` the same as `queued` does,
+    /// and the task only reaches its entry step once that hook, too, has
+    /// exited clean — a passing `queued` hook alone must not be enough.
+    #[test]
+    fn a_passing_hook_fires_started_too_before_the_task_launches() {
+        let mut repo = fixture("hook-started-fires");
+        write_hook(&repo, "ok.sh", "exit 0");
+        repo.config.issue_tracking.hook = "ok.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]);
+
+        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::QUEUED);
+        assert_eq!(
+            stage, "implement",
+            "a clean hook on both events must let the task launch"
+        );
+
+        for event in [crate::pipeline::QUEUED, crate::pipeline::STARTED] {
+            assert_eq!(
+                crate::tracking::exit_code(&repo, &reload(&path), event),
+                Some(0),
+                "`{event}`'s own hook never ran"
+            );
+        }
+    }
+
+    /// Acceptance criterion: a non-zero exit on `started` pauses the task
+    /// exactly the way a failing `queued` hook does, and records which
+    /// event's run `spoolway resume` has to forget — even though `queued`'s
+    /// own hook, run first, passed clean.
+    #[test]
+    fn a_failing_started_hook_lands_the_task_on_paused() {
+        let mut repo = fixture("hook-started-pause");
+        write_hook(
+            &repo,
+            "fail-started.sh",
+            r#"if [ "$SPOOLWAY_EVENT" = started ]; then exit 1; fi
+exit 0"#,
+        );
+        repo.config.issue_tracking.hook = "fail-started.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]);
+
+        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::QUEUED);
+        assert_eq!(stage, crate::pipeline::PAUSED);
+        assert!(
+            mux.did("start").is_empty(),
+            "the task must never have started a lane: {:?}",
+            mux.calls()
+        );
+        assert_eq!(
+            reload(&path).front.hook_paused.as_deref(),
+            Some(crate::pipeline::STARTED),
+            "resume needs to know `started`'s run to forget, not `queued`'s"
+        );
     }
 
     /// Acceptance criterion: a non-zero hook exit holds the task out of the

@@ -219,17 +219,21 @@ else
   bad "both trial arms run their assigned pipelines to done (at \`$(stage_of alpha-1)\`/\`$(stage_of beta-1)\`)"
 fi
 
-# Acceptance criterion: trial dispatch suppresses the queued/done issue
-# hooks — the control's own env files below are the proof the hook mechanism
+# Acceptance criterion: trial dispatch suppresses the queued/started/done
+# issue hooks — the control's own env files below are the proof the hook mechanism
 # itself works in this run at all, so a trial arm's missing files are absence
 # of the event, not absence of the hook.
 has "the control's queued event reached the hook" "SPOOLWAY_EVENT=queued" \
   "$SPOOLWAY_PROJECT_HOME/queue/control.md.env.queued"
 has "and its done event too" "SPOOLWAY_EVENT=done" \
   "$SPOOLWAY_PROJECT_HOME/queue/control.md.env.done"
+has "and its started event, as it left queued" "SPOOLWAY_EVENT=started" \
+  "$SPOOLWAY_PROJECT_HOME/queue/control.md.env.started"
 for arm in alpha-1 beta-1; do
   works "$arm's queued event never reached the hook" \
     bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md.env.queued"
+  works "$arm's started event never reached the hook" \
+    bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md.env.started"
   works "$arm's done event never reached the hook either" \
     bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md.env.done"
 done

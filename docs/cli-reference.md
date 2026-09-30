@@ -510,8 +510,8 @@ Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `pau
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
 it goes to `blocked`. A task an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) paused forgets that
-hook's failed run, so it fires again; a task paused on `queued` resumes to `queued`, and one
-paused on `done` resumes straight back to `done`.
+hook's failed run, so it fires again; a task paused on `queued` or `started` resumes to
+`queued`, and one paused on `done` resumes straight back to `done`.
 
 ```
 spoolway resume <task>
@@ -728,7 +728,9 @@ Print every event an issue-tracking hook runs on and the environment each one ca
 |---|---|
 | `open` | Before a task is queued. Synchronous |
 | `queued`, `blocked`, `paused`, `done` | When a task reaches that state |
+| `started` | When a queued task is ready and about to leave `queued` for its entry step |
 | `fetch` | From `spoolway issue show`. Synchronous |
+| `check` | From `spoolway doctor`, and once as the dispatcher starts. Synchronous |
 
 ### `spoolway config contract`
 

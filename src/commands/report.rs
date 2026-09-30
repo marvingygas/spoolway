@@ -2147,6 +2147,62 @@ mod tests {
         );
     }
 
+    /// Acceptance criterion: a task paused on `started` — the task never
+    /// left `queued`, so it has no worktree, no lane and no `last_report`
+    /// — goes back to `queued`, exactly the road a `queued` hold already
+    /// takes, and forgets `started`'s own run rather than `queued`'s.
+    #[test]
+    fn resume_forgets_a_failed_started_hooks_run_and_goes_back_to_queued() {
+        clear_lane_env();
+        let mut repo = fixture("hook-resume-started");
+        write_hook(&repo, "fail.sh", "exit 1");
+        add(&repo, "demo", &[]);
+        repo.config.issue_tracking.hook = "fail.sh".into();
+
+        let mut task = queued(&repo, "demo");
+        crate::tracking::fire(&repo, &task, crate::pipeline::STARTED, 1).unwrap();
+        assert_eq!(
+            wait_for_exit_code(&repo, &task, crate::pipeline::STARTED),
+            1
+        );
+
+        // What `Dispatcher::pause_for_hook_failure` would have written.
+        task.front.hook_paused = Some(crate::pipeline::STARTED.to_string());
+        task.set_stage(
+            crate::pipeline::PAUSED,
+            Some("issue_tracking hook exited 1 on `started`"),
+        );
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "demo");
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::QUEUED,
+            "a task paused on `started` never left `queued`, so that is where it goes back to"
+        );
+        assert!(
+            task.front.hook_paused.is_none(),
+            "the marker must be spent by the resume that reads it"
+        );
+        assert_eq!(
+            crate::tracking::exit_code(&repo, &task, crate::pipeline::STARTED),
+            None,
+            "the failed run must be forgotten, or the very next pass pauses it right back"
+        );
+    }
+
     /// Acceptance criterion: a task paused on `done` goes back to `done`,
     /// not to `queued` or a step — `resume_target`'s ordinary roads only
     /// know pipeline steps and `queued`, neither of which `done` is.
