@@ -121,14 +121,22 @@ jobs:
           git diff --exit-code
           ./target/release/spoolway pipeline check
 
-      # The suites keep their trees under a mktemp root and print it; collecting
-      # the lot is simpler than parsing for it, and only happens on a failure.
+      # `KEEP: 1` above leaves the run's whole tree at
+      # `/tmp/spoolway-e2e-run.<pid>.<random>` (see `run.sh`'s own `mktemp`),
+      # and every failing suite's log is copied beside it as
+      # `/tmp/spoolway-e2e-fail.<suite>.log`. Collecting both by their fixed
+      # prefix is simpler than parsing the `kept:` line, and only happens on a
+      # failure. This used to name `/tmp/tmp.*`, which the suites have not
+      # written to since the root gained its own prefix, so a red run
+      # uploaded nothing and left no evidence behind at all.
       - name: keep the wreckage
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-scratch-${{ inputs.tier }}
-          path: /tmp/tmp.*
+          path: |
+            /tmp/spoolway-e2e-run.*
+            /tmp/spoolway-e2e-fail.*.log
           retention-days: 3
           if-no-files-found: ignore
 
