@@ -55,6 +55,17 @@ pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Resul
         })
         .collect();
     let term = dialoguer::console::Term::stdout();
+    // One screen row per item, cut to fit. The selector erases its menu by
+    // counting the lines it wrote, not the rows they took, so an item that
+    // wraps — a note naming long clone paths — leaves rows of the menu
+    // behind on the screen once the question is answered. Two columns go to
+    // the selector's own marker, and one more keeps a line that exactly
+    // fills the width from wrapping on terminals that wrap eagerly.
+    let fit = usize::from(term.size().1).saturating_sub(3).max(1);
+    let items: Vec<String> = items
+        .iter()
+        .map(|item| dialoguer::console::truncate_str(item, fit, "…").into_owned())
+        .collect();
     Ok(dialoguer::Select::new()
         .with_prompt(question)
         .items(&items)

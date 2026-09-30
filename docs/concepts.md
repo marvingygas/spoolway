@@ -51,6 +51,15 @@ A checkout with no `.spoolway/` can still be a project. This works when some wor
 that shares it: the checkout's absolute path, and the name of a `dispatchers/` subfolder that
 holds its queue, archive, worktrees and lock.
 
+`spoolway init --setup home` puts a checkout into home mode. With no workspace yet, or with
+`--workspace new`, it creates one: `~/.spoolway/<label>-<id>/`, the same name shape a repo-mode
+home takes, with an empty `config/` and a `dispatchers/<name>/` for this checkout. With
+`--workspace <name>`, it adds this checkout to that workspace instead, with a dispatcher folder
+of its own — the checkout's directory name, with `-2` added when that name is already taken —
+and leaves the workspace's `config/` exactly as it is. Nothing is written into the checkout or
+its `.git` either way, and skills install into the coding agent's user folder instead of the
+project's own.
+
 A home-mode checkout reads its config, pipelines and prompts from the workspace's `config/`.
 Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place of the
 `~/.spoolway/<label>-<id>/` a repo-mode project uses. Nothing is read from or written to the

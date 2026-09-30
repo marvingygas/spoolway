@@ -835,9 +835,9 @@ See [Pricing](cost.md#pricing).
 
 ### `spoolway init`
 
-Scaffold `.spoolway/` in a repository: config, pipelines, prompts, templates, hook scripts and
-skills. At a terminal it asks for the agent, whether to install the example setup, the tracker
-and the project key. With no terminal it takes the defaults.
+Scaffold a project's setup: config, pipelines, prompts, templates, hook scripts and skills. At
+a terminal it asks where the setup lives, for the agent, whether to install the example setup,
+the tracker and the project key. With no terminal it takes the defaults.
 
 Before any of that, it prints the project directory it resolved and waits for a yes — a path you
 do not recognise is the whole of the check, and it matters most when `init` was reached from a
@@ -845,19 +845,37 @@ keybinding rather than typed in a directory you were looking at. Answering no wr
 exits 0. With nobody there to answer, that question takes its default, which is no, so a script
 or CI runner passes `--yes`.
 
+`Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
+default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
+`home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
+checkout or its `.git`. With no workspace yet, home mode creates one; with workspaces already
+there, `init` also asks `Which workspace should this checkout use?`, and `--workspace <name>`
+or `--workspace new` answers it. Joining a workspace keeps its `config/` exactly as it is and
+skips the example and tracker questions. With nobody to ask and no `--workspace`, `init` starts
+a new workspace rather than joining one unasked. See [Home mode](concepts.md#home-mode).
+
+Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+`--workspace <name>` naming a workspace other than the one a checkout already uses. Each
+refusal names the command to run instead.
+
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
 that id and the checkout's path. A fresh clone binds itself on whatever command it runs first.
-`--adopt` and `--new-id` write a binding over one that already exists. See [Runtime
+`--adopt` and `--new-id` write a binding over one that already exists. A home-mode checkout is
+listed in its workspace's `project.toml` instead, with nothing stamped into `.git`. See [Runtime
 state](configuration.md#runtime-state).
 
 ```
 spoolway init
 spoolway init --yes --provider codex --tracker github --project-key owner/repo
+spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
+| `--setup <repo\|home>` | `repo` | Answer `Where should this project's setup live?` without asking |
+| `--workspace <NAME\|new>` | | Answer `Which workspace should this checkout use?` without asking. Implies `--setup home`. `new` starts a workspace; a name joins one that already exists |
 | `--provider <claude\|codex>` | `claude` | The coding agent whose skills are installed and which becomes the project's agent profile |
 | `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts, task templates and ticket templates. Also the answer with nobody to ask |
 | `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
@@ -886,6 +904,7 @@ Install the pipeline skills for one coding agent. `init` runs this for you.
 
 ```
 spoolway install codex
+spoolway install claude --user
 ```
 
 | Provider | Skills go in |
@@ -894,9 +913,18 @@ spoolway install codex
 | `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/`. Loaded once the project is trusted |
 
+`--user` installs into the agent's user folder instead — `~/.claude/skills/`,
+`~/.agents/skills/` or `~/.pi/agent/skills/` — which it loads in every project. It needs no
+project and writes nothing into any checkout. A home-mode project's plain `install` goes there
+too, with or without `--user`, since its project skill folder sits inside a checkout that home
+mode promises to leave untouched. pi's project-trust note is not printed for a user-level install,
+since a user folder loads without being asked. See [The pipeline
+skills](installation.md#the-pipeline-skills).
+
 | Flag | Default | What it does |
 |---|---|---|
 | `--force` | | Overwrite files that already exist |
+| `--user` | | Install into the agent's user folder instead of the project's |
 
 ### `spoolway update`
 

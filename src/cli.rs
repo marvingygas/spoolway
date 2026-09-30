@@ -54,7 +54,7 @@ pub enum Command {
         file's fenced key reference — documentation of this binary's contract, not anything \
         you meant — is refreshed in place, with every other line copied through unread. The \
         old `.gitignore` block spoolway used to manage is removed. Skills for every provider \
-        you have installed are refreshed too.\n\n\
+        you have installed are refreshed too, in this project and in your user folder.\n\n\
         Prompts, their assets, and task skeletons are not touched, ever. They are prose a \
         project owns outright, with nothing generated inside them; `spoolway pipeline check` \
         is what tells you when one names a command this binary no longer has, and `--replace` \
@@ -581,6 +581,14 @@ pub struct EvalArgs {
 #[command(
     long_about = "Scaffold a project: config, pipelines, prompts, skeletons, ignore rules \
         — and the three answers that would otherwise be edited in afterwards.\n\n\
+        The first question is where the setup lives, and `--setup` answers it. `repo`, the \
+        default and the answer when there is nobody to ask, writes a tracked `.spoolway/` \
+        into the checkout. `home` keeps the setup in a workspace under `~/.spoolway/` and \
+        writes nothing into the checkout or its `.git`; skills go to the agent's user \
+        folder. When workspaces already exist, `init` asks which one this checkout uses, and \
+        `--workspace <name>` or `--workspace new` answers it. Joining one keeps its \
+        `config/` as it is and skips the example and tracker questions. With nobody to ask \
+        and no `--workspace`, a new workspace is started.\n\n\
         Every run prints the project directory it resolved and waits for a yes before it \
         writes anything: a path you do not recognise is the whole of the check. With nobody \
         there to answer, that question takes its default — no — and nothing is written, so a \
@@ -604,7 +612,7 @@ pub struct EvalArgs {
         for the spoolway-config skill to fill.\n\n\
         `--tracker` names the issue tracker `[issue_tracking]` points at — `github`, `jira` \
         or `none` — and `--project-key` is the project its tickets open into. Choosing a \
-        tracker writes `.spoolway/hooks/` with every hook script in it, so switching \
+        tracker writes `hooks/` into the setup folder with every hook script in it, so switching \
         between trackers later is a `spoolway config set issue_tracking.hook` away. \
         Choosing `none` writes no `hooks/` folder at all."
 )]
@@ -686,6 +694,31 @@ pub struct InitArgs {
     /// folders instead of the shipped examples.
     #[arg(long)]
     pub no_examples: bool,
+
+    /// Answer `Where should this project's setup live?` without asking:
+    /// `repo` for a tracked `.spoolway/` in this checkout, `home` for a
+    /// workspace under `~/.spoolway/` that writes nothing into the checkout.
+    /// `repo` is also the answer when there is nobody to ask.
+    #[arg(long, value_enum, conflicts_with_all = ["adopt", "new_id"])]
+    pub setup: Option<Setup>,
+
+    /// Answer `Which workspace should this checkout use?` without asking:
+    /// the name of a workspace folder under `~/.spoolway/` to join, or `new`
+    /// to start one. Implies `--setup home`. With nobody to ask and no flag,
+    /// a new workspace is started rather than joining one unasked.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["adopt", "new_id"])]
+    pub workspace: Option<String>,
+}
+
+/// Where `spoolway init` puts a project's setup — the answer to "Where
+/// should this project's setup live?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Setup {
+    /// `.spoolway/` in the checkout, tracked by git.
+    Repo,
+    /// A workspace under `~/.spoolway/`, with nothing written into the
+    /// checkout or its `.git`.
+    Home,
 }
 
 #[derive(Debug, Args)]
@@ -697,6 +730,14 @@ pub struct InstallArgs {
     /// Overwrite files that already exist.
     #[arg(long)]
     pub force: bool,
+
+    /// Install into the agent's user folder — `~/.claude/skills/`,
+    /// `~/.agents/skills/` or `~/.pi/agent/skills/` — which it loads in
+    /// every project, instead of this project's own. Needs no project, and
+    /// writes nothing into any checkout. A home-mode project installs there
+    /// with or without it.
+    #[arg(long)]
+    pub user: bool,
 }
 
 /// A coding agent that can be the identity of a freshly scaffolded project.

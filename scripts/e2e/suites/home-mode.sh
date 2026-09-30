@@ -10,9 +10,13 @@
 # `spoolway stack` it runs from there, each finding the one workspace from a
 # checkout that is neither the clone nor carries a `.spoolway/` of its own.
 #
-# The workspace is written by hand, as the task that introduced it says it
-# must be until `init` learns to write one: the project is initialised the
-# ordinary way, and its setup is then moved out of the checkout.
+# `init --setup home` writes a workspace itself now, and the last section runs
+# it for real: in a fresh git repository, and again from a second clone that
+# joins the same workspace, checking that neither checkout nor its `.git` is
+# touched. Which questions it asks and what each flag answers is unit-tested
+# in src/commands/init.rs. The lane pass above it still builds its workspace
+# by hand, by moving an ordinary setup out of the checkout, because the
+# harness's fixture helpers rewrite a checkout's own `.spoolway/` in place.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -81,5 +85,75 @@ if [ -e .spoolway ]; then bad "no .spoolway/ reappears in the checkout"
 else ok "no .spoolway/ reappears in the checkout"; fi
 if [ -z "$(git status --porcelain)" ]; then ok "the checkout is left clean"
 else bad "the checkout is left clean"; git status --porcelain | sed 's/^/        /'; fi
+
+# ------------------------------------------- init writes the workspace
+# A git repository spoolway has never seen, set up in home mode by `init`
+# itself with every question answered by a flag and no terminal attached.
+# The promise is the same as above, made by the writer this time: the
+# workspace and the user-level skills are all it leaves behind.
+FRESH="$LIVE/api"
+mkdir -p "$FRESH"
+cd "$FRESH" || exit 2
+must "the fresh repo" git init -q -b main .
+must "the fresh repo" git -c user.email=spoolway@example.invalid -c user.name="spoolway tests" \
+  commit -q --allow-empty -m seed
+ls -A .git > "$LIVE/api.git-before"
+before_ws=$(ls "$HOME/.spoolway")
+
+must "a home-mode init runs without a terminal" "$SPOOLWAY" init --setup home --workspace new \
+  --provider claude --examples --tracker none --yes </dev/null
+
+WS2=
+for dir in "$HOME"/.spoolway/api-*/; do
+  name=$(basename "$dir")
+  grep -qxF "$name" <<<"$before_ws" || WS2="$HOME/.spoolway/$name"
+done
+if [ -n "$WS2" ] && [ -d "$WS2/config" ] && [ -d "$WS2/dispatchers/api" ]; then
+  ok "init made a workspace ~/.spoolway/api-<id>/ with config/ and dispatchers/api/"
+else
+  bad "init made a workspace ~/.spoolway/api-<id>/ with config/ and dispatchers/api/"
+  ls -A "$HOME/.spoolway" | sed 's/^/        /'
+fi
+has "its project.toml lists this clone" "root = \"$(pwd -P)\"" "$WS2/project.toml"
+if [ -f "$WS2/config/config.toml" ] && [ -f "$WS2/config/pipelines/default.yml" ]; then
+  ok "the setup and the example pipelines were written into config/"
+else bad "the setup and the example pipelines were written into config/"; ls -R "$WS2/config" | sed 's/^/        /'; fi
+if [ -f "$HOME/.claude/skills/spoolway-plan/SKILL.md" ]; then ok "the skills went into the user's ~/.claude/skills/"
+else bad "the skills went into the user's ~/.claude/skills/"; fi
+if [ -z "$(git status --porcelain --ignored)" ]; then ok "git status shows nothing from a home-mode init"
+else bad "git status shows nothing from a home-mode init"; git status --porcelain --ignored | sed 's/^/        /'; fi
+if ls -A .git | diff -q "$LIVE/api.git-before" - >/dev/null && [ -z "$(find .git -iname '*spoolway*')" ]; then
+  ok ".git holds nothing from a home-mode init"
+else
+  bad ".git holds nothing from a home-mode init"
+  ls -A .git | diff "$LIVE/api.git-before" - | sed 's/^/        /'
+  find .git -iname '*spoolway*' | sed 's/^/        /'
+fi
+
+# ------------------------------------------------- a second clone joins
+# A clone made by `git clone`, answering the workspace question by name. It
+# gets a dispatcher folder of its own beside the first clone's and reads the
+# one shared config/, which joining must leave exactly as it was.
+SECOND="$LIVE/api-review"
+must "the second clone" git clone -q "$FRESH" "$SECOND"
+cd "$SECOND" || exit 2
+ls -A .git > "$LIVE/review.git-before"
+config_before=$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)
+
+says "joining reports config/ as kept" "kept     ~/.spoolway/$(basename "$WS2")/config/" "$SPOOLWAY" init --setup home \
+  --workspace "$(basename "$WS2")" --provider claude --yes </dev/null
+if [ "$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)" = "$config_before" ]; then
+  ok "joining leaves the shared config/ unchanged"
+else bad "joining leaves the shared config/ unchanged"; fi
+has "project.toml now lists the second clone" "root = \"$(pwd -P)\"" "$WS2/project.toml"
+has "project.toml still lists the first clone" "root = \"$(cd "$FRESH" && pwd -P)\"" "$WS2/project.toml"
+if [ -d "$WS2/dispatchers/api-review" ]; then ok "the second clone has its own dispatchers/api-review/"
+else bad "the second clone has its own dispatchers/api-review/"; ls -A "$WS2/dispatchers" | sed 's/^/        /'; fi
+says "the second clone finds the shared config/" "$WS2/config" "$SPOOLWAY" doctor -v
+if [ -z "$(git status --porcelain --ignored)" ]; then ok "git status shows nothing in the second clone"
+else bad "git status shows nothing in the second clone"; git status --porcelain --ignored | sed 's/^/        /'; fi
+if ls -A .git | diff -q "$LIVE/review.git-before" - >/dev/null && [ -z "$(find .git -iname '*spoolway*')" ]; then
+  ok ".git holds nothing in the second clone"
+else bad ".git holds nothing in the second clone"; fi
 
 finish

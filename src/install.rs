@@ -249,9 +249,47 @@ impl Provider {
         }
     }
 
+    /// The directory this provider scans for a person's own skills, the ones
+    /// it loads in every project — under `home`, the user's home directory.
+    /// Where a home-mode `init` and `spoolway install --user` put skills,
+    /// because a home-mode project promises to write nothing into the
+    /// checkout, and a project skill folder sits inside it.
+    ///
+    /// Each row was read off that agent's own documentation, as
+    /// [`skills_dir`](Self::skills_dir)'s rows were:
+    ///
+    /// - Claude Code 2.1.286 names `~/.claude/skills/` in its own help text,
+    ///   as the folder "for skills that work in any project".
+    /// - Codex's skills documentation (developers.openai.com/codex/skills)
+    ///   gives its USER scope as `$HOME/.agents/skills`.
+    /// - pi 0.85.1's `docs/skills.md` lists `~/.pi/agent/skills/` as a
+    ///   global skill folder, `skills/` under `getAgentDir()`. It also reads
+    ///   `~/.agents/skills/`, so a person who installs both Codex and pi at
+    ///   user level shows pi each skill twice; the pi copy is the one worded
+    ///   for an agent with no dialog tool, which is why pi keeps a folder of
+    ///   its own here rather than sharing Codex's.
+    pub fn user_skills_dir(self, home: &Path) -> PathBuf {
+        match self {
+            Provider::Claude => home.join(".claude").join("skills"),
+            Provider::Codex => home.join(".agents").join("skills"),
+            Provider::Pi => home.join(".pi").join("agent").join("skills"),
+        }
+    }
+
     /// Where this provider expects skills to live, and under what filename.
     pub fn plan(self, root: &Path) -> Vec<Planned> {
-        let skills = self.skills_dir(root);
+        self.plan_at(&self.skills_dir(root))
+    }
+
+    /// [`plan`](Self::plan), for the user-level folder under `home` — see
+    /// [`user_skills_dir`](Self::user_skills_dir).
+    pub fn plan_user(self, home: &Path) -> Vec<Planned> {
+        self.plan_at(&self.user_skills_dir(home))
+    }
+
+    /// Every file this provider's copy of [`SKILLS`] lands as, under
+    /// `skills`: the one layout both the project and the user folder take.
+    fn plan_at(self, skills: &Path) -> Vec<Planned> {
         SKILLS
             .iter()
             .flat_map(|skill| {
@@ -306,18 +344,61 @@ pub struct Outcome {
 /// [`crate::sync::skills`]), so there is nothing here for a per-file record
 /// to protect any more.
 pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
-    let planned = provider.plan(root);
+    write_planned(&provider.plan(root), provider.caveat(), force)
+}
 
-    for file in &planned {
+/// [`install`], into the provider's user-level folder rather than a
+/// project's — a home-mode `init`, and `spoolway install --user`. Refused
+/// when there is no home directory to install under, rather than writing a
+/// `.claude/` into whatever directory a relative path would land in.
+pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
+    let Some(home) = user_home() else {
+        anyhow::bail!(
+            "cannot install {} skills at user level: no home directory is set ($HOME is empty)\n  \
+             set $HOME and run this again, or run `spoolway install {}` without --user inside \
+             a repo-mode project",
+            provider.name(),
+            provider.name()
+        );
+    };
+    // No caveat: pi's is about trusting a project before it loads that
+    // project's skills, and a user folder is loaded without asking.
+    write_planned(&provider.plan_user(&home), None, force)
+}
+
+/// The home directory user-level skills are installed under and synced in.
+///
+/// Inside the test binary this is only ever a scratch home a test set with
+/// `crate::platform::test_home::with_home`, never the real `$HOME`: every
+/// sync test scans user-level folders too, and one run on a machine whose
+/// person installed spoolway's skills at user level would otherwise rewrite
+/// that person's real `~/.claude/skills/` from whatever branch was under test.
+#[cfg(not(test))]
+pub(crate) fn user_home() -> Option<PathBuf> {
+    crate::platform::home_dir()
+}
+
+/// See the non-test [`user_home`].
+#[cfg(test)]
+pub(crate) fn user_home() -> Option<PathBuf> {
+    crate::platform::test_home::current()
+}
+
+/// Write each planned file, skipping any that already exist unless `force`,
+/// and carry `caveat` on to [`report`].
+fn write_planned(
+    planned: &[Planned],
+    caveat: Option<&'static str>,
+    force: bool,
+) -> Result<Outcome> {
+    for file in planned {
         if file.path.exists() && !force {
             continue;
         }
         write_atomic(&file.path, file.contents)?;
     }
 
-    Ok(Outcome {
-        caveat: provider.caveat(),
-    })
+    Ok(Outcome { caveat })
 }
 
 /// Print the deliberately small successful-install report.
@@ -377,6 +458,60 @@ mod tests {
 
             assert_eq!(paths, expected, "{}", provider.name());
         }
+    }
+
+    /// Every provider's user-level folder, spelled out for the same reason
+    /// [`root_of`] is: a silent change to one is a person whose skills stop
+    /// loading in every project with nothing failing.
+    #[test]
+    fn every_provider_has_its_documented_user_folder() {
+        let home = Path::new("/home/someone");
+        for (provider, expected) in [
+            (Provider::Claude, home.join(".claude").join("skills")),
+            (Provider::Codex, home.join(".agents").join("skills")),
+            (Provider::Pi, home.join(".pi").join("agent").join("skills")),
+        ] {
+            assert_eq!(
+                provider.user_skills_dir(home),
+                expected,
+                "{}",
+                provider.name()
+            );
+        }
+    }
+
+    /// The user-level counterpart of [`no_two_providers_claim_the_same_directory`].
+    #[test]
+    fn no_two_providers_claim_the_same_user_folder() {
+        let home = Path::new("/home/someone");
+        let dirs: Vec<PathBuf> = <Provider as clap::ValueEnum>::value_variants()
+            .iter()
+            .map(|provider| provider.user_skills_dir(home))
+            .collect();
+        for (i, dir) in dirs.iter().enumerate() {
+            assert!(
+                !dirs[i + 1..].contains(dir),
+                "{} is claimed twice",
+                dir.display()
+            );
+        }
+    }
+
+    /// `install --user` writes the same files a project install would, under
+    /// the user folder of the home it runs in, and nothing anywhere else.
+    #[test]
+    fn install_user_writes_every_skill_under_the_user_folder() {
+        let home = crate::scratch::root("install-user");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            install_user(Provider::Codex, false).unwrap();
+        });
+        for planned in Provider::Codex.plan_user(&home) {
+            assert!(planned.path.is_file(), "{} missing", planned.path.display());
+        }
+        assert!(!home.join(".claude").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Two providers writing to one directory would each report having

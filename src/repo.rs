@@ -690,9 +690,10 @@ impl CheckoutNote {
 }
 
 /// `path`, with a leading run matching the home directory rewritten to `~` —
-/// the short form the `checkout:` line prints. Left absolute when `path` does
+/// the short form the `checkout:` line prints, and the one `init` and `sync`
+/// name a home-mode workspace's files and user-level skills by. Left absolute when `path` does
 /// not sit under home, or when home cannot be resolved at all.
-fn shorten_home(path: &Path) -> String {
+pub(crate) fn shorten_home(path: &Path) -> String {
     let Some(home) = crate::platform::home_dir() else {
         return path.display().to_string();
     };
@@ -1301,10 +1302,12 @@ fn home_recording(root: &Path) -> Option<PathBuf> {
 /// A home-mode workspace's own `project.toml`: the clones that share its
 /// `config/`, each found by its path rather than a stamp — see the
 /// `home-mode-discovery` task and the plan's `#d-path-binding` drawing.
-/// Written by hand into a fixture, by a later task's `spoolway init`, or
-/// rewritten in place by [`adopt_workspace_clone`] — the one way this
-/// binary itself ever changes one, and only a clone entry's own `root`, on
-/// a person's explicit `spoolway init --adopt <workspace>/<dispatcher>`.
+/// Written by a home-mode `spoolway init`, which creates one with
+/// [`create_workspace`] or adds a clone to one with [`join_workspace`], and
+/// rewritten in place by [`adopt_workspace_clone`], which changes only a
+/// clone entry's own `root`, on a person's explicit
+/// `spoolway init --adopt <workspace>/<dispatcher>`. Nothing ever removes a
+/// clone entry.
 ///
 /// Its `clones` field is what tells this shape apart from an ordinary
 /// [`Binding`], which this same [`BINDING_FILE`] name holds for a repo-mode
@@ -2189,20 +2192,161 @@ fn adopt_workspace_clone(root: &Path, workspace_name: &str, dispatcher: &str) ->
 
 /// Write `workspace`'s `project.toml` whole, in the same explained-header
 /// style [`write_binding`] uses for a repo-mode home's own record. The one
-/// place a workspace's own file is ever rewritten by this binary, and only
-/// through [`adopt_workspace_clone`], on a person's own
-/// `spoolway init --adopt <workspace>/<dispatcher>` — nothing else in home
-/// mode ever changes a clone entry, including a stale one nothing has
-/// re-attached (the `home-mode-discovery` task's own non-goal on not going
-/// further than reporting one).
+/// place a workspace's own file is ever written by this binary: by `init`,
+/// through [`create_workspace`] and [`join_workspace`], and by
+/// [`adopt_workspace_clone`] on a person's own
+/// `spoolway init --adopt <workspace>/<dispatcher>`. None of them removes a
+/// clone entry, including a stale one nothing has re-attached (the
+/// `home-mode-discovery` task's own non-goal on not going further than
+/// reporting one).
 fn write_workspace(workspace: &Path, toml_value: &WorkspaceToml) -> Result<()> {
     let body = format!(
         "# The clones that read this workspace's config/, each found by its path.\n\
-         # Nothing is stamped into any clone. Updated only by a person running\n\
-         # `spoolway init --adopt <workspace>/<dispatcher>` by hand.\n{}",
+         # Nothing is stamped into any clone. `spoolway init` adds a clone here,\n\
+         # and `spoolway init --adopt <workspace>/<dispatcher>` re-attaches one\n\
+         # that moved.\n{}",
         toml::to_string_pretty(toml_value).context("serialising project.toml")?
     );
     crate::task::write_atomic(&workspace.join(BINDING_FILE), body)
+}
+
+/// One workspace as `init`'s "Which workspace should this checkout use?"
+/// menu lists it: its folder name under `~/.spoolway/`, and the path of
+/// every clone that uses it, in the order its `project.toml` lists them.
+pub(crate) struct WorkspaceSummary {
+    pub(crate) name: String,
+    pub(crate) clones: Vec<PathBuf>,
+}
+
+/// Every workspace under `~/.spoolway/`, sorted by name so the menu reads
+/// the same on every run — [`all_workspaces`] follows `read_dir`'s order,
+/// which is whatever the filesystem happens to hand back.
+pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
+    let mut found: Vec<WorkspaceSummary> = all_workspaces()
+        .into_iter()
+        .filter_map(|(path, toml)| {
+            Some(WorkspaceSummary {
+                name: path.file_name()?.to_string_lossy().into_owned(),
+                clones: toml.clones.into_iter().map(|clone| clone.root).collect(),
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// Start a new workspace for `root`: `~/.spoolway/<label>-<id>/` holding an
+/// empty `config/`, `dispatchers/<name>/` for this clone, and a
+/// `project.toml` listing it. `<label>` is `root`'s basename and `<id>` a
+/// fresh one, the same shape a repo-mode home takes, so the two kinds of
+/// folder sit side by side under `~/.spoolway/` without either needing a
+/// prefix to tell them apart.
+///
+/// Nothing is written into `root` or its `.git`: the workspace's own
+/// `project.toml` is the whole of the binding.
+pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
+    let state = crate::mux::state_root();
+    std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
+    let label = sanitize_label(&crate::mux::project_label(root));
+    // `create_dir`, not `create_dir_all`: it fails when the folder is
+    // already there, so a fresh id that happens to name an existing folder —
+    // or a second `init` racing this one to the same name — draws again
+    // rather than both writing into one folder.
+    let (workspace, id) = loop {
+        let id = generate_id();
+        let candidate = state.join(format!("{label}-{id}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break (candidate, id),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("creating {}", candidate.display()));
+            }
+        }
+    };
+    let clone = WorkspaceClone {
+        workspace: workspace.clone(),
+        dispatcher: label,
+    };
+    for dir in [clone.config_dir(), clone.home_dir()] {
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    // Written last, so a workspace is only ever found — by `all_workspaces`,
+    // which reads nothing but this file — once its folders are all there.
+    write_workspace(
+        &workspace,
+        &WorkspaceToml {
+            id,
+            clones: vec![CloneEntry {
+                root: root.to_path_buf(),
+                dispatcher: clone.dispatcher.clone(),
+            }],
+        },
+    )?;
+    Ok(clone)
+}
+
+/// Add `root` to the workspace named `name` under `~/.spoolway/`, with a
+/// dispatcher folder of its own, and leave its `config/` exactly as it is —
+/// every clone of a workspace reads the one setup.
+///
+/// The dispatcher folder takes `root`'s basename, with `-2`, `-3` and so on
+/// added while that name is taken — by another clone entry, or by a folder
+/// already under `dispatchers/` that a clone entry no longer names, whose
+/// queue and worktrees must not be picked up by a clone they never belonged
+/// to. A checkout the workspace already lists keeps its own entry.
+pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> {
+    if !crate::tracking::is_bare_filename(name) {
+        bail!("`{name}` is not a workspace name — it cannot carry a path separator or a `..`");
+    }
+    let workspace = crate::mux::state_root().join(name);
+    let record_path = workspace.join(BINDING_FILE);
+    let raw = std::fs::read_to_string(&record_path).with_context(|| {
+        format!(
+            "no workspace named {name} exists under {}",
+            crate::mux::state_root().display()
+        )
+    })?;
+    let mut parsed: WorkspaceToml = toml::from_str(&raw).with_context(|| {
+        format!(
+            "{} does not read as a workspace's project.toml",
+            record_path.display()
+        )
+    })?;
+    if let Some(existing) = parsed.clones.iter().find(|clone| clone.root == root) {
+        return Ok(WorkspaceClone {
+            workspace,
+            dispatcher: existing.dispatcher.clone(),
+        });
+    }
+    let base = sanitize_label(&crate::mux::project_label(root));
+    let taken = |candidate: &str| {
+        parsed
+            .clones
+            .iter()
+            .any(|clone| clone.dispatcher == candidate)
+            || (WorkspaceClone {
+                workspace: workspace.clone(),
+                dispatcher: candidate.to_string(),
+            })
+            .home_dir()
+            .exists()
+    };
+    let dispatcher = std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}-{n}")))
+        .find(|candidate| !taken(candidate))
+        .expect("an unbounded run of names always has a free one");
+    let clone = WorkspaceClone {
+        workspace: workspace.clone(),
+        dispatcher: dispatcher.clone(),
+    };
+    let home = clone.home_dir();
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    parsed.clones.push(CloneEntry {
+        root: root.to_path_buf(),
+        dispatcher,
+    });
+    write_workspace(&workspace, &parsed)?;
+    Ok(clone)
 }
 
 /// `spoolway init --new-id`: mint `root` a fresh id it has never carried
@@ -4747,8 +4891,8 @@ mod tests {
     /// A scratch `$HOME` carrying a hand-written workspace — `project.toml`
     /// naming `clone` as `dispatcher`, plus `config/` with an empty
     /// `config.toml` — the fixture every `home-mode-discovery` test shares.
-    /// Written by hand, the way `init`'s own home-mode task leaves it for a
-    /// real project: nothing here ever comes from `spoolway init`.
+    /// Written by hand rather than through `spoolway init`'s own
+    /// `create_workspace`, so these tests pin discovery alone.
     fn workspace_fixture(name: &str, clone: &Path, dispatcher: &str) -> PathBuf {
         let home = scratch_home(name);
         let workspace = home.join(".spoolway").join(format!("{name}-ws"));
