@@ -35,13 +35,28 @@ pub fn pipeline_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
         return Ok(());
     }
     for pipeline in pipelines.pipelines.values() {
-        println!("{}", pipeline.name);
+        println!("{}{}", pipeline.name, private_marker(pipeline));
         if let Some(description) = &pipeline.description {
             println!("    {description}");
         }
         println!();
     }
     Ok(())
+}
+
+/// `  private · <file>` for a pipeline loaded from `local/pipelines/`, empty
+/// for a tracked one — the one piece of text `pipeline list` and
+/// `pipeline show` both print after a private pipeline's name, factored out
+/// so it is one sentence to get right and one place a test can check it
+/// against, rather than two copies that could read differently. Never a
+/// stand-in for a tracked pipeline of the same name — names cannot clash,
+/// see `crate::pipeline::merge_private` — only a mark so nobody mistakes
+/// this pipeline for the tracked one it may have started life as a copy of.
+fn private_marker(pipeline: &Pipeline) -> String {
+    match &pipeline.private_file {
+        Some(file) => format!("  private · {}", file.display()),
+        None => String::new(),
+    }
 }
 
 /// One pipeline, as `--json pipeline list` names it: exactly the facts a
@@ -51,6 +66,12 @@ pub fn pipeline_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
 struct PipelineListEntry {
     name: String,
     description: Option<String>,
+    /// `"tracked"` for a pipeline from `.spoolway/pipelines/`, `"private"`
+    /// for one from `local/pipelines/` — see [`crate::local`].
+    source: &'static str,
+    /// The private file this pipeline was loaded from, `None` for a tracked
+    /// one.
+    file: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -66,6 +87,15 @@ fn build_list(pipelines: &Pipelines) -> PipelineListJson {
             .map(|pipeline| PipelineListEntry {
                 name: pipeline.name.clone(),
                 description: pipeline.description.clone(),
+                source: if pipeline.private_file.is_some() {
+                    "private"
+                } else {
+                    "tracked"
+                },
+                file: pipeline
+                    .private_file
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
             })
             .collect(),
     }
@@ -106,14 +136,18 @@ const STEP_KEYS: &[&str] = &[
 /// `on_loop_max:`, kept on [`Step`] only so a file still naming them gets a
 /// message pointing at the replacement — or, for `cleanup:` and
 /// `on_loop_max:`, saying why there is none — rather than serde's own
-/// "unknown field", and two struct fields that answer a fact about where a
+/// "unknown field", and three struct fields that answer a fact about where a
 /// `Pipeline` came from rather than something a file could ever set —
-/// [`Pipeline::name`], because the file name is the name, and
+/// [`Pipeline::name`], because the file name is the name;
 /// [`Pipeline::blocked_declared`], set only by [`Pipelines::assemble`] once a
-/// file is read.
+/// file is read; and [`Pipeline::private_file`], set only by
+/// [`crate::pipeline::Pipelines::load_impl`] when this pipeline came from
+/// `local/pipelines/` rather than the tracked directory — see
+/// [`crate::local`].
 const REFUSED_KEYS: &[&str] = &[
     "name",
     "blocked_declared",
+    "private_file",
     "max_new_sessions",
     "max_rounds",
     "cleanup",
@@ -518,7 +552,12 @@ fn chain_marker(step: &crate::pipeline::Step) -> &'static str {
 }
 
 fn show_one(pipeline: &Pipeline) -> Result<()> {
-    println!("pipeline `{}`  entry: {}", pipeline.name, pipeline.entry());
+    println!(
+        "pipeline `{}`  entry: {}{}",
+        pipeline.name,
+        pipeline.entry(),
+        private_marker(pipeline)
+    );
     if let Some(description) = &pipeline.description {
         println!("    {description}");
     }
@@ -1100,6 +1139,76 @@ mod tests {
                 "missing `description`: {entry}"
             );
         }
+    }
+
+    /// `--json pipeline list` carries a private pipeline's file under
+    /// `source`/`file`, and a tracked one's `source: "tracked"` with no
+    /// `file` — acceptance criterion 4's json half.
+    #[test]
+    fn build_list_carries_source_and_file_for_a_private_pipeline() {
+        let tracked = Pipeline::parse(
+            "impl",
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+        let mut private = Pipeline::parse(
+            "impl-strict",
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+        private.private_file = Some(std::path::PathBuf::from(
+            "/home/x/.spoolway/proj/local/pipelines/impl-strict.yml",
+        ));
+
+        let pipelines = Pipelines {
+            pipelines: [
+                ("impl".to_string(), tracked),
+                ("impl-strict".to_string(), private),
+            ]
+            .into_iter()
+            .collect(),
+            ignored_overrides: Vec::new(),
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&build_list(&pipelines)).unwrap()).unwrap();
+        let entries: std::collections::BTreeMap<String, serde_json::Value> = value["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| (entry["name"].as_str().unwrap().to_string(), entry.clone()))
+            .collect();
+
+        assert_eq!(entries["impl"]["source"], "tracked");
+        assert!(entries["impl"]["file"].is_null(), "{:?}", entries["impl"]);
+
+        assert_eq!(entries["impl-strict"]["source"], "private");
+        assert_eq!(
+            entries["impl-strict"]["file"],
+            "/home/x/.spoolway/proj/local/pipelines/impl-strict.yml"
+        );
+    }
+
+    /// `private_marker` — the text `pipeline list` and `pipeline show` both
+    /// print after a private pipeline's name — is empty for a tracked
+    /// pipeline and names the file for a private one.
+    #[test]
+    fn private_marker_is_empty_for_tracked_and_names_the_file_for_private() {
+        let tracked = Pipeline::parse(
+            "impl",
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+        assert_eq!(private_marker(&tracked), "");
+
+        let mut private = tracked.clone();
+        private.private_file = Some(std::path::PathBuf::from(
+            "/x/local/pipelines/impl-strict.yml",
+        ));
+        assert_eq!(
+            private_marker(&private),
+            "  private · /x/local/pipelines/impl-strict.yml"
+        );
     }
 
     /// `pipeline show`'s marker for a command step that reads differently for

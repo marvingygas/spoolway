@@ -436,6 +436,15 @@ impl Repo {
         self.home.join(crate::config::OVERRIDES_DIR)
     }
 
+    /// The private layer's own directory — see [`crate::local`]. Under
+    /// [`Repo::home`], the same as [`Repo::overrides_dir`] and for the same
+    /// reason, and read only in repo mode: [`crate::local::is_repo_mode`] is
+    /// every caller's to check first, since `home` still resolves to a real
+    /// directory in home mode and this alone would not say so.
+    pub fn local_dir(&self) -> PathBuf {
+        self.home.join(crate::local::LOCAL_DIR)
+    }
+
     /// Where a project keeps tasks it wants to re-run — see
     /// [`crate::config::ROUTINES_DIR`] for why nothing auto-creates this the
     /// way [`Repo::pending_dir`] creates itself: an ordinary project that has

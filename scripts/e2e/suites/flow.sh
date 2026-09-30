@@ -161,6 +161,42 @@ works "a command that does not route survives the same file" \
 
 rm -f "$BROKEN"
 
+# ------------------------------------------------------------ the private layer
+# A private pipeline lives under the project's home, not in any checkout, so a
+# lane's worktree has to find the very same `local/` the main checkout does —
+# through git's common directory, which is the part no unit test reaches with
+# a real linked worktree. One private pipeline naming one private prompt, read
+# from both sides.
+PRIVATE_DIR="$SPOOLWAY_PROJECT_HOME/local/pipelines"
+mkdir -p "$PRIVATE_DIR" "$SPOOLWAY_PROJECT_HOME/local/prompts/helper"
+printf 'description: A pipeline only this machine has.\nsteps:\n  - id: solo\n    agent: pi\n    prompt: helper\n    model: %s\n    on_pass: done\n' \
+  "$(local_model)" > "$PRIVATE_DIR/strict.yml"
+printf '# helper\n\nYou do one small thing and report it.\n' \
+  > "$SPOOLWAY_PROJECT_HOME/local/prompts/helper/PROMPT.md"
+
+says "pipeline list marks a private pipeline and names its file" \
+  "strict  private · $PRIVATE_DIR/strict.yml" \
+  "$SPOOLWAY" pipeline list
+says "pipeline list in a worktree finds the same private pipeline" \
+  "strict  private · $PRIVATE_DIR/strict.yml" \
+  "$SPOOLWAY" -C "$WT" pipeline list
+says "--json pipeline list carries the private source as a field" \
+  '"source": "private"' \
+  "$SPOOLWAY" -C "$WT" --json pipeline list
+says "pipeline show marks it the same way" \
+  "private · $PRIVATE_DIR/strict.yml" \
+  "$SPOOLWAY" -C "$WT" pipeline show
+works "pipeline check in the main checkout reads the private prompt" \
+  "$SPOOLWAY" pipeline check
+works "pipeline check in a worktree reads the private prompt" \
+  "$SPOOLWAY" -C "$WT" pipeline check
+# And it really was read: take the prompt away and the same check refuses.
+rm -rf "$SPOOLWAY_PROJECT_HOME/local/prompts/helper"
+refuses "pipeline check in a worktree misses a private prompt that is gone" \
+  "helper" "$SPOOLWAY" -C "$WT" pipeline check
+
+rm -rf "$SPOOLWAY_PROJECT_HOME/local"
+
 must "removing the worktree" git worktree remove --force "$WT"
 must "removing its branch" git branch -D task/pipeline-set
 

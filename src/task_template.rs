@@ -28,18 +28,39 @@ pub const FALLBACK: &str = "default";
 
 /// The skeleton a task queued on `pipeline` is written from.
 ///
-/// `<pipeline>.md`, then `default.md`, then the built-in — the same shape as
-/// a step's `prompt:` fallback, and the same refusal to treat a missing file
-/// as an error. A skeleton that is not there is a project that has not written
-/// one, which is the normal state of most projects and no reason to stop a
-/// queue.
+/// `<pipeline>.md`, then `local/templates/tasks/<pipeline>.md` (repo mode
+/// only, and only when `pipeline` is not itself a tracked one — see below),
+/// then `default.md` and its own private fallback, then the built-in — the
+/// same shape as a step's `prompt:` fallback, and the same refusal to treat
+/// a missing file as an error. A skeleton that is not there is a project
+/// that has not written one, which is the normal state of most projects and
+/// no reason to stop a queue.
+///
+/// `local/templates/tasks/<name>.md` belongs to the private pipeline named
+/// `<name>` — the skeleton `pipeline copy` writes beside a private pipeline
+/// it names the same. A *tracked* pipeline with no skeleton of its own is
+/// never one of those: it falls through to `default.md`, the tracked
+/// project's own answer, never to a private file that merely happens to
+/// share its name — nothing private ever replaces a tracked file, and
+/// stepping in front of `default.md` here would be exactly that, however
+/// different the two filenames are. Every private fallback below is tried
+/// only once its tracked counterpart is confirmed absent, for the same
+/// reason.
 pub fn resolve(repo: &Repo, pipeline: &str) -> String {
     let dir = repo.task_templates_dir();
 
     if let Some(contents) = read(&dir.join(format!("{pipeline}.md"))) {
         return contents;
     }
+    if !is_tracked_pipeline(repo, pipeline)
+        && let Some(contents) = local(repo, pipeline)
+    {
+        return contents;
+    }
     if let Some(contents) = read(&dir.join(format!("{FALLBACK}.md"))) {
+        return contents;
+    }
+    if let Some(contents) = local(repo, FALLBACK) {
         return contents;
     }
 
@@ -47,6 +68,29 @@ pub fn resolve(repo: &Repo, pipeline: &str) -> String {
         .or_else(|| crate::assets::task_template(FALLBACK))
         .unwrap_or_default()
         .to_string()
+}
+
+/// Whether `pipeline` names a pipeline the tracked `.spoolway/pipelines/`
+/// (or a home-mode workspace's own `config/pipelines/`) actually has a file
+/// for — checked directly on disk rather than through a loaded
+/// [`crate::pipeline::Pipelines`], since `resolve` is reached from places
+/// (queuing a task, `pipeline contract`'s own sample) that have a pipeline
+/// *name* in hand, not always a parsed set to ask. Both extensions
+/// `crate::pipeline::read_pipeline_dir` accepts are checked, so a project
+/// that wrote `.yaml` is not mistaken for one with no file at all.
+fn is_tracked_pipeline(repo: &Repo, pipeline: &str) -> bool {
+    let dir = crate::pipeline::Pipelines::dir_in(&repo.checkout);
+    dir.join(format!("{pipeline}.yml")).is_file() || dir.join(format!("{pipeline}.yaml")).is_file()
+}
+
+/// `local/templates/tasks/<name>.md`, repo mode only — `None` in home mode,
+/// where the whole setup is already private and there is no `local/` beside
+/// it to read.
+fn local(repo: &Repo, name: &str) -> Option<String> {
+    if !crate::local::is_repo_mode(&repo.checkout) {
+        return None;
+    }
+    read(&crate::local::task_templates_dir(&repo.local_dir()).join(format!("{name}.md")))
 }
 
 /// A skeleton file's markdown, or nothing if it is absent or empty. An empty
@@ -199,6 +243,92 @@ mod tests {
 
         let resolved = resolve(&repo, "hotfix");
         assert_eq!(resolved, crate::assets::task_template(FALLBACK).unwrap());
+    }
+
+    /// `local/templates/tasks/<pipeline>.md` — the private layer, see
+    /// `crate::local` — answers when the tracked skeleton is absent, in repo
+    /// mode, before falling all the way back to the built-in.
+    #[test]
+    fn a_private_skeleton_is_used_when_the_tracked_file_is_absent() {
+        let root = crate::scratch::root("task-template-private");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            home: root.join(".home"),
+            root,
+            config: crate::config::Config::default(),
+        };
+
+        let private = crate::local::task_templates_dir(&repo.local_dir()).join("impl-strict.md");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "our own private skeleton\n").unwrap();
+
+        assert_eq!(resolve(&repo, "impl-strict"), "our own private skeleton\n");
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A tracked skeleton is never shadowed by a private one of the same
+    /// name — nothing private ever replaces a tracked file.
+    #[test]
+    fn a_tracked_skeleton_wins_over_a_private_one_of_the_same_name() {
+        let root = crate::scratch::root("task-template-private-shadowed");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(crate::config::TASK_TEMPLATES_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("impl-strict.md"), "the tracked skeleton\n").unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            home: root.join(".home"),
+            root,
+            config: crate::config::Config::default(),
+        };
+
+        let private = crate::local::task_templates_dir(&repo.local_dir()).join("impl-strict.md");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "the private skeleton\n").unwrap();
+
+        assert_eq!(resolve(&repo, "impl-strict"), "the tracked skeleton\n");
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A tracked pipeline with no skeleton of its own falls through to the
+    /// tracked `default.md`, never to a private `<pipeline>.md` that merely
+    /// shares its name — `local/templates/tasks/` belongs to a private
+    /// pipeline of that name, and `impl` here is a tracked one.
+    #[test]
+    fn a_tracked_pipeline_with_no_skeleton_of_its_own_falls_back_to_tracked_default_not_a_private_file()
+     {
+        let root = crate::scratch::root("task-template-tracked-pipeline-over-private-fallback");
+        let _ = std::fs::remove_dir_all(&root);
+        let templates_dir = root.join(crate::config::TASK_TEMPLATES_DIR);
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(templates_dir.join("default.md"), "the tracked default\n").unwrap();
+
+        let pipelines_dir = crate::pipeline::Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        std::fs::write(
+            pipelines_dir.join("impl.yml"),
+            "steps:\n  - id: a\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let repo = Repo {
+            checkout: root.clone(),
+            home: root.join(".home"),
+            root,
+            config: crate::config::Config::default(),
+        };
+
+        let private = crate::local::task_templates_dir(&repo.local_dir()).join("impl.md");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "a private file that only shares impl's name\n").unwrap();
+
+        assert_eq!(resolve(&repo, "impl"), "the tracked default\n");
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
     }
 
     /// A project that has written its own `epic.md` or `ticket.md` wins —

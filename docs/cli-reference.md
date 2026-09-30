@@ -573,11 +573,15 @@ pipeline `impl`  entry: implement
 ```
 
 A command step marked `first: true` prints `first-of-chain` the same way, in place of
-`last-of-chain`. See [`first:`](pipelines.md#first--a-step-only-a-chains-root-runs).
+`last-of-chain`. A pipeline loaded from `local/pipelines/` prints `private · <file>` after its
+`entry:` line, naming the file it came from. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway pipeline check`
 
-Validate every pipeline file, its agent references and its prompts against the config.
+Validate every pipeline file, its agent references and its prompts against the config. This
+covers a private pipeline in `local/pipelines/` and a private prompt in `local/prompts/` the
+same way it covers a tracked one.
 
 ```
 $ spoolway pipeline check
@@ -596,7 +600,9 @@ Copy the blank to `.spoolway/pipelines/<name>.yml`, delete what you do not need,
 
 ### `spoolway pipeline list`
 
-Print every pipeline's name and description.
+Print every pipeline's name and description. A pipeline loaded from `local/pipelines/` prints
+`private · <file>` after its name, naming the file it came from. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ```
 $ spoolway pipeline list
@@ -605,6 +611,8 @@ bugfix
 
 impl
     One unit of feature work, start to finish: implement against the acceptance criteria, review the diff, carry the change into the end-to-end suites, then document and hand over.
+
+impl-strict  private · /home/you/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
 ```
 
 ### `spoolway pipeline list --json`
@@ -613,10 +621,12 @@ The same list as JSON, one entry per pipeline.
 
 ```
 $ spoolway pipeline list --json
-{"pipelines": [{"name": "bugfix", "description": "..."}, ...]}
+{"pipelines": [{"name": "bugfix", "description": "...", "source": "tracked", "file": null}, ...]}
 ```
 
-A pipeline with no `description:` carries `"description": null`.
+A pipeline with no `description:` carries `"description": null`. `source` is `"tracked"` for a
+pipeline from `.spoolway/pipelines/` or `"private"` for one from `local/pipelines/`. `file`
+names the private file a private pipeline came from, and is `null` for a tracked one.
 
 ### `spoolway pipeline override <name> --set <step>.<key>=<value>`
 

@@ -15,6 +15,16 @@ A prompt is a directory under `.spoolway/prompts/` holding a `PROMPT.md`, plus a
 role uses. A step's `prompt:` names it and defaults to the step's own id. A step with
 `id: review` and no `prompt:` runs `.spoolway/prompts/review/PROMPT.md`.
 
+### Private prompts
+
+A private prompt lives at `local/prompts/<name>/PROMPT.md`, under the project's own home
+rather than the checkout, in the same directory shape as a tracked prompt. See [Private
+pipelines](pipelines.md#private-pipelines). It answers only when the tracked prompt of that
+name is absent, only in repo mode, and only in the directory shape above: a flat
+`local/prompts/<name>.md` is not read.
+
+A private prompt whose name matches a tracked one is refused, naming both files.
+
 ## A prompt is prose, and nothing else
 
 spoolway never parses a prompt. There is no format and no generated region:

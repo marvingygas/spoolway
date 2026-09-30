@@ -1,6 +1,6 @@
 ---
 domain: configuration
-covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "assets/tracking/**", "assets/hooks/**"]
+covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/tracking/**", "assets/hooks/**"]
 ---
 
 # Configuration
@@ -62,13 +62,16 @@ project](dispatcher.md#one-home-for-every-run-in-every-project).
 
 | Directory | Holds | Swept by `retention_days` |
 |---|---|---|
-| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `claims/` | Work in flight | No |
+| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | No |
 | `archive/`, `scratch/`, `headless/`, `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | Yes |
 | `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
 turned off. See [The overrides layer](#the-overrides-layer).
+
+`local/` holds a project's own private pipelines, prompts and task skeletons, read only in
+repo mode. See [Private pipelines](pipelines.md#private-pipelines).
 
 Delete `~/.spoolway/<label>-<id>/` to forget every task, plan and lane. The checkout is
 untouched. The next command in that checkout refuses, because the checkout still carries a stamp

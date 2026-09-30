@@ -105,15 +105,22 @@ fn builtin_pipelines() -> Result<BTreeMap<String, Pipeline>> {
         .collect()
 }
 
-/// Every `<name>.yml` in the pipeline directory, or `None` when the directory
-/// is not there at all.
+/// Every `<name>.yml` (or `.yaml`) in the pipeline directory, with the exact
+/// path each one was read from, or `None` when the directory is not there at
+/// all.
+///
+/// The path is carried out alongside the name and the raw text because a
+/// caller cannot safely rebuild it: [`Pipelines::file_in`] always guesses
+/// `.yml`, which is wrong for a project that wrote `.yaml` — see
+/// `merge_private`, which prints this path in a refusal and records it as
+/// [`Pipeline::private_file`], both of which have to name the real file.
 ///
 /// `Some(empty)` and `None` both reach the same `no pipelines defined` bail in
 /// [`Pipelines::load_impl`] now — there is no fallback left for either to opt
 /// into. The split still matters for one thing: only `None` goes on to check
 /// for the old single-file `pipeline.yml`, so a project carrying one gets that
 /// migration message instead of the generic one.
-fn read_pipeline_dir(dir: &Path) -> Result<Option<Vec<(String, String)>>> {
+fn read_pipeline_dir(dir: &Path) -> Result<Option<Vec<(String, PathBuf, String)>>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -136,7 +143,7 @@ fn read_pipeline_dir(dir: &Path) -> Result<Option<Vec<(String, String)>>> {
         };
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        files.push((name.to_string(), raw));
+        files.push((name.to_string(), path.clone(), raw));
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Some(files))
@@ -1031,6 +1038,16 @@ pub struct Pipeline {
     /// mark the row `from config` or `overridden in <name>.yml`.
     #[serde(skip)]
     pub blocked_declared: bool,
+
+    /// The file this pipeline was loaded from under `local/pipelines/`, for
+    /// a pipeline that came from the private layer rather than the tracked
+    /// `.spoolway/pipelines/` — set only by [`Pipelines::load_impl`]. `None`
+    /// for a tracked pipeline. Read by `pipeline list` (text and `--json`)
+    /// and `pipeline show` to mark the pipeline `private` and name the file
+    /// it came from, so nobody mistakes it for a tracked pipeline of the
+    /// same shape. See [`crate::local`].
+    #[serde(skip)]
+    pub private_file: Option<PathBuf>,
 
     pub steps: Vec<Step>,
 }
@@ -2383,7 +2400,7 @@ impl Pipelines {
             Ok(None) | Err(_) => return Vec::new(),
         };
         let mut problems = Vec::new();
-        for (name, raw) in &files {
+        for (name, _path, raw) in &files {
             match serde_norway::from_str::<Pipeline>(raw) {
                 Ok(mut pipeline) => {
                     pipeline.name = name.clone();
@@ -2418,7 +2435,7 @@ impl Pipelines {
             Ok(None) | Err(_) => return None,
         };
         let mut count = 0;
-        for (_, raw) in &files {
+        for (_, _path, raw) in &files {
             match serde_norway::from_str::<Pipeline>(raw) {
                 Ok(pipeline) if !pipeline.retired_shape_problems().is_empty() => count += 1,
                 Ok(_) => {}
@@ -2489,13 +2506,13 @@ impl Pipelines {
 
         let mut pipelines = BTreeMap::new();
         let mut ignored = Vec::new();
-        for (name, raw) in files {
+        for (name, path, raw) in files {
             // Unvalidated: a file's own `blocked` step may declare only
             // some of its five keys on purpose, leaning on
             // `Pipelines::assemble` to fill the rest in from config
             // before anything checks that the step is a runnable one.
-            let mut pipeline = parse_unchecked(&name, &raw)
-                .with_context(|| format!("in {}", Pipelines::file_in(root, &name).display()))?;
+            let mut pipeline =
+                parse_unchecked(&name, &raw).with_context(|| format!("in {}", path.display()))?;
             if let Some(overrides) = overrides {
                 ignored.extend(crate::overrides::apply_pipeline_patch(
                     &mut pipeline,
@@ -2515,8 +2532,36 @@ impl Pipelines {
                 }
             }
         }
-        let set = Pipelines::assemble(pipelines, config, ignored)
-            .with_context(|| format!("in {}", dir.display()))?;
+
+        // The private layer: `local/pipelines/` and `local/prompts/`, read
+        // beside the tracked files rather than merged onto them — gated on
+        // `overrides.is_some()` the same way the patch layer above is, so
+        // `load_tracked` (the probe `pipeline_override` and
+        // `override_promote` use) sees only the tracked files, and on repo
+        // mode, since home mode's whole setup is already private and has no
+        // `local/` to read. See `crate::local`.
+        let mut private_dir = None;
+        if overrides.is_some() && crate::local::is_repo_mode(root) {
+            let local = crate::local::dir_for(root)?;
+            private_dir = Some(crate::local::pipelines_dir(&local));
+            merge_private(root, &mut pipelines)?;
+        }
+
+        // Named against whichever directory(ies) a failing pipeline could
+        // actually have come from — never only the tracked one, since a
+        // validation error from `set.validate()` (each already carrying its
+        // own `pipeline \`{name}\`` context) can just as well be a private
+        // pipeline's, and pointing only at `dir` there would send a person
+        // to a file that was never the problem.
+        let set =
+            Pipelines::assemble(pipelines, config, ignored).with_context(
+                || match &private_dir {
+                    Some(private_dir) => {
+                        format!("in {} or {}", dir.display(), private_dir.display())
+                    }
+                    None => format!("in {}", dir.display()),
+                },
+            )?;
         if overrides.is_some() {
             crate::overrides::print_ignored_notices(&set.ignored_overrides);
         }
@@ -2714,6 +2759,100 @@ impl Pipelines {
         }
         Ok(())
     }
+}
+
+/// Read `local/pipelines/` and `local/prompts/` for `root` and add them
+/// beside the already-loaded tracked `pipelines` — called only in repo mode,
+/// and only from [`Pipelines::load`] (never `load_tracked`), by
+/// [`Pipelines::load_impl`]. See [`crate::local`].
+///
+/// Two refusals, both fatal rather than skipped the way a stale override is:
+/// a private pipeline or prompt whose name already belongs to a tracked one
+/// (nothing private may stand in for a tracked file, so this cannot be
+/// allowed to sit there silently shadowed), and a *tracked* pipeline's step
+/// naming a prompt that exists only privately (that pipeline would break the
+/// moment it ran anywhere else).
+fn merge_private(root: &Path, pipelines: &mut BTreeMap<String, Pipeline>) -> Result<()> {
+    let local = crate::local::dir_for(root)?;
+    let local_pipelines_dir = crate::local::pipelines_dir(&local);
+    let local_prompts_dir = crate::local::prompts_dir(&local);
+
+    // The prompt name sets are gathered before either loop below touches
+    // `pipelines`, so "found only in `local/`" always means what it says —
+    // a tracked pipeline never gets to check itself against a set a private
+    // pipeline has already added an entry to. Directory shape only for the
+    // private side — see `crate::prompt::local_names_in` — so this agrees
+    // with the one shape `crate::prompt::path_for` ever looks for privately.
+    let tracked_prompt_names = crate::prompt::tracked_names_in(root)?;
+    let local_prompt_names = crate::prompt::local_names_in(&local_prompts_dir)?;
+    for name in &local_prompt_names {
+        if tracked_prompt_names.contains(name) {
+            bail!(
+                "private prompt `{name}` clashes with the tracked one — both {} and {} name \
+                 `{name}`; rename the private prompt",
+                crate::prompt::directory_form_in(root, name).display(),
+                local_prompts_dir
+                    .join(name)
+                    .join(crate::assets::PROMPT_FILE)
+                    .display(),
+            );
+        }
+    }
+
+    // A tracked pipeline naming a prompt found only privately would break on
+    // every other machine, so it is refused here, against the tracked set
+    // exactly as it stood before any private pipeline joined it.
+    for (name, pipeline) in pipelines.iter() {
+        for step in &pipeline.steps {
+            if step.kind() != StepKind::Agent {
+                continue;
+            }
+            let prompt_name = step.prompt_name();
+            if !tracked_prompt_names.contains(prompt_name)
+                && local_prompt_names.contains(prompt_name)
+            {
+                bail!(
+                    "tracked pipeline `{name}`/`{}` names prompt `{prompt_name}`, found only in \
+                     {} — a tracked pipeline may only name a tracked prompt, since a private one \
+                     would break on every other machine",
+                    step.id,
+                    local_prompts_dir.join(prompt_name).display(),
+                );
+            }
+        }
+    }
+
+    if let Some(files) = read_pipeline_dir(&local_pipelines_dir)? {
+        for (name, file, raw) in files {
+            if pipelines.contains_key(&name) {
+                // `file_in` always spells `.yml`; a tracked `.yaml` would be
+                // named as a file that does not exist, the same slip the
+                // private side's own path once made.
+                let yml = Pipelines::file_in(root, &name);
+                let tracked_file = if yml.is_file() {
+                    yml
+                } else {
+                    Pipelines::dir_in(root).join(format!("{name}.yaml"))
+                };
+                bail!(
+                    "private pipeline `{name}` clashes with the tracked one — both {} and {} \
+                     name `{name}`; rename the private file",
+                    tracked_file.display(),
+                    file.display(),
+                );
+            }
+            let mut pipeline =
+                parse_unchecked(&name, &raw).with_context(|| format!("in {}", file.display()))?;
+            // No `apply_pipeline_patch` here: the override layer patches a
+            // pipeline the checkout already tracks, and a private pipeline
+            // is not one — see the task's own non-goal against touching
+            // that layer.
+            pipeline.private_file = Some(file);
+            pipelines.insert(name, pipeline);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4746,5 +4885,416 @@ mod tests {
                 "load, the ordinary entry point, still sees it"
             );
         });
+    }
+
+    // -----------------------------------------------------------------
+    // The private layer — `local/pipelines/` and `local/prompts/`, read
+    // beside the tracked files in repo mode. See `crate::local` and
+    // `merge_private`.
+    // -----------------------------------------------------------------
+
+    /// A private pipeline joins the tracked set, marked with the file it
+    /// came from, and the tracked pipeline beside it is untouched.
+    #[test]
+    fn a_private_pipeline_loads_beside_the_tracked_ones() {
+        with_override_fixture("private-loads", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl-strict.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+
+            let private = pipelines.get("impl-strict").unwrap();
+            assert_eq!(
+                private.private_file.as_deref(),
+                Some(dir.join("impl-strict.yml").as_path())
+            );
+
+            let tracked = pipelines.get("impl").unwrap();
+            assert!(
+                tracked.private_file.is_none(),
+                "a tracked pipeline must never be marked private"
+            );
+        });
+    }
+
+    /// `Pipelines::load_tracked` — the probe `pipeline_override` and
+    /// `override_promote` use — must see only the tracked files, the same
+    /// way it already ignores the override layer.
+    #[test]
+    fn load_tracked_never_sees_a_private_pipeline() {
+        with_override_fixture("private-load-tracked", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl-strict.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let tracked = Pipelines::load_tracked(root, &crate::config::Config::default()).unwrap();
+            assert!(
+                tracked.get("impl-strict").is_err(),
+                "load_tracked must not see it"
+            );
+        });
+    }
+
+    /// A private pipeline whose name already belongs to a tracked one is
+    /// refused outright, naming both files — never silently shadowed.
+    #[test]
+    fn a_private_pipeline_naming_a_tracked_pipeline_is_refused() {
+        with_override_fixture("private-pipeline-clash", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&Pipelines::file_in(root, "impl").display().to_string()),
+                "{message}"
+            );
+            assert!(
+                message.contains(&dir.join("impl.yml").display().to_string()),
+                "{message}"
+            );
+        });
+    }
+
+    /// A private prompt whose name already belongs to a tracked one is
+    /// refused, naming both files, the same as a private pipeline's clash.
+    #[test]
+    fn a_private_prompt_naming_a_tracked_prompt_is_refused() {
+        with_override_fixture("private-prompt-clash", |root| {
+            let tracked = crate::prompt::directory_form_in(root, "shared");
+            std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+            std::fs::write(&tracked, "# tracked\n").unwrap();
+
+            let local = crate::local::dir_for(root).unwrap();
+            let private_dir = crate::local::prompts_dir(&local).join("shared");
+            std::fs::create_dir_all(&private_dir).unwrap();
+            std::fs::write(private_dir.join(crate::assets::PROMPT_FILE), "# private\n").unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&tracked.display().to_string()),
+                "{message}"
+            );
+            assert!(
+                message.contains(
+                    &private_dir
+                        .join(crate::assets::PROMPT_FILE)
+                        .display()
+                        .to_string()
+                ),
+                "{message}"
+            );
+        });
+    }
+
+    /// A tracked pipeline's step naming a prompt that exists only privately
+    /// is refused — that pipeline would break the moment it ran on a
+    /// machine with no copy of the private prompt. `write_tracked_impl`'s
+    /// `review` step names no `prompt:`, so its prompt name is its own id.
+    #[test]
+    fn a_tracked_pipeline_naming_a_private_only_prompt_is_refused() {
+        with_override_fixture("tracked-wants-private-prompt", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::prompts_dir(&local).join("review");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(crate::assets::PROMPT_FILE), "# private\n").unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("impl"), "{message}");
+            assert!(message.contains("review"), "{message}");
+        });
+    }
+
+    /// A private pipeline naming a private prompt is fine — nothing about
+    /// the refusal above applies to a pipeline that is itself private.
+    #[test]
+    fn a_private_pipeline_may_name_a_private_prompt() {
+        with_override_fixture("private-names-private-prompt", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let pipelines_dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&pipelines_dir).unwrap();
+            std::fs::write(
+                pipelines_dir.join("impl-strict.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    prompt: helper\n    \
+                 model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+            let prompt_dir = crate::local::prompts_dir(&local).join("helper");
+            std::fs::create_dir_all(&prompt_dir).unwrap();
+            std::fs::write(prompt_dir.join(crate::assets::PROMPT_FILE), "# helper\n").unwrap();
+
+            let pipelines = Pipelines::load(root, &crate::config::Config::default())
+                .expect("a private pipeline naming a private prompt must load");
+            assert!(pipelines.get("impl-strict").is_ok());
+        });
+    }
+
+    /// `local/prompts/` has one shape only, the directory one: a flat
+    /// `local/prompts/review.md` is not a private prompt at all. Before the
+    /// review round of 2026-09-30 it counted as one here while
+    /// `crate::prompt::path_for` never resolved it, so the tracked `impl`
+    /// — whose `review` step names prompt `review` — was refused as naming
+    /// a private-only prompt over a file nothing would ever read.
+    #[test]
+    fn a_flat_private_prompt_file_is_not_a_private_prompt() {
+        with_override_fixture("private-flat-prompt", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::prompts_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("review.md"), "# flat\n").unwrap();
+
+            Pipelines::load(root, &crate::config::Config::default())
+                .expect("a flat local/prompts/review.md must not make impl name a private prompt");
+        });
+    }
+
+    /// A private pipeline written as `.yaml` is marked with that file, not a
+    /// `.yml` sibling that does not exist — the path was once rebuilt as
+    /// `<name>.yml` rather than read from disk.
+    #[test]
+    fn a_private_yaml_pipeline_is_marked_with_its_own_file() {
+        with_override_fixture("private-yaml", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl-strict.yaml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert_eq!(
+                pipelines
+                    .get("impl-strict")
+                    .unwrap()
+                    .private_file
+                    .as_deref(),
+                Some(dir.join("impl-strict.yaml").as_path())
+            );
+        });
+    }
+
+    /// The clash refusal names the private file as it is on disk, `.yaml`
+    /// included, so the person is sent to a file that exists.
+    #[test]
+    fn a_private_yaml_pipeline_clashing_with_a_tracked_one_names_the_yaml_file() {
+        with_override_fixture("private-yaml-clash", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl.yaml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&dir.join("impl.yaml").display().to_string()),
+                "{message}"
+            );
+        });
+    }
+
+    /// The clash refusal names a tracked `.yaml` file as it is on disk too,
+    /// not the `.yml` spelling `Pipelines::file_in` would give it.
+    #[test]
+    fn a_private_pipeline_clashing_with_a_tracked_yaml_file_names_the_tracked_yaml() {
+        with_override_fixture("private-clash-tracked-yaml", |root| {
+            let tracked_yml = Pipelines::file_in(root, "impl");
+            let tracked_yaml = Pipelines::dir_in(root).join("impl.yaml");
+            std::fs::rename(&tracked_yml, &tracked_yaml).unwrap();
+
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&tracked_yaml.display().to_string()),
+                "{message}"
+            );
+        });
+    }
+
+    /// A private pipeline that fails validation points the person at
+    /// `local/pipelines/` too, not only at the tracked directory it never
+    /// came from.
+    #[test]
+    fn a_private_pipeline_failing_validation_names_the_private_directory() {
+        with_override_fixture("private-invalid", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("impl-strict.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    \
+                 on_pass: nowhere\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains(&dir.display().to_string()), "{message}");
+            assert!(message.contains("impl-strict"), "{message}");
+        });
+    }
+
+    /// Home mode has no private layer of its own — the whole setup is
+    /// already private — so a `local/pipelines/` sitting under the
+    /// workspace's own dispatcher home is never read. Written by hand, the
+    /// same way `crate::repo`'s own `home-mode-discovery` tests build a
+    /// workspace fixture, since this only needs `workspace_clone` to answer
+    /// for `root`.
+    #[test]
+    fn in_home_mode_the_private_layer_is_never_read() {
+        let root = crate::scratch::root("pipeline-private-home-mode");
+        let home = crate::scratch::root("pipeline-private-home-mode-home");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&root).unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let workspace = crate::mux::state_root().join("pipeline-private-home-mode-ws");
+            std::fs::create_dir_all(workspace.join("config").join("pipelines")).unwrap();
+            std::fs::write(
+                workspace.join("config").join("pipelines").join("solo.yml"),
+                "steps:\n  - id: a\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+            std::fs::write(
+                workspace.join("project.toml"),
+                format!(
+                    "id = \"pipeline-private-home-mode-ws\"\nclones = [{{ root = {:?}, \
+                     dispatcher = \"d\" }}]\n",
+                    root.display(),
+                ),
+            )
+            .unwrap();
+
+            // A private pipeline that, if home mode read `local/` at all,
+            // would load beside the workspace's own tracked `solo`.
+            let local_pipelines = workspace
+                .join("dispatchers")
+                .join("d")
+                .join(crate::local::LOCAL_DIR)
+                .join("pipelines");
+            std::fs::create_dir_all(&local_pipelines).unwrap();
+            std::fs::write(
+                local_pipelines.join("private-only.yml"),
+                "steps:\n  - id: a\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let pipelines = Pipelines::load(&root, &crate::config::Config::default()).unwrap();
+            assert!(
+                pipelines.get("solo").is_ok(),
+                "the workspace's own pipeline loads"
+            );
+            assert!(
+                pipelines.get("private-only").is_err(),
+                "home mode must never read local/"
+            );
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// End-to-end coverage the task calls for: a repo-mode fixture with one
+    /// private pipeline naming one private prompt, checked by
+    /// `pipeline check` and `pipeline list`.
+    #[test]
+    fn a_private_pipeline_naming_a_private_prompt_checks_and_lists() {
+        let root = crate::scratch::root("pipeline-private-e2e");
+        let home = crate::scratch::root("pipeline-private-e2e-home");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+
+        // A tracked pipeline with its own prompt present, so `pipeline
+        // check` has nothing tracked to complain about.
+        std::fs::create_dir_all(Pipelines::dir_in(&root)).unwrap();
+        std::fs::write(
+            Pipelines::file_in(&root, "impl"),
+            "steps:\n  - id: implement\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+        )
+        .unwrap();
+        let tracked_prompt = crate::prompt::directory_form_in(&root, "implement");
+        std::fs::create_dir_all(tracked_prompt.parent().unwrap()).unwrap();
+        std::fs::write(&tracked_prompt, "# implement\n").unwrap();
+        // Every pipeline's `blocked` step is materialised from
+        // `[unattended]` and needs a prompt of its own — see
+        // `blocked_step_from_config` — so both pipelines below need it too.
+        let unblocker_prompt = crate::prompt::directory_form_in(&root, "unblocker");
+        std::fs::create_dir_all(unblocker_prompt.parent().unwrap()).unwrap();
+        std::fs::write(&unblocker_prompt, "# unblocker\n").unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let local = crate::local::dir_for(&root).unwrap();
+            let pipelines_dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&pipelines_dir).unwrap();
+            std::fs::write(
+                pipelines_dir.join("impl-strict.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    prompt: helper\n    \
+                 model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+            let prompt_dir = crate::local::prompts_dir(&local).join("helper");
+            std::fs::create_dir_all(&prompt_dir).unwrap();
+            std::fs::write(prompt_dir.join(crate::assets::PROMPT_FILE), "# helper\n").unwrap();
+
+            let config = crate::config::Config::default();
+            let pipelines = Pipelines::load(&root, &config).unwrap();
+            assert_eq!(
+                pipelines
+                    .get("impl-strict")
+                    .unwrap()
+                    .private_file
+                    .as_deref(),
+                Some(pipelines_dir.join("impl-strict.yml").as_path())
+            );
+
+            let repo = crate::repo::Repo {
+                checkout: root.clone(),
+                root: root.clone(),
+                config,
+                home: crate::mux::project_home(&root).unwrap(),
+            };
+
+            crate::commands::pipeline_check(&repo, Ok(pipelines.clone()), false)
+                .expect("the private pipeline and its private prompt must both check out");
+            crate::commands::pipeline_list(&repo, &pipelines, false)
+                .expect("listing must not fail with a private pipeline present");
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 }
