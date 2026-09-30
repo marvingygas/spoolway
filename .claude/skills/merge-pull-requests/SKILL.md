@@ -320,7 +320,7 @@ branches across every project.
 
 A dangling worktree in `git worktree list` is **usually not spoolway's**. Spoolway removes
 every checkout it cuts, in `Dispatcher::tear_down_checkout`, and it cuts them under
-`~/.spoolway/<project>/worktrees/` and nowhere else. A registration anywhere else came from
+`~/.spoolway/<label>-<id>/worktrees/` and nowhere else. A registration anywhere else came from
 another tool: `~/.herdr/worktrees/` is herdr's, and `.claude/worktrees/` and anything under
 `/tmp/claude-*/` are Claude Code's. Check the path before reporting spoolway left something
 behind.

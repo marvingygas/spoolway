@@ -51,7 +51,7 @@ writes a task into the pending directory works too.
 
 The plan page is one self-contained HTML file. A person reads it once to approve the shape.
 The binary never reads it. It lives outside the checkout, at
-`~/.spoolway/<project>/plans/<YYYY-MM-DD>-<slug>.html`.
+`~/.spoolway/<label>-<id>/plans/<YYYY-MM-DD>-<slug>.html`.
 
 Every page has four sections in this order: Intend, Context, Decisions and Mockup. The
 template is `assets/skills/claude/spoolway-plan/assets/template.html`.
@@ -71,14 +71,14 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 | Non-goals | Name the tempting wrong thing next door: the refactor, the extra endpoint, the framework swap. |
 | Reference paths | Point at files and examples. Do not paste prose that will go stale. |
 | Mockups from real output | Draw a panel from a real screenshot or real command output. A panel for something that does not exist yet names the bound it was drawn to. |
-| Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `~/.spoolway/<project>/plans/<group>/` first, and the task links the copy. |
+| Link a mockup, never redraw it | A task's `## Mockup` links each plan step and decision record it builds, by id. A source file from outside the project home is copied into `~/.spoolway/<label>-<id>/plans/<group>/` first, and the task links the copy. |
 | Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. |
 | Independent, or ordered | Judge from what each task changes whether two tasks may run side by side. A shared file alone is no reason to chain them. Tasks that do run side by side are both marked `parallel: true`. |
 
 ## Queueing a plan
 
 `/spoolway-tasks` writes each task as its own file into
-`~/.spoolway/<project>/pending/<task-id>.md`. Every task names the same `group:`. It then
+`~/.spoolway/<label>-<id>/pending/<task-id>.md`. Every task names the same `group:`. It then
 runs `spoolway task contract --from` over the directory to check the set.
 
 <img src="screenshots/queue.png" alt="the queue screen">

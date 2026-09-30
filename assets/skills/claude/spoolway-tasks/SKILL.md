@@ -12,11 +12,15 @@ frontmatter: it has to be reachable from inside another skill's own procedure, n
 person's own prompt.
 
 A task is a markdown file, and nothing else. It goes in the pending directory —
-`~/.spoolway/<project>/pending/<task-id>.md`, `<project>` being the basename of the repo
-root — where `spoolway queue` reads it. Nothing is appended to whatever page or record the
-shape came from.
+`<home>/pending/<task-id>.md` — where `spoolway queue` reads it. Nothing is appended to
+whatever page or record the shape came from.
 
-**Refuse to re-cut a plan whose tasks already exist.** `ls ~/.spoolway/<project>/pending/`
+**`<home>` is this project's own home, `~/.spoolway/<label>-<id>/`, and never a path built from
+the repo's name.** A folder named after the repo alone is one spoolway never reads. Take it off
+the contract instead: `spoolway task contract` prints the pending directory as `output.dir`,
+and `<home>` is the directory above it.
+
+**Refuse to re-cut a plan whose tasks already exist.** `ls <home>/pending/`
 and `spoolway group list`: a task still pending, or a task of this group still in the
 queue, means the breakdown is already out there. A further change is a new plan with a group
 of its own, or a revision above the tasks, not a re-cut.
@@ -150,7 +154,7 @@ reading the file whole.
    branch is not in this repository), or names one that is not open (`state` is not `OPEN`).
 
 3. **Write one file per task**, with **Write**, at
-   `~/.spoolway/<project>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
+   `<home>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
    step 1's contract already printed for this task's own pipeline — same headings, same order
    as the `body` field's `.spoolway/templates/tasks/<pipeline>.md`, with every `[[bracketed]]`
    placeholder replaced by this task's own answer, never carried through unfilled. A heading
@@ -197,7 +201,7 @@ reading the file whole.
    page, a screenshot, anything the person named or pasted — is linked from the task, never
    copied or translated into Markdown. A lane reads nothing outside its worktree and the
    project home, so a file anywhere else is first copied into
-   `~/.spoolway/<project>/plans/<group>/` and linked there.
+   `<home>/plans/<group>/` and linked there.
 
    The body's `## Mockup`, only when the task changes something a person opens, starts on
    this line, word for word:
@@ -242,11 +246,11 @@ reading the file whole.
    default to prefer over the rest — and say the swap out loud to the caller instead of just
    writing a different `pipeline:` into its task.
 
-5. **Prove the tasks.** `spoolway task contract --from ~/.spoolway/<project>/pending` —
+5. **Prove the tasks.** `spoolway task contract --from <home>/pending` —
    the same validation `queue add --from` runs, stopping short of the save. Fix what it
    reports, re-run until it passes, never mention the loop to the human.
 
-6. **Say one line**, once: `<n> tasks written to ~/.spoolway/<project>/pending. Open the
+6. **Say one line**, once: `<n> tasks written to <home>/pending. Open the
    board to send them.` Never summarise the tasks themselves.
 
 ## Guardrails
@@ -255,7 +259,7 @@ reading the file whole.
   never leave a task as the unfilled skeleton.
 - Never write a task anywhere but the pending directory, and never write anything else
   there — it is a queue of tasks, not a scratch directory. The one other place this skill
-  writes is `~/.spoolway/<project>/plans/<group>/`, and only a source file copied in
+  writes is `<home>/plans/<group>/`, and only a source file copied in
   to be linked.
 - Never redraw a source in a task. A figure, a panel or a screenshot that exists as a file
   is linked; only what exists nowhere else is written out.
