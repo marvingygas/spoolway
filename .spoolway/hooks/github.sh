@@ -1,7 +1,8 @@
 #!/bin/sh
 # Written once by `spoolway init`. Yours after that; `spoolway update`
 # never touches it. Called with `open` as the group is queued, `fetch` when
-# someone runs `spoolway issue show`, then on queued, blocked, paused and
+# someone runs `spoolway issue show`, `check` from `spoolway doctor` and
+# once more as the dispatcher starts, then on queued, blocked, paused and
 # done.
 #
 # spoolway-requires: gh >= 2.97.0
@@ -123,6 +124,18 @@ comment_snapshot() {
     comment_section "## Handoff"
   } | gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body-file -
 }
+
+if [ "$SPOOLWAY_EVENT" = check ]; then
+  gh auth status >/dev/null 2>&1 || {
+    echo "github.sh check: gh is not logged in — run \`gh auth login\`" >&2
+    exit 1
+  }
+  gh repo view "$repo" >/dev/null 2>&1 || {
+    echo "github.sh check: repository $repo not found, or gh cannot see it" >&2
+    exit 1
+  }
+  exit 0
+fi
 
 if [ "$SPOOLWAY_EVENT" = fetch ]; then
   gh issue view "$SPOOLWAY_REF" -R "$repo" \
