@@ -69,8 +69,8 @@ price_max_age_days = 30
 dirs = []
 
 [issue_tracking]
-hook = "github.sh"
-project_key = "marvingygas/spoolway"
+hook = "jira.sh"
+project_key = "KAN"
 key_in_names = true
 
 [agents.claude]
