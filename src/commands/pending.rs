@@ -871,7 +871,8 @@ mod tests {
 
     /// A group every one of whose tasks the queue already holds cannot be
     /// queued again — `validate_batch` would refuse it — so it is marked and
-    /// sorted behind the groups that can be, the same way `h` hides it.
+    /// sorted behind the groups that can be. The queue screen leaves it off its
+    /// list altogether.
     #[test]
     fn a_group_already_in_the_queue_is_marked_and_sorted_last() {
         let repo = crate::commands::testutil::fixture("pending-already-queued");

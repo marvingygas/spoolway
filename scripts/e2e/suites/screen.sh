@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bare `spoolway`: the one screen with its dispatch, queue, jobs and eval
-# tabs, driven end to end as the whole binary. It opens only with stdout on a
+# Bare `spoolway`: the one screen with its dispatch, queue, routines, jobs
+# and eval tabs, driven end to end as the whole binary. It opens only with stdout on a
 # terminal, so the run is wrapped in `script`, which gives it a pty for stdout
 # while the keys still arrive on an ordinary pipe — the same way every other
 # screen suite scripts its keystrokes.
@@ -10,8 +10,9 @@
 # a dispatcher and, behind a popup asking how, stops it. While one screen is open, a second `spoolway` or
 # `spoolway dispatch` in the same project refuses. A refusal on the queue tab
 # is drawn in a popup over the tab, and so is what a clean submission queued,
-# ending on whether a dispatcher will pick it up. Off a terminal, bare
-# `spoolway` still prints the grouped help.
+# ending on whether a dispatcher will pick it up. `→` from the queue tab
+# reaches the routines tab. Off a terminal, bare `spoolway` still prints the
+# grouped help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -91,8 +92,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" 
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
-has "the strip names all four tabs in order" \
-  "dispatch       [queue]       jobs        eval" "$FIRST"
+has "the strip names all five tabs in order" \
+  "dispatch       [queue]       routines        jobs        eval" "$FIRST"
 has "it opens on the queue tab" "groups  1 of 1" "$FIRST"
 has "with the pending group listed" "cart" "$FIRST"
 lacks "not on the dispatch tab" "dispatcher" "$FIRST"
@@ -163,7 +164,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "Dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "dispatch       [queue]       jobs        eval" "$SECOND.plain"
+lacks "without drawing a screen" "dispatch       [queue]       routines        jobs        eval" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "Dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -177,7 +178,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "Dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "dispatch       [queue]       jobs        eval" "$AFTER.plain"
+has "drawing the strip" "dispatch       [queue]       routines        jobs        eval" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -195,7 +196,7 @@ has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
-has "under the strip" "dispatch       [queue]       jobs        eval" "$LAST"
+has "under the strip" "dispatch       [queue]       routines        jobs        eval" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # A clean submission lands on the queued popup, which ends by saying whether a
@@ -221,12 +222,12 @@ works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export
 # task `frames-onto-writer` exists for: no redrawing screen erases the whole
 # terminal any more, all five of them painting through the shared frame
 # writer instead (`src/screen/frame_writer.rs`). `←` from the queue tab
-# reaches dispatch, `→` three times walks back through queue, jobs and eval,
-# and `←` three times walks all the way back — every tab this screen has,
-# both ways, with no `enter` anywhere so nothing is started or queued.
+# reaches dispatch, `→` four times walks back through queue, routines, jobs
+# and eval, and `←` four times walks all the way back — every tab this screen
+# has, both ways, with no `enter` anywhere so nothing is started or queued.
 ALL_TABS="$LIVE/all-tabs.txt"
 works "cycling every tab does not crash the screen" \
-  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
 if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
   bad "no frame drawn while cycling every tab still erases the whole screen"
   tail -30 "$ALL_TABS" | cat -v
@@ -235,13 +236,30 @@ else
 fi
 sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
 # The check above passes on an empty capture too — a screen that crashed or
-# quit before drawing a single tab has no `ESC[2J` in it either. These four
+# quit before drawing a single tab has no `ESC[2J` in it either. These five
 # require every tab this walk visits actually drew, so the check above is
 # proof about frames that were really there.
 has "the walk actually reached the dispatch tab" "┌─ dispatch ─" "$ALL_TABS.plain"
 has "and the queue tab" "─ groups" "$ALL_TABS.plain"
+has "and the routines tab" "queue       [routines]       jobs" "$ALL_TABS.plain"
 has "and the jobs tab" "no jobs yet" "$ALL_TABS.plain"
 has "and the eval tab" "┌─ eval ·" "$ALL_TABS.plain"
+
+# `→` from the queue tab, where the screen opens, reaches the routines tab
+# between queue and jobs, listing the one routine under `.spoolway/routines/`.
+# Written last, so no check above runs with a routine in the checkout.
+mkdir -p .spoolway/routines/nightly
+task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nightly"
+ROUTINES="$LIVE/routines.txt"
+works "→ from the queue tab ends when its keys run out" \
+  script -qec "printf '\\033[C' | '$SPOOLWAY'" "$ROUTINES"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "→ reaches the routines tab" \
+  "dispatch        queue       [routines]       jobs        eval" "$LAST"
+has "listing the routine" "routines  1 of 1" "$LAST"
+has "under its own key line" \
+  "[space] select   [enter] queue   [tab] tasks   [q] quit" "$LAST"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

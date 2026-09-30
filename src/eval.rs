@@ -4746,7 +4746,7 @@ mod screen_tests {
     }
 
     /// Hosted, a ledger eval cannot read is held on the tab under the strip
-    /// — the shell still has three other tabs to reach — rather than printed
+    /// — the shell still has four other tabs to reach — rather than printed
     /// on the way out, and `←` leaves it.
     #[test]
     fn hosted_an_unreadable_window_is_held_on_the_tab_until_a_shell_key() {

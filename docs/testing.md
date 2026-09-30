@@ -91,10 +91,10 @@ with a `// covers:` line.
 | `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention |
 | `lock` | A second `--tier pr` run waits for the first |
 | `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |
-| `routines` | The routines pane and the `s` save panel on the queue screen |
+| `routines` | The routines tab, and the `s` save panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | Bare `spoolway`'s jobs tab writing, pausing and deleting a job |
-| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting a dispatcher and, behind the stop popup, `enter` stopping it, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, the grouped help off a terminal, its raw output opening and closing on the alternate screen, and a walk through all four tabs and back that draws no frame with a full-screen erase |
+| `screen` | Bare `spoolway`: the five-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting a dispatcher and, behind the stop popup, `enter` stopping it, `→` from the queue tab reaching the routines tab, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, the grouped help off a terminal, its raw output opening and closing on the alternate screen, and a walk through all five tabs and back that draws no frame with a full-screen erase |
 | `board-pause` | The board's confirm panels: `p` and the dispatch tab's stop popup's `i`, and `U`, over a live lane |
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, `--force` over a live lane, and the tool-requirements gate over `queue add --from` on a real pty, checking no alternate screen and the task left in pending |
 | `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |

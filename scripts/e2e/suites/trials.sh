@@ -115,18 +115,20 @@ works "both source tasks are left exactly where they were" \
   _ "$SPOOLWAY_PROJECT_HOME"
 
 # A second template, this one already run through a pipeline once: its sole
-# document lives in the queue directory, carrying every key spoolway stamped
-# on that run — `stage:` chief among them, which `parse_submission` refuses
-# outright. `list_groups` reads such a group's task straight out of `queue/`,
-# verbatim, so forking it is `t` over exactly the shape a task queued or
-# archived earlier has. `f` narrows to it by name, `enter` leaves the search
+# document lives in the archive, carrying every key spoolway stamped on that
+# run — `stage:` chief among them, which `parse_submission` refuses outright.
+# `list_groups` reads such a group's task straight out of `archive/`,
+# verbatim, so forking it is `t` over exactly the shape a task archived
+# earlier has. Not `queue/`: the queue tab never lists a queued group, and
+# its filter never reaches one. `f` narrows to it by name, `enter` leaves the search
 # box keeping the query, and `t` then reaches it straight from the groups
 # pane, with no `Tab` needed. Two `→`s land it on `default` — one press to
 # `bugfix`, the pipeline that sorts first with nothing assigned yet, a
 # second past it — since `enter` refuses to advance with it still
 # unassigned; `enter` then advances past the assign screen, and `enter`
 # again launches with nothing ticked to skip.
-task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
+mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
+task_doc "$SPOOLWAY_PROJECT_HOME/archive/old-run.md" old-run "$BODY" \
   "group: old-run" \
   "stage: done" \
   "run: r00000000000000af" \
@@ -148,15 +150,12 @@ lacks "the reset held: no stamped stage on the forked arm" "stage: done" \
 lacks "nor the run id the earlier run minted" "run: r00000000000000af" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 
-# The source document goes now that the arm is forked off it, and it has to:
-# `t` leaves a source exactly where it found it, and this one was written
-# straight into `queue/` with no `pipeline:` on purpose. A routeless document
-# in the live queue is precisely what `check_task_routes` refuses a whole
-# start over — correctly — so leaving it here would refuse every dispatcher
-# the rest of this suite starts, and the runtime half below would assert on
-# tasks nothing ever moved. The same disposal `command-steps.sh` does for its
-# own routeless fixture, for the same reason.
-rm -f "$SPOOLWAY_PROJECT_HOME/queue/old-run.md"
+# The source document goes now that the arm is forked off it: `t` leaves a
+# source exactly where it found it, and this one was written straight into
+# `archive/` with no `pipeline:` on purpose, a record no real run left. The
+# runtime half below asserts on what the archive holds after a real
+# dispatcher, so a hand-written entry is cleared out of its way first.
+rm -f "$SPOOLWAY_PROJECT_HOME/archive/old-run.md"
 
 # ------------------------------------------------------- dispatch and cleanup
 # Everything above only ever wrote queue files. From here a real dispatcher

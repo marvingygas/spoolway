@@ -949,7 +949,8 @@ works "it never touched the pending directory" \
 # The pending directory is empty at this point — both cases above already
 # cleared every document out of it — so this is also the one place proving
 # the screen opens on an empty pending directory rather than refusing with
-# "Nothing to list", so long as the queue itself still holds a group.
+# "Nothing to list", so long as the queue itself still holds a group. The
+# queue tab never lists a queued group, so not even `h` draws its row.
 on_screen 'h' "$LIVE/queue-screen-only.out"
 if grep -q "Nothing to list" "$LIVE/queue-screen-only.out"; then
   bad "a group with nothing left in pending still opens the screen"
@@ -957,13 +958,13 @@ if grep -q "Nothing to list" "$LIVE/queue-screen-only.out"; then
 else
   ok "a group with nothing left in pending still opens the screen"
 fi
-has "\`h\` still lists a group whose tasks are only in the queue now" \
+lacks "\`h\` never lists a group whose tasks are only in the queue now" \
   "screen-shipped-group" "$LIVE/queue-screen-only.out"
 
 # --------------------------------------------------- the archive's own rows
-# `list_groups` now reads `archive/` as a third source, and `h` widens the
-# left pane one state at a time: pending only, then plus queued, then plus
-# done, then wraps. Only the real binary, run against a task a real
+# `list_groups` now reads `archive/` as a third source, and `h` switches the
+# left pane between queueable only and queueable plus done. Only the real
+# binary, run against a task a real
 # dispatcher actually archived, proves the wiring — `list_groups`'s own unit
 # tests read a synthetic fixture directory, never `Repo::archive_dir()`
 # after a real run.
@@ -979,13 +980,13 @@ fi
 works "and landed in the archive" \
   test -f "$SPOOLWAY_PROJECT_HOME/archive/archived-row.md"
 
-# Three key presses of `h`, captured as one session: the shared frame writer
+# Two key presses of `h`, captured as one session: the shared frame writer
 # (`src/screen/frame_writer.rs`) writes a fresh `\x1b[?2026h\x1b[H` before
 # every frame that differs from the last, so the python snippet below splits
-# the raw output back into the four frames this draws — opening, then one
+# the raw output back into the three frames this draws — opening, then one
 # per press — rather than grepping the whole file, which could never tell
 # "shown once, then hidden again" from "never shown".
-on_screen 'hhh' "$LIVE/queue-h-cycle.out"
+on_screen 'hh' "$LIVE/queue-h-cycle.out"
 if python3 - "$LIVE/queue-h-cycle.out" arch-row <<'PY'
 import sys
 
@@ -997,16 +998,16 @@ name = sys.argv[2].encode()
 # non-empty, since the preamble is itself a few bytes long and would
 # otherwise pass.
 frames = data.split(b"\x1b[?2026h\x1b[H")[1:]
-# frames[0..3] are the opening frame and the three `h` presses, in order —
-# `done` is the third widening, so the group first appears in frames[2] and
-# the fourth frame (the wrap) must not carry it any more.
-ok = len(frames) >= 4 and name in frames[2] and name not in frames[-1]
+# frames[0..2] are the opening frame and the two `h` presses, in order —
+# the first press shows done groups, so the group first appears in frames[1],
+# and the second press hides them again, so the last frame must not carry it.
+ok = len(frames) >= 3 and name not in frames[0] and name in frames[1] and name not in frames[-1]
 sys.exit(0 if ok else 1)
 PY
 then
-  ok "\`h\` shows the archived group under \`done\` on the third press and hides it again on the wrap"
+  ok "\`h\` shows the archived group under \`done\` on the first press and hides it again on the second"
 else
-  bad "\`h\` shows the archived group under \`done\` on the third press and hides it again on the wrap"
+  bad "\`h\` shows the archived group under \`done\` on the first press and hides it again on the second"
   sed 's/^/        /' "$LIVE/queue-h-cycle.out"
 fi
 

@@ -10,7 +10,7 @@ use chrono::Local;
 
 use super::queue::{
     Focus, Items, RoutineNav, clip as clip_to, handle_routine_key, highlighted_routine_folder,
-    highlighted_routine_task, labeled_row, layout, routine_level, two_pane_frame, window,
+    highlighted_routine_task, labeled_row, layout, two_pane_frame, window,
 };
 use super::routines::RoutineFolder;
 use super::*;
@@ -1361,16 +1361,19 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
 }
 
 /// The routine picker's keys, in its popup and on the line under the frame.
+/// One row for both panes, unlike the queue screen's routines pane: `esc`
+/// cancels the picker from either, so nothing on it changes with focus.
 const ROUTINE_KEYS: &[(&str, &str)] = &[
-    ("o", "open task"),
     ("space", "select"),
     ("enter", "use it"),
+    ("o", "open task"),
+    ("tab", "tasks"),
     ("esc", "cancel"),
 ];
 
 /// The routine picker's overlay, as step 32 of the screen's mockup draws it:
-/// the folders at the browser's current level, each with its tick, and under
-/// them the highlighted folder's own tasks — the ones `enter` would use
+/// one row per routine, each with its tick, and under them the highlighted
+/// routine's tasks — the ones `enter` would use
 /// — by id and title. The same browser the queue screen's routines pane
 /// drives, [`handle_routine_key`] and all, drawn in a box over the list
 /// rather than in place of it.
@@ -1379,19 +1382,15 @@ fn routine_panel(ctx: &Ctx, nav: &RoutineNav) -> Vec<String> {
     // As wide as the key row under it, so a long title never widens the
     // popup past what the keys already take.
     let width = key_row.chars().count();
-    let level = routine_level(ctx.routines, &nav.path);
 
     let mut body = vec![String::new()];
-    if level.is_empty() {
+    if ctx.routines.is_empty() {
         body.push(clip_to(
-            match nav.path.is_empty() {
-                true => format!("nothing under {}", ctx.routines_dir.display()),
-                false => "nothing here".to_string(),
-            },
+            format!("nothing under {}", ctx.routines_dir.display()),
             width,
         ));
     }
-    for (i, folder) in level.iter().enumerate() {
+    for (i, folder) in ctx.routines.iter().enumerate() {
         let marker = match i == nav.folder_cursor && nav.focus == Focus::Groups {
             true => ">",
             false => " ",
@@ -1936,7 +1935,9 @@ mod tests {
             "{frame}"
         );
         assert!(
-            frame.contains("[o] open task   [space] select   [enter] use it   [esc] cancel"),
+            frame.contains(
+                "[space] select   [enter] use it   [o] open task   [tab] tasks   [esc] cancel"
+            ),
             "{frame}"
         );
         assert!(frame.contains("─ jobs"), "the list under it: {frame}");
@@ -2006,8 +2007,9 @@ mod tests {
 
         let walking = drive(&repo, "n").to_string();
         assert!(
-            last_frame(&walking)
-                .contains("[o] open task   [space] select   [enter] use it   [esc] cancel"),
+            last_frame(&walking).contains(
+                "[space] select   [enter] use it   [o] open task   [tab] tasks   [esc] cancel"
+            ),
             "{}",
             last_frame(&walking)
         );
@@ -2070,13 +2072,80 @@ mod tests {
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_routines(&repo);
 
-        // `n` opens the routine picker, `→` focuses the tasks pane on
+        // `n` opens the routine picker, `tab` focuses the tasks pane on
         // `nightly`'s own `audit`, `o` tries to open it.
-        let drawn = drive(&repo, "n\x1b[Co");
+        let drawn = drive(&repo, "n\to");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
         assert!(last.contains("┌─ open task "), "in a popup: {last}");
+    }
+
+    /// The picker lists one row per routine. A subfolder inside `nightly`
+    /// is never a row of its own; its task shows under `nightly` instead,
+    /// the same routine a job pointing at `nightly` fires it with.
+    #[test]
+    fn the_routine_picker_lists_a_subfolder_s_tasks_under_its_routine() {
+        let repo = fixture("jobs-picker-flat");
+        seed_routines(&repo);
+        let sub = repo.routines_dir().join("nightly").join("extra");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("sweep.md"),
+            "---\nid: sweep\ntitle: sweep the cache\ngroup: demo\n---\n",
+        )
+        .unwrap();
+
+        let drawn = drive(&repo, "n");
+        let last = last_frame(&drawn);
+
+        assert!(last.contains("> [ ] nightly"), "{last}");
+        assert!(last.contains("[ ] weekly"), "{last}");
+        assert!(!last.contains("[ ] extra"), "a subfolder is no row: {last}");
+        assert!(last.contains("sweep   sweep the cache"), "{last}");
+        assert!(
+            last.contains(
+                "[space] select   [enter] use it   [o] open task   [tab] tasks   [esc] cancel"
+            ),
+            "{last}"
+        );
+    }
+
+    /// `tab` moves the picker's cursor onto the tasks pane and back. The
+    /// arrows move nothing: they belong to the tab strip now.
+    #[test]
+    fn tab_moves_the_routine_picker_between_panes_and_the_arrows_do_nothing() {
+        let repo = fixture("jobs-picker-tab");
+        seed_routines(&repo);
+
+        let last = |input: &str| last_frame(&drive(&repo, input)).to_string();
+
+        let arrows = last("n\x1b[C\x1b[D\x1b[C");
+        assert!(
+            arrows.contains("> [ ] nightly"),
+            "still on the list: {arrows}"
+        );
+        assert!(!arrows.contains("> audit"), "{arrows}");
+
+        let tasks = last("n\t");
+        assert!(tasks.contains("  [ ] nightly"), "{tasks}");
+        assert!(tasks.contains("> audit"), "{tasks}");
+
+        let back = last("n\t\t");
+        assert!(back.contains("> [ ] nightly"), "{back}");
+    }
+
+    /// `esc` cancels the picker from the tasks pane too, not only from the
+    /// list: the picker has no "back to the list" of its own.
+    #[test]
+    fn esc_over_the_routine_picker_s_tasks_pane_cancels_it() {
+        let repo = fixture("jobs-picker-esc-tasks");
+        seed_routines(&repo);
+
+        let last = last_frame(&drive(&repo, "n\t\x1b")).to_string();
+
+        assert!(!last.contains("which routine"), "picker closed: {last}");
+        assert!(last.contains("[n] new"), "back on the list: {last}");
     }
 
     #[test]

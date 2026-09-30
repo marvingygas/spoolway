@@ -403,8 +403,8 @@ impl Repo {
     /// Where a project keeps tasks it wants to re-run — see
     /// [`crate::config::ROUTINES_DIR`] for why nothing auto-creates this the
     /// way [`Repo::pending_dir`] creates itself: an ordinary project that has
-    /// saved no routine has no directory here at all, and the queue screen's
-    /// `r` pane says so by naming this path rather than opening an empty one.
+    /// saved no routine has no directory here at all, and the routines tab
+    /// says so by naming this path rather than opening an empty one.
     pub fn routines_dir(&self) -> PathBuf {
         self.checkout.join(crate::config::ROUTINES_DIR)
     }

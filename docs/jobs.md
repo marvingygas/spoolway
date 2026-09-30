@@ -72,9 +72,10 @@ schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
 `n` and `e` walk three panels. `esc` on any of them writes nothing.
 
-1. The routine. This is the same routines browser as the queue screen's `r` pane. `space`
-   ticks a folder and `enter` picks it. `space` over a single task picks that task.
-   `o` opens the highlighted task, once the tasks pane has focus.
+1. The routine. This is the same routines browser as the routines tab, listing one
+   row per routine. `space` ticks a routine and `enter` picks it. `tab` moves focus onto the
+   tasks pane, where `space` picks the highlighted task and `o` opens it in your editor. `esc`
+   cancels the picker from either pane.
 2. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
 3. The pipeline. The picker lists every pipeline the repo defines and narrows as you type.
