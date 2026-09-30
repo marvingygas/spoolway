@@ -2454,8 +2454,16 @@ enum Mode {
     /// the two tabs never share a visit. The folders and tasks themselves
     /// live in `run_screen`'s own `routines`, read fresh on every visit to
     /// the tab, the same way `groups` is read once up front rather than
-    /// carried on the mode.
+    /// carried on the mode, and read again after `x` deletes one.
     Routines(RoutineNav),
+    /// `x`'s own popup over the routines pane `nav` describes: the routine
+    /// and every job that points into it, deleted together on `enter` —
+    /// see [`delete_routine`] — and all kept on `esc`. Every other key does
+    /// nothing, so a stray keystroke can neither delete nor dismiss it.
+    DeleteRoutine {
+        nav: RoutineNav,
+        target: RoutineDelete,
+    },
     /// `s`'s own panel, over the pending screen: saving the named group's
     /// tasks into `.spoolway/routines/<name>/`, `name` typed and edited
     /// the same way `Mode::Filter`'s query is. `group` is fixed at the
@@ -2788,7 +2796,8 @@ fn selectable(group: &Group) -> bool {
 /// queue with it.
 ///
 /// The folders themselves are not here — it lives in `run_screen`'s own
-/// `routines`, read fresh on every visit to the routines tab, the same read
+/// `routines`, read fresh on every visit to the routines tab and again
+/// after `x` deletes one, the same read
 /// [`super::routines::list_routines`] gives the empty-directory case no
 /// error over.
 ///
@@ -3174,7 +3183,8 @@ pub(crate) fn queue_tab(
 /// [`Mode::Routines`] pane, over the terminal the shell around it already
 /// holds. Answers the [`Leave`] that ended it.
 ///
-/// The routine folders are read here, once per visit, so a routine saved
+/// The routine folders are read here, once per visit — and again only
+/// after `x` deletes one, see [`after_routine_delete`] — so a routine saved
 /// with `s` on the queue tab is listed the moment `→` reaches this one. Each
 /// visit also starts on a fresh [`RoutineNav`], with nothing ticked and both
 /// cursors at the top, the same as the queue tab starts each visit fresh.
@@ -3257,7 +3267,7 @@ fn run_screen_from(
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<ScreenExit> {
-    let (mut groups, routines) = lists;
+    let (mut groups, mut routines) = lists;
     let routines_dir = repo.routines_dir();
 
     loop {
@@ -3508,6 +3518,12 @@ fn run_screen_from(
                         &mut |_| {},
                     );
                 }
+                // `x` over the list: the popup naming the routine and every
+                // job that goes with it. Read only on the list, so the tasks
+                // pane has no delete — see `begin_routine_delete`.
+                Key::Char('x') if nav.focus == Focus::Groups => {
+                    state.mode = begin_routine_delete(repo, &routines, nav);
+                }
                 // `o` over the tasks pane: open the highlighted task
                 // in an editor pane, the same shape `open_highlighted` gives
                 // the pending screen — see `open_highlighted_routine`. Gated
@@ -3524,6 +3540,17 @@ fn run_screen_from(
                     handle_routine_key(&routines, &mut nav, key);
                     state.mode = Mode::Routines(nav);
                 }
+            },
+            Mode::DeleteRoutine { nav, target } => match key {
+                Key::Enter => {
+                    let (nav, target) = (nav.clone(), target.clone());
+                    let result = delete_routine(repo, &target);
+                    state.mode = after_routine_delete(repo, &mut routines, nav, result);
+                }
+                Key::Esc => state.mode = Mode::Routines(nav.clone()),
+                // Every other key leaves the popup open, so a stray
+                // keystroke can neither delete nor dismiss it.
+                _ => {}
             },
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
@@ -3857,8 +3884,8 @@ pub(super) fn highlighted_routine_task<'a>(
 }
 
 /// One key over the routines pane — everything but `esc` over the tasks
-/// pane, `enter` on a selected folder, `space` over the tasks pane and `o`
-/// over a highlighted task, which all need the repo to act on or change
+/// pane, `enter` on a selected folder, `space` over the tasks pane, `x`
+/// over the list and `o` over a highlighted task, which all need the repo to act on or change
 /// this mode outright, so `run_screen` reads those first and only falls through to this for the
 /// rest, the same split it makes for `handle_browse_key`. `q` is part of
 /// that rest, and does nothing here either.
@@ -5041,7 +5068,7 @@ pub(super) fn two_pane_frame(
 /// `←`/`→` switch tabs instead.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
-/// [`Mode::SaveRoutine`] — none of the ordinary line's keys is read, so this
+/// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`] — none of the ordinary line's keys is read, so this
 /// draws the picker's own key row instead, the same keys its popup names. A
 /// notice is different: it reads only `enter` to close it, which its own
 /// popup says, and the line under the frame stays the one the screen will
@@ -5060,6 +5087,7 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         // to leave it — `enter`/`esc` — rather than any of the ordinary
         // line's, none of which this mode reads as anything but a letter.
         Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
+        Mode::DeleteRoutine { .. } => key_hint(DELETE_ROUTINE_KEYS),
         Mode::Gate(_) => key_hint(GATE_KEYS),
         Mode::Trial(trial) => match trial.stage {
             TrialStage::AssignPipelines => hint(&assign_keys(
@@ -5072,14 +5100,15 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
         // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
         // which apply here. One line per pane, as the pending screen's is:
-        // `o` only where a task is under the cursor. No `esc`: over the list
+        // `x` only over the list, the one pane it deletes from, and `o`
+        // only where a task is under the cursor. No `esc`: over the list
         // it does nothing, since this pane is the routines tab's whole
         // screen, and over the tasks pane it goes back to the list, which
         // `tab` already names. The same line under a notice drawn over the
         // pane.
         _ if let Some(nav) = routines_beneath(&state.mode) => {
             let pane: &[(&str, &str)] = match nav.focus {
-                Focus::Groups => &[("tab", "tasks")],
+                Focus::Groups => &[("x", "delete"), ("tab", "tasks")],
                 Focus::Tasks => &[("o", "open task"), ("tab", "routines")],
             };
             key_hint(
@@ -5140,6 +5169,10 @@ const GATE_KEYS: &[(&str, &str)] = &[("enter", "set"), ("g", "clear"), ("esc", "
 /// The save panel's keys, in its popup and on the line under the frame.
 const SAVE_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "cancel")];
 
+/// `x`'s popup's keys, in its popup and on the line under the frame — the
+/// same pair the jobs tab's delete answers to.
+const DELETE_ROUTINE_KEYS: &[(&str, &str)] = &[("enter", "delete"), ("esc", "keep")];
+
 /// The trial picker's second screen's keys, in its popup and on the line
 /// under the frame.
 const SKIP_KEYS: &[(&str, &str)] = &[
@@ -5181,8 +5214,8 @@ fn fit_keys(row: String, width: usize) -> String {
 }
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
-/// notice opened from it, or the tool-requirements gate or the issue
-/// question a routine submit stopped at. `None` for everything drawn over
+/// notice opened from it, `x`'s delete popup, or the tool-requirements gate
+/// or the issue question a routine submit stopped at. `None` for everything drawn over
 /// the pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
     match mode {
@@ -5202,7 +5235,8 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
         | Mode::IssueQuestion {
             then: Resume::Routines(nav) | Resume::RoutineTask(nav),
             ..
-        } => Some(nav),
+        }
+        | Mode::DeleteRoutine { nav, .. } => Some(nav),
         _ => None,
     }
 }
@@ -5280,6 +5314,7 @@ fn popup(
         Mode::Gate(cursor) => gate_panel(groups, pipelines, state, *cursor),
         Mode::Trial(trial) => trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)),
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
+        Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border — see
         // `checkbox_row_cap`.
@@ -6364,6 +6399,214 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
             crate::platform::relative(&repo.checkout, &dir)
         ),
     )
+}
+
+/// What `x`'s popup asked about, fixed at the moment `x` was pressed: the
+/// routine's folder, and every job pointing into it with the store it lives
+/// in. `enter` deletes exactly what the popup named, never a list read
+/// again behind the person's back.
+#[derive(Debug, Clone)]
+struct RoutineDelete {
+    name: String,
+    path: std::path::PathBuf,
+    tasks: usize,
+    jobs: Vec<(String, crate::jobs::Scope)>,
+}
+
+/// Every job in `jobs` whose resolved path is `folder` or anything inside
+/// it — a whole-folder job and a single-task one alike, since either fails
+/// on every firing once the folder is gone. The match is by path component,
+/// so `nightly` never claims a job on `nightly-extra`. A job whose path
+/// escapes the routines directory resolves to nothing and points nowhere,
+/// so it is left alone for `spoolway doctor` to name.
+fn jobs_into<'a>(
+    repo: &Repo,
+    jobs: &'a [crate::jobs::Job],
+    folder: &std::path::Path,
+) -> Vec<&'a crate::jobs::Job> {
+    jobs.iter()
+        .filter(|job| job.target(repo).is_ok_and(|path| path.starts_with(folder)))
+        .collect()
+}
+
+/// `x` over the routine list: the popup naming the highlighted routine and
+/// the jobs [`jobs_into`] finds for it.
+///
+/// A job store that will not read hides which jobs point in, so the delete
+/// is refused here, before anything is removed, rather than leave a job
+/// firing at a folder that is gone.
+fn begin_routine_delete(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNav) -> Mode {
+    let Some(folder) = highlighted_routine_folder(routines, nav) else {
+        return Mode::Routines(nav.clone());
+    };
+    let jobs = match crate::jobs::load(repo) {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            return outcome_over(
+                Some(nav),
+                "routine not deleted",
+                format!(
+                    "{err:#}\n\nthe jobs pointing into {} cannot be told apart until this \
+                     store reads, so nothing was removed. `spoolway doctor` names what is wrong.",
+                    folder.name
+                ),
+            );
+        }
+    };
+    let target = RoutineDelete {
+        name: folder.name.clone(),
+        path: folder.path.clone(),
+        tasks: folder.tasks.len(),
+        jobs: jobs_into(repo, &jobs, &folder.path)
+            .into_iter()
+            .map(|job| (job.name.clone(), job.scope))
+            .collect(),
+    };
+    Mode::DeleteRoutine {
+        nav: nav.clone(),
+        target,
+    }
+}
+
+/// `x`'s popup: the routine, what deleting it means, and the jobs that go
+/// with it, each beside its store. The jobs lines are left out when there
+/// are none.
+fn delete_routine_panel(target: &RoutineDelete) -> Vec<String> {
+    let mut body = vec![
+        String::new(),
+        format!("  {} · {}", target.name, plural(target.tasks, "task")),
+        "  its folder is removed from disk,".to_string(),
+        "  and only git can bring it back.".to_string(),
+    ];
+    if !target.jobs.is_empty() {
+        // Names padded to the longest one, three spaces short of the store,
+        // so the `user`/`project` column lines up as the mockup draws it.
+        let width = target
+            .jobs
+            .iter()
+            .map(|(name, _)| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        body.push(String::new());
+        body.push("  these jobs are deleted with it:".to_string());
+        for (name, scope) in &target.jobs {
+            body.push(format!("    {}   {}", pad_to(name, width), scope.label()));
+        }
+    }
+    panel("delete this routine", &body, &keys(DELETE_ROUTINE_KEYS))
+}
+
+/// `enter` on `x`'s popup: every job the popup named, then the folder and
+/// everything under it — in that order, so a failure part way leaves at
+/// worst a routine nothing fires, never a job firing at a folder that is
+/// gone. Nothing is staged: the folder leaves the working tree, and git is
+/// the way back, the same as [`save_routine`] writes without touching git.
+///
+/// Both stores are read again first, and a store broken since `x` refuses
+/// the delete with nothing removed, the same refusal `x` itself gives. Each
+/// job is then removed from its own store alone, so a failure is only ever
+/// that job's, and the jobs listed before it really are gone.
+///
+/// A failure answers the text of the popup that says so: the error, what
+/// was already removed and what is left.
+fn delete_routine(repo: &Repo, target: &RoutineDelete) -> std::result::Result<(), String> {
+    let folder = format!(
+        "folder {}",
+        crate::platform::relative(&repo.checkout, &target.path)
+    );
+    let job_line =
+        |(name, scope): &(String, crate::jobs::Scope)| format!("job {name} ({})", scope.label());
+    if let Err(err) = crate::jobs::load(repo) {
+        let err = err.context("nothing was removed — `spoolway doctor` names what is wrong");
+        let left: Vec<String> = target
+            .jobs
+            .iter()
+            .map(job_line)
+            .chain([folder.clone()])
+            .collect();
+        return Err(partial_delete(&err, &[], &left));
+    }
+    for (done, job) in target.jobs.iter().enumerate() {
+        if let Err(err) = crate::jobs::delete_in(repo, job.1, &job.0) {
+            let removed: Vec<String> = target.jobs[..done].iter().map(job_line).collect();
+            let left: Vec<String> = target.jobs[done..]
+                .iter()
+                .map(job_line)
+                .chain([folder.clone()])
+                .collect();
+            return Err(partial_delete(&err, &removed, &left));
+        }
+    }
+    match std::fs::remove_dir_all(&target.path) {
+        Ok(()) => Ok(()),
+        // Gone already, by another hand between `x` and `enter`: the disk
+        // already says what this was asked to make it say.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            let err =
+                anyhow::Error::new(err).context(format!("removing {}", target.path.display()));
+            let removed: Vec<String> = target.jobs.iter().map(job_line).collect();
+            Err(partial_delete(&err, &removed, &[folder]))
+        }
+    }
+}
+
+/// The text of the popup a delete stopped part way through opens: the
+/// error, then what is gone and what is still there, so a person knows what
+/// to finish by hand.
+fn partial_delete(err: &anyhow::Error, removed: &[String], left: &[String]) -> String {
+    let list = |lines: &[String]| match lines.is_empty() {
+        true => "  nothing".to_string(),
+        false => lines
+            .iter()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    format!(
+        "{err:#}\n\nremoved:\n{}\n\nleft:\n{}",
+        list(removed),
+        list(left)
+    )
+}
+
+/// The routines pane after a delete: `routines` read again so the gone
+/// folder drops out, the cursor pulled back inside what is left, and the
+/// tick set cut to folders still listed. Answers the popup to open, if the
+/// delete or the read that follows it failed.
+fn after_routine_delete(
+    repo: &Repo,
+    routines: &mut Vec<RoutineFolder>,
+    mut nav: RoutineNav,
+    result: std::result::Result<(), String>,
+) -> Mode {
+    let reread = super::routines::list_routines(repo);
+    let reread_err = match reread {
+        Ok(fresh) => {
+            *routines = fresh;
+            None
+        }
+        // The list stays as it was, minus any folder no longer on disk, so
+        // the deleted routine is not drawn as if it were still there.
+        Err(err) => {
+            routines.retain(|folder| folder.path.is_dir());
+            Some(err)
+        }
+    };
+    nav.selected
+        .retain(|path| routines.iter().any(|folder| &folder.path == path));
+    nav.folder_cursor = nav.folder_cursor.min(routines.len().saturating_sub(1));
+    nav.task_cursor = 0;
+    nav.focus = Focus::Groups;
+    match (result, reread_err) {
+        (Err(text), _) => outcome_over(Some(&nav), "routine not fully deleted", text),
+        (Ok(()), Some(err)) => outcome_over(
+            Some(&nav),
+            "routine deleted",
+            format!("the routine list would not read again: {err:#}"),
+        ),
+        (Ok(()), None) => Mode::Routines(nav),
+    }
 }
 
 /// Every task in the ticked routines — each one's nested subfolders
@@ -8263,7 +8506,8 @@ mod tests {
         let (exit, drawn) = routines_exit(&repo, "q");
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
-            last_frame(&drawn).contains(" [space] select   [enter] queue   [tab] tasks   [q] quit"),
+            last_frame(&drawn)
+                .contains(" [space] select   [enter] queue   [x] delete   [tab] tasks   [q] quit"),
             "{drawn}"
         );
         assert!(last_frame(&drawn).contains("[routines]"), "{drawn}");
@@ -11557,7 +11801,7 @@ mod tests {
         assert!(last.contains("nightly"), "{last}");
         assert!(last.contains("1 task"), "{last}");
         assert!(
-            last.contains("[space] select   [enter] queue   [tab] tasks"),
+            last.contains("[space] select   [enter] queue   [x] delete   [tab] tasks"),
             "{last}"
         );
         assert!(!last.contains("[esc] back"), "{last}");
@@ -11720,7 +11964,7 @@ mod tests {
         );
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
-            back.contains(" [space] select   [enter] queue   [tab] tasks   [q] quit"),
+            back.contains(" [space] select   [enter] queue   [x] delete   [tab] tasks   [q] quit"),
             "{back}"
         );
     }
@@ -11757,6 +12001,342 @@ mod tests {
             "{}",
             last_frame(&drawn)
         );
+    }
+
+    /// A job on `routine` in `scope`'s store, as the jobs tab would write it.
+    fn write_job(repo: &Repo, scope: crate::jobs::Scope, name: &str, routine: &str) {
+        crate::jobs::write(
+            repo,
+            scope,
+            name,
+            &crate::jobs::JobSpec {
+                schedule: "0 3 * * *".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: routine.to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Two routines, `maintenance` and `nightly`, sorted in that order, with
+    /// `nightly` holding two tasks — the shape the mockup draws.
+    fn seed_two_routines(repo: &Repo) {
+        write_routine(
+            repo,
+            "maintenance",
+            "prune",
+            &task_text("prune", "group: maintenance\n", BODY),
+        );
+        write_routine(
+            repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        write_routine(
+            repo,
+            "nightly",
+            "audit-docs",
+            &task_text("audit-docs", "group: nightly\n", BODY),
+        );
+    }
+
+    fn job_names(repo: &Repo) -> Vec<String> {
+        crate::jobs::load(repo)
+            .unwrap()
+            .into_iter()
+            .map(|job| job.name)
+            .collect()
+    }
+
+    /// A job points into a routine when its path is the folder or anything
+    /// inside it; a job on another routine, even one whose name starts the
+    /// same way, is left alone.
+    #[test]
+    fn a_routine_claims_its_whole_folder_and_single_task_jobs_only() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-delete-match");
+        seed_two_routines(&repo);
+        write_routine(
+            &repo,
+            "nightly-extra",
+            "other",
+            &task_text("other", "group: nightly-extra\n", BODY),
+        );
+        write_job(&repo, Scope::User, "whole", "nightly");
+        write_job(&repo, Scope::Project, "single", "nightly/audit-docs.md");
+        write_job(&repo, Scope::User, "elsewhere", "maintenance");
+        write_job(&repo, Scope::User, "prefix", "nightly-extra");
+        write_job(&repo, Scope::User, "escapes", "../nightly");
+
+        let jobs = crate::jobs::load(&repo).unwrap();
+        let folder = repo.routines_dir().join("nightly");
+        let matched: Vec<(&str, Scope)> = jobs_into(&repo, &jobs, &folder)
+            .into_iter()
+            .map(|job| (job.name.as_str(), job.scope))
+            .collect();
+        assert_eq!(
+            matched,
+            vec![("whole", Scope::User), ("single", Scope::Project)]
+        );
+    }
+
+    /// A store broken between `x` and `enter` refuses the delete with
+    /// nothing removed: the listed job is still in its own store, the folder
+    /// is still there, and the popup text sends the person to `spoolway
+    /// doctor`.
+    #[test]
+    fn a_store_broken_after_x_refuses_with_nothing_removed() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-delete-store-broken");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "whole", "nightly");
+        let folder = repo.routines_dir().join("nightly");
+        let target = RoutineDelete {
+            name: "nightly".to_string(),
+            path: folder.clone(),
+            tasks: 2,
+            jobs: vec![("whole".to_string(), Scope::User)],
+        };
+        // Broken after `x` read the stores, the way a hand edit between the
+        // popup and `enter` would break it.
+        std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
+        std::fs::write(repo.jobs_file(), "[jobs.single\n").unwrap();
+
+        let text = delete_routine(&repo, &target).unwrap_err();
+
+        assert!(folder.is_dir(), "the folder is kept");
+        assert!(
+            std::fs::read_to_string(repo.user_jobs_file())
+                .unwrap()
+                .contains("[jobs.whole]"),
+            "the job is kept"
+        );
+        assert!(text.contains("spoolway doctor"), "{text}");
+        assert!(text.contains("jobs.toml"), "{text}");
+        let (removed, left) = text.split_once("left:").unwrap();
+        assert!(removed.contains("removed:\n  nothing"), "{text}");
+        assert!(left.contains("job whole (user)"), "{text}");
+        assert!(left.contains("folder .spoolway/routines/nightly"), "{text}");
+    }
+
+    /// The jobs go first and the folder last. A job that will not delete
+    /// stops everything after it: the job before it is really gone from its
+    /// store, the failed one and the folder are still there, and the popup
+    /// text says exactly that.
+    #[test]
+    fn a_job_that_will_not_delete_leaves_the_routine_folder() {
+        use crate::jobs::Scope;
+        use std::os::unix::fs::PermissionsExt;
+        let repo = fixture("routine-delete-order-jobs");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::Project, "single", "nightly/audit-docs.md");
+        write_job(&repo, Scope::User, "whole", "nightly");
+        let folder = repo.routines_dir().join("nightly");
+        let target = RoutineDelete {
+            name: "nightly".to_string(),
+            path: folder.clone(),
+            tasks: 2,
+            jobs: vec![
+                ("single".to_string(), Scope::Project),
+                ("whole".to_string(), Scope::User),
+            ],
+        };
+        // The user store still reads, but its directory takes no write, so
+        // `whole` alone fails to delete.
+        let home = repo.user_jobs_file().parent().unwrap().to_path_buf();
+        let mut perms = std::fs::metadata(&home).unwrap().permissions();
+        perms.set_mode(0o500); // read + execute, no write
+        std::fs::set_permissions(&home, perms.clone()).unwrap();
+
+        let result = delete_routine(&repo, &target);
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // directory this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&home, perms).unwrap();
+        let text = result.unwrap_err();
+        assert!(folder.is_dir(), "the folder waits on its jobs");
+        assert!(
+            !std::fs::read_to_string(repo.jobs_file())
+                .unwrap()
+                .contains("[jobs.single]"),
+            "the job before the failure is gone"
+        );
+        assert!(
+            std::fs::read_to_string(repo.user_jobs_file())
+                .unwrap()
+                .contains("[jobs.whole]"),
+            "the failed job is still there"
+        );
+        let (removed, left) = text.split_once("left:").unwrap();
+        assert!(removed.contains("job single (project)"), "{text}");
+        assert!(!removed.contains("job whole"), "{text}");
+        assert!(left.contains("job whole (user)"), "{text}");
+        assert!(left.contains("folder .spoolway/routines/nightly"), "{text}");
+    }
+
+    /// A folder that will not remove is reached only after its jobs are
+    /// gone, and the popup text says the jobs went and the folder stayed.
+    #[test]
+    fn a_folder_that_will_not_remove_is_tried_after_its_jobs() {
+        use crate::jobs::Scope;
+        use std::os::unix::fs::PermissionsExt;
+        let repo = fixture("routine-delete-order-folder");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "whole", "nightly");
+        write_job(&repo, Scope::Project, "single", "nightly/audit-docs.md");
+        let folder = repo.routines_dir().join("nightly");
+        let target = RoutineDelete {
+            name: "nightly".to_string(),
+            path: folder.clone(),
+            tasks: 2,
+            jobs: vec![
+                ("whole".to_string(), Scope::User),
+                ("single".to_string(), Scope::Project),
+            ],
+        };
+        let routines_dir = repo.routines_dir();
+        let mut perms = std::fs::metadata(&routines_dir).unwrap().permissions();
+        perms.set_mode(0o500); // read + execute, no write
+        std::fs::set_permissions(&routines_dir, perms.clone()).unwrap();
+
+        let result = delete_routine(&repo, &target);
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // directory this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&routines_dir, perms).unwrap();
+        let text = result.unwrap_err();
+        assert!(job_names(&repo).is_empty(), "both jobs went first");
+        assert!(folder.is_dir());
+        let (removed, left) = text.split_once("left:").unwrap();
+        assert!(removed.contains("job whole (user)"), "{text}");
+        assert!(removed.contains("job single (project)"), "{text}");
+        assert!(left.contains("folder .spoolway/routines/nightly"), "{text}");
+    }
+
+    /// `x` opens the popup the mockup draws: the routine, its task count,
+    /// and every job that goes with it beside its store — with the popup's
+    /// own keys on the line under the frame.
+    #[test]
+    fn x_names_the_routine_and_every_job_pointing_into_it() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-delete-popup");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "nightly-audit", "nightly");
+        write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
+        write_job(&repo, Scope::User, "weekly-prune", "maintenance");
+
+        let drawn = routines_screen(&repo, "jx");
+        let last = last_frame(&drawn);
+
+        assert!(last.contains("─ delete this routine "), "{last}");
+        assert!(last.contains("nightly · 2 tasks"), "{last}");
+        assert!(last.contains("its folder is removed from disk,"), "{last}");
+        assert!(last.contains("and only git can bring it back."), "{last}");
+        assert!(last.contains("these jobs are deleted with it:"), "{last}");
+        assert!(last.contains("nightly-audit   user"), "{last}");
+        assert!(last.contains("audit-docs      project"), "{last}");
+        assert!(!last.contains("weekly-prune"), "{last}");
+        assert_eq!(
+            last.matches("[enter] delete   [esc] keep").count(),
+            2,
+            "in the popup and on the line under the frame: {last}"
+        );
+    }
+
+    /// With no job pointing in, the popup leaves the jobs lines out.
+    #[test]
+    fn x_on_a_routine_no_job_points_into_leaves_the_jobs_lines_out() {
+        let repo = fixture("routine-delete-no-jobs");
+        seed_two_routines(&repo);
+
+        let last = last_frame(&routines_screen(&repo, "x")).to_string();
+
+        assert!(last.contains("maintenance · 1 task"), "{last}");
+        assert!(!last.contains("these jobs are deleted with it:"), "{last}");
+    }
+
+    /// `esc` keeps everything, and every other key leaves the popup open.
+    #[test]
+    fn x_then_esc_keeps_the_routine_and_its_jobs() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-delete-esc");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "nightly-audit", "nightly");
+
+        let held = last_frame(&routines_screen(&repo, "jxynq ")).to_string();
+        assert!(held.contains("─ delete this routine "), "{held}");
+        assert!(repo.routines_dir().join("nightly").is_dir());
+
+        let last = last_frame(&routines_screen(&repo, "jx\x1b")).to_string();
+        assert!(!last.contains("delete this routine"), "{last}");
+        assert!(last.contains("routines  2 of 2"), "{last}");
+        assert!(repo.routines_dir().join("nightly").is_dir());
+        assert_eq!(job_names(&repo), vec!["nightly-audit"]);
+    }
+
+    /// `enter` deletes the jobs and the folder, reads the list again, keeps
+    /// the cursor on a row that is still there and drops the routine from
+    /// the ticked set — and stages nothing.
+    #[test]
+    fn x_then_enter_deletes_the_routine_and_its_jobs() {
+        use crate::jobs::Scope;
+        let repo = fixture("routine-delete-enter");
+        seed_two_routines(&repo);
+        write_job(&repo, Scope::User, "nightly-audit", "nightly");
+        write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
+        write_job(&repo, Scope::User, "weekly-prune", "maintenance");
+
+        let last = last_frame(&routines_screen(&repo, "j x\r")).to_string();
+
+        assert!(!repo.routines_dir().join("nightly").exists());
+        assert_eq!(job_names(&repo), vec!["weekly-prune"]);
+        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("> [ ] maintenance"), "{last}");
+        assert!(!last.contains("nightly"), "{last}");
+        assert!(!last.contains("delete this routine"), "{last}");
+        let staged =
+            crate::repo::run(&repo.root, "git", &["diff", "--cached", "--name-only"]).unwrap();
+        assert!(staged.trim().is_empty(), "nothing staged: {staged}");
+    }
+
+    /// A job store that will not parse refuses the delete before anything
+    /// is removed, naming the store and `spoolway doctor`.
+    #[test]
+    fn x_refuses_while_a_job_store_will_not_parse() {
+        let repo = fixture("routine-delete-bad-store");
+        seed_two_routines(&repo);
+        std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
+        std::fs::write(repo.jobs_file(), "[jobs.broken\n").unwrap();
+
+        let last = last_frame(&routines_screen(&repo, "jx\r")).to_string();
+        assert!(repo.routines_dir().join("nightly").is_dir());
+
+        let refused = last_frame(&routines_screen(&repo, "jx")).to_string();
+        assert!(refused.contains("routine not deleted"), "{refused}");
+        assert!(refused.contains("jobs.toml"), "{refused}");
+        assert!(refused.contains("spoolway doctor"), "{refused}");
+        assert!(
+            !last.contains("routine not deleted"),
+            "enter closes it: {last}"
+        );
+    }
+
+    /// `x` reads only over the routine list: over the tasks pane it does
+    /// nothing, and the key line there does not name it.
+    #[test]
+    fn x_over_the_tasks_pane_does_nothing_and_is_not_named() {
+        let repo = fixture("routine-delete-tasks-pane");
+        seed_two_routines(&repo);
+
+        let last = last_frame(&routines_screen(&repo, "\tx")).to_string();
+
+        assert!(!last.contains("delete this routine"), "{last}");
+        assert!(!last.contains("[x] delete"), "{last}");
+        assert!(last.contains("[o] open task"), "{last}");
     }
 
     /// `esc` over the routine list does nothing: the pane is the routines

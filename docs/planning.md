@@ -145,6 +145,7 @@ row per routine, and its right pane lists the highlighted routine's tasks.
 |---|---|
 | `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
 | `enter` | Queue every task under every ticked routine as one batch. |
+| `x` | Over the list, delete the highlighted routine and every job that points into it, after a popup. |
 | `tab` | Switch focus between the routine list and the tasks pane. |
 | `o` | Over the tasks pane, open the highlighted task in your editor. |
 | `esc` | Over the tasks pane, return focus to the list. Over the list, do nothing. |
@@ -158,6 +159,13 @@ the same batch is rewritten to the sibling's new id. The saved files are never c
 Press `s` on a pending group to save it as a routine. The panel is prefilled with the group's
 name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier
 run are removed on the way. A folder that already holds tasks is refused.
+
+Press `x` on a routine to delete it. The popup names the routine, its task count, and every
+job whose routine path is that folder or a task inside it. Each job is listed beside its
+store, `user` or `project`. `enter` deletes those jobs first, then the folder. `esc` keeps
+everything. The folder leaves disk without touching git, so only git can bring it back. A job
+store that will not read refuses the delete before anything is removed, naming the store and
+`spoolway doctor`.
 
 A job queues a routine on a cron schedule. See [Jobs](jobs.md).
 
