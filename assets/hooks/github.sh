@@ -22,6 +22,61 @@ same_repo_issue() {
   esac
 }
 
+# `$SPOOLWAY_LABELS`, comma-joined, one label per line — `queue add` already
+# refuses one holding whitespace or a comma (src/commands/queue.rs), so a
+# plain split on `,` is all this needs.
+each_label() {
+  [ -n "$SPOOLWAY_LABELS" ] || return 0
+  old_ifs=$IFS
+  IFS=,
+  for label in $SPOOLWAY_LABELS; do
+    IFS=$old_ifs
+    [ -n "$label" ] && printf '%s\n' "$label"
+  done
+  IFS=$old_ifs
+}
+
+# `gh label create` for every label `$SPOOLWAY_LABELS` names that `gh label
+# list` does not already show for this repository — never `--force`, so a
+# label that already exists keeps whatever colour or description it already
+# has. Run once, before either issue is created, so both can carry every
+# label from the moment they exist.
+#
+# `--limit 1000` because `gh label list` defaults to 30 — a repository
+# carrying more than that would otherwise read a real, older label as
+# missing, `gh label create` would then refuse it as a duplicate, and the
+# whole `open` event would fail over a label that was never actually
+# missing. The match itself is case-insensitive: GitHub treats a label's
+# name that way too, so `Bug` against an existing `bug` is the same label,
+# not a new one.
+create_missing_labels() {
+  [ -n "$SPOOLWAY_LABELS" ] || return 0
+  existing=$(gh label list -R "$repo" -L 1000 --json name --jq '.[].name') || return $?
+  missing=$(each_label | while IFS= read -r label; do
+    printf '%s\n' "$existing" | grep -qiFx "$label" || printf '%s\n' "$label"
+  done)
+  [ -n "$missing" ] || return 0
+  # A `<<` heredoc, not a pipe: `gh label create`'s exit code has to reach
+  # `exit $?` directly, and the right side of a pipe runs in its own
+  # subshell that `exit` there would only ever leave.
+  while IFS= read -r label; do
+    [ -n "$label" ] || continue
+    gh label create "$label" -R "$repo" || exit $?
+  done <<LABELS
+$missing
+LABELS
+}
+
+# `$1` (`--label` or `--add-label`) once per label in `$SPOOLWAY_LABELS`,
+# meant to be splatted unquoted into a `gh` call: `$(label_flags --label)`.
+# Splitting the substitution on whitespace is safe here — `each_label`'s own
+# labels can hold none.
+label_flags() {
+  each_label | while IFS= read -r label; do
+    printf '%s\n%s\n' "$1" "$label"
+  done
+}
+
 # One section's own content out of a task file, matching the boundary rule
 # `Task::find_section` uses in src/task.rs: a line equal to `heading` (case
 # folded, trailing space trimmed) starts it, and it ends at the next line
@@ -169,6 +224,10 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
     { echo "epic=$epic"; echo "ticket=$ticket"; } > "$state"
   }
 
+  # Every label this task names has to exist before either issue below can
+  # be created or edited with it.
+  create_missing_labels || exit $?
+
   # A group issue opens whatever the group's size — a group of one gets one
   # too, rather than folding its lone task straight under `$SPOOLWAY_SOURCE`:
   # one issue shape for every group, not two. `$SPOOLWAY_GROUP_DESCRIPTION`
@@ -191,12 +250,17 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
       cat "$SPOOLWAY_EPIC_BODY"
     } > "$epic_body"
     set -- gh issue create -R "$repo" -t "$epic_title" \
-      -F "$epic_body" --label spoolway:group
+      -F "$epic_body" --label spoolway:group $(label_flags --label)
     if same_repo_issue "$SPOOLWAY_SOURCE"; then
       set -- "$@" --parent "$SPOOLWAY_SOURCE"
     fi
     epic=$("$@") || exit $?
     save_state
+  elif [ -n "$SPOOLWAY_LABELS" ]; then
+    # The epic already exists — a task queued after the group's first still
+    # carries its own labels onto it, so the group issue ends up with the
+    # union of every task's labels rather than just the first task's.
+    gh issue edit "$epic" -R "$repo" $(label_flags --add-label) || exit $?
   fi
 
   body="$SPOOLWAY_OUT.ticket-body.md"
@@ -214,7 +278,7 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
       deps="${deps}${deps:+,}$dep"
     done
     set -- gh issue create -R "$repo" -t "$SPOOLWAY_TITLE" \
-      -F "$body" --label spoolway:task --parent "$epic"
+      -F "$body" --label spoolway:task --parent "$epic" $(label_flags --label)
     [ -n "$deps" ] && set -- "$@" --blocked-by "$deps"
     ticket=$("$@") || exit $?
     save_state

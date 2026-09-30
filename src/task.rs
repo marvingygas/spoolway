@@ -276,6 +276,17 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_description: Option<String>,
 
+    /// Plain words carried onto this task's own tracker issue, and its
+    /// group's, beside whatever `spoolway:*` labels the hook adds itself —
+    /// see `assets/hooks/github.sh`'s own `open` branch. `queue add`'s
+    /// `parse_submission` refuses a batch where any one of them holds
+    /// whitespace or a comma, naming the task and the label: a comma is the
+    /// join character [`crate::tracking::build_env`] and [`crate::tracking::
+    /// open_env`] hand a hook in `SPOOLWAY_LABELS`, and Jira's own labels
+    /// cannot hold a space at all, so neither is ever safe inside one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+
     /// A reference to where this task came from — an issue URL, a plan page
     /// path, a bare name. Nothing in spoolway parses it; it is carried for a
     /// person to follow back, and for nothing else.

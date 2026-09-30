@@ -54,6 +54,7 @@ as JSON.
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
+| `labels` | you | Plain words for a hook to put on this task's own tracker issue and its group's. A label may hold no whitespace and no comma. |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
@@ -86,6 +87,16 @@ mine.md sets `run:`, which spoolway sets on every task itself — remove it from
 ```
 
 Every other dispatcher field in a task is dropped.
+
+A label in `labels:` holding whitespace or a comma is refused, naming the task and the label,
+since a hook reads the whole list comma-joined.
+
+```
+$ spoolway queue add --from mine.md
+mine.md: label `has space` may not hold whitespace or a comma — a hook reads every label
+comma-joined in SPOOLWAY_LABELS, and Jira's own labels cannot hold a space at all. Join the
+words with a hyphen instead, for example `needs-triage`.
+```
 
 ### One constraint no key can express
 

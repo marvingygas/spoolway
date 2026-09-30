@@ -28,6 +28,7 @@
 # covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
 # covers: the shipped github.sh's `check` branch passes with gh logged in and the repository visible, and fails on each of the two alone
 # covers: `spoolway doctor` runs the hook with SPOOLWAY_EVENT=check, synchronously; a non-zero exit is one FAIL row carrying the hook's own stderr, not the merged stdout+stderr log a detached run leaves under tracking/
+# covers: a task's `labels:` reaches every event with a task behind it as SPOOLWAY_LABELS, comma-joined and empty when the task has none; `queue add` refuses a label holding whitespace or a comma, naming the task and the label
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -54,6 +55,21 @@ publish plan/live
 
 BODY="$LIVE/body.md"
 task_body "$BODY"
+
+# --------------------------------------------------------------- labels:
+# `queue add` refuses a label holding whitespace before a hook ever sees it
+# — checked with no hook configured at all, since the refusal is
+# `parse_submission`'s own, not anything the tracker does.
+task_doc "$LIVE/spaced-label.md" spaced-label "$BODY" "group: spaced-label-group" \
+  'labels: ["has space"]'
+refuses "a label holding a space is refused, naming the task" \
+  "spaced-label" \
+  "$SPOOLWAY" queue add --from "$LIVE/spaced-label.md"
+refuses "a label holding a space is refused, naming the label" \
+  "has space" \
+  "$SPOOLWAY" queue add --from "$LIVE/spaced-label.md"
+works "nothing was queued for the refused label" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/spaced-label.md"
 
 # ------------------------------------------------------- issue_tracking hook
 # `[issue_tracking]` fires a project's own script once per task on each of the
@@ -165,7 +181,8 @@ dispatcher_restart
 # deterministic below — the two can never reach `done` in the same pass, so
 # `tracked-a`'s own hook always sees `tracked-b` still open.
 task_doc "$LIVE/tracked-a.md" tracked-a "$BODY" "group: tracked-pair" \
-  "group_description: a dependent pair, tracked end to end"
+  "group_description: a dependent pair, tracked end to end" \
+  "labels: [gh, tracked]"
 task_doc "$LIVE/tracked-b.md" tracked-b "$BODY" "group: tracked-pair" \
   "depends_on: [tracked-a]"
 must "the first of a dependent pair queues" "$SPOOLWAY" queue add --from "$LIVE/tracked-a.md"
@@ -183,6 +200,13 @@ has "the event it fired for" "SPOOLWAY_EVENT=queued" "$ENV_A_QUEUED"
 has "the project key from config" "SPOOLWAY_PROJECT_KEY=acme/app" "$ENV_A_QUEUED"
 has "the task's own group" "SPOOLWAY_GROUP=tracked-pair" "$ENV_A_QUEUED"
 has "the task file's own absolute path" "SPOOLWAY_TASK_FILE=" "$ENV_A_QUEUED"
+has "its own labels, comma-joined" "SPOOLWAY_LABELS=gh,tracked" "$ENV_A_QUEUED"
+
+ENV_B_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.env.queued"
+# The whole line, not a prefix: `has` would pass on any value at all, and the
+# promise is that a task with no `labels:` hands the hook an empty one.
+works "a task with no labels: carries the variable, empty" \
+  grep -qx 'SPOOLWAY_LABELS=' "$ENV_B_QUEUED"
 
 ENV_A_DONE="$SPOOLWAY_PROJECT_HOME/queue/tracked-a.md.env.done"
 ENV_B_DONE="$SPOOLWAY_PROJECT_HOME/queue/tracked-b.md.env.done"

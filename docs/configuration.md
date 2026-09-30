@@ -264,7 +264,8 @@ flowchart LR
 Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOLWAY_EVENT`,
 `SPOOLWAY_PROJECT_KEY`, `SPOOLWAY_TASK`, `SPOOLWAY_FROM`, `SPOOLWAY_SOURCE`, `SPOOLWAY_GROUP`,
 `SPOOLWAY_BRANCH`, `SPOOLWAY_TITLE`, `SPOOLWAY_TASK_FILE`, `SPOOLWAY_GROUP_SIZE`,
-`SPOOLWAY_EPIC` and `SPOOLWAY_TICKET`. The `done` event of a group's last open task also gets
+`SPOOLWAY_LABELS` (its `labels:`, comma-joined, empty when it has none), `SPOOLWAY_EPIC` and
+`SPOOLWAY_TICKET`. The `done` event of a group's last open task also gets
 `SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`. The
 board prints `issue_tracking: N hook failures — see tracking/` while any hook has failed.
 `check` carries only `SPOOLWAY_EVENT` and `SPOOLWAY_PROJECT_KEY`, and writes no log under
@@ -364,7 +365,7 @@ notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
 
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` | `gh` >= 2.97.0, logged in | On `check` confirms `gh` is logged in and the repository named in `SPOOLWAY_PROJECT_KEY` is visible. Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
+| `github.sh` | `gh` >= 2.97.0, logged in | On `check` confirms `gh` is logged in and the repository named in `SPOOLWAY_PROJECT_KEY` is visible. Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
 | `jira.sh` | `acli` >= 1.3.30 and `jq` >= 1.6 | The same events except `check`: its script has no `check` branch, so `doctor` reports it as a note and neither `doctor` nor the dispatcher ever runs it. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
 
 ### How the sample GitHub workflow works

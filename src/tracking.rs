@@ -274,6 +274,10 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
         "how many tasks this group is opening at once",
     ),
     (
+        "SPOOLWAY_LABELS",
+        "its `labels:`, comma-joined, empty when it has none",
+    ),
+    (
         "SPOOLWAY_EPIC",
         "the group's already-open epic, if this is not its first task",
     ),
@@ -350,6 +354,7 @@ fn open_env(
             repo.config.issue_tracking.project_key.clone(),
         ),
         ("SPOOLWAY_GROUP_SIZE".to_string(), group_size.to_string()),
+        ("SPOOLWAY_LABELS".to_string(), front.labels.join(",")),
         ("SPOOLWAY_EPIC".to_string(), group_epic.to_string()),
         (
             "SPOOLWAY_DEPENDS_TICKETS".to_string(),
@@ -907,6 +912,10 @@ pub(crate) const DISPATCH_EVENT_VARS: &[(&str, &str)] = &[
         "SPOOLWAY_GROUP_SIZE",
         "how many tasks in its group are still open",
     ),
+    (
+        "SPOOLWAY_LABELS",
+        "its `labels:`, comma-joined, empty when it has none",
+    ),
     ("SPOOLWAY_EPIC", "the epic `open` answered, if any"),
     ("SPOOLWAY_TICKET", "the ticket `open` answered, if any"),
     (
@@ -946,6 +955,7 @@ fn build_env(repo: &Repo, task: &Task, event: &str, group_open: usize) -> BTreeM
             repo.config.issue_tracking.project_key.clone(),
         ),
         ("SPOOLWAY_GROUP_SIZE".to_string(), group_open.to_string()),
+        ("SPOOLWAY_LABELS".to_string(), front.labels.join(",")),
         (
             "SPOOLWAY_EPIC".to_string(),
             task.extra_str("epic").to_string(),
@@ -1013,6 +1023,7 @@ mod tests {
             pipeline: None,
             group: None,
             group_description: None,
+            labels: Vec::new(),
             source: None,
             plan: None,
             gate_at: None,
@@ -1095,6 +1106,7 @@ mod tests {
             f.group = Some("scanner-rework".into());
             f.source = Some("https://example.com/issues/1".into());
             f.branch = Some("task/demo".into());
+            f.labels = vec!["bug".to_string(), "needs-triage".to_string()];
             f.extra
                 .insert("epic".into(), serde_norway::Value::String("EPIC-1".into()));
             f.extra
@@ -1121,6 +1133,7 @@ mod tests {
             "SPOOLWAY_EPIC=EPIC-1",
             "SPOOLWAY_TICKET=TCK-9",
             "SPOOLWAY_GROUP_SIZE=1",
+            "SPOOLWAY_LABELS=bug,needs-triage",
         ] {
             assert!(log.contains(expected), "missing `{expected}` in:\n{log}");
         }
@@ -1847,14 +1860,19 @@ mod tests {
     // `fixture`'s own scratch root and nothing here needs a process-global
     // environment variable.
 
-    /// A `gh` stand-in for the `done`-branch tests below: it logs every
-    /// invocation, answers `pr view`'s `--json url` shape from a file the
-    /// test writes first, captures whatever `--body` argument `gh pr
-    /// comment` and `gh issue comment` are each given, and can be told to
-    /// fail any of its four calls independently — `stub/pr_view_fail` for
-    /// the branch lookup, `stub/pr_comment_fail` for the marker comment,
-    /// `stub/issue_edit_fail` for the label swap, `stub/issue_comment_fail`
-    /// for the final "ready for review" comment — which is what the
+    /// A `gh` stand-in for the `done`-branch tests below, and the `open`-
+    /// branch label tests beside them: it logs every invocation, answers
+    /// `pr view`'s `--json url` shape from a file the test writes first,
+    /// captures whatever `--body` argument `gh pr comment` and `gh issue
+    /// comment` are each given, answers `gh label list` from
+    /// `stub/existing_labels` (one name per line, blank when the file is
+    /// absent), mints an increasing `https://github.com/o/r/issues/<n>` for
+    /// every `gh issue create`, and can be told to fail any of its calls
+    /// independently — `stub/pr_view_fail` for the branch lookup,
+    /// `stub/pr_comment_fail` for the marker comment, `stub/issue_edit_fail`
+    /// for the label swap, `stub/issue_comment_fail` for the final "ready
+    /// for review" comment, `stub/label_list_fail` and
+    /// `stub/label_create_fail` for the label tests — which is what the
     /// failure-propagation tests below each need one of.
     fn write_stub_gh(bin_dir: &std::path::Path) {
         std::fs::create_dir_all(bin_dir).unwrap();
@@ -1890,6 +1908,22 @@ case "$1 $2" in
     ;;
   "issue close")
     echo "$*" >> stub/close.log
+    ;;
+  "label list")
+    [ -f stub/label_list_fail ] && exit 1
+    cat stub/existing_labels 2>/dev/null
+    ;;
+  "label create")
+    [ -f stub/label_create_fail ] && exit 1
+    echo "$*" >> stub/label_create.log
+    ;;
+  "issue create")
+    [ -f stub/issue_create_fail ] && exit 1
+    echo "$*" >> stub/issue_create.log
+    n=$(cat stub/issue_counter 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > stub/issue_counter
+    echo "https://github.com/o/r/issues/$n"
     ;;
 esac
 exit 0
@@ -1932,6 +1966,164 @@ exit 0
                 .insert("ticket".into(), serde_norway::Value::String(ticket.into()));
         });
         (repo, t, stub)
+    }
+
+    /// [`github_done_fixture`]'s own counterpart for the `open` branch's
+    /// label tests below: the same real, shipped `github.sh` against the
+    /// same stub `gh`, but with nothing pinned to `ticket:` — `open_ticket`
+    /// is what creates one — and `stub/existing_labels` seeded with the two
+    /// `spoolway:*` labels every group and task already carries, so a test
+    /// naming its own labels beside them proves the hook creates only what
+    /// is actually missing.
+    fn github_open_fixture(name: &str) -> (Repo, PathBuf) {
+        let mut repo = fixture(name);
+        let stub = repo.root.join("stub");
+        write_stub_gh(&stub.join("bin"));
+        std::fs::write(
+            stub.join("existing_labels"),
+            "spoolway:group\nspoolway:task\n",
+        )
+        .unwrap();
+
+        let real = crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(known, _)| *known == "github.sh")
+            .expect("github.sh is a shipped hook")
+            .1;
+        let script = format!("PATH=\"{}:$PATH\"\n{real}", stub.join("bin").display());
+        with_hook(&mut repo, "github.sh", &script);
+        (repo, stub)
+    }
+
+    /// Acceptance criteria: `open` creates only the labels `gh label list`
+    /// does not already show, never with `--force`, and adds every label
+    /// to both the task's own ticket and its group's epic, beside the
+    /// `spoolway:*` labels each already carries.
+    #[test]
+    fn github_sh_open_creates_missing_labels_and_adds_them_to_both_issues() {
+        let (repo, stub) = github_open_fixture("open-labels-new-epic");
+        let t = task("demo", |f| {
+            f.title = "add labels".into();
+            f.group = Some("labelled-group".into());
+            f.labels = vec!["bug".to_string(), "needs-triage".to_string()];
+        });
+
+        let result = open_ticket(&repo, &t, 1, "", "", "a group needing labels", "").unwrap();
+        let OpenResult::Answered { epic, ticket, .. } = result else {
+            panic!("expected an answered open: {result:?}");
+        };
+        assert_eq!(epic, "https://github.com/o/r/issues/1");
+        assert_eq!(ticket, "https://github.com/o/r/issues/2");
+
+        let create_log = std::fs::read_to_string(stub.join("label_create.log")).unwrap();
+        assert!(create_log.contains("bug"), "{create_log}");
+        assert!(create_log.contains("needs-triage"), "{create_log}");
+        assert!(
+            !create_log.contains("spoolway:"),
+            "an already-existing label was created again: {create_log}"
+        );
+
+        let gh_log = std::fs::read_to_string(stub.join("gh.log")).unwrap();
+        assert!(
+            !gh_log.contains("--force"),
+            "an existing label must never be forced: {gh_log}"
+        );
+
+        let issue_log = std::fs::read_to_string(stub.join("issue_create.log")).unwrap();
+        let mut calls = issue_log.lines();
+        let epic_call = calls.next().unwrap();
+        let ticket_call = calls.next().unwrap();
+        for call in [epic_call, ticket_call] {
+            assert!(call.contains("--label bug"), "{call}");
+            assert!(call.contains("--label needs-triage"), "{call}");
+        }
+        assert!(epic_call.contains("--label spoolway:group"), "{epic_call}");
+        assert!(
+            ticket_call.contains("--label spoolway:task"),
+            "{ticket_call}"
+        );
+    }
+
+    /// Review finding, ported: GitHub treats a label's name case-
+    /// insensitively, so a task naming `Bug` where the repository already
+    /// has `bug` must not try to create a second one — that call would fail
+    /// as a duplicate and take the whole `open` event down with it, exactly
+    /// the failure a case-sensitive match let through. This also proves
+    /// `gh label list` is asked for more than its own default 30-row limit
+    /// — a repository with more labels than that would otherwise read an
+    /// older one as missing the same way.
+    #[test]
+    fn github_sh_open_matches_an_existing_label_case_insensitively() {
+        let (repo, stub) = github_open_fixture("open-labels-case-insensitive");
+        std::fs::write(
+            stub.join("existing_labels"),
+            "spoolway:group\nspoolway:task\nBug\n",
+        )
+        .unwrap();
+        let t = task("demo", |f| {
+            f.title = "case-insensitive label".into();
+            f.group = Some("labelled-group".into());
+            f.labels = vec!["bug".to_string()];
+        });
+
+        let result = open_ticket(&repo, &t, 1, "", "", "a group needing labels", "").unwrap();
+        assert!(matches!(result, OpenResult::Answered { .. }), "{result:?}");
+
+        assert!(
+            !stub.join("label_create.log").exists(),
+            "`bug` was created again though `Bug` already existed"
+        );
+
+        let gh_log = std::fs::read_to_string(stub.join("gh.log")).unwrap();
+        assert!(
+            gh_log.contains("label list") && gh_log.contains("-L 1000"),
+            "gh label list must ask past its own 30-row default: {gh_log}"
+        );
+    }
+
+    /// A group's epic already open from an earlier task in the same batch
+    /// still picks up a later task's own labels — added by `gh issue edit
+    /// --add-label`, since `open` never creates the epic a second time —
+    /// the union effect that gives the group issue every task's labels
+    /// rather than only the first one's.
+    #[test]
+    fn github_sh_open_adds_a_later_tasks_labels_onto_an_already_open_epic() {
+        let (repo, stub) = github_open_fixture("open-labels-existing-epic");
+        let t = task("demo", |f| {
+            f.title = "second of the group".into();
+            f.group = Some("labelled-group".into());
+            f.labels = vec!["docs".to_string()];
+        });
+
+        let result = open_ticket(
+            &repo,
+            &t,
+            2,
+            "https://github.com/o/r/issues/9",
+            "",
+            "a group needing labels",
+            "",
+        )
+        .unwrap();
+        let OpenResult::Answered { epic, .. } = result else {
+            panic!("expected an answered open: {result:?}");
+        };
+        assert_eq!(
+            epic, "https://github.com/o/r/issues/9",
+            "the epic was not recreated"
+        );
+
+        let edit_log = std::fs::read_to_string(stub.join("issue_edit.log")).unwrap();
+        assert!(
+            edit_log.contains("https://github.com/o/r/issues/9"),
+            "{edit_log}"
+        );
+        assert!(edit_log.contains("--add-label docs"), "{edit_log}");
+
+        // Only the ticket goes through `issue create` here — the epic
+        // already existed, so it must not appear a second time.
+        let issue_log = std::fs::read_to_string(stub.join("issue_create.log")).unwrap();
+        assert_eq!(issue_log.lines().count(), 1, "{issue_log}");
     }
 
     /// Acceptance criterion: `done` leaves the ticket open, marks the pull

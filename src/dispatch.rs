@@ -7315,6 +7315,7 @@ mod tests {
             pipeline: Some("default".to_string()),
             group: None,
             group_description: None,
+            labels: Vec::new(),
             source: None,
             plan: None,
             gate_at: None,
