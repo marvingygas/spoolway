@@ -236,12 +236,7 @@ fn run() -> Result<()> {
             commands::config_list(&Repo::discover(&cwd)?, cli.json)
         }
         Command::Config(ConfigCommand::Path) => {
-            let repo = Repo::discover(&cwd)?;
-            if let Some(note) = repo.checkout_note()? {
-                note.print(cli.json)?;
-            }
-            println!("{}", config::Config::path_in(&repo.checkout).display());
-            Ok(())
+            commands::config_path(&Repo::discover(&cwd)?, cli.json)
         }
         Command::Config(ConfigCommand::Get { key }) => {
             commands::config_get(&Repo::discover(&cwd)?, key, cli.json)

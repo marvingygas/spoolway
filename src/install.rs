@@ -567,6 +567,49 @@ mod tests {
         }
     }
 
+    /// `spoolway-config` routes among four cases — edit the tracked setup,
+    /// make a private copy, tweak one value, or `init` — and its "never
+    /// reach past" rule has to name all three places a project's setup can
+    /// live, in every provider's copy, not only Claude's own. A drift here
+    /// is a person on Codex or pi being routed by a rule the other two
+    /// agents never read.
+    #[test]
+    fn spoolway_config_routes_the_same_four_cases_in_every_provider_copy() {
+        let skill = SKILLS
+            .iter()
+            .find(|s| s.name == "spoolway-config")
+            .expect("spoolway-config is a shipped skill");
+        for (provider, copy) in skill.copies() {
+            for route in [
+                "Edit the setup, for everyone",
+                "Try it, just for me",
+                "Tweak one value here",
+                "Set up, join a workspace, or start from nothing",
+            ] {
+                assert!(
+                    copy.contains(route),
+                    "spoolway-config's {provider} copy is missing the {route:?} route"
+                );
+            }
+            for path in ["pipeline copy", "prompt copy", "pipeline promote", "init"] {
+                assert!(
+                    copy.contains(path),
+                    "spoolway-config's {provider} copy never mentions `{path}`"
+                );
+            }
+            assert!(
+                copy.contains("config path --json"),
+                "spoolway-config's {provider} copy does not read locations from `config path \
+                 --json`"
+            );
+            assert!(
+                copy.contains("the setup folder, `local/` and `overrides/`"),
+                "spoolway-config's {provider} copy's \"never reach past\" rule does not name \
+                 all three places"
+            );
+        }
+    }
+
     /// A question dropped in translation is the failure this whole split
     /// exists to avoid: the procedure carries on past a decision the person was
     /// supposed to make. Where Claude's copy asks, every other copy has to ask

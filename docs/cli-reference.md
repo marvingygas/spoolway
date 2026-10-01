@@ -819,7 +819,7 @@ spoolway config edit
 |---|---|
 | `show` | Print the whole file |
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
-| `path` | Print the file's path |
+| `path` | Print the setup folder, the private `local/` folder (repo mode only) and the overrides folder. `--json` prints them as `{"setup","local","overrides"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree |
 | `edit` | Open the file in `$EDITOR` and validate it on save |

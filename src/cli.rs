@@ -1512,7 +1512,8 @@ pub enum ConfigCommand {
     /// `[models]` glob nobody has named yet is settable but not listed.
     List,
 
-    /// Print the path to the config file.
+    /// Print where the setup folder, the private `local/` folder (repo mode
+    /// only) and the override folder each live for this project.
     Path,
 
     /// Read one value, e.g. `agents.pi.kind`.

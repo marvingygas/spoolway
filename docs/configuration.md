@@ -16,7 +16,7 @@ spoolway config contract       # every setting, its values and its default
 spoolway config edit           # open the file in $EDITOR, checked on save
 spoolway config show           # the whole config
 spoolway config list           # every scalar key, as `key = value`
-spoolway config path           # where the file is
+spoolway config path           # where the setup, local/ and overrides folders live
 spoolway config get agents.pi.kind
 spoolway config set models.claude-opus-5.input 5.0
 ```

@@ -1054,8 +1054,8 @@ says "config get in the worktree reads its own value" "from-the-worktree" \
   "$SPOOLWAY" -C "$WT" config get dispatch.worktree_root
 silent_about "config get in the main checkout does not see it" "from-the-worktree" \
   "$SPOOLWAY" config get dispatch.worktree_root
-says "config path in the worktree names its own file, not the project's" \
-  "$WT/.spoolway/config.toml" "$SPOOLWAY" -C "$WT" config path
+says "config path in the worktree names its own setup folder, not the project's" \
+  "setup:     $WT/.spoolway" "$SPOOLWAY" -C "$WT" config path
 
 BEFORE_ROOT=$(cat .spoolway/config.toml)
 BEFORE_WT=$(cat "$WT/.spoolway/config.toml")
