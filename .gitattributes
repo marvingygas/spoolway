@@ -11,3 +11,4 @@
 # the Windows CI job checks out a tree no other job sees.
 * text=auto eol=lf
 *.png binary
+*.gif binary
