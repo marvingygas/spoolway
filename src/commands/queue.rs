@@ -166,6 +166,7 @@ pub(crate) const RESERVED_KEYS: &[&str] = &[
     "base_commit",
     "cut_from",
     "trial",
+    "trial_group",
     "branch",
 ];
 
@@ -2206,8 +2207,9 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     // forks a whole group for a side-by-side comparison run and has its own
     // `depends_on` emptied on the way in (`queue_routine_target_with`,
     // `begin_trial`) precisely so it never waits on the source it was
-    // forked from — counting it here would read that deliberate fan as a
-    // second root of the group it forked from.
+    // forked from. An arm minted before each copy got a group of its own
+    // sat in the very group it forked, so counting it here would read that
+    // deliberate fan as a second root of the group it forked from.
     let mut by_group: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
     for t in &tasks {
         if t.front.trial.is_some() {
@@ -2705,8 +2707,8 @@ enum Mode {
     /// Choosing a step off the highlighted task's own pipeline, cursor into
     /// that pipeline's `steps`.
     Gate(usize),
-    /// Forking a whole group into one arm per task — `t`'s own two screens,
-    /// assigning a pipeline to every task and then choosing what each one
+    /// Forking a whole group once per ticked pipeline — `t`'s own two
+    /// screens, ticking the pipelines and then choosing what each one
     /// skips. The whole of what was picked lives on the [`TrialState`] it
     /// carries, not split across `ScreenState` fields the way `gates` is: a
     /// trial never touches the outer selection, and `esc` off the first
@@ -3165,10 +3167,10 @@ impl RoutineNav {
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrialStage {
-    /// Assigning one pipeline to every task in the group — `←`/`→` cycle the
-    /// one under the cursor through [`trial_pipeline_names`].
-    AssignPipelines,
-    /// Choosing which steps of each task's own assigned pipeline to skip.
+    /// Ticking which of the project's pipelines the group is tried under —
+    /// one row per name [`trial_pipeline_names`] lists.
+    PickPipelines,
+    /// Choosing which steps of each ticked pipeline to skip.
     ChooseSkips,
 }
 
@@ -3177,42 +3179,48 @@ enum TrialStage {
 /// fixes its own group rather than reading `state.group_cursor` live, since
 /// nothing here lets the cursor move underneath this panel but the field
 /// says so regardless — which of its two screens is showing, and the
-/// picks made so far on each: every task's own assigned pipeline, and, once
-/// a pipeline is assigned, whatever steps of it are ticked to skip. Both
-/// maps are keyed by [`task_key`] rather than position, so a reload that
-/// reorders `group.tasks` out from under this mode can never point a pick at
-/// the wrong task.
+/// picks made so far on each: the pipelines ticked, and the steps of each
+/// one ticked to skip. Both are keyed by pipeline name rather than by
+/// position or by task: every task of the group runs under every ticked
+/// pipeline, one full copy of the group each, so a skip set belongs to a
+/// pipeline and reaches every arm of that pipeline's copy.
 #[derive(Debug, Clone)]
 struct TrialState {
     group: GroupKey,
     stage: TrialStage,
-    /// The cursor's own meaning changes with `stage`: a task index while
-    /// assigning pipelines, a flattened index across every task's own
-    /// assigned pipeline's steps while choosing skips — see
+    /// The cursor's own meaning changes with `stage`: an index into
+    /// [`trial_pipeline_names`] while picking pipelines, a flattened index
+    /// across every ticked pipeline's steps while choosing skips — see
     /// [`trial_total_steps`].
     cursor: usize,
-    pipeline: std::collections::BTreeMap<TaskKey, String>,
-    skip: std::collections::BTreeMap<TaskKey, std::collections::BTreeSet<String>>,
+    ticked: std::collections::BTreeSet<String>,
+    skip: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl TrialState {
-    /// Opened by `t`: every task in `group` starts out assigned its own
-    /// task's `pipeline:` when it names one. There is no project default
-    /// to fall back to any more, so a legacy or hand-edited task naming
-    /// none opens unassigned instead — `←`/`→` on [`TrialStage::AssignPipelines`]
-    /// is what has to give it one before `enter` can advance, rather than the
-    /// picker silently choosing for it.
-    fn new(_pipelines: &Pipelines, group: &Group) -> TrialState {
-        let pipeline = group
+    /// Opened by `t`: every pipeline one of the group's own tasks names
+    /// starts ticked, so the run a person was already going to make is one
+    /// of the arms without a key pressed. Only a name the project still has
+    /// is ticked — a stale `pipeline:` would otherwise be a tick with no row
+    /// to untick it from. The cursor starts on the first tick, where the
+    /// mockup draws it, or on the top row when nothing is ticked.
+    fn new(pipelines: &Pipelines, group: &Group) -> TrialState {
+        let names = trial_pipeline_names(pipelines);
+        let ticked: std::collections::BTreeSet<String> = group
             .tasks
             .iter()
-            .filter_map(|task| doc_pipeline_name(&task.doc).map(|name| (task_key(task), name)))
+            .filter_map(|task| doc_pipeline_name(&task.doc))
+            .filter(|name| names.contains(&name.as_str()))
             .collect();
+        let cursor = names
+            .iter()
+            .position(|name| ticked.contains(*name))
+            .unwrap_or(0);
         TrialState {
             group: group_key(group),
-            stage: TrialStage::AssignPipelines,
-            cursor: 0,
-            pipeline,
+            stage: TrialStage::PickPipelines,
+            cursor,
+            ticked,
             skip: Default::default(),
         }
     }
@@ -3227,15 +3235,21 @@ fn trial_group<'a>(groups: &'a [Group], trial: &TrialState) -> Option<&'a Group>
     groups.iter().find(|group| group_key(group) == trial.group)
 }
 
-/// Whether every task in `group` has a pipeline assignment — what
-/// [`TrialStage::AssignPipelines`]'s own `enter` requires before advancing,
-/// since [`begin_trial`] has no project default left to hand an unassigned
-/// task instead.
-fn trial_fully_assigned(group: &Group, trial: &TrialState) -> bool {
-    group
-        .tasks
+/// The ticked pipelines, in the order [`trial_pipeline_names`] lists them —
+/// the order the skip screen draws their blocks and [`begin_trial`] mints
+/// their copies' ids in. A tick naming a pipeline a reload has since taken
+/// away is left out, the same care [`trial_group`] takes over a group that
+/// moved: there is nothing left to run it under.
+fn trial_ticked<'a>(
+    pipelines: &'a Pipelines,
+    trial: &TrialState,
+) -> Vec<(&'a str, &'a crate::pipeline::Pipeline)> {
+    pipelines
+        .pipelines
         .iter()
-        .all(|task| trial.pipeline.contains_key(&task_key(task)))
+        .filter(|(name, _)| trial.ticked.contains(*name))
+        .map(|(name, pipeline)| (name.as_str(), pipeline))
+        .collect()
 }
 
 /// `h`'s own two-way switch: whether the left pane shows the done groups
@@ -3632,7 +3646,7 @@ fn run_screen_from(
         // each tab's own home screen — browsing on the queue tab, the
         // routines pane on the routines tab — the two modes with no popup
         // or sub-mode open. Every other mode keeps them: a popup over
-        // either tab, the trial picker's arrows, the filter's `q` typed
+        // either tab, the trial picker, the filter's `q` typed
         // into its query.
         if matches!(state.mode, Mode::Browsing | Mode::Routines(_))
             && let Some(leave) = crate::screen::shell::leave_on(key)
@@ -3657,16 +3671,14 @@ fn run_screen_from(
             }
             Mode::Trial(trial) => match key {
                 // The first screen's own `enter`: advance to the second
-                // rather than launch anything — but only once every task has
-                // an assignment. A legacy or hand-edited task names none
-                // (see `TrialState::new`), and `begin_trial` has no default
-                // left to fall back to, so a task still unassigned here would
-                // otherwise be silently dropped from the batch rather than
-                // queued.
+                // rather than launch anything — but only once a pipeline is
+                // ticked. A trial under no pipeline has no arm to write, so
+                // an `enter` with nothing ticked falls to the catch-all
+                // below, a no-op there, rather than advancing onto an empty
+                // skip screen.
                 Key::Enter
-                    if trial.stage == TrialStage::AssignPipelines
-                        && trial_group(&groups, trial)
-                            .is_some_and(|group| trial_fully_assigned(group, trial)) =>
+                    if trial.stage == TrialStage::PickPipelines
+                        && !trial_ticked(pipelines, trial).is_empty() =>
                 {
                     let mut trial = trial.clone();
                     trial.stage = TrialStage::ChooseSkips;
@@ -3675,12 +3687,9 @@ fn run_screen_from(
                 }
                 // The second screen's own `enter`: mint and write the batch.
                 // Guarded on `ChooseSkips` rather than a bare fallthrough —
-                // an `enter` on the first screen with a task still
-                // unassigned must fall to the catch-all below instead
-                // (a no-op there), not reach `begin_trial`, which has
-                // nothing left to hand an unassigned task and would panic
-                // on the `.expect()` that assumes this screen already
-                // refused to let it through.
+                // an `enter` on the first screen with nothing ticked must
+                // fall to the catch-all below instead (a no-op there), not
+                // reach `begin_trial`, which would have no copy to write.
                 Key::Enter if trial.stage == TrialStage::ChooseSkips => {
                     let trial = trial.clone();
                     let base = crate::repo::branch_at(cwd)?;
@@ -3689,7 +3698,7 @@ fn run_screen_from(
                 _ => {
                     let trial = trial.clone();
                     state.mode = match trial_group(&groups, &trial) {
-                        Some(group) => handle_trial_key(group, pipelines, trial, key),
+                        Some(_) => handle_trial_key(pipelines, trial, key),
                         None => Mode::Browsing,
                     };
                 }
@@ -4024,7 +4033,7 @@ struct Held {
 
 impl Held {
     fn new(groups: &[Group], panes: &Panes, state: &ScreenState) -> Held {
-        let footer = footer(groups, state);
+        let footer = footer(state);
         Held {
             frame: beneath(groups, panes, state, &footer),
             footer,
@@ -5455,7 +5464,7 @@ pub(super) fn two_pane_frame(
 /// focus — so this draws the filter's own line instead, naming exactly the
 /// one key [`handle_filter_key`] does not simply append to the query:
 /// `enter`, which leaves it.
-fn footer(groups: &[Group], state: &ScreenState) -> String {
+fn footer(state: &ScreenState) -> String {
     match &state.mode {
         Mode::Filter => key_hint(&[("enter", "leave search")]),
         // The save panel reads a name the same way the filter box reads a
@@ -5468,9 +5477,7 @@ fn footer(groups: &[Group], state: &ScreenState) -> String {
         Mode::JobSaved { .. } => hint(&confirm()),
         Mode::Gate(_) => key_hint(GATE_KEYS),
         Mode::Trial(trial) => match trial.stage {
-            TrialStage::AssignPipelines => hint(&assign_keys(
-                trial_group(groups, trial).is_some_and(|group| trial_fully_assigned(group, trial)),
-            )),
+            TrialStage::PickPipelines => key_hint(PICK_KEYS),
             TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
         },
         // Its own screen, not an overlay over the pending one — so its own
@@ -5561,24 +5568,16 @@ const SKIP_KEYS: &[(&str, &str)] = &[
     ("esc", "pipelines"),
 ];
 
-/// The trial picker's first screen's key row. `enter` refuses to advance
-/// until every task has an assignment (see `handle_trial_key`) — silently,
-/// unless the row says why, which is what the unassigned form is for.
-fn assign_keys(assigned: bool) -> String {
-    let moves = keys(&[("↑↓", "task"), ("←→", "pipeline")]);
-    match assigned {
-        true => format!(
-            "{moves}{}{}",
-            crate::status::GUTTER,
-            keys(&[("enter", "next"), ("esc", "cancel")])
-        ),
-        false => format!(
-            "{moves}{gutter}assign every task, then [enter]{gutter}{}",
-            keys(&[("esc", "cancel")]),
-            gutter = crate::status::GUTTER,
-        ),
-    }
-}
+/// The trial picker's first screen's keys, in its popup and on the line
+/// under the frame. `enter` does nothing while no pipeline is ticked; the
+/// arm count under the list already reads `0 arms` then, which is the reason
+/// a person needs, so the row itself stays the one the mockup draws.
+const PICK_KEYS: &[(&str, &str)] = &[
+    ("↑↓", "move"),
+    ("space", "tick"),
+    ("enter", "next"),
+    ("esc", "cancel"),
+];
 
 /// A trial popup's key row, kept inside `width` like every other row it
 /// draws — the bracketed row is often its widest, and on a narrow frame it
@@ -5626,7 +5625,7 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
 /// A frame: the pending screen, or the routines pane, with whatever popup
 /// the mode has open laid over it and the key line under it.
 fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
-    let footer = footer(groups, state);
+    let footer = footer(state);
     let frame = beneath(groups, panes, state, &footer);
     let popup = popup(groups, panes.pipelines, state, layout(&footer));
     compose(frame, popup.as_deref(), footer)
@@ -5840,96 +5839,60 @@ fn trial_pipeline_names(pipelines: &Pipelines) -> Vec<&str> {
     pipelines.pipelines.keys().map(String::as_str).collect()
 }
 
-/// The pipeline `trial` has assigned a given task, or `None` for a task the
-/// picker has not been given one for yet — still unassigned, since
-/// [`TrialState::new`] seeds one only from the task itself — or for
-/// one whose assignment named a pipeline a reload swapped out from under an
-/// open picker, handled the same careful way [`trial_group`] handles a group
-/// that moved.
-fn trial_task_pipeline<'a>(
-    pipelines: &'a Pipelines,
-    trial: &TrialState,
-    task: &PendingTask,
-) -> Option<&'a crate::pipeline::Pipeline> {
-    let name = trial.pipeline.get(&task_key(task))?;
-    pipelines.get(name).ok()
-}
-
-/// How many rows [`choose_skips_panel`] draws once every task's steps are
-/// flattened into one list — the span [`handle_trial_key`]'s own cursor
-/// clamps `ChooseSkips` to, and what [`toggle_trial_skip`] walks to find
-/// which task and step the cursor is actually sitting on.
-fn trial_total_steps(group: &Group, pipelines: &Pipelines, trial: &TrialState) -> usize {
-    group
-        .tasks
+/// How many rows [`choose_skips_panel`] draws once every ticked pipeline's
+/// steps are flattened into one list — the span [`handle_trial_key`]'s own
+/// cursor clamps `ChooseSkips` to, and what [`toggle_trial_skip`] walks to
+/// find which pipeline and step the cursor is actually sitting on.
+fn trial_total_steps(pipelines: &Pipelines, trial: &TrialState) -> usize {
+    trial_ticked(pipelines, trial)
         .iter()
-        .filter_map(|task| trial_task_pipeline(pipelines, trial, task))
-        .map(|pipeline| pipeline.steps.len())
+        .map(|(_, pipeline)| pipeline.steps.len())
         .sum()
 }
 
-/// The trial picker's first screen: every task in the group, its own row,
-/// and — on the row the cursor sits on — the pipeline it is currently
-/// assigned to, between the arrows `←`/`→` cycle it with. Every other row
-/// shows its own assignment plainly, so the whole batch's pipelines are
-/// readable without moving the cursor onto each one in turn.
-fn assign_pipelines_panel(
+/// The trial picker's first screen: every project pipeline, its own row
+/// and its own tick, and under the list how many arms the ticks come to —
+/// every ticked pipeline runs the whole group, so the count is the product,
+/// and a big group with many ticks queues a lot of work a person should see
+/// before `enter` writes it.
+fn pick_pipelines_panel(
     group: &Group,
     pipelines: &Pipelines,
     trial: &TrialState,
     width: usize,
 ) -> Vec<String> {
-    let names = trial_pipeline_names(pipelines);
-    // The id column is budgeted against the pipeline column beside it, not
-    // simply sized to the longest id there happens to be: the pipeline name
-    // and the arrows around it are the whole point of this screen, so a very
-    // long id gives up its own tail rather than pushing them off the row.
-    // Same trade `groups_pane_lines` makes between a group name and its tail.
-    let widest_pipeline = names
-        .iter()
-        .map(|name| name.chars().count())
-        .chain(std::iter::once(TRIAL_UNASSIGNED.chars().count()))
-        .max()
-        .unwrap_or(0);
-    let id_budget = width
-        .saturating_sub(widest_pipeline + ASSIGN_ROW_CHROME_COLUMNS)
-        .max(MIN_NAME_COLUMN);
-    let id_width = group
-        .tasks
-        .iter()
-        .map(|task| task.id.chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(id_budget);
-
     let mut body = vec![
         String::new(),
-        "assign one pipeline to every task".to_string(),
+        "pick pipelines to compare".to_string(),
         String::new(),
     ];
-    for (i, task) in group.tasks.iter().enumerate() {
+    for (i, name) in trial_pipeline_names(pipelines).into_iter().enumerate() {
         let marker = if i == trial.cursor { '>' } else { ' ' };
-        let pipeline = trial
-            .pipeline
-            .get(&task_key(task))
-            .map(String::as_str)
-            .unwrap_or(TRIAL_UNASSIGNED);
-        let id = pad_to(&clip(task.id.clone(), id_width), id_width);
-        body.push(clip(
-            if i == trial.cursor && !names.is_empty() {
-                format!("{marker} {id}   ←  {pipeline}  →")
-            } else {
-                format!("{marker} {id}      {pipeline}")
-            },
-            width,
-        ));
+        let tick = if trial.ticked.contains(name) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        body.push(clip(format!("{marker} {tick} {name}"), width));
     }
 
-    let footer = fit_keys(assign_keys(trial_fully_assigned(group, trial)), width);
+    let ticked = trial_ticked(pipelines, trial).len();
+    let tasks = group.tasks.len();
+    body.push(String::new());
+    body.push(clip(
+        format!(
+            "{} × {} = {}",
+            plural(ticked, "pipeline"),
+            plural(tasks, "task"),
+            plural(ticked * tasks, "arm")
+        ),
+        width,
+    ));
+
     panel(
         &clip(format!("trial {}", group.name), width),
         &body,
-        &footer,
+        &fit_keys(keys(PICK_KEYS), width),
     )
 }
 
@@ -5951,21 +5914,9 @@ fn checkbox_row_cap(layout: Layout) -> usize {
     layout.left + layout.right
 }
 
-/// What one [`assign_pipelines_panel`] row spends on something other than
-/// the task id and the pipeline name themselves: the cursor marker and the
-/// space after it, the gap between the two columns, and the `←`/`→` the
-/// cursor's own row draws around its pipeline. The cursor row spends all of
-/// that — 11 columns — while the non-cursor row, with no arrows to draw,
-/// spends only 8; the constant budgets against the wider of the two, which
-/// is what keeps the cursor row from ever being the one that overflows.
-/// Both shapes still start their pipeline column at the same offset, which
-/// is what keeps every row's pipeline name aligned under the last.
-const ASSIGN_ROW_CHROME_COLUMNS: usize = 11;
-
-/// What [`assign_pipelines_panel`] shows in the pipeline column for a task
-/// the trial picker has not been given one for yet — there is no project
-/// default to show instead, so this is what a legacy or hand-edited task
-/// naming none reads as until `←`/`→` gives it one.
+/// What the tasks pane shows for a task naming no `pipeline:` of its own —
+/// there is no project default to show instead, and `parse_submission`
+/// refuses such a task outright once it is submitted.
 const TRIAL_UNASSIGNED: &str = "(unset)";
 
 /// Cut `line` to `width` columns, ending it in `…` when there was more,
@@ -5989,17 +5940,18 @@ pub(crate) fn clip(line: String, width: usize) -> String {
     out
 }
 
-/// The trial picker's second screen: every task's own header — its id and
-/// the pipeline the first screen left it with — and, under it, that
-/// pipeline's own steps, each with its own tick to skip, packed several to a
-/// line the way the mockup draws a short pipeline and wrapped onto as many
-/// lines as [`checkbox_row_cap`] takes once a pipeline runs longer than that
-/// — every step still gets its own checkbox drawn, whichever line it lands
-/// on. The cursor is one index flattened across every task's steps in turn,
-/// so `↑↓` walks the whole batch top to bottom without a second axis to move
-/// along; the `>` marker sits right before whichever checkbox that
-/// flattened index has currently reached, on whichever line that checkbox
-/// wrapped to.
+/// The trial picker's second screen: one block per ticked pipeline, in the
+/// order [`trial_ticked`] lists them, its name over its own steps, each with
+/// its own tick to skip, packed several to a line the way the mockup draws a
+/// short pipeline and wrapped onto as many lines as [`checkbox_row_cap`]
+/// takes once a pipeline runs longer than that — every step still gets its
+/// own checkbox drawn, whichever line it lands on. A block is a pipeline,
+/// not a task: what is ticked in it is skipped by every arm of that
+/// pipeline's copy of the group. The cursor is one index flattened across
+/// every block's steps in turn, so `↑↓` walks the whole set top to bottom
+/// without a second axis to move along; the `>` marker sits right before
+/// whichever checkbox that flattened index has currently reached, on
+/// whichever line that checkbox wrapped to.
 fn choose_skips_panel(
     group: &Group,
     pipelines: &Pipelines,
@@ -6012,29 +5964,10 @@ fn choose_skips_panel(
         String::new(),
     ];
     let mut flat = 0usize;
-    for task in &group.tasks {
-        let key = task_key(task);
-        let Some(pipeline) = trial_task_pipeline(pipelines, trial, task) else {
-            continue;
-        };
-        let pipeline_name = trial
-            .pipeline
-            .get(&key)
-            .map(String::as_str)
-            .expect("trial_task_pipeline resolved, so this task has an assignment");
-        // Same budget as the first screen's rows: the pipeline name says
-        // which steps are listed underneath, so it outranks the tail of a
-        // very long id. The outer `clip` is the backstop for a pipeline
-        // name so long that even a floored id cannot fit beside it.
-        let id_budget = width
-            .saturating_sub(pipeline_name.chars().count() + 4)
-            .max(MIN_NAME_COLUMN);
-        body.push(clip(
-            format!(" {} · {pipeline_name}", clip(task.id.clone(), id_budget)),
-            width,
-        ));
+    for (name, pipeline) in trial_ticked(pipelines, trial) {
+        body.push(clip(format!(" {name}"), width));
 
-        let skip = trial.skip.get(&key);
+        let skip = trial.skip.get(name);
         let mut line = String::from("   ");
         for (i, step) in pipeline.steps.iter().enumerate() {
             let marker = if flat + i == trial.cursor { "> " } else { "  " };
@@ -6079,7 +6012,7 @@ fn trial_panel(
         return None;
     }
     Some(match trial.stage {
-        TrialStage::AssignPipelines => assign_pipelines_panel(group, pipelines, trial, width),
+        TrialStage::PickPipelines => pick_pipelines_panel(group, pipelines, trial, width),
         TrialStage::ChooseSkips => choose_skips_panel(group, pipelines, trial, width),
     })
 }
@@ -6114,58 +6047,49 @@ fn save_routine_panel(groups: &[Group], group: &GroupKey, name: &str) -> Option<
 
 /// One key over the trial picker — everything but `enter`, which needs the
 /// repo to either advance past the first screen or write the batch. Pure
-/// given the group it targets, so it can be checked without a screen to
-/// drive: given a group, a state and a key, the next state.
-fn handle_trial_key(group: &Group, pipelines: &Pipelines, mut trial: TrialState, key: Key) -> Mode {
+/// given the pipelines it lists, so it can be checked without a screen to
+/// drive: given a state and a key, the next state.
+fn handle_trial_key(pipelines: &Pipelines, mut trial: TrialState, key: Key) -> Mode {
     match trial.stage {
-        TrialStage::AssignPipelines => {
+        TrialStage::PickPipelines => {
             let names = trial_pipeline_names(pipelines);
-            let last = group.tasks.len().saturating_sub(1);
+            let last = names.len().saturating_sub(1);
             match key {
                 Key::Esc => return Mode::Browsing,
                 Key::Up | Key::Char('k') => trial.cursor = trial.cursor.saturating_sub(1),
                 Key::Down | Key::Char('j') => trial.cursor = (trial.cursor + 1).min(last),
-                // Cycles the highlighted task's own assignment through every
-                // project pipeline, wrapping either direction rather than
-                // stopping at the ends — the mockup draws both arrows live
-                // on every row, never one greyed out.
-                Key::Left | Key::Right if !names.is_empty() => {
-                    if let Some(task) = group.tasks.get(trial.cursor) {
-                        let key_ = task_key(task);
-                        let at = trial
-                            .pipeline
-                            .get(&key_)
-                            .and_then(|current| names.iter().position(|n| n == current));
-                        let next = match (at, key) {
-                            (Some(at), Key::Left) => (at + names.len() - 1) % names.len(),
-                            (Some(at), _) => (at + 1) % names.len(),
-                            // Unassigned: whichever arrow is pressed first
-                            // lands on the pipeline that sorts first — there
-                            // is no current position to cycle away from.
-                            (None, _) => 0,
-                        };
-                        trial.pipeline.insert(key_, names[next].to_string());
+                Key::Char(' ') => {
+                    if let Some(name) = names.get(trial.cursor) {
+                        // Unticking drops that pipeline's skips with it: a
+                        // pipeline ticked again later starts from none,
+                        // rather than carrying picks off a screen a person
+                        // has since left behind.
+                        if !trial.ticked.remove(*name) {
+                            trial.ticked.insert(name.to_string());
+                        } else {
+                            trial.skip.remove(*name);
+                        }
                     }
                 }
                 _ => {}
             }
         }
         TrialStage::ChooseSkips => {
-            let total = trial_total_steps(group, pipelines, &trial);
+            let total = trial_total_steps(pipelines, &trial);
             match key {
                 // Back to the first screen, not out of the picker — `enter`
                 // moving forward through the two screens is what `esc` walks
                 // back through, one at a time; nothing already picked is
                 // dropped by moving between them either way.
                 Key::Esc => {
-                    trial.stage = TrialStage::AssignPipelines;
+                    trial.stage = TrialStage::PickPipelines;
                     trial.cursor = 0;
                 }
                 Key::Up | Key::Char('k') => trial.cursor = trial.cursor.saturating_sub(1),
                 Key::Down | Key::Char('j') => {
                     trial.cursor = (trial.cursor + 1).min(total.saturating_sub(1))
                 }
-                Key::Char(' ') => toggle_trial_skip(group, pipelines, &mut trial),
+                Key::Char(' ') => toggle_trial_skip(pipelines, &mut trial),
                 _ => {}
             }
         }
@@ -6174,18 +6098,16 @@ fn handle_trial_key(group: &Group, pipelines: &Pipelines, mut trial: TrialState,
 }
 
 /// Space on the second trial screen: tick or untick whichever step the
-/// flattened cursor is currently sitting on, in whichever task's own skip set
-/// that step belongs to — [`trial_total_steps`]'s own walk over every task's
-/// steps in turn, stopped as soon as the cursor's index falls inside one.
-fn toggle_trial_skip(group: &Group, pipelines: &Pipelines, trial: &mut TrialState) {
+/// flattened cursor is currently sitting on, in whichever pipeline's own
+/// skip set that step belongs to — [`trial_total_steps`]'s own walk over
+/// every ticked pipeline's steps in turn, stopped as soon as the cursor's
+/// index falls inside one.
+fn toggle_trial_skip(pipelines: &Pipelines, trial: &mut TrialState) {
     let mut flat = 0usize;
-    for task in &group.tasks {
-        let Some(pipeline) = trial_task_pipeline(pipelines, trial, task) else {
-            continue;
-        };
+    for (name, pipeline) in trial_ticked(pipelines, trial) {
         if trial.cursor < flat + pipeline.steps.len() {
             let step = pipeline.steps[trial.cursor - flat].id.clone();
-            let set = trial.skip.entry(task_key(task)).or_default();
+            let set = trial.skip.entry(name.to_string()).or_default();
             if !set.remove(&step) {
                 set.insert(step);
             }
@@ -6486,23 +6408,21 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
     Ok(format!("---\n{yaml}---\n{body}"))
 }
 
-/// The pipeline the trial picker assigned this task, written into its task
-/// before [`parse_submission`] is given it.
+/// The ticked pipeline an arm runs under, written into its task before
+/// [`parse_submission`] is given it.
 ///
-/// The picker's first screen exists precisely to route a task that names
-/// no pipeline of its own: [`TrialState::new`] opens such a task unassigned,
-/// the panel draws it `(unset)`, and that screen's `enter` refuses to advance
-/// until `←`/`→` has given every task one. But `parse_submission` refuses a
-/// task with no `pipeline:`, and it is handed the *source* task — so
-/// without this the picker refused every task it was built to route, the whole
-/// batch was abandoned with `trial refused:`, and nothing was minted. Stamping
-/// `front.pipeline` on the arm afterwards cannot save it: the refusal has
-/// already happened by then.
+/// Every task of the group runs under every ticked pipeline, whatever its
+/// own `pipeline:` said, and a task may name none at all. But
+/// `parse_submission` refuses a task with no `pipeline:`, and it is handed
+/// the *source* task — so without this a group holding such a task could
+/// never be tried, the whole batch abandoned with `trial refused:` and
+/// nothing minted. Stamping `front.pipeline` on the arm afterwards cannot
+/// save it: the refusal has already happened by then.
 ///
 /// Written over whatever the task said rather than only filled in when it
-/// is blank, because the screen may equally have cycled a task *off* the
-/// pipeline its own task named — `trial.pipeline` is the authority here,
-/// which is the same order of precedence `front.pipeline` is stamped in below.
+/// is blank, because each copy of the group runs under its own ticked
+/// pipeline — the tick is the authority here, which is the same order of
+/// precedence `front.pipeline` is stamped in below.
 fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> {
     let (yaml, body) =
         crate::task::split_fence(doc).with_context(|| format!("{name}: not a task"))?;
@@ -6521,16 +6441,26 @@ fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> 
     Ok(format!("---\n{yaml}---\n{body}"))
 }
 
+/// What a trial stamps on every arm of one copy of the group, beside the
+/// arm's own id, pipeline and skips: the trial the whole batch shares, the
+/// group a person tried, and the group this copy runs in.
+struct TrialStamp<'a> {
+    trial: &'a str,
+    source_group: &'a str,
+    group: &'a str,
+}
+
 /// One trial arm: the source task parsed exactly as `queue add --from`
-/// would, with the four things a trial names for the task itself stamped
-/// on afterwards — the id spoolway minted, the trial the whole batch shares,
+/// would, with what a trial names for the task itself stamped on
+/// afterwards — the id spoolway minted, the [`TrialStamp`] its copy shares,
 /// the pipeline this arm runs, and the ticked steps that pipeline is asked
 /// to walk past.
 ///
 /// `parse_submission` always resets `front.skip` to empty, since a task
 /// may not set it itself (see that function's own comment); this is the one
 /// caller allowed to put it back; here it is spoolway naming the task, not
-/// the task. `front.branch` is recomputed too, after the id changes —
+/// the task. `front.trial` and `front.trial_group` are reserved the same
+/// way. `front.branch` is recomputed too, after the id changes —
 /// `parse_submission` already built one, but off the task's own bare
 /// id, before this ever had a minted one to use.
 ///
@@ -6540,15 +6470,15 @@ fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> 
 /// a task a producer wrote for a fresh run, rather than being refused for
 /// setting a reserved key spoolway itself put there.
 ///
-/// The picker's chosen pipeline goes into that task *before* it is parsed,
-/// by [`with_trial_pipeline`], and not only onto the arm afterwards — see that
+/// The ticked pipeline goes into that task *before* it is parsed, by
+/// [`with_trial_pipeline`], and not only onto the arm afterwards — see that
 /// function for why stamping `front.pipeline` below is too late on its own.
 fn build_trial_arm(
     name: &str,
     doc: &str,
     base: &str,
     id: &str,
-    trial_id: &str,
+    stamp: &TrialStamp,
     pipeline: &crate::pipeline::Pipeline,
     skip: &std::collections::BTreeSet<String>,
 ) -> Result<Task> {
@@ -6557,12 +6487,15 @@ fn build_trial_arm(
     let mut arm = parse_submission(name, &doc, Some(base))?;
     arm.front.id = id.to_string();
     arm.front.branch = Some(format!("task/{id}"));
-    arm.front.trial = Some(trial_id.to_string());
+    arm.front.trial = Some(stamp.trial.to_string());
+    arm.front.trial_group = Some(stamp.source_group.to_string());
+    arm.front.group = Some(stamp.group.to_string());
     arm.front.pipeline = Some(pipeline.name.clone());
     // Only the ticked steps this pipeline actually has: `spoolway doctor`
     // refuses a `skip:` naming a step its own pipeline lacks
-    // (`src/commands/pipeline.rs`), and a trial's arms rarely share every
-    // step of their own pipelines.
+    // (`src/commands/pipeline.rs`). Each pipeline keeps its own skip set
+    // already, so this filter only bites on a set a reload left naming a
+    // step the pipeline has since dropped.
     arm.front.skip = skip
         .iter()
         .filter(|step| pipeline.step(step).is_some())
@@ -6572,15 +6505,56 @@ fn build_trial_arm(
     Ok(arm)
 }
 
-/// `enter` on the trial picker's second screen: mint one id per task in the
-/// group, build that task's own arm on the pipeline and skip set the two
-/// screens chose for it, and write the whole set — or refuse, and touch
-/// nothing. Mirrors [`begin_submission`], but over a group forked whole
-/// rather than chosen piece by piece, and the source tasks are never
-/// deleted: they were templates for the arms, not themselves submitted, and
-/// stay in whichever directory `t` found them in exactly as it found them —
-/// the same "nothing minted is ever written back" the doc comment on
-/// `TrialState` promises.
+/// Every `group:` the queue or the archive already holds — what a trial's
+/// own copies are named around, so a copy never lands in a group an earlier
+/// run still owns. Read both verbatim and through [`bare_group`], so a
+/// group a hook's slug prefixed still counts as the name it was given.
+fn groups_on_disk(repo: &Repo) -> Result<std::collections::BTreeSet<String>> {
+    let mut tasks = repo.tasks()?;
+    let (archived, _) = crate::task::load_dir(&repo.archive_dir())?;
+    tasks.extend(archived);
+    Ok(tasks
+        .iter()
+        .flat_map(|task| [task.front.group.clone(), bare_group(repo, task)])
+        .flatten()
+        .collect())
+}
+
+/// The group one copy of a trial runs in: `<group>-<pipeline>`, or the
+/// lowest `<group>-<pipeline>-N` from 2 up that neither `on_disk` nor an
+/// earlier copy of the same trial (`claimed`) already holds — the same way
+/// [`mint_id`] numbers around an id that is taken. Starts at 2 because the
+/// bare name is the first copy's; a `-1` would read as a task id's suffix.
+fn mint_trial_group(
+    group: &str,
+    pipeline: &str,
+    on_disk: &std::collections::BTreeSet<String>,
+    claimed: &std::collections::BTreeSet<String>,
+) -> String {
+    let base = format!("{group}-{pipeline}");
+    let free = |name: &String| !on_disk.contains(name) && !claimed.contains(name);
+    if free(&base) {
+        return base;
+    }
+    (2usize..)
+        .map(|n| format!("{base}-{n}"))
+        .find(free)
+        .expect("an unbounded range always reaches a free name")
+}
+
+/// `enter` on the trial picker's second screen: one full copy of the group
+/// per ticked pipeline, each copy in a group of its own (see
+/// [`mint_trial_group`]), every task in it minted its own id and built on
+/// that pipeline and that pipeline's skip set — and the whole set written,
+/// or refused with nothing touched. Mirrors [`begin_submission`], but over a
+/// group forked whole rather than chosen piece by piece, and the source
+/// tasks are never deleted: they were templates for the arms, not
+/// themselves submitted, and stay in whichever directory `t` found them in
+/// exactly as it found them.
+///
+/// Each copy gets its own group because a group must be one chain: two
+/// copies under one name would be two roots, and separate groups also let
+/// the copies run side by side rather than one after the other.
 fn begin_trial(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -6591,7 +6565,8 @@ fn begin_trial(
     let Some(group) = trial_group(groups, trial) else {
         return Mode::Browsing;
     };
-    if group.tasks.is_empty() {
+    let ticked = trial_ticked(pipelines, trial);
+    if group.tasks.is_empty() || ticked.is_empty() {
         return Mode::Browsing;
     }
 
@@ -6601,78 +6576,85 @@ fn begin_trial(
     // value, one row per run, and a reused value would silently
     // fold two unrelated batches into one comparison table.
     let trial_id = crate::usage::new_trial_id();
+    let on_disk = match groups_on_disk(repo) {
+        Ok(on_disk) => on_disk,
+        Err(err) => return outcome("trial refused", format!("{err:#}")),
+    };
 
     let mut minted: std::collections::BTreeSet<String> = Default::default();
-    let mut id_map: std::collections::BTreeMap<String, String> = Default::default();
-    let mut arms = Vec::with_capacity(group.tasks.len());
+    let mut claimed: std::collections::BTreeSet<String> = Default::default();
+    let mut arms = Vec::with_capacity(group.tasks.len() * ticked.len());
 
-    // `group.tasks` lists dependencies before dependents (see `Group`'s own
-    // doc comment), so by the time a dependent task is minted here, every
-    // group member it could `depends_on` already has its own entry in
-    // `id_map` — one forward pass is enough to remap the whole chain.
-    for task in &group.tasks {
-        let key = task_key(task);
-        let pipeline_name = trial
-            .pipeline
-            .get(&key)
-            .cloned()
-            .expect("the AssignPipelines screen's own `enter` refuses to advance until every task is assigned");
-        let pipeline = match pipelines.get(&pipeline_name) {
-            Ok(pipeline) => pipeline,
-            Err(err) => {
+    // Pipelines outside, tasks inside: every task's arms are numbered in
+    // the order the pipelines are listed, so `alpha-1` and `beta-1` are the
+    // first pipeline's copy and `alpha-2`, `beta-2` the second's.
+    for (pipeline_name, pipeline) in ticked {
+        let copy_group = mint_trial_group(&group.name, pipeline_name, &on_disk, &claimed);
+        claimed.insert(copy_group.clone());
+        let stamp = TrialStamp {
+            trial: &trial_id,
+            source_group: &group.name,
+            group: &copy_group,
+        };
+        let skip = trial.skip.get(pipeline_name).cloned().unwrap_or_default();
+        // Per copy, not per trial: a dependent in this copy waits on its
+        // predecessor in this same copy, never on another pipeline's arm.
+        let mut id_map: std::collections::BTreeMap<String, String> = Default::default();
+
+        // `group.tasks` lists dependencies before dependents (see `Group`'s
+        // own doc comment), so by the time a dependent task is minted here,
+        // every group member it could `depends_on` already has its own entry
+        // in `id_map` — one forward pass is enough to remap the whole chain.
+        for task in &group.tasks {
+            // A task id becomes a branch and a file name — the same check an
+            // ordinary submission runs in `validate_batch`.
+            let id = mint_id(repo, &task.id, &minted);
+            if let Err(err) = crate::mux::check_task_id(&id) {
                 return outcome("trial refused", format!("{err:#}"));
             }
-        };
+            minted.insert(id.clone());
+            id_map.insert(task.id.clone(), id.clone());
 
-        // A task id becomes a branch and a file name — the same check an
-        // ordinary submission runs in `validate_batch`.
-        let id = mint_id(repo, &task.id, &minted);
-        if let Err(err) = crate::mux::check_task_id(&id) {
-            return outcome("trial refused", format!("{err:#}"));
+            let mut arm = match build_trial_arm(
+                &task.path.display().to_string(),
+                &task.doc,
+                base,
+                &id,
+                &stamp,
+                pipeline,
+                &skip,
+            ) {
+                Ok(arm) => arm,
+                Err(err) => {
+                    return outcome("trial refused", format!("{err:#}"));
+                }
+            };
+
+            // Every dependency this copy also forks maps to that
+            // predecessor's own minted id — the bare id it named is never
+            // itself queued by a trial (see `build_trial_arm`), so this is
+            // what keeps the chain the source group named intact inside the
+            // copy. A dependency outside the group is left exactly as it
+            // read, unless this task itself is already archived: `retain`
+            // sweeps a finished predecessor out of `archive/`, so a stale
+            // reference an archived task still carries cannot be trusted to
+            // resolve, and is dropped instead — the same emptying a lone
+            // archived fork always made, generalised from "the one task this
+            // forked" to "this task, whichever one of the group it is".
+            arm.front.depends_on = arm
+                .front
+                .depends_on
+                .iter()
+                .filter_map(|dep| match id_map.get(dep) {
+                    Some(mapped) => Some(mapped.clone()),
+                    None if task.state == TaskState::Done => None,
+                    None => Some(dep.clone()),
+                })
+                .collect();
+
+            arm.path = repo.queue_dir().join(format!("{id}.md"));
+            arms.push(arm);
         }
-        minted.insert(id.clone());
-        id_map.insert(task.id.clone(), id.clone());
-
-        let skip = trial.skip.get(&key).cloned().unwrap_or_default();
-        let mut arm = match build_trial_arm(
-            &task.path.display().to_string(),
-            &task.doc,
-            base,
-            &id,
-            &trial_id,
-            pipeline,
-            &skip,
-        ) {
-            Ok(arm) => arm,
-            Err(err) => {
-                return outcome("trial refused", format!("{err:#}"));
-            }
-        };
-
-        // Every dependency this trial is also forking maps to that
-        // predecessor's own minted id — the bare id it named is never itself
-        // queued by a trial (see `build_trial_arm`), so this is what keeps
-        // the chain the source group named intact inside the batch. A
-        // dependency outside the batch is left exactly as it read, unless
-        // this task itself is already archived: `retain` sweeps a
-        // finished predecessor out of `archive/`, so a stale reference an
-        // archived task still carries cannot be trusted to resolve, and
-        // is dropped instead — the same emptying a lone archived fork always
-        // made, generalised from "the one task this forked" to "this task,
-        // whichever one of the group it is".
-        arm.front.depends_on = arm
-            .front
-            .depends_on
-            .iter()
-            .filter_map(|dep| match id_map.get(dep) {
-                Some(mapped) => Some(mapped.clone()),
-                None if task.state == TaskState::Done => None,
-                None => Some(dep.clone()),
-            })
-            .collect();
-
-        arm.path = repo.queue_dir().join(format!("{id}.md"));
-        arms.push(arm);
     }
 
     match finish_trial(repo, arms) {
@@ -8758,6 +8740,7 @@ mod tests {
             "base_commit",
             "cut_from",
             "trial",
+            "trial_group",
             "branch",
         ] {
             let text = task_text("demo", &format!("group: demo\n{key}: bogus\n"), BODY);
@@ -9344,10 +9327,10 @@ mod tests {
 
         // `key_hint` opens every key line on one column of indent.
         let mut state = ScreenState::new();
-        let line = crate::status::strip_ansi(&footer(&[], &state));
+        let line = crate::status::strip_ansi(&footer(&state));
         assert_eq!(line, format!(" {groups_line}"));
         state.focus = Focus::Tasks;
-        let line = crate::status::strip_ansi(&footer(&[], &state));
+        let line = crate::status::strip_ansi(&footer(&state));
         assert_eq!(line, format!(" {tasks_line}"));
 
         let drawn = screen(&repo, listed(&repo), "\t");
@@ -9865,7 +9848,7 @@ mod tests {
     /// bare `spoolway`'s tab strip — is scrolled off the screen.
     #[test]
     fn wrapped_rows_counts_the_rows_a_key_line_wraps_onto() {
-        let line = footer(&[], &ScreenState::new());
+        let line = footer(&ScreenState::new());
         let columns = crate::status::strip_ansi(&line).chars().count();
         assert!(columns > 100, "the key line fits in 100 columns now");
         assert_eq!(wrapped_rows(&line, 100), 2);
@@ -11054,16 +11037,17 @@ mod tests {
         );
     }
 
-    /// `t`'s own first screen: every task in the group, its own row, and a
-    /// task that names its own `pipeline:` shown assigned to it
-    /// already — one that names none shows unassigned instead, there being
-    /// no project default left to seed it with.
+    /// `t`'s own first screen: every project pipeline, its own row, in the
+    /// order `trial_pipeline_names` gives — and only the pipelines the
+    /// group's own tasks name start ticked. A task naming none ticks
+    /// nothing. The arm count under the list multiplies the ticks by the
+    /// group's tasks.
     #[test]
-    fn assign_pipelines_panel_lists_every_task_already_assigned_a_pipeline() {
-        let repo = fixture("screen-trial-assign");
-        // Built by hand rather than through `task`, which now fills in
+    fn pick_pipelines_panel_lists_every_pipeline_and_ticks_the_groups_own() {
+        let repo = fixture("screen-trial-pick");
+        // Built by hand rather than through `task`, which fills in
         // `pipeline: default` — alpha's own point here is that it names
-        // none, so the picker opens it unassigned.
+        // none, so it ticks nothing and `default` opens unticked.
         write_pending(
             &repo,
             "alpha",
@@ -11080,6 +11064,7 @@ mod tests {
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
+        assert_eq!(trial_pipeline_names(&pipelines), vec!["bugfix", "default"]);
 
         let trial = TrialState::new(&pipelines, &groups[0]);
         let panel = trial_panel(
@@ -11092,75 +11077,87 @@ mod tests {
         let flat = panel.join("\n");
 
         assert!(flat.contains("trial chain"), "{flat}");
-        assert!(flat.contains("assign one pipeline to every task"), "{flat}");
-        assert!(flat.contains("alpha"), "{flat}");
-        assert!(flat.contains(TRIAL_UNASSIGNED), "{flat}");
-        assert!(flat.contains("beta"), "{flat}");
-        assert!(flat.contains("bugfix"), "{flat}");
-        // alpha is still unassigned, so the footer says so rather than
-        // offering an `enter` that would silently refuse to advance —
-        // tightened to two spaces a key, to fit the headless frame's width.
+        assert!(flat.contains("pick pipelines to compare"), "{flat}");
+        // The cursor opens on the first tick, as the mockup draws it.
+        let bugfix_at = flat.find("> [x] bugfix").expect(&flat);
+        let default_at = flat.find("  [ ] default").expect(&flat);
+        assert!(bugfix_at < default_at, "listed in name order: {flat}");
+        assert!(flat.contains("1 pipeline × 2 tasks = 2 arms"), "{flat}");
         assert!(
-            flat.contains(
-                "[↑↓] task  [←→] pipeline  assign every task, then [enter]  [esc] cancel"
-            ),
+            flat.contains("[↑↓] move   [space] tick   [enter] next   [esc] cancel"),
             "{flat}"
         );
     }
 
-    /// `←`/`→` on the first screen cycles the highlighted task's own
-    /// assignment through every project pipeline, wrapping past either end
-    /// rather than stopping there, and never touches any other task's own
-    /// pick — an unassigned task the cursor never visited stays unassigned.
+    /// `space` ticks and unticks the pipeline under the cursor, the arm
+    /// count follows, and unticking a pipeline drops the skips it held.
     #[test]
-    fn left_right_cycles_only_the_highlighted_tasks_own_pipeline() {
-        let repo = fixture("screen-trial-cycle");
-        // Built by hand, the same as the panel test above — both tasks have
-        // to open unassigned, and `task` would otherwise fill in
-        // `pipeline: default` for them.
-        write_pending(
-            &repo,
-            "alpha",
-            &format!("---\nid: alpha\ntitle: alpha, done\ngroup: demo\n---\n{BODY}"),
-        );
+    fn space_ticks_the_highlighted_pipeline_and_untick_drops_its_skips() {
+        let repo = fixture("screen-trial-tick");
+        write_pending(&repo, "alpha", &task_text("alpha", "group: demo\n", BODY));
         write_pending(
             &repo,
             "beta",
-            &format!("---\nid: beta\ntitle: beta, done\ngroup: demo\n---\n{BODY}"),
+            &task_text("beta", "group: demo\ndepends_on: [alpha]\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let group = &groups[0];
-        let beta_key = task_key(&group.tasks[1]);
-        assert!(
-            !TrialState::new(&pipelines, group)
-                .pipeline
-                .contains_key(&beta_key),
-            "a task naming no `pipeline:` opens unassigned"
-        );
 
         let trial = TrialState::new(&pipelines, group);
-        let Mode::Trial(trial) = handle_trial_key(group, &pipelines, trial, Key::Right) else {
+        assert_eq!(
+            trial.ticked.iter().collect::<Vec<_>>(),
+            vec!["default"],
+            "both tasks name `default`, so it alone starts ticked"
+        );
+        assert_eq!(trial.cursor, 1, "the cursor opens on `default`'s row");
+
+        // Up onto `bugfix` and tick it.
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Up) else {
             panic!("expected to stay on the trial picker");
         };
+        let Mode::Trial(mut trial) = handle_trial_key(&pipelines, trial, Key::Char(' ')) else {
+            panic!("expected to stay on the trial picker");
+        };
+        assert!(trial.ticked.contains("bugfix") && trial.ticked.contains("default"));
+        let flat = trial_panel(&groups, &pipelines, &trial, 80)
+            .unwrap()
+            .join("\n");
+        assert!(flat.contains("2 pipelines × 2 tasks = 4 arms"), "{flat}");
 
-        // Unassigned, so `→` lands on whichever pipeline sorts first.
-        let names = trial_pipeline_names(&pipelines);
-        let expected = names[0];
-        assert_eq!(
-            trial.pipeline[&task_key(&group.tasks[0])],
-            expected,
-            "the highlighted task (alpha) moved on"
-        );
-        assert!(
-            !trial.pipeline.contains_key(&beta_key),
-            "beta was never under the cursor, so it must still be unassigned"
-        );
+        // A skip held for `bugfix` goes with its tick.
+        trial
+            .skip
+            .entry("bugfix".to_string())
+            .or_default()
+            .insert("handover".to_string());
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Char(' ')) else {
+            panic!("expected to stay on the trial picker");
+        };
+        assert!(!trial.ticked.contains("bugfix"));
+        assert!(!trial.skip.contains_key("bugfix"), "{:?}", trial.skip);
+    }
+
+    /// `enter` does nothing while no pipeline is ticked: the picker stays on
+    /// its first screen and nothing is queued.
+    #[test]
+    fn enter_with_no_pipeline_ticked_does_nothing() {
+        let repo = fixture("screen-trial-none-ticked");
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
+        let groups = listed(&repo);
+
+        // `t` opens with `default` ticked (the cursor on it), `space`
+        // unticks it, and two `enter`s would otherwise reach the write.
+        let drawn = screen(&repo, groups, "t \r\r");
+
+        assert!(repo.queue_dir().read_dir().unwrap().next().is_none());
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("pick pipelines to compare"), "{frame}");
+        assert!(frame.contains("0 pipelines × 1 task = 0 arms"), "{frame}");
     }
 
     /// `esc` off the second screen returns to the first without dropping
-    /// anything either screen already picked — the acceptance criterion this
-    /// task names explicitly.
+    /// anything either screen already picked.
     #[test]
     fn esc_off_the_skip_screen_returns_to_pipelines_without_losing_picks() {
         let repo = fixture("screen-trial-esc-back");
@@ -11168,32 +11165,30 @@ mod tests {
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let group = &groups[0];
-        let key = task_key(&group.tasks[0]);
 
         let mut trial = TrialState::new(&pipelines, group);
-        trial.pipeline.insert(key.clone(), "bugfix".to_string());
+        trial.ticked.insert("bugfix".to_string());
         trial.stage = TrialStage::ChooseSkips;
         trial
             .skip
-            .entry(key.clone())
+            .entry("bugfix".to_string())
             .or_default()
             .insert("checks".to_string());
 
-        let Mode::Trial(trial) = handle_trial_key(group, &pipelines, trial, Key::Esc) else {
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Esc) else {
             panic!("expected to stay on the trial picker");
         };
 
-        assert_eq!(trial.stage, TrialStage::AssignPipelines);
-        assert_eq!(trial.pipeline[&key], "bugfix");
-        assert!(trial.skip[&key].contains("checks"));
+        assert_eq!(trial.stage, TrialStage::PickPipelines);
+        assert!(trial.ticked.contains("bugfix"));
+        assert!(trial.skip["bugfix"].contains("checks"));
     }
 
-    /// `t`'s own second screen: every task's own header names the pipeline
-    /// the first screen left it with, its steps are listed under it, and a
-    /// tick made against one task's steps never reaches another's — each
-    /// keeps its own skip set, keyed by the task rather than by position.
+    /// `t`'s own second screen: one block per ticked pipeline, its name over
+    /// its own steps, and a tick made in one pipeline's block never reaches
+    /// another's — each pipeline keeps its own skip set.
     #[test]
-    fn choose_skips_panel_keeps_a_separate_skip_set_per_task() {
+    fn choose_skips_panel_keeps_a_separate_skip_set_per_pipeline() {
         let repo = fixture("screen-trial-skips");
         write_pending(
             &repo,
@@ -11217,7 +11212,7 @@ mod tests {
         trial.stage = TrialStage::ChooseSkips;
         trial
             .skip
-            .entry(task_key(&group.tasks[0]))
+            .entry("bugfix".to_string())
             .or_default()
             .insert("handover".to_string());
 
@@ -11231,11 +11226,23 @@ mod tests {
         let flat = panel.join("\n");
 
         assert!(flat.contains("choose steps to skip"), "{flat}");
-        assert!(flat.contains("alpha · bugfix"), "{flat}");
-        assert!(flat.contains("beta · default"), "{flat}");
+        // A block's header is the pipeline's name alone on its row.
+        let header = |name: &str| {
+            panel
+                .iter()
+                .position(|line| line.trim_matches(|c| c == '│' || c == ' ') == name)
+                .unwrap_or_else(|| panic!("no `{name}` header: {flat}"))
+        };
+        let bugfix_at = header("bugfix");
+        let default_at = header("default");
+        assert!(bugfix_at < default_at, "blocks in name order: {flat}");
+        assert!(
+            !flat.contains("alpha ·"),
+            "a block is a pipeline, not a task: {flat}"
+        );
         assert!(flat.contains("[x] handover"), "{flat}");
-        // `beta`'s own `handover` — the same step id, a different task — is
-        // never ticked by alpha's own skip set.
+        // `default`'s own `handover` — the same step id, a different
+        // pipeline — is never ticked by bugfix's own skip set.
         assert_eq!(flat.matches("[x]").count(), 1, "{flat}");
         assert!(
             flat.contains("[↑↓] move   [space] toggle   [enter] run   [esc] pipelines"),
@@ -11309,9 +11316,9 @@ mod tests {
     /// popup lost its right border on every row and its bottom border
     /// entirely, and any checkbox past the cut was never painted at all.
     ///
-    /// Two tasks rather than one, so the assertion covers a panel tall
-    /// enough to have a header, wrapped rows and a keys line all competing
-    /// for the same width.
+    /// Both pipelines ticked rather than one, so the assertion covers a
+    /// panel tall enough to have two headers, wrapped rows and a keys line
+    /// all competing for the same width.
     #[test]
     fn the_skips_popup_survives_being_overlaid_on_the_frame() {
         let repo = fixture("screen-trial-skips-overlay");
@@ -11320,14 +11327,16 @@ mod tests {
             "alpha",
             &task_text("alpha", "group: audits\npipeline: bugfix\n", BODY),
             "beta",
-            &task_text("beta", "group: audits\npipeline: bugfix\n", BODY),
+            &task_text("beta", "group: audits\npipeline: default\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let bugfix = pipelines.get("bugfix").unwrap();
+        let default = pipelines.get("default").unwrap();
 
         let mut trial = TrialState::new(&pipelines, &groups[0]);
         trial.stage = TrialStage::ChooseSkips;
+        assert_eq!(trial.ticked.len(), 2, "{:?}", trial.ticked);
 
         let layout = Layout {
             left: LEFT_PANE_WIDTH,
@@ -11340,11 +11349,11 @@ mod tests {
         overlay(&mut frame, &panel);
         let drawn = frame.join("\n");
 
-        // Every step of both tasks is painted onto the frame itself, not
+        // Every step of both pipelines is painted onto the frame itself, not
         // merely present in the panel that was handed to `overlay`. Counted
         // on a whole id rather than a bare substring, so `reproduce` does
         // not also count the `reproduce-again` row two lines under it.
-        for step in &bugfix.steps {
+        for step in bugfix.steps.iter().chain(&default.steps) {
             let needle = format!("[ ] {}", step.id);
             let drew = drawn
                 .match_indices(&needle)
@@ -11353,9 +11362,13 @@ mod tests {
                         .starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
                 })
                 .count();
+            let expected = [bugfix, default]
+                .iter()
+                .filter(|pipeline| pipeline.step(&step.id).is_some())
+                .count();
             assert_eq!(
-                drew, 2,
-                "`{}` drew {drew} checkboxes on the frame, not one per task:\n{drawn}",
+                drew, expected,
+                "`{}` drew {drew} checkboxes on the frame, not one per pipeline:\n{drawn}",
                 step.id
             );
         }
@@ -11405,32 +11418,28 @@ mod tests {
     /// Neither trial screen runs off the frame when what it is drawing is a
     /// long name rather than a long pipeline. This is the same defect
     /// `look` failed the first pass for, reached through the other input:
-    /// the checkbox rows were bounded by `checkbox_row_cap`, but a task's
-    /// own id and the group name in the popup's title were not, so a long
-    /// enough id overflowed the popup exactly the same way and `overlay`
-    /// ate the right border off every row again.
+    /// the checkbox rows were bounded by `checkbox_row_cap`, but the group
+    /// name in the popup's title was not, so a long enough name overflowed
+    /// the popup exactly the same way and `overlay` ate the right border off
+    /// every row again.
     ///
     /// Driven at the narrowest layout `layout_for` ever produces, since
     /// that is where the budget is tightest, and across both stages, since
     /// they build their rows separately.
     #[test]
-    fn a_long_task_id_is_cut_rather_than_pushing_a_trial_popup_off_the_frame() {
+    fn a_long_group_name_is_cut_rather_than_pushing_a_trial_popup_off_the_frame() {
         let repo = fixture("screen-trial-long-names");
-        let long = "alpha-with-a-really-quite-long-task-identifier";
+        let group = "a-group-with-a-really-quite-long-name-of-its-own-that-runs-on-and-on";
         write_pending_two(
             &repo,
-            long,
+            "alpha",
             &task_text(
-                long,
-                "group: a-group-with-a-long-name-of-its-own\npipeline: bugfix\n",
+                "alpha",
+                &format!("group: {group}\npipeline: bugfix\n"),
                 BODY,
             ),
             "beta",
-            &task_text(
-                "beta",
-                "group: a-group-with-a-long-name-of-its-own\npipeline: bugfix\n",
-                BODY,
-            ),
+            &task_text("beta", &format!("group: {group}\npipeline: bugfix\n"), BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -11442,7 +11451,7 @@ mod tests {
         };
         let frame_width = layout.left + layout.right + 7;
 
-        for stage in [TrialStage::AssignPipelines, TrialStage::ChooseSkips] {
+        for stage in [TrialStage::PickPipelines, TrialStage::ChooseSkips] {
             let mut trial = TrialState::new(&pipelines, &groups[0]);
             trial.stage = stage;
             let panel = trial_panel(&groups, &pipelines, &trial, checkbox_row_cap(layout)).unwrap();
@@ -11460,7 +11469,7 @@ mod tests {
             let drawn = frame.join("\n");
             assert!(
                 drawn.contains('…'),
-                "{stage:?} never cut the long id at all: \n{drawn}"
+                "{stage:?} never cut the long group name at all: \n{drawn}"
             );
             assert!(
                 frame.iter().any(|line| {
@@ -11811,12 +11820,13 @@ mod tests {
         );
     }
 
-    /// `t` on a group forks every one of its tasks, one arm each, on the
-    /// pipeline the first screen assigned it and the steps the second
-    /// screen ticked to skip — and the source task, never itself
+    /// `t` on a group forks the whole group once per ticked pipeline, each
+    /// copy in its own `<group>-<pipeline>` group, ids numbered in the order
+    /// the pipelines are listed — and a skip ticked in one pipeline's block
+    /// reaches only that pipeline's arms. The source task, never itself
     /// submitted, is left exactly where it was.
     #[test]
-    fn a_trial_forks_every_task_on_its_own_assigned_pipeline() {
+    fn a_trial_forks_the_group_once_on_each_ticked_pipeline() {
         let repo = fixture("screen-trial");
         write_pending(
             &repo,
@@ -11832,27 +11842,42 @@ mod tests {
             .position(|s| s.id == "handover")
             .unwrap();
 
-        // `t` opens the picker straight from the groups pane — no `Tab`
-        // needed, since the whole group forks regardless of which pane has
-        // focus. One `→` cycles `solo`'s own assignment from the project
-        // default to `bugfix` (the two builtin pipelines sort `bugfix`
-        // first), `enter` advances to the skip screen, `handover_at` more
-        // `↓` walks onto its last step, `space` ticks it, `enter` launches.
-        let keys = format!("t\x1b[C\r{} \r", "\x1b[B".repeat(handover_at));
+        // `t` opens the picker with `default` — what `solo` names — ticked
+        // and under the cursor. `↑` onto `bugfix`, `space` ticks it, `enter`
+        // advances to the skip screen, whose first block is `bugfix`'s;
+        // `handover_at` more `↓` walks onto its `handover`, `space` ticks
+        // it, `enter` launches.
+        let keys = format!("t\x1b[A \r{} \r", "\x1b[B".repeat(handover_at));
         screen(&repo, groups, &keys);
 
-        let arm = queued(&repo, "solo-1");
-        assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
-        assert_eq!(arm.front.skip, vec!["handover".to_string()]);
-        assert_eq!(arm.front.group.as_deref(), Some("audits"));
-        assert_eq!(arm.front.branch.as_deref(), Some("task/solo-1"));
+        let first = queued(&repo, "solo-1");
+        assert_eq!(first.front.pipeline.as_deref(), Some("bugfix"));
+        assert_eq!(first.front.group.as_deref(), Some("audits-bugfix"));
+        assert_eq!(first.front.skip, vec!["handover".to_string()]);
+        assert_eq!(first.front.branch.as_deref(), Some("task/solo-1"));
+        assert_eq!(first.front.trial_group.as_deref(), Some("audits"));
         assert!(
-            arm.front
+            first
+                .front
                 .trial
                 .as_deref()
                 .is_some_and(|id| id.starts_with('t')),
             "the trial id is freshly minted, not the group's own name or the task's own id: {:?}",
-            arm.front.trial
+            first.front.trial
+        );
+
+        let second = queued(&repo, "solo-2");
+        assert_eq!(second.front.pipeline.as_deref(), Some("default"));
+        assert_eq!(second.front.group.as_deref(), Some("audits-default"));
+        assert!(
+            second.front.skip.is_empty(),
+            "`handover` was ticked in bugfix's block, not default's: {:?}",
+            second.front.skip
+        );
+        assert_eq!(second.front.trial_group.as_deref(), Some("audits"));
+        assert_eq!(
+            first.front.trial, second.front.trial,
+            "one trial, two copies"
         );
 
         assert!(
@@ -11865,14 +11890,12 @@ mod tests {
         );
     }
 
-    /// The picker's whole reason to exist, and the one case nothing covered:
-    /// a task naming no pipeline at all. Every other trial test goes
-    /// through `task`, which fills in `pipeline: default` unless the
-    /// task names one — so all of them arrived already routed, and the
-    /// unassigned task the assign screen is *for* was never driven end to
-    /// end. It did not work: `build_trial_arm` hands `parse_submission` the
-    /// source task, which refuses one with no `pipeline:`, so the whole
-    /// batch was abandoned with `trial refused:` and nothing was minted.
+    /// A task naming no pipeline at all ticks nothing, so the picker opens
+    /// with every row empty, and the pipeline a person ticks is what its
+    /// arm runs. `build_trial_arm` hands `parse_submission` the source
+    /// task, which refuses one with no `pipeline:` — so the tick has to be
+    /// written into the task before it is parsed, or the whole batch would
+    /// be abandoned with `trial refused:` and nothing minted.
     ///
     /// A bare `pipeline:` rather than no line at all, so `task`'s own
     /// fill-in steps aside and the task reads exactly as unassigned as
@@ -11892,25 +11915,23 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // `t` opens the picker with `solo` drawn `(unset)`, which `enter`
-        // alone will not advance past. One `→` lands it on `bugfix` — the
-        // pipeline that sorts first, there being no current position to
-        // cycle away from — `enter` advances to the skips screen, `enter`
-        // launches with nothing ticked.
-        screen(&repo, groups, "t\x1b[C\r\r");
+        // `t` opens with nothing ticked and the cursor on `bugfix`, the
+        // first row; `space` ticks it, `enter` advances to the skips
+        // screen, `enter` launches with nothing skipped.
+        screen(&repo, groups, "t \r\r");
 
         let arm = queued(&repo, "solo-1");
         assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
-        assert_eq!(arm.front.group.as_deref(), Some("audits"));
+        assert_eq!(arm.front.group.as_deref(), Some("audits-bugfix"));
         assert_eq!(arm.front.branch.as_deref(), Some("task/solo-1"));
     }
 
-    /// A group of more than one task mints one arm per task, all sharing the
-    /// one trial id, and a task that named a sibling in `depends_on` keeps
-    /// waiting on it — remapped to that sibling's own minted id, since the
-    /// bare id a trial's arms name is never itself queued.
+    /// A group of more than one task, tried under two pipelines, becomes two
+    /// copies of the whole chain: every arm shares the one trial id, and a
+    /// task that named a sibling in `depends_on` waits on that sibling's arm
+    /// in its own copy — never on another pipeline's.
     #[test]
-    fn a_trial_remaps_depends_on_to_the_sibling_arms_own_minted_ids() {
+    fn a_trial_remaps_depends_on_within_each_pipelines_own_copy() {
         let repo = fixture("screen-trial-chain");
         write_pending(&repo, "alpha", &task_text("alpha", "group: chain\n", BODY));
         write_pending(
@@ -11920,21 +11941,116 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // `t`, `enter` twice past both screens (nothing changed — both tasks
-        // keep the project default).
+        // `t` (default ticked), `↑` onto bugfix, `space` ticks it, `enter`
+        // twice past both screens.
+        screen(&repo, groups, "t\x1b[A \r\r");
+
+        let trial = queued(&repo, "alpha-1").front.trial;
+        assert!(trial.is_some());
+        for (n, pipeline) in [(1, "bugfix"), (2, "default")] {
+            let alpha = queued(&repo, &format!("alpha-{n}"));
+            let beta = queued(&repo, &format!("beta-{n}"));
+            let group = format!("chain-{pipeline}");
+            for arm in [&alpha, &beta] {
+                assert_eq!(arm.front.pipeline.as_deref(), Some(pipeline));
+                assert_eq!(arm.front.group.as_deref(), Some(group.as_str()));
+                assert_eq!(arm.front.trial, trial, "every arm shares one trial id");
+            }
+            assert_eq!(
+                beta.front.depends_on,
+                vec![format!("alpha-{n}")],
+                "beta's own depends_on must follow alpha into its own copy's minted id"
+            );
+        }
+        assert_eq!(repo.queue_dir().read_dir().unwrap().count(), 4);
+    }
+
+    /// A copy's `<group>-<pipeline>` name is numbered around one the queue
+    /// or the archive already holds, the way a task id is: `-2`, then `-3`.
+    #[test]
+    fn a_trial_names_its_copy_around_a_group_already_on_disk() {
+        let repo = fixture("screen-trial-group-taken");
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
+        std::fs::write(
+            repo.queue_dir().join("earlier.md"),
+            "---\nid: earlier\ntitle: earlier\ngroup: audits-default\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+        already_done(&repo, "older", "audits-default-2");
+        let groups = listed(&repo);
+
         screen(&repo, groups, "t\r\r");
 
-        let alpha = queued(&repo, "alpha-1");
-        let beta = queued(&repo, "beta-1");
-        assert!(alpha.front.trial.is_some(), "{:?}", alpha.front.trial);
         assert_eq!(
-            alpha.front.trial, beta.front.trial,
-            "both arms of the same trial share one minted id"
+            queued(&repo, "solo-1").front.group.as_deref(),
+            Some("audits-default-3"),
+            "audits-default is queued and audits-default-2 is archived"
+        );
+    }
+
+    /// A skip set belongs to one pipeline, and an arm is only given the
+    /// skips its own pipeline has a step for — a set left naming a step the
+    /// pipeline does not have is filtered rather than written, since
+    /// `spoolway doctor` refuses a `skip:` naming a step its pipeline lacks.
+    #[test]
+    fn a_trial_writes_only_skips_the_arms_own_pipeline_has() {
+        let repo = fixture("screen-trial-skip-filter");
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
+        trial.ticked.insert("bugfix".to_string());
+        trial.stage = TrialStage::ChooseSkips;
+        trial.skip.insert(
+            "bugfix".to_string(),
+            ["reproduce".to_string(), "implement".to_string()].into(),
+        );
+        trial
+            .skip
+            .insert("default".to_string(), ["implement".to_string()].into());
+
+        let mode = begin_trial(&repo, &pipelines, "main", &groups, &trial);
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+
+        assert_eq!(
+            queued(&repo, "solo-1").front.skip,
+            vec!["reproduce".to_string()],
+            "bugfix has no `implement` step"
         );
         assert_eq!(
-            beta.front.depends_on,
-            vec!["alpha-1".to_string()],
-            "beta's own depends_on must follow alpha into its minted id, not the bare one"
+            queued(&repo, "solo-2").front.skip,
+            vec!["implement".to_string()],
+            "only default's own set reaches default's arm"
+        );
+    }
+
+    /// Any refusal writes nothing at all — not the first pipeline's copy,
+    /// not the part of a copy minted before the refusal. A dependency on an
+    /// id nothing holds is refused by `check_dependencies_set` once every
+    /// arm of every copy is built.
+    #[test]
+    fn a_refused_trial_writes_no_copy_at_all() {
+        let repo = fixture("screen-trial-refused");
+        write_pending(&repo, "alpha", &task_text("alpha", "group: chain\n", BODY));
+        write_pending(
+            &repo,
+            "beta",
+            &task_text("beta", "group: chain\ndepends_on: [alpha, nowhere]\n", BODY),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
+        trial.ticked.insert("bugfix".to_string());
+        trial.stage = TrialStage::ChooseSkips;
+
+        let mode = begin_trial(&repo, &pipelines, "main", &groups, &trial);
+        assert!(matches!(mode, Mode::Outcome { .. }), "{mode:?}");
+        assert_eq!(
+            repo.queue_dir().read_dir().unwrap().count(),
+            0,
+            "a refused trial must write no arm of any copy"
         );
     }
 

@@ -496,9 +496,10 @@ pub struct EvalArgs {
     #[arg(long = "group", value_name = "GROUP")]
     pub group: Option<String>,
 
-    /// One task's runs only. A trial forks a whole group, one arm per source
-    /// task (`alpha-1`, `beta-1`, …), so this is not how to see a trial side
-    /// by side — that is `--by task --trial <id>`.
+    /// One task's runs only. A trial forks a whole group once per ticked
+    /// pipeline, one arm per source task in each copy (`alpha-1`, `beta-1`,
+    /// `alpha-2`, …), so this is not how to see a trial side by side — that
+    /// is `--by task --trial <id>`.
     #[arg(long, value_name = "ID")]
     pub task: Option<String>,
 

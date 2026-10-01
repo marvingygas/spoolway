@@ -142,7 +142,7 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 refused, naming every column `--by`'s current value accepts. It cannot be combined with
 `--discard`.
 
-A trial forks one group into one arm per task, each under its own pipeline, all under one
+A trial forks one group into one full copy per pipeline it was ticked under, all under one
 trial id. See [Trials](planning.md#trials).
 
 ```

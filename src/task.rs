@@ -372,12 +372,23 @@ pub struct Frontmatter {
     /// on every arm the queue screen's `t` picker forks — see
     /// `commands::queue::begin_trial`. Absent on a task queued the ordinary
     /// way. What lets `spoolway eval --by task --trial <id>` find a trial's arms
-    /// together in the ledger: a trial forks a whole group, one arm per
-    /// source task (`alpha-1`, `beta-1`, …), so those arms come from
-    /// different source tasks and share nothing else — not even an id
-    /// prefix — to group them by.
+    /// together in the ledger: a trial forks a whole group once per ticked
+    /// pipeline, one arm per source task in each copy (`alpha-1`,
+    /// `beta-1`, `alpha-2`, …), each copy in a group of its own, so those
+    /// arms come from different source tasks and different groups and share
+    /// nothing else — not even an id prefix — to group them by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
+
+    /// The group a trial arm was forked from, stamped beside [`Self::trial`]
+    /// on every arm by `commands::queue::begin_trial`. Absent on a task
+    /// queued the ordinary way. An arm runs in a group of its own,
+    /// `<group>-<pipeline>`, so its own `group:` no longer names the group
+    /// a person tried; and once a trial settles its arms are deleted, so
+    /// this, carried onto every ledger line the arm banks, is the only
+    /// record left of which group the trial compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_group: Option<String>,
 
     /// The run a task replayed, for a task `spoolway eval --replay` once
     /// wrote. Absent on every ordinary task. That command, and the `--show`

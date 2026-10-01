@@ -2,13 +2,15 @@
 # The queue tab's `t` picker, driven end to end — the one path no unit test
 # can drive, since `run_screen` is exercised headlessly in Rust already, but
 # never as the whole binary reading real keystrokes off a real pipe, under
-# the pty `on_screen` gives it. `t` forks a whole group: one pipeline
-# assigned per task on the first popup, one skip set per task on the second,
-# one new arm per source task under one freshly minted trial id.
+# the pty `on_screen` gives it. `t` forks a whole group once per pipeline:
+# pipelines ticked on the first popup, one skip set per ticked pipeline on the
+# second, and one full copy of the group per tick, each copy in a group of its
+# own named `<group>-<pipeline>`, every arm under one freshly minted trial id.
 #
 # The first half of this suite drives no dispatcher: a trial's whole setup job
 # is landing arms in the queue directory with the right `pipeline:`, `skip:`,
-# `group:` and `trial:` on them, and that is what the queue-screen block below
+# `group:`, `trial:` and `trial_group:` on them, and that is what the
+# queue-screen block below
 # asserts — not that any of them ever runs. The second half — everything past
 # "dispatch and cleanup" — is the dependent half: a real dispatcher, a real
 # forge and a real issue-tracking hook, proving what a trial's runtime
@@ -33,15 +35,15 @@ new_repo "$LIVE/proj"
 configure_project plan/live
 
 # Two pending documents sharing one group, `beta` depending on `alpha` — the
-# unit `t` now forks whole. `spoolway init` writes exactly the two built-in
+# unit `t` forks whole. `spoolway init` writes exactly the two built-in
 # pipelines, `default` and `bugfix`, under `.spoolway/pipelines/`, and
-# `trial_pipeline_names` walks them in the same alphabetical order
-# (`bugfix`, `default`) the assign screen's `←`/`→` cycles through.
+# `trial_pipeline_names` lists them in the same alphabetical order
+# (`bugfix`, `default`) the pick screen draws its rows in.
 BODY="$LIVE/body.md"
 task_body "$BODY"
 # A bare `pipeline:` line leaves each document genuinely unassigned — see
-# `task_doc`'s own doc comment — which is the whole point of this suite's
-# picker cases below.
+# `task_doc`'s own doc comment — so the pick screen opens with nothing
+# ticked, and every tick below is one this suite made.
 pending_doc alpha "$BODY" "group: audits" "pipeline:"
 pending_doc beta "$BODY" "group: audits" "pipeline:" \
   "depends_on: [alpha]"
@@ -49,63 +51,89 @@ pending_doc beta "$BODY" "group: audits" "pipeline:" \
 # `Tab` focuses the tasks pane on a task inside the group (`alpha`, first in
 # reading order since it is the dependency), proving `t` reaches the whole
 # group from a selected task too, not only from the groups pane. `t` opens
-# the assign-pipelines popup with every task unassigned — there is no
-# project default to seed it with any more, so `enter` on this screen
-# refuses to advance until every task has one. `←` on `alpha` lands on
-# `bugfix`, the pipeline that sorts first, since there is no current
-# position to cycle away from yet; two `→`s on `beta` land it on `default`
-# instead — one press to the same first-sorting `bugfix`, a second to cycle
-# past it. `enter` then advances to the skips screen. There the flattened
-# cursor opens on `alpha`'s first checkbox: one `j` reaches its second,
-# `fix`, and `space` ticks it; eight more `j`s walk past the rest of
-# `alpha`'s own checkboxes onto `beta`'s third one, `document`, and `space`
-# ticks that too. Both runs are counted off the flattened checkbox list, so
-# they have to be recounted whenever either built-in pipeline gains or
-# loses a step. `alpha` contributes seven checkboxes, not the six steps
-# `bugfix` declares, because every pipeline is loaded with a `blocked` step
-# appended to it; `beta` contributes five the same way. `enter` mints and
-# writes both arms and goes back to browsing; the trailing `n` is noise the
-# screen ignores, and the pipe running dry ends it the same way `esc` would.
-on_screen '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' /dev/null
+# the pick-pipelines popup with nothing ticked and the cursor on `bugfix`,
+# the first row: `space` ticks it, `j` moves onto `default` and `space`
+# ticks that too. `enter` then advances to the skips screen, one block per
+# ticked pipeline, `bugfix`'s first. The flattened cursor opens on its first
+# checkbox: one `j` reaches its second, `fix`, and `space` ticks it; eight
+# more `j`s walk past the rest of `bugfix`'s own checkboxes onto `default`'s
+# third one, `document`, and `space` ticks that too. Both runs are counted
+# off the flattened checkbox list, so they have to be recounted whenever
+# either built-in pipeline gains or loses a step. `bugfix` contributes seven
+# checkboxes, not the six steps it declares, because every pipeline is
+# loaded with a `blocked` step appended to it; `default` contributes five
+# the same way. `enter` mints and writes all four arms and goes back to
+# browsing; the trailing `n` is noise the screen ignores, and the pipe
+# running dry ends it the same way `esc` would.
+on_screen '\tt j \rj jjjjjjjj \rn' /dev/null
 
-works "the alpha arm reaches the queue" \
-  test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
-works "and the beta arm beside it" \
-  test -f "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-works "two distinct minted ids — never either task's own bare one" \
+# Two copies of the two-task chain, ids numbered in pipeline order: the
+# `bugfix` copy is `alpha-1`, `beta-1`, the `default` copy `alpha-2`,
+# `beta-2`.
+ARMS="alpha-1 beta-1 alpha-2 beta-2"
+for arm in $ARMS; do
+  works "the $arm arm reaches the queue" \
+    test -f "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+done
+works "four arms and no more" \
+  bash -c '[ "$(ls "$1"/queue/*.md | wc -l)" -eq 4 ]' _ "$SPOOLWAY_PROJECT_HOME"
+works "never either task's own bare id" \
   bash -c '[ ! -e "$1/queue/alpha.md" ] && [ ! -e "$1/queue/beta.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
-has "alpha's arm carries the pipeline cycled onto it" "pipeline: bugfix" \
-  "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
-has "beta's arm carries the pipeline explicitly cycled onto it too" \
-  "pipeline: default" "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-works "alpha's own ticked skip, and none of beta's" \
-  bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- fix"' \
-  _ "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
-works "beta's own ticked skip, and none of alpha's" \
-  bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- document"' \
-  _ "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-has "both arms keep the task's own group" "group: audits" \
-  "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
-has "on both arms" "group: audits" \
-  "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
+for arm in alpha-1 beta-1; do
+  has "$arm runs the first ticked pipeline" "pipeline: bugfix" \
+    "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+  has "$arm sits in the bugfix copy's own group" "group: audits-bugfix" \
+    "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+  works "$arm carries bugfix's ticked skip, and none of default's" \
+    bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- fix"' \
+    _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+done
+for arm in alpha-2 beta-2; do
+  has "$arm runs the second ticked pipeline" "pipeline: default" \
+    "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+  has "$arm sits in the default copy's own group" "group: audits-default" \
+    "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+  works "$arm carries default's ticked skip, and none of bugfix's" \
+    bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- document"' \
+    _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+done
+for arm in $ARMS; do
+  has "$arm names the group the trial forked" "trial_group: audits" \
+    "$SPOOLWAY_PROJECT_HOME/queue/$arm.md"
+done
+
+QUEUE_LIST=$("$SPOOLWAY" queue list 2>&1)
+says "the queue lists the bugfix copy as a group of its own" "audits-bugfix" \
+  bash -c 'printf "%s" "$1"' _ "$QUEUE_LIST"
+says "and the default copy as another" "audits-default" \
+  bash -c 'printf "%s" "$1"' _ "$QUEUE_LIST"
 
 works "the shared trial id is freshly minted, t plus sixteen hex" \
   bash -c 'grep -qE "^trial: t[0-9a-f]{16}$" "$1"' \
   _ "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
-works "and the same id lands on both arms of the one launch" \
+works "and the same id lands on all four arms of the one launch" \
   bash -c '
     a=$(grep "^trial:" "$1/queue/alpha-1.md")
-    b=$(grep "^trial:" "$1/queue/beta-1.md")
-    [ -n "$a" ] && [ "$a" = "$b" ]
+    [ -n "$a" ] || exit 1
+    for arm in beta-1 alpha-2 beta-2; do
+      [ "$a" = "$(grep "^trial:" "$1/queue/$arm.md")" ] || exit 1
+    done
   ' _ "$SPOOLWAY_PROJECT_HOME"
 
-has "beta's depends_on is remapped onto alpha's own minted sibling id" \
-  "alpha-1" "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-works "not left naming the bare id nothing in this batch is queued under" \
-  bash -c '! grep -qxF -- "- alpha" "$1"' \
+# Each copy is the whole chain: `beta` waits on `alpha` inside its own copy,
+# never on the other pipeline's arm, and never on the bare id nothing in
+# this batch is queued under.
+works "beta-1 waits on alpha-1, its own copy's minted sibling" \
+  bash -c 'grep -A1 "^depends_on:" "$1" | tail -1 | grep -qxF -- "- alpha-1"' \
   _ "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
+works "beta-2 waits on alpha-2, its own copy's minted sibling" \
+  bash -c 'grep -A1 "^depends_on:" "$1" | tail -1 | grep -qxF -- "- alpha-2"' \
+  _ "$SPOOLWAY_PROJECT_HOME/queue/beta-2.md"
+works "neither is left naming the bare id" \
+  bash -c '! grep -qxF -- "- alpha" "$1/queue/beta-1.md" && ! grep -qxF -- "- alpha" "$1/queue/beta-2.md"' \
+  _ "$SPOOLWAY_PROJECT_HOME"
 
 # A trial forks the documents; it does not submit them. The pending copies
 # are templates the picker read from, not a batch the screen queued and
@@ -122,11 +150,10 @@ works "both source tasks are left exactly where they were" \
 # earlier has. Not `queue/`: the queue tab never lists a queued group, and
 # its filter never reaches one. `f` narrows to it by name, `enter` leaves the search
 # box keeping the query, and `t` then reaches it straight from the groups
-# pane, with no `Tab` needed. Two `→`s land it on `default` — one press to
-# `bugfix`, the pipeline that sorts first with nothing assigned yet, a
-# second past it — since `enter` refuses to advance with it still
-# unassigned; `enter` then advances past the assign screen, and `enter`
-# again launches with nothing ticked to skip.
+# pane, with no `Tab` needed. Nothing is ticked, since the task names no
+# pipeline, and `enter` will not advance until something is: `j` moves onto
+# `default` and `space` ticks it, `enter` advances past the pick screen, and
+# `enter` again launches with nothing ticked to skip.
 mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
 task_doc "$SPOOLWAY_PROJECT_HOME/archive/old-run.md" old-run "$BODY" \
   "group: old-run" \
@@ -139,11 +166,11 @@ task_doc "$SPOOLWAY_PROJECT_HOME/archive/old-run.md" old-run "$BODY" \
   "attempts: 2" \
   "pipeline:"
 
-on_screen 'fold-run\rt\x1b[C\x1b[C\r\rn' /dev/null
+on_screen 'fold-run\rtj \r\rn' /dev/null
 
 works "the reset lets a stamped task reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
-has "under the pipeline cycled onto it" "pipeline: default" \
+has "under the pipeline ticked for it" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 lacks "the reset held: no stamped stage on the forked arm" "stage: done" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
@@ -159,8 +186,8 @@ rm -f "$SPOOLWAY_PROJECT_HOME/archive/old-run.md"
 
 # ------------------------------------------------------- dispatch and cleanup
 # Everything above only ever wrote queue files. From here a real dispatcher
-# runs two trial arms and one ordinary task through the same `default`
-# pipeline, against a real (if local) forge and a real `[issue_tracking]`
+# runs the four trial arms — two copies of a two-task chain, one per
+# pipeline — and one ordinary task, against a real (if local) forge and a real `[issue_tracking]`
 # hook — proving the runtime boundary the plan's own "trial runtime owns
 # safety and disposal" decision describes: no queued/done hook, no publishing,
 # and full disposal once every arm of a trial has settled, while an ordinary
@@ -191,9 +218,9 @@ chmod +x .spoolway/hooks/record.sh
 must "the hook is named" "$SPOOLWAY" config set issue_tracking.hook record.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/app
 
-# `alpha-1` and `beta-1` are exactly the two-arm trial the queue-screen block
-# above already minted — a real trial id, shared, on the same `group:
-# audits` — so there is no need to hand-write one: `trial:` is a key
+# `alpha-1`, `beta-1`, `alpha-2` and `beta-2` are exactly the four-arm trial
+# the queue-screen block above already minted — a real trial id, shared
+# across both copies — so there is no need to hand-write one: `trial:` is a key
 # `queue_add::parse_submission` refuses on any document, precisely because it
 # is spoolway's own to mint, never a person's or a script's to set. `old-run-1`
 # is a trial of one and is left queued rather than driven, so it dispatches in
@@ -202,8 +229,7 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 #
 # One ordinary task beside them, queued the everyday way and never touched by
 # `t` — same pipeline, same shape of work, so the only thing that can explain
-# a difference in what happens to it and to `alpha-1`/`beta-1` is trial mode
-# itself.
+# a difference in what happens to it and to the arms is trial mode itself.
 TRIAL_ID=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md" | awk '{print $2}')
 task_doc "$LIVE/control.md" control "$BODY" "group: control-live" \
   "pipeline: default" \
@@ -212,11 +238,10 @@ must "control queues" "$SPOOLWAY" queue add --from "$LIVE/control.md"
 
 if drive control gone 180; then ok "the ordinary control task runs the pipeline to done"
 else bad "the ordinary control task runs the pipeline to done (stuck at \`$(stage_of control)\`)"; fi
-if drive alpha-1 gone 180 && drive beta-1 gone 180; then
-  ok "both trial arms run their assigned pipelines to done"
-else
-  bad "both trial arms run their assigned pipelines to done (at \`$(stage_of alpha-1)\`/\`$(stage_of beta-1)\`)"
-fi
+for arm in $ARMS; do
+  if drive "$arm" gone 180; then ok "$arm runs its copy's pipeline to done"
+  else bad "$arm runs its copy's pipeline to done (stuck at \`$(stage_of "$arm")\`)"; fi
+done
 
 # Acceptance criterion: trial dispatch suppresses the queued/started/done
 # issue hooks — the control's own env files below are the proof the hook mechanism
@@ -228,7 +253,7 @@ has "and its done event too" "SPOOLWAY_EVENT=done" \
   "$SPOOLWAY_PROJECT_HOME/queue/control.md.env.done"
 has "and its started event, as it left queued" "SPOOLWAY_EVENT=started" \
   "$SPOOLWAY_PROJECT_HOME/queue/control.md.env.started"
-for arm in alpha-1 beta-1; do
+for arm in $ARMS; do
   works "$arm's queued event never reached the hook" \
     bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/$arm.md.env.queued"
   works "$arm's started event never reached the hook" \
@@ -243,7 +268,7 @@ done
 # came up.
 if handed_over control; then ok "the control is handed over as a pushed branch and a pull request"
 else bad "the control is handed over as a pushed branch and a pull request"; fi
-for arm in alpha-1 beta-1; do
+for arm in $ARMS; do
   works "$arm's branch was never pushed to the forge" \
     bash -c '! git ls-remote --exit-code --heads origin "task/$1" >/dev/null 2>&1' _ "$arm"
   works "$arm never opened a pull request" \
@@ -251,13 +276,14 @@ for arm in alpha-1 beta-1; do
 done
 
 # Acceptance criterion: once every task in a trial settles, its documents,
-# worktrees and local branches are removed — the control's own archive
+# worktrees and local branches are removed — all four arms, across both
+# copies' groups — the control's own archive
 # document, worktree and branch survive exactly as before, so the trial
 # arms' disappearance is the trial boundary and not ordinary teardown acting
 # on everyone alike.
 has "the control keeps its archive task, the durable record cleanup means" \
   "id: control" "$SPOOLWAY_PROJECT_HOME/archive/control.md"
-for arm in alpha-1 beta-1; do
+for arm in $ARMS; do
   works "$arm's archive task is gone, not merely queued for retention" \
     bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/archive/$arm.md"
   works "$arm's local branch is gone" \
@@ -270,22 +296,30 @@ done
 # thing a settled trial leaves standing, which is what makes `spoolway eval
 # --by task --trial <id>` still answerable after every disposable copy is gone.
 TRIAL_ROWS=$(grep -c "\"trial\":\"$TRIAL_ID\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl" 2>/dev/null || true)
-works "both arms' usage rows are still in the ledger, correlated by trial id" \
-  bash -c '[ "$1" -ge 2 ]' _ "${TRIAL_ROWS:-0}"
+works "all four arms' usage rows are still in the ledger, correlated by trial id" \
+  bash -c '[ "$1" -ge 4 ]' _ "${TRIAL_ROWS:-0}"
+# Every one of those rows names the group the trial forked, which no arm's
+# own task does any more: each sat in its copy's `<group>-<pipeline>`, and
+# all four were deleted when the trial settled.
+works "and every one of them names the source group beside the trial" \
+  bash -c '
+    rows=$(grep "\"trial\":\"$1\"" "$2")
+    [ "$(grep -c "\"trial_group\":\"audits\"" <<<"$rows")" -eq "$(wc -l <<<"$rows")" ]
+  ' _ "$TRIAL_ID" "$SPOOLWAY_PROJECT_HOME/usage.jsonl"
 
 # And that question, asked: `--by task` is one row per arm, closed by the
 # table's `Total` line, and `--trial` adds one delta line per arm against
 # the first. Which arm started first is the mock's scheduling to decide, so
-# the delta line is accepted either way round.
+# the delta lines are counted rather than matched by name.
 COMPARE_OUT=$("$SPOOLWAY" eval --by task --trial "$TRIAL_ID" 2>&1)
-for arm in alpha-1 beta-1; do
+for arm in $ARMS; do
   says "eval --by task --trial has a row for $arm" "$arm" \
     bash -c 'printf "%s" "$1"' _ "$COMPARE_OUT"
 done
 works "the arms' table closes on its Total line" \
-  bash -c 'grep -Eq "^Total +2 " <<<"$1"' _ "$COMPARE_OUT"
-works "and compares the second arm against the first on one delta line" \
-  bash -c 'grep -Eq "^(beta-1 vs alpha-1|alpha-1 vs beta-1): pass .*, cost .*, time " <<<"$1"' \
+  bash -c 'grep -Eq "^Total +4 " <<<"$1"' _ "$COMPARE_OUT"
+works "and compares every other arm against the first, one delta line each" \
+  bash -c '[ "$(grep -Ec "^(alpha|beta)-[12] vs (alpha|beta)-[12]: pass .*, cost .*, time " <<<"$1")" -eq 3 ]' \
   _ "$COMPARE_OUT"
 
 # ------------------------------------------------------------ explicit discard
@@ -297,7 +331,8 @@ works "and compares the second arm against the first on one delta line" \
 # A trial of its own group, so the discard below has nothing in common with
 # the two arms already settled. `t`'s minimal form: `f` narrows to the group
 # by name, `enter` leaves the search box keeping the query, `t` opens the
-# picker, two `enter`s take both screens' defaults and queue the trial;
+# picker with the task's own `default` already ticked, two `enter`s take
+# both screens' defaults and queue the trial as one copy under it;
 # the trailing `n` is noise it ignores, and the pipe running dry ends the
 # screen.
 #
@@ -310,8 +345,8 @@ works "and compares the second arm against the first on one delta line" \
 # no longer exists, and the discard refuses an id nothing carries any more.
 # That is exactly how this failed once the tier started running concurrently.
 #
-# So every pipeline here gates its own entry step: whichever the picker
-# assigns the arm, the arm runs that one step — cutting the worktree and the
+# So every pipeline here gates its own entry step: whichever pipeline the
+# arm's copy runs, the arm runs that one step — cutting the worktree and the
 # branch this scenario is about — and the pass is then held on `paused`, where
 # it stays until a person resumes it. A state, not a window.
 #

@@ -456,12 +456,15 @@ When a task reaches `done`:
 
 ### Trial arms
 
-A trial forks a group into one arm per task under one `trial:` id. See
-[Trials](planning.md#trials). An arm is a disposable copy:
+A trial forks a group into one full copy per ticked pipeline, each copy in a group of its own,
+every task in every copy an arm under one shared `trial:` id. See [Trials](planning.md#trials).
+An arm is a disposable copy:
 
 - Its `queued`, `started` and `done` events never fire the `[issue_tracking]` hook.
 - `spoolway stack` is a no-op for it, so it opens no pull request.
 - Its branch is deleted at cleanup whether or not a remote has it.
+- It carries `trial_group:`, the source group a person tried. Every ledger line it banks stores
+  that source group beside `trial:`. The field is absent on an ordinary task's lines.
 
 When the last arm reaches `done`, every arm's copy is removed. The source group and the usage
 rows stay:
@@ -470,9 +473,9 @@ rows stay:
 trial t9f3a settled
 
   kept      source group board-step-grace-window
-  kept      usage rows for 3 trial tasks
-  removed   3 tasks, worktrees and local branches
-  removed   3 panes, scratch dirs, sessions and run-file sets
+  kept      usage rows for 6 trial tasks
+  removed   6 tasks, worktrees and local branches
+  removed   6 panes, scratch dirs, sessions and run-file sets
 
   read      spoolway eval --by task --trial t9f3a
 ```

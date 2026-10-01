@@ -259,7 +259,7 @@ impl<'a> Dispatcher<'a> {
             return;
         };
         let mut removed = 0usize;
-        let mut source_group = task.front.group.clone().unwrap_or_default();
+        let mut source_group = trial_source_group(task);
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -272,7 +272,7 @@ impl<'a> Dispatcher<'a> {
                 continue;
             }
             if source_group.is_empty() {
-                source_group = arm.front.group.clone().unwrap_or_default();
+                source_group = trial_source_group(&arm);
             }
             if std::fs::remove_file(&path).is_ok() {
                 removed += 1;
@@ -886,6 +886,20 @@ fn task_for_branch(repo: &crate::repo::Repo, branch: &str) -> Option<Task> {
     }
 }
 
+/// The group a trial arm was forked from, as a settle or discard report
+/// names it. An arm runs in `<group>-<pipeline>`, so its own `group:` is
+/// its copy's, not the group a person tried; `trial_group` names that. An
+/// arm minted before `trial_group` existed ran in the source group itself,
+/// so its `group:` is still the right answer there. Empty when neither is
+/// set, which the reports read as nothing to name.
+fn trial_source_group(arm: &Task) -> String {
+    arm.front
+        .trial_group
+        .clone()
+        .or_else(|| arm.front.group.clone())
+        .unwrap_or_default()
+}
+
 /// Every task that belongs to `trial`, wherever it is sitting.
 ///
 /// Read straight off the three directories rather than through
@@ -995,7 +1009,7 @@ pub fn discard_trial(
     let mut source_group = String::new();
     for mut arm in arms {
         if source_group.is_empty() {
-            source_group = arm.front.group.clone().unwrap_or_default();
+            source_group = trial_source_group(&arm);
         }
         dispatcher.discard_arm(&mut arm, &lanes, &mut report);
         if std::fs::remove_file(&arm.path).is_ok() {
