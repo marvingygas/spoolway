@@ -20,12 +20,14 @@
 # reads that way. Two more things a site can still differ on, and each is a
 # one-line edit at the head of this file if yours does: that `Blocks` and
 # `Relates` are your project's own spelling for "this one comes first" and
-# "this is the same piece of work as that", and that your workflow actually
-# wires up a transition into whatever `status_progress` names — the live
-# proof this shipped with found a Jira site whose board draws an "In
-# Progress" column that no transition ever reaches from Draft; the hook
-# still asks for it, same as any other status here, and a `started` event
-# against a workflow like that is a silent no-op rather than a failure.
+# "this is the same piece of work as that", and that the three status names
+# match the ones `acli` sees. Jira answers in the language of the account
+# `acli` is logged in as: a German account sees `Entwurf` and `In Arbeit`
+# where this file says `Draft` and `In Progress`, and a transition asked for
+# by the English name finds nothing to move to. The live proof this shipped
+# with first ran under a German account, and read that as a workflow with no
+# route from Draft into In Progress; switching the account to English (at
+# id.atlassian.com, account preferences) made every transition here work.
 #
 # The task file itself is deliberately not sent. Jira's REST API would take
 # it as a real attachment, but only against a site, an account email and an
@@ -183,14 +185,41 @@ if [ "$SPOOLWAY_EVENT" = fetch ]; then
   # below reads as "no comments" rather than losing the whole fetch over it.
   comments=$(acli jira workitem comment list --key "$SPOOLWAY_REF" --json 2>/dev/null) || true
   [ -n "$comments" ] || comments='{"comments":[]}'
-  jq -n --argjson f "$fields" --argjson c "$comments" --arg site "$(site_host)" '{
+  # Jira Cloud's v3 API sends a description and a comment body as an
+  # Atlassian Document Format tree, not text — `adf` below flattens one into
+  # plain text, a paragraph per blank-line-separated block and `- ` per list
+  # item, so whoever reads `body` gets prose rather than a nested object. A
+  # plain string passes through unchanged. A comment's author is
+  # `displayName` on Cloud, which no longer sends `name` at all; the old
+  # `.author.name // .author` fallback handed back the whole author object.
+  jq -n --argjson f "$fields" --argjson c "$comments" --arg site "$(site_host)" '
+  def adf:
+    if type == "string" then .
+    elif type == "array" then map(adf) | join("")
+    elif type != "object" then ""
+    elif .type == "text" then .text // ""
+    elif .type == "hardBreak" then "\n"
+    elif .type == "mention" or .type == "emoji" then .attrs.text // ""
+    elif .type == "inlineCard" or .type == "blockCard" then .attrs.url // ""
+    elif .type == "listItem" then "- " + ((.content // []) | adf)
+    elif .type == "codeBlock" then "```\n" + ((.content // []) | adf) + "\n```\n\n"
+    elif .type == "rule" then "---\n\n"
+    elif .type == "paragraph" or .type == "heading" or .type == "blockquote" then
+      ((.content // []) | adf) + "\n\n"
+    else (.content // []) | adf
+    end;
+  def text: adf | gsub("\n{3,}"; "\n\n") | sub("\\s+$"; "");
+  {
     ref: $f.key,
     url: ("https://" + $site + "/browse/" + $f.key),
     title: $f.fields.summary,
     state: ($f.fields.status.name // "" | ascii_downcase),
     labels: ($f.fields.labels // []),
-    body: ($f.fields.description // ""),
-    comments: [$c.comments[]? | {author: (.author.name // .author // ""), body: (.body // "")}]
+    body: ($f.fields.description // "" | text),
+    comments: [$c.comments[]? | {
+      author: (.author | if type == "object" then .displayName // .name // "" else . // "" end),
+      body: (.body // "" | text)
+    }]
   }' > "$SPOOLWAY_OUT"
   exit 0
 fi
@@ -306,9 +335,7 @@ case "$SPOOLWAY_EVENT" in
       # which is every started after the group's first: `&&` short-circuits
       # on the false test, and that false exit status is what the arm, and
       # so the whole script, exits with. This paused every later Sub-task's
-      # own started event on a live run, though never on KAN's own site,
-      # since KAN's Story never actually left Draft to begin with (see the
-      # header note on `status_progress`).
+      # own started event on a live run.
       if [ "$still_draft" = true ]; then
         acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_progress" --yes
       fi
