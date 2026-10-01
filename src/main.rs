@@ -502,7 +502,7 @@ fn run() -> Result<()> {
                 }
 
                 Command::Template(TemplateCommand::Contract) => commands::template_contract(&repo),
-                Command::Hook(HookCommand::Contract) => commands::hook_contract(),
+                Command::Hook(HookCommand::Contract) => commands::hook_contract(&repo),
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 

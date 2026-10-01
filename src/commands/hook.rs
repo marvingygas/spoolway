@@ -2,8 +2,9 @@
 //! handed, event by event.
 //!
 //! A hook is one script, named by `issue_tracking.hook`, resolved inside
-//! `.spoolway/hooks/` and run on seven events — [`crate::tracking`] is the
-//! whole of what calls it. This prints straight from the tables
+//! `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`) and run
+//! on seven events — [`crate::tracking`] is the whole of what calls it.
+//! This prints straight from the tables
 //! [`crate::tracking::COMMON_EVENT_VARS`], [`crate::tracking::
 //! OPEN_EVENT_VARS`], [`crate::tracking::DISPATCH_EVENT_VARS`] and
 //! [`crate::tracking::FETCH_EVENT_VARS`] kept beside the functions that
@@ -18,8 +19,8 @@
 use super::*;
 
 /// `spoolway hook contract`.
-pub fn hook_contract() -> Result<()> {
-    print!("{}", render_hook_contract());
+pub fn hook_contract(repo: &Repo) -> Result<()> {
+    print!("{}", render_hook_contract(repo));
     Ok(())
 }
 
@@ -33,18 +34,22 @@ fn render_vars(out: &mut String, vars: &[(&str, &str)]) {
 
 /// [`hook_contract`]'s body, built as a string so a test can assert on it
 /// directly rather than capturing stdout.
-fn render_hook_contract() -> String {
+fn render_hook_contract(repo: &Repo) -> String {
     use crate::tracking::{
         COMMON_EVENT_VARS, DISPATCH_EVENT_VARS, FETCH_EVENT_VARS, OPEN_EVENT_VARS,
     };
 
+    let hooks_dir = relative(
+        &repo.checkout,
+        &crate::tracking::hooks_dir_in(&repo.checkout),
+    );
     let mut out = String::new();
     out.push_str("THE HOOK CONTRACT\n");
     out.push_str("=================\n\n");
-    out.push_str(
-        "One script, named by `issue_tracking.hook`, resolved inside .spoolway/hooks/ — a\n\
+    out.push_str(&format!(
+        "One script, named by `issue_tracking.hook`, resolved inside {hooks_dir}/ — a\n\
          bare filename only, never a path. Run on seven events, `SPOOLWAY_EVENT` naming which.\n\n",
-    );
+    ));
 
     out.push_str("EVERY EVENT CARRIES\n");
     render_vars(&mut out, COMMON_EVENT_VARS);
@@ -113,8 +118,17 @@ fn render_hook_contract() -> String {
          automation to wire, not a shipped hook's. Three ordinary ways to wire it: the \
          tracker's own GitHub app with an automation rule keyed on the pull request title, a \
          pull request workflow the project already runs, or a `spoolway jobs` routine polled \
-         on a schedule. A custom hook should keep the same split.\n",
+         on a schedule. A custom hook should keep the same split.\n\n",
     );
+
+    out.push_str("This project's own files:\n");
+    out.push_str(&format!(
+        "  {}\n",
+        relative(
+            &repo.checkout,
+            &crate::tracking::hooks_dir_in(&repo.checkout)
+        )
+    ));
     out
 }
 
@@ -127,7 +141,8 @@ mod tests {
     /// guessing which lines a script may lean on.
     #[test]
     fn hook_contract_names_every_event_and_its_own_variables() {
-        let text = render_hook_contract();
+        let repo = crate::commands::testutil::fixture("hook-contract-events");
+        let text = render_hook_contract(&repo);
         for fact in [
             "SPOOLWAY_EVENT",
             "SPOOLWAY_PROJECT_KEY",
@@ -169,7 +184,8 @@ mod tests {
     /// wire, with three ordinary ways to do it.
     #[test]
     fn hook_contract_says_done_is_a_handoff_and_names_three_ways_to_close() {
-        let text = render_hook_contract();
+        let repo = crate::commands::testutil::fixture("hook-contract-done");
+        let text = render_hook_contract(&repo);
         // Each assertion below is a distinct claim the acceptance criteria
         // make: a looser one (just "GitHub" and "Jira" appearing anywhere)
         // would still pass if the load-bearing sentences it is drawn from
@@ -185,5 +201,45 @@ mod tests {
         ] {
             assert!(text.contains(fact), "hook contract drops `{fact}`");
         }
+    }
+
+    /// A home-mode checkout has no `.spoolway/hooks/` of its own — the
+    /// contract's closing "this project's own files" line has to name the
+    /// workspace's `config/hooks/` instead, the folder a hook actually
+    /// resolves against there.
+    #[test]
+    fn hook_contract_names_the_workspace_hooks_folder_in_home_mode() {
+        let root = crate::scratch::root("hook-contract-home-mode");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("hook-contract-home-mode-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let workspace = home.join(".spoolway").join("ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"ws\"\nclones = [{{ root = \"{}\", dispatcher = \"api\" }}]\n",
+                root.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: workspace.join("dispatchers").join("api"),
+        };
+
+        let text = crate::platform::test_home::with_home(&home, || render_hook_contract(&repo));
+        assert!(
+            text.contains(&workspace.join("config").join("hooks").display().to_string()),
+            "{text}"
+        );
+        // The opening sentence, not only the closing "this project's own
+        // files" line, has to name the workspace's folder — review finding
+        // 2: it used to say `.spoolway/hooks/` unconditionally, which
+        // contradicted the closing line right below it.
+        assert!(!text.contains(".spoolway/hooks/"), "{text}");
     }
 }

@@ -271,7 +271,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
         "no stale .git/index.lock".into(),
         crate::commands::dispatch::check_index_lock(repo),
     ));
-    report.record_all(agent_checks(pipelines, config));
+    report.record_all(agent_checks(repo, pipelines, config));
     report.record_all(model_health_checks(pipelines, config));
     report.record_all(agent_kind_checks(config));
     // `doctor_sync`'s own rows are the ones tagged `Warning::File` below —
@@ -458,7 +458,7 @@ pub fn doctor(
             Err(err) => Err(anyhow::anyhow!("{err:#}")),
         },
     ));
-    report.record_all(agent_checks(pipelines, &config));
+    report.record_all(agent_checks(repo, pipelines, &config));
     report.record_all(model_health_checks(pipelines, &config));
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
@@ -587,8 +587,9 @@ fn doctor_unconfigured(
         None => report.note_verbose("no dispatcher running"),
     }
     report.note(format!(
-        "{} does not parse (this checkout's own copy)",
-        relative(&repo.checkout, &Config::path_in(&repo.checkout))
+        "{} does not parse ({})",
+        relative(&repo.checkout, &Config::path_in(&repo.checkout)),
+        config_owner_label(repo),
     ));
 
     finish(&report, verbose, json)
@@ -645,6 +646,18 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
     )
 }
 
+/// Whether `config.toml` is this checkout's own to claim, or the workspace's
+/// shared one every clone reads instead — home mode's whole point: `config/`
+/// sits beside the workspace, not inside any one clone, so calling it "this
+/// checkout's own copy" there names an owner the file does not have.
+fn config_owner_label(repo: &Repo) -> &'static str {
+    if crate::repo::workspace_clone(&repo.checkout).is_some() {
+        "the workspace's shared config"
+    } else {
+        "this checkout's own copy"
+    }
+}
+
 /// The checks that only need the checkout's own loaded `config` and whether
 /// the project's own copy (`repo.root`'s) parsed — see the module doc for why
 /// those are two different questions. Order matches `doctor`'s own: the
@@ -662,8 +675,9 @@ fn config_checks(
     findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(
-            "{} — this checkout's own copy",
-            Config::path_in(&repo.checkout).display()
+            "{} — {}",
+            Config::path_in(&repo.checkout).display(),
+            config_owner_label(repo),
         ))),
     ));
     // The checkout's file parsing says nothing about the project's own copy —
@@ -1295,13 +1309,27 @@ fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
     })
 }
 
+/// Where a project's own pipeline files actually sit — the workspace's
+/// `config/pipelines/<name>.yml` in home mode, `.spoolway/pipelines/<name>.yml`
+/// in repo mode — for the hints below that point a person at "give this step
+/// a model" rather than at a file that does not exist under this checkout.
+fn pipelines_hint(repo: &Repo) -> String {
+    let dir = if crate::repo::workspace_clone(&repo.checkout).is_some() {
+        "config/pipelines"
+    } else {
+        ".spoolway/pipelines"
+    };
+    format!("{dir}/<name>.yml")
+}
+
 /// Per agent profile a pipeline actually references: whether its binary is on
 /// PATH, whether every step that runs on it names a model, and whether its
 /// permission mode is one spoolway recognises. Three checks per agent rather
 /// than one, because each is fixed a different way and a person should not
 /// have to guess which of three things "agent `x` is broken" means.
-fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let pipelines_hint = pipelines_hint(repo);
     for (agent, steps) in pipelines.referenced_agents() {
         let outcome = config.agent(agent).and_then(|profile| {
             let found = which(&profile.kind);
@@ -1322,18 +1350,18 @@ fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         // a person and launches no agent. Config checks enforce its model once
         // unattended mode actually staffs it; do not misdirect an attended
         // project to pipeline YAML for this config-derived blank.
-        let model = if steps
+        let missing: Vec<&str> = steps
             .iter()
-            .filter(|step| config.unattended.enabled || **step != crate::pipeline::BLOCKED)
-            .all(|step| pipelines.step_has_model(step))
-        {
-            Ok(Some(
-                "set per step in .spoolway/pipelines/<name>.yml".into(),
-            ))
+            .copied()
+            .filter(|step| config.unattended.enabled || *step != crate::pipeline::BLOCKED)
+            .filter(|step| !pipelines.step_has_model(step))
+            .collect();
+        let model = if missing.is_empty() {
+            Ok(Some(format!("set per step in {pipelines_hint}")))
         } else {
             Err(anyhow::anyhow!(
-                "some step running on `{agent}` names no model: — give it one in \
-                 .spoolway/pipelines/<name>.yml"
+                "{missing:?} names no model, running on `{agent}` — give it one in \
+                 {pipelines_hint}"
             ))
         };
         findings.push(Finding::Check(
@@ -1377,8 +1405,14 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         .get(crate::models::PLACEHOLDER)
         .cloned()
         .unwrap_or_default();
+    // Labelled apart from `agent \`x\` has a model`'s own check, even though
+    // both are about a step's `model:` — that one already fails and lists
+    // the steps when one is missing outright, and a passing row here with
+    // the old label "a model is named for every step" read as contradicting
+    // it, right next to it in the report, on a project this placeholder
+    // check was never about.
     findings.push(Finding::Check(
-        "a model is named for every step".into(),
+        "no step still names the spoolway placeholder model".into(),
         match unset.is_empty() {
             true => Ok(None),
             false => Err(anyhow::anyhow!(
@@ -2127,9 +2161,10 @@ mod tests {
     /// that `Pipelines::load` now refuses (finding 25).
     #[test]
     fn the_model_check_points_at_the_pipelines_directory() {
+        let repo = crate::commands::testutil::fixture("doctor-model-check-points");
         let pipelines = crate::pipeline::Pipelines::builtin();
         let config = Config::default();
-        let findings = agent_checks(&pipelines, &config);
+        let findings = agent_checks(&repo, &pipelines, &config);
 
         let notes: Vec<String> = findings
             .iter()
@@ -2152,6 +2187,7 @@ mod tests {
 
     #[test]
     fn an_attended_synthetic_blocked_step_needs_no_model() {
+        let repo = crate::commands::testutil::fixture("doctor-attended-blocked-no-model");
         let mut pipelines = crate::pipeline::Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             pipeline
@@ -2164,18 +2200,51 @@ mod tests {
         let mut config = Config::default();
         config.unattended.blocked_model.clear();
 
-        let attended = agent_checks(&pipelines, &config);
+        let attended = agent_checks(&repo, &pipelines, &config);
         assert!(attended.iter().all(|finding| match finding {
             Finding::Check(label, result) if label.ends_with("has a model") => result.is_ok(),
             _ => true,
         }));
 
         config.unattended.enabled = true;
-        let unattended = agent_checks(&pipelines, &config);
+        let unattended = agent_checks(&repo, &pipelines, &config);
         assert!(unattended.iter().any(|finding| match finding {
             Finding::Check(label, result) if label.ends_with("has a model") => result.is_err(),
             _ => false,
         }));
+    }
+
+    /// The failing "has a model" row names the step that is missing one,
+    /// rather than the generic "some step" it used to say with nothing
+    /// after the colon — see the `home-mode-messages` task.
+    #[test]
+    fn the_has_a_model_failure_names_the_missing_step() {
+        let repo = crate::commands::testutil::fixture("doctor-model-check-names-step");
+        let mut pipelines = crate::pipeline::Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline
+                .steps
+                .iter_mut()
+                .find(|step| step.id == crate::pipeline::BLOCKED)
+                .unwrap()
+                .model = None;
+        }
+        let mut config = Config::default();
+        config.unattended.enabled = true;
+        config.unattended.blocked_model.clear();
+
+        let findings = agent_checks(&repo, &pipelines, &config);
+        let failure = findings
+            .iter()
+            .find_map(|finding| match finding {
+                Finding::Check(label, Err(err)) if label.ends_with("has a model") => {
+                    Some(format!("{err:#}"))
+                }
+                _ => None,
+            })
+            .expect("the model check fails");
+        assert!(failure.contains(crate::pipeline::BLOCKED), "{failure}");
+        assert!(!failure.contains("some step running on"), "{failure}");
     }
 
     /// One note per `[models]` entry that sets `slots` or `exclusive` without
@@ -3150,6 +3219,44 @@ mod tests {
             note.contains(&workspace.join("config").display().to_string()),
             "{note}"
         );
+    }
+
+    /// A home-mode checkout has no `.spoolway/` of its own — the model hint
+    /// and the `config parses` note must name the workspace's shared
+    /// `config/`, not a path under this checkout that does not exist, and
+    /// never call it "this checkout's own copy".
+    #[test]
+    fn home_mode_pipeline_and_config_messages_name_the_workspace_not_the_checkout() {
+        let root = crate::scratch::root("doctor-home-mode-messages");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("doctor-home-mode-messages-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let workspace = home.join(".spoolway").join("ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"ws\"\nclones = [{{ root = \"{}\", dispatcher = \"api\" }}]\n",
+                root.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: workspace.join("dispatchers").join("api"),
+        };
+
+        crate::platform::test_home::with_home(&home, || {
+            let hint = pipelines_hint(&repo);
+            assert_eq!(hint, "config/pipelines/<name>.yml", "{hint}");
+
+            let owner = config_owner_label(&repo);
+            assert_eq!(owner, "the workspace's shared config", "{owner}");
+            assert_ne!(owner, "this checkout's own copy");
+        });
     }
 
     /// Whatever `bind` could not settle — every one of the seven states the

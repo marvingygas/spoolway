@@ -333,6 +333,18 @@ impl Provider {
 /// The facts a command may report after the skill files are safely in place.
 pub struct Outcome {
     caveat: Option<&'static str>,
+    /// Where the files landed, shown the way a person would type it back —
+    /// relative to the project for [`install`], `~`-shortened for
+    /// [`install_user`] — so [`report`] can say where it installed rather
+    /// than only that it did.
+    dest: String,
+    /// Whether any file was actually written, as opposed to every planned
+    /// one already sitting there unchanged. `init` folds this into its own
+    /// "did this run write anything at all" tally, so a repeat run that
+    /// skipped every scaffold file but picked up a provider's skills for
+    /// the first time does not also claim there was "nothing to install" —
+    /// see the `home-mode-messages` task.
+    pub(crate) wrote: bool,
 }
 
 /// Write the provider's skill files, skipping any that already exist unless
@@ -344,7 +356,8 @@ pub struct Outcome {
 /// [`crate::sync::skills`]), so there is nothing here for a per-file record
 /// to protect any more.
 pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
-    write_planned(&provider.plan(root), provider.caveat(), force)
+    let dest = crate::fmt::relative(root, &provider.skills_dir(root));
+    write_planned(&provider.plan(root), provider.caveat(), force, dest)
 }
 
 /// The one proof `sync` trusts that a provider's user-level folder is
@@ -372,7 +385,8 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     };
     // No caveat: pi's is about trusting a project before it loads that
     // project's skills, and a user folder is loaded without asking.
-    let outcome = write_planned(&provider.plan_user(&home), None, force)?;
+    let dest = crate::repo::shorten_home(&provider.user_skills_dir(&home));
+    let outcome = write_planned(&provider.plan_user(&home), None, force, dest)?;
     // Written every time, force or not: the marker is not a skill file a
     // person could have edited, just proof this command ran here, and a
     // `--user` install that never writes it would look, to `sync`, exactly
@@ -404,30 +418,47 @@ pub(crate) fn user_home() -> Option<PathBuf> {
 }
 
 /// Write each planned file, skipping any that already exist unless `force`,
-/// and carry `caveat` on to [`report`].
+/// and carry `caveat` and `dest` on to [`report`].
 fn write_planned(
     planned: &[Planned],
     caveat: Option<&'static str>,
     force: bool,
+    dest: String,
 ) -> Result<Outcome> {
+    let mut wrote = false;
     for file in planned {
         if file.path.exists() && !force {
             continue;
         }
         write_atomic(&file.path, file.contents)?;
+        wrote = true;
     }
 
-    Ok(Outcome { caveat })
+    Ok(Outcome {
+        caveat,
+        dest,
+        wrote,
+    })
 }
 
 /// Print the deliberately small successful-install report.
+///
+/// Says "already" rather than "successfully" when nothing was actually
+/// written — every planned file already sat there, unforced — so a plain
+/// repeat `init` does not claim to have just installed these skills right
+/// next to its own "nothing to install" line for the very same run; see the
+/// `home-mode-messages` task's review finding 1.
 pub fn report(outcome: Outcome) {
     // Reported whether or not anything was written: a project that installed
     // these last week and has never seen them load wants this warning too.
     if let Some(caveat) = outcome.caveat {
         println!("  note  {caveat}");
     }
-    println!("Skills installed successfully.");
+    if outcome.wrote {
+        println!("Skills installed successfully, into {}.", outcome.dest);
+    } else {
+        println!("Skills already installed, in {}.", outcome.dest);
+    }
 }
 
 #[cfg(test)]

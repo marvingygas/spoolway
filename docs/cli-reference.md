@@ -874,7 +874,9 @@ Print the prose template a project owns and where it lives.
 
 ### `spoolway hook contract`
 
-Print every event an issue-tracking hook runs on and the environment each one carries. See
+Print every event an issue-tracking hook runs on and the environment each one carries, and
+close with this project's own hooks folder: `.spoolway/hooks/` in repo mode, or the workspace's
+`config/hooks/` in home mode. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
 
 | Event | When it runs |
@@ -1007,8 +1009,10 @@ there, `init` also asks `Which workspace should this checkout use?`, naming each
 repository and sorting one already holding a clone of this repository to the top, and
 `--workspace <name>` or `--workspace new` answers it without asking. `new` is always the
 default. Joining a workspace keeps its `config/` exactly as it is and skips the example and
-tracker questions. With nobody to ask and no `--workspace`, `init` starts a new workspace, the
-same default the menu takes; when a workspace already holds a clone of this repository, it
+tracker questions; `--tracker`, `--project-key`, `--examples` or `--no-examples` passed anyway
+are ignored, and `init` prints a note naming which. With nobody to ask and no `--workspace`,
+`init` starts a new workspace, the same default the menu takes; when a workspace already holds
+a clone of this repository, it
 prints that workspace's name and how to join it first. See [Home
 mode](concepts.md#home-mode). Either mode needs a real git repository behind the checkout; a
 plain folder is refused.
@@ -1059,7 +1063,10 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 a repo-mode home: it rewrites that `dispatcher` clone entry's path, in the named workspace's
 `project.toml`, to this checkout, and keeps that dispatcher's queue, archive and worktrees.
 Nothing is stamped into `.git` either way. This is the exact command the "no spoolway project
-found" error prints for a clone whose folder moved. See [Home mode](concepts.md#home-mode).
+found" error prints for a clone whose folder moved, shell-quoted and naming the entry's old
+path. `--adopt <workspace>`, naming a workspace with no `/<dispatcher>`, is refused, naming the
+dispatchers that workspace has so you can add the right one. See [Home
+mode](concepts.md#home-mode).
 
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes

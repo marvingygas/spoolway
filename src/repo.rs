@@ -1272,7 +1272,7 @@ pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
         let tracked = crate::config::tracked_setup_dir_in(root);
         if tracked.is_dir() {
             bail!(
-                "{} carries a tracked `.spoolway/` and is also listed as a clone in {}\n  \
+                "{} has a `.spoolway/` folder and is also listed as a clone in {}\n  \
                  choose one by hand: delete the clone entry from the workspace's project.toml, \
                  or remove `.spoolway/` from the checkout",
                 tracked.display(),
@@ -1801,6 +1801,12 @@ pub(crate) fn sibling_clones(workspace: &Path, except: &Path) -> Vec<PathBuf> {
 /// for a checkout that moved or was deleted without being re-attached. This
 /// is the only place any such entry is reported; nothing here removes one.
 ///
+/// The `<workspace>/<dispatcher>` argument is shell-quoted — a workspace
+/// folder a person named by hand can carry a space or another character a
+/// shell would otherwise split on — and each line names the entry's own old
+/// `root`, so a person staring at several stale lines at once can tell
+/// which checkout each one is actually offering to re-attach.
+///
 /// Best-effort like [`workspace_clone`]: by the time this runs,
 /// [`Repo::root`] has already let a broken workspace file's own error
 /// through if there was one to report, so a failure here is some other
@@ -1816,8 +1822,13 @@ fn stale_workspace_clones() -> Vec<String> {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| workspace.display().to_string());
             toml.clones.into_iter().filter_map(move |clone| {
-                (!clone.root.exists())
-                    .then(|| format!("spoolway init --adopt {name}/{}", clone.dispatcher))
+                (!clone.root.exists()).then(|| {
+                    format!(
+                        "spoolway init --adopt {} — was {}",
+                        crate::platform::quote(&format!("{name}/{}", clone.dispatcher)),
+                        clone.root.display(),
+                    )
+                })
             })
         })
         .collect()
@@ -2418,6 +2429,29 @@ pub(crate) fn adopt(root: &Path, name: &str) -> Result<PathBuf> {
              adopting an existing one.",
             crate::mux::state_root().display(),
             crate::mux::state_root().display(),
+        );
+    }
+    // `name` with no `/` reaches here whether it names a repo-mode home or a
+    // home-mode workspace, since both sit as plain directories straight
+    // under `state_root()` and nothing before this point tells them apart.
+    // A workspace's own `project.toml` has no `root` field at all — the
+    // `<label>-<id>` split and the `Binding` parse below are both written
+    // for a repo-mode home's shape — so naming a workspace here used to run
+    // straight into a raw TOML parse error from deep inside this function,
+    // instead of the one fix that actually works: naming the dispatcher
+    // too.
+    if let Ok(raw) = std::fs::read_to_string(home.join(BINDING_FILE))
+        && let Ok(workspace) = toml::from_str::<WorkspaceToml>(&raw)
+    {
+        let dispatchers: Vec<&str> = workspace
+            .clones
+            .iter()
+            .map(|clone| clone.dispatcher.as_str())
+            .collect();
+        bail!(
+            "{name} is a workspace, not a home — name the dispatcher too: `spoolway init \
+             --adopt {name}/<dispatcher>`\n  this workspace has: {}",
+            dispatchers.join(", "),
         );
     }
     // A 0.2 home, named the way every home was before an id keyed one:
@@ -5698,6 +5732,38 @@ mod tests {
         );
     }
 
+    /// `--adopt <workspace>` with no `/<dispatcher>` used to fall through to
+    /// the repo-mode routes below — `name` passes `is_bare_filename`, so it
+    /// read as an ordinary home name, and failed deep inside the
+    /// `<label>-<id>` split or the `Binding` TOML parse with an error about
+    /// neither a workspace nor a dispatcher. Named by name instead: the
+    /// workspace exists, and the fix is the dispatcher half, not a
+    /// different home.
+    #[test]
+    fn adopt_names_the_dispatcher_form_when_given_a_bare_workspace_name() {
+        // `canon` is deliberately not the workspace's own clone — adopting
+        // it onto itself would hit the earlier "already set up in home
+        // mode" refusal first, which is a different bug than this one.
+        let other = crate::scratch::root("adopt-bare-workspace-other");
+        let _ = std::fs::remove_dir_all(&other);
+        let clone = bind_fixture("adopt-bare-workspace");
+        let canon = clone.canonical().unwrap();
+        let home = workspace_fixture("adopt-bare-workspace", &other, "api");
+
+        let err = crate::platform::test_home::with_home(&home, || {
+            adopt(&canon, "adopt-bare-workspace-ws")
+        })
+        .expect_err("a bare workspace name with no dispatcher cannot be adopted");
+        let said = format!("{err:#}");
+        assert!(said.contains("name the dispatcher too"), "{said}");
+        assert!(
+            said.contains("--adopt adopt-bare-workspace-ws/<dispatcher>"),
+            "{said}"
+        );
+        assert!(said.contains("api"), "{said}");
+        assert!(!said.contains("TOML"), "{said}");
+    }
+
     /// Bug: `--adopt <workspace>/<dispatcher>` rewrites the entry's `root`
     /// with no check that the clone it currently names is still there.
     /// Clone `A` (`old`) is the live checkout using dispatcher `api`; clone
@@ -6957,8 +7023,8 @@ mod tests {
 
     /// Nothing here names the checkout being asked about, but a workspace
     /// elsewhere lists a clone whose folder is gone — the "no spoolway
-    /// project found" error names it, with the exact `--adopt` line that
-    /// re-attaches it.
+    /// project found" error names it, with the exact, shell-quoted `--adopt`
+    /// line that re-attaches it, and the old path that clone used to be at.
     #[test]
     fn no_project_found_lists_a_stale_clone_with_its_adopt_line() {
         let missing = crate::scratch::root("home-mode-stale-gone");
@@ -6971,9 +7037,10 @@ mod tests {
             .expect_err("an unrelated directory is still not a project");
         let said = format!("{err:#}");
         assert!(
-            said.contains("spoolway init --adopt home-mode-stale-ws/api"),
+            said.contains("spoolway init --adopt 'home-mode-stale-ws/api'"),
             "{said}"
         );
+        assert!(said.contains(&missing.display().to_string()), "{said}");
     }
 
     /// Six clones joining one workspace at once must all end up listed:

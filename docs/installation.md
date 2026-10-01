@@ -121,7 +121,7 @@ flowchart LR
 |---|---|
 | `.spoolway/config.toml` | Every setting, with defaults and comments. |
 | `.spoolway/pipelines/` | The two sample pipelines, with the example setup. Edit or replace them. |
-| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts, with the example setup. Updates never touch them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The five sample prompts, with the example setup. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders, with the example setup. |
@@ -160,9 +160,10 @@ untouched, matching home mode's own promise to write nothing into the checkout.
 
 `--setup home` puts the setup in a workspace under `~/.spoolway/` instead of the checkout, and
 `init` writes nothing into the checkout or its `.git`. With no workspace yet, or with
-`--workspace new`, it creates `~/.spoolway/<label>-<id>/` holding an empty `config/`, a
-`dispatchers/<name>/` for this clone, and a `project.toml` listing it. `<label>` and `<id>`
-take the same shape a repo-mode home's own folder does.
+`--workspace new`, it creates `~/.spoolway/<label>-<id>/`: a `dispatchers/<name>/` for this
+clone, a `project.toml` listing it, and a `config/` scaffolded the same way the table above
+scaffolds a repo-mode checkout's `.spoolway/`. `<label>` and `<id>` take the same shape a
+repo-mode home's own folder does.
 
 With workspaces already there, `init` also asks which one this checkout uses. Each row names the
 repository its clones belong to — the first clone's `origin` URL, or its path shortened under
@@ -205,7 +206,7 @@ $ spoolway init --setup home --workspace new --provider claude --examples --trac
   wrote  ~/.spoolway/api-k7f2q9/config/pipelines/default.yml
   ...
   bound  /home/you/work/api  ->  ~/.spoolway/api-k7f2q9/dispatchers/api/
-Skills installed successfully.
+Skills installed successfully, into ~/.claude/skills.
 Project initialized successfully.
 ```
 
@@ -216,7 +217,7 @@ $ spoolway init --setup home --workspace api-k7f2q9 --provider claude --yes
 ...
   kept   ~/.spoolway/api-k7f2q9/config/
   bound  /home/you/work/api-review  ->  ~/.spoolway/api-k7f2q9/dispatchers/api-review/
-Skills installed successfully.
+Skills already installed, in ~/.claude/skills.
 Project initialized successfully.
 ```
 

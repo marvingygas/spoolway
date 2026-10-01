@@ -233,7 +233,9 @@ fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
         "{out}"
     );
     assert!(
-        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        out.ends_with(&format!(
+            "Skills installed successfully, into .claude/skills.\n{CLOSING_LINES}"
+        )),
         "{out}"
     );
     assert_scaffold(&project, "claude");
@@ -250,12 +252,18 @@ fn repeat_init_that_adds_skills_omits_project_success() {
     let paths = scaffold_paths(&project);
     let out = stdout(&project.run(&["init", "--yes", "--provider", "codex"]));
 
-    // Nothing was missing, so every file gets a `kept` row rather than a
-    // `wrote` one, and the run closes by saying so — no tracker flag was
-    // given, so `[issue_tracking]` was never touched either.
+    // Nothing in the scaffold was missing, so every file gets a `kept` row
+    // rather than a `wrote` one — no tracker flag was given, so
+    // `[issue_tracking]` was never touched either. But switching providers
+    // installs Codex's skills for the first time, so this run did write
+    // something after all, and must not also close on "nothing to
+    // install" right next to the line saying the opposite.
     assert_report_rows(&out, "kept", &paths);
-    assert!(out.contains("Skills installed successfully.\n"), "{out}");
-    assert!(out.trim_end().ends_with("nothing to install."), "{out}");
+    assert!(
+        out.contains("Skills installed successfully, into .agents/skills.\n"),
+        "{out}"
+    );
+    assert!(!out.trim_end().ends_with("nothing to install."), "{out}");
     assert!(!out.contains("Project initialized successfully."));
     assert!(project.as_ref().join(".claude/skills").is_dir());
     let codex_plan = project
@@ -272,6 +280,26 @@ fn repeat_init_that_adds_skills_omits_project_success() {
         std::fs::read(project.as_ref().join(".spoolway/pipelines/default.yml")).unwrap(),
         pipeline_before
     );
+}
+
+/// A plain repeat `init` with the same provider and nothing missing writes
+/// nothing at all — not the scaffold, not the skills — so it must say so
+/// once, not twice in a way that reads as contradicting itself: never both
+/// "Skills installed successfully." (nothing was actually installed just
+/// now) and "nothing to install." in the same run.
+#[test]
+fn a_plain_repeat_init_says_nothing_to_install_exactly_once() {
+    let project = Project::new("plain-repeat");
+    project.init("claude");
+
+    let out = stdout(&project.run(&["init", "--yes", "--provider", "claude"]));
+
+    assert!(!out.contains("Skills installed successfully."), "{out}");
+    assert!(
+        out.contains("Skills already installed, in .claude/skills.\n"),
+        "{out}"
+    );
+    assert!(out.trim_end().ends_with("nothing to install."), "{out}");
 }
 
 /// A repeat `init` that restores nothing but a missing prompt *asset* —
@@ -299,7 +327,13 @@ fn repeat_init_that_restores_only_a_missing_prompt_asset_writes_that_one_path_an
         "{out}"
     );
     assert_report_rows(&out, "kept", &kept);
-    assert!(out.contains("Skills installed successfully.\n"), "{out}");
+    // Claude's skills were already installed by the first `init`, and this
+    // run names the same provider with no `--force`, so nothing about them
+    // was actually (re)written — "already", not "successfully".
+    assert!(
+        out.contains("Skills already installed, in .claude/skills.\n"),
+        "{out}"
+    );
     assert!(
         asset.exists(),
         "the missing asset must actually be restored"
@@ -514,7 +548,7 @@ fn a_fresh_init_without_examples_makes_empty_folders_and_names_the_skill() {
     assert!(!project.as_ref().join(".spoolway/hooks").exists());
     assert!(
         out.ends_with(
-            "Skills installed successfully.\n\
+            "Skills installed successfully, into .claude/skills.\n\
              Project initialized successfully.\n\
              Use the spoolway-config skill to create pipelines.\n"
         ),
@@ -561,7 +595,9 @@ fn a_fresh_init_with_examples_and_github_writes_both() {
     assert_report_rows(&out, "wrote", &paths);
     assert!(!project.as_ref().join(".github").exists());
     assert!(
-        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        out.ends_with(&format!(
+            "Skills installed successfully, into .claude/skills.\n{CLOSING_LINES}"
+        )),
         "{out}"
     );
 }
@@ -588,7 +624,9 @@ fn forced_init_reprints_every_wrote_row_and_closes_like_a_fresh_run() {
     assert_report_rows(&out, "wrote", &scaffold_paths(&project));
     assert!(!out.contains("stamped"), "{out}");
     assert!(
-        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        out.ends_with(&format!(
+            "Skills installed successfully, into .agents/skills.\n{CLOSING_LINES}"
+        )),
         "{out}"
     );
     assert_eq!(stderr(&result), "");
@@ -610,13 +648,13 @@ fn init_rejects_the_removed_agent_and_model_flags() {
 }
 
 #[test]
-fn standalone_install_uses_the_concise_success_message() {
+fn standalone_install_names_where_it_installed() {
     let project = Project::new("install");
     project.init("claude");
 
     assert_eq!(
         stdout(&project.run(&["install", "codex"])),
-        "Skills installed successfully.\n"
+        "Skills installed successfully, into .agents/skills.\n"
     );
 }
 
@@ -651,7 +689,10 @@ fn a_fresh_init_prints_the_stamped_line_below_its_other_rows() {
             .unwrap_or_else(|| panic!("{needle:?} is not in {output:?}"))
     };
     assert!(at(removed) < at(&stamped), "{output:?}");
-    assert_eq!(lines[at(&stamped) + 1], "Skills installed successfully.");
+    assert_eq!(
+        lines[at(&stamped) + 1],
+        "Skills installed successfully, into .claude/skills."
+    );
 }
 
 /// Every file and directory under `from`, copied to the same relative path
@@ -1063,6 +1104,108 @@ fn force_in_a_home_mode_clone_names_the_other_clones_before_rewriting_their_conf
         out.contains(&first.canonicalize().unwrap().display().to_string())
             || out.contains(&first.display().to_string()),
         "expected the first clone's path named before the shared config was rewritten:\n{out}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A clone joining a workspace uses the setup already chosen there, so
+/// `--tracker`, `--project-key` and `--examples` do nothing on that run —
+/// but the run has to say so, rather than silently dropping them with no
+/// trace beyond their absence from `config.toml`.
+#[test]
+fn joining_a_workspace_names_the_flags_it_ignored() {
+    let base = std::env::temp_dir().join(format!(
+        "spoolway-init-output-join-ignored-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = base.join("home");
+    let first = base.join("first");
+    let second = base.join("second");
+    for root in [&first, &second] {
+        std::fs::create_dir_all(root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    let run = |root: &Path, args: &[&str]| -> Output {
+        let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(args)
+            .current_dir(root)
+            .env("HOME", &home)
+            .output()
+            .expect("run spoolway");
+        assert!(
+            output.status.success(),
+            "spoolway failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    run(
+        &first,
+        &[
+            "init",
+            "--yes",
+            "--setup",
+            "home",
+            "--workspace",
+            "new",
+            "--provider",
+            "claude",
+            "--tracker",
+            "none",
+        ],
+    );
+    let workspace_name = std::fs::read_dir(home.join(".spoolway"))
+        .expect("read ~/.spoolway")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("first-"))
+        .expect("the fresh workspace folder, labelled after the first clone");
+
+    let out = stdout(&run(
+        &second,
+        &[
+            "init",
+            "--yes",
+            "--workspace",
+            &workspace_name,
+            "--provider",
+            "claude",
+            "--tracker",
+            "github",
+            "--project-key",
+            "o/r",
+            "--examples",
+        ],
+    ));
+
+    assert!(out.contains("ignored"), "{out}");
+    assert!(out.contains("--tracker"), "{out}");
+    assert!(out.contains("--project-key"), "{out}");
+    assert!(out.contains("--examples"), "{out}");
+    let config = std::fs::read_to_string(
+        home.join(".spoolway")
+            .join(&workspace_name)
+            .join("config")
+            .join("config.toml"),
+    )
+    .unwrap();
+    assert!(
+        !config.contains("hook = \"github.sh\"") && !config.contains("project_key = \"o/r\""),
+        "the joining run's --tracker must not have touched the shared config:\n{config}"
     );
 
     std::fs::remove_dir_all(&base).ok();

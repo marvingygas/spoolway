@@ -237,12 +237,12 @@ project_key = ""
 key_in_names = false
 ```
 
-One script in `.spoolway/hooks/` connects spoolway to an issue tracker. No pipeline file
-names a tracker.
+One script in `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`) connects
+spoolway to an issue tracker. No pipeline file names a tracker.
 
 | Key | Default | What it controls |
 |---|---|---|
-| `hook` | blank | A bare file name inside `.spoolway/hooks/`, such as `github.sh`. Blank runs no hook. A path is refused. |
+| `hook` | blank | A bare file name inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`), such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
 | `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
 
@@ -345,11 +345,12 @@ failing `queued` hook does. `spoolway resume` runs the hook again. A trial arm n
 
 ### The shipped hook scripts
 
-`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`, but only
-when a tracker is chosen; answering `none` leaves that folder unwritten. They are project-owned
-starting points, not required integrations: edit either script, replace it with any executable
-that follows `spoolway hook contract`, or leave `hook` blank. `spoolway sync` never changes
-them. Switch trackers with `spoolway config set issue_tracking.hook <file>`.
+`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/` (a
+home-mode workspace's own `config/hooks/`), but only when a tracker is chosen; answering `none`
+leaves that folder unwritten. They are project-owned starting points, not required
+integrations: edit either script, replace it with any executable that follows `spoolway hook
+contract`, or leave `hook` blank. `spoolway sync` never changes them. Switch trackers with
+`spoolway config set issue_tracking.hook <file>`.
 
 A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
 comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's

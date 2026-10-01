@@ -32,10 +32,6 @@ checkout's name. The home records the same id and its checkout in its own `proje
 command checks the two against each other and refuses when they disagree. See [Runtime
 state](configuration.md#runtime-state).
 
-Everything spoolway writes while it runs lives in `~/.spoolway/<basename of the checkout>/`:
-the queue, the archive, pending tasks, worktrees and the ledger. See
-[Runtime state](configuration.md#runtime-state).
-
 Commands find the project through git. A command run inside a task worktree reaches the
 project's real queue. The queue belongs to the project, so every worktree and every branch
 shares one queue and one dispatcher.
@@ -54,9 +50,11 @@ holds its queue, archive, worktrees and lock.
 
 `spoolway init --setup home` puts a checkout into home mode. With no workspace yet, or with
 `--workspace new`, it creates one: `~/.spoolway/<label>-<id>/`, the same name shape a repo-mode
-home takes, with an empty `config/` and a `dispatchers/<name>/` for this checkout. With
-`--workspace <name>`, it adds this checkout to that workspace instead, with a dispatcher folder
-of its own — the checkout's directory name, with `-2` added when that name is already taken —
+home takes, with a `dispatchers/<name>/` for this checkout and a `config/` scaffolded the same
+way `spoolway init` scaffolds a repo-mode checkout's `.spoolway/`. See [Scaffolding a
+project](installation.md#scaffolding-a-project). With `--workspace <name>`, it adds this
+checkout to that workspace instead, with a dispatcher folder of its own — the checkout's
+directory name, with `-2` added when that name is already taken —
 and leaves the workspace's `config/` exactly as it is. Nothing is written into the checkout or
 its `.git` either way, and skills install into the coding agent's user folder instead of the
 project's own.
@@ -92,14 +90,16 @@ storing a path that can never match it again.
 
 Re-attach a clone that moved or was re-cloned with `spoolway init --adopt
 <workspace>/<dispatcher>`. It rewrites that clone's path in the workspace's `project.toml` and
-keeps its dispatcher folder. The "no spoolway project found" error lists this exact command for
-every clone entry whose folder is gone.
+keeps its dispatcher folder. The "no spoolway project found" error lists this exact command,
+shell-quoted, for every clone entry whose folder is gone, naming the path that entry was at.
 
 `--adopt <workspace>/<dispatcher>` is refused when the checkout being adopted has no git
 repository behind it, when the entry's current root still exists as a live git checkout, when
 the checkout being adopted is already listed in any workspace, when it has a tracked
 `.spoolway/`, or when it is a different repository from the one the entry was set
-up for. Each refusal says why, and what to run instead.
+up for. Each refusal says why, and what to run instead. Naming the workspace alone, with no
+`/<dispatcher>`, is refused too, listing that workspace's dispatchers so you can add the right
+one.
 
 A clone moves from the workspace it is listed in to another with `spoolway workspace move
 <to>`, carrying its dispatcher folder along under its current name unless `--dispatcher <name>`

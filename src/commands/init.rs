@@ -108,7 +108,34 @@ impl Answers {
     /// already chosen — its examples, its tracker — so asking either again
     /// would take an answer this run has nowhere to put, and writing one into
     /// the shared `config/` would change every other clone's setup from here.
+    ///
+    /// Any of `--tracker`, `--project-key`, `--examples` or `--no-examples`
+    /// given alongside a join used to be silently dropped on the floor —
+    /// answered, from this function's point of view, exactly as if they had
+    /// never been typed, with nothing printed to say so. Named here instead,
+    /// so a person who typed one does not have to notice its absence from
+    /// `config.toml` to learn it did nothing.
     fn joining(root: &Path, args: &InitArgs) -> Result<Self> {
+        let mut ignored = Vec::new();
+        if args.tracker.is_some() {
+            ignored.push("--tracker");
+        }
+        if args.project_key.is_some() {
+            ignored.push("--project-key");
+        }
+        if args.examples {
+            ignored.push("--examples");
+        }
+        if args.no_examples {
+            ignored.push("--no-examples");
+        }
+        if !ignored.is_empty() {
+            println!(
+                "  note  joining a workspace uses its own shared setup, already chosen — \
+                 ignored: {}",
+                ignored.join(", ")
+            );
+        }
         Ok(Self {
             // A checkout joining a workspace has no own-checkout config to
             // read an existing provider off — the workspace's shared config
@@ -1193,6 +1220,12 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     } else {
         crate::install::install(root, answers.provider, args.force)?
     };
+    // Folded in before the report consumes `installed`: a repeat run whose
+    // scaffold rows all came back `kept` but whose skills were installed for
+    // the first time (a provider switch, say) has written something, and
+    // must not also claim below that there was "nothing to install" right
+    // next to "Skills installed successfully" saying otherwise.
+    wrote_any |= installed.wrote;
     crate::install::report(installed);
     // A fresh (or freshly `--force`d) project is, by construction, exactly
     // what this binary would write — so it is stamped the same fact
