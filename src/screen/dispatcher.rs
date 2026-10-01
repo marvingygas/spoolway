@@ -17,7 +17,7 @@
 //! screen alone. The screen then decides to stop the child, the same as `q`.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -45,7 +45,14 @@ impl Dispatcher {
     /// this screen is running. A binary on `PATH` could be another version.
     pub(crate) fn start(cwd: &Path) -> Result<Dispatcher> {
         let exe = std::env::current_exe().context("could not find the spoolway binary")?;
-        let mut command = Command::new(exe);
+        let mut command = Command::new(runnable(&exe));
+        // A child started through `/proc/self/exe` would otherwise call
+        // itself `exe` in every usage line clap writes to the popup.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.arg0("spoolway");
+        }
         command
             .arg("-C")
             .arg(cwd)
@@ -174,6 +181,22 @@ impl Drop for Dispatcher {
             self.stop();
         }
     }
+}
+
+/// The path to start this same binary from, given what `current_exe` said.
+///
+/// An install that lands while the screen is open — `spoolway update`,
+/// `cargo install`, npm — replaces the file at `exe`. On Linux,
+/// `current_exe` then names the old inode as `<path> (deleted)`, a file
+/// that does not exist, and every start fails with `No such file or
+/// directory`. `/proc/self/exe` still reaches the binary this screen is
+/// running, so the child is the same version the screen is.
+fn runnable(exe: &Path) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    if !exe.exists() {
+        return PathBuf::from("/proc/self/exe");
+    }
+    exe.to_path_buf()
 }
 
 /// The popup for a child that ended without being asked to, or a start
@@ -357,6 +380,27 @@ mod tests {
                 .any(|line| line.contains("It exited with exit status: 4 and said nothing.")),
             "{panel:?}"
         );
+    }
+
+    /// A binary still where it was is started from that path.
+    #[test]
+    fn a_binary_still_in_place_is_started_from_its_own_path() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(runnable(&exe), exe);
+    }
+
+    /// A binary replaced while the screen ran is started from the inode
+    /// this process still holds, which runs: the reported path does not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_binary_is_started_from_the_running_one() {
+        let gone = Path::new("/nonexistent/spoolway (deleted)");
+        let path = runnable(gone);
+        assert_eq!(path, Path::new("/proc/self/exe"));
+        let mut command = Command::new(path);
+        command.arg("--list");
+        let output = command.output().expect("the running binary starts");
+        assert!(output.status.success(), "{output:?}");
     }
 
     /// A child the screen asked to stop ends with no popup at all.
