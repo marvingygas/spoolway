@@ -1422,12 +1422,19 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
 /// so a transcript found directly inside a directory named `subagents` names
 /// its parent in the directory one level further up. `None` either for a
 /// root session, or for a subagent whose transcript is no longer on disk to
-/// ask — see [`crate::eval`]'s own fold of `dirs` entries onto this, which is
-/// the one place this matters.
+/// ask.
+///
+/// `crate::eval`'s own fold of `dirs` entries onto this — the one place this
+/// mattered — now goes through [`read_sessions`] instead, which answers the
+/// same question from a walk and a read it was already paying for rather
+/// than a second one of its own. Kept, with its own test, as the direct
+/// question-and-answer this crate's tests hold it to.
+#[allow(dead_code)]
 pub fn parent_session(kind: &str, session: &str) -> Option<String> {
     parent_session_in(&home_dir()?, kind, session)
 }
 
+#[allow(dead_code)]
 fn parent_session_in(home: &Path, kind_name: &str, session: &str) -> Option<String> {
     parent_of_transcript(&session_file_in(home, kind_name, session)?)
 }
@@ -3001,6 +3008,12 @@ fn bank_dir_session(
 /// against a clock the provider cannot be trusted for. There is no stall
 /// question here, only "how long did this conversation run", which is a
 /// question about the provider's own clock.
+///
+/// `crate::eval::load` now reads a session's span through [`read_sessions`]
+/// instead, which shares the walk and the read with the skill markers it
+/// also needs. Kept, with its own test, as the direct question this crate's
+/// tests hold it to.
+#[allow(dead_code)]
 pub fn session_span(
     kind: &str,
     session: &str,
@@ -3011,7 +3024,15 @@ pub fn session_span(
 fn session_span_at(
     path: &Path,
 ) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
-    let raw = std::fs::read_to_string(path).ok()?;
+    span_in_raw(&std::fs::read_to_string(path).ok()?)
+}
+
+/// [`session_span_at`]'s own parse, pulled out so [`read_session`] can run it
+/// against bytes it already has in hand, rather than paying for a second
+/// `read_to_string` of the same transcript.
+fn span_in_raw(
+    raw: &str,
+) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
     let mut first = None;
     let mut last = None;
     for line in raw.lines() {
@@ -3050,17 +3071,30 @@ fn session_span_at(
 /// bytes of the file already hold the marker exactly as this reads it. The
 /// Skill tool call has no such text form — it is a structured `tool_use`
 /// block — so that half is read one line of JSON at a time instead.
+///
+/// `crate::eval::load` now reads a session's markers through
+/// [`read_sessions`] instead, which shares the walk and the read with the
+/// span it also needs. Kept, with its own tests, as the direct question this
+/// crate's tests hold it to.
+#[allow(dead_code)]
 pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
     let Some(path) = session_file(kind, session) else {
-        return out;
+        return BTreeSet::new();
     };
     let Ok(raw) = std::fs::read_to_string(&path) else {
-        return out;
+        return BTreeSet::new();
     };
+    markers_in_raw(&raw)
+}
+
+/// [`skill_markers`]'s own scan, pulled out so [`read_session`] can run it
+/// against bytes it already has in hand, rather than paying for a second
+/// `read_to_string` of the same transcript.
+fn markers_in_raw(raw: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
     const OPEN: &str = "<command-name>";
     const CLOSE: &str = "</command-name>";
-    let mut rest = raw.as_str();
+    let mut rest = raw;
     while let Some(start) = rest.find(OPEN) {
         rest = &rest[start + OPEN.len()..];
         let Some(end) = rest.find(CLOSE) else {
@@ -3086,6 +3120,149 @@ pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
             }
         }
     }
+    out
+}
+
+/// What [`read_session`] finds for one session, from one directory walk and
+/// at most one file read, for a caller (`eval::load`) that otherwise pays
+/// for [`parent_session`], [`skill_markers`] and [`session_span`]
+/// separately — each of which walks the store and rereads the transcript on
+/// its own.
+#[derive(Default)]
+pub struct SessionRead {
+    /// See [`parent_session`]. `None` for a root session, same as there.
+    pub parent: Option<String>,
+    /// See [`skill_markers`]. Empty, not missing, when the transcript has
+    /// none — same as there.
+    pub skills: BTreeSet<String>,
+    /// See [`session_span`].
+    pub span: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+}
+
+/// [`parent_session`], [`skill_markers`] and [`session_span`], answered
+/// together from one `session_file` walk and one `read_to_string` — see
+/// [`SessionRead`]. A session whose transcript cannot be located or read
+/// comes back as [`SessionRead::default`], the same absence each of the
+/// three functions this replaces reports on its own.
+pub fn read_session(kind: &str, session: &str) -> SessionRead {
+    match session_file(kind, session) {
+        Some(path) => session_read_from_path(&path),
+        None => SessionRead::default(),
+    }
+}
+
+/// [`read_session`]'s own read, once the transcript's path is already known
+/// — shared with [`read_sessions`], which resolves a whole batch of paths
+/// before reading any of them.
+fn session_read_from_path(path: &Path) -> SessionRead {
+    // `parent_of_transcript` only inspects the path's own components, so it
+    // costs nothing extra and does not depend on the file being readable.
+    let parent = parent_of_transcript(path);
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return SessionRead {
+            parent,
+            ..SessionRead::default()
+        };
+    };
+    SessionRead {
+        parent,
+        skills: markers_in_raw(&raw),
+        span: span_in_raw(&raw),
+    }
+}
+
+/// [`read_session`], over every one of `requests`' `(kind, session)` pairs
+/// at once.
+///
+/// `session_file`'s own search — see its doc comment — is a walk of every
+/// transcript an agent has ever written, paid again for every single
+/// session asked about. A caller that already knows every id it will ask
+/// about before it asks, the way `eval::load` does, can instead pay for one
+/// walk per *kind* and answer every session of that kind from it — see
+/// [`session_files_in`]. Grouped by kind here because the walk, and the
+/// store directory it walks, are a kind's own.
+pub fn read_sessions<'a>(
+    requests: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> BTreeMap<String, SessionRead> {
+    let mut out = BTreeMap::new();
+    let Some(home) = home_dir() else {
+        return out;
+    };
+    let mut by_kind: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (kind_name, session) in requests {
+        by_kind.entry(kind_name).or_default().push(session);
+    }
+    for (kind_name, sessions) in by_kind {
+        // `OwnHome` has no id legible off a filename for `session_files_in`
+        // to index by — see its own doc comment — so a kind of that shape
+        // falls back to the original per-session walk, same as before this
+        // batched path existed.
+        let batched = kind(kind_name)
+            .is_some_and(|a| !matches!(a.store, Store::Transcript(FileShape::OwnHome { .. })));
+        if !batched {
+            for session in sessions {
+                out.insert(session.to_string(), read_session(kind_name, session));
+            }
+            continue;
+        }
+        let paths = session_files_in(&home, kind_name, sessions.iter().copied());
+        for session in sessions {
+            let read = match paths.get(session) {
+                Some(path) => session_read_from_path(path),
+                None => SessionRead::default(),
+            };
+            out.insert(session.to_string(), read);
+        }
+    }
+    out
+}
+
+/// Every one of `sessions`' transcript files for `kind_name`, from one walk
+/// of the store rather than one per session.
+///
+/// Only for the `Exact`/`AfterUnderscore` shapes `dir_candidates` already
+/// walks this same way to read a session id back off a filename — the
+/// caller (`read_sessions`) has already turned away an `OwnHome` kind before
+/// this runs. The walk visits every transcript once and keeps, per session
+/// `sessions` asks for, whichever file [`newest_matching`] would have
+/// returned on its own — the most recently modified of any that match,
+/// which matters only for the rare case of more than one file carrying the
+/// same id.
+fn session_files_in<'a>(
+    home: &Path,
+    kind_name: &str,
+    sessions: impl Iterator<Item = &'a str>,
+) -> BTreeMap<String, PathBuf> {
+    let mut out = BTreeMap::new();
+    let Some(accounting) = kind(kind_name) else {
+        return out;
+    };
+    let Store::Transcript(shape) = accounting.store;
+    let wanted: BTreeSet<&str> = sessions.collect();
+    if wanted.is_empty() {
+        return out;
+    }
+    let mut newest: BTreeMap<String, std::time::SystemTime> = BTreeMap::new();
+    let root = home.join(accounting.sessions_dir);
+    transcripts_matching(&root, |_| true, &mut |at, path| {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let session = match shape {
+            FileShape::Exact => stem.into_owned(),
+            FileShape::AfterUnderscore => match stem.rsplit_once('_') {
+                Some((_, id)) => id.to_string(),
+                None => return,
+            },
+            // Turned away by the caller before this walk starts.
+            FileShape::OwnHome { .. } => return,
+        };
+        if !wanted.contains(session.as_str()) {
+            return;
+        }
+        if newest.get(&session).is_none_or(|prev| at > *prev) {
+            newest.insert(session.clone(), at);
+            out.insert(session, path);
+        }
+    });
     out
 }
 
@@ -6374,6 +6551,197 @@ mod tests {
                 .expect("a span");
         assert_eq!(first.format("%H:%M:%S").to_string(), "06:14:15");
         assert_eq!((last - first).num_seconds(), 64 * 60, "1h 04m apart");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `read_sessions` must answer exactly what `parent_session`,
+    /// `skill_markers` and `session_span` would answer on their own —
+    /// per-session, per-call — for both shapes its batched walk
+    /// (`session_files_in`) actually handles: `Exact` (claude, where the
+    /// filename *is* the id) and `AfterUnderscore` (pi, where the id is
+    /// everything after the last `_`). Also covers a subagent, so `parent`
+    /// is exercised and not just `skills`/`span`.
+    #[test]
+    fn read_sessions_agrees_with_the_three_functions_it_replaces_for_exact_and_after_underscore_kinds()
+     {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = crate::scratch::root("read-sessions-agrees");
+
+        let claude_session = "0198e2c0-7777-4000-8000-00000000e001";
+        let claude_dir = root.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(format!("{claude_session}.jsonl")),
+            CLAUDE_TRANSCRIPT,
+        )
+        .unwrap();
+
+        let subagent = "agent-e002";
+        let subagents_dir = claude_dir.join(claude_session).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        std::fs::write(
+            subagents_dir.join(format!("{subagent}.jsonl")),
+            skill_transcript_for_test(),
+        )
+        .unwrap();
+
+        let pi_session = "0198e2c0-7777-4000-8000-00000000e003";
+        let pi_dir = root.join(".pi/agent/sessions/--home-someone-work--");
+        std::fs::create_dir_all(&pi_dir).unwrap();
+        std::fs::write(
+            pi_dir.join(format!("2026-08-04T06-14-15-743Z_{pi_session}.jsonl")),
+            PI_TRANSCRIPT,
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&root, || {
+            let batched = read_sessions([
+                ("claude", claude_session),
+                ("claude", subagent),
+                ("pi", pi_session),
+            ]);
+
+            for (kind, session) in [
+                ("claude", claude_session),
+                ("claude", subagent),
+                ("pi", pi_session),
+            ] {
+                let one = batched
+                    .get(session)
+                    .expect("read_sessions dropped a session it was asked for");
+                assert_eq!(
+                    one.parent,
+                    parent_session(kind, session),
+                    "parent disagrees for {kind}/{session}"
+                );
+                assert_eq!(
+                    one.skills,
+                    skill_markers(kind, session),
+                    "skills disagree for {kind}/{session}"
+                );
+                assert_eq!(
+                    one.span,
+                    session_span(kind, session),
+                    "span disagrees for {kind}/{session}"
+                );
+            }
+            assert_eq!(
+                batched.get(subagent).unwrap().parent.as_deref(),
+                Some(claude_session),
+                "the subagent's own parent must still come back right"
+            );
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A transcript for a session `<command-name>/spoolway-plan</command-name>`
+    /// marks, timestamped so `session_span` has something to read — used by
+    /// the `read_sessions` equivalence test above for its subagent, kept
+    /// separate from [`skill_transcript`] (`eval`'s own copy, not reachable
+    /// from here).
+    fn skill_transcript_for_test() -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-09-01T09:00:00.000Z",
+                "message": {"role": "user", "content":
+                    "<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"},
+            }),
+        )
+    }
+
+    /// Two files can carry the same session id when a transcript rolled over
+    /// — `session_file_in`'s own per-session walk keeps whichever is newest,
+    /// and `session_files_in`'s batched walk must keep the same one, not
+    /// whichever the directory walk happens to visit first.
+    #[test]
+    fn read_sessions_keeps_the_newest_of_two_files_sharing_one_session_id() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let session = "0198e2c0-7777-4000-8000-00000000e010";
+        let root = crate::scratch::root("read-sessions-duplicate-id");
+        let project = root.join(".claude/projects/-home-someone-work");
+        let old_dir = project.join("old-shard");
+        let new_dir = project.join("new-shard");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+
+        let stale = format!(
+            "{}\n",
+            serde_json::json!({"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user","content":"stale"}}),
+        );
+        let fresh = format!(
+            "{}\n",
+            serde_json::json!({"type":"user","timestamp":"2026-09-01T09:00:00.000Z","message":{"role":"user","content":"fresh"}}),
+        );
+        std::fs::write(old_dir.join(format!("{session}.jsonl")), &stale).unwrap();
+        std::fs::write(new_dir.join(format!("{session}.jsonl")), &fresh).unwrap();
+        crate::scratch::set_mtime(
+            &old_dir.join(format!("{session}.jsonl")),
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+
+        let span = crate::platform::test_home::with_home(&root, || {
+            read_sessions([("claude", session)])
+                .get(session)
+                .and_then(|r| r.span)
+                .expect("a span")
+        });
+        assert_eq!(
+            span.0.format("%Y").to_string(),
+            "2026",
+            "the newer file's own timestamp must win, not the older one's"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `session_files_in` turns away an `OwnHome` kind (codex) before it
+    /// ever walks — its session id is not legible off a filename — so
+    /// `read_sessions` must fall back to the original per-session
+    /// `session_file`/`read_session` path for it instead of silently
+    /// dropping it.
+    #[test]
+    fn read_sessions_falls_back_to_the_per_session_walk_for_an_own_home_kind() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let session = "0198e2c0-7777-4000-8000-00000000e020";
+        let home = home_with("codex", session, CODEX_TRANSCRIPT);
+
+        let (batched, direct) = crate::platform::test_home::with_home(&home, || {
+            (
+                read_sessions([("codex", session)]),
+                read_session("codex", session),
+            )
+        });
+        let one = batched.get(session).expect("codex session missing");
+        assert_eq!(one.span, direct.span);
+        assert_eq!(one.skills, direct.skills);
+        assert!(
+            one.span.is_some(),
+            "the codex transcript's own span must still be read"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A session asked about that has no transcript on disk at all comes
+    /// back as [`SessionRead::default`] — absence, not a panic on a lookup
+    /// that found nothing.
+    #[test]
+    fn read_sessions_defaults_for_a_session_with_no_transcript() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let home = crate::scratch::root("read-sessions-missing");
+        std::fs::create_dir_all(&home).unwrap();
+        let batched = crate::platform::test_home::with_home(&home, || {
+            read_sessions([("claude", "no-such-session")])
+        });
+        let one = batched
+            .get("no-such-session")
+            .expect("the session must still be in the map");
+        assert!(one.parent.is_none());
+        assert!(one.skills.is_empty());
+        assert!(one.span.is_none());
         std::fs::remove_dir_all(&home).ok();
     }
 }

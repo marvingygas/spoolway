@@ -1987,32 +1987,78 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
     dirs.retain(|entry| window.contains(&entry.ts));
     dirs.sort_by(|a, b| a.ts.cmp(&b.ts));
 
-    // A subagent has no session of its own to show: `agent-<id>` is only the
-    // filename Claude Code happened to write its transcript under, next to
-    // the parent session that actually ran it — see `usage::parent_session`.
-    // Folded here, before anything groups `dirs` by session at all, so every
-    // later read of this table — the row itself, its skill markers, its span
-    // — already sees one session, not two. A subagent whose transcript has
-    // since been swept off disk keeps its own `agent-<id>` row instead: there
-    // is no path left to read its parent's name off of.
-    let subagents: Vec<(String, String, String)> = dirs
+    // Every distinct (session, kind) in `dirs` — parents and subagents
+    // alike — read in one pass: see `usage::read_sessions`, which resolves a
+    // whole batch of sessions per kind with one directory walk apiece,
+    // rather than the one-walk-per-session `session_file` would otherwise
+    // cost here. A post-fold session (below) is *usually* already a member
+    // of this same set, since folding ordinarily renames a subagent row onto
+    // a parent row that is itself one of `dirs`' own sessions — but not
+    // always: the window or the ledger can hold a subagent's own line
+    // without the parent's, in which case the parent never earned a row
+    // here at all. That gap is read separately, below, once folding has
+    // found it.
+    let distinct: BTreeSet<(String, String)> = dirs
         .iter()
         .map(|e| (e.session.clone(), e.kind.clone()))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .collect();
+    let reads = crate::usage::read_sessions(
+        distinct
+            .iter()
+            .map(|(session, kind)| (kind.as_str(), session.as_str())),
+    );
+
+    // A subagent has no session of its own to show: `agent-<id>` is only the
+    // filename Claude Code happened to write its transcript under, next to
+    // the parent session that actually ran it — see `usage::SessionRead`'s
+    // `parent`. Folded here, before anything groups `dirs` by session at
+    // all, so every later read of this table — the row itself, its skill
+    // markers, its span — already sees one session, not two. A subagent
+    // whose transcript has since been swept off disk keeps its own
+    // `agent-<id>` row instead: there is no path left to read its parent's
+    // name off of.
+    let subagents: Vec<(String, String, String, &BTreeSet<String>)> = distinct
+        .iter()
         .filter_map(|(session, kind)| {
-            let parent = crate::usage::parent_session(&kind, &session)?;
-            Some((session, kind, parent))
+            let read = reads.get(session)?;
+            let parent = read.parent.clone()?;
+            Some((session.clone(), kind.clone(), parent, &read.skills))
         })
         .collect();
+    // parent -> a kind that read it, for the gap below — a subagent and the
+    // parent it folds onto are always the same kind, so this is the kind a
+    // parent's own row would have carried had it had one in `dirs`.
+    let parent_kind: HashMap<&str, &str> = subagents
+        .iter()
+        .map(|(_, kind, parent, _)| (parent.as_str(), kind.as_str()))
+        .collect();
+    // session -> parent, keyed for a single lookup per `dirs` entry instead
+    // of a scan of `subagents` for every one — see the task's own account of
+    // this fold.
+    let subagent_parent: HashMap<&str, &str> = subagents
+        .iter()
+        .map(|(session, _, parent, _)| (session.as_str(), parent.as_str()))
+        .collect();
     for entry in &mut dirs {
-        if let Some((_, _, parent)) = subagents
-            .iter()
-            .find(|(session, ..)| *session == entry.session)
-        {
-            entry.session = parent.clone();
+        if let Some(parent) = subagent_parent.get(entry.session.as_str()) {
+            entry.session = (*parent).to_string();
         }
     }
+
+    // A parent folded onto here that never had its own line in `dirs` (see
+    // the gap called out above `distinct`) is not in `reads` at all yet —
+    // resolved with one more batched call, so it is still read exactly
+    // once, just not in the first batch.
+    let missing: BTreeSet<&str> = dirs
+        .iter()
+        .map(|e| e.session.as_str())
+        .filter(|session| !reads.contains_key(*session))
+        .collect();
+    let extra_reads = crate::usage::read_sessions(
+        missing
+            .iter()
+            .filter_map(|session| Some((*parent_kind.get(session)?, *session))),
+    );
 
     let mut skills_by_session: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut spans_by_session = HashMap::new();
@@ -2021,28 +2067,26 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         .map(|e| e.session.as_str())
         .collect::<BTreeSet<_>>()
     {
-        let kind = dirs
-            .iter()
-            .find(|e| e.session == session)
-            .map(|e| e.kind.as_str())
-            .unwrap_or_default();
+        let read = reads.get(session).or_else(|| extra_reads.get(session));
         skills_by_session.insert(
             session.to_string(),
-            crate::usage::skill_markers(kind, session),
+            read.map(|r| r.skills.clone()).unwrap_or_default(),
         );
-        if let Some(span) = crate::usage::session_span(kind, session) {
+        if let Some(span) = read.and_then(|r| r.span) {
             spans_by_session.insert(session.to_string(), span);
         }
     }
     // A subagent's own skills belong on its parent's row too — its transcript
     // is never one of `dirs`' sessions any more after the fold above, so the
-    // loop over `dirs` just ran can never have read it.
-    for (subagent, kind, parent) in &subagents {
-        let markers = crate::usage::skill_markers(kind, subagent);
+    // loop over `dirs` just ran can never have read it. The markers were
+    // already read above, in the first batch (`reads`), since a subagent's
+    // own session is always one of `dirs`' sessions, so this is no further
+    // disk access.
+    for (_, _, parent, markers) in &subagents {
         skills_by_session
             .entry(parent.clone())
             .or_default()
-            .extend(markers);
+            .extend(markers.iter().cloned());
     }
 
     // The same `to_string_lossy` spelling `usage::sweep_dirs` banks a root
@@ -5798,6 +5842,200 @@ mod screen_tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A window or filter can keep a subagent's own ledger line while
+    /// dropping its parent's — the parent itself may have run before
+    /// `since`, with the subagent running (and so being re-banked) later.
+    /// The fold in `load` still renames that subagent's row onto the parent,
+    /// but the parent never earned a row of its own in the pre-fold `dirs`
+    /// that `load`'s batched read is seeded from — see the task's own
+    /// account of this gap. The parent's own skills and span must still show
+    /// up on the folded row, read on the side rather than silently dropped.
+    #[test]
+    fn a_parent_s_own_skills_and_span_survive_when_only_its_subagent_is_in_window() {
+        let repo = fixture("screen-dirs-window-excludes-parent-ledger-line");
+        let parent = "0198e2c0-4444-4000-8000-00000000d030";
+        let subagent = "agent-aabbccdd";
+        bank_dir(
+            &repo,
+            "2026-08-30T09:00:00+00:00",
+            "/w/spoolway",
+            parent,
+            0.50,
+        );
+        bank_dir(
+            &repo,
+            "2026-09-01T09:05:00+00:00",
+            "/w/spoolway",
+            subagent,
+            0.20,
+        );
+
+        let root = crate::scratch::root("eval-subagent-fold-window-gap");
+        let project = root.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{parent}.jsonl")), skill_transcript()).unwrap();
+        let subagents_dir = project.join(parent).join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        let subagent_lines = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-09-01T09:05:10.000Z",
+                "message": {
+                    "model": "claude-opus-5",
+                    "usage": {"input_tokens": 2, "output_tokens": 10},
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_3", "name": "Skill", "input": {"skill": "other-skill"}}
+                    ]
+                }
+            }),
+        );
+        std::fs::write(
+            subagents_dir.join(format!("{subagent}.jsonl")),
+            &subagent_lines,
+        )
+        .unwrap();
+
+        let filters = Filters {
+            since: "2026-09-01".to_string(),
+            ..no_filters()
+        };
+        let loaded =
+            crate::platform::test_home::with_home(&root, || load(&repo, &filters).unwrap());
+
+        assert_eq!(
+            loaded
+                .skills_by_session
+                .get(parent)
+                .cloned()
+                .unwrap_or_default(),
+            BTreeSet::from(["/spoolway-plan".to_string(), "other-skill".to_string()]),
+            "the parent's own skills must survive even though only its subagent's ledger \
+             line is in the window: {:?}",
+            loaded.skills_by_session
+        );
+        assert!(
+            loaded.spans_by_session.contains_key(parent),
+            "the parent's own span must still be read even though its own ledger line is \
+             outside the window: {:?}",
+            loaded.spans_by_session
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// One session's own transcript, plus its one subagent's, sized to make a
+    /// transcript read and a directory walk show up in a timing, not just a
+    /// correctness check.
+    fn perf_lines(tag: &str, n_lines: usize) -> String {
+        let mut out = String::new();
+        for j in 0..n_lines {
+            out += &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "timestamp": format!("2026-09-01T09:{:02}:{:02}.000Z", (j / 60) % 60, j % 60),
+                    "message": {"role": "user", "content": format!(
+                        "<command-name>/perf-{tag}-{j}</command-name>\n<command-args></command-args>"
+                    )},
+                }),
+            );
+        }
+        out
+    }
+
+    /// `n` parent sessions, each with one subagent, under one project
+    /// directory — the shape `load` walks and reads once per session for
+    /// skill markers and span, and once more per subagent. Each session and
+    /// its subagent are also banked as a `dir` ledger line, so they are both
+    /// rows `load` has to resolve a transcript for.
+    fn many_sessions_home(
+        name: &str,
+        repo: &Repo,
+        n: usize,
+        lines_per_session: usize,
+    ) -> std::path::PathBuf {
+        let root = crate::scratch::root(&format!("eval-load-perf-{name}"));
+        let project = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+        std::fs::create_dir_all(&project).unwrap();
+        for i in 0..n {
+            let session = format!("perf-{i:04}");
+            std::fs::write(
+                project.join(format!("{session}.jsonl")),
+                perf_lines(&session, lines_per_session),
+            )
+            .unwrap();
+            let subagents_dir = project.join(&session).join("subagents");
+            std::fs::create_dir_all(&subagents_dir).unwrap();
+            let subagent = format!("agent-{i:04}");
+            std::fs::write(
+                subagents_dir.join(format!("{subagent}.jsonl")),
+                perf_lines(&subagent, lines_per_session),
+            )
+            .unwrap();
+
+            let ts = format!("2026-09-01T09:{:02}:{:02}+00:00", (i / 60) % 60, i % 60);
+            bank_dir(repo, &ts, "/w/perf", &session, 0.01);
+            bank_dir(repo, &ts, "/w/perf", &subagent, 0.01);
+        }
+        root
+    }
+
+    /// `load` must locate and read each session's transcript once, and each
+    /// subagent's once, not several times over and not by scanning the whole
+    /// `dirs` list for every session — see the task's own account of `load`'s
+    /// per-session `kind` lookup and subagent fold, and of `skill_markers`,
+    /// `session_span` and `parent_session` each doing their own directory
+    /// walk and file read.
+    ///
+    /// Pinned by comparing `load`'s time over `SMALL_N` sessions against
+    /// `SCALE` times as many, rather than by an absolute duration, so the
+    /// bound holds whatever the machine's own speed is. A linear read cost
+    /// takes about `SCALE` times as long; the repeated walks and the O(n)
+    /// `kind` lookup and subagent fold this task describes multiply that by
+    /// `SCALE` again, so `BOUND` sits well below `SCALE * SCALE` and well
+    /// above `SCALE` on its own.
+    #[test]
+    fn load_reads_each_transcript_once_so_its_time_grows_about_linearly_with_sessions() {
+        const SMALL_N: usize = 60;
+        const SCALE: usize = 4;
+        const LARGE_N: usize = SMALL_N * SCALE;
+        const LINES_PER_SESSION: usize = 20;
+        const BOUND: f64 = 8.0;
+
+        let repo_small = fixture("eval-load-perf-small");
+        let home_small = many_sessions_home("small", &repo_small, SMALL_N, LINES_PER_SESSION);
+        let elapsed_small = crate::platform::test_home::with_home(&home_small, || {
+            let start = std::time::Instant::now();
+            let loaded = load(&repo_small, &no_filters()).unwrap();
+            assert_eq!(loaded.dirs.len(), SMALL_N * 2);
+            start.elapsed()
+        });
+
+        let repo_large = fixture("eval-load-perf-large");
+        let home_large = many_sessions_home("large", &repo_large, LARGE_N, LINES_PER_SESSION);
+        let elapsed_large = crate::platform::test_home::with_home(&home_large, || {
+            let start = std::time::Instant::now();
+            let loaded = load(&repo_large, &no_filters()).unwrap();
+            assert_eq!(loaded.dirs.len(), LARGE_N * 2);
+            start.elapsed()
+        });
+
+        std::fs::remove_dir_all(&home_small).ok();
+        std::fs::remove_dir_all(&home_large).ok();
+
+        let ratio = elapsed_large.as_secs_f64() / elapsed_small.as_secs_f64().max(f64::EPSILON);
+        assert!(
+            ratio < BOUND,
+            "load took {elapsed_small:?} for {SMALL_N} sessions and {elapsed_large:?} for \
+             {LARGE_N} sessions ({SCALE}x as many) — a {ratio:.1}x slowdown means load is \
+             rescanning the whole session list per session and re-reading each transcript \
+             several times over, not once; the bound is {BOUND}x, well under the \
+             {}x a quadratic read pattern would cost",
+            SCALE * SCALE,
+        );
     }
 
     /// A notice's own overlay must never draw wider than the frame it sits
