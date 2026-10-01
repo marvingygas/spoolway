@@ -244,8 +244,8 @@ spoolway jobs list         # every job, its schedule, and when it fires next
 spoolway jobs run <name>   # fire one now, ignoring its schedule
 ```
 
-Bare `spoolway` opens the jobs tab, the only place a job is written, edited, paused, resumed or
-deleted.
+Bare `spoolway` opens the jobs tab, the only place a job is edited, paused, resumed or deleted.
+The routines tab can also write one, with `n` on a routine.
 
 <img src="docs/screenshots/jobs.png" alt="the jobs screen">
 

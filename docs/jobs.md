@@ -54,9 +54,11 @@ With no job enabled, an empty queue stops the run as usual. See
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
-Bare `spoolway`'s jobs tab opens this screen. It is the only thing that writes a job. The left
-pane lists every job from both stores. The right pane shows the highlighted job: its routine,
-schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
+Bare `spoolway`'s jobs tab opens this screen. It is the only place a job is edited, paused or
+deleted. The left pane lists every job from both stores. The right pane shows the highlighted
+job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
+
+The routines tab writes a job too, with its own `n`. See [Routines](planning.md#routines).
 
 | Key | What it does |
 |---|---|
@@ -64,7 +66,7 @@ schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 | `n` | Write a new job. |
 | `e` | Edit the highlighted job. |
 | `space` | Pause or resume it. |
-| `x` | Delete it, after `y`/`n`. |
+| `x` | Delete it, after `enter`/`esc`. |
 | `r` | Fire it now. |
 | `ctrl-c` | Leave the screen. |
 
@@ -81,11 +83,15 @@ schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 3. The pipeline. The picker lists every pipeline the repo defines and narrows as you type.
    `enter` saves the job.
 
+The routines tab's own `n` starts on the schedule panel, for the routine highlighted there, then
+walks the same pipeline panel and save.
+
 ### What the screen decides for you
 
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
-gives the job `nightly`, the task `nightly/audit.md` gives the job `audit`. A job in the
-project store is written by hand once; the screen then edits it in place.
+gives the job `nightly`, the task `nightly/audit.md` gives the job `audit`. This is the same
+whether the walk started on the jobs tab or the routines tab. A job in the project store is
+written by hand once; the screen then edits it in place.
 
 ## The cron grammar
 

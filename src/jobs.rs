@@ -11,7 +11,9 @@
 //! came from — a fired minute is a fact about this machine.
 //!
 //! Reads dominate. The two stores are written only by the `spoolway jobs`
-//! screen, through [`write`] and [`delete`] — nothing else stamps a schedule.
+//! screen, through [`write`] and [`delete`] — nothing else stamps a schedule —
+//! and by the routines tab's `x`, which deletes every job pointing into the
+//! routine it removes.
 //! A missing store is an empty list, not an error, so a project with no job in
 //! it lists nothing and the dispatcher behaves exactly as it does today.
 //!
@@ -259,20 +261,28 @@ pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()
 /// is still there.
 pub fn delete(repo: &Repo, name: &str) -> Result<()> {
     for scope in [Scope::User, Scope::Project] {
-        let path = store_path(repo, scope);
-        let Some(text) = read_store_text(&path)? else {
-            continue;
-        };
-        let mut doc: DocumentMut = text
-            .parse()
-            .with_context(|| format!("job store {} is not valid TOML", path.display()))?;
-        let removed = doc
-            .get_mut("jobs")
-            .and_then(Item::as_table_mut)
-            .is_some_and(|jobs| jobs.remove(name).is_some());
-        if removed {
-            crate::task::write_atomic(&path, doc.to_string())?;
-        }
+        delete_in(repo, scope, name)?;
+    }
+    Ok(())
+}
+
+/// [`delete`], in `scope`'s store alone. For a caller that already knows
+/// which store holds the job and has to report exactly what it removed: a
+/// store it never needed to touch cannot fail it after the removal landed.
+pub fn delete_in(repo: &Repo, scope: Scope, name: &str) -> Result<()> {
+    let path = store_path(repo, scope);
+    let Some(text) = read_store_text(&path)? else {
+        return Ok(());
+    };
+    let mut doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("job store {} is not valid TOML", path.display()))?;
+    let removed = doc
+        .get_mut("jobs")
+        .and_then(Item::as_table_mut)
+        .is_some_and(|jobs| jobs.remove(name).is_some());
+    if removed {
+        crate::task::write_atomic(&path, doc.to_string())?;
     }
     Ok(())
 }

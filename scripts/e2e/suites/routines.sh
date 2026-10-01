@@ -8,9 +8,11 @@
 #
 # Nothing here drives a dispatcher: what is asserted is that `enter` lands
 # the right task files in the queue directory, under minted ids, with their
-# bodies untouched, and that `s` copies a pending group's documents back
-# into the checkout. No `new_forge`/`install_agents` needed for the same
-# reason `trials.sh` needs none.
+# bodies untouched, that `s` copies a pending group's documents back
+# into the checkout, that `x` removes a routine with the jobs that point
+# into it, and that `n` saves a job for a routine to the user store. No
+# `new_forge`/`install_agents` needed for the same reason `trials.sh` needs
+# none.
 #
 # No `covers:` tag of its own — see `commands.sh`'s own queue-screen block:
 # the map `coverage.sh` builds only enumerates `config.toml` keys and
@@ -171,5 +173,80 @@ has "under a freshly minted id" "id: archived-reuse-1" \
 works "never the earlier run's own bare id" \
   bash -c '! grep -qxF "id: archived-reuse" "$1"' \
   _ "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse-1.md"
+
+# `x` deletes a routine and every job that points into it: a user job on the
+# whole `nightly` folder, a project job on one task inside it, and a user job
+# on `maintenance` that has to survive. The folders sort `archived-reuse`,
+# `maintenance`, `nightly`, `release`, so `jj` puts the cursor on `nightly`.
+USER_STORE="$SPOOLWAY_PROJECT_HOME/jobs.toml"
+PROJECT_STORE=.spoolway/jobs.toml
+cat >"$USER_STORE" <<'EOF'
+[jobs.nightly-audit]
+schedule = "0 3 * * 1-5"
+pipeline = "bugfix"
+routine = "nightly"
+
+[jobs.weekly-prune]
+schedule = "0 4 * * 1"
+pipeline = "bugfix"
+routine = "maintenance"
+EOF
+cat >"$PROJECT_STORE" <<'EOF'
+[jobs.audit-docs]
+schedule = "0 5 * * *"
+pipeline = "bugfix"
+routine = "nightly/audit-docs.md"
+EOF
+
+# x asks, esc keeps everything.
+DELETE="$LIVE/routine-delete.txt"
+LAST="$LIVE/routine-delete-popup.txt"
+on_screen '\x1b[Cjjx\x1b' "$DELETE"
+works "x then esc keeps the routine" test -d .spoolway/routines/nightly
+has "and its whole-folder job" "[jobs.nightly-audit]" "$USER_STORE"
+has "and its single-task job" "[jobs.audit-docs]" "$PROJECT_STORE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete this routine/ { last = $0 } END { print last }' \
+  "$DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "x opens the delete popup" "delete this routine" "$LAST"
+has "naming the routine and its task count" "nightly · 2 tasks" "$LAST"
+has "the whole-folder job beside its store" "nightly-audit   user" "$LAST"
+has "the single-task job beside its store" "audit-docs      project" "$LAST"
+lacks "never a job on another routine" "weekly-prune" "$LAST"
+has "under its own keys" "[enter] delete   [esc] keep" "$LAST"
+
+# x asks, enter deletes the jobs and then the folder.
+on_screen '\x1b[Cjjx\r' /dev/null
+works "x then enter removes the routine folder" \
+  test ! -e .spoolway/routines/nightly
+lacks "and its whole-folder job from the user store" "[jobs.nightly-audit]" "$USER_STORE"
+lacks "and its single-task job from the project store" "[jobs.audit-docs]" "$PROJECT_STORE"
+has "a job on another routine is left alone" "[jobs.weekly-prune]" "$USER_STORE"
+works "the other routines stay" test -d .spoolway/routines/maintenance
+works "nothing is staged" \
+  bash -c '[ -z "$(git diff --cached --name-only -- .spoolway/routines .spoolway/jobs.toml)" ]'
+
+# `n` makes a job of the highlighted routine: a schedule, a pipeline found by
+# typing, `enter` — and the job is in the user store under the routine's own
+# name. The folders now sort `archived-reuse`, `maintenance`, `release`, so
+# `jj` puts the cursor on `release`.
+NEW_JOB="$LIVE/routine-new-job.txt"
+LAST="$LIVE/routine-new-job-saved.txt"
+on_screen '\x1b[Cjjn0 3 * * 1-5\rbug\r' "$NEW_JOB"
+has "n saves the job to the user store" "[jobs.release]" "$USER_STORE"
+has "with the routine it was made on" 'routine = "release"' "$USER_STORE"
+has "with the schedule typed" 'schedule = "0 3 * * 1-5"' "$USER_STORE"
+has "with the pipeline picked" 'pipeline = "bugfix"' "$USER_STORE"
+lacks "never in the project store" "[jobs.release]" "$PROJECT_STORE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /job saved/ { last = $0 } END { print last }' \
+  "$NEW_JOB" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "and says so in a popup" "release runs at 03:00, Monday to Friday, on bugfix." "$LAST"
+
+# A second `n` on the same routine is refused: the name is taken.
+REFUSED="$LIVE/routine-new-job-refused.txt"
+on_screen '\x1b[Cjjn0 4 * * *\r\r' "$REFUSED"
+has "n on a routine whose job exists is refused" "already exists" "$REFUSED"
+works "and the store keeps the one job" \
+  bash -c '[ "$(grep -c "^\[jobs.release\]" "$1")" = 1 ] && grep -qF "schedule = \"0 3 * * 1-5\"" "$1"' \
+  _ "$USER_STORE"
 
 finish
