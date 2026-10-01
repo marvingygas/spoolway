@@ -53,19 +53,17 @@ pending_doc beta "$BODY" "group: audits" "pipeline:" \
 # group from a selected task too, not only from the groups pane. `t` opens
 # the pick-pipelines popup with nothing ticked and the cursor on `bugfix`,
 # the first row: `space` ticks it, `j` moves onto `default` and `space`
-# ticks that too. `enter` then advances to the skips screen, one block per
-# ticked pipeline, `bugfix`'s first. The flattened cursor opens on its first
-# checkbox: one `j` reaches its second, `fix`, and `space` ticks it; eight
-# more `j`s walk past the rest of `bugfix`'s own checkboxes onto `default`'s
-# third one, `document`, and `space` ticks that too. Both runs are counted
-# off the flattened checkbox list, so they have to be recounted whenever
-# either built-in pipeline gains or loses a step. `bugfix` contributes seven
-# checkboxes, not the six steps it declares, because every pipeline is
-# loaded with a `blocked` step appended to it; `default` contributes five
-# the same way. `enter` mints and writes all four arms and goes back to
-# browsing; the trailing `n` is noise the screen ignores, and the pipe
-# running dry ends it the same way `esc` would.
-on_screen '\tt j \rj jjjjjjjj \rn' /dev/null
+# ticks that too. `enter` then advances to the skips screen, one page per
+# ticked pipeline, `bugfix`'s first. The cursor opens on its first step: one
+# `j` reaches its second, `fix`, and `space` ticks it. `→` turns to
+# `default`'s page, where the cursor starts on its first step again; two `j`s
+# reach its third, `document`, and `space` ticks that too. Both runs are
+# counted off each pipeline's own steps, so they have to be recounted
+# whenever either built-in pipeline gains or loses a step near the top.
+# `enter` mints and writes all four arms and goes back to browsing; the
+# trailing `n` is noise the screen ignores, and the pipe running dry ends it
+# the same way `esc` would.
+on_screen '\tt j \rj \033[Cjj \rn' /dev/null
 
 # Two copies of the two-task chain, ids numbered in pipeline order: the
 # `bugfix` copy is `alpha-1`, `beta-1`, the `default` copy `alpha-2`,

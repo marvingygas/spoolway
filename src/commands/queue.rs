@@ -3170,7 +3170,8 @@ enum TrialStage {
     /// Ticking which of the project's pipelines the group is tried under —
     /// one row per name [`trial_pipeline_names`] lists.
     PickPipelines,
-    /// Choosing which steps of each ticked pipeline to skip.
+    /// Choosing which steps of each ticked pipeline to skip, one ticked
+    /// pipeline to a page — see [`choose_skips_panel`].
     ChooseSkips,
 }
 
@@ -3189,10 +3190,12 @@ struct TrialState {
     group: GroupKey,
     stage: TrialStage,
     /// The cursor's own meaning changes with `stage`: an index into
-    /// [`trial_pipeline_names`] while picking pipelines, a flattened index
-    /// across every ticked pipeline's steps while choosing skips — see
-    /// [`trial_total_steps`].
+    /// [`trial_pipeline_names`] while picking pipelines, an index into the
+    /// steps of the page's own pipeline while choosing skips.
     cursor: usize,
+    /// Which ticked pipeline the skip screen shows, an index into
+    /// [`trial_ticked`] — see [`trial_page`]. Unused on the first screen.
+    page: usize,
     ticked: std::collections::BTreeSet<String>,
     skip: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
@@ -3220,6 +3223,7 @@ impl TrialState {
             group: group_key(group),
             stage: TrialStage::PickPipelines,
             cursor,
+            page: 0,
             ticked,
             skip: Default::default(),
         }
@@ -3236,7 +3240,7 @@ fn trial_group<'a>(groups: &'a [Group], trial: &TrialState) -> Option<&'a Group>
 }
 
 /// The ticked pipelines, in the order [`trial_pipeline_names`] lists them —
-/// the order the skip screen draws their blocks and [`begin_trial`] mints
+/// the order the skip screen turns its pages in and [`begin_trial`] mints
 /// their copies' ids in. A tick naming a pipeline a reload has since taken
 /// away is left out, the same care [`trial_group`] takes over a group that
 /// moved: there is nothing left to run it under.
@@ -3683,6 +3687,7 @@ fn run_screen_from(
                     let mut trial = trial.clone();
                     trial.stage = TrialStage::ChooseSkips;
                     trial.cursor = 0;
+                    trial.page = 0;
                     state.mode = Mode::Trial(trial);
                 }
                 // The second screen's own `enter`: mint and write the batch.
@@ -5562,8 +5567,9 @@ const DELETE_ROUTINE_KEYS: &[(&str, &str)] = &[("enter", "delete"), ("esc", "kee
 /// The trial picker's second screen's keys, in its popup and on the line
 /// under the frame.
 const SKIP_KEYS: &[(&str, &str)] = &[
-    ("↑↓", "move"),
-    ("space", "toggle"),
+    ("↑↓", "step"),
+    ("←→", "pipeline"),
+    ("space", "skip"),
     ("enter", "run"),
     ("esc", "pipelines"),
 ];
@@ -5693,7 +5699,12 @@ fn popup(
 ) -> Option<Vec<String>> {
     match &state.mode {
         Mode::Gate(cursor) => gate_panel(groups, pipelines, state, *cursor),
-        Mode::Trial(trial) => trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)),
+        Mode::Trial(trial) => trial_panel(
+            groups,
+            pipelines,
+            trial,
+            (checkbox_row_cap(layout), popup_height(layout)),
+        ),
         Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
         Mode::DeleteRoutine { target, .. } => Some(delete_routine_panel(target)),
         Mode::NewJob { walk, .. } => Some(walk.panel(pipelines)),
@@ -5839,42 +5850,124 @@ fn trial_pipeline_names(pipelines: &Pipelines) -> Vec<&str> {
     pipelines.pipelines.keys().map(String::as_str).collect()
 }
 
-/// How many rows [`choose_skips_panel`] draws once every ticked pipeline's
-/// steps are flattened into one list — the span [`handle_trial_key`]'s own
-/// cursor clamps `ChooseSkips` to, and what [`toggle_trial_skip`] walks to
-/// find which pipeline and step the cursor is actually sitting on.
-fn trial_total_steps(pipelines: &Pipelines, trial: &TrialState) -> usize {
-    trial_ticked(pipelines, trial)
-        .iter()
-        .map(|(_, pipeline)| pipeline.steps.len())
-        .sum()
+/// The ticked pipeline the skip screen's page shows, with its place among
+/// the ticks and how many there are. The page is clamped to the last tick
+/// rather than trusted, since a reload can take a ticked pipeline away
+/// under an open picker — see [`trial_ticked`]. `None` only when nothing is
+/// ticked at all, which the first screen's `enter` never lets through.
+fn trial_page<'a>(
+    pipelines: &'a Pipelines,
+    trial: &TrialState,
+) -> Option<(usize, usize, &'a str, &'a crate::pipeline::Pipeline)> {
+    let ticked = trial_ticked(pipelines, trial);
+    let page = trial.page.min(ticked.len().checked_sub(1)?);
+    let (name, pipeline) = ticked[page];
+    Some((page, ticked.len(), name, pipeline))
+}
+
+/// The rows a trial popup spends on something other than its scrolling
+/// list: the two borders, and the blank row and key row [`panel`] puts
+/// under every body. Each screen adds its own fixed rows on top — see
+/// [`PICK_CHROME_ROWS`] and [`SKIP_CHROME_ROWS`].
+const TRIAL_PANEL_ROWS: usize = 4;
+
+/// The first screen's own fixed rows: a blank, its heading and a blank over
+/// the list, and a blank and the arm count under it.
+const PICK_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 5;
+
+/// The second screen's own fixed rows: a blank, its title row and a blank
+/// over the list.
+const SKIP_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 3;
+
+/// How many list rows a trial popup `height` lines tall has room for once
+/// `chrome` of them are spent, and never fewer than one — a terminal too
+/// short for even that still shows the cursor's own row, rather than a list
+/// of none a person could not move through. `None` is a run with no terminal
+/// to measure, where nothing is cut.
+fn list_room(height: Option<usize>, chrome: usize) -> usize {
+    height.map_or(usize::MAX, |height| height.saturating_sub(chrome).max(1))
+}
+
+/// The slice of `rows` a list `room` rows tall shows, with the row at
+/// `cursor` always among them, and a `↑ n more` row over it and a `↓ n
+/// more` row under it whenever rows are hidden on that side. Both markers
+/// are counted inside `room`, so what comes back is never taller than it:
+/// a trial popup taller than the frame loses its bottom rows and its own
+/// bottom border to [`overlay`], which drops whatever runs past the frame.
+///
+/// The window is worked out afresh from the cursor on every frame rather
+/// than remembered, the way [`window`] keeps a pane's focus in view. Under
+/// three rows there is no room for a marker beside a row, so the markers
+/// are dropped and only the rows around the cursor are drawn.
+fn scroll_rows(rows: &[String], cursor: usize, room: usize) -> Vec<String> {
+    let room = room.max(1);
+    let len = rows.len();
+    if len <= room {
+        return rows.to_vec();
+    }
+    let cursor = cursor.min(len - 1);
+    if room < 3 {
+        let offset = cursor.saturating_sub(room - 1).min(len - room);
+        return rows[offset..offset + room].to_vec();
+    }
+    // At either end one marker is enough; in the middle both are drawn, and
+    // the cursor sits on the last row between them.
+    let edge = room - 1;
+    let (offset, count) = if cursor < edge {
+        (0, edge)
+    } else if cursor >= len - edge {
+        (len - edge, edge)
+    } else {
+        (cursor + 3 - room, room - 2)
+    };
+    let below = len - offset - count;
+    let mut out = Vec::with_capacity(room);
+    if offset > 0 {
+        out.push(format!("  ↑ {offset} more"));
+    }
+    out.extend_from_slice(&rows[offset..offset + count]);
+    if below > 0 {
+        out.push(format!("  ↓ {below} more"));
+    }
+    out
 }
 
 /// The trial picker's first screen: every project pipeline, its own row
 /// and its own tick, and under the list how many arms the ticks come to —
 /// every ticked pipeline runs the whole group, so the count is the product,
 /// and a big group with many ticks queues a lot of work a person should see
-/// before `enter` writes it.
+/// before `enter` writes it. A project with more pipelines than the popup
+/// has rows for scrolls the list the way the skip screen does — see
+/// [`scroll_rows`].
 fn pick_pipelines_panel(
     group: &Group,
     pipelines: &Pipelines,
     trial: &TrialState,
-    width: usize,
+    (width, height): (usize, Option<usize>),
 ) -> Vec<String> {
     let mut body = vec![
         String::new(),
         "pick pipelines to compare".to_string(),
         String::new(),
     ];
-    for (i, name) in trial_pipeline_names(pipelines).into_iter().enumerate() {
-        let marker = if i == trial.cursor { '>' } else { ' ' };
-        let tick = if trial.ticked.contains(name) {
-            "[x]"
-        } else {
-            "[ ]"
-        };
-        body.push(clip(format!("{marker} {tick} {name}"), width));
-    }
+    let rows: Vec<String> = trial_pipeline_names(pipelines)
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let marker = if i == trial.cursor { '>' } else { ' ' };
+            let tick = if trial.ticked.contains(name) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            clip(format!("{marker} {tick} {name}"), width)
+        })
+        .collect();
+    body.extend(scroll_rows(
+        &rows,
+        trial.cursor,
+        list_room(height, PICK_CHROME_ROWS),
+    ));
 
     let ticked = trial_ticked(pipelines, trial).len();
     let tasks = group.tasks.len();
@@ -5896,20 +5989,20 @@ fn pick_pipelines_panel(
     )
 }
 
-/// The widest a line [`choose_skips_panel`] draws may run before it wraps
-/// onto a new one, so the popup [`boxed`] draws around it never grows wider
-/// than the frame [`overlay`] is centring it over — which is what happens
-/// with nothing here to stop it: `overlay` writes a panel line onto the
-/// frame underneath it one character at a time and simply stops once it
-/// runs past the frame's own width, taking the panel's own right and bottom
-/// border with it and leaving whatever ran off screen undrawn.
+/// The widest a line a trial popup draws may run, so the popup [`boxed`]
+/// draws around it never grows wider than the frame [`overlay`] is centring
+/// it over — which is what happens with nothing here to stop it: `overlay`
+/// writes a panel line onto the frame underneath it one character at a time
+/// and simply stops once it runs past the frame's own width, taking the
+/// panel's own right and bottom border with it and leaving whatever ran off
+/// screen undrawn. The same cap bounds every notice popup on this screen.
 ///
 /// [`two_pane_frame`] draws a frame row `layout.left + layout.right + 7`
 /// columns wide, and [`boxed`] spends 6 of those around a body line's own
 /// text — its two-space indent, its own inner padding, and its two border
 /// columns — so a line here has to stay at `layout.left + layout.right + 1`
 /// or narrower. Capped one column under that rather than exactly on it, so
-/// the wrap always fires before `overlay`'s own silent truncation could.
+/// the cut always happens before `overlay`'s own silent truncation could.
 fn checkbox_row_cap(layout: Layout) -> usize {
     layout.left + layout.right
 }
@@ -5920,14 +6013,12 @@ fn checkbox_row_cap(layout: Layout) -> usize {
 const TRIAL_UNASSIGNED: &str = "(unset)";
 
 /// Cut `line` to `width` columns, ending it in `…` when there was more,
-/// for the lines of the trial popups that are not built out of fixed-width
-/// pieces — a task's own id, and the group name in a popup's title.
+/// for the lines of the trial popups — a pipeline or step name, and the
+/// group name in a popup's title.
 ///
-/// The steps of a long pipeline wrap instead of being cut, because every
-/// one of them has its own checkbox a person has to be able to reach. A
-/// task id has nothing to reach, so it is cheaper to read one cut id than
-/// to reflow a header across two lines. Either way the rule is the same one
-/// [`checkbox_row_cap`] states: no line a trial popup draws may be wider
+/// Cutting is safe there because every row is its own pipeline or step, so
+/// a cut row still has its own checkbox for the cursor to reach. The rule is
+/// the one [`checkbox_row_cap`] states: no line a trial popup draws may be wider
 /// than the frame [`overlay`] paints it onto, because `overlay` answers an
 /// over-wide line by silently dropping the rest of it along with the
 /// popup's own right and bottom border.
@@ -5940,50 +6031,56 @@ pub(crate) fn clip(line: String, width: usize) -> String {
     out
 }
 
-/// The trial picker's second screen: one block per ticked pipeline, in the
-/// order [`trial_ticked`] lists them, its name over its own steps, each with
-/// its own tick to skip, packed several to a line the way the mockup draws a
-/// short pipeline and wrapped onto as many lines as [`checkbox_row_cap`]
-/// takes once a pipeline runs longer than that — every step still gets its
-/// own checkbox drawn, whichever line it lands on. A block is a pipeline,
-/// not a task: what is ticked in it is skipped by every arm of that
-/// pipeline's copy of the group. The cursor is one index flattened across
-/// every block's steps in turn, so `↑↓` walks the whole set top to bottom
-/// without a second axis to move along; the `>` marker sits right before
-/// whichever checkbox that flattened index has currently reached, on
-/// whichever line that checkbox wrapped to.
+/// The trial picker's second screen: one ticked pipeline to a page, in the
+/// order [`trial_ticked`] lists them, its steps one per row, each with its
+/// own tick to skip. A page is a pipeline, not a task: what is ticked on it
+/// is skipped by every arm of that pipeline's copy of the group. The title
+/// row names the page and counts its own skips, since a tick on another page
+/// is out of sight.
+///
+/// The steps scroll inside whatever rows the popup has left once its own
+/// rows are drawn — see [`scroll_rows`] — so the popup is never taller than
+/// `height`. `release` runs 17 steps, and several such pipelines in one
+/// popup with no scrolling ran past the frame's bottom, where [`overlay`]
+/// dropped the rest along with the popup's own bottom border.
 fn choose_skips_panel(
     group: &Group,
     pipelines: &Pipelines,
     trial: &TrialState,
-    width: usize,
+    (width, height): (usize, Option<usize>),
 ) -> Vec<String> {
-    let mut body = vec![
-        String::new(),
-        "choose steps to skip".to_string(),
-        String::new(),
-    ];
-    let mut flat = 0usize;
-    for (name, pipeline) in trial_ticked(pipelines, trial) {
-        body.push(clip(format!(" {name}"), width));
-
+    let mut body = vec![String::new()];
+    if let Some((page, pages, name, pipeline)) = trial_page(pipelines, trial) {
         let skip = trial.skip.get(name);
-        let mut line = String::from("   ");
-        for (i, step) in pipeline.steps.iter().enumerate() {
-            let marker = if flat + i == trial.cursor { "> " } else { "  " };
-            let ticked = skip.is_some_and(|set| set.contains(&step.id));
-            let box_ = if ticked { "[x]" } else { "[ ]" };
-            let token = format!("{marker}{box_} {:<13}", step.id);
-            if line.chars().count() + token.chars().count() > width && !line.trim().is_empty() {
-                body.push(line.trim_end().to_string());
-                line = String::from("   ");
-            }
-            line.push_str(&token);
-        }
-        if !line.trim().is_empty() {
-            body.push(line.trim_end().to_string());
-        }
-        flat += pipeline.steps.len();
+        let skipped = pipeline
+            .steps
+            .iter()
+            .filter(|step| skip.is_some_and(|set| set.contains(&step.id)))
+            .count();
+        body.push(clip(
+            format!(
+                "skip steps   ←  {name}  {} of {pages}  →   {skipped} skipped",
+                page + 1
+            ),
+            width,
+        ));
+        body.push(String::new());
+        let rows: Vec<String> = pipeline
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let marker = if i == trial.cursor { '>' } else { ' ' };
+                let ticked = skip.is_some_and(|set| set.contains(&step.id));
+                let box_ = if ticked { "[x]" } else { "[ ]" };
+                clip(format!("{marker} {box_} {}", step.id), width)
+            })
+            .collect();
+        body.extend(scroll_rows(
+            &rows,
+            trial.cursor,
+            list_room(height, SKIP_CHROME_ROWS),
+        ));
     }
 
     panel(
@@ -6000,21 +6097,32 @@ fn choose_skips_panel(
 /// at least one, but a reload racing an open picker is handled the same
 /// careful way [`gate_panel`] already is. `width` is the budget both
 /// screens keep every line they draw inside — see [`checkbox_row_cap`] for
-/// what happens to a popup that runs past it.
+/// what happens to a popup that runs past it — and `height` the most lines
+/// either popup may take, `None` where there is no terminal to measure.
 fn trial_panel(
     groups: &[Group],
     pipelines: &Pipelines,
     trial: &TrialState,
-    width: usize,
+    bounds: (usize, Option<usize>),
 ) -> Option<Vec<String>> {
     let group = trial_group(groups, trial)?;
     if group.tasks.is_empty() {
         return None;
     }
     Some(match trial.stage {
-        TrialStage::PickPipelines => pick_pipelines_panel(group, pipelines, trial, width),
-        TrialStage::ChooseSkips => choose_skips_panel(group, pipelines, trial, width),
+        TrialStage::PickPipelines => pick_pipelines_panel(group, pipelines, trial, bounds),
+        TrialStage::ChooseSkips => choose_skips_panel(group, pipelines, trial, bounds),
     })
+}
+
+/// The most lines a trial popup may take over a frame drawn to `layout`.
+/// The frame is `layout.rows` plus its two borders, and [`compose`]
+/// stretches any frame shorter than the popup plus four rows — right for a
+/// frame with no terminal under it, but on a real one every row it adds
+/// pushes the frame's top off the screen. Two under `layout.rows` is the
+/// tallest popup that leaves the frame as it was.
+fn popup_height(layout: Layout) -> Option<usize> {
+    layout.rows.map(|rows| rows.saturating_sub(2))
 }
 
 /// The save panel: the folder `name` would save under, and how many
@@ -6075,7 +6183,11 @@ fn handle_trial_key(pipelines: &Pipelines, mut trial: TrialState, key: Key) -> M
             }
         }
         TrialStage::ChooseSkips => {
-            let total = trial_total_steps(pipelines, &trial);
+            let pages = trial_ticked(pipelines, &trial).len().max(1);
+            let page = trial_page(pipelines, &trial);
+            let last = page.map_or(0, |(_, _, _, pipeline)| {
+                pipeline.steps.len().saturating_sub(1)
+            });
             match key {
                 // Back to the first screen, not out of the picker — `enter`
                 // moving forward through the two screens is what `esc` walks
@@ -6086,35 +6198,34 @@ fn handle_trial_key(pipelines: &Pipelines, mut trial: TrialState, key: Key) -> M
                     trial.cursor = 0;
                 }
                 Key::Up | Key::Char('k') => trial.cursor = trial.cursor.saturating_sub(1),
-                Key::Down | Key::Char('j') => {
-                    trial.cursor = (trial.cursor + 1).min(total.saturating_sub(1))
+                Key::Down | Key::Char('j') => trial.cursor = (trial.cursor + 1).min(last),
+                // Turning the page wraps round at either end, so the `←`
+                // drawn on the first page and the `→` on the last both do
+                // something. A new page starts on its first step: its
+                // pipeline's steps are not the ones the cursor was counting.
+                Key::Left | Key::Right => {
+                    let current = page.map_or(0, |(page, ..)| page);
+                    trial.page = match key {
+                        Key::Left => (current + pages - 1) % pages,
+                        _ => (current + 1) % pages,
+                    };
+                    trial.cursor = 0;
                 }
-                Key::Char(' ') => toggle_trial_skip(pipelines, &mut trial),
+                Key::Char(' ') => {
+                    if let Some((_, _, name, pipeline)) = page
+                        && let Some(step) = pipeline.steps.get(trial.cursor)
+                    {
+                        let set = trial.skip.entry(name.to_string()).or_default();
+                        if !set.remove(&step.id) {
+                            set.insert(step.id.clone());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
     Mode::Trial(trial)
-}
-
-/// Space on the second trial screen: tick or untick whichever step the
-/// flattened cursor is currently sitting on, in whichever pipeline's own
-/// skip set that step belongs to — [`trial_total_steps`]'s own walk over
-/// every ticked pipeline's steps in turn, stopped as soon as the cursor's
-/// index falls inside one.
-fn toggle_trial_skip(pipelines: &Pipelines, trial: &mut TrialState) {
-    let mut flat = 0usize;
-    for (name, pipeline) in trial_ticked(pipelines, trial) {
-        if trial.cursor < flat + pipeline.steps.len() {
-            let step = pipeline.steps[trial.cursor - flat].id.clone();
-            let set = trial.skip.entry(name.to_string()).or_default();
-            if !set.remove(&step) {
-                set.insert(step);
-            }
-            return;
-        }
-        flat += pipeline.steps.len();
-    }
 }
 
 /// `n` with its noun, singular where that is what `n` is.
@@ -11071,7 +11182,7 @@ mod tests {
             &groups,
             &pipelines,
             &trial,
-            LEFT_PANE_WIDTH + RIGHT_PANE_WIDTH,
+            (LEFT_PANE_WIDTH + RIGHT_PANE_WIDTH, None),
         )
         .unwrap();
         let flat = panel.join("\n");
@@ -11120,7 +11231,7 @@ mod tests {
             panic!("expected to stay on the trial picker");
         };
         assert!(trial.ticked.contains("bugfix") && trial.ticked.contains("default"));
-        let flat = trial_panel(&groups, &pipelines, &trial, 80)
+        let flat = trial_panel(&groups, &pipelines, &trial, (80, None))
             .unwrap()
             .join("\n");
         assert!(flat.contains("2 pipelines × 2 tasks = 4 arms"), "{flat}");
@@ -11184,11 +11295,13 @@ mod tests {
         assert!(trial.skip["bugfix"].contains("checks"));
     }
 
-    /// `t`'s own second screen: one block per ticked pipeline, its name over
-    /// its own steps, and a tick made in one pipeline's block never reaches
-    /// another's — each pipeline keeps its own skip set.
+    /// `t`'s own second screen: one ticked pipeline to a page, its steps one
+    /// per row, and a title row naming the page and counting only its own
+    /// skips. `→` and `←` turn the page, wrapping round at either end, and a
+    /// tick made on one page never reaches another's — each pipeline keeps
+    /// its own skip set.
     #[test]
-    fn choose_skips_panel_keeps_a_separate_skip_set_per_pipeline() {
+    fn the_skip_screen_shows_one_ticked_pipeline_a_page() {
         let repo = fixture("screen-trial-skips");
         write_pending(
             &repo,
@@ -11206,119 +11319,349 @@ mod tests {
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
-        let group = &groups[0];
+        let bugfix = pipelines.get("bugfix").unwrap();
+        let default = pipelines.get("default").unwrap();
 
-        let mut trial = TrialState::new(&pipelines, group);
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
         trial.stage = TrialStage::ChooseSkips;
         trial
             .skip
             .entry("bugfix".to_string())
             .or_default()
             .insert("handover".to_string());
-
-        let panel = trial_panel(
-            &groups,
-            &pipelines,
-            &trial,
-            LEFT_PANE_WIDTH + RIGHT_PANE_WIDTH,
-        )
-        .unwrap();
-        let flat = panel.join("\n");
-
-        assert!(flat.contains("choose steps to skip"), "{flat}");
-        // A block's header is the pipeline's name alone on its row.
-        let header = |name: &str| {
+        let draw = |trial: &TrialState| {
+            trial_panel(
+                &groups,
+                &pipelines,
+                trial,
+                (LEFT_PANE_WIDTH + RIGHT_PANE_WIDTH, None),
+            )
+            .unwrap()
+        };
+        let step_rows = |panel: &[String]| {
             panel
                 .iter()
-                .position(|line| line.trim_matches(|c| c == '│' || c == ' ') == name)
-                .unwrap_or_else(|| panic!("no `{name}` header: {flat}"))
+                .filter(|line| line.contains("[ ] ") || line.contains("[x] "))
+                .count()
         };
-        let bugfix_at = header("bugfix");
-        let default_at = header("default");
-        assert!(bugfix_at < default_at, "blocks in name order: {flat}");
+
+        let panel = draw(&trial);
+        let flat = panel.join("\n");
         assert!(
-            !flat.contains("alpha ·"),
-            "a block is a pipeline, not a task: {flat}"
-        );
-        assert!(flat.contains("[x] handover"), "{flat}");
-        // `default`'s own `handover` — the same step id, a different
-        // pipeline — is never ticked by bugfix's own skip set.
-        assert_eq!(flat.matches("[x]").count(), 1, "{flat}");
-        assert!(
-            flat.contains("[↑↓] move   [space] toggle   [enter] run   [esc] pipelines"),
+            flat.contains("skip steps   ←  bugfix  1 of 2  →   1 skipped"),
             "{flat}"
         );
+        assert_eq!(step_rows(&panel), bugfix.steps.len(), "{flat}");
+        assert!(flat.contains("> [ ] reproduce"), "{flat}");
+        assert!(flat.contains("  [x] handover"), "{flat}");
+        assert!(
+            !flat.contains("implement"),
+            "default's steps are on its own page: {flat}"
+        );
+        // Tightened to two spaces a pair, since this row is wider than the
+        // fallback layout's popup — see `fit_keys`.
+        assert!(
+            flat.contains("[↑↓] step  [←→] pipeline  [space] skip  [enter] run  [esc] pipelines"),
+            "{flat}"
+        );
+
+        // `→` turns to `default`, whose own `handover` — the same step id,
+        // another pipeline — is not ticked by bugfix's set.
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Right) else {
+            panic!("expected to stay on the trial picker");
+        };
+        let panel = draw(&trial);
+        let flat = panel.join("\n");
+        assert!(
+            flat.contains("skip steps   ←  default  2 of 2  →   0 skipped"),
+            "{flat}"
+        );
+        assert_eq!(step_rows(&panel), default.steps.len(), "{flat}");
+        assert!(!flat.contains("[x]"), "{flat}");
+
+        // `space` here ticks default's own first step and nothing of bugfix's.
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Char(' ')) else {
+            panic!("expected to stay on the trial picker");
+        };
+        assert!(trial.skip["default"].contains("implement"));
+        assert_eq!(trial.skip["bugfix"].len(), 1, "{:?}", trial.skip);
+
+        // Past the last page `→` wraps to the first, and `←` from the first
+        // back to the last.
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Right) else {
+            panic!("expected to stay on the trial picker");
+        };
+        assert!(draw(&trial).join("\n").contains("←  bugfix  1 of 2  →"));
+        let Mode::Trial(trial) = handle_trial_key(&pipelines, trial, Key::Left) else {
+            panic!("expected to stay on the trial picker");
+        };
+        assert!(
+            draw(&trial)
+                .join("\n")
+                .contains("←  default  2 of 2  →   1 skipped")
+        );
     }
 
-    /// A pipeline with more steps than one line comfortably packs — `bugfix`
-    /// at seven, against a realistic terminal width — wraps onto as many
-    /// lines as it takes instead of running off the edge of the frame: every
-    /// one of its steps still draws its own checkbox, and no line this panel
-    /// draws is wider than what `overlay` can actually paint onto the frame
-    /// underneath it. The regression this guards: before `checkbox_row_cap`,
-    /// every step of a pipeline this long was packed onto one line with no
-    /// wrap at all, so `overlay`'s own silent per-character stop cut the row
-    /// short partway through, taking the popup's own right and bottom
-    /// border with it, and left a step past the cut with no checkbox drawn
-    /// at all even though the flattened cursor could still land on it.
+    /// The window the mockup draws: seven steps with room for six rows show
+    /// the first five and a `↓ 2 more` row. And for every length, room and
+    /// cursor, the window is never taller than its room, always holds the
+    /// cursor's own row, and counts exactly the rows it hides.
     #[test]
-    fn a_long_pipelines_steps_wrap_rather_than_run_off_the_panel() {
-        let repo = fixture("screen-trial-skips-wrap");
-        write_pending(
-            &repo,
-            "solo",
-            &task_text("solo", "group: audits\npipeline: bugfix\n", BODY),
+    fn scroll_rows_keeps_the_cursor_in_view_and_fits_its_room() {
+        let rows = |n: usize| (0..n).map(|i| format!("row {i}")).collect::<Vec<_>>();
+
+        assert_eq!(
+            scroll_rows(&rows(7), 0, 6),
+            ["row 0", "row 1", "row 2", "row 3", "row 4", "  ↓ 2 more"]
         );
-        let groups = listed(&repo);
-        let pipelines = Pipelines::builtin();
-        let group = &groups[0];
-        let bugfix = pipelines.get("bugfix").unwrap();
+        assert_eq!(
+            scroll_rows(&rows(7), 6, 6),
+            ["  ↑ 2 more", "row 2", "row 3", "row 4", "row 5", "row 6"]
+        );
+        assert_eq!(
+            scroll_rows(&rows(12), 5, 6),
+            [
+                "  ↑ 2 more",
+                "row 2",
+                "row 3",
+                "row 4",
+                "row 5",
+                "  ↓ 6 more"
+            ]
+        );
 
-        let mut trial = TrialState::new(&pipelines, group);
-        trial.stage = TrialStage::ChooseSkips;
-
-        let width = LEFT_PANE_WIDTH + RIGHT_PANE_WIDTH;
-        let panel = trial_panel(&groups, &pipelines, &trial, width).unwrap();
-
-        for step in &bugfix.steps {
-            assert!(
-                panel
-                    .iter()
-                    .any(|line| line.contains(&format!("[ ] {}", step.id))),
-                "`{}` never drew a checkbox: {panel:?}",
-                step.id
-            );
+        for len in 1..20 {
+            for room in 1..22 {
+                for cursor in 0..len {
+                    let shown = scroll_rows(&rows(len), cursor, room);
+                    assert!(shown.len() <= room, "{len}/{room}/{cursor}: {shown:?}");
+                    assert!(
+                        shown.contains(&format!("row {cursor}")),
+                        "{len}/{room}/{cursor}: {shown:?}"
+                    );
+                    let count = |prefix: &str| {
+                        shown
+                            .iter()
+                            .find_map(|line| line.strip_prefix(prefix)?.strip_suffix(" more"))
+                            .map_or(0, |n| n.parse::<usize>().unwrap())
+                    };
+                    let drawn = shown.iter().filter(|line| line.starts_with("row ")).count();
+                    if room >= 3 {
+                        assert_eq!(
+                            count("  ↑ ") + drawn + count("  ↓ "),
+                            len,
+                            "{len}/{room}/{cursor}: {shown:?}"
+                        );
+                    }
+                }
+            }
         }
-        assert!(
-            panel.iter().all(|line| line.chars().count() <= width + 6),
-            "a body line ran wider than {} + 6 columns of `boxed` overhead: {panel:?}",
-            width
-        );
-        // The frame's own closing border survives — `boxed` always draws it
-        // last — rather than the panel simply running out mid-box the way
-        // it used to once `overlay` gave up partway through an over-wide
-        // row.
-        assert!(
-            panel
-                .last()
-                .is_some_and(|line| line.starts_with('└') && line.ends_with('┘')),
-            "{panel:?}"
-        );
     }
 
-    /// The same long pipeline, but drawn the way the screen actually draws
-    /// it: `boxed` popup over a real [`two_pane_frame`], composed by the
-    /// real [`overlay`]. This is the shape `look` reproduced live and the
-    /// one the panel-level test above cannot see, because `overlay`'s
-    /// truncation happens after `choose_skips_panel` has already handed its
-    /// lines over — it writes a panel row onto the frame one character at a
-    /// time and simply stops at the frame's own right edge, so an over-wide
-    /// popup lost its right border on every row and its bottom border
-    /// entirely, and any checkbox past the cut was never painted at all.
-    ///
-    /// Both pipelines ticked rather than one, so the assertion covers a
-    /// panel tall enough to have two headers, wrapped rows and a keys line
-    /// all competing for the same width.
+    /// The pipelines tests stand in for: `release`'s own seventeen step ids,
+    /// each a copy of `default`'s first step, beside the built-in pair — the
+    /// skip screen reads nothing of a step but its id, and the real
+    /// `.spoolway/pipelines/release.yml` is the control plane, not a fixture
+    /// this crate's tests can load.
+    fn with_release(mut pipelines: Pipelines) -> Pipelines {
+        const RELEASE: [&str; 17] = [
+            "ready",
+            "upgrade",
+            "fix",
+            "review-fix",
+            "await-fix",
+            "version",
+            "preflight",
+            "notes",
+            "candidate",
+            "review-release",
+            "await-release",
+            "publish",
+            "released",
+            "recover",
+            "fixture",
+            "review-fixture",
+            "await-fixture",
+        ];
+        let mut release = pipelines.get("default").unwrap().clone();
+        let step = release.steps[0].clone();
+        release.name = "release".to_string();
+        release.steps = RELEASE
+            .iter()
+            .map(|id| crate::pipeline::Step {
+                id: id.to_string(),
+                ..step.clone()
+            })
+            .collect();
+        pipelines.pipelines.insert("release".to_string(), release);
+        pipelines
+    }
+
+    /// The popup's own top and bottom borders on `frame`, as row indices —
+    /// told apart from the frame's own by the `┬`/`┴` the frame's carry
+    /// between its two panes, which the popup's never do.
+    fn popup_borders(frame: &[String]) -> (Option<usize>, Option<usize>) {
+        let top = frame
+            .iter()
+            .position(|line| line.contains("┌─ trial") && !line.contains('┬'));
+        let bottom = frame
+            .iter()
+            .position(|line| line.contains('└') && line.contains('┘') && !line.contains('┴'));
+        (top, bottom)
+    }
+
+    /// Every row of the popup `panel`, as `overlay` drew it onto `frame`,
+    /// still closes on its own right border — the column `overlay` cuts a
+    /// popup wider than the frame at.
+    fn popup_closes_every_row(frame: &[String], panel: &[String]) -> bool {
+        let (Some(top), Some(bottom)) = popup_borders(frame) else {
+            return false;
+        };
+        let x = frame[top].chars().position(|c| c == '┌').unwrap();
+        let right = x + panel[0].chars().count() - 1;
+        frame[top..=bottom]
+            .iter()
+            .all(|line| matches!(line.chars().nth(right), Some('┐' | '│' | '┘')))
+    }
+
+    /// The height bound the plan proves against: `release`'s seventeen steps
+    /// on a 24-row terminal. Moving the cursor down through every one of
+    /// them, each frame draws the cursor's own row, both of the popup's
+    /// borders, and the frame's own bottom border under the popup. Before
+    /// the skip screen scrolled, a popup this tall ran past the frame's
+    /// bottom and `overlay` dropped its last rows and its bottom border.
+    #[test]
+    fn release_on_a_24_row_terminal_reaches_every_step_inside_the_frame() {
+        let repo = fixture("screen-trial-skips-release");
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
+        let groups = listed(&repo);
+        let pipelines = with_release(Pipelines::builtin());
+        let release = pipelines.get("release").unwrap();
+        assert_eq!(release.steps.len(), 17);
+
+        let layout = layout_for(100, 24);
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
+        trial.ticked = ["release".to_string()].into();
+        trial.stage = TrialStage::ChooseSkips;
+        trial.cursor = 0;
+
+        for (i, step) in release.steps.iter().enumerate() {
+            let panel = trial_panel(
+                &groups,
+                &pipelines,
+                &trial,
+                (checkbox_row_cap(layout), popup_height(layout)),
+            )
+            .unwrap();
+            let frame = compose(
+                two_pane_frame(&[], &[], "groups", "audits", layout),
+                Some(&panel),
+                "keys".to_string(),
+            );
+            let drawn = frame.join("\n");
+
+            assert_eq!(
+                frame.len(),
+                24 - 1,
+                "the frame grew under the popup:\n{drawn}"
+            );
+            assert!(
+                drawn.contains(&format!("> [ ] {}", step.id)),
+                "step {i}:\n{drawn}"
+            );
+            assert!(
+                popup_closes_every_row(&frame, &panel),
+                "step {i} lost a popup border:\n{drawn}"
+            );
+            assert!(
+                frame[frame.len() - 2].contains('┴'),
+                "the frame's own bottom border was drawn over:\n{drawn}"
+            );
+            if i == 0 {
+                assert!(drawn.contains("↓ 7 more"), "{drawn}");
+            }
+            if i == 16 {
+                assert!(drawn.contains("↑ 7 more"), "{drawn}");
+            }
+
+            let Mode::Trial(next) = handle_trial_key(&pipelines, trial, Key::Down) else {
+                panic!("expected to stay on the trial picker");
+            };
+            trial = next;
+        }
+    }
+
+    /// The first screen scrolls in the same kind of window once a project
+    /// has more pipelines than the popup has rows: every pipeline can be
+    /// reached, and the popup stays inside a 24-row frame.
+    #[test]
+    fn the_tick_list_scrolls_when_there_are_more_pipelines_than_rows() {
+        let repo = fixture("screen-trial-pick-scroll");
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
+        let groups = listed(&repo);
+        let mut pipelines = Pipelines::builtin();
+        let bugfix = pipelines.get("bugfix").unwrap().clone();
+        for n in 0..30 {
+            let name = format!("p{n:02}");
+            pipelines.pipelines.insert(name.clone(), bugfix.clone());
+        }
+        let names: Vec<String> = trial_pipeline_names(&pipelines)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let layout = layout_for(100, 24);
+        let mut trial = TrialState::new(&pipelines, &groups[0]);
+        trial.cursor = 0;
+        for (i, name) in names.iter().enumerate() {
+            let panel = trial_panel(
+                &groups,
+                &pipelines,
+                &trial,
+                (checkbox_row_cap(layout), popup_height(layout)),
+            )
+            .unwrap();
+            assert!(panel.len() <= popup_height(layout).unwrap(), "{panel:?}");
+            let frame = compose(
+                two_pane_frame(&[], &[], "groups", "audits", layout),
+                Some(&panel),
+                "keys".to_string(),
+            );
+            let drawn = frame.join("\n");
+            assert_eq!(
+                frame.len(),
+                24 - 1,
+                "the frame grew under the popup:\n{drawn}"
+            );
+            assert!(
+                frame
+                    .iter()
+                    .any(|line| line.contains("> [") && line.contains(&format!("] {name} "))),
+                "`{name}` is not on screen with the cursor on it:\n{drawn}"
+            );
+            assert!(
+                drawn.contains("× 1 task ="),
+                "the arm count was cut:\n{drawn}"
+            );
+            assert!(popup_closes_every_row(&frame, &panel), "row {i}:\n{drawn}");
+            if i == 0 {
+                assert!(drawn.contains("↓ ") && drawn.contains(" more"), "{drawn}");
+            }
+
+            let Mode::Trial(next) = handle_trial_key(&pipelines, trial, Key::Down) else {
+                panic!("expected to stay on the trial picker");
+            };
+            trial = next;
+        }
+    }
+
+    /// Each page, drawn the way the screen draws it — `boxed` popup over a
+    /// real [`two_pane_frame`], composed by the real [`overlay`] — paints
+    /// every step of its own pipeline onto the frame, once, with every row
+    /// closing on its right border. `overlay` writes a panel row onto the
+    /// frame one character at a time and stops at the frame's own right
+    /// edge, so a popup wider than the frame lost its right border on every
+    /// row and its bottom border entirely.
     #[test]
     fn the_skips_popup_survives_being_overlaid_on_the_frame() {
         let repo = fixture("screen-trial-skips-overlay");
@@ -11331,8 +11674,6 @@ mod tests {
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
-        let bugfix = pipelines.get("bugfix").unwrap();
-        let default = pipelines.get("default").unwrap();
 
         let mut trial = TrialState::new(&pipelines, &groups[0]);
         trial.stage = TrialStage::ChooseSkips;
@@ -11343,76 +11684,49 @@ mod tests {
             right: RIGHT_PANE_WIDTH,
             rows: Some(40),
         };
-        let panel = trial_panel(&groups, &pipelines, &trial, checkbox_row_cap(layout)).unwrap();
+        for name in ["bugfix", "default"] {
+            let pipeline = pipelines.get(name).unwrap();
+            let panel = trial_panel(
+                &groups,
+                &pipelines,
+                &trial,
+                (checkbox_row_cap(layout), popup_height(layout)),
+            )
+            .unwrap();
+            let mut frame = two_pane_frame(&[], &[], "groups", "audits", layout);
+            overlay(&mut frame, &panel);
+            let drawn = frame.join("\n");
 
-        let mut frame = two_pane_frame(&[], &[], "groups", "audits", layout);
-        overlay(&mut frame, &panel);
-        let drawn = frame.join("\n");
-
-        // Every step of both pipelines is painted onto the frame itself, not
-        // merely present in the panel that was handed to `overlay`. Counted
-        // on a whole id rather than a bare substring, so `reproduce` does
-        // not also count the `reproduce-again` row two lines under it.
-        for step in bugfix.steps.iter().chain(&default.steps) {
-            let needle = format!("[ ] {}", step.id);
-            let drew = drawn
-                .match_indices(&needle)
-                .filter(|(at, _)| {
-                    !drawn[at + needle.len()..]
-                        .starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
-                })
-                .count();
-            let expected = [bugfix, default]
-                .iter()
-                .filter(|pipeline| pipeline.step(&step.id).is_some())
-                .count();
-            assert_eq!(
-                drew, expected,
-                "`{}` drew {drew} checkboxes on the frame, not one per pipeline:\n{drawn}",
-                step.id
-            );
-        }
-
-        // The popup's own bottom border survives the overlay. This is the
-        // half `look` found missing outright: once a body row ran past the
-        // frame's right edge, `overlay` stopped mid-row and the box simply
-        // had no closing line at all. Matched on a run of dashes with no
-        // `┬` in it, so the frame's own bottom border — which carries a
-        // `┘` of its own, and a `┬` between the two panes — cannot stand in
-        // for the popup's.
-        assert!(
-            frame.iter().any(|line| {
-                let body = line.trim();
-                body.starts_with('└')
-                    && body.ends_with('┘')
-                    && !body.contains('┬')
-                    && body.chars().filter(|c| *c == '─').count() > 10
-            }),
-            "the popup's own bottom border never made it onto the frame:\n{drawn}"
-        );
-
-        // Every row of the popup still closes on its right border, which is
-        // the other half `overlay` used to eat once a row ran over.
-        let closing = frame
-            .iter()
-            .filter(|line| line.contains("[ ] "))
-            .collect::<Vec<_>>();
-        assert!(!closing.is_empty(), "{drawn}");
-        for line in closing {
+            assert!(drawn.contains(&format!("←  {name}  ")), "{drawn}");
+            // Counted on a whole id rather than a bare substring, so
+            // `reproduce` does not also count the `reproduce-again` row.
+            for step in &pipeline.steps {
+                let drew = frame
+                    .iter()
+                    .filter(|line| {
+                        line.split('│').any(|cell| {
+                            cell.trim().trim_start_matches("> ") == format!("[ ] {}", step.id)
+                        })
+                    })
+                    .count();
+                assert_eq!(drew, 1, "`{}` on the `{name}` page:\n{drawn}", step.id);
+            }
             assert!(
-                line.trim_end().ends_with('│'),
-                "a checkbox row lost its right border:\n{drawn}"
+                popup_closes_every_row(&frame, &panel),
+                "a popup row lost its right border:\n{drawn}"
             );
-        }
+            let width = frame[0].chars().count();
+            assert_eq!(width, layout.left + layout.right + 7, "{drawn}");
+            assert!(
+                frame.iter().all(|line| line.chars().count() == width),
+                "a frame row changed width under the popup:\n{drawn}"
+            );
 
-        // And the frame itself is still rectangular — no row was widened or
-        // eaten by the popup sitting on it.
-        let width = frame[0].chars().count();
-        assert_eq!(width, layout.left + layout.right + 7, "{drawn}");
-        assert!(
-            frame.iter().all(|line| line.chars().count() == width),
-            "a frame row changed width under the popup:\n{drawn}"
-        );
+            let Mode::Trial(next) = handle_trial_key(&pipelines, trial, Key::Right) else {
+                panic!("expected to stay on the trial picker");
+            };
+            trial = next;
+        }
     }
 
     /// Neither trial screen runs off the frame when what it is drawing is a
@@ -11454,7 +11768,13 @@ mod tests {
         for stage in [TrialStage::PickPipelines, TrialStage::ChooseSkips] {
             let mut trial = TrialState::new(&pipelines, &groups[0]);
             trial.stage = stage;
-            let panel = trial_panel(&groups, &pipelines, &trial, checkbox_row_cap(layout)).unwrap();
+            let panel = trial_panel(
+                &groups,
+                &pipelines,
+                &trial,
+                (checkbox_row_cap(layout), popup_height(layout)),
+            )
+            .unwrap();
 
             let widest = panel.iter().map(|l| l.chars().count()).max().unwrap();
             assert!(
@@ -11924,6 +12244,31 @@ mod tests {
         assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
         assert_eq!(arm.front.group.as_deref(), Some("audits-bugfix"));
         assert_eq!(arm.front.branch.as_deref(), Some("task/solo-1"));
+    }
+
+    /// The skip screen driven through the real screen loop: `→` turns from
+    /// `bugfix`'s page to `default`'s, the cursor starts on that page's first
+    /// step, and the skip ticked on each page reaches only that pipeline's
+    /// copy. The same keys `scripts/e2e/suites/trials.sh` sends.
+    #[test]
+    fn right_turns_the_skip_page_and_each_page_skips_its_own_copy() {
+        let repo = fixture("screen-trial-skip-pages");
+        write_pending(
+            &repo,
+            "solo",
+            &task_text("solo", "group: audits\npipeline:\n", BODY),
+        );
+        let groups = listed(&repo);
+
+        // Tick `bugfix` and `default`, skip bugfix's second step, turn the
+        // page, skip default's third.
+        screen(&repo, groups, "t j \rj \x1b[Cjj \r");
+
+        assert_eq!(queued(&repo, "solo-1").front.skip, vec!["fix".to_string()]);
+        assert_eq!(
+            queued(&repo, "solo-2").front.skip,
+            vec!["document".to_string()]
+        );
     }
 
     /// A group of more than one task, tried under two pipelines, becomes two

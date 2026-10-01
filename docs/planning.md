@@ -122,9 +122,15 @@ A trial runs the same group under several pipelines to compare them. Press `t` o
 1. The first screen lists every project pipeline with a tick. Pipelines the group's own tasks
    already name start ticked. `space` ticks or unticks the highlighted pipeline. A line under
    the list reads `N pipelines × M tasks = K arms`. `enter` continues once at least one pipeline
-   is ticked. With none ticked, `enter` does nothing.
-2. The second screen lists each ticked pipeline's steps, one block per pipeline. `space` ticks a
-   step to skip. `esc` goes back to the first screen. `enter` runs the trial.
+   is ticked. With none ticked, `enter` does nothing. The list scrolls when the project has more
+   pipelines than the popup has rows.
+2. The second screen shows one ticked pipeline at a time, its steps one per row. The title row
+   reads `skip steps   ←  <pipeline>  n of N  →   k skipped`. `←`/`→` turn the page to another
+   ticked pipeline, wrapping from the last back to the first. `space` ticks the highlighted step
+   to skip on that pipeline. The list scrolls so the cursor is always visible, with `↑ n more`
+   and `↓ n more` rows where steps are hidden. `esc` goes back to the first screen and keeps
+   every pipeline's skips; unticking a pipeline there drops its own skips. `enter` runs the
+   trial. The popup never grows taller than the terminal.
 
 Running the trial queues one full copy of the whole group per ticked pipeline. Each copy runs in
 its own group, named `<group>-<pipeline>`, or `<group>-<pipeline>-2` (then `-3`, and so on) when
