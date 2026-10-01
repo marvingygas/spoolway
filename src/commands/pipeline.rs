@@ -1283,24 +1283,23 @@ struct Moved {
     dir: bool,
 }
 
-/// Copy `from`'s whole text to `to` and remove `from` — a move built from a
-/// read, an atomic write and a delete rather than [`std::fs::rename`],
-/// because `from` (under a project's home) and `to` (under the checkout)
-/// are not guaranteed to share a filesystem, and `rename` refuses across
-/// one.
-fn move_file(from: &Path, to: &Path) -> Result<()> {
+/// Copy `from`'s whole text to `to` — a copy built from a read and an
+/// atomic write rather than [`std::fs::copy`], so a reader never sees a
+/// half-written `to`, and rather than [`std::fs::rename`], because `from`
+/// (under a project's home) and `to` (under the checkout) are not
+/// guaranteed to share a filesystem, and `rename` refuses across one.
+///
+/// This only copies — it never touches `from`. [`pipeline_promote`] runs
+/// every item's copy first and only deletes the private sources once every
+/// one of them has landed, so a copy failing partway through only ever has
+/// to remove the copies already made ([`undo_copy`]) — the private sources
+/// are all still there. A *delete* failing later is a different case,
+/// handled with [`undo_delete`]: by then some private sources are already
+/// gone, and those have to be restored from their own tracked copy before
+/// that copy, too, can be removed.
+fn copy_file(from: &Path, to: &Path) -> Result<()> {
     let body = std::fs::read(from).with_context(|| format!("reading {}", from.display()))?;
-    write_atomic(to, body)?;
-    std::fs::remove_file(from).with_context(|| format!("removing {}", from.display()))
-}
-
-/// [`move_file`] for a whole directory — a private prompt's own folder,
-/// `PROMPT.md` and whatever else it holds (an `assets/` of its own,
-/// chiefly) — copied recursively then removed, for the same cross-filesystem
-/// reason [`move_file`] does not reach for [`std::fs::rename`].
-fn move_dir(from: &Path, to: &Path) -> Result<()> {
-    copy_dir_all(from, to)?;
-    std::fs::remove_dir_all(from).with_context(|| format!("removing {}", from.display()))
+    write_atomic(to, body)
 }
 
 /// A plain recursive copy, every file under `from` landing at the same
@@ -1317,6 +1316,129 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
         {
             copy_dir_all(&entry.path(), &dest)?;
         } else {
+            std::fs::copy(entry.path(), &dest).with_context(|| {
+                format!("copying {} to {}", entry.path().display(), dest.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `dir`, or anything nested under it, holds a symlink that points
+/// at a directory — or at nothing at all.
+///
+/// `copy_dir_all` walks a directory with [`std::fs::read_dir`] and, for
+/// anything that is not itself a directory, hands it to [`std::fs::copy`].
+/// That call follows a symlink to a regular file and copies its contents
+/// correctly, so a plain file symlink is left for it to handle exactly as
+/// before this check existed — this is not the "changing what promote
+/// moves" the task ruled out. A symlink to a directory is different:
+/// `std::fs::copy` cannot copy a directory at all, and fails partway
+/// through a copy that `pipeline_promote` has otherwise already committed
+/// to. A dangling symlink fails the same way, with nothing to follow to
+/// find out it would have been a problem. Both are checked up front, before
+/// the plan is executed at all, so a prompt folder holding one is refused
+/// outright rather than copied halfway.
+fn dir_contains_symlinked_directory(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            // `metadata` (unlike the `symlink_metadata` that `file_type`
+            // above already reads) follows the link. `is_dir()` false here
+            // also covers a dangling symlink, where `metadata` errors out —
+            // treated the same as a directory target, since there is
+            // nothing for `std::fs::copy` to copy either way.
+            let points_at_dir = std::fs::metadata(entry.path())
+                .map(|meta| meta.is_dir())
+                .unwrap_or(true);
+            if points_at_dir {
+                return Ok(true);
+            }
+            continue;
+        }
+        if file_type.is_dir() && dir_contains_symlinked_directory(&entry.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Copy a [`Moved`] plan item forward, directory or plain file alike.
+fn copy_item(item: &Moved) -> Result<()> {
+    if item.dir {
+        copy_dir_all(&item.from, &item.to)
+    } else {
+        copy_file(&item.from, &item.to)
+    }
+}
+
+/// Remove a plan item's private source, once its copy has already landed —
+/// the second half of a move.
+fn delete_source(item: &Moved) -> Result<()> {
+    if item.dir {
+        std::fs::remove_dir_all(&item.from)
+            .with_context(|| format!("removing {}", item.from.display()))
+    } else {
+        std::fs::remove_file(&item.from)
+            .with_context(|| format!("removing {}", item.from.display()))
+    }
+}
+
+/// Undo a copy already made — removes `item.to`, leaving `item.from`
+/// untouched. Used to roll back the copies a failed promote already wrote,
+/// so a part that finished is not left behind by a part that did not.
+fn undo_copy(item: &Moved) -> Result<()> {
+    if !item.to.exists() {
+        return Ok(());
+    }
+    if item.dir {
+        std::fs::remove_dir_all(&item.to).with_context(|| format!("removing {}", item.to.display()))
+    } else {
+        std::fs::remove_file(&item.to).with_context(|| format!("removing {}", item.to.display()))
+    }
+}
+
+/// Undo a delete — copies back from `item.to` whatever [`delete_source`]
+/// actually removed from `item.from`, and nothing else.
+///
+/// Only what is missing is written. A delete that failed may have removed
+/// nothing at all: with `local/pipelines` read-only, `remove_file` on the
+/// pipeline file fails and leaves it in place. Re-copying it anyway wrote a
+/// temporary file into that same read-only folder, failed, and stopped the
+/// rollback with tracked copies left beside the private ones — the clash
+/// that breaks every command (seen in review, 2026-10-01). A file still
+/// present is intact, because `remove_file` removes a file whole or not at
+/// all.
+fn undo_delete(item: &Moved) -> Result<()> {
+    if item.dir {
+        restore_missing(&item.to, &item.from)
+    } else if item.from.symlink_metadata().is_ok() {
+        Ok(())
+    } else {
+        copy_file(&item.to, &item.from)
+    }
+}
+
+/// Copy every file under `from` that is missing at the same relative path
+/// under `to`, leaving the ones already there alone — [`undo_delete`]'s
+/// half for a directory that `remove_dir_all` only partly removed.
+fn restore_missing(from: &Path, to: &Path) -> Result<()> {
+    if !to.is_dir() {
+        std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    }
+    for entry in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", from.display()))?;
+        let dest = to.join(entry.file_name());
+        if entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?
+            .is_dir()
+        {
+            restore_missing(&entry.path(), &dest)?;
+        } else if dest.symlink_metadata().is_err() {
             std::fs::copy(entry.path(), &dest).with_context(|| {
                 format!("copying {} to {}", entry.path().display(), dest.display())
             })?;
@@ -1478,6 +1600,23 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
                 tracked_dir.display()
             );
         }
+        // Refused here, before anything is moved — `copy_dir_all` cannot
+        // copy a symlinked directory correctly (it hands a symlink to
+        // `std::fs::copy`, which errors out on one pointing at a
+        // directory), and failing mid-copy after the pipeline file above
+        // has already landed is exactly the half-promoted state this
+        // command exists to avoid. A symlink to a plain file is unaffected
+        // — `std::fs::copy` follows and copies those correctly, so it is
+        // left to do exactly that, the same as before this check existed.
+        if dir_contains_symlinked_directory(&private_dir)
+            .with_context(|| format!("checking {} for symlinks", private_dir.display()))?
+        {
+            bail!(
+                "`{prompt_name}` holds a symlinked directory — {} — promote cannot copy it; move \
+                 the symlink's target in by hand first",
+                private_dir.display()
+            );
+        }
         plan.push(Moved {
             from: private_dir,
             to: tracked_dir,
@@ -1501,14 +1640,65 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         });
     }
 
-    // Every destination above is now known clash-free, so nothing past
-    // this point ever refuses — the actual filesystem changes happen only
-    // once the whole plan is settled.
-    for item in &plan {
-        if item.dir {
-            move_dir(&item.from, &item.to)?;
-        } else {
-            move_file(&item.from, &item.to)?;
+    // Every destination above is now known clash-free, so nothing past this
+    // point ever refuses on a name — but the filesystem itself can still
+    // fail partway (a read-only tracked prompts directory, a read-only
+    // private one), and a promote that fails here must not leave some of
+    // the plan tracked and the rest still private. Copy every item first;
+    // only once every copy has landed are the private sources deleted.
+    for (done, item) in plan.iter().enumerate() {
+        if let Err(err) = copy_item(item) {
+            // `..=done`, not `..done` — a directory copy that fails partway
+            // through (a permission-denied file three entries in, say) has
+            // already created the destination and copied whatever came
+            // before it, so the failing item's own half-made copy needs
+            // undoing too, not just the ones that finished cleanly before
+            // it. Every destination here was checked absent while the plan
+            // was built, so removing any of them, however much of it
+            // exists, only ever gets back to that starting state.
+            for item in &plan[..=done] {
+                let _ = undo_copy(item);
+            }
+            return Err(err);
+        }
+    }
+
+    // Every copy is down. Delete the private sources, in the same order.
+    for (done, item) in plan.iter().enumerate() {
+        if let Err(err) = delete_source(item) {
+            // `delete_source` can fail partway through a directory too
+            // (`remove_dir_all` stops at the first entry it cannot remove),
+            // so the failing item's own source may now be incomplete —
+            // `..=done` restores it, from its still-intact tracked copy,
+            // right alongside every delete that had already finished.
+            let mut unrestored = Vec::new();
+            for item in plan[..=done].iter().rev() {
+                if undo_delete(item).is_err() {
+                    unrestored.push(item.from.display().to_string());
+                }
+            }
+            if !unrestored.is_empty() {
+                // A source could not be put back, and its tracked copy is
+                // now the only surviving copy of it — removing that copy
+                // too, the way the clean path below does, would lose the
+                // data outright. Stop here and say so, rather than finish
+                // the rollback and make that worse.
+                let paths = unrestored.join(", ");
+                bail!(
+                    "{err:#}\n\nand restoring what that delete removed also failed for: \
+                     {paths} — part of them now exists only in its tracked copy under \
+                     `.spoolway`; copy the missing files back by hand before trying `pipeline \
+                     promote` again"
+                );
+            }
+            // Every private source is confirmed back in place, so it is now
+            // safe to remove every tracked copy this promote made —
+            // including the ones past `done` that were copied but never
+            // reached the delete loop at all.
+            for item in &plan {
+                let _ = undo_copy(item);
+            }
+            return Err(err);
         }
     }
 
@@ -1828,6 +2018,368 @@ mod tests {
             }
         }
         found
+    }
+
+    /// A promote that fails partway through must undo everything it already
+    /// moved, rather than leave the project with some of a pipeline tracked
+    /// and the rest still private.
+    ///
+    /// Here the pipeline file itself is the one item in the plan whose copy
+    /// finishes before the failure: `pipeline_promote`'s copy loop copies
+    /// the pipeline file tracked first, then reaches the private prompt it
+    /// names. Making the tracked prompts directory read-only — the same "a
+    /// read-only `.spoolway/prompts`" shape the task's own "how to see it"
+    /// names — makes that prompt's own `copy_dir_all` fail at its
+    /// `create_dir_all` outright, before either private source has been
+    /// deleted.
+    ///
+    /// A correct promote leaves every file exactly where it was before it
+    /// ran once any part of it fails: the pipeline file back under
+    /// `local/`, nothing of the prompt ever landing tracked, every pipeline
+    /// still loadable, and the same `pipeline promote` runnable again
+    /// afterward. `pipeline_promote`'s copy loop undoes exactly that —
+    /// removing the pipeline file's already-made tracked copy, since
+    /// nothing was ever deleted privately to put back — once the prompt's
+    /// own copy fails.
+    #[test]
+    fn a_promote_that_fails_partway_leaves_every_file_exactly_where_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, home) = repo_for_home_aware("promote-atomic");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "worker", false).unwrap();
+
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: worker");
+            assert!(raw.contains("prompt: worker"), "{raw}");
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let tracked_prompts_dir = repo.prompts_dir();
+            let mut perms = std::fs::metadata(&tracked_prompts_dir)
+                .unwrap()
+                .permissions();
+            let writable = perms.clone();
+            perms.set_mode(0o555);
+            std::fs::set_permissions(&tracked_prompts_dir, perms).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false);
+
+            // Restored before any assertion, so a failed one does not leave
+            // a directory this test's own cleanup cannot remove.
+            std::fs::set_permissions(&tracked_prompts_dir, writable).unwrap();
+
+            let err = err.expect_err("the read-only tracked prompts directory must fail the move");
+            assert!(
+                format!("{err:#}").contains("worker"),
+                "the failure should be the prompt move: {err:#}"
+            );
+
+            // The pipeline file must be back where it was, not left tracked
+            // with nothing having caught up to it.
+            assert!(
+                !Pipelines::file_in(&repo.root, "default-strict").is_file(),
+                "a failed promote must undo a part that already finished — the pipeline file \
+                 must not be left tracked"
+            );
+            assert!(
+                crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .is_file(),
+                "the private pipeline file must be restored so a retry has something to work \
+                 from"
+            );
+
+            // Nothing of the prompt should have landed tracked, and the
+            // private copy must still be there.
+            assert!(
+                !crate::prompt::directory_form(&repo, "worker").is_file(),
+                "the prompt move itself never finished, so nothing should be tracked"
+            );
+            assert!(
+                crate::local::prompts_dir(&repo.local_dir())
+                    .join("worker")
+                    .join(crate::assets::PROMPT_FILE)
+                    .is_file(),
+                "the private prompt must still be there"
+            );
+
+            // The project must still be able to load every pipeline.
+            Pipelines::load(&repo.checkout, &repo.config)
+                .expect("a failed promote must leave the project loadable");
+
+            // And the same promote must be runnable again.
+            pipeline_promote(&repo, "default-strict", false)
+                .expect("a failed promote must leave something to retry from");
+        });
+    }
+
+    /// A copy that fails partway *through* a directory must undo the
+    /// partial copy it already made, not just the copies that finished
+    /// before it.
+    ///
+    /// `worker` holds a file with no read permission, so `copy_dir_all`
+    /// creates `worker`'s tracked directory, copies `PROMPT.md` into it,
+    /// then fails reading `blocked.txt` — `worker`'s own destination is
+    /// left half-populated rather than merely absent, unlike the
+    /// read-only-tracked-prompts-dir case above where `create_dir_all`
+    /// itself never gets anywhere. A correct promote removes that partial
+    /// directory along with the pipeline file's own already-made copy,
+    /// leaving nothing tracked and every private file untouched — nothing
+    /// was ever deleted, since the copy loop runs in full before any
+    /// delete does.
+    #[test]
+    fn a_promote_removes_its_own_partial_copy_when_a_directory_copy_fails_midway() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, home) = repo_for_home_aware("promote-copy-rollback");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "worker", false).unwrap();
+
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: worker");
+            assert!(raw.contains("prompt: worker"), "{raw}");
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let worker_dir = crate::local::prompts_dir(&repo.local_dir()).join("worker");
+            let blocked = worker_dir.join("blocked.txt");
+            std::fs::write(&blocked, b"private data").unwrap();
+            let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+            let writable = perms.clone();
+            perms.set_mode(0o000);
+            std::fs::set_permissions(&blocked, perms).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false);
+
+            std::fs::set_permissions(&blocked, writable).unwrap();
+
+            let err = err.expect_err("the unreadable file must fail the directory copy");
+            assert!(format!("{err:#}").contains("blocked.txt"), "{err:#}");
+
+            let tracked_worker_dir = crate::prompt::directory_form(&repo, "worker")
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            assert!(
+                !tracked_worker_dir.exists(),
+                "the partial tracked copy must be removed entirely, not left half-populated: {}",
+                tracked_worker_dir.display()
+            );
+            assert!(!Pipelines::file_in(&repo.root, "default-strict").is_file());
+
+            assert!(
+                crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .is_file()
+            );
+            assert!(worker_dir.join(crate::assets::PROMPT_FILE).is_file());
+            assert!(blocked.is_file(), "nothing private was ever touched");
+
+            pipeline_promote(&repo, "default-strict", false)
+                .expect("a failed promote must leave something to retry from");
+        });
+    }
+
+    /// A delete failing *after* an earlier delete in the same promote has
+    /// already succeeded must undo both — not just the one that failed.
+    ///
+    /// Two prompts, `aaa` and `zzz`, sort in that order, so `aaa`'s delete
+    /// runs and finishes before `zzz`'s is ever attempted. `zzz` holds a
+    /// subdirectory made read-only, so `remove_dir_all` on it fails partway
+    /// through — a real file inside is left behind. (A read-only
+    /// `local/pipelines`, where the delete removes nothing at all, is a
+    /// different case — see
+    /// `a_promote_whose_first_delete_removes_nothing_rolls_back_cleanly`.)
+    /// A correct promote restores `zzz`'s own source from its
+    /// tracked copy, restores `aaa`'s too even though its own delete never
+    /// failed, and then removes every tracked copy, leaving nothing
+    /// promoted and every private file back.
+    #[test]
+    fn a_promote_undoes_an_earlier_delete_when_a_later_one_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, home) = repo_for_home_aware("promote-delete-rollback");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "aaa", false).unwrap();
+            prompt_copy(&repo, "reviewer", "zzz", false).unwrap();
+
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw
+                .replace("prompt: implementer", "prompt: aaa")
+                .replace("prompt: reviewer", "prompt: zzz");
+            assert!(
+                raw.contains("prompt: aaa") && raw.contains("prompt: zzz"),
+                "{raw}"
+            );
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let zzz_dir = crate::local::prompts_dir(&repo.local_dir()).join("zzz");
+            let locked_dir = zzz_dir.join("locked");
+            std::fs::create_dir_all(&locked_dir).unwrap();
+            std::fs::write(locked_dir.join("inside.txt"), b"private data").unwrap();
+            let mut locked_perms = std::fs::metadata(&locked_dir).unwrap().permissions();
+            let locked_writable = locked_perms.clone();
+            locked_perms.set_mode(0o555);
+            std::fs::set_permissions(&locked_dir, locked_perms).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false);
+
+            // Restored before any assertion, same as the read-only-tracked-
+            // prompts-dir test above — a failed assertion must not leave a
+            // directory this test's own cleanup cannot remove.
+            std::fs::set_permissions(&locked_dir, locked_writable).unwrap();
+
+            let err = err.expect_err("the undeletable `locked` subdirectory must fail the move");
+            assert!(format!("{err:#}").contains("zzz"), "{err:#}");
+
+            // Nothing is left tracked — not the pipeline, not either prompt.
+            assert!(!Pipelines::file_in(&repo.root, "default-strict").is_file());
+            assert!(!crate::prompt::directory_form(&repo, "aaa").is_file());
+            assert!(!crate::prompt::directory_form(&repo, "zzz").is_file());
+
+            // Every private file is back — the pipeline, `aaa` (whose own
+            // delete had already finished), and `zzz` (whose delete failed
+            // partway through), including the file under the read-only
+            // subdirectory.
+            assert!(
+                crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .is_file()
+            );
+            assert!(
+                crate::local::prompts_dir(&repo.local_dir())
+                    .join("aaa")
+                    .join(crate::assets::PROMPT_FILE)
+                    .is_file(),
+                "aaa's already-finished delete must be undone too"
+            );
+            assert!(
+                locked_dir.join("inside.txt").is_file(),
+                "zzz's own partially-deleted source must be fully restored"
+            );
+
+            Pipelines::load(&repo.checkout, &repo.config)
+                .expect("a failed promote must leave the project loadable");
+
+            pipeline_promote(&repo, "default-strict", false)
+                .expect("a failed promote must leave something to retry from");
+        });
+    }
+
+    /// A read-only `local/pipelines` — the task's own "the delete fails
+    /// after the copy" case — rolls back to nothing tracked.
+    ///
+    /// The pipeline file is the first item deleted, and `remove_file` fails
+    /// on it without removing anything. Nothing private is missing, so the
+    /// rollback must not try to write the file back into that read-only
+    /// folder. It used to, failed, and stopped with the pipeline and its
+    /// prompt both tracked and private, so every command refused to load.
+    #[test]
+    fn a_promote_whose_first_delete_removes_nothing_rolls_back_cleanly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, home) = repo_for_home_aware("promote-readonly-private");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "worker", false).unwrap();
+
+            let private_pipelines = crate::local::pipelines_dir(&repo.local_dir());
+            let pipeline_path = private_pipelines.join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: worker");
+            assert!(raw.contains("prompt: worker"), "{raw}");
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let mut perms = std::fs::metadata(&private_pipelines).unwrap().permissions();
+            let writable = perms.clone();
+            perms.set_mode(0o555);
+            std::fs::set_permissions(&private_pipelines, perms).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false);
+
+            // Restored before any assertion, same as the tests above.
+            std::fs::set_permissions(&private_pipelines, writable).unwrap();
+
+            let err = err.expect_err("the read-only private pipelines folder must fail the move");
+            assert!(format!("{err:#}").contains("default-strict.yml"), "{err:#}");
+            assert!(
+                !format!("{err:#}").contains("restoring"),
+                "nothing was removed, so nothing needed restoring: {err:#}"
+            );
+
+            assert!(!Pipelines::file_in(&repo.root, "default-strict").is_file());
+            assert!(!crate::prompt::directory_form(&repo, "worker").is_file());
+            assert!(pipeline_path.is_file());
+            assert!(
+                crate::local::prompts_dir(&repo.local_dir())
+                    .join("worker")
+                    .join(crate::assets::PROMPT_FILE)
+                    .is_file()
+            );
+
+            Pipelines::load(&repo.checkout, &repo.config)
+                .expect("a failed promote must leave the project loadable");
+
+            pipeline_promote(&repo, "default-strict", false)
+                .expect("a failed promote must leave something to retry from");
+        });
+    }
+
+    /// A private prompt folder holding a symlinked directory is refused
+    /// before `pipeline_promote` moves anything — `copy_dir_all` cannot
+    /// copy one correctly (`std::fs::copy` errors out on a symlink that
+    /// points at a directory), so the whole promote must bail out while the
+    /// pipeline file is still private, rather than land it tracked and then
+    /// fail on the prompt that names it.
+    #[test]
+    fn pipeline_promote_refuses_a_prompt_holding_a_symlinked_directory() {
+        let (repo, home) = repo_for_home_aware("promote-symlink");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "worker", false).unwrap();
+
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: worker");
+            assert!(raw.contains("prompt: worker"), "{raw}");
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let worker_dir = crate::local::prompts_dir(&repo.local_dir()).join("worker");
+            let target_dir = worker_dir.parent().unwrap().join("elsewhere");
+            std::fs::create_dir_all(&target_dir).unwrap();
+            std::os::unix::fs::symlink(&target_dir, worker_dir.join("assets")).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false)
+                .expect_err("a symlinked directory inside the prompt must be refused");
+            assert!(format!("{err:#}").contains("worker"), "{err:#}");
+
+            // Refused before anything moved — the pipeline file must still
+            // be private, not land tracked ahead of the prompt's own
+            // refusal.
+            assert!(
+                !Pipelines::file_in(&repo.root, "default-strict").is_file(),
+                "nothing should have moved yet"
+            );
+            assert!(
+                crate::local::pipelines_dir(&repo.local_dir())
+                    .join("default-strict.yml")
+                    .is_file()
+            );
+        });
     }
 
     /// `pipeline promote` on a name with no private pipeline is refused by

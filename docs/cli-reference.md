@@ -683,10 +683,15 @@ moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/imp
 Refused inside a linked worktree, naming the command to run in the main checkout instead — the
 dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
 against a clash with any tracked file, naming it. Refused if a step names a prompt that is not
-one plain name, before anything is moved. Refused in home mode, where the whole setup is
-already private and there is nothing to promote into. Nothing is committed. `--json` prints
-`{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and `to` relative to
-the checkout, matching the two columns above. See [Private
+one plain name, or if a private prompt's folder holds a symlinked directory, before anything is
+moved. Refused in home mode, where the whole setup is already private and there is nothing to
+promote into. Nothing is committed.
+
+A promote that fails partway through puts every file back where it was. Nothing is left tracked
+or deleted halfway, and the same `spoolway pipeline promote <name>` can be run again.
+
+`--json` prints `{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and
+`to` relative to the checkout, matching the two columns above. See [Private
 pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway prompt contract`
