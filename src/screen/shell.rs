@@ -841,7 +841,8 @@ mod tests {
     /// that call site's own comment.
     #[test]
     fn a_live_dispatcher_lock_refuses_the_screen() {
-        let repo = crate::status::testutil::fixture("shell-already-running-dispatch");
+        let (repo, _root_guard) =
+            crate::status::testutil::fixture("shell-already-running-dispatch");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         assert!(crate::commands::already_running(&repo, false).unwrap());
     }
@@ -850,7 +851,7 @@ mod tests {
     /// — refuses too.
     #[test]
     fn a_live_screen_lock_refuses_a_second_screen() {
-        let repo = crate::status::testutil::fixture("shell-already-running-screen");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-already-running-screen");
         let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         assert!(crate::commands::already_running(&repo, false).unwrap());
     }
@@ -859,7 +860,7 @@ mod tests {
     /// screen open.
     #[test]
     fn no_live_lock_lets_the_screen_open() {
-        let repo = crate::status::testutil::fixture("shell-already-running-clear");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-already-running-clear");
         assert!(!crate::commands::already_running(&repo, false).unwrap());
     }
 
@@ -948,7 +949,7 @@ mod tests {
     // dispatcher behind it, offering `enter` to start one.
     #[test]
     fn host_opens_on_the_queue_tab_and_left_reaches_the_board() {
-        let repo = crate::status::testutil::fixture("shell-host-left");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-left");
         let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
@@ -1012,7 +1013,7 @@ mod tests {
     /// `forget` is needed is `frame_writer::tab_switch_leaves_nothing_behind`.
     #[test]
     fn every_tab_forgets_the_last_one_going_round_and_back() {
-        let repo = crate::status::testutil::fixture("shell-host-tab-cycle");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-tab-cycle");
         // Queue (open) → Dispatch → Queue → Routines → Jobs → Eval → Jobs →
         // Routines → Queue → Dispatch → Queue: forward through all five, then
         // back through all five, both with a real switch behind every arrow.
@@ -1081,7 +1082,8 @@ mod tests {
     /// bold.
     #[test]
     fn dispatch_board_paints_as_before() {
-        let repo = crate::status::testutil::fixture("dispatch-board-paints-as-before");
+        let (repo, _root_guard) =
+            crate::status::testutil::fixture("dispatch-board-paints-as-before");
         crate::status::testutil::add(&repo, "wire", &[], None);
         let pipelines = Pipelines::builtin();
         let mut board = crate::status::Board::hosted();
@@ -1118,7 +1120,7 @@ mod tests {
     /// calls over a board nothing has touched write the same bytes once.
     #[test]
     fn an_idle_board_writes_nothing_on_a_second_draw() {
-        let repo = crate::status::testutil::fixture("shell-draw-board-idle");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-draw-board-idle");
         crate::status::testutil::add(&repo, "wire", &[], None);
         let pipelines = Pipelines::builtin();
         let mut board = crate::status::Board::hosted();
@@ -1154,7 +1156,7 @@ mod tests {
     /// nothing asked it to and the pane never moved.
     #[test]
     fn a_moved_task_forces_the_idle_board_to_repaint() {
-        let repo = crate::status::testutil::fixture("shell-draw-board-task-moves");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-draw-board-task-moves");
         crate::status::testutil::add(&repo, "wire", &[], None);
         let pipelines = Pipelines::builtin();
         let mut board = crate::status::Board::hosted();
@@ -1194,7 +1196,7 @@ mod tests {
     /// was drawn for.
     #[test]
     fn a_resize_forces_the_idle_board_to_repaint_even_with_the_same_content() {
-        let repo = crate::status::testutil::fixture("shell-draw-board-resize");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-draw-board-resize");
         crate::status::testutil::add(&repo, "wire", &[], None);
         let pipelines = Pipelines::builtin();
         let mut board = crate::status::Board::hosted();
@@ -1228,7 +1230,7 @@ mod tests {
     // is already listed. `→` again moves on to jobs.
     #[test]
     fn right_from_queue_opens_routines_with_a_routine_just_saved_then_jobs() {
-        let repo = crate::status::testutil::fixture("shell-host-routines");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
         std::fs::write(
             repo.pending_dir().join("audit-deps.md"),
             "---\nid: audit-deps\ntitle: audit-deps\npipeline: default\ngroup: nightly\n---\nbody\n",
@@ -1260,28 +1262,28 @@ mod tests {
 
     #[test]
     fn q_ends_the_screen() {
-        let repo = crate::status::testutil::fixture("shell-host-q");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-q");
         let frames = drive_host(&repo, "q");
         assert_eq!(frames.len(), 1, "one frame, then q ended it: {frames:?}");
     }
 
     /// A project with an override layer nobody has acknowledged.
-    fn fixture_with_layer(name: &str) -> Repo {
-        let repo = crate::status::testutil::fixture(name);
+    fn fixture_with_layer(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (repo, root_guard) = crate::status::testutil::fixture(name);
         std::fs::create_dir_all(repo.overrides_dir().join("pipelines")).unwrap();
         std::fs::write(
             repo.overrides_dir().join("pipelines/default.yml"),
             "steps:\n  implement:\n    model: fake-opus\n",
         )
         .unwrap();
-        repo
+        (repo, root_guard)
     }
 
     // `enter` asks the overrides gate first, as a popup over the board, and
     // the popup reads every key: `→` does not leave the tab while it is up.
     #[test]
     fn enter_opens_the_overrides_popup_and_it_keeps_the_arrows() {
-        let repo = fixture_with_layer("shell-host-overrides");
+        let (repo, _root_guard) = fixture_with_layer("shell-host-overrides");
         let frames = drive_host(&repo, "\x1b[D\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
@@ -1303,7 +1305,7 @@ mod tests {
     // at rest, still offering to start dispatching.
     #[test]
     fn esc_off_the_overrides_popup_starts_nothing() {
-        let repo = fixture_with_layer("shell-host-overrides-esc");
+        let (repo, _root_guard) = fixture_with_layer("shell-host-overrides-esc");
         let frames = drive_host(&repo, "\x1b[D\r\x1b");
         let last = frames.last().unwrap();
         assert!(!last.contains("overrides are active"), "{last}");
@@ -1318,7 +1320,7 @@ mod tests {
     // say, so nothing here reaches a start.
     #[test]
     fn x_on_the_overrides_popup_hides_it_and_asks_the_warnings_next() {
-        let mut repo = fixture_with_layer("shell-host-overrides-x");
+        let (mut repo, _root_guard) = fixture_with_layer("shell-host-overrides-x");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         let mut tab = DispatchTab::default();
@@ -1341,7 +1343,7 @@ mod tests {
     // closes it, and with no child left `enter` is back to starting one.
     #[test]
     fn an_ended_popup_closes_on_enter() {
-        let repo = crate::status::testutil::fixture("shell-host-ended");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-ended");
         let mut tab = DispatchTab {
             child: None,
             popup: Some(Popup::Ended(super::super::dispatcher::popup(
@@ -1372,7 +1374,7 @@ mod tests {
     // once, drawn as the mockup draws it, and it reads no key.
     #[test]
     fn a_start_opens_the_keyless_starting_popup() {
-        let repo = crate::status::testutil::fixture("shell-starting-opens");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-opens");
         let mut tab = DispatchTab::default();
         tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
         let popup = tab.popup.as_ref().expect("the popup is up");
@@ -1395,7 +1397,7 @@ mod tests {
     // running under the board.
     #[test]
     fn the_starting_popup_closes_on_the_first_claim() {
-        let repo = crate::status::testutil::fixture("shell-starting-claim");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-claim");
         let mut tab = DispatchTab::default();
         tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
         std::thread::sleep(FIRST_PASS_GAP);
@@ -1411,7 +1413,7 @@ mod tests {
     // before the start does not.
     #[test]
     fn the_starting_popup_closes_on_a_first_pass_that_claimed_nothing() {
-        let repo = crate::status::testutil::fixture("shell-starting-empty");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-empty");
         crate::task::write_atomic(&repo.lanes_file(), "{}").unwrap();
         crate::task::write_atomic(&repo.claims_dir().join("gone"), "review").unwrap();
         std::thread::sleep(FIRST_PASS_GAP);
@@ -1430,7 +1432,7 @@ mod tests {
     // place; one stopped from the stop popup just takes the popup away.
     #[test]
     fn a_child_ending_first_replaces_the_starting_popup() {
-        let repo = crate::status::testutil::fixture("shell-starting-ended");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-starting-ended");
         let mut tab = DispatchTab::default();
         tab.started(
             Ok(stand_in("echo refused >&2; exit 1")),
@@ -1482,7 +1484,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn enter_over_a_running_dispatcher_asks_and_esc_leaves_it_running() {
-        let repo = crate::status::testutil::fixture("shell-stop-esc");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-esc");
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
         tab.enter(&repo, &pipelines, &repo.root);
@@ -1505,7 +1507,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn enter_on_the_stop_popup_stops_the_child_and_changes_no_task() {
-        let repo = crate::status::testutil::fixture("shell-stop-enter");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-enter");
         crate::status::testutil::add(&repo, "login", &[], Some("handover"));
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("handover", "login");
@@ -1535,7 +1537,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn i_on_the_stop_popup_interrupts_parks_and_stops() {
-        let repo = crate::status::testutil::fixture("shell-stop-i");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-i");
         crate::status::testutil::add(&repo, "login", &[], Some("handover"));
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("handover", "login");
@@ -1568,7 +1570,7 @@ mod tests {
     // board rather than opening the queue tab.
     #[test]
     fn an_open_board_panel_keeps_the_arrows_from_the_shell() {
-        let repo = crate::status::testutil::fixture("shell-host-panel");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel");
         crate::status::testutil::add(&repo, "wire", &[], None);
         let frames = drive_host(&repo, "\x1b[DU\x1b[C");
         let last = frames.last().unwrap();
@@ -1584,7 +1586,7 @@ mod tests {
     // queue tab.
     #[test]
     fn an_answered_board_panel_gives_the_arrows_back() {
-        let repo = crate::status::testutil::fixture("shell-host-panel-answered");
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel-answered");
         crate::status::testutil::add(&repo, "wire", &[], None);
         let frames = drive_host(&repo, "\x1b[DU\r\x1b[C");
         let last = frames.last().unwrap();

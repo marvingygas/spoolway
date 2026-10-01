@@ -60,16 +60,19 @@ pub fn issue_show(repo: &Repo, reference: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn fixture(name: &str) -> Repo {
+    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("issue-show-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".spoolway/hooks")).unwrap();
-        Repo {
-            checkout: root.clone(),
-            root: root.clone(),
-            config: Config::default(),
-            home: root.join(".home"),
-        }
+        (
+            Repo {
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config: Config::default(),
+                home: root.join(".home"),
+            },
+            root,
+        )
     }
 
     fn with_hook(repo: &mut Repo, name: &str, script: &str) {
@@ -84,7 +87,7 @@ mod tests {
     /// No hook at all names which of the two failures this is.
     #[test]
     fn no_hook_is_refused_by_name() {
-        let repo = fixture("no-hook");
+        let (repo, _root_guard) = fixture("no-hook");
         let err = issue_show(&repo, "57").unwrap_err();
         assert!(
             format!("{err:#}").contains("no `[issue_tracking]` hook is configured"),
@@ -96,7 +99,7 @@ mod tests {
     /// script rather than failing on a mysterious empty answer.
     #[test]
     fn no_fetch_branch_is_refused_by_name() {
-        let mut repo = fixture("no-fetch");
+        let (mut repo, _root_guard) = fixture("no-fetch");
         with_hook(&mut repo, "old.sh", "exit 0");
         let err = issue_show(&repo, "57").unwrap_err();
         assert!(
@@ -111,7 +114,7 @@ mod tests {
     /// stdout next.
     #[test]
     fn a_clean_answer_is_printed_as_json() {
-        let mut repo = fixture("clean");
+        let (mut repo, _root_guard) = fixture("clean");
         with_hook(
             &mut repo,
             "fetch.sh",
@@ -133,7 +136,7 @@ mod tests {
     /// stdout.
     #[test]
     fn a_non_json_answer_is_refused() {
-        let mut repo = fixture("garbage");
+        let (mut repo, _root_guard) = fixture("garbage");
         with_hook(
             &mut repo,
             "fetch.sh",

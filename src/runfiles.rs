@@ -159,7 +159,7 @@ mod tests {
     fn clearing_leaves_nothing_a_later_read_can_believe() {
         let dir = crate::scratch::root("runfiles-cleared");
         std::fs::create_dir_all(&dir).unwrap();
-        let files = RunFiles::new(dir.clone());
+        let files = RunFiles::new(dir.to_path_buf());
 
         std::fs::write(files.pid_path("demo"), "4242").unwrap();
         std::fs::write(files.exit_path("demo"), "3").unwrap();
@@ -180,7 +180,7 @@ mod tests {
     fn an_exit_file_with_nothing_in_it_yet_is_not_a_code() {
         let dir = crate::scratch::root("runfiles-half-written");
         std::fs::create_dir_all(&dir).unwrap();
-        let files = RunFiles::new(dir.clone());
+        let files = RunFiles::new(dir.to_path_buf());
 
         std::fs::write(files.exit_path("demo"), "").unwrap();
         assert_eq!(files.read_exit_code("demo"), None);
@@ -202,7 +202,7 @@ mod tests {
         let dir = crate::scratch::root("runfiles-empty");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let files = RunFiles::new(dir.clone());
+        let files = RunFiles::new(dir.to_path_buf());
 
         assert_eq!(files.read_pid("demo"), None);
         assert_eq!(files.read_exit_code("demo"), None);
@@ -215,7 +215,7 @@ mod tests {
         let dir = crate::scratch::root("runfiles-round-trip");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let files = RunFiles::new(dir.clone());
+        let files = RunFiles::new(dir.to_path_buf());
 
         std::fs::write(files.pid_path("demo"), "1234\n").unwrap();
         assert_eq!(files.read_pid("demo"), Some(1234));

@@ -1574,7 +1574,7 @@ mod tests {
     /// cell for cell, in text, colour and bold.
     #[test]
     fn jobs_paints_as_before() {
-        let repo = fixture("jobs-paints-as-before");
+        let (repo, _root_guard) = fixture("jobs-paints-as-before");
         one_job(&repo);
         let jobs = jobs::load(&repo).unwrap();
         let pipelines = Pipelines::builtin();
@@ -1605,7 +1605,7 @@ mod tests {
 
     #[test]
     fn jobs_run_queues_the_minted_tasks_and_records_the_firing() {
-        let repo = fixture("jobs-run");
+        let (repo, _root_guard) = fixture("jobs-run");
         one_job(&repo);
 
         jobs_run(&repo, &Pipelines::builtin(), "nightly", false).unwrap();
@@ -1635,7 +1635,7 @@ mod tests {
 
     #[test]
     fn jobs_run_names_jobs_list_when_the_job_is_unknown() {
-        let repo = fixture("jobs-run-unknown");
+        let (repo, _root_guard) = fixture("jobs-run-unknown");
         one_job(&repo);
         let err = format!(
             "{:#}",
@@ -1647,14 +1647,14 @@ mod tests {
 
     #[test]
     fn jobs_run_is_refused_from_inside_a_lane() {
-        let repo = fixture("jobs-run-lane");
+        let (repo, _root_guard) = fixture("jobs-run-lane");
         one_job(&repo);
         assert!(jobs_run(&repo, &Pipelines::builtin(), "nightly", true).is_err());
     }
 
     #[test]
     fn a_json_row_carries_schedule_error_only_when_the_expression_will_not_parse() {
-        let repo = fixture("jobs-json-shape");
+        let (repo, _root_guard) = fixture("jobs-json-shape");
         std::fs::create_dir_all(repo.home()).unwrap();
         std::fs::write(
             repo.user_jobs_file(),
@@ -1741,7 +1741,7 @@ mod tests {
     #[test]
     fn hosted_the_resting_list_leaves_on_the_arrows_and_q_but_a_walk_does_not() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture("jobs-hosted-leave");
+        let (repo, _root_guard) = fixture("jobs-hosted-leave");
         seed_routines(&repo);
         let _hosting = Hosting::open(Tab::Jobs);
 
@@ -1782,7 +1782,7 @@ mod tests {
 
     #[test]
     fn the_walk_writes_a_job_to_the_user_store_named_after_its_routine() {
-        let repo = fixture("jobs-screen-new");
+        let (repo, _root_guard) = fixture("jobs-screen-new");
         seed_routines(&repo);
 
         // n → new; space ticks the first folder (`nightly`); enter uses it;
@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn esc_out_of_the_routine_browser_writes_nothing() {
-        let repo = fixture("jobs-screen-esc");
+        let (repo, _root_guard) = fixture("jobs-screen-esc");
         seed_routines(&repo);
         drive(&repo, "n\x1bq");
         assert!(jobs::load(&repo).unwrap().is_empty());
@@ -1819,7 +1819,7 @@ mod tests {
     /// not exercised here.
     #[test]
     fn q_does_nothing_over_the_resting_list() {
-        let repo = fixture("jobs-screen-q-inert");
+        let (repo, _root_guard) = fixture("jobs-screen-q-inert");
         seed_routines(&repo);
 
         // `q` first, then a real walk that writes a job — see
@@ -1833,7 +1833,7 @@ mod tests {
 
     #[test]
     fn the_schedule_field_refuses_enter_until_the_expression_parses() {
-        let repo = fixture("jobs-screen-badexpr");
+        let (repo, _root_guard) = fixture("jobs-screen-badexpr");
         seed_routines(&repo);
         // A broken expression, then enter (refused), then esc back to the
         // list, then a trailing key that does nothing before input runs out.
@@ -1847,7 +1847,7 @@ mod tests {
 
     #[test]
     fn an_empty_store_names_both_paths_rather_than_drawing_an_empty_pane() {
-        let repo = fixture("jobs-screen-empty");
+        let (repo, _root_guard) = fixture("jobs-screen-empty");
         seed_routines(&repo);
         let frame = drive(&repo, "q").to_string();
         let frame = last_frame(&frame);
@@ -1860,7 +1860,7 @@ mod tests {
 
     #[test]
     fn space_pauses_and_resumes_the_highlighted_job() {
-        let repo = fixture("jobs-screen-pause");
+        let (repo, _root_guard) = fixture("jobs-screen-pause");
         seed_routines(&repo);
         jobs::write(
             &repo,
@@ -1884,7 +1884,7 @@ mod tests {
 
     #[test]
     fn x_then_enter_deletes_the_highlighted_job() {
-        let repo = fixture("jobs-screen-delete");
+        let (repo, _root_guard) = fixture("jobs-screen-delete");
         seed_routines(&repo);
         jobs::write(
             &repo,
@@ -1905,7 +1905,7 @@ mod tests {
 
     #[test]
     fn x_then_esc_keeps_the_highlighted_job() {
-        let repo = fixture("jobs-screen-delete-esc");
+        let (repo, _root_guard) = fixture("jobs-screen-delete-esc");
         seed_routines(&repo);
         jobs::write(
             &repo,
@@ -1926,7 +1926,7 @@ mod tests {
 
     #[test]
     fn a_derived_name_already_in_use_is_refused_naming_both_stores() {
-        let repo = fixture("jobs-screen-clash");
+        let (repo, _root_guard) = fixture("jobs-screen-clash");
         seed_routines(&repo);
         jobs::write(
             &repo,
@@ -1956,7 +1956,7 @@ mod tests {
     /// `enter` closes a notice onto the list again.
     #[test]
     fn enter_closes_a_notice_onto_the_list() {
-        let repo = fixture("jobs-screen-notice-enter");
+        let (repo, _root_guard) = fixture("jobs-screen-notice-enter");
         seed_routines(&repo);
         jobs::write(
             &repo,
@@ -1979,8 +1979,8 @@ mod tests {
 
     /// A job over `nightly` whose hook declares a floor this machine's
     /// `cargo` cannot meet, so `r` has the tool-requirements gate to ask.
-    fn job_behind_an_unmet_hook(name: &str) -> Repo {
-        let mut repo = fixture(name);
+    fn job_behind_an_unmet_hook(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (mut repo, root_guard) = fixture(name);
         one_job(&repo);
         let dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1994,14 +1994,14 @@ mod tests {
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         std::fs::set_permissions(&path, perms).unwrap();
         repo.config.issue_tracking.hook = "versioned.sh".to_string();
-        repo
+        (repo, root_guard)
     }
 
     /// `r` asks the tool-requirements gate as a popup over the list, never
     /// printed under the frame, and `esc` goes back having fired nothing.
     #[test]
     fn r_asks_the_tool_gate_in_a_popup_and_esc_fires_nothing() {
-        let repo = job_behind_an_unmet_hook("jobs-screen-tool-gate-esc");
+        let (repo, _root_guard) = job_behind_an_unmet_hook("jobs-screen-tool-gate-esc");
 
         let drawn = drive(&repo, "r");
         assert!(
@@ -2033,7 +2033,7 @@ mod tests {
     /// the routine is queued and the hook is never called.
     #[test]
     fn enter_on_the_tool_gate_fires_the_job_without_tracking() {
-        let repo = job_behind_an_unmet_hook("jobs-screen-tool-gate-enter");
+        let (repo, _root_guard) = job_behind_an_unmet_hook("jobs-screen-tool-gate-enter");
         crate::repo::run(&repo.root, "git", &["init", "-q", "-b", "main"]).unwrap();
 
         let drawn = drive(&repo, "r\r");
@@ -2059,7 +2059,7 @@ mod tests {
     /// highlighted folder's tasks under them, and the keys in brackets.
     #[test]
     fn the_routine_picker_is_a_popup_over_the_list() {
-        let repo = fixture("jobs-screen-routine-popup");
+        let (repo, _root_guard) = fixture("jobs-screen-routine-popup");
         seed_routines(&repo);
         let frame = drive(&repo, "n ").to_string();
         let frame = last_frame(&frame);
@@ -2131,7 +2131,7 @@ mod tests {
 
     #[test]
     fn the_resting_list_has_no_new_row_and_the_walk_shows_it_highlighted() {
-        let repo = fixture("jobs-screen-newrow");
+        let (repo, _root_guard) = fixture("jobs-screen-newrow");
         seed_routines(&repo);
         jobs::write(
             &repo,
@@ -2172,7 +2172,7 @@ mod tests {
     /// byte rather than some near miss.
     #[test]
     fn the_list_and_routine_picker_key_lines_read_as_the_mockup_draws_them() {
-        let repo = fixture("jobs-screen-footer-list");
+        let (repo, _root_guard) = fixture("jobs-screen-footer-list");
         seed_routines(&repo);
 
         let resting = drive(&repo, "q").to_string();
@@ -2195,7 +2195,7 @@ mod tests {
 
     #[test]
     fn enter_saves_the_ticked_folder_under_the_cursor_not_the_first_one() {
-        let repo = fixture("jobs-screen-multitick");
+        let (repo, _root_guard) = fixture("jobs-screen-multitick");
         seed_routines(&repo);
         // Tick `nightly` (folder 0), move down, tick `weekly`, then use it:
         // the cursor is on `weekly`, so that is the target.
@@ -2209,7 +2209,7 @@ mod tests {
 
     #[test]
     fn enter_over_an_unticked_folder_does_nothing_even_with_a_tick_elsewhere() {
-        let repo = fixture("jobs-screen-unticked");
+        let (repo, _root_guard) = fixture("jobs-screen-unticked");
         seed_routines(&repo);
         // Tick `nightly` (folder 0), move the cursor down to `weekly` — which
         // is not ticked — press enter, then esc back to the list; the
@@ -2226,7 +2226,7 @@ mod tests {
     /// routines pane gives it.
     #[test]
     fn o_does_nothing_while_the_folders_pane_has_focus_in_the_routine_picker() {
-        let repo = fixture("jobs-screen-open-folders-focus");
+        let (repo, _root_guard) = fixture("jobs-screen-open-folders-focus");
         seed_routines(&repo);
 
         let drawn = drive(&repo, "no\x1bq");
@@ -2246,7 +2246,7 @@ mod tests {
     /// path does once a pane actually opens, not this one.
     #[test]
     fn pressing_o_in_the_routine_picker_with_no_multiplexer_surfaces_the_refusal() {
-        let mut repo = fixture("jobs-screen-open-headless");
+        let (mut repo, _root_guard) = fixture("jobs-screen-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         seed_routines(&repo);
 
@@ -2264,7 +2264,7 @@ mod tests {
     /// the same routine a job pointing at `nightly` fires it with.
     #[test]
     fn the_routine_picker_lists_a_subfolder_s_tasks_under_its_routine() {
-        let repo = fixture("jobs-picker-flat");
+        let (repo, _root_guard) = fixture("jobs-picker-flat");
         seed_routines(&repo);
         let sub = repo.routines_dir().join("nightly").join("extra");
         std::fs::create_dir_all(&sub).unwrap();
@@ -2293,7 +2293,7 @@ mod tests {
     /// arrows move nothing: they belong to the tab strip now.
     #[test]
     fn tab_moves_the_routine_picker_between_panes_and_the_arrows_do_nothing() {
-        let repo = fixture("jobs-picker-tab");
+        let (repo, _root_guard) = fixture("jobs-picker-tab");
         seed_routines(&repo);
 
         let last = |input: &str| last_frame(&drive(&repo, input)).to_string();
@@ -2317,7 +2317,7 @@ mod tests {
     /// list: the picker has no "back to the list" of its own.
     #[test]
     fn esc_over_the_routine_picker_s_tasks_pane_cancels_it() {
-        let repo = fixture("jobs-picker-esc-tasks");
+        let (repo, _root_guard) = fixture("jobs-picker-esc-tasks");
         seed_routines(&repo);
 
         let last = last_frame(&drive(&repo, "n\t\x1b")).to_string();
@@ -2328,7 +2328,7 @@ mod tests {
 
     #[test]
     fn a_name_added_to_a_store_during_the_walk_is_still_refused_at_save() {
-        let repo = fixture("jobs-screen-race");
+        let (repo, _root_guard) = fixture("jobs-screen-race");
         seed_routines(&repo);
 
         // The job exists on disk, but `run_jobs_screen` is handed an empty

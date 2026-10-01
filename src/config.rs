@@ -2458,10 +2458,15 @@ mod tests {
 
         let roots = crate::platform::test_home::with_home(&home, || config.watch_roots(&root));
 
-        let expected: Vec<_> = [&root, &home.join("notes"), &root.join("logs"), &absolute]
-            .into_iter()
-            .map(|p| p.canonical().unwrap())
-            .collect();
+        let expected: Vec<_> = [
+            root.to_path_buf(),
+            home.join("notes"),
+            root.join("logs"),
+            absolute.to_path_buf(),
+        ]
+        .into_iter()
+        .map(|p| p.canonical().unwrap())
+        .collect();
         assert_eq!(roots.len(), expected.len(), "{roots:?}");
         for path in &expected {
             assert!(roots.contains(path), "{path:?} missing from {roots:?}");

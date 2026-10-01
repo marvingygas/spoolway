@@ -64,7 +64,7 @@ mod tests {
     /// this contract names.
     #[test]
     fn template_contract_names_the_task_shape_and_no_longer_lane_prompt_or_pr() {
-        let repo = crate::commands::testutil::fixture("template-contract");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("template-contract");
         let text = render_template_contract(&repo);
         for fact in ["TASK —", "Status Log"] {
             assert!(text.contains(fact), "template contract drops `{fact}`");

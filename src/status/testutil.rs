@@ -16,7 +16,7 @@ pub fn strip(text: &str) -> String {
 /// git, and a seed commit: `check_task_base` looks every task's base up
 /// against the repository's own local branches, `refs/heads/group/demo`
 /// included, and an unborn branch has no ref for that lookup to find.
-pub fn fixture(name: &str) -> Repo {
+pub fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
     let root = crate::scratch::root(&format!("board-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -27,12 +27,15 @@ pub fn fixture(name: &str) -> Repo {
         &["commit", "-q", "--allow-empty", "-m", "seed"],
     )
     .unwrap();
-    Repo {
-        home: root.join(".home"),
-        checkout: root.clone(),
+    (
+        Repo {
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: crate::config::Config::default(),
+        },
         root,
-        config: crate::config::Config::default(),
-    }
+    )
 }
 
 pub fn add(repo: &Repo, id: &str, depends_on: &[&str], stage: Option<&str>) {

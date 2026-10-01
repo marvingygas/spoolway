@@ -183,7 +183,7 @@ mod tests {
     /// error — the same tolerance an empty pending directory gets.
     #[test]
     fn a_project_with_no_routines_directory_lists_none() {
-        let repo = crate::commands::testutil::fixture("routines-none");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-none");
         assert!(list_routines(&repo).unwrap().is_empty());
     }
 
@@ -191,7 +191,7 @@ mod tests {
     /// of it a subfolder.
     #[test]
     fn a_flat_folder_lists_its_own_tasks() {
-        let repo = crate::commands::testutil::fixture("routines-flat");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-flat");
         let dir = repo.routines_dir().join("nightly");
         write(&dir, "audit-deps.md", "audit-deps", "");
         write(&dir, "audit-docs.md", "audit-docs", "");
@@ -207,7 +207,7 @@ mod tests {
     /// subfolder, recursively — not just what sits directly inside it.
     #[test]
     fn a_nested_folder_counts_every_task_below_it() {
-        let repo = crate::commands::testutil::fixture("routines-nested");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-nested");
         let top = repo.routines_dir().join("maintenance");
         write(&top, "sweep.md", "sweep", "");
         let sub = top.join("weekly");
@@ -228,7 +228,7 @@ mod tests {
     /// [`super::pending::list_groups`] gives a task with no `group:`.
     #[test]
     fn a_task_with_no_readable_id_is_skipped() {
-        let repo = crate::commands::testutil::fixture("routines-unreadable");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("routines-unreadable");
         let dir = repo.routines_dir().join("release");
         write(&dir, "good.md", "good", "");
         std::fs::write(dir.join("garbage.md"), "not a task\n").unwrap();

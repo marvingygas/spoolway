@@ -282,8 +282,8 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let home = root.join(".home");
         let repo = Repo {
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config,
             home,
         };
@@ -301,9 +301,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
+            checkout: root.to_path_buf(),
             home: root.join(".home"),
-            root,
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
         };
 
@@ -326,9 +326,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("impl-strict.md"), "the tracked skeleton\n").unwrap();
         let repo = Repo {
-            checkout: root.clone(),
+            checkout: root.to_path_buf(),
             home: root.join(".home"),
-            root,
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
         };
 
@@ -363,9 +363,9 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
-            checkout: root.clone(),
+            checkout: root.to_path_buf(),
             home: root.join(".home"),
-            root,
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
         };
 
@@ -400,9 +400,9 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
-            checkout: root.clone(),
+            checkout: root.to_path_buf(),
             home: root.join(".home"),
-            root,
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
         };
 
@@ -448,9 +448,9 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
-            checkout: root.clone(),
+            checkout: root.to_path_buf(),
             home: root.join(".home"),
-            root,
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
         };
 
@@ -483,8 +483,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ticket.md"), "our own ticket body\n").unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
             home: dir.join(".home"),
         };

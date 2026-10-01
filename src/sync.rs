@@ -1620,19 +1620,22 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    fn fixture(name: &str) -> Repo {
+    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("sync-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         let config = Config::default();
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         std::fs::create_dir_all(root.join(".spoolway/templates")).unwrap();
         let home = root.join(".home");
-        Repo {
-            checkout: root.clone(),
+        (
+            Repo {
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config,
+                home,
+            },
             root,
-            config,
-            home,
-        }
+        )
     }
 
     fn args() -> SyncArgs {
@@ -1678,7 +1681,7 @@ mod tests {
     /// `repo.checkout` whether or not a workspace claims it.
     #[test]
     fn sync_writes_nothing_into_a_home_mode_checkout() {
-        let repo = fixture("home-mode");
+        let (repo, _root_guard) = fixture("home-mode");
         let home = repo.root.join(".ws-home");
         let _ = std::fs::remove_dir_all(&home);
         let workspace = home.join(".spoolway").join("home-mode-ws");
@@ -1753,7 +1756,7 @@ mod tests {
     /// nothing more than the panel itself; a stray key before it is ignored.
     #[test]
     fn asking_sync_writes_only_once_enter_is_pressed() {
-        let repo = fixture("ask-enter");
+        let (repo, _root_guard) = fixture("ask-enter");
         let drawn = ask(&repo, &args(), false, false, true, "q\r");
         assert!(drawn.contains(TITLE), "{drawn}");
         assert!(drawn.contains("config.toml"), "{drawn}");
@@ -1770,7 +1773,7 @@ mod tests {
     #[test]
     fn asking_sync_writes_nothing_on_esc_or_ctrl_c() {
         for (name, keys) in [("ask-esc", "\x1b"), ("ask-ctrl-c", "")] {
-            let repo = fixture(name);
+            let (repo, _root_guard) = fixture(name);
             let drawn = ask(&repo, &args(), false, false, true, keys);
             assert!(drawn.contains(TITLE), "{name}: {drawn}");
             assert!(
@@ -1792,7 +1795,7 @@ mod tests {
             ("ask-json", true, false, true),
             ("ask-lane", false, true, true),
         ] {
-            let repo = fixture(name);
+            let (repo, _root_guard) = fixture(name);
             let drawn = ask(&repo, &args(), json, in_lane, tty, "");
             assert!(drawn.is_empty(), "{name}: {drawn}");
             assert!(Config::path_in(&repo.checkout).is_file(), "{name}");
@@ -1804,7 +1807,7 @@ mod tests {
     /// nothing left to write.
     #[test]
     fn asking_sync_draws_no_panel_for_a_dry_run_or_nothing_to_do() {
-        let repo = fixture("ask-dry-run");
+        let (repo, _root_guard) = fixture("ask-dry-run");
         let dry = SyncArgs {
             dry_run: true,
             replace: Vec::new(),
@@ -1836,7 +1839,7 @@ mod tests {
     /// this replaced.
     #[test]
     fn the_report_is_the_paths_and_one_line() {
-        let repo = fixture("report-shape");
+        let (repo, _root_guard) = fixture("report-shape");
         std::fs::write(
             crate::config::Config::path_in(&repo.root),
             "[dispatch]\nlane_quiet = \"45m\"\n",
@@ -1873,7 +1876,7 @@ mod tests {
     /// already had.
     #[test]
     fn a_sync_brings_a_config_forward_without_touching_its_values() {
-        let repo = fixture("config-forward");
+        let (repo, _root_guard) = fixture("config-forward");
         let path = crate::config::Config::path_in(&repo.root);
         std::fs::write(
             &path,
@@ -1906,7 +1909,7 @@ mod tests {
     /// and the report says which key stood under it.
     #[test]
     fn a_comment_that_is_not_the_binarys_is_rewritten_and_named() {
-        let repo = fixture("config-comment");
+        let (repo, _root_guard) = fixture("config-comment");
         let path = crate::config::Config::path_in(&repo.root);
         let mine = "# Ten minutes: our lanes are quick and we watch the board.";
         std::fs::write(&path, format!("[dispatch]\n{mine}\nlane_quiet = \"10m\"\n")).unwrap();
@@ -1934,7 +1937,7 @@ mod tests {
     /// A dry run is a reading, on this file as on every other.
     #[test]
     fn a_dry_run_says_what_the_config_would_gain_and_writes_nothing() {
-        let repo = fixture("config-dry");
+        let (repo, _root_guard) = fixture("config-dry");
         let path = crate::config::Config::path_in(&repo.root);
         let before = "[dispatch]\nlane_quiet = \"45m\"\n";
         std::fs::write(&path, before).unwrap();
@@ -1963,7 +1966,7 @@ mod tests {
     /// handling turns into a non-zero exit.
     #[test]
     fn a_dry_run_fails_loudly_on_a_config_that_does_not_parse() {
-        let repo = fixture("config-garbage");
+        let (repo, _root_guard) = fixture("config-garbage");
         let path = crate::config::Config::path_in(&repo.root);
         std::fs::write(&path, "garbage = [\n").unwrap();
 
@@ -1990,7 +1993,7 @@ mod tests {
     /// file exactly as it read it.
     #[test]
     fn a_config_still_naming_dispatch_interval_is_refused_before_sync_and_accepted_after() {
-        let repo = fixture("config-retired-interval");
+        let (repo, _root_guard) = fixture("config-retired-interval");
         let path = crate::config::Config::path_in(&repo.root);
         std::fs::write(
             &path,
@@ -2031,7 +2034,7 @@ mod tests {
     /// changes, not only the dropped key.
     #[test]
     fn a_config_still_naming_issue_tracking_on_fail_loses_it_and_the_section_moves() {
-        let repo = fixture("config-retired-on-fail");
+        let (repo, _root_guard) = fixture("config-retired-on-fail");
         let path = crate::config::Config::path_in(&repo.root);
         std::fs::write(
             &path,
@@ -2113,7 +2116,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             checkout: checkout.clone(),
-            root: root.clone(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home,
         };
@@ -2150,7 +2153,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             checkout: checkout.clone(),
-            root: root.clone(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home,
         };
@@ -2249,7 +2252,7 @@ mod tests {
     fn replacing_a_shipped_hook_leaves_it_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let repo = fixture("replace-hook-executable");
+        let (repo, _root_guard) = fixture("replace-hook-executable");
         let hook = repo.checkout.join(".spoolway/hooks/github.sh");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
 
@@ -2316,7 +2319,7 @@ mod tests {
     fn a_dry_run_replace_repairs_neither_a_hooks_text_nor_its_mode() {
         use std::os::unix::fs::PermissionsExt;
 
-        let repo = fixture("replace-hook-dry-run");
+        let (repo, _root_guard) = fixture("replace-hook-dry-run");
         let hook = repo.checkout.join(".spoolway/hooks/github.sh");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
 
@@ -2350,7 +2353,7 @@ mod tests {
     /// or not it looks anything like the one we ship.
     #[test]
     fn a_task_skeleton_is_never_touched_by_a_sync() {
-        let repo = fixture("task-skeleton-untouched");
+        let (repo, _root_guard) = fixture("task-skeleton-untouched");
         let mine = repo.task_templates_dir().join("default.md");
         let theirs = repo.task_templates_dir().join("bugfix.md");
         std::fs::write(&mine, "## Mine\n\nkeep me\n").unwrap();
@@ -2383,7 +2386,7 @@ mod tests {
     /// reports nothing and fails nothing, whatever is on disk.
     #[test]
     fn templates_has_nothing_left_to_check_and_reports_nothing() {
-        let repo = fixture("no-skeletons-left");
+        let (repo, _root_guard) = fixture("no-skeletons-left");
         let mut outcomes = Vec::new();
         templates(&repo, &args(), &mut outcomes).unwrap();
         assert!(outcomes.is_empty(), "{:?}", outcome_lines(&outcomes));
@@ -2411,7 +2414,7 @@ mod tests {
     /// around it survives.
     #[test]
     fn a_stale_key_reference_is_refreshed_and_the_rest_of_the_file_kept() {
-        let repo = fixture("pipeline-stale");
+        let (repo, _root_guard) = fixture("pipeline-stale");
         let stale = format!(
             "{}\n# Top level\n#   template    What this used to say.\n{}",
             crate::assets::PIPELINE_KEYS_BEGIN,
@@ -2444,7 +2447,7 @@ mod tests {
     /// to have meant — every line is a claim about what this binary does.
     #[test]
     fn an_edit_inside_the_markers_is_discarded_not_refused() {
-        let repo = fixture("pipeline-edited");
+        let (repo, _root_guard) = fixture("pipeline-edited");
         let edited =
             crate::pipeline::key_block().replace("Absent: 30m.", "Absent: however long you like.");
         let path = pipeline_file(&repo, "default", &edited);
@@ -2468,7 +2471,7 @@ mod tests {
     /// somebody's own file. Nothing is written into it, and nothing is said.
     #[test]
     fn a_pipeline_with_no_markers_is_left_alone_and_not_mentioned() {
-        let repo = fixture("pipeline-unmarked");
+        let (repo, _root_guard) = fixture("pipeline-unmarked");
         let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mine.yml");
@@ -2494,7 +2497,7 @@ mod tests {
     /// path, and the key reference is current too.
     #[test]
     fn sync_migrates_a_pipelines_retired_shapes_and_refreshes_its_key_reference() {
-        let repo = fixture("pipeline-retired-shapes");
+        let (repo, _root_guard) = fixture("pipeline-retired-shapes");
         let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bugfix.yml");
@@ -2558,7 +2561,7 @@ mod tests {
     /// marker with no end could be anyone's.
     #[test]
     fn a_start_marker_with_no_end_is_reported_rather_than_guessed_at() {
-        let repo = fixture("pipeline-unterminated");
+        let (repo, _root_guard) = fixture("pipeline-unterminated");
         let half = format!("{}\n# Top level\n", crate::assets::PIPELINE_KEYS_BEGIN);
         let path = pipeline_file(&repo, "half", &half);
         let before = std::fs::read_to_string(&path).unwrap();
@@ -2579,7 +2582,7 @@ mod tests {
     /// A dry run reads and says, on this file as on every other.
     #[test]
     fn a_dry_run_leaves_a_stale_key_reference_where_it_is() {
-        let repo = fixture("pipeline-dry");
+        let (repo, _root_guard) = fixture("pipeline-dry");
         let stale = format!(
             "{}\n# Top level\n{}",
             crate::assets::PIPELINE_KEYS_BEGIN,
@@ -2613,7 +2616,7 @@ mod tests {
     /// has to reach every kind of file spoolway writes, or it is not that.
     #[test]
     fn replace_knows_every_kind_of_file_spoolway_writes() {
-        let repo = fixture("replace");
+        let (repo, _root_guard) = fixture("replace");
         let prompts = repo.prompts_dir();
         for (path, expected) in [
             (prompts.join("reviewer").join("PROMPT.md"), "## "),
@@ -2655,7 +2658,7 @@ mod tests {
     /// 67).
     #[test]
     fn a_flat_prompt_shadowed_by_its_directory_is_not_shipped_for() {
-        let repo = fixture("prompt-shadowed");
+        let (repo, _root_guard) = fixture("prompt-shadowed");
         let prompts = repo.prompts_dir();
         let flat = prompts.join("reviewer.md");
 
@@ -2675,7 +2678,7 @@ mod tests {
     /// at user level is left without a folder.
     #[test]
     fn skills_refreshes_a_user_level_install() {
-        let repo = fixture("skills-user-level");
+        let (repo, _root_guard) = fixture("skills-user-level");
         let home = crate::scratch::root("sync-user-home");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -2721,7 +2724,7 @@ mod tests {
     /// writes spoolway's whole current set into that same directory.
     #[test]
     fn sync_leaves_a_hand_made_user_level_folder_with_a_retired_name_alone() {
-        let repo = fixture("skills-user-level");
+        let (repo, _root_guard) = fixture("skills-user-level");
         let home = crate::scratch::root("sync-user-home-owned-only");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -2762,7 +2765,7 @@ mod tests {
     /// marked user folder into its removal loop and deleted it anyway.
     #[test]
     fn a_marked_user_folder_still_keeps_a_hand_made_retired_name_directory() {
-        let repo = fixture("skills-user-level");
+        let (repo, _root_guard) = fixture("skills-user-level");
         let home = crate::scratch::root("sync-user-home-marked-and-owned");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -2794,7 +2797,7 @@ mod tests {
     /// project actually installed.
     #[test]
     fn skills_refreshes_every_installed_provider() {
-        let repo = fixture("skills-providers");
+        let (repo, _root_guard) = fixture("skills-providers");
 
         for provider in [crate::cli::Provider::Codex, crate::cli::Provider::Pi] {
             let first = provider.plan(&repo.root).into_iter().next().unwrap();
@@ -2824,7 +2827,7 @@ mod tests {
     /// everything checked out.
     #[test]
     fn sync_adds_a_newly_shipped_skill_to_an_installed_provider() {
-        let repo = fixture("skills-new-skill");
+        let (repo, _root_guard) = fixture("skills-new-skill");
         let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
         let plan = claude_dir.join("spoolway-plan").join("SKILL.md");
         std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
@@ -2861,7 +2864,7 @@ mod tests {
     /// other stale file.
     #[test]
     fn a_hand_edited_skill_file_is_overwritten_and_named() {
-        let repo = fixture("skills-hand-edited");
+        let (repo, _root_guard) = fixture("skills-hand-edited");
         let planned = crate::cli::Provider::Claude.plan(&repo.root);
         let first = planned.into_iter().next().unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
@@ -2891,7 +2894,7 @@ mod tests {
     /// the second sync then finds nothing left to do.
     #[test]
     fn a_project_with_no_fingerprint_at_all_is_brought_current_in_one_sync() {
-        let repo = fixture("skills-0-5-0-project");
+        let (repo, _root_guard) = fixture("skills-0-5-0-project");
         let planned = crate::cli::Provider::Claude.plan(&repo.root);
         let first = planned.into_iter().next().unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
@@ -2921,7 +2924,7 @@ mod tests {
     /// replaced it is written in the same pass that removes the old one.
     #[test]
     fn sync_writes_the_renamed_skill_where_only_the_retired_one_stood() {
-        let repo = fixture("skills-only-retired");
+        let (repo, _root_guard) = fixture("skills-only-retired");
         let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
         let stale = claude_dir.join("spoolway-pipeline");
         std::fs::create_dir_all(&stale).unwrap();
@@ -2941,7 +2944,7 @@ mod tests {
     /// A dry run over the same tree reports every addition and writes none.
     #[test]
     fn a_dry_run_reports_a_missing_skill_without_writing_it() {
-        let repo = fixture("skills-new-skill-dry");
+        let (repo, _root_guard) = fixture("skills-new-skill-dry");
         let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
         let plan = claude_dir.join("spoolway-plan").join("SKILL.md");
         std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
@@ -2978,7 +2981,7 @@ mod tests {
     /// project made there is not spoolway's and stays.
     #[test]
     fn sync_moves_codex_skills_out_of_the_old_root() {
-        let repo = fixture("skills-codex-old-root");
+        let (repo, _root_guard) = fixture("skills-codex-old-root");
         let old_root = repo.root.join(".codex").join("skills");
         for name in ["spoolway-plan", "spoolway-pipeline", "a-projects-own-skill"] {
             let dir = old_root.join(name);
@@ -3023,7 +3026,7 @@ mod tests {
     /// go with it.
     #[test]
     fn an_emptied_codex_root_goes_with_the_move() {
-        let repo = fixture("skills-codex-emptied");
+        let (repo, _root_guard) = fixture("skills-codex-emptied");
         let dir = repo
             .root
             .join(".codex")
@@ -3041,7 +3044,7 @@ mod tests {
     /// The same move in a dry run is reported and not made.
     #[test]
     fn a_dry_run_reports_the_codex_move_without_making_it() {
-        let repo = fixture("skills-codex-old-root-dry");
+        let (repo, _root_guard) = fixture("skills-codex-old-root-dry");
         let old_root = repo.root.join(".codex").join("skills");
         let dir = old_root.join("spoolway-plan");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3077,7 +3080,7 @@ mod tests {
     /// list) is left exactly as it was.
     #[test]
     fn sync_removes_a_stale_renamed_skill_and_leaves_everything_else() {
-        let repo = fixture("retired-skill");
+        let (repo, _root_guard) = fixture("retired-skill");
         let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
         let stale = claude_dir.join("spoolway-pipeline");
         std::fs::create_dir_all(&stale).unwrap();
@@ -3110,7 +3113,7 @@ mod tests {
     /// than a file simply changing name.
     #[test]
     fn sync_removes_an_installed_doctor_skill_with_its_own_reason() {
-        let repo = fixture("retired-doctor-skill");
+        let (repo, _root_guard) = fixture("retired-doctor-skill");
         let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
         let stale = claude_dir.join("spoolway-doctor");
         std::fs::create_dir_all(&stale).unwrap();
@@ -3133,7 +3136,7 @@ mod tests {
     /// the same promise every other `sync` scan already keeps.
     #[test]
     fn sync_dry_run_reports_a_stale_skill_without_removing_it() {
-        let repo = fixture("retired-skill-dry-run");
+        let (repo, _root_guard) = fixture("retired-skill-dry-run");
         let stale = crate::cli::Provider::Claude
             .skills_dir(&repo.root)
             .join("spoolway-pipeline");
@@ -3157,7 +3160,7 @@ mod tests {
     /// places — is left exactly where it was.
     #[test]
     fn sync_removes_every_retired_template_and_leaves_a_projects_own_file() {
-        let repo = fixture("retired-templates");
+        let (repo, _root_guard) = fixture("retired-templates");
         let dir = repo.checkout.join(".spoolway/templates");
         let task_log = dir.join("task-log.md");
         let pull_request = dir.join("pull-request.md");
@@ -3211,7 +3214,7 @@ mod tests {
     /// keeps for a retired skill.
     #[test]
     fn sync_dry_run_reports_retired_templates_without_removing_them() {
-        let repo = fixture("retired-templates-dry-run");
+        let (repo, _root_guard) = fixture("retired-templates-dry-run");
         let dir = repo.checkout.join(".spoolway/templates");
         let task_log = dir.join("task-log.md");
         let pull_request = dir.join("pull-request.md");
@@ -3239,7 +3242,7 @@ mod tests {
     /// main checkout and a linked worktree.
     #[test]
     fn sync_writes_a_stamp_that_reads_back_and_keeps_a_siblings_line() {
-        let repo = fixture("stamp-roundtrip");
+        let (repo, _root_guard) = fixture("stamp-roundtrip");
         let other = repo.root.join("other-checkout");
 
         write_stamp(&repo.home, &other).unwrap();
@@ -3259,7 +3262,7 @@ mod tests {
     /// it any more.
     #[test]
     fn sync_removes_a_leftover_skill_stamp() {
-        let repo = fixture("skill-stamp-leftover");
+        let (repo, _root_guard) = fixture("skill-stamp-leftover");
         let stamp = repo.home.join(SKILL_STAMP_FILE);
         std::fs::create_dir_all(&repo.home).unwrap();
         std::fs::write(&stamp, "some-fingerprint /a/skill/SKILL.md\n").unwrap();
@@ -3273,7 +3276,7 @@ mod tests {
     /// exception.
     #[test]
     fn a_dry_run_leaves_a_leftover_skill_stamp_alone() {
-        let repo = fixture("skill-stamp-leftover-dry-run");
+        let (repo, _root_guard) = fixture("skill-stamp-leftover-dry-run");
         let stamp = repo.home.join(SKILL_STAMP_FILE);
         std::fs::create_dir_all(&repo.home).unwrap();
         std::fs::write(&stamp, "some-fingerprint /a/skill/SKILL.md\n").unwrap();
@@ -3335,7 +3338,7 @@ mod tests {
     /// synced either.
     #[test]
     fn a_dry_run_never_writes_the_stamp() {
-        let repo = fixture("stamp-dry-run");
+        let (repo, _root_guard) = fixture("stamp-dry-run");
         run(
             &repo,
             &SyncArgs {

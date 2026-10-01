@@ -1189,7 +1189,7 @@ mod tests {
     /// be the default.
     #[test]
     fn contract_with_neither_task_nor_pipeline_is_refused() {
-        let repo = crate::commands::testutil::fixture("prompt-contract-no-subject");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("prompt-contract-no-subject");
         let pipelines = Pipelines::builtin();
         let args = crate::cli::PromptContractArgs {
             step: None,
@@ -1213,7 +1213,7 @@ mod tests {
     /// still not found.
     #[test]
     fn a_private_pipelines_missing_prompt_names_both_layers() {
-        let repo = crate::commands::testutil::fixture("missing-prompt-private");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("missing-prompt-private");
         let message =
             missing_prompt_message(&repo, true, "ghost", "step `a`", "run `spoolway init`");
         let tracked = directory_form(&repo, "ghost");
@@ -1234,7 +1234,7 @@ mod tests {
     /// second path would only confuse.
     #[test]
     fn a_tracked_pipelines_missing_prompt_names_one_path() {
-        let repo = crate::commands::testutil::fixture("missing-prompt-tracked");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("missing-prompt-tracked");
         let message =
             missing_prompt_message(&repo, false, "ghost", "step `a`", "run `spoolway init`");
         let private = crate::local::prompts_dir(&repo.local_dir()).join("ghost");
@@ -1369,7 +1369,7 @@ mod tests {
     /// line, used to do.
     #[test]
     fn two_occurrences_on_different_lines_are_two_findings() {
-        let repo = fixture("restated-report-two-lines");
+        let (repo, _root_guard) = fixture("restated-report-two-lines");
         let tracked = directory_form(&repo, "implementer");
         std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
         std::fs::write(
@@ -1446,15 +1446,18 @@ mod tests {
     /// reads straight off that field, so no real `$HOME` or git repository is
     /// needed to test the patch layer here, unlike `Pipelines::load` and
     /// `Config::load`.
-    fn fixture(name: &str) -> Repo {
+    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let base = crate::scratch::root(&format!("prompt-override-{name}"));
         let _ = std::fs::remove_dir_all(&base);
-        Repo {
-            checkout: base.clone(),
-            root: base.clone(),
-            config: crate::config::Config::default(),
-            home: base.join(".home"),
-        }
+        (
+            Repo {
+                checkout: base.to_path_buf(),
+                root: base.to_path_buf(),
+                config: crate::config::Config::default(),
+                home: base.join(".home"),
+            },
+            base,
+        )
     }
 
     /// `overrides/prompts/<name>/PROMPT.md` replaces the tracked prompt
@@ -1462,7 +1465,7 @@ mod tests {
     /// key in it for a patch to aim at.
     #[test]
     fn an_override_replaces_the_tracked_prompt_whole() {
-        let repo = fixture("replaces-whole");
+        let (repo, _root_guard) = fixture("replaces-whole");
         let tracked = directory_form(&repo, "implementer");
         std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
         std::fs::write(&tracked, "the tracked prompt").unwrap();
@@ -1491,7 +1494,7 @@ mod tests {
     /// though that file is, per [`path_for_tracked`]'s own doc.
     #[test]
     fn an_override_for_a_prompt_the_checkout_no_longer_has_is_not_used() {
-        let repo = fixture("stale-prompt");
+        let (repo, _root_guard) = fixture("stale-prompt");
 
         let overridden = repo
             .overrides_dir()
@@ -1517,7 +1520,7 @@ mod tests {
     /// disk, for a caller that must not see the merge.
     #[test]
     fn path_for_tracked_ignores_a_patch_on_disk() {
-        let repo = fixture("tracked-ignores-patch");
+        let (repo, _root_guard) = fixture("tracked-ignores-patch");
         let tracked = directory_form(&repo, "implementer");
         std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
         std::fs::write(&tracked, "the tracked prompt").unwrap();
@@ -1540,7 +1543,7 @@ mod tests {
     /// exactly what it did before this layer existed.
     #[test]
     fn with_no_overrides_directory_path_for_is_unchanged() {
-        let repo = fixture("absent");
+        let (repo, _root_guard) = fixture("absent");
         let tracked = directory_form(&repo, "implementer");
         std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
         std::fs::write(&tracked, "the tracked prompt").unwrap();
@@ -1558,7 +1561,7 @@ mod tests {
     /// mode.
     #[test]
     fn a_private_prompt_is_used_when_the_tracked_file_is_absent() {
-        let repo = fixture("private-prompt-used");
+        let (repo, _root_guard) = fixture("private-prompt-used");
         let private = crate::local::prompts_dir(&repo.local_dir())
             .join("implementer")
             .join(crate::assets::PROMPT_FILE);
@@ -1578,7 +1581,7 @@ mod tests {
     /// private file its own loader does not know exists.
     #[test]
     fn a_private_prompt_name_holding_a_slash_is_never_resolved() {
-        let repo = fixture("nested-private-name-refused");
+        let (repo, _root_guard) = fixture("nested-private-name-refused");
         let private = crate::local::prompts_dir(&repo.local_dir())
             .join("nest")
             .join("inner")
@@ -1601,7 +1604,7 @@ mod tests {
     /// reported missing even though `prompt show` finds it fine.
     #[test]
     fn entries_include_a_private_prompt_the_tracked_folder_does_not_have() {
-        let repo = fixture("entries-see-private");
+        let (repo, _root_guard) = fixture("entries-see-private");
         let private = crate::local::prompts_dir(&repo.local_dir())
             .join("impl2")
             .join(crate::assets::PROMPT_FILE);
@@ -1622,7 +1625,7 @@ mod tests {
     /// name — nothing private ever replaces a tracked file.
     #[test]
     fn a_tracked_prompt_wins_over_a_private_one_of_the_same_name() {
-        let repo = fixture("tracked-wins-over-private");
+        let (repo, _root_guard) = fixture("tracked-wins-over-private");
         let tracked = directory_form(&repo, "implementer");
         std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
         std::fs::write(&tracked, "the tracked prompt").unwrap();

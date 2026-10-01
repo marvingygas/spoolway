@@ -1777,7 +1777,7 @@ mod tests {
     #[test]
     fn a_settling_step_has_its_leftovers_committed_as_wip() {
         clear_lane_env();
-        let repo = fixture("auto-commit");
+        let (repo, _root_guard) = fixture("auto-commit");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "T"]);
@@ -1816,7 +1816,7 @@ mod tests {
     #[test]
     fn a_report_is_refused_when_task_differs_from_spoolway_task() {
         clear_lane_env();
-        let repo = fixture("report-wrong-task");
+        let (repo, _root_guard) = fixture("report-wrong-task");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -1864,7 +1864,7 @@ mod tests {
     #[test]
     fn auto_commit_off_reports_the_leftovers_and_commits_nothing() {
         clear_lane_env();
-        let mut repo = fixture("auto-commit-off");
+        let (mut repo, _root_guard) = fixture("auto-commit-off");
         repo.config.dispatch.auto_commit = false;
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -1917,7 +1917,7 @@ mod tests {
     #[test]
     fn a_report_leaves_its_verdict_for_the_ledger_tagged_with_its_step() {
         clear_lane_env();
-        let repo = fixture("report-leaves-verdict");
+        let (repo, _root_guard) = fixture("report-leaves-verdict");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -1965,7 +1965,7 @@ mod tests {
     #[test]
     fn a_report_appends_each_handoff_line_credited_to_its_step() {
         clear_lane_env();
-        let repo = fixture("report-carries-handoff");
+        let (repo, _root_guard) = fixture("report-carries-handoff");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2020,7 +2020,7 @@ mod tests {
         // the task really does come to rest on `blocked` and the trail is the
         // only thing that will ever say where it stopped.
         clear_lane_env();
-        let repo = fixture("block-records-step");
+        let (repo, _root_guard) = fixture("block-records-step");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn resume_forgets_a_failed_queued_hooks_run() {
         clear_lane_env();
-        let mut repo = fixture("hook-resume-queued");
+        let (mut repo, _root_guard) = fixture("hook-resume-queued");
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "demo", &[]);
         repo.config.issue_tracking.hook = "fail.sh".into();
@@ -2154,7 +2154,7 @@ mod tests {
     #[test]
     fn resume_forgets_a_failed_started_hooks_run_and_goes_back_to_queued() {
         clear_lane_env();
-        let mut repo = fixture("hook-resume-started");
+        let (mut repo, _root_guard) = fixture("hook-resume-started");
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "demo", &[]);
         repo.config.issue_tracking.hook = "fail.sh".into();
@@ -2209,7 +2209,7 @@ mod tests {
     #[test]
     fn resume_on_a_done_hook_pause_forgets_the_run_and_goes_back_to_done() {
         clear_lane_env();
-        let mut repo = fixture("hook-resume-done");
+        let (mut repo, _root_guard) = fixture("hook-resume-done");
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "demo", &[]);
         repo.config.issue_tracking.hook = "fail.sh".into();
@@ -2281,10 +2281,10 @@ mod tests {
     }
 
     /// The same, for a project whose runs stop for nobody.
-    fn unattended_fixture(name: &str) -> Repo {
-        let mut repo = fixture(name);
+    fn unattended_fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (mut repo, root_guard) = fixture(name);
         repo.config.unattended.enabled = true;
-        repo
+        (repo, root_guard)
     }
 
     fn report_outcome(repo: &Repo, pipelines: &Pipelines, id: &str, outcome: Outcome) {
@@ -2332,7 +2332,7 @@ mod tests {
     /// the plan's stack — was credited with a pass it never ran.
     #[test]
     fn a_lane_may_not_report_on_a_step_its_task_has_already_left() {
-        let repo = fixture("report-from-a-stale-lane");
+        let (repo, _root_guard) = fixture("report-from-a-stale-lane");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2391,7 +2391,7 @@ mod tests {
     #[test]
     fn a_pass_to_a_cleanup_terminal_is_held_while_the_worktree_is_dirty() {
         clear_lane_env();
-        let mut repo = fixture("held-dirty");
+        let (mut repo, _root_guard) = fixture("held-dirty");
         repo.config.dispatch.auto_commit = false;
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2453,7 +2453,7 @@ mod tests {
     /// the second lane.
     #[test]
     fn an_unattended_block_resumes_the_step_instead_of_reaching_a_person() {
-        let repo = unattended_fixture("unattended-roundtrip");
+        let (repo, _root_guard) = unattended_fixture("unattended-roundtrip");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2485,7 +2485,7 @@ mod tests {
     /// it goes is `blocked_from`'s `on_pass`.
     #[test]
     fn a_staffed_blocked_steps_pass_carries_the_task_past_where_it_blocked() {
-        let repo = unattended_fixture("staffed-blocked-pass");
+        let (repo, _root_guard) = unattended_fixture("staffed-blocked-pass");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2520,7 +2520,7 @@ mod tests {
     /// hands the task back to the step itself rather than past it.
     #[test]
     fn a_staffed_blocked_steps_pass_hands_a_command_step_back_to_itself() {
-        let repo = unattended_fixture("staffed-blocked-command-pass");
+        let (repo, _root_guard) = unattended_fixture("staffed-blocked-command-pass");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2569,7 +2569,7 @@ mod tests {
     /// unblocker choosing where this goes, not vouching for its work.
     #[test]
     fn a_staged_pass_from_blocked_lands_on_the_named_step_the_task_has_run() {
-        let repo = unattended_fixture("staged-pass-lands");
+        let (repo, _root_guard) = unattended_fixture("staged-pass-lands");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2614,7 +2614,7 @@ mod tests {
     /// from `blocked` already takes.
     #[test]
     fn a_staged_pass_from_blocked_into_a_spent_step_parks_on_paused() {
-        let repo = unattended_fixture("staged-pass-spent");
+        let (repo, _root_guard) = unattended_fixture("staged-pass-spent");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2686,7 +2686,7 @@ mod tests {
     /// says it has — in pipeline order, not the map's own key order.
     #[test]
     fn a_staged_pass_naming_a_step_never_run_is_refused() {
-        let repo = unattended_fixture("staged-pass-refused");
+        let (repo, _root_guard) = unattended_fixture("staged-pass-refused");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2759,7 +2759,7 @@ mod tests {
     /// its word, the same as an ungated one would be.
     #[test]
     fn a_pass_from_blocked_is_held_at_the_origins_own_gate() {
-        let repo = unattended_fixture("blocked-pass-origin-gate");
+        let (repo, _root_guard) = unattended_fixture("blocked-pass-origin-gate");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2816,7 +2816,7 @@ mod tests {
         banked: &[(&str, &str)],
         stage: &str,
     ) -> String {
-        let repo = unattended_fixture(name);
+        let (repo, _root_guard) = unattended_fixture(name);
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2929,7 +2929,7 @@ mod tests {
     /// again, and its own gate holds its own pass, same as any other visit.
     #[test]
     fn a_staged_pass_may_name_the_gated_step_itself() {
-        let repo = unattended_fixture("staged-pass-names-the-gate");
+        let (repo, _root_guard) = unattended_fixture("staged-pass-names-the-gate");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -2978,7 +2978,7 @@ mod tests {
     /// other step.
     #[test]
     fn a_staged_pass_is_refused_off_blocked() {
-        let repo = unattended_fixture("staged-pass-off-blocked");
+        let (repo, _root_guard) = unattended_fixture("staged-pass-off-blocked");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3026,7 +3026,7 @@ mod tests {
     /// already have pushed a branch or opened a pull request.
     #[test]
     fn a_staged_pass_naming_blocked_itself_is_refused_even_though_blocked_banked_its_own_launch() {
-        let repo = unattended_fixture("staged-pass-excludes-blocked");
+        let (repo, _root_guard) = unattended_fixture("staged-pass-excludes-blocked");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3091,7 +3091,7 @@ mod tests {
     /// cold one, the same as a take-over would leave it.
     #[test]
     fn a_block_reported_from_blocked_hands_the_task_back_to_where_it_blocked_once_resumed() {
-        let repo = fixture("blocked-hands-back-block");
+        let (repo, _root_guard) = fixture("blocked-hands-back-block");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3149,7 +3149,7 @@ mod tests {
     /// not exist before this rule.
     #[test]
     fn a_pause_reported_from_blocked_also_hands_the_task_back_to_where_it_blocked_once_resumed() {
-        let repo = fixture("blocked-hands-back-pause");
+        let (repo, _root_guard) = fixture("blocked-hands-back-pause");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3203,7 +3203,7 @@ mod tests {
     /// is consulted first, and it knows where the task actually was.
     #[test]
     fn a_lost_origin_falls_back_to_the_last_report_not_the_entry() {
-        let repo = unattended_fixture("lost-origin");
+        let (repo, _root_guard) = unattended_fixture("lost-origin");
         let pipelines = staffed_pipelines();
         let pipeline = pipelines.pipelines.get("default").unwrap();
         add(&repo, "stuck", &[]);
@@ -3249,7 +3249,7 @@ mod tests {
     /// answer than a real origin and a far better one than a loop.
     #[test]
     fn a_last_report_naming_blocked_is_skipped_rather_than_resumed_into() {
-        let repo = unattended_fixture("blocked-last-report");
+        let (repo, _root_guard) = unattended_fixture("blocked-last-report");
         let pipelines = staffed_pipelines();
         let pipeline = pipelines.pipelines.get("default").unwrap();
         add(&repo, "stuck", &[]);
@@ -3288,7 +3288,7 @@ mod tests {
     #[test]
     fn a_staffed_blocked_steps_fail_block_or_pause_lands_on_paused() {
         for outcome in [Outcome::Fail, Outcome::Block, Outcome::Pause] {
-            let repo = unattended_fixture(&format!("staffed-blocked-{outcome}"));
+            let (repo, _root_guard) = unattended_fixture(&format!("staffed-blocked-{outcome}"));
             let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
             git(&["config", "user.email", "t@example.com"]);
             git(&["config", "user.name", "t"]);
@@ -3330,7 +3330,7 @@ mod tests {
     #[test]
     fn resuming_a_pause_raised_from_blocked_itself_still_clears_the_block() {
         clear_lane_env();
-        let repo = fixture("blocked-pause-resume");
+        let (repo, _root_guard) = fixture("blocked-pause-resume");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3374,7 +3374,7 @@ mod tests {
     /// refused rather than silently read as one of them.
     #[test]
     fn a_pause_reported_anywhere_but_blocked_is_refused() {
-        let repo = fixture("pause-elsewhere");
+        let (repo, _root_guard) = fixture("pause-elsewhere");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3416,7 +3416,7 @@ mod tests {
     /// another go by the lane that knows what happened.
     #[test]
     fn an_unattended_fail_that_falls_through_to_blocked_resumes_too() {
-        let repo = unattended_fixture("unattended-fail");
+        let (repo, _root_guard) = unattended_fixture("unattended-fail");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3442,7 +3442,7 @@ mod tests {
     /// a wall nothing can clear.
     #[test]
     fn a_budget_bound_for_a_person_does_not_bind_an_unattended_run_with_no_staffed_blocked_step() {
-        let repo = unattended_fixture("unattended-rounds");
+        let (repo, _root_guard) = unattended_fixture("unattended-rounds");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3486,7 +3486,7 @@ mod tests {
     /// limit binds exactly as it would in an attended run.
     #[test]
     fn a_budget_bound_does_bind_an_unattended_run_that_staffs_blocked() {
-        let repo = unattended_fixture("unattended-rounds-staffed");
+        let (repo, _root_guard) = unattended_fixture("unattended-rounds-staffed");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3515,7 +3515,7 @@ mod tests {
     /// these two.
     #[test]
     fn a_budget_bound_for_a_person_still_binds_an_attended_run() {
-        let repo = fixture("attended-rounds");
+        let (repo, _root_guard) = fixture("attended-rounds");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3544,7 +3544,7 @@ mod tests {
     /// other way now, on the steps a pass and a fail both reach.
     #[test]
     fn the_second_failure_takes_the_exit_now_the_cold_start_counts() {
-        let repo = fixture("two-arrivals");
+        let (repo, _root_guard) = fixture("two-arrivals");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3601,7 +3601,7 @@ mod tests {
     /// where that half is pinned.
     #[test]
     fn a_pass_reported_from_blocked_leaves_the_arrivals_spent() {
-        let repo = fixture("blocked-pass-keeps-arrivals");
+        let (repo, _root_guard) = fixture("blocked-pass-keeps-arrivals");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3640,7 +3640,7 @@ mod tests {
     /// refund, not the escalation.
     #[test]
     fn the_unattended_self_resume_leaves_the_rounds_spent() {
-        let repo = unattended_fixture("unattended-resume-keeps-rounds");
+        let (repo, _root_guard) = unattended_fixture("unattended-resume-keeps-rounds");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3678,7 +3678,7 @@ mod tests {
     /// other: there is nobody to park in front of.
     #[test]
     fn a_gated_step_blocks_like_any_other_when_nobody_is_there() {
-        let repo = unattended_fixture("unattended-gate");
+        let (repo, _root_guard) = unattended_fixture("unattended-gate");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3705,7 +3705,7 @@ mod tests {
     /// written for.
     #[test]
     fn a_gated_step_parks_for_the_person_it_is_written_for() {
-        let repo = fixture("attended-gate");
+        let (repo, _root_guard) = fixture("attended-gate");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3757,7 +3757,7 @@ mod tests {
     /// which is the change this replaced a per-step `on_loop_max:` with.
     #[test]
     fn a_spent_budget_parks_the_task_on_blocked() {
-        let repo = fixture("on-max-routes");
+        let (repo, _root_guard) = fixture("on-max-routes");
         add(&repo, "stuck", &[]);
         let pipelines = looping_pipelines(1);
 
@@ -3790,7 +3790,7 @@ mod tests {
     /// opened a conversation.
     #[test]
     fn backward_moves_not_conversations_spend_the_budget() {
-        let repo = fixture("warm-loop");
+        let (repo, _root_guard) = fixture("warm-loop");
         add(&repo, "stuck", &[]);
         let pipelines = looping_pipelines(2);
 
@@ -3818,7 +3818,7 @@ mod tests {
     /// `a_budget_bound_does_bind_an_unattended_run_that_staffs_blocked`.
     #[test]
     fn an_unattended_run_skips_a_budget_whose_exit_is_a_person() {
-        let repo = unattended_fixture("unattended-on-max-blocked");
+        let (repo, _root_guard) = unattended_fixture("unattended-on-max-blocked");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -3883,7 +3883,7 @@ mod tests {
     #[test]
     fn resume_refuses_from_inside_a_lanes_own_environment() {
         clear_lane_env();
-        let repo = fixture("gate-jumper");
+        let (repo, _root_guard) = fixture("gate-jumper");
         let pipelines = gate_pipelines();
         paused_at_deploy(&repo, "ship");
 
@@ -3913,7 +3913,7 @@ mod tests {
     #[test]
     fn a_lane_on_blocked_may_resume_another_stopped_task() {
         clear_lane_env();
-        let repo = fixture("blocked-lane-resumes-sibling");
+        let (repo, _root_guard) = fixture("blocked-lane-resumes-sibling");
         let pipelines = gate_pipelines();
         add(&repo, "sibling", &[]);
         let mut task = queued(&repo, "sibling");
@@ -3942,7 +3942,7 @@ mod tests {
     #[test]
     fn a_lane_on_blocked_may_not_resume_past_a_gate_or_reroute() {
         clear_lane_env();
-        let repo = fixture("blocked-lane-cannot-cross-a-gate");
+        let (repo, _root_guard) = fixture("blocked-lane-cannot-cross-a-gate");
         let pipelines = gate_pipelines();
         paused_at_deploy(&repo, "ship");
 
@@ -3992,7 +3992,7 @@ mod tests {
     #[test]
     fn a_gated_steps_pass_waits_for_a_person_and_resume_lets_it_past() {
         clear_lane_env();
-        let repo = fixture("gate-release");
+        let (repo, _root_guard) = fixture("gate-release");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4047,7 +4047,7 @@ mod tests {
     #[test]
     fn a_gated_pass_writes_the_arrival_note_and_the_lanes_own_message() {
         clear_lane_env();
-        let repo = fixture("gate-hands-over-status-log");
+        let (repo, _root_guard) = fixture("gate-hands-over-status-log");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4100,7 +4100,7 @@ mod tests {
     #[test]
     fn a_gated_pass_with_no_paused_by_still_resumes_by_the_old_inference() {
         clear_lane_env();
-        let repo = fixture("gate-release-no-paused-by");
+        let (repo, _root_guard) = fixture("gate-release-no-paused-by");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4158,7 +4158,7 @@ mod tests {
     /// have refused.
     #[test]
     fn paused_by_alone_is_enough_for_caught_at_to_read_a_catch() {
-        let repo = fixture("caught-at-paused-by-alone");
+        let (repo, _root_guard) = fixture("caught-at-paused-by-alone");
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
         task.front.paused_at = Some("deploy".into());
@@ -4185,7 +4185,7 @@ mod tests {
     #[test]
     fn a_tasks_own_gate_at_pauses_a_step_the_pipeline_never_gated() {
         clear_lane_env();
-        let repo = fixture("gate-at");
+        let (repo, _root_guard) = fixture("gate-at");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4293,7 +4293,7 @@ mod tests {
     #[test]
     fn a_tasks_own_gate_at_catches_a_failing_step_and_resume_takes_on_pass() {
         clear_lane_env();
-        let repo = fixture("gate-at-fail");
+        let (repo, _root_guard) = fixture("gate-at-fail");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4357,7 +4357,7 @@ mod tests {
     #[test]
     fn a_tasks_own_gate_at_catches_a_block_and_resume_sends_it_to_blocked() {
         clear_lane_env();
-        let repo = fixture("gate-at-block");
+        let (repo, _root_guard) = fixture("gate-at-block");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4420,7 +4420,7 @@ mod tests {
     #[test]
     fn a_caught_pass_is_not_read_as_a_block_because_an_old_blocked_from_still_names_the_step() {
         clear_lane_env();
-        let repo = fixture("gate-at-stale-blocked-from");
+        let (repo, _root_guard) = fixture("gate-at-stale-blocked-from");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4514,7 +4514,7 @@ mod tests {
     #[test]
     fn a_tasks_own_gate_at_catches_a_spent_loop_headed_for_blocked() {
         clear_lane_env();
-        let repo = fixture("gate-at-loop-max");
+        let (repo, _root_guard) = fixture("gate-at-loop-max");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -4578,7 +4578,7 @@ mod tests {
     #[test]
     fn an_unattended_gated_pass_still_parks_on_paused() {
         clear_lane_env();
-        let repo = unattended_fixture("gate-unattended");
+        let (repo, _root_guard) = unattended_fixture("gate-unattended");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
@@ -4612,7 +4612,7 @@ mod tests {
     /// gate, the same as `release` used to.
     #[test]
     fn resuming_a_paused_task_with_no_stage_lets_it_past_the_gate() {
-        let repo = fixture("gate-unblock");
+        let (repo, _root_guard) = fixture("gate-unblock");
         let pipelines = gate_pipelines();
         paused_at_deploy(&repo, "ship");
 
@@ -4637,7 +4637,7 @@ mod tests {
     /// gate.
     #[test]
     fn resuming_a_paused_task_with_a_stage_reroutes_it_instead() {
-        let repo = fixture("gate-unblock");
+        let (repo, _root_guard) = fixture("gate-unblock");
         let pipelines = gate_pipelines();
         paused_at_deploy(&repo, "ship");
 
@@ -4664,7 +4664,7 @@ mod tests {
     /// arrival is a person's call, made one at a time.
     #[test]
     fn a_hand_resume_refunds_no_arrivals_so_the_next_failure_blocks_again() {
-        let repo = fixture("unblock-keeps-arrivals-spent");
+        let (repo, _root_guard) = fixture("unblock-keeps-arrivals-spent");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -4726,7 +4726,7 @@ mod tests {
     /// showing `↻2` after a person resumes it past a blocked `review`.
     #[test]
     fn a_hand_resume_does_not_erase_a_steps_arrival_count() {
-        let repo = fixture("unblock-keeps-arrivals");
+        let (repo, _root_guard) = fixture("unblock-keeps-arrivals");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -4781,7 +4781,7 @@ mod tests {
     /// one cannot pick the mark up by accident.
     #[test]
     fn resuming_marks_the_step_it_resumes_to_be_continued() {
-        let repo = fixture("unblock-marks-resume");
+        let (repo, _root_guard) = fixture("unblock-marks-resume");
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -4819,7 +4819,7 @@ mod tests {
     /// not one to count against a `loop:` budget.
     #[test]
     fn resuming_a_task_parked_off_queued_lands_it_back_on_queued() {
-        let repo = fixture("unpark-from-queued");
+        let (repo, _root_guard) = fixture("unpark-from-queued");
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -4856,7 +4856,7 @@ mod tests {
     /// same way a real resume does.
     #[test]
     fn resuming_a_parked_task_puts_it_back_without_banking_a_lap() {
-        let repo = fixture("unpark-round-trip");
+        let (repo, _root_guard) = fixture("unpark-round-trip");
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -4900,7 +4900,7 @@ mod tests {
     /// step it once named would read at launch as a park nobody asked for.
     #[test]
     fn rerouting_a_parked_task_with_a_stage_clears_parked_from_too() {
-        let repo = fixture("unpark-stage-reroute");
+        let (repo, _root_guard) = fixture("unpark-stage-reroute");
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -4937,7 +4937,7 @@ mod tests {
     /// answer, and no fresh one would ever start.
     #[test]
     fn unparking_frees_the_stale_lane_it_left_behind() {
-        let mut repo = fixture("unpark-stale-lane");
+        let (mut repo, _root_guard) = fixture("unpark-stale-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         add(&repo, "stuck", &[]);
 
@@ -4990,7 +4990,7 @@ mod tests {
     /// what they asked for — that one starts fresh.
     #[test]
     fn resuming_to_a_named_stage_starts_that_step_fresh() {
-        let repo = fixture("unblock-elsewhere");
+        let (repo, _root_guard) = fixture("unblock-elsewhere");
         add(&repo, "stuck", &[]);
 
         let mut task = queued(&repo, "stuck");
@@ -5040,7 +5040,7 @@ mod tests {
     /// would wedge the task forever.
     #[test]
     fn resuming_frees_the_stale_lane_that_blocked() {
-        let mut repo = fixture("unblock-stale-lane");
+        let (mut repo, _root_guard) = fixture("unblock-stale-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);

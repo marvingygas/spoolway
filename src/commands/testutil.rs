@@ -6,7 +6,7 @@ use super::*;
 /// looks a task's `base:` up against the repository's own local branches —
 /// `refs/heads/plan/demo` included, which needs a commit to exist at all: an
 /// unborn branch has no ref for `check_task_base`'s `rev-parse` to find.
-pub fn fixture(name: &str) -> Repo {
+pub fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
     let root = crate::scratch::root(&format!("commands-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -21,12 +21,15 @@ pub fn fixture(name: &str) -> Repo {
     // `~/.spoolway/<basename>/` — every test writes its queue, archive and
     // plans here through `Repo`'s own accessors, which create it on demand.
     let home = root.join(".home");
-    Repo {
-        checkout: root.clone(),
+    (
+        Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+            home,
+        },
         root,
-        config: Config::default(),
-        home,
-    }
+    )
 }
 
 pub fn add(repo: &Repo, id: &str, depends_on: &[&str]) {

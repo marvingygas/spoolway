@@ -2072,7 +2072,7 @@ mod tests {
 
     /// A scratch checkout with a repo's config loaded — shared by every
     /// command test below that needs a real `Repo` to run against.
-    fn repo_for(name: &str) -> Repo {
+    fn repo_for(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("pipeline-cmd-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -2082,12 +2082,15 @@ mod tests {
         // A scratch home beside the checkout, the same as every other
         // command test's — nothing here touches the real `~/.spoolway/`.
         let home = root.join(".home");
-        Repo {
-            checkout: root.clone(),
+        (
+            Repo {
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config,
+                home,
+            },
             root,
-            config,
-            home,
-        }
+        )
     }
 
     /// `init` now claims a name under the real `~/.spoolway/`, so every test
@@ -2125,7 +2128,7 @@ mod tests {
     /// holds — the acceptance shape's first sentence.
     #[test]
     fn pipeline_copy_writes_the_pipeline_and_its_skeleton_into_the_private_layer() {
-        let repo = repo_for("copy-writes");
+        let (repo, _root_guard) = repo_for("copy-writes");
 
         pipeline_copy(&repo, "default", "default-strict", false).expect("copy");
 
@@ -2153,7 +2156,7 @@ mod tests {
     #[test]
     fn pipeline_copy_shares_an_explicit_task_template_it_names() {
         for tracked in [false, true] {
-            let repo = repo_for(&format!("copy-explicit-task-template-{tracked}"));
+            let (repo, _root_guard) = repo_for(&format!("copy-explicit-task-template-{tracked}"));
 
             let default_raw = std::fs::read_to_string(
                 crate::pipeline::Pipelines::dir_in(&repo.checkout).join("default.yml"),
@@ -2201,7 +2204,7 @@ mod tests {
     /// tracked pipeline, and one that already names a private one.
     #[test]
     fn pipeline_copy_refuses_a_to_that_already_exists_tracked_or_private() {
-        let repo = repo_for("copy-clash");
+        let (repo, _root_guard) = repo_for("copy-clash");
 
         let err = pipeline_copy(&repo, "default", "default", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
@@ -2221,7 +2224,7 @@ mod tests {
     // covers: pipeline copy refuses when the destination skeleton already exists, private or tracked
     #[test]
     fn pipeline_copy_refuses_when_the_destination_skeleton_already_exists() {
-        let repo = repo_for("copy-skeleton-clash");
+        let (repo, _root_guard) = repo_for("copy-skeleton-clash");
 
         let private_skeleton = crate::local::task_templates_dir(&repo.local_dir()).join("foo.md");
         std::fs::create_dir_all(private_skeleton.parent().unwrap()).unwrap();
@@ -2240,7 +2243,7 @@ mod tests {
     /// A private pipeline may itself be `from` — copying a copy.
     #[test]
     fn pipeline_copy_reads_from_an_already_private_pipeline() {
-        let repo = repo_for("copy-from-private");
+        let (repo, _root_guard) = repo_for("copy-from-private");
         pipeline_copy(&repo, "default", "default-strict", false).unwrap();
 
         pipeline_copy(&repo, "default-strict", "default-stricter", false).unwrap();
@@ -2255,7 +2258,7 @@ mod tests {
     /// `pipeline copy` on a name nothing has is refused by name.
     #[test]
     fn pipeline_copy_refuses_an_unknown_from() {
-        let repo = repo_for("copy-unknown");
+        let (repo, _root_guard) = repo_for("copy-unknown");
         let err = pipeline_copy(&repo, "nosuchpipeline", "x", false).unwrap_err();
         assert!(format!("{err:#}").contains("no pipeline named"), "{err:#}");
     }
@@ -2269,7 +2272,7 @@ mod tests {
     /// run from a worktree that has not picked up that commit.
     #[test]
     fn pipeline_copy_refuses_a_to_the_main_checkout_tracks_even_run_from_a_worktree() {
-        let repo = repo_for("copy-worktree-clash");
+        let (repo, _root_guard) = repo_for("copy-worktree-clash");
         // The main checkout already tracks `extra`.
         std::fs::write(
             Pipelines::file_in(&repo.root, "extra"),
@@ -2279,7 +2282,7 @@ mod tests {
 
         // A linked worktree: its own tracked checkout, which never got
         // that commit, so `extra` is not among its own tracked pipelines.
-        let other = repo_for("copy-worktree-clash-wt");
+        let (other, _other_guard) = repo_for("copy-worktree-clash-wt");
         let mut worktree = repo.clone();
         worktree.checkout = other.checkout;
 
@@ -2291,7 +2294,7 @@ mod tests {
     /// `local/prompts/<to>/PROMPT.md`.
     #[test]
     fn prompt_copy_writes_the_prompt_into_the_private_layer() {
-        let repo = repo_for("prompt-copy-writes");
+        let (repo, _root_guard) = repo_for("prompt-copy-writes");
 
         prompt_copy(&repo, "implementer", "implementer-strict", false).expect("copy");
 
@@ -2309,7 +2312,7 @@ mod tests {
     /// The same clash refusal `pipeline copy` gives, on the prompt side.
     #[test]
     fn prompt_copy_refuses_a_to_that_already_exists_tracked_or_private() {
-        let repo = repo_for("prompt-copy-clash");
+        let (repo, _root_guard) = repo_for("prompt-copy-clash");
 
         let err = prompt_copy(&repo, "implementer", "implementer", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
@@ -2325,7 +2328,7 @@ mod tests {
     /// heard of it.
     #[test]
     fn prompt_copy_refuses_a_to_the_main_checkout_tracks_even_run_from_a_worktree() {
-        let repo = repo_for("prompt-copy-worktree-clash");
+        let (repo, _root_guard) = repo_for("prompt-copy-worktree-clash");
         // The main checkout already tracks `arch2`.
         let tracked_dir = crate::prompt::directory_form(&repo, "arch2")
             .parent()
@@ -2336,7 +2339,7 @@ mod tests {
 
         // A linked worktree: its own tracked checkout, which never got
         // that commit.
-        let other = repo_for("prompt-copy-worktree-clash-wt");
+        let (other, _other_guard) = repo_for("prompt-copy-worktree-clash-wt");
         let mut worktree = repo.clone();
         worktree.checkout = other.checkout;
 
@@ -2352,7 +2355,7 @@ mod tests {
     /// `local/prompts/arch2/PROMPT.md`.
     #[test]
     fn prompt_copy_copies_the_whole_prompt_folder_assets_included() {
-        let repo = repo_for("prompt-copy-assets");
+        let (repo, _root_guard) = repo_for("prompt-copy-assets");
 
         prompt_copy(&repo, "archivist", "arch2", false).expect("copy");
 
@@ -2386,7 +2389,7 @@ mod tests {
     /// refuses as a clash with the very files the failed copy left behind.
     #[test]
     fn prompt_copy_refuses_a_prompt_holding_a_symlinked_directory() {
-        let repo = repo_for("prompt-copy-symlink");
+        let (repo, _root_guard) = repo_for("prompt-copy-symlink");
 
         let source_assets = crate::prompt::path_for_tracked(&repo, "archivist")
             .parent()
@@ -2416,7 +2419,7 @@ mod tests {
     /// loader never reads.
     #[test]
     fn pipeline_copy_refuses_a_to_that_is_not_one_plain_name() {
-        let repo = repo_for("copy-bad-to");
+        let (repo, _root_guard) = repo_for("copy-bad-to");
         let pipelines_dir = crate::local::pipelines_dir(&repo.local_dir());
         let templates_dir = crate::local::task_templates_dir(&repo.local_dir());
 
@@ -2458,7 +2461,7 @@ mod tests {
     /// nothing about the join itself differs by mode.
     #[test]
     fn prompt_copy_refuses_a_to_that_is_not_one_plain_name() {
-        let repo = repo_for("prompt-copy-bad-to");
+        let (repo, _root_guard) = repo_for("prompt-copy-bad-to");
         let prompts_dir = crate::local::prompts_dir(&repo.local_dir());
 
         for bad in [
@@ -2494,7 +2497,7 @@ mod tests {
     /// writes and reads through `repo.local_dir()` itself.
     #[test]
     fn pipeline_promote_moves_the_pipeline_its_private_prompt_and_its_skeleton() {
-        let (repo, home) = repo_for_home_aware("promote-e2e");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-e2e");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -2601,7 +2604,7 @@ mod tests {
     fn a_promote_that_fails_partway_leaves_every_file_exactly_where_it_was() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (repo, home) = repo_for_home_aware("promote-atomic");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-atomic");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -2691,7 +2694,7 @@ mod tests {
     fn a_promote_removes_its_own_partial_copy_when_a_directory_copy_fails_midway() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (repo, home) = repo_for_home_aware("promote-copy-rollback");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-copy-rollback");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -2761,7 +2764,7 @@ mod tests {
     fn a_promote_undoes_an_earlier_delete_when_a_later_one_fails() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (repo, home) = repo_for_home_aware("promote-delete-rollback");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-delete-rollback");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -2845,7 +2848,7 @@ mod tests {
     fn a_promote_whose_first_delete_removes_nothing_rolls_back_cleanly() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (repo, home) = repo_for_home_aware("promote-readonly-private");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-readonly-private");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -2901,7 +2904,7 @@ mod tests {
     /// fail on the prompt that names it.
     #[test]
     fn pipeline_promote_refuses_a_prompt_holding_a_symlinked_directory() {
-        let (repo, home) = repo_for_home_aware("promote-symlink");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-symlink");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -2942,7 +2945,7 @@ mod tests {
     /// name.
     #[test]
     fn pipeline_promote_refuses_an_unknown_name() {
-        let repo = repo_for("promote-unknown");
+        let (repo, _root_guard) = repo_for("promote-unknown");
         let err = pipeline_promote(&repo, "nosuchpipeline", false).unwrap_err();
         assert!(
             format!("{err:#}").contains("no private pipeline named"),
@@ -2957,7 +2960,7 @@ mod tests {
     /// already promoted.
     #[test]
     fn pipeline_promote_on_an_already_tracked_name_says_so() {
-        let repo = repo_for("promote-already-tracked");
+        let (repo, _root_guard) = repo_for("promote-already-tracked");
         let err = pipeline_promote(&repo, "default", false).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("already tracked"), "{message}");
@@ -2969,7 +2972,7 @@ mod tests {
     /// case the tracked file arrived afterwards.
     #[test]
     fn pipeline_promote_refuses_a_clash_with_a_tracked_pipeline() {
-        let repo = repo_for("promote-tracked-clash");
+        let (repo, _root_guard) = repo_for("promote-tracked-clash");
         pipeline_copy(&repo, "default", "default-strict", false).unwrap();
         // Land a tracked pipeline by this name after the private copy was
         // made, so `pipeline copy` itself never got a chance to refuse it.
@@ -2994,7 +2997,7 @@ mod tests {
     /// `repo_for_home_aware` sets up for the clash tests below.
     #[test]
     fn pipeline_promote_refuses_a_pipeline_naming_a_non_plain_prompt() {
-        let (repo, home) = repo_for_home_aware("promote-bad-prompt-name");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-bad-prompt-name");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -3036,7 +3039,7 @@ mod tests {
     // covers: standards — path traversal through an unvalidated task_template:
     #[test]
     fn pipeline_promote_refuses_a_pipeline_naming_a_non_plain_task_template() {
-        let (repo, home) = repo_for_home_aware("promote-bad-task-template-name");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-bad-task-template-name");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -3077,7 +3080,7 @@ mod tests {
     /// and that resolution agree on.
     #[test]
     fn pipeline_promote_refuses_a_skeleton_clash_without_moving_anything_first() {
-        let (repo, home) = repo_for_home_aware("promote-skeleton-clash");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-skeleton-clash");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -3124,7 +3127,7 @@ mod tests {
     // covers: promote moves the skeleton the pipeline actually names
     #[test]
     fn pipeline_promote_moves_the_skeleton_task_template_names_not_the_pipelines_own_name() {
-        let (repo, home) = repo_for_home_aware("promote-task-template-name");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-task-template-name");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -3164,7 +3167,7 @@ mod tests {
     // covers: promote refuses when that skeleton is shared
     #[test]
     fn pipeline_promote_refuses_a_skeleton_shared_with_another_private_pipeline() {
-        let (repo, home) = repo_for_home_aware("promote-skeleton-shared");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-skeleton-shared");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -3203,7 +3206,7 @@ mod tests {
     /// files, never a worktree's own copy.
     #[test]
     fn pipeline_promote_refuses_from_a_linked_worktree() {
-        let repo = repo_for("promote-worktree");
+        let (repo, _root_guard) = repo_for("promote-worktree");
         pipeline_copy(&repo, "default", "default-strict", false).unwrap();
 
         let mut worktree = repo.clone();
@@ -3240,8 +3243,8 @@ mod tests {
 
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
-                checkout: root.clone(),
-                root: root.clone(),
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config: Config::default(),
                 home,
             };
@@ -3273,7 +3276,7 @@ mod tests {
     /// must re-enter the same `crate::platform::test_home::with_home` for
     /// the two resolutions to agree, since [`repo_for`]'s own placeholder
     /// `root.join(".home")` never would.
-    fn repo_for_home_aware(name: &str) -> (Repo, PathBuf) {
+    fn repo_for_home_aware(name: &str) -> (Repo, PathBuf, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("pipeline-cmd-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -3292,13 +3295,13 @@ mod tests {
             )
             .expect("init");
             Repo {
-                checkout: root.clone(),
-                root: root.clone(),
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config: Config::default(),
                 home: crate::mux::project_home(&root).unwrap(),
             }
         });
-        (repo, home)
+        (repo, home, root)
     }
 
     /// Every pipeline's name and description are printed, and nothing more —
@@ -3306,7 +3309,7 @@ mod tests {
     /// `pipeline show` does.
     #[test]
     fn pipeline_list_prints_every_pipeline_and_succeeds() {
-        let repo = repo_for("list");
+        let (repo, _root_guard) = repo_for("list");
         let pipelines = Pipelines::builtin();
         assert!(!pipelines.pipelines.is_empty(), "nothing to list against");
         pipeline_list(&repo, &pipelines, false).expect("listing names alone cannot fail");
@@ -3479,8 +3482,8 @@ mod tests {
         config.agents.insert("flaky".into(), flaky);
         let home = root.join(".home");
         let repo = Repo {
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config,
             home,
         };
@@ -3512,8 +3515,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3547,8 +3550,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3593,8 +3596,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3642,8 +3645,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config,
         };
 
@@ -3675,7 +3678,7 @@ mod tests {
     // covers: pipeline check and the task commands resolve a pipeline's skeleton through one shared function
     #[test]
     fn pipeline_check_sees_a_private_skeleton_a_pipeline_names() {
-        let repo = repo_for("check-private-skeleton");
+        let (repo, _root_guard) = repo_for("check-private-skeleton");
 
         let private_skeleton =
             crate::local::task_templates_dir(&repo.local_dir()).join("myskel.md");
@@ -3709,7 +3712,7 @@ mod tests {
     // covers: a tracked pipeline never resolves to a private skeleton
     #[test]
     fn pipeline_check_still_reports_a_tracked_pipelines_private_skeleton_missing() {
-        let repo = repo_for("check-tracked-pipeline-private-skeleton");
+        let (repo, _root_guard) = repo_for("check-tracked-pipeline-private-skeleton");
 
         std::fs::write(
             Pipelines::dir_in(&repo.checkout).join("impl.yml"),
@@ -3757,8 +3760,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3791,8 +3794,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3832,8 +3835,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3870,8 +3873,8 @@ mod tests {
         config.agents.insert("flaky".into(), flaky);
         let home = root.join(".home");
         let repo = Repo {
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config,
             home,
         };
@@ -3908,8 +3911,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -3949,8 +3952,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
 
@@ -4132,8 +4135,8 @@ mod tests {
 
         let repo = Repo {
             home: root.join(".home"),
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
         };
         let pipelines = Pipelines::load(&repo.root, &repo.config).expect("template must load");
@@ -4145,7 +4148,7 @@ mod tests {
     /// agents and prompts rather than an invented example.
     #[test]
     fn bare_contract_prints_every_section_as_json() {
-        let repo = repo_for("pipeline-contract-bare");
+        let (repo, _root_guard) = repo_for("pipeline-contract-bare");
         let pipelines = Pipelines::builtin();
         let value: serde_json::Value = serde_json::from_str(
             &serde_json::to_string(&build_contract(&repo, &pipelines)).unwrap(),
@@ -4205,8 +4208,8 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let config = Config::default();
             let repo = Repo {
-                checkout: root.clone(),
-                root: root.clone(),
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config,
                 home,
             };
@@ -4330,7 +4333,7 @@ mod tests {
     /// same load actually carries the patched value.
     #[test]
     fn pipeline_promote_starts_an_override_file_applying() {
-        let (repo, home) = repo_for_home_aware("promote-starts-applying");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-starts-applying");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();
@@ -4391,7 +4394,7 @@ mod tests {
     /// silent while it waits, and starts applying once that promote lands.
     #[test]
     fn pipeline_promote_starts_a_prompt_fork_applying_too() {
-        let (repo, home) = repo_for_home_aware("promote-starts-prompt-applying");
+        let (repo, home, _root_guard) = repo_for_home_aware("promote-starts-prompt-applying");
 
         crate::platform::test_home::with_home(&home, || {
             pipeline_copy(&repo, "default", "default-strict", false).unwrap();

@@ -724,8 +724,8 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let config = Config::default();
             let repo = Repo {
-                checkout: root.clone(),
-                root: root.clone(),
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config,
                 home,
             };

@@ -2090,7 +2090,11 @@ mod tests {
     /// and a linked worktree's checkout without paying for real git. What
     /// `doctor` reads is a function of which directory it is handed, not of
     /// anything git-specific, so this is enough to pin that down.
-    fn two_configs(name: &str, root_body: &str, checkout_body: &str) -> (PathBuf, PathBuf) {
+    fn two_configs(
+        name: &str,
+        root_body: &str,
+        checkout_body: &str,
+    ) -> (PathBuf, PathBuf, crate::scratch::ScratchRoot) {
         let base = crate::scratch::root(&format!("doctor-{name}"));
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("root");
@@ -2100,7 +2104,7 @@ mod tests {
             std::fs::create_dir_all(&state).unwrap();
             std::fs::write(state.join("config.toml"), body).unwrap();
         }
-        (root, checkout)
+        (root, checkout, base)
     }
 
     /// `--json`'s reading of a report: a `kind` tag per row, and the same
@@ -2145,7 +2149,7 @@ mod tests {
     /// override` or its siblings.
     #[test]
     fn override_layer_note_is_silent_with_no_layer() {
-        let repo = crate::commands::testutil::fixture("doctor-override-note-empty");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-override-note-empty");
         assert!(override_layer_note(&repo).is_empty());
     }
 
@@ -2155,7 +2159,7 @@ mod tests {
     /// all.
     #[test]
     fn override_layer_note_names_an_active_layer() {
-        let repo = crate::commands::testutil::fixture("doctor-override-note-active");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-override-note-active");
         let overrides = repo.overrides_dir();
         std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
         std::fs::write(
@@ -2178,7 +2182,7 @@ mod tests {
     /// read `collect_override_rows`.
     #[test]
     fn override_layer_note_names_a_stale_entry_with_its_reason() {
-        let repo = crate::commands::testutil::fixture("doctor-override-note-stale");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-override-note-stale");
         std::fs::create_dir_all(repo.checkout.join(".spoolway/pipelines")).unwrap();
         std::fs::write(
             repo.checkout.join(".spoolway/pipelines/default.yml"),
@@ -2218,7 +2222,7 @@ mod tests {
     /// that `Pipelines::load` now refuses (finding 25).
     #[test]
     fn the_model_check_points_at_the_pipelines_directory() {
-        let repo = crate::commands::testutil::fixture("doctor-model-check-points");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-model-check-points");
         let pipelines = crate::pipeline::Pipelines::builtin();
         let config = Config::default();
         let findings = agent_checks(&repo, &pipelines, &config);
@@ -2244,7 +2248,8 @@ mod tests {
 
     #[test]
     fn an_attended_synthetic_blocked_step_needs_no_model() {
-        let repo = crate::commands::testutil::fixture("doctor-attended-blocked-no-model");
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("doctor-attended-blocked-no-model");
         let mut pipelines = crate::pipeline::Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             pipeline
@@ -2276,7 +2281,8 @@ mod tests {
     /// after the colon — see the `home-mode-messages` task.
     #[test]
     fn the_has_a_model_failure_names_the_missing_step() {
-        let repo = crate::commands::testutil::fixture("doctor-model-check-names-step");
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("doctor-model-check-names-step");
         let mut pipelines = crate::pipeline::Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             pipeline
@@ -2416,7 +2422,7 @@ mod tests {
     /// is not.
     #[test]
     fn a_prompt_no_step_runs_is_noted_and_a_used_one_is_silent() {
-        let repo = scratch_repo("orphan-prompt");
+        let (repo, _root_guard) = scratch_repo("orphan-prompt");
         for name in ["worker", "summariser"] {
             let file = crate::prompt::directory_form(&repo, name);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -2443,7 +2449,7 @@ mod tests {
 
     #[test]
     fn names_key_reads_whichever_directory_it_is_given() {
-        let (root, checkout) = two_configs(
+        let (root, checkout, _base_guard) = two_configs(
             "names-key",
             "[dispatch]\nmax_launches = 3\n",
             "[dispatch]\nworktree_root = \"x\"\n",
@@ -2481,16 +2487,19 @@ mod tests {
     /// A `Repo` whose checkout is a scratch directory, real enough for
     /// `issue_tracking_checks` to stat a hook path against — nothing else
     /// reads `config` or `home` here, so both are defaults.
-    fn scratch_repo(name: &str) -> Repo {
+    fn scratch_repo(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let checkout = crate::scratch::root(&format!("doctor-{name}"));
         let _ = std::fs::remove_dir_all(&checkout);
         std::fs::create_dir_all(&checkout).unwrap();
-        Repo {
-            root: checkout.clone(),
-            home: checkout.join(".home"),
+        (
+            Repo {
+                root: checkout.to_path_buf(),
+                home: checkout.join(".home"),
+                checkout: checkout.to_path_buf(),
+                config: Config::default(),
+            },
             checkout,
-            config: Config::default(),
-        }
+        )
     }
 
     /// A hook named with nothing to hand it: `project_key` blank while
@@ -2499,7 +2508,7 @@ mod tests {
     /// than on `hook` itself.
     #[test]
     fn issue_tracking_checks_refuses_a_hook_with_a_blank_project_key() {
-        let repo = scratch_repo("blank-project-key");
+        let (repo, _root_guard) = scratch_repo("blank-project-key");
         let findings = issue_tracking_checks(&repo, &tracking("record.sh"));
         let Finding::Check(label, outcome) = &findings[0] else {
             panic!("{:?}", findings[0])
@@ -2515,7 +2524,7 @@ mod tests {
     /// `crate::tracking::is_bare_filename`.
     #[test]
     fn issue_tracking_checks_refuses_a_hook_that_is_not_a_bare_filename() {
-        let repo = scratch_repo("not-bare");
+        let (repo, _root_guard) = scratch_repo("not-bare");
         let findings = issue_tracking_checks(&repo, &tracking("../record.sh"));
         let Finding::Check(label, outcome) = &findings[1] else {
             panic!("{:?}", findings[1])
@@ -2531,7 +2540,7 @@ mod tests {
     /// config naming a script that was renamed or never copied in.
     #[test]
     fn issue_tracking_checks_refuses_a_hook_naming_a_script_that_does_not_exist() {
-        let repo = scratch_repo("missing-script");
+        let (repo, _root_guard) = scratch_repo("missing-script");
         let findings = issue_tracking_checks(&repo, &tracking("ghost.sh"));
         let Finding::Check(label, outcome) = &findings[2] else {
             panic!("{:?}", findings[2])
@@ -2547,7 +2556,7 @@ mod tests {
     /// names it, unlike the three checks above, which run for any hook.
     #[test]
     fn issue_tracking_checks_requires_acli_and_jq_for_the_jira_hook() {
-        let repo = scratch_repo("jira-hook");
+        let (repo, _root_guard) = scratch_repo("jira-hook");
         let hook = crate::cli::Tracker::Jira.hook_name();
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
@@ -2719,7 +2728,7 @@ mod tests {
     /// is set absurdly high and passing when it plainly is not.
     #[test]
     fn issue_tracking_checks_enforces_a_declared_tool_version() {
-        let repo = scratch_repo("requires-version");
+        let (repo, _root_guard) = scratch_repo("requires-version");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
@@ -2793,7 +2802,7 @@ mod tests {
     /// different name.
     #[test]
     fn issue_tracking_checks_defers_to_the_existing_not_on_path_failure() {
-        let repo = scratch_repo("requires-missing-tool");
+        let (repo, _root_guard) = scratch_repo("requires-missing-tool");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
@@ -2816,7 +2825,7 @@ mod tests {
     /// now exists.
     #[test]
     fn issue_tracking_checks_is_unchanged_with_no_requires_line() {
-        let repo = scratch_repo("no-requires");
+        let (repo, _root_guard) = scratch_repo("no-requires");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(hooks_dir.join("plain.sh"), "#!/bin/sh\nexit 0\n").unwrap();
@@ -2835,7 +2844,7 @@ mod tests {
     /// both when the script does write the line and when the flag is off.
     #[test]
     fn issue_tracking_checks_reports_key_in_names_without_a_slug_line() {
-        let repo = scratch_repo("slug-gap");
+        let (repo, _root_guard) = scratch_repo("slug-gap");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
@@ -3007,16 +3016,17 @@ mod tests {
     /// panes to test — [`crate::headless::Headless::create_pane`] hands back
     /// a `tab_id` of `None`, which is exactly the shape `live_check` has to
     /// answer with a note rather than a check for.
-    fn headless_mux(name: &str) -> crate::headless::Headless {
+    fn headless_mux(name: &str) -> (crate::headless::Headless, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("doctor-live-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        crate::headless::Headless::new(
+        let mux = crate::headless::Headless::new(
             &root,
             &crate::config::DispatchConfig::default(),
-            root.clone(),
+            root.to_path_buf(),
         )
-        .unwrap()
+        .unwrap();
+        (mux, root)
     }
 
     /// `--no-live` skips the row outright, without asking the backend
@@ -3024,7 +3034,7 @@ mod tests {
     /// counts towards `problems()` either way.
     #[test]
     fn no_live_skips_the_row_without_touching_the_backend() {
-        let mux = headless_mux("no-live");
+        let (mux, _root_guard) = headless_mux("no-live");
         assert!(matches!(
             live_check(&mux, LiveCheckMode::Skip),
             Finding::NoteVerbose(text) if text.contains("--no-live")
@@ -3041,7 +3051,7 @@ mod tests {
     /// instead.
     #[test]
     fn a_backend_with_no_real_pane_is_a_note_not_a_check() {
-        let mux = headless_mux("no-real-pane");
+        let (mux, _root_guard) = headless_mux("no-real-pane");
         assert!(matches!(
             live_check(&mux, LiveCheckMode::Default),
             Finding::NoteVerbose(text) if text.contains("no real pane")
@@ -3443,8 +3453,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3501,8 +3511,8 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: workspace.join("dispatchers").join("api"),
         };
@@ -3543,8 +3553,8 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: workspace.join("dispatchers").join("api"),
         };
@@ -3569,8 +3579,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3603,8 +3613,8 @@ mod tests {
         let home = root.join(".home");
         assert!(!home.exists());
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home,
         };
@@ -3640,8 +3650,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3768,8 +3778,8 @@ mod tests {
         std::fs::create_dir_all(state.join("logs")).unwrap();
 
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3841,7 +3851,7 @@ mod tests {
     /// or the one that opens a real pane.
     #[test]
     fn cheap_findings_excludes_network_pane_and_override_layer_checks() {
-        let repo = crate::commands::testutil::fixture("doctor-cheap-findings");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-findings");
         let overrides = repo.overrides_dir();
         std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
         std::fs::write(

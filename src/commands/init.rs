@@ -1322,7 +1322,7 @@ mod tests {
     }
 
     /// A project on disk after `init`, in a directory of its own.
-    fn scaffold(name: &str, args: &InitArgs) -> std::path::PathBuf {
+    fn scaffold(name: &str, args: &InitArgs) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("init-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -1816,8 +1816,8 @@ mod tests {
         run_init(&root, &confirmed()).expect("init");
         let home = root.join(".home");
         let repo = Repo {
-            checkout: root.clone(),
-            root,
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home,
         };
@@ -2281,10 +2281,10 @@ mod tests {
         std::fs::write(&hook, mine).unwrap();
 
         let repo = Repo {
-            checkout: root.clone(),
+            checkout: root.to_path_buf(),
             config: Config::load(&root).unwrap(),
             home: root.join(".home"),
-            root,
+            root: root.to_path_buf(),
         };
         // `scan`, not `run`: `run` also prints the report and writes the
         // sync-stamp, neither of which this test is about — see `sync.rs`'s

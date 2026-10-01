@@ -136,7 +136,7 @@ mod tests {
     /// release takes it off.
     #[test]
     fn a_mark_reads_only_under_a_live_lock_and_goes_on_release() {
-        let repo = crate::status::testutil::fixture("claim-live-lock");
+        let (repo, _root_guard) = crate::status::testutil::fixture("claim-live-lock");
         let mut claims = Claims::new(&repo);
         claims.claim("t1", "implement");
         assert!(live(&repo).is_empty(), "no lock, no mark");
@@ -152,7 +152,7 @@ mod tests {
     /// bookkeeping — is cleared on the way out.
     #[test]
     fn a_held_mark_is_cleared_on_drop() {
-        let repo = crate::status::testutil::fixture("claim-drop");
+        let (repo, _root_guard) = crate::status::testutil::fixture("claim-drop");
         {
             let mut claims = Claims::new(&repo);
             claims.claim("t1", "implement");
@@ -165,7 +165,7 @@ mod tests {
     /// A mark left by a dispatcher killed mid-boot is swept by `clear`.
     #[test]
     fn clear_sweeps_a_mark_left_behind() {
-        let repo = crate::status::testutil::fixture("claim-clear");
+        let (repo, _root_guard) = crate::status::testutil::fixture("claim-clear");
         let mut claims = Claims::new(&repo);
         claims.claim("t1", "implement");
         std::mem::forget(claims);

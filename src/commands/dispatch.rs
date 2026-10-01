@@ -1352,7 +1352,7 @@ mod tests {
     /// error naming "already running", not as a silent takeover.
     #[test]
     fn a_dispatch_finding_the_lock_held_never_takes_it() {
-        let repo = fixture("lock-held-never-taken");
+        let (repo, _root_guard) = fixture("lock-held-never-taken");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs::default();
@@ -1371,7 +1371,7 @@ mod tests {
     /// fifth exactly like the first.
     #[test]
     fn a_held_lock_is_refused_the_same_way_every_time() {
-        let repo = fixture("repeated-refusal");
+        let (repo, _root_guard) = fixture("repeated-refusal");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs::default();
@@ -1390,7 +1390,7 @@ mod tests {
     /// two apart.
     #[test]
     fn an_empty_queue_exits_three() {
-        let repo = fixture("empty-queue-exit");
+        let (repo, _root_guard) = fixture("empty-queue-exit");
         let args = DispatchArgs::default();
         assert_eq!(
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
@@ -1473,7 +1473,7 @@ mod tests {
     /// start, naming both tasks and both bases, and the fix.
     #[test]
     fn check_task_bases_refuses_a_dependent_that_disagrees_with_its_dependency() {
-        let repo = fixture("bases-chain-disagrees");
+        let (repo, _root_guard) = fixture("bases-chain-disagrees");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         crate::commands::testutil::add(&repo, "cart-discounts", &["cart-totals"]);
         let mut discounts = repo.task("cart-discounts").unwrap();
@@ -1503,7 +1503,7 @@ mod tests {
     /// worktree.
     #[test]
     fn check_task_bases_refuses_a_cut_task_whose_base_moved() {
-        let repo = fixture("bases-cut-moved");
+        let (repo, _root_guard) = fixture("bases-cut-moved");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         let mut totals = repo.task("cart-totals").unwrap();
         totals.front.cut_from = Some("plan/demo".to_string());
@@ -1531,7 +1531,7 @@ mod tests {
     /// locally before `origin` is ever asked.
     #[test]
     fn check_task_bases_refuses_a_task_whose_base_exists_nowhere() {
-        let repo = fixture("bases-base-gone");
+        let (repo, _root_guard) = fixture("bases-base-gone");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         let mut totals = repo.task("cart-totals").unwrap();
         totals.front.base = Some("task/gh-412-checkout".to_string());
@@ -1558,7 +1558,7 @@ mod tests {
     /// error (non-goal).
     #[test]
     fn check_task_bases_does_not_ask_existence_of_a_task_already_cut() {
-        let repo = fixture("bases-cut-not-asked");
+        let (repo, _root_guard) = fixture("bases-cut-not-asked");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         let mut totals = repo.task("cart-totals").unwrap();
         totals.front.cut_from = Some("plan/demo".to_string());
@@ -1572,7 +1572,7 @@ mod tests {
     /// untouched.
     #[test]
     fn check_task_bases_passes_a_consistent_chain() {
-        let repo = fixture("bases-consistent");
+        let (repo, _root_guard) = fixture("bases-consistent");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         crate::commands::testutil::add(&repo, "cart-discounts", &["cart-totals"]);
 
@@ -1584,7 +1584,7 @@ mod tests {
     /// find it that way.
     #[test]
     fn a_lock_already_held_exits_four() {
-        let repo = fixture("lock-held-exit");
+        let (repo, _root_guard) = fixture("lock-held-exit");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         let args = DispatchArgs::default();
         assert_eq!(
@@ -1599,7 +1599,7 @@ mod tests {
     /// own running yet.
     #[test]
     fn a_live_screen_lock_refuses_a_typed_dispatch() {
-        let repo = fixture("screen-lock-refuses");
+        let (repo, _root_guard) = fixture("screen-lock-refuses");
         let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         let args = DispatchArgs::default();
         assert_eq!(
@@ -1614,7 +1614,7 @@ mod tests {
     /// take the dispatcher's own lock and run.
     #[test]
     fn a_screen_started_child_is_not_refused_by_its_own_parent() {
-        let repo = fixture("screen-child-not-refused");
+        let (repo, _root_guard) = fixture("screen-child-not-refused");
         let _screen_lock =
             crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         assert!(!already_running(&repo, true).unwrap());
@@ -1626,7 +1626,7 @@ mod tests {
     /// already applies to the dispatcher's own lock.
     #[test]
     fn a_dead_process_in_either_lock_does_not_refuse() {
-        let repo = fixture("dead-holder-not-refused");
+        let (repo, _root_guard) = fixture("dead-holder-not-refused");
         std::fs::write(repo.screen_lock_file(), "0\n").unwrap();
         std::fs::write(repo.lock_file(), "0\n").unwrap();
         assert!(!already_running(&repo, false).unwrap());
@@ -1670,7 +1670,7 @@ mod tests {
     /// leave alone.
     #[test]
     fn git_identity_is_not_checked_when_nothing_commits() {
-        let mut repo = fixture("git-identity-nothing-commits");
+        let (mut repo, _root_guard) = fixture("git-identity-nothing-commits");
         blank_git_identity(&repo);
         repo.config.dispatch.auto_commit = false;
         assert!(
@@ -1687,7 +1687,7 @@ mod tests {
     /// it once wrapped for `dispatch`'s own refusal.
     #[test]
     fn git_identity_is_refused_when_the_shipped_pipeline_reaches_stack() {
-        let repo = fixture("git-identity-missing");
+        let (repo, _root_guard) = fixture("git-identity-missing");
         blank_git_identity(&repo);
 
         let bare = format!(
@@ -1726,7 +1726,7 @@ mod tests {
     /// stack` at all — is reason enough: `auto_commit` commits on its own.
     #[test]
     fn git_identity_is_refused_for_auto_commit_alone() {
-        let repo = fixture("git-identity-auto-commit-alone");
+        let (repo, _root_guard) = fixture("git-identity-auto-commit-alone");
         blank_git_identity(&repo);
         let err = check_git_identity(&repo, &single_step_pipelines(), &repo.config).unwrap_err();
         let message = format!("{err:#}");
@@ -1740,7 +1740,7 @@ mod tests {
     /// does commit and does have an identity passes clean.
     #[test]
     fn git_identity_passes_when_it_is_set() {
-        let repo = fixture("git-identity-set");
+        let (repo, _root_guard) = fixture("git-identity-set");
         assert!(
             check_git_identity(&repo, &Pipelines::builtin(), &repo.config)
                 .unwrap()
@@ -1756,7 +1756,7 @@ mod tests {
     /// checkout's, does.
     #[test]
     fn git_identity_reads_the_config_it_is_handed_not_repos_own() {
-        let mut repo = fixture("git-identity-checkout-config");
+        let (mut repo, _root_guard) = fixture("git-identity-checkout-config");
         blank_git_identity(&repo);
         repo.config.dispatch.auto_commit = false;
         let mut checkout_config = repo.config.clone();
@@ -1779,7 +1779,7 @@ mod tests {
     /// absence is a pass.
     #[test]
     fn index_lock_is_refused_when_present_and_clear_otherwise() {
-        let repo = fixture("index-lock");
+        let (repo, _root_guard) = fixture("index-lock");
         assert!(check_index_lock(&repo).unwrap().is_none());
 
         // Joined a component at a time, the way `check_index_lock` builds it
@@ -1809,16 +1809,19 @@ mod tests {
     /// A bare repository stands in for a checkout `main_checkout` cannot
     /// place at all — one of the two cases `check_backend_checkout` refuses
     /// herdr on, its own doc above.
-    fn bare_repo(name: &str) -> Repo {
+    fn bare_repo(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let dir = crate::scratch::root(&format!("bare-checkout-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         crate::repo::run(&dir, "git", &["init", "-q", "--bare"]).unwrap();
-        Repo {
-            root: dir.clone(),
-            checkout: dir.clone(),
-            config: Config::default(),
-            home: dir.join(".home"),
-        }
+        (
+            Repo {
+                root: dir.to_path_buf(),
+                checkout: dir.to_path_buf(),
+                config: Config::default(),
+                home: dir.join(".home"),
+            },
+            dir,
+        )
     }
 
     /// A repo dispatched from a linked worktree — `checkout` a sibling
@@ -1971,7 +1974,7 @@ mod tests {
     /// only herdr binds a workspace to a resolved main checkout at all.
     #[test]
     fn backend_checkout_is_unconcerned_with_a_non_herdr_backend() {
-        let repo = bare_repo("non-herdr");
+        let (repo, _root_guard) = bare_repo("non-herdr");
         let mux = StubMux {
             name: "headless",
             available: true,
@@ -1985,7 +1988,7 @@ mod tests {
     /// main checkout fine and passes.
     #[test]
     fn backend_checkout_passes_herdr_on_an_ordinary_checkout() {
-        let repo = fixture("herdr-ordinary-checkout");
+        let (repo, _root_guard) = fixture("herdr-ordinary-checkout");
         let mux = StubMux {
             name: "herdr",
             available: true,
@@ -1999,7 +2002,7 @@ mod tests {
     /// can place at all — is refused, naming the path and a way out.
     #[test]
     fn backend_checkout_refuses_herdr_on_a_bare_repository() {
-        let repo = bare_repo("herdr-bare");
+        let (repo, _root_guard) = bare_repo("herdr-bare");
         let mux = StubMux {
             name: "herdr",
             available: true,
@@ -2183,22 +2186,22 @@ mod tests {
     /// whether or not the test process happens to have a real terminal.
     #[test]
     fn overrides_gate_with_no_layer_proceeds_without_asking() {
-        let repo = fixture("overrides-gate-no-layer");
+        let (repo, _root_guard) = fixture("overrides-gate-no-layer");
         assert!(overrides_gate(&repo).unwrap());
     }
 
     /// A fixture with a real layer on it, forked the same way `spoolway
     /// pipeline override` writes one — for every `overrides_gate_with` case
     /// below, which needs an actual `OverrideRow` to ask about.
-    fn fixture_with_layer(name: &str) -> Repo {
-        let repo = fixture(name);
+    fn fixture_with_layer(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (repo, root_guard) = fixture(name);
         std::fs::create_dir_all(repo.overrides_dir().join("pipelines")).unwrap();
         std::fs::write(
             repo.overrides_dir().join("pipelines/default.yml"),
             "steps:\n  implement:\n    model: fake-opus\n",
         )
         .unwrap();
-        repo
+        (repo, root_guard)
     }
 
     fn keys(s: &str) -> std::io::Cursor<Vec<u8>> {
@@ -2212,7 +2215,7 @@ mod tests {
     /// here would hang the test rather than fail it.
     #[test]
     fn overrides_gate_with_a_layer_and_no_tty_proceeds_having_printed() {
-        let repo = fixture_with_layer("overrides-gate-no-tty");
+        let (repo, _root_guard) = fixture_with_layer("overrides-gate-no-tty");
         let mut input = keys("");
         let mut out = Vec::new();
         let proceed = overrides_gate_with(
@@ -2233,7 +2236,7 @@ mod tests {
     /// written, since the mockup reserves that for `x` alone.
     #[test]
     fn overrides_gate_enter_proceeds_without_acknowledging() {
-        let repo = fixture_with_layer("overrides-gate-enter");
+        let (repo, _root_guard) = fixture_with_layer("overrides-gate-enter");
         let mut input = keys("\r");
         let mut out = Vec::new();
         assert!(
@@ -2260,7 +2263,7 @@ mod tests {
     /// either.
     #[test]
     fn overrides_gate_esc_declines() {
-        let repo = fixture_with_layer("overrides-gate-esc");
+        let (repo, _root_guard) = fixture_with_layer("overrides-gate-esc");
         let mut input = keys("\x1b");
         let mut out = Vec::new();
         assert!(
@@ -2285,7 +2288,7 @@ mod tests {
     /// all, or it would hang rather than pass.
     #[test]
     fn overrides_gate_x_acknowledges_and_is_not_asked_again() {
-        let repo = fixture_with_layer("overrides-gate-x");
+        let (repo, _root_guard) = fixture_with_layer("overrides-gate-x");
         let fingerprint = crate::version::layer_fingerprint(&repo).unwrap();
 
         let mut input = keys("x");
@@ -2485,7 +2488,7 @@ mod tests {
     /// one blank row, the key line, and the border straight under it.
     #[test]
     fn the_overrides_popup_reads_as_the_dispatch_tab_draws_it() {
-        let repo = fixture_with_layer("overrides-popup-layout");
+        let (repo, _root_guard) = fixture_with_layer("overrides-popup-layout");
         let panel = overrides_popup(&repo)
             .unwrap()
             .expect("a layer to name")
@@ -2514,7 +2517,7 @@ mod tests {
     /// Step 20: the same shape, the key line straight on the border.
     #[test]
     fn the_warnings_popup_reads_as_the_dispatch_tab_draws_it() {
-        let mut repo = fixture("warnings-popup-layout");
+        let (mut repo, _root_guard) = fixture("warnings-popup-layout");
         repo.config.unattended.enabled = true;
         let panel = warnings_popup(&repo, &Pipelines::builtin())
             .expect("unattended with no ceiling is worth a warning")
@@ -2539,7 +2542,7 @@ mod tests {
     /// screen, though the popup wraps the same findings narrower.
     #[test]
     fn hiding_the_warnings_popup_hides_the_cli_screen_too() {
-        let mut repo = fixture("warnings-popup-hide");
+        let (mut repo, _root_guard) = fixture("warnings-popup-hide");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         warnings_popup(&repo, &pipelines)
@@ -2565,7 +2568,7 @@ mod tests {
     /// `x` on the overrides popup does the same for the overrides gate.
     #[test]
     fn hiding_the_overrides_popup_hides_the_cli_gate_too() {
-        let repo = fixture_with_layer("overrides-popup-hide");
+        let (repo, _root_guard) = fixture_with_layer("overrides-popup-hide");
         overrides_popup(&repo)
             .unwrap()
             .expect("a layer to name")
@@ -2593,7 +2596,7 @@ mod tests {
     /// test).
     #[test]
     fn warnings_gate_with_no_tty_prints_and_proceeds() {
-        let repo = fixture("warnings-gate-no-tty");
+        let (repo, _root_guard) = fixture("warnings-gate-no-tty");
         let pipelines = Pipelines::builtin();
         let mut input = keys("");
         let mut out = Vec::new();
@@ -2619,7 +2622,7 @@ mod tests {
     /// rather than skipping itself for having nothing to say.
     #[test]
     fn warnings_gate_enter_proceeds_without_acknowledging() {
-        let mut repo = fixture("warnings-gate-enter");
+        let (mut repo, _root_guard) = fixture("warnings-gate-enter");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         let mut input = keys("\r");
@@ -2641,7 +2644,7 @@ mod tests {
     /// anything below it in `dispatch` ever spawns a lane.
     #[test]
     fn warnings_gate_esc_declines() {
-        let mut repo = fixture("warnings-gate-esc");
+        let (mut repo, _root_guard) = fixture("warnings-gate-esc");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         let mut input = keys("\x1b");
@@ -2665,7 +2668,7 @@ mod tests {
     /// and it draws nothing.
     #[test]
     fn warnings_gate_x_acknowledges_and_is_not_asked_again() {
-        let mut repo = fixture("warnings-gate-x");
+        let (mut repo, _root_guard) = fixture("warnings-gate-x");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
 
@@ -2708,7 +2711,7 @@ mod tests {
     /// screen's headings are not.
     #[test]
     fn warnings_gate_footer_is_flush_left() {
-        let mut repo = fixture("warnings-gate-footer");
+        let (mut repo, _root_guard) = fixture("warnings-gate-footer");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         let mut input = keys("\x1b");

@@ -164,3 +164,6 @@ what the lane reported. See [Comparing pipelines](eval.md).
 
 Each project has its own `usage.jsonl`. Setup and dispatch note the project root in an index
 under the state directory, and `--all` reads every ledger it lists. The index holds no usage.
+
+A read or a write of the index drops any project whose checkout and whose home are both gone
+from disk.

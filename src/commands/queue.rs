@@ -7362,7 +7362,7 @@ mod tests {
     fn queue_json_calls_a_stranded_task_queued_with_no_field_in_its_place() {
         use crate::status::testutil::{add, fixture};
 
-        let repo = fixture("stranded-json");
+        let (repo, _root_guard) = fixture("stranded-json");
         let pipelines = Pipelines::builtin();
         add(&repo, "search-typo", &[], Some(crate::pipeline::BLOCKED));
         add(
@@ -7563,7 +7563,7 @@ mod tests {
     /// before anything is read from `--from`, naming why.
     #[test]
     fn queue_add_refuses_from_inside_a_lanes_own_environment() {
-        let repo = fixture("queue-add-in-lane");
+        let (repo, _root_guard) = fixture("queue-add-in-lane");
         let text = task_text("login", "", BODY);
         let path = write_doc(&repo, "login.md", &text);
 
@@ -7589,7 +7589,7 @@ mod tests {
     /// base a submission gets.
     #[test]
     fn a_task_is_based_on_the_flag_not_the_checkout_it_was_queued_in() {
-        let repo = fixture("base-from-flag-not-cwd");
+        let (repo, _root_guard) = fixture("base-from-flag-not-cwd");
         let git = |dir: &Path, args: &[&str]| crate::repo::run(dir, "git", args).unwrap();
         git(&repo.root, &["config", "user.email", "t@example.com"]);
         git(&repo.root, &["config", "user.name", "t"]);
@@ -7638,7 +7638,7 @@ mod tests {
     /// this task will be cut from. Across two plan branches it never does.
     #[test]
     fn a_dependency_on_a_task_of_another_plan_branch_is_refused() {
-        let repo = fixture("cross-base-dep");
+        let (repo, _root_guard) = fixture("cross-base-dep");
         add(&repo, "login", &[]);
 
         let mut sessions = queued(&repo, "login");
@@ -7655,7 +7655,7 @@ mod tests {
 
     #[test]
     fn a_dependency_on_a_task_that_does_not_exist_is_refused() {
-        let repo = fixture("unknown-dep");
+        let (repo, _root_guard) = fixture("unknown-dep");
         add(&repo, "login", &[]);
 
         let text = task_text("sessions", "group: demo\ndepends_on: [lgoin]\n", BODY);
@@ -7681,7 +7681,7 @@ mod tests {
     /// it, and this is the one caller that knows enough to say so.
     #[test]
     fn a_dependency_swept_out_of_the_archive_says_the_age_is_why() {
-        let repo = fixture("swept-dep");
+        let (repo, _root_guard) = fixture("swept-dep");
 
         // `login` finished a while ago: written straight into `archive/`,
         // the same shape a real `done` task lands in, rather than queued and
@@ -7738,7 +7738,7 @@ mod tests {
     /// is refused by name, with the fix named too.
     #[test]
     fn a_task_setting_parallel_is_refused() {
-        let repo = fixture("parallel-is-gone");
+        let (repo, _root_guard) = fixture("parallel-is-gone");
         let text = task_text("cart-empty", "group: cart\nparallel: true\n", BODY);
         let path = write_doc(&repo, "cart-empty.md", &text);
         let err = queue_add(
@@ -7764,7 +7764,7 @@ mod tests {
     /// mockup verbatim.
     #[test]
     fn a_group_with_two_roots_is_refused() {
-        let repo = fixture("two-roots");
+        let (repo, _root_guard) = fixture("two-roots");
         let a = write_doc(
             &repo,
             "cart-totals.md",
@@ -7798,7 +7798,7 @@ mod tests {
     /// puts a task into, and `doctor` is the backstop for the rest.
     #[test]
     fn a_broken_group_on_disk_does_not_refuse_a_task_in_another_group() {
-        let repo = fixture("unrelated-broken-group");
+        let (repo, _root_guard) = fixture("unrelated-broken-group");
         for id in ["live-a", "live-b"] {
             std::fs::write(
                 repo.queue_dir().join(format!("{id}.md")),
@@ -7828,7 +7828,7 @@ mod tests {
     /// second time.
     #[test]
     fn a_group_reused_after_its_only_task_is_archived_is_not_a_second_root() {
-        let repo = fixture("group-reused-after-archive");
+        let (repo, _root_guard) = fixture("group-reused-after-archive");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("audit-deps-1.md"),
@@ -7856,7 +7856,7 @@ mod tests {
     /// closed name being picked up again, and still refused.
     #[test]
     fn a_second_root_is_refused_while_the_groups_first_task_is_still_queued() {
-        let repo = fixture("group-still-queued-two-roots");
+        let (repo, _root_guard) = fixture("group-still-queued-two-roots");
         add(&repo, "audit-deps-1", &[]);
 
         let text = task_text("audit-deps-2", "group: demo\n", BODY);
@@ -7881,7 +7881,7 @@ mod tests {
     /// refused, naming both dependents and the group.
     #[test]
     fn a_group_with_a_fan_is_refused() {
-        let repo = fixture("group-fan");
+        let (repo, _root_guard) = fixture("group-fan");
         add(&repo, "cart-totals", &[]);
         let left = write_doc(
             &repo,
@@ -7925,7 +7925,7 @@ mod tests {
     /// refused, naming that group rather than reading like a typo.
     #[test]
     fn a_dependency_on_a_group_still_in_the_pending_directory_is_refused() {
-        let repo = fixture("pending-group-dep");
+        let (repo, _root_guard) = fixture("pending-group-dep");
         write_pending(
             &repo,
             "login",
@@ -7950,7 +7950,7 @@ mod tests {
 
     #[test]
     fn a_dependency_that_would_close_a_cycle_is_refused() {
-        let repo = fixture("cycle-dep");
+        let (repo, _root_guard) = fixture("cycle-dep");
         add(&repo, "a", &[]);
         add(&repo, "b", &["a"]);
 
@@ -7965,7 +7965,7 @@ mod tests {
 
     #[test]
     fn a_task_may_not_depend_on_itself() {
-        let repo = fixture("self-dep");
+        let (repo, _root_guard) = fixture("self-dep");
         let text = task_text("a", "group: demo\ndepends_on: [a]\n", BODY);
         let path = write_doc(&repo, "a.md", &text);
         let err = queue_add(
@@ -7986,7 +7986,7 @@ mod tests {
     /// depends on.
     #[test]
     fn a_dependency_on_a_task_of_another_group_that_is_not_its_last_is_refused() {
-        let repo = fixture("cross-group-dep");
+        let (repo, _root_guard) = fixture("cross-group-dep");
         add(&repo, "login", &[]);
         add(&repo, "profile", &["login"]);
 
@@ -8015,7 +8015,7 @@ mod tests {
     /// cut from that task's branch like any other dependency.
     #[test]
     fn a_group_stacks_onto_anothers_last_task_is_accepted() {
-        let repo = fixture("group-stacks-on-group");
+        let (repo, _root_guard) = fixture("group-stacks-on-group");
         add(&repo, "login", &[]);
 
         let text = task_text("sessions", "group: other\ndepends_on: [login]\n", BODY);
@@ -8042,7 +8042,7 @@ mod tests {
     /// below cover the rest of this shape.
     #[test]
     fn a_task_naming_a_cross_group_dependency_alongside_an_in_group_one_is_refused() {
-        let repo = fixture("cross-group-plus-in-group");
+        let (repo, _root_guard) = fixture("cross-group-plus-in-group");
         add(&repo, "billing", &[]);
         let text = task_text("login", "group: other\n", BODY);
         let path = write_doc(&repo, "login.md", &text);
@@ -8080,7 +8080,7 @@ mod tests {
     /// at most one, since two would be a join across groups.
     #[test]
     fn a_task_naming_two_other_groups_is_refused() {
-        let repo = fixture("cross-group-two-groups");
+        let (repo, _root_guard) = fixture("cross-group-two-groups");
         queue_add(
             &repo,
             &Pipelines::builtin(),
@@ -8130,7 +8130,7 @@ mod tests {
     /// last task, and no more than that one task.
     #[test]
     fn a_task_naming_two_tasks_of_the_same_other_group_is_refused() {
-        let repo = fixture("cross-group-two-tasks-one-group");
+        let (repo, _root_guard) = fixture("cross-group-two-tasks-one-group");
         queue_add(
             &repo,
             &Pipelines::builtin(),
@@ -8188,7 +8188,7 @@ mod tests {
     /// land before the dependent is ever queued.
     #[test]
     fn stacking_onto_a_group_that_has_fully_landed_is_accepted() {
-        let repo = fixture("stack-onto-landed-group");
+        let (repo, _root_guard) = fixture("stack-onto-landed-group");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("auth-login.md"),
@@ -8222,7 +8222,7 @@ mod tests {
     /// is still refused, naming the task that depends on it in turn.
     #[test]
     fn stacking_onto_a_landed_groups_non_last_task_is_refused() {
-        let repo = fixture("stack-onto-landed-non-tail");
+        let (repo, _root_guard) = fixture("stack-onto-landed-non-tail");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("auth-login.md"),
@@ -8263,7 +8263,7 @@ mod tests {
     /// outright before this test ever got to stack `demo` onto it.
     #[test]
     fn stacking_onto_a_group_that_is_not_one_chain_is_refused() {
-        let repo = fixture("cross-group-not-a-chain");
+        let (repo, _root_guard) = fixture("cross-group-not-a-chain");
         std::fs::write(
             repo.queue_dir().join("auth-one.md"),
             "---\nid: auth-one\ntitle: auth-one\ngroup: auth\nstage: queued\n---\nbody\n",
@@ -8297,7 +8297,7 @@ mod tests {
     /// on: with it off the same two groups are still two groups.
     #[test]
     fn a_dependency_on_a_sibling_whose_group_carries_the_slug_prefix_is_accepted() {
-        let repo = fixture("cross-batch-slug-prefix");
+        let (repo, _root_guard) = fixture("cross-batch-slug-prefix");
         add(&repo, "auth-01", &[]);
         // What the first `queue add` left behind with the flag on.
         let mut parent = queued(&repo, "auth-01");
@@ -8331,7 +8331,7 @@ mod tests {
     /// rather than a two-group stack (jobs review finding 3).
     #[test]
     fn bare_group_strips_a_recognised_slug_prefix_only_with_the_flag_on() {
-        let mut repo = fixture("bare-group-slug");
+        let (mut repo, _root_guard) = fixture("bare-group-slug");
         add(&repo, "auth-01", &[]);
         let mut parent = queued(&repo, "auth-01");
         parent.front.group = Some("proj-12-demo".into());
@@ -8361,7 +8361,7 @@ mod tests {
     /// first itself rather than trusting the task's own order.
     #[test]
     fn a_depends_on_naming_two_parents_is_reordered_so_the_deeper_one_leads() {
-        let repo = fixture("reorder-dep");
+        let (repo, _root_guard) = fixture("reorder-dep");
         add(&repo, "base", &[]);
         add(&repo, "top", &["base"]);
 
@@ -8389,7 +8389,7 @@ mod tests {
     /// as it went in.
     #[test]
     fn a_single_id_depends_on_is_left_untouched() {
-        let repo = fixture("single-dep");
+        let (repo, _root_guard) = fixture("single-dep");
         add(&repo, "login", &[]);
         add(&repo, "sessions", &["login"]);
 
@@ -8411,7 +8411,7 @@ mod tests {
         // so the three go in one submission, the one shape that can still
         // reach `c`'s own reorder check before the group-shape check ever
         // gets a look at `a` and `b` alone.
-        let repo = fixture("no-head-dep");
+        let (repo, _root_guard) = fixture("no-head-dep");
         let a = write_doc(&repo, "a.md", &task_text("a", "group: demo\n", BODY));
         let b = write_doc(&repo, "b.md", &task_text("b", "group: demo\n", BODY));
         let c = write_doc(
@@ -8443,7 +8443,7 @@ mod tests {
     /// the step it was pulled off of.
     #[test]
     fn queue_pause_parks_a_task_with_nothing_live_to_interrupt() {
-        let repo = fixture("queue-pause");
+        let (repo, _root_guard) = fixture("queue-pause");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -8464,7 +8464,7 @@ mod tests {
     /// survives untouched beside the fresh `parked_from: blocked`.
     #[test]
     fn queue_pause_interrupts_a_blocked_tasks_live_unblocker() {
-        let mut repo = fixture("queue-pause-blocked");
+        let (mut repo, _root_guard) = fixture("queue-pause-blocked");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[]);
@@ -8497,7 +8497,7 @@ mod tests {
 
     #[test]
     fn queue_pause_refuses_an_unknown_task() {
-        let repo = fixture("queue-pause-unknown");
+        let (repo, _root_guard) = fixture("queue-pause-unknown");
         let pipelines = Pipelines::builtin();
         assert!(queue_pause(&repo, &pipelines, "ghost", false).is_err());
     }
@@ -8511,7 +8511,7 @@ mod tests {
     /// proves the process is actually gone, not just forgotten about.
     #[test]
     fn queue_pause_refuses_a_running_command_step_without_force() {
-        let repo = fixture("queue-pause-running");
+        let (repo, _root_guard) = fixture("queue-pause-running");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -8561,7 +8561,7 @@ mod tests {
     /// `crate::status::resume_task`.
     #[test]
     fn queue_resume_sends_a_paused_task_back_onto_its_step() {
-        let repo = fixture("queue-resume");
+        let (repo, _root_guard) = fixture("queue-resume");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -8588,7 +8588,7 @@ mod tests {
     /// suite could not tell apart from the guard doing its job.
     #[test]
     fn a_question_held_task_is_restarted_on_the_step_its_pane_never_answered() {
-        let repo = fixture("queue-resume-question-pane");
+        let (repo, _root_guard) = fixture("queue-resume-question-pane");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -8617,7 +8617,7 @@ mod tests {
 
     #[test]
     fn queue_resume_refuses_an_unknown_task() {
-        let repo = fixture("queue-resume-unknown");
+        let (repo, _root_guard) = fixture("queue-resume-unknown");
         let pipelines = Pipelines::builtin();
         assert!(queue_resume(&repo, &pipelines, "ghost").is_err());
     }
@@ -8627,7 +8627,7 @@ mod tests {
     /// fill one in with, still unfilled.
     #[test]
     fn bare_queue_add_prints_an_unfilled_skeleton_task() {
-        let repo = fixture("skeleton");
+        let (repo, _root_guard) = fixture("skeleton");
         let pipelines = Pipelines::builtin();
 
         let doc = skeleton_task(&repo, &pipelines).unwrap();
@@ -8893,7 +8893,7 @@ mod tests {
     /// this one finished too.
     #[test]
     fn validate_batch_refuses_an_id_in_either_the_queue_or_the_archive() {
-        let repo = fixture("validate-batch-existing");
+        let (repo, _root_guard) = fixture("validate-batch-existing");
         std::fs::write(
             repo.queue_dir().join("taken.md"),
             "---\nid: taken\ntitle: taken\nstage: queued\n---\nbody\n",
@@ -8940,7 +8940,7 @@ mod tests {
     /// own value happens to disagree with the flag.
     #[test]
     fn a_flags_base_is_checked_the_same_as_a_tasks_own() {
-        let repo = fixture("flag-base-checked");
+        let (repo, _root_guard) = fixture("flag-base-checked");
         let text = task_text("demo", "group: demo\n", BODY);
         let err = validate_batch(
             &repo,
@@ -8967,7 +8967,7 @@ mod tests {
     /// to shadow each other into skipping the check.
     #[test]
     fn a_tasks_own_base_is_checked_even_when_it_matches_the_flag() {
-        let repo = fixture("own-base-matches-flag");
+        let (repo, _root_guard) = fixture("own-base-matches-flag");
         let text = task_text("demo", "group: demo\nbase: no/such/branch\n", BODY);
         let err = validate_batch(
             &repo,
@@ -8985,7 +8985,7 @@ mod tests {
     /// would refuse the ordinary case of stacking a task on one.
     #[test]
     fn a_base_only_origin_has_is_accepted() {
-        let repo = fixture("remote-only-base");
+        let (repo, _root_guard) = fixture("remote-only-base");
         let origin = crate::scratch::root("remote-only-base-origin.git");
         let _ = std::fs::remove_dir_all(&origin);
         std::fs::create_dir_all(&origin).unwrap();
@@ -9072,7 +9072,7 @@ mod tests {
     /// in this batch.
     #[test]
     fn a_sibling_in_the_same_submission_satisfies_depends_on() {
-        let repo = fixture("sibling-dep");
+        let (repo, _root_guard) = fixture("sibling-dep");
         let login = task_text("login", "group: demo\n", BODY);
         let sessions = task_text("sessions", "group: demo\ndepends_on: [login]\n", BODY);
         let login_path = write_doc(&repo, "login.md", &login);
@@ -9095,7 +9095,7 @@ mod tests {
     /// leave the ones that would have passed sitting in the queue.
     #[test]
     fn one_bad_task_queues_nothing_from_the_same_submission() {
-        let repo = fixture("all-or-none");
+        let (repo, _root_guard) = fixture("all-or-none");
         let good = task_text("wire", "group: demo\n", BODY);
         let bad = task_text("bogus", "group: demo\ndepends_on: [ghost]\n", BODY);
         let good_path = write_doc(&repo, "wire.md", &good);
@@ -9136,7 +9136,7 @@ mod tests {
     /// filename order — non-markdown files beside them are not tasks.
     #[test]
     fn a_directory_expands_to_its_md_files_in_order() {
-        let repo = fixture("from-dir");
+        let (repo, _root_guard) = fixture("from-dir");
         let dir = repo.root.join("tasks");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("b.md"), task_text("b", "group: demo\n", BODY)).unwrap();
@@ -9289,7 +9289,7 @@ mod tests {
     /// bare `spoolway` without meaning two things on one screen.
     #[test]
     fn only_tab_moves_focus_between_the_two_panes() {
-        let repo = fixture("screen-focus-tab-only");
+        let (repo, _root_guard) = fixture("screen-focus-tab-only");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let groups = listed(&repo);
         let mut state = ScreenState::new();
@@ -9306,7 +9306,7 @@ mod tests {
     /// group cursor where it was; over the groups pane it does nothing.
     #[test]
     fn esc_returns_focus_from_the_tasks_pane_and_keeps_the_group_cursor() {
-        let repo = fixture("screen-focus-esc");
+        let (repo, _root_guard) = fixture("screen-focus-esc");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         write_pending(&repo, "gate", &task_text("gate", "group: b\n", BODY));
         let groups = listed(&repo);
@@ -9333,7 +9333,7 @@ mod tests {
     #[test]
     fn hosted_the_key_line_follows_focus_between_the_two_panes() {
         use crate::screen::shell::{Hosting, Tab};
-        let repo = fixture("screen-hosted-footer-focus");
+        let (repo, _root_guard) = fixture("screen-hosted-footer-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
         let groups_line = "[space] select   [enter] queue   [f] find   [tab] tasks   [t] trial   \
@@ -9367,7 +9367,7 @@ mod tests {
     #[test]
     fn hosted_the_arrows_leave_the_tab_from_the_tasks_pane_too() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture("screen-hosted-leave-tasks");
+        let (repo, _root_guard) = fixture("screen-hosted-leave-tasks");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
@@ -9383,7 +9383,7 @@ mod tests {
     #[test]
     fn hosted_the_arrows_and_q_leave_the_tab_while_browsing() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture("screen-hosted-leave");
+        let (repo, _root_guard) = fixture("screen-hosted-leave");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
@@ -9405,7 +9405,7 @@ mod tests {
     #[test]
     fn hosted_the_arrows_and_q_leave_the_routines_tab_and_its_line_names_q() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture("screen-hosted-routines-leave");
+        let (repo, _root_guard) = fixture("screen-hosted-routines-leave");
         write_routine(
             &repo,
             "nightly",
@@ -9436,7 +9436,7 @@ mod tests {
     #[test]
     fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
         use crate::screen::shell::{Hosting, Tab};
-        let mut repo = fixture("screen-hosted-routines-popup");
+        let (mut repo, _root_guard) = fixture("screen-hosted-routines-popup");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
             &repo,
@@ -9457,7 +9457,7 @@ mod tests {
     #[test]
     fn hosted_a_sub_mode_keeps_the_arrows_and_q_for_itself() {
         use crate::screen::shell::{Hosting, Tab};
-        let repo = fixture("screen-hosted-sub-mode");
+        let (repo, _root_guard) = fixture("screen-hosted-sub-mode");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
@@ -9476,7 +9476,7 @@ mod tests {
     #[test]
     fn the_queue_tab_holds_its_opening_message_instead_of_ending() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture("queue-tab-opening-message");
+        let (repo, _root_guard) = fixture("queue-tab-opening-message");
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
             "---\nid: stray\ntitle: stray\n---\n## Goal\n\nx\n",
@@ -9513,7 +9513,7 @@ mod tests {
     #[test]
     fn the_queue_tab_opens_with_the_sync_notice_then_the_update_notice() {
         use crate::screen::shell::{Hosting, OnOpen, Tab};
-        let repo = fixture("queue-tab-on-open");
+        let (repo, _root_guard) = fixture("queue-tab-on-open");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
         let on_open = OnOpen {
@@ -9564,7 +9564,7 @@ mod tests {
     #[test]
     fn the_queue_tab_opens_with_the_ignored_overrides_and_enter_closes_them() {
         use crate::screen::shell::{Hosting, Leave, OnOpen, Tab, Toward};
-        let repo = fixture("queue-tab-ignored");
+        let (repo, _root_guard) = fixture("queue-tab-ignored");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
         let on_open = OnOpen {
@@ -9626,7 +9626,7 @@ mod tests {
     /// `←` leaves nothing.
     #[test]
     fn unhosted_the_screen_draws_no_strip_and_the_arrows_do_not_leave() {
-        let repo = fixture("screen-unhosted");
+        let (repo, _root_guard) = fixture("screen-unhosted");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
 
         let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[Dq");
@@ -9728,7 +9728,7 @@ mod tests {
     /// `groups_pane_lines` and `tasks_pane_lines`, the same as `draw` does.
     #[test]
     fn draw_two_panes_borders_and_rows_are_all_the_same_width() {
-        let repo = fixture("panes-width");
+        let (repo, _root_guard) = fixture("panes-width");
         write_pending(
             &repo,
             "wire",
@@ -9939,7 +9939,7 @@ mod tests {
     /// pane handed `window`.
     #[test]
     fn the_tasks_pane_marker_counts_tasks_at_every_scroll_position() {
-        let repo = fixture("scroll-counts-tasks");
+        let (repo, _root_guard) = fixture("scroll-counts-tasks");
         let ids: Vec<String> = (1..=6).map(|i| format!("task-{i}")).collect();
         for (i, id) in ids.iter().enumerate() {
             let depends = match i {
@@ -10054,7 +10054,7 @@ mod tests {
     /// the filter's own `find:` row are lines, never groups out of sight.
     #[test]
     fn the_groups_pane_marker_never_counts_separators_or_the_find_row() {
-        let repo = fixture("scroll-counts-groups");
+        let (repo, _root_guard) = fixture("scroll-counts-groups");
         for i in 0..4 {
             let id = format!("g{i}");
             write_pending(&repo, &id, &task_text(&id, &format!("group: {id}\n"), BODY));
@@ -10118,7 +10118,7 @@ mod tests {
     /// dependency nobody sent.
     #[test]
     fn selecting_a_group_queues_every_task_in_it() {
-        let repo = fixture("screen-whole-group");
+        let (repo, _root_guard) = fixture("screen-whole-group");
         write_pending_two(
             &repo,
             "first",
@@ -10144,7 +10144,7 @@ mod tests {
     /// are already queued, and the dispatch tab is where they are watched.
     #[test]
     fn a_queued_group_cannot_be_selected_again() {
-        let repo = fixture("screen-queued-group");
+        let (repo, _root_guard) = fixture("screen-queued-group");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
@@ -10177,7 +10177,7 @@ mod tests {
     /// the bottom of the pane.
     #[test]
     fn groups_pane_lines_draws_one_unmarked_separator_between_the_two_groups() {
-        let repo = fixture("screen-separator-row");
+        let (repo, _root_guard) = fixture("screen-separator-row");
         write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
         already_done(&repo, "cook", "cook");
         let groups = listed(&repo);
@@ -10223,7 +10223,7 @@ mod tests {
     /// two, and `group_cursor` on the done group shifts past just that one.
     #[test]
     fn a_queued_group_leaves_no_separator_of_its_own_once_done_groups_show() {
-        let repo = fixture("screen-two-separators");
+        let (repo, _root_guard) = fixture("screen-two-separators");
         write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
         write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
         already_queued(&repo, "cook");
@@ -10257,7 +10257,7 @@ mod tests {
     /// The mockup's exact tail: the bare word `queued`, no timestamp.
     #[test]
     fn the_queued_tail_is_the_bare_word() {
-        let repo = fixture("screen-queued-tail");
+        let (repo, _root_guard) = fixture("screen-queued-tail");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
@@ -10283,7 +10283,7 @@ mod tests {
     /// a future tail could still crowd the name otherwise.
     #[test]
     fn a_queued_name_stays_legible_at_an_ordinary_terminal_width() {
-        let repo = fixture("screen-queued-name-width");
+        let (repo, _root_guard) = fixture("screen-queued-name-width");
         for name in ["bound-loops", "queue-open", "state-paths"] {
             write_pending(
                 &repo,
@@ -10316,7 +10316,7 @@ mod tests {
     /// `MAX_LEFT_PANE` is meant to afford.
     #[test]
     fn a_long_name_still_fits_at_the_widest_left_pane() {
-        let repo = fixture("screen-queued-name-max-width");
+        let (repo, _root_guard) = fixture("screen-queued-name-max-width");
         // 33 characters — exactly what MAX_LEFT_PANE budgeted a name before
         // the tail grew, and the width MAX_LEFT_PANE was widened to keep
         // affording it.
@@ -10351,7 +10351,7 @@ mod tests {
     /// `MAX_LEFT_PANE`, the pane's single widest setting.
     #[test]
     fn the_queued_tail_never_truncates_from_min_left_pane_up() {
-        let repo = fixture("screen-queued-tail-never-truncates");
+        let (repo, _root_guard) = fixture("screen-queued-tail-never-truncates");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
@@ -10375,7 +10375,7 @@ mod tests {
     /// widest extreme — each rendered a truncated tail before this fix.
     #[test]
     fn the_queued_tail_survives_the_reviews_live_repro_widths() {
-        let repo = fixture("screen-queued-tail-live-repro-widths");
+        let (repo, _root_guard) = fixture("screen-queued-tail-live-repro-widths");
         write_pending(
             &repo,
             "bound-loops",
@@ -10409,7 +10409,7 @@ mod tests {
     /// pane's own copy of the list is what gets inspected afterward.
     #[test]
     fn submit_clears_the_group_from_the_pane_and_from_the_pending_directory() {
-        let repo = fixture("screen-submit-clears-pending");
+        let (repo, _root_guard) = fixture("screen-submit-clears-pending");
         let path = write_pending(
             &repo,
             "wire",
@@ -10469,7 +10469,7 @@ mod tests {
     /// and leaving the queued sibling alone.
     #[test]
     fn queueing_a_group_leaves_its_queued_sibling_alone_and_queues_the_pending_task() {
-        let repo = fixture("screen-requeue-group");
+        let (repo, _root_guard) = fixture("screen-requeue-group");
         // `beta` depends on `alpha`: a group is one chain now, so the second
         // half of a group queued in two passes has to say how it continues
         // the first — see `a_group_with_two_roots_is_refused`.
@@ -10527,7 +10527,7 @@ mod tests {
     /// sibling was its whole finished record.
     #[test]
     fn queueing_a_group_leaves_its_archived_sibling_alone_and_names_it() {
-        let repo = fixture("screen-requeue-group-archived");
+        let (repo, _root_guard) = fixture("screen-requeue-group-archived");
         // `beta` depends on `alpha`, same reason as the queued-sibling test
         // above: a group is one chain, archived tasks counted the same as
         // queued ones.
@@ -10585,7 +10585,7 @@ mod tests {
     /// checkbox of its own: the selection lives on the group.
     #[test]
     fn the_tasks_pane_draws_no_header_and_no_estimate_columns() {
-        let repo = fixture("screen-columns");
+        let (repo, _root_guard) = fixture("screen-columns");
         write_pending(
             &repo,
             "wire",
@@ -10634,7 +10634,7 @@ mod tests {
     /// `Description:` label — the one sentence a person picks by.
     #[test]
     fn a_tasks_title_reaches_the_tasks_pane() {
-        let repo = fixture("screen-description");
+        let (repo, _root_guard) = fixture("screen-description");
         write_pending(
             &repo,
             "ctx-peak",
@@ -10657,7 +10657,7 @@ mod tests {
     /// submit time — the pane just has nothing to draw.
     #[test]
     fn a_task_with_no_title_draws_no_extra_line() {
-        let repo = fixture("screen-no-description");
+        let (repo, _root_guard) = fixture("screen-no-description");
         write_pending(
             &repo,
             "wire",
@@ -10693,7 +10693,7 @@ mod tests {
     /// none at all.
     #[test]
     fn tasks_pane_draws_each_tasks_own_state_beside_its_id() {
-        let repo = fixture("screen-mixed-task-states");
+        let (repo, _root_guard) = fixture("screen-mixed-task-states");
         write_pending(
             &repo,
             "third",
@@ -10742,7 +10742,7 @@ mod tests {
     /// task underneath tells a person nothing the group row did not already.
     #[test]
     fn a_wholly_done_groups_own_tasks_draw_no_repeated_done_tail() {
-        let repo = fixture("screen-done-no-repeat");
+        let (repo, _root_guard) = fixture("screen-done-no-repeat");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         for id in ["first", "second"] {
             std::fs::write(
@@ -10775,7 +10775,7 @@ mod tests {
     /// `a_dependent_task_draws_no_base_row` below.
     #[test]
     fn every_row_in_a_wide_pane_starts_its_value_at_the_same_column() {
-        let repo = fixture("screen-labelled-rows");
+        let (repo, _root_guard) = fixture("screen-labelled-rows");
         write_pending(
             &repo,
             "tracking-open",
@@ -10817,7 +10817,7 @@ mod tests {
     /// with its dependency's.
     #[test]
     fn a_dependent_task_draws_no_base_row() {
-        let repo = fixture("screen-dependent-no-base");
+        let (repo, _root_guard) = fixture("screen-dependent-no-base");
         write_pending(
             &repo,
             "cart-discounts",
@@ -10851,7 +10851,7 @@ mod tests {
     /// blank `base:` reads the same as an absent one, as it does there.
     #[test]
     fn a_task_with_no_base_shows_the_boards_branch() {
-        let repo = fixture("screen-base-fallback");
+        let (repo, _root_guard) = fixture("screen-base-fallback");
         write_pending(
             &repo,
             "cart-totals",
@@ -10884,7 +10884,7 @@ mod tests {
     /// the label itself, which the acceptance criterion rules out.
     #[test]
     fn a_narrow_right_pane_keeps_every_label_and_drops_its_value_below() {
-        let repo = fixture("screen-narrow-labelled-rows");
+        let (repo, _root_guard) = fixture("screen-narrow-labelled-rows");
         write_pending(
             &repo,
             "wire",
@@ -10919,7 +10919,7 @@ mod tests {
     /// again by name rather than by the index it no longer sits at.
     #[test]
     fn reload_keeps_the_cursor_on_the_same_group_after_a_reorder() {
-        let repo = fixture("screen-reload-cursor");
+        let (repo, _root_guard) = fixture("screen-reload-cursor");
         write_pending(&repo, "older", &task_text("older", "group: older\n", BODY));
         let mut groups = listed(&repo);
         let mut state = ScreenState::new();
@@ -10948,7 +10948,7 @@ mod tests {
     /// second frame.
     #[test]
     fn draw_writes_nothing_when_the_frame_has_not_changed() {
-        let repo = fixture("screen-idle-draw");
+        let (repo, _root_guard) = fixture("screen-idle-draw");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -10983,7 +10983,7 @@ mod tests {
     /// same way.
     #[test]
     fn queue_paints_as_before() {
-        let repo = fixture("queue-paints-as-before");
+        let (repo, _root_guard) = fixture("queue-paints-as-before");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -11060,7 +11060,7 @@ mod tests {
     /// no project default left to seed it with.
     #[test]
     fn assign_pipelines_panel_lists_every_task_already_assigned_a_pipeline() {
-        let repo = fixture("screen-trial-assign");
+        let (repo, _root_guard) = fixture("screen-trial-assign");
         // Built by hand rather than through `task`, which now fills in
         // `pipeline: default` — alpha's own point here is that it names
         // none, so the picker opens it unassigned.
@@ -11114,7 +11114,7 @@ mod tests {
     /// pick — an unassigned task the cursor never visited stays unassigned.
     #[test]
     fn left_right_cycles_only_the_highlighted_tasks_own_pipeline() {
-        let repo = fixture("screen-trial-cycle");
+        let (repo, _root_guard) = fixture("screen-trial-cycle");
         // Built by hand, the same as the panel test above — both tasks have
         // to open unassigned, and `task` would otherwise fill in
         // `pipeline: default` for them.
@@ -11163,7 +11163,7 @@ mod tests {
     /// task names explicitly.
     #[test]
     fn esc_off_the_skip_screen_returns_to_pipelines_without_losing_picks() {
-        let repo = fixture("screen-trial-esc-back");
+        let (repo, _root_guard) = fixture("screen-trial-esc-back");
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -11194,7 +11194,7 @@ mod tests {
     /// keeps its own skip set, keyed by the task rather than by position.
     #[test]
     fn choose_skips_panel_keeps_a_separate_skip_set_per_task() {
-        let repo = fixture("screen-trial-skips");
+        let (repo, _root_guard) = fixture("screen-trial-skips");
         write_pending(
             &repo,
             "alpha",
@@ -11256,7 +11256,7 @@ mod tests {
     /// at all even though the flattened cursor could still land on it.
     #[test]
     fn a_long_pipelines_steps_wrap_rather_than_run_off_the_panel() {
-        let repo = fixture("screen-trial-skips-wrap");
+        let (repo, _root_guard) = fixture("screen-trial-skips-wrap");
         write_pending(
             &repo,
             "solo",
@@ -11314,7 +11314,7 @@ mod tests {
     /// for the same width.
     #[test]
     fn the_skips_popup_survives_being_overlaid_on_the_frame() {
-        let repo = fixture("screen-trial-skips-overlay");
+        let (repo, _root_guard) = fixture("screen-trial-skips-overlay");
         write_pending_two(
             &repo,
             "alpha",
@@ -11415,7 +11415,7 @@ mod tests {
     /// they build their rows separately.
     #[test]
     fn a_long_task_id_is_cut_rather_than_pushing_a_trial_popup_off_the_frame() {
-        let repo = fixture("screen-trial-long-names");
+        let (repo, _root_guard) = fixture("screen-trial-long-names");
         let long = "alpha-with-a-really-quite-long-task-identifier";
         write_pending_two(
             &repo,
@@ -11477,7 +11477,7 @@ mod tests {
     /// panicking on an index that is not there.
     #[test]
     fn the_tasks_pane_is_empty_with_nothing_under_the_cursor() {
-        let repo = fixture("panes-empty");
+        let (repo, _root_guard) = fixture("panes-empty");
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
@@ -11511,7 +11511,7 @@ mod tests {
     /// above `run_screen` rather than read as a key at all.
     #[test]
     fn browsing_keys_select_move_focus_and_hide_queued_groups() {
-        let repo = fixture("screen-browse");
+        let (repo, _root_guard) = fixture("screen-browse");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let groups = listed(&repo);
         let mut state = ScreenState::new();
@@ -11536,7 +11536,7 @@ mod tests {
     /// counting the done group alone, never a queued one beside it.
     #[test]
     fn the_screen_opens_with_done_groups_hidden_and_h_brings_them_back() {
-        let repo = fixture("screen-opens-hidden");
+        let (repo, _root_guard) = fixture("screen-opens-hidden");
         already_done(&repo, "finished", "finished");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
@@ -11570,7 +11570,7 @@ mod tests {
     /// setting, and the filter does not reach it either.
     #[test]
     fn h_toggles_done_groups_and_never_shows_a_queued_one() {
-        let repo = fixture("screen-h-toggle");
+        let (repo, _root_guard) = fixture("screen-h-toggle");
         already_done(&repo, "finished", "finished");
         write_pending(&repo, "wire", &task_text("wire", "group: sent\n", BODY));
         already_queued(&repo, "wire");
@@ -11613,7 +11613,7 @@ mod tests {
     /// none of them is reachable by calling `groups_pane_lines` alone.
     #[test]
     fn the_first_drawn_frame_hides_done_groups_and_h_shows_them() {
-        let repo = fixture("screen-first-frame-hidden");
+        let (repo, _root_guard) = fixture("screen-first-frame-hidden");
         already_done(&repo, "finished", "finished");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
@@ -11675,7 +11675,7 @@ mod tests {
     /// exactly the one key press an ordinary move between two groups would.
     #[test]
     fn pressing_down_across_the_separator_lands_on_the_first_done_group() {
-        let repo = fixture("screen-cross-separator");
+        let (repo, _root_guard) = fixture("screen-cross-separator");
         write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
         already_done(&repo, "cook", "cook");
         let groups = listed(&repo);
@@ -11701,7 +11701,7 @@ mod tests {
     /// batch has nothing to queue, and must not reach the dispatcher offer.
     #[test]
     fn enter_does_nothing_with_no_selection() {
-        let repo = fixture("screen-enter-empty");
+        let (repo, _root_guard) = fixture("screen-enter-empty");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let groups = listed(&repo);
         let mut state = ScreenState::new();
@@ -11716,7 +11716,7 @@ mod tests {
     /// screen stopping on its own rather than hanging on the next read.
     #[test]
     fn the_screen_submits_a_selected_group_and_clears_its_tasks() {
-        let repo = fixture("screen-submit");
+        let (repo, _root_guard) = fixture("screen-submit");
         write_pending(
             &repo,
             "wire",
@@ -11744,7 +11744,7 @@ mod tests {
     /// the task up on its next pass.
     #[test]
     fn a_dispatcher_already_holding_the_lock_changes_nothing_about_enter() {
-        let repo = fixture("gate-clean-locked");
+        let (repo, _root_guard) = fixture("gate-clean-locked");
         write_pending(
             &repo,
             "wire",
@@ -11770,7 +11770,7 @@ mod tests {
     /// from what each task changes, not from any glob spoolway reads.
     #[test]
     fn two_groups_write_with_no_edge_added() {
-        let repo = fixture("overlap-across-groups");
+        let (repo, _root_guard) = fixture("overlap-across-groups");
         write_pending(&repo, "left", &task_text("left", "group: one\n", BODY));
         write_pending(&repo, "right", &task_text("right", "group: two\n", BODY));
         let groups = listed(&repo);
@@ -11790,7 +11790,7 @@ mod tests {
     /// task it came from.
     #[test]
     fn a_gate_chosen_on_the_screen_reaches_the_queued_task() {
-        let repo = fixture("screen-gate");
+        let (repo, _root_guard) = fixture("screen-gate");
         write_pending(
             &repo,
             "wire",
@@ -11817,7 +11817,7 @@ mod tests {
     /// submitted, is left exactly where it was.
     #[test]
     fn a_trial_forks_every_task_on_its_own_assigned_pipeline() {
-        let repo = fixture("screen-trial");
+        let (repo, _root_guard) = fixture("screen-trial");
         write_pending(
             &repo,
             "solo",
@@ -11880,7 +11880,7 @@ mod tests {
     /// `task_doc` writes for this.
     #[test]
     fn a_trial_routes_a_task_that_names_no_pipeline_of_its_own() {
-        let repo = fixture("screen-trial-unassigned");
+        let (repo, _root_guard) = fixture("screen-trial-unassigned");
         write_pending(
             &repo,
             "solo",
@@ -11911,7 +11911,7 @@ mod tests {
     /// bare id a trial's arms name is never itself queued.
     #[test]
     fn a_trial_remaps_depends_on_to_the_sibling_arms_own_minted_ids() {
-        let repo = fixture("screen-trial-chain");
+        let (repo, _root_guard) = fixture("screen-trial-chain");
         write_pending(&repo, "alpha", &task_text("alpha", "group: chain\n", BODY));
         write_pending(
             &repo,
@@ -11948,13 +11948,13 @@ mod tests {
     /// would otherwise produce identically.
     #[test]
     fn two_trials_of_the_same_source_mint_two_different_trial_ids() {
-        let repo = fixture("screen-trial-two-launches-a");
+        let (repo, _root_guard) = fixture("screen-trial-two-launches-a");
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
         screen(&repo, groups, "t\r\r");
         let first_trial = queued(&repo, "solo-1").front.trial;
 
-        let repo = fixture("screen-trial-two-launches-b");
+        let (repo, _root_guard) = fixture("screen-trial-two-launches-b");
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
         screen(&repo, groups, "t\r\r");
@@ -11973,7 +11973,7 @@ mod tests {
     /// collided with.
     #[test]
     fn a_trial_mints_around_ids_already_on_disk() {
-        let repo = fixture("screen-trial-mint");
+        let (repo, _root_guard) = fixture("screen-trial-mint");
         write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         already_queued(&repo, "solo-1");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
@@ -12000,7 +12000,7 @@ mod tests {
     /// a trial that never needed to resolve it in the first place.
     #[test]
     fn a_trial_forked_from_an_archived_task_drops_its_depends_on() {
-        let repo = fixture("screen-trial-archived");
+        let (repo, _root_guard) = fixture("screen-trial-archived");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("finished.md"),
@@ -12029,7 +12029,7 @@ mod tests {
     /// queue no longer measures a task id against any lane at all.
     #[test]
     fn a_long_task_id_is_not_refused_for_its_lane_name() {
-        let repo = fixture("screen-trial-long-id");
+        let (repo, _root_guard) = fixture("screen-trial-long-id");
         let base_id = "a".repeat(60);
         write_pending(
             &repo,
@@ -12056,7 +12056,7 @@ mod tests {
     /// with the good one still selected from before the refusal.
     #[test]
     fn a_refused_submission_keeps_the_selection_for_a_second_try() {
-        let repo = fixture("screen-refused");
+        let (repo, _root_guard) = fixture("screen-refused");
         write_pending(
             &repo,
             "bogus",
@@ -12101,7 +12101,7 @@ mod tests {
     /// writes nothing — cancelling by running out of input is silent.
     #[test]
     fn ending_the_screen_queues_nothing() {
-        let repo = fixture("screen-quit");
+        let (repo, _root_guard) = fixture("screen-quit");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
@@ -12120,7 +12120,7 @@ mod tests {
     /// that is `q_quits_from_a_mode_that_is_not_browsing` just below.
     #[test]
     fn q_does_nothing_while_browsing() {
-        let repo = fixture("screen-q-inert");
+        let (repo, _root_guard) = fixture("screen-q-inert");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
@@ -12144,7 +12144,7 @@ mod tests {
     /// its own. The last frame is the evidence: the popup is still on it.
     #[test]
     fn q_under_a_popup_is_the_popups_to_ignore() {
-        let repo = fixture("screen-quit-report");
+        let (repo, _root_guard) = fixture("screen-quit-report");
         write_pending(
             &repo,
             "bogus",
@@ -12170,7 +12170,7 @@ mod tests {
     /// a dispatcher, and this screen never starts one.
     #[test]
     fn enter_only_queues_and_says_what_it_queued() {
-        let mut repo = fixture("screen-enter-only-queues");
+        let (mut repo, _root_guard) = fixture("screen-enter-only-queues");
         repo.config.unattended.enabled = true;
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
@@ -12274,7 +12274,7 @@ mod tests {
     /// `spoolway dispatch` holds for as long as it runs.
     #[test]
     fn a_held_dispatcher_lock_says_the_dispatcher_is_running() {
-        let repo = fixture("queued-popup-dispatcher-running");
+        let (repo, _root_guard) = fixture("queued-popup-dispatcher-running");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         assert_eq!(dispatcher_line(&repo), Some("Dispatcher is running"));
     }
@@ -12284,7 +12284,7 @@ mod tests {
     /// no dispatcher is up.
     #[test]
     fn the_screens_own_lock_does_not_count_as_a_dispatcher() {
-        let repo = fixture("queued-popup-screen-lock");
+        let (repo, _root_guard) = fixture("queued-popup-screen-lock");
         let _screen = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         assert_eq!(
             dispatcher_line(&repo),
@@ -12297,7 +12297,7 @@ mod tests {
     /// the popup must not guess either way.
     #[test]
     fn an_unreadable_dispatcher_lock_leaves_the_line_off() {
-        let repo = fixture("queued-popup-lock-unreadable");
+        let (repo, _root_guard) = fixture("queued-popup-lock-unreadable");
         std::fs::create_dir_all(repo.lock_file()).unwrap();
         assert_eq!(dispatcher_line(&repo), None);
         let Mode::Queued { panel, .. } =
@@ -12320,7 +12320,7 @@ mod tests {
     /// `cargo test` for ten minutes.
     #[test]
     fn opening_the_screen_with_nothing_pending_does_not_error() {
-        let repo = fixture("screen-nothing-pending");
+        let (repo, _root_guard) = fixture("screen-nothing-pending");
         let groups = listed(&repo);
         assert_eq!(opening_message(&repo, &groups), None);
         let (exit, _) = screen_exit(&repo, groups, "");
@@ -12332,7 +12332,7 @@ mod tests {
     /// skill the binary does not depend on and must not advertise here.
     #[test]
     fn an_empty_pending_directory_opens_the_screen_with_no_message() {
-        let repo = fixture("opening-message-empty");
+        let (repo, _root_guard) = fixture("opening-message-empty");
         let groups = listed(&repo);
         assert!(groups.is_empty());
         assert_eq!(
@@ -12356,7 +12356,7 @@ mod tests {
     /// key to read.
     #[test]
     fn the_empty_screen_draws_a_frame_and_names_no_planning_skill() {
-        let repo = fixture("screen-empty-frame");
+        let (repo, _root_guard) = fixture("screen-empty-frame");
         let groups = listed(&repo);
 
         let (exit, drawn) = screen_exit(&repo, groups, "");
@@ -12381,7 +12381,7 @@ mod tests {
     /// the one diagnostic `pending::unreadable` exists for.
     #[test]
     fn opening_message_names_an_unreadable_task() {
-        let repo = fixture("opening-message-unreadable");
+        let (repo, _root_guard) = fixture("opening-message-unreadable");
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
             "---\nid: stray\ntitle: stray\n---\n## Goal\n\nx\n",
@@ -12400,7 +12400,7 @@ mod tests {
     /// above has nothing to do with the group already queued below.
     #[test]
     fn opening_message_still_names_an_unreadable_task_beside_an_unrelated_queued_group() {
-        let repo = fixture("opening-message-unreadable-and-queued");
+        let (repo, _root_guard) = fixture("opening-message-unreadable-and-queued");
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
             "---\nid: stray\ntitle: stray\n---\n## Goal\n\nx\n",
@@ -12428,7 +12428,7 @@ mod tests {
     /// printed "Nothing to list" instead.
     #[test]
     fn opening_message_opens_the_screen_past_a_stray_task_beside_a_real_group() {
-        let repo = fixture("opening-message-stray-beside-real-group");
+        let (repo, _root_guard) = fixture("opening-message-stray-beside-real-group");
         write_pending(
             &repo,
             "wire",
@@ -12459,7 +12459,7 @@ mod tests {
     /// the screen has something to open onto even here.
     #[test]
     fn a_queue_only_group_still_opens_the_screen_over_an_empty_pending_directory() {
-        let repo = fixture("screen-queue-only");
+        let (repo, _root_guard) = fixture("screen-queue-only");
         // Not `already_queued`: that helper writes a minimal task with
         // no `group:` at all, which `list_groups` cannot file under any row
         // — this is the shape a real submission would actually leave behind.
@@ -12495,7 +12495,7 @@ mod tests {
     /// whatever backend the fixture's default config names.
     #[test]
     fn o_does_nothing_while_the_groups_pane_has_focus() {
-        let repo = fixture("screen-open-groups-focus");
+        let (repo, _root_guard) = fixture("screen-open-groups-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
@@ -12514,7 +12514,7 @@ mod tests {
     /// sign the key did anything at all.
     #[test]
     fn pressing_o_with_no_multiplexer_surfaces_the_refusal() {
-        let mut repo = fixture("screen-open-headless");
+        let (mut repo, _root_guard) = fixture("screen-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
@@ -12536,7 +12536,7 @@ mod tests {
     /// common with the query off the list entirely.
     #[test]
     fn playing_f_queue_narrows_the_pending_pane_to_matching_names() {
-        let repo = fixture("screen-filter-narrows");
+        let (repo, _root_guard) = fixture("screen-filter-narrows");
         for name in ["queue-browse", "queue-second-group", "home-state"] {
             write_pending(
                 &repo,
@@ -12565,7 +12565,7 @@ mod tests {
     /// as an action the way `run_screen`'s old `Mode::Filter` arm did.
     #[test]
     fn every_letter_types_while_the_filter_box_has_focus() {
-        let repo = fixture("screen-filter-every-letter");
+        let (repo, _root_guard) = fixture("screen-filter-every-letter");
         write_pending(&repo, "solo", &task_text("solo", "group: demo\n", BODY));
         let groups = listed(&repo);
 
@@ -12586,7 +12586,7 @@ mod tests {
     /// is text.
     #[test]
     fn the_filter_footer_names_only_leaving_search() {
-        let repo = fixture("screen-filter-footer");
+        let (repo, _root_guard) = fixture("screen-filter-footer");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
@@ -12606,7 +12606,7 @@ mod tests {
     /// it exactly still leaves the pane empty.
     #[test]
     fn a_filter_never_reaches_a_queued_group() {
-        let repo = fixture("screen-filter-reaches-queued");
+        let (repo, _root_guard) = fixture("screen-filter-reaches-queued");
         write_pending(
             &repo,
             "wire",
@@ -12645,7 +12645,7 @@ mod tests {
     /// test so neither can pass by accident while the other regresses.
     #[test]
     fn q_is_a_letter_in_the_filter_and_does_nothing_in_browsing() {
-        let repo = fixture("screen-filter-q");
+        let (repo, _root_guard) = fixture("screen-filter-q");
         write_pending(
             &repo,
             "wire",
@@ -12678,7 +12678,7 @@ mod tests {
     /// like any other character.
     #[test]
     fn a_control_byte_is_not_typed_into_the_filter() {
-        let repo = fixture("screen-filter-control-byte");
+        let (repo, _root_guard) = fixture("screen-filter-control-byte");
         write_pending(
             &repo,
             "wire",
@@ -12711,7 +12711,7 @@ mod tests {
     /// `space`/`enter`/`tab` rather than the pending screen's keys.
     #[test]
     fn the_routines_tab_opens_on_the_routine_list() {
-        let repo = fixture("routines-tab-opens");
+        let (repo, _root_guard) = fixture("routines-tab-opens");
         write_routine(
             &repo,
             "nightly",
@@ -12744,7 +12744,7 @@ mod tests {
     /// gives the pending screen's own `o`.
     #[test]
     fn o_does_nothing_while_the_folders_pane_has_focus_in_routines() {
-        let repo = fixture("routines-open-folders-focus");
+        let (repo, _root_guard) = fixture("routines-open-folders-focus");
         write_routine(
             &repo,
             "nightly",
@@ -12766,7 +12766,7 @@ mod tests {
     /// `Mode::Routines` afterwards, not falling back to `Mode::Browsing`.
     #[test]
     fn pressing_o_in_routines_with_no_multiplexer_surfaces_the_refusal() {
-        let mut repo = fixture("routines-open-headless");
+        let (mut repo, _root_guard) = fixture("routines-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_routine(
             &repo,
@@ -12790,7 +12790,7 @@ mod tests {
     /// nested task shows in its routine's tasks pane instead.
     #[test]
     fn a_subfolder_is_no_row_and_its_tasks_show_under_its_routine() {
-        let repo = fixture("routines-flat-list");
+        let (repo, _root_guard) = fixture("routines-flat-list");
         write_routine(
             &repo,
             "maintenance",
@@ -12819,7 +12819,7 @@ mod tests {
     /// they belong to the tab strip.
     #[test]
     fn tab_moves_between_the_panes_and_the_arrows_do_nothing() {
-        let repo = fixture("routines-tab-nav");
+        let (repo, _root_guard) = fixture("routines-tab-nav");
         write_routine(
             &repo,
             "nightly",
@@ -12866,7 +12866,7 @@ mod tests {
     #[test]
     fn esc_over_the_tasks_pane_goes_back_to_the_list() {
         use crate::screen::shell::{Hosting, Tab};
-        let repo = fixture("routines-esc-tasks");
+        let (repo, _root_guard) = fixture("routines-esc-tasks");
         write_routine(
             &repo,
             "nightly",
@@ -12899,7 +12899,7 @@ mod tests {
     /// Ticking a routine queues its nested subfolder's tasks with it.
     #[test]
     fn enter_on_a_routine_queues_its_nested_tasks_with_it() {
-        let repo = fixture("routines-enter-nested");
+        let (repo, _root_guard) = fixture("routines-enter-nested");
         write_routine(
             &repo,
             "maintenance",
@@ -12986,7 +12986,7 @@ mod tests {
     #[test]
     fn a_routine_claims_its_whole_folder_and_single_task_jobs_only() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-delete-match");
+        let (repo, _root_guard) = fixture("routine-delete-match");
         seed_two_routines(&repo);
         write_routine(
             &repo,
@@ -13019,7 +13019,7 @@ mod tests {
     #[test]
     fn a_store_broken_after_x_refuses_with_nothing_removed() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-delete-store-broken");
+        let (repo, _root_guard) = fixture("routine-delete-store-broken");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "whole", "nightly");
         let folder = repo.routines_dir().join("nightly");
@@ -13059,7 +13059,7 @@ mod tests {
     fn a_job_that_will_not_delete_leaves_the_routine_folder() {
         use crate::jobs::Scope;
         use std::os::unix::fs::PermissionsExt;
-        let repo = fixture("routine-delete-order-jobs");
+        let (repo, _root_guard) = fixture("routine-delete-order-jobs");
         seed_two_routines(&repo);
         write_job(&repo, Scope::Project, "single", "nightly/audit-docs.md");
         write_job(&repo, Scope::User, "whole", "nightly");
@@ -13113,7 +13113,7 @@ mod tests {
     fn a_folder_that_will_not_remove_is_tried_after_its_jobs() {
         use crate::jobs::Scope;
         use std::os::unix::fs::PermissionsExt;
-        let repo = fixture("routine-delete-order-folder");
+        let (repo, _root_guard) = fixture("routine-delete-order-folder");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "whole", "nightly");
         write_job(&repo, Scope::Project, "single", "nightly/audit-docs.md");
@@ -13153,7 +13153,7 @@ mod tests {
     #[test]
     fn x_names_the_routine_and_every_job_pointing_into_it() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-delete-popup");
+        let (repo, _root_guard) = fixture("routine-delete-popup");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-audit", "nightly");
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
@@ -13180,7 +13180,7 @@ mod tests {
     /// With no job pointing in, the popup leaves the jobs lines out.
     #[test]
     fn x_on_a_routine_no_job_points_into_leaves_the_jobs_lines_out() {
-        let repo = fixture("routine-delete-no-jobs");
+        let (repo, _root_guard) = fixture("routine-delete-no-jobs");
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "x")).to_string();
@@ -13193,7 +13193,7 @@ mod tests {
     #[test]
     fn x_then_esc_keeps_the_routine_and_its_jobs() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-delete-esc");
+        let (repo, _root_guard) = fixture("routine-delete-esc");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-audit", "nightly");
 
@@ -13214,7 +13214,7 @@ mod tests {
     #[test]
     fn x_then_enter_deletes_the_routine_and_its_jobs() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-delete-enter");
+        let (repo, _root_guard) = fixture("routine-delete-enter");
         seed_two_routines(&repo);
         write_job(&repo, Scope::User, "nightly-audit", "nightly");
         write_job(&repo, Scope::Project, "audit-docs", "nightly/audit-docs.md");
@@ -13237,7 +13237,7 @@ mod tests {
     /// is removed, naming the store and `spoolway doctor`.
     #[test]
     fn x_refuses_while_a_job_store_will_not_parse() {
-        let repo = fixture("routine-delete-bad-store");
+        let (repo, _root_guard) = fixture("routine-delete-bad-store");
         seed_two_routines(&repo);
         std::fs::create_dir_all(repo.jobs_file().parent().unwrap()).unwrap();
         std::fs::write(repo.jobs_file(), "[jobs.broken\n").unwrap();
@@ -13259,7 +13259,7 @@ mod tests {
     /// nothing, and the key line there does not name it.
     #[test]
     fn x_over_the_tasks_pane_does_nothing_and_is_not_named() {
-        let repo = fixture("routine-delete-tasks-pane");
+        let (repo, _root_guard) = fixture("routine-delete-tasks-pane");
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "\tx")).to_string();
@@ -13274,7 +13274,7 @@ mod tests {
     /// and writes nothing yet.
     #[test]
     fn n_opens_the_schedule_popup_for_the_highlighted_routine() {
-        let repo = fixture("routine-new-job-open");
+        let (repo, _root_guard) = fixture("routine-new-job-open");
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "jn")).to_string();
@@ -13292,7 +13292,7 @@ mod tests {
     /// nothing, and the key line there does not name it.
     #[test]
     fn n_over_the_tasks_pane_does_nothing_and_is_not_named() {
-        let repo = fixture("routine-new-job-tasks-pane");
+        let (repo, _root_guard) = fixture("routine-new-job-tasks-pane");
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "\tn")).to_string();
@@ -13305,7 +13305,7 @@ mod tests {
     /// nothing.
     #[test]
     fn esc_on_either_job_popup_writes_nothing() {
-        let repo = fixture("routine-new-job-esc");
+        let (repo, _root_guard) = fixture("routine-new-job-esc");
         seed_two_routines(&repo);
 
         for input in ["n0 3 * * *\x1b", "n0 3 * * *\r\x1b"] {
@@ -13325,7 +13325,7 @@ mod tests {
     #[test]
     fn n_walks_the_schedule_and_pipeline_and_saves_a_user_job() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-new-job-save");
+        let (repo, _root_guard) = fixture("routine-new-job-save");
         seed_two_routines(&repo);
 
         let saved = last_frame(&routines_screen(&repo, "n0 3 * * 1-5\rbug\r")).to_string();
@@ -13371,7 +13371,7 @@ mod tests {
     #[test]
     fn n_on_a_routine_whose_job_name_is_taken_is_refused() {
         use crate::jobs::Scope;
-        let repo = fixture("routine-new-job-taken");
+        let (repo, _root_guard) = fixture("routine-new-job-taken");
         seed_two_routines(&repo);
         write_job(&repo, Scope::Project, "nightly", "maintenance");
 
@@ -13393,7 +13393,7 @@ mod tests {
     /// tab's whole screen, with no pending screen behind it to go back to.
     #[test]
     fn esc_over_the_routine_list_does_nothing() {
-        let repo = fixture("routines-esc-back");
+        let (repo, _root_guard) = fixture("routines-esc-back");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         write_routine(
             &repo,
@@ -13415,7 +13415,7 @@ mod tests {
     /// so the pending screen stays exactly where it was.
     #[test]
     fn the_queue_tab_ignores_r() {
-        let repo = fixture("routines-queue-ignores-r");
+        let (repo, _root_guard) = fixture("routines-queue-ignores-r");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         write_routine(
             &repo,
@@ -13444,7 +13444,7 @@ mod tests {
         // below replays its own keys from a bare screen, so a shared repo
         // between them would be queuing the routine twice into one group,
         // which is not what either half of this test is about.
-        let repo = fixture("routines-queued-close");
+        let (repo, _root_guard) = fixture("routines-queued-close");
         write_routine(
             &repo,
             "nightly",
@@ -13456,7 +13456,7 @@ mod tests {
         assert!(under.contains("queued 1 task"), "{under}");
         assert!(under.contains("routines  1 of 1"), "over the list: {under}");
 
-        let repo = fixture("routines-queued-close-2");
+        let (repo, _root_guard) = fixture("routines-queued-close-2");
         write_routine(
             &repo,
             "nightly",
@@ -13475,7 +13475,7 @@ mod tests {
     /// blank pane a person could mistake for a project with no keys to press.
     #[test]
     fn the_empty_routines_pane_names_its_own_path() {
-        let repo = fixture("routines-empty");
+        let (repo, _root_guard) = fixture("routines-empty");
 
         // Checked against `routine_folder_lines` directly, at a width wide
         // enough to hold the whole path: the left pane's own fixed 25
@@ -13496,7 +13496,7 @@ mod tests {
     /// they were.
     #[test]
     fn enter_on_a_selected_folder_queues_every_task_under_minted_ids() {
-        let repo = fixture("routines-enter-mints");
+        let (repo, _root_guard) = fixture("routines-enter-mints");
         let deps = write_routine(
             &repo,
             "nightly",
@@ -13558,7 +13558,7 @@ mod tests {
     /// else in the task is.
     #[test]
     fn enter_remaps_depends_on_between_siblings_in_the_same_folder() {
-        let repo = fixture("routines-enter-remaps-depends-on");
+        let (repo, _root_guard) = fixture("routines-enter-remaps-depends-on");
         write_routine(
             &repo,
             "chain",
@@ -13589,7 +13589,7 @@ mod tests {
     /// queued is not refused for a dependency this solo pick dropped.
     #[test]
     fn space_on_a_solo_task_queues_it_alone_with_depends_on_emptied() {
-        let repo = fixture("routines-solo-space");
+        let (repo, _root_guard) = fixture("routines-solo-space");
         write_routine(
             &repo,
             "chain",
@@ -13636,7 +13636,7 @@ mod tests {
     /// unchanged, same ids.
     #[test]
     fn s_saves_a_pending_group_into_routines_unchanged() {
-        let repo = fixture("routines-save");
+        let (repo, _root_guard) = fixture("routines-save");
         write_pending(
             &repo,
             "audit-deps",
@@ -13657,7 +13657,7 @@ mod tests {
             "{panel}"
         );
 
-        let repo2 = fixture("routines-save-2");
+        let (repo2, _root_guard2) = fixture("routines-save-2");
         write_pending(
             &repo2,
             "audit-deps",
@@ -13681,7 +13681,7 @@ mod tests {
     /// does — and only `esc` backs out of it.
     #[test]
     fn q_is_a_letter_in_the_save_name() {
-        let repo = fixture("routines-save-q-is-a-letter");
+        let (repo, _root_guard) = fixture("routines-save-q-is-a-letter");
         write_pending(
             &repo,
             "audit-deps",
@@ -13704,7 +13704,7 @@ mod tests {
     /// folder name is all `s` accepts.
     #[test]
     fn s_refuses_a_name_that_is_not_a_plain_folder_name() {
-        let repo = fixture("routines-save-refuses-a-path");
+        let (repo, _root_guard) = fixture("routines-save-refuses-a-path");
         write_pending(
             &repo,
             "audit-deps",
@@ -13737,7 +13737,7 @@ mod tests {
     /// it.
     #[test]
     fn s_refuses_a_folder_that_already_holds_tasks() {
-        let repo = fixture("routines-save-refuses-merge");
+        let (repo, _root_guard) = fixture("routines-save-refuses-merge");
         write_pending(
             &repo,
             "audit-deps",
@@ -13791,7 +13791,7 @@ mod tests {
         /// directory at all.
         #[test]
         fn no_hook_configured_is_a_no_op() {
-            let repo = fixture("open-no-hook");
+            let (repo, _root_guard) = fixture("open-no-hook");
             let text = task_text("login", "group: demo\n", BODY);
             let path = write_doc(&repo, "login.md", &text);
             queue_add(
@@ -13823,7 +13823,7 @@ mod tests {
         /// anything is queued or the hook is ever run.
         #[test]
         fn a_group_with_no_description_is_refused_once_a_hook_is_configured() {
-            let mut repo = fixture("open-no-description");
+            let (mut repo, _root_guard) = fixture("open-no-description");
             with_hook(&mut repo, "exit 1");
             let text = task_text("mirrored", "group: issue-mirror\n", BODY);
             let path = write_doc(&repo, "mirrored.md", &text);
@@ -13856,7 +13856,7 @@ mod tests {
         /// group with no `group_description:` on any task queues cleanly.
         #[test]
         fn a_group_with_no_description_is_fine_with_no_hook_configured() {
-            let repo = fixture("open-no-description-no-hook");
+            let (repo, _root_guard) = fixture("open-no-description-no-hook");
             let text = task_text("mirrored", "group: issue-mirror\n", BODY);
             let path = write_doc(&repo, "mirrored.md", &text);
 
@@ -13878,7 +13878,7 @@ mod tests {
         /// the empty string, not a name nothing can open.
         #[test]
         fn a_task_with_no_backing_file_gets_an_empty_task_file() {
-            let mut repo = fixture("open-no-backing-file");
+            let (mut repo, _root_guard) = fixture("open-no-backing-file");
             with_hook(
                 &mut repo,
                 r#"printf '%s' "$SPOOLWAY_TASK_FILE" >"$(dirname "$SPOOLWAY_OUT")/task-file.seen"
@@ -13921,7 +13921,7 @@ mod tests {
         /// `SPOOLWAY_DEPENDS_TICKETS`.
         #[test]
         fn the_hook_runs_per_task_in_dependency_order_and_writes_both_ids() {
-            let mut repo = fixture("open-runs");
+            let (mut repo, _root_guard) = fixture("open-runs");
             with_hook(
                 &mut repo,
                 r#"echo "$SPOOLWAY_TASK $SPOOLWAY_DEPENDS_TICKETS" >>"$(dirname "$SPOOLWAY_OUT")/order.log"
@@ -13976,7 +13976,7 @@ mod tests {
         /// the moment it is ever invoked.
         #[test]
         fn a_task_already_naming_a_ticket_skips_the_hook() {
-            let mut repo = fixture("open-kept");
+            let (mut repo, _root_guard) = fixture("open-kept");
             with_hook(&mut repo, "exit 1");
             let text = task_text(
                 "retry-drops",
@@ -14005,7 +14005,7 @@ mod tests {
         /// it already there and resumes rather than opening a second set.
         #[test]
         fn a_failing_hook_queues_nothing_and_resumes_on_the_next_run() {
-            let mut repo = fixture("open-fails-midbatch");
+            let (mut repo, _root_guard) = fixture("open-fails-midbatch");
             with_hook(
                 &mut repo,
                 r#"if [ "$SPOOLWAY_TASK" = "split-fields" ]; then exit 1; fi
@@ -14099,7 +14099,7 @@ mod tests {
         /// it lives under.
         #[test]
         fn a_hook_failing_on_the_first_call_says_so_with_nothing_to_resume_from() {
-            let mut repo = fixture("open-fails-first-call");
+            let (mut repo, _root_guard) = fixture("open-fails-first-call");
             with_hook(&mut repo, "exit 3");
             let text = task_text(
                 "opens-first",
@@ -14141,7 +14141,7 @@ mod tests {
         /// different slug on the re-run cannot displace the first one.
         #[test]
         fn a_secured_slug_survives_a_failed_batch_and_pins_the_re_run() {
-            let mut repo = fixture("open-slug-writeback");
+            let (mut repo, _root_guard) = fixture("open-slug-writeback");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14211,7 +14211,7 @@ mod tests {
         /// slug is what every task of the group carries afterwards.
         #[test]
         fn the_dependency_order_winner_survives_reversed_task_order() {
-            let mut repo = fixture("open-slug-dep-order");
+            let (mut repo, _root_guard) = fixture("open-slug-dep-order");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14283,7 +14283,7 @@ mod tests {
         /// own invariant.
         #[test]
         fn key_in_names_prefixes_the_group_the_branch_and_stores_the_url() {
-            let mut repo = fixture("open-prefix");
+            let (mut repo, _root_guard) = fixture("open-prefix");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14342,7 +14342,7 @@ mod tests {
         /// on it, not two.
         #[test]
         fn a_task_whose_group_already_carries_the_slug_is_not_prefixed_twice() {
-            let mut repo = fixture("open-prefix-twice");
+            let (mut repo, _root_guard) = fixture("open-prefix-twice");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(&mut repo, "exit 1");
 
@@ -14384,7 +14384,7 @@ mod tests {
         /// fire report it `kept` and reuse the first fire's ticket.
         #[test]
         fn a_fired_routine_opens_tickets_and_takes_the_prefix_like_queue_add() {
-            let mut repo = fixture("open-routine-prefix");
+            let (mut repo, _root_guard) = fixture("open-routine-prefix");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14438,7 +14438,7 @@ mod tests {
         /// that running it again opens a second set.
         #[test]
         fn a_hook_failing_on_a_routine_says_the_ids_were_not_written_anywhere() {
-            let mut repo = fixture("open-routine-fails");
+            let (mut repo, _root_guard) = fixture("open-routine-fails");
             with_hook(
                 &mut repo,
                 r#"if [ "$SPOOLWAY_TASK" != "${SPOOLWAY_TASK#second}" ]; then exit 1; fi
@@ -14481,7 +14481,7 @@ mod tests {
         /// answered yes.
         #[test]
         fn a_screen_submission_takes_the_prefix_like_queue_add() {
-            let mut repo = fixture("open-screen-prefix");
+            let (mut repo, _root_guard) = fixture("open-screen-prefix");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14523,7 +14523,7 @@ mod tests {
         /// there for `terminal-names` and the flag gates only the naming.
         #[test]
         fn with_the_flag_off_a_slug_answer_changes_no_name_but_the_url_is_kept() {
-            let mut repo = fixture("open-no-prefix");
+            let (mut repo, _root_guard) = fixture("open-no-prefix");
             with_hook(
                 &mut repo,
                 r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"
@@ -14561,7 +14561,7 @@ mod tests {
         /// prefix.
         #[test]
         fn an_invalid_slug_is_dropped_and_the_batch_still_queues() {
-            let mut repo = fixture("open-bad-slug");
+            let (mut repo, _root_guard) = fixture("open-bad-slug");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14595,7 +14595,7 @@ mod tests {
         /// than an invalid branch.
         #[test]
         fn an_authored_invalid_slug_is_not_turned_into_a_branch_prefix() {
-            let mut repo = fixture("open-authored-bad-slug");
+            let (mut repo, _root_guard) = fixture("open-authored-bad-slug");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(&mut repo, r#"{ echo "ticket=PROJ-13"; } >"$SPOOLWAY_OUT""#);
 
@@ -14625,7 +14625,7 @@ mod tests {
         /// stored — the batch still queues.
         #[test]
         fn a_relative_url_is_dropped_and_the_batch_still_queues() {
-            let mut repo = fixture("open-bad-url");
+            let (mut repo, _root_guard) = fixture("open-bad-url");
             with_hook(
                 &mut repo,
                 r#"{ echo "ticket=PROJ-13"; echo "url=/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
@@ -14655,7 +14655,7 @@ mod tests {
         /// recognised `<slug>-` prefix off a queued sibling before comparing.
         #[test]
         fn a_second_queue_add_reuses_the_epic_and_the_slug() {
-            let mut repo = fixture("open-prefix-resume");
+            let (mut repo, _root_guard) = fixture("open-prefix-resume");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
@@ -14723,7 +14723,7 @@ mod tests {
         /// inherit that sibling's epic.
         #[test]
         fn an_invalid_sibling_slug_is_not_a_recognised_prefix_for_the_epic_lookup() {
-            let mut repo = fixture("open-bad-sibling-slug");
+            let (mut repo, _root_guard) = fixture("open-bad-sibling-slug");
             repo.config.issue_tracking.key_in_names = true;
 
             // A sibling already in the queue, with a corrupt `slug:` and a
@@ -14769,8 +14769,8 @@ mod tests {
             /// A hook that logs every call it gets and answers an epic and a
             /// ticket numbered by the call, and one pending group `cart` of
             /// two tasks, ready to select with `space`.
-            fn cart(name: &str) -> Repo {
-                let mut repo = fixture(name);
+            fn cart(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+                let (mut repo, root_guard) = fixture(name);
                 with_hook(
                     &mut repo,
                     r#"log="$(dirname "$SPOOLWAY_OUT")/calls.log"
@@ -14797,7 +14797,7 @@ depends_on: [cart-empty-state]
                         BODY,
                     ),
                 );
-                repo
+                (repo, root_guard)
             }
 
             fn hook_calls(repo: &Repo) -> Vec<String> {
@@ -14812,7 +14812,7 @@ depends_on: [cart-empty-state]
             /// every task in the batch and names the tracker, over the tab.
             #[test]
             fn enter_asks_before_the_hook_runs() {
-                let repo = cart("issue-question-asks");
+                let (repo, _root_guard) = cart("issue-question-asks");
                 let drawn = screen(&repo, listed(&repo), " \r");
                 let frame = last_frame(&drawn);
                 assert!(frame.contains("┌─ issue tracking "), "{frame}");
@@ -14835,7 +14835,7 @@ depends_on: [cart-empty-state]
             /// no ticket, and a popup naming what it queued.
             #[test]
             fn n_queues_with_no_hook_call() {
-                let repo = cart("issue-question-n");
+                let (repo, _root_guard) = cart("issue-question-n");
                 let drawn = screen(&repo, listed(&repo), " \rn");
                 assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
                 let task = queued(&repo, "cart-totals");
@@ -14853,7 +14853,7 @@ depends_on: [cart-empty-state]
             /// selection as it was.
             #[test]
             fn esc_queues_nothing_and_opens_nothing() {
-                let repo = cart("issue-question-esc");
+                let (repo, _root_guard) = cart("issue-question-esc");
                 let drawn = screen(&repo, listed(&repo), " \r\x1b");
                 assert!(hook_calls(&repo).is_empty());
                 assert!(repo.queued_ids().is_empty());
@@ -14868,7 +14868,7 @@ depends_on: [cart-empty-state]
             /// taking `enter` to close.
             #[test]
             fn enter_opens_the_tickets_row_by_row_and_queues() {
-                let repo = cart("issue-question-enter");
+                let (repo, _root_guard) = cart("issue-question-enter");
                 let drawn = screen(&repo, listed(&repo), " \r\r");
                 assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
                 assert_eq!(
@@ -14933,7 +14933,7 @@ depends_on: [cart-empty-state]
             /// `opening issues` frame drawn once the last ticket is in.
             #[test]
             fn a_slug_answer_keeps_the_result_to_the_ticket_rows() {
-                let mut repo = cart("issue-question-slug");
+                let (mut repo, _root_guard) = cart("issue-question-slug");
                 repo.config.issue_tracking.key_in_names = true;
                 with_hook(
                     &mut repo,
@@ -14999,7 +14999,7 @@ depends_on: [cart-empty-state]
             /// pane, and `n` there queues it with no hook call.
             #[test]
             fn queuing_a_routine_asks_the_same_question() {
-                let repo = cart("issue-question-routine");
+                let (repo, _root_guard) = cart("issue-question-routine");
                 write_routine(
                     &repo,
                     "nightly",
@@ -15033,7 +15033,7 @@ group_description: audit
             /// A trial never asks and opens no tickets, as before.
             #[test]
             fn a_trial_never_asks_and_opens_no_tickets() {
-                let repo = cart("issue-question-trial");
+                let (repo, _root_guard) = cart("issue-question-trial");
                 let drawn = screen(&repo, listed(&repo), "t\r\r");
                 assert!(!drawn.contains("issue tracking"), "{drawn}");
                 assert!(hook_calls(&repo).is_empty());
@@ -15069,7 +15069,7 @@ group_description: audit
         /// a project with no layer.
         #[test]
         fn no_hook_configured_has_nothing_unmet() {
-            let repo = fixture("tool-gate-no-hook");
+            let (repo, _root_guard) = fixture("tool-gate-no-hook");
             assert!(unmet_requirements(&repo).is_empty());
         }
 
@@ -15078,7 +15078,7 @@ group_description: audit
         /// without drawing at all.
         #[test]
         fn a_met_requirement_draws_nothing() {
-            let mut repo = fixture("tool-gate-met");
+            let (mut repo, _root_guard) = fixture("tool-gate-met");
             with_versioned_hook(&mut repo, "0.0.1");
             assert!(unmet_requirements(&repo).is_empty());
 
@@ -15104,7 +15104,7 @@ group_description: audit
         /// call here would hang the test rather than fail it.
         #[test]
         fn an_unmet_requirement_draws_and_proceeds_with_no_tty() {
-            let mut repo = fixture("tool-gate-no-tty");
+            let (mut repo, _root_guard) = fixture("tool-gate-no-tty");
             with_versioned_hook(&mut repo, "999.0.0");
 
             let mut input = keys("");
@@ -15137,7 +15137,7 @@ group_description: audit
         /// gives, reached instead by a person answering the prompt.
         #[test]
         fn enter_over_the_gate_skips_tracking() {
-            let mut repo = fixture("tool-gate-enter");
+            let (mut repo, _root_guard) = fixture("tool-gate-enter");
             with_versioned_hook(&mut repo, "999.0.0");
 
             let mut input = keys("\r");
@@ -15160,7 +15160,7 @@ group_description: audit
         /// a refusal, since nothing here failed.
         #[test]
         fn esc_over_the_gate_cancels() {
-            let mut repo = fixture("tool-gate-esc");
+            let (mut repo, _root_guard) = fixture("tool-gate-esc");
             with_versioned_hook(&mut repo, "999.0.0");
 
             let mut input = keys("\x1b");
@@ -15180,8 +15180,11 @@ group_description: audit
         /// meet, selected and submitted on the queue screen: `enter` draws
         /// the gate as a popup over the tab — the tab still drawn under it,
         /// nothing printed outside the frame — and queues nothing yet.
-        fn submit_over_the_gate(name: &str, then: &str) -> (Repo, String) {
-            let mut repo = fixture(name);
+        fn submit_over_the_gate(
+            name: &str,
+            then: &str,
+        ) -> (Repo, String, crate::scratch::ScratchRoot) {
+            let (mut repo, root_guard) = fixture(name);
             with_versioned_hook(&mut repo, "999.0.0");
             write_pending(
                 &repo,
@@ -15189,12 +15192,12 @@ group_description: audit
                 &task_text("wire", "group: a\ngroup_description: a\n", BODY),
             );
             let (_, drawn) = screen_exit(&repo, listed(&repo), &format!(" \r{then}"));
-            (repo, drawn)
+            (repo, drawn, root_guard)
         }
 
         #[test]
         fn the_screen_draws_the_gate_in_a_popup_over_the_tab() {
-            let (repo, drawn) = submit_over_the_gate("tool-gate-popup", "");
+            let (repo, drawn, _root_guard) = submit_over_the_gate("tool-gate-popup", "");
             let frame = last_frame(&drawn);
             assert!(frame.contains("┌─ issue tracking "), "{frame}");
             assert!(frame.contains("versioned.sh"), "{frame}");
@@ -15219,7 +15222,7 @@ group_description: audit
         /// queued nothing and said nothing more.
         #[test]
         fn esc_off_the_gate_popup_goes_back_and_queues_nothing() {
-            let (repo, drawn) = submit_over_the_gate("tool-gate-popup-esc", "\x1b");
+            let (repo, drawn, _root_guard) = submit_over_the_gate("tool-gate-popup-esc", "\x1b");
             let frame = last_frame(&drawn);
             assert!(!frame.contains("issue tracking"), "{frame}");
             assert!(frame.contains("[x] a"), "still selected: {frame}");
@@ -15230,7 +15233,7 @@ group_description: audit
         /// the hook is never called.
         #[test]
         fn enter_on_the_gate_popup_queues_without_tracking() {
-            let (repo, drawn) = submit_over_the_gate("tool-gate-popup-enter", "\r");
+            let (repo, drawn, _root_guard) = submit_over_the_gate("tool-gate-popup-enter", "\r");
             let frame = last_frame(&drawn);
             assert!(!frame.contains("issue tracking"), "{frame}");
             let task = queued(&repo, "wire");
@@ -15249,7 +15252,7 @@ group_description: audit
         /// PATH" in place of a version and a location.
         #[test]
         fn a_tool_missing_from_path_entirely_is_unmet() {
-            let mut repo = fixture("tool-gate-missing-tool");
+            let (mut repo, _root_guard) = fixture("tool-gate-missing-tool");
             let dir = repo.checkout.join(".spoolway/hooks");
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("versioned.sh");
@@ -15288,7 +15291,7 @@ group_description: audit
         /// no-tty branch the test above drives directly.
         #[test]
         fn open_and_prefix_skips_open_tickets_when_a_requirement_is_unmet() {
-            let mut repo = fixture("tool-gate-open-and-prefix");
+            let (mut repo, _root_guard) = fixture("tool-gate-open-and-prefix");
             with_versioned_hook(&mut repo, "999.0.0");
             let doc = task_text(
                 "solo",
@@ -15323,7 +15326,7 @@ group_description: audit
         /// no hook for it and never hold it waiting on one.
         #[test]
         fn open_and_prefix_stamps_tracking_off_when_a_requirement_is_unmet() {
-            let mut repo = fixture("tool-gate-stamps-tracking-off");
+            let (mut repo, _root_guard) = fixture("tool-gate-stamps-tracking-off");
             with_versioned_hook(&mut repo, "999.0.0");
             let doc = task_text(
                 "solo",
@@ -15350,7 +15353,7 @@ group_description: audit
         /// alongside the one above.
         #[test]
         fn open_and_prefix_writes_no_tracking_key_when_tickets_open() {
-            let repo = fixture("tool-gate-no-tracking-key-when-open");
+            let (repo, _root_guard) = fixture("tool-gate-no-tracking-key-when-open");
             let doc = task_text("solo", "group: solo\n", BODY);
             let mut tasks = validate_batch(
                 &repo,
@@ -15526,7 +15529,7 @@ body\n";
     /// unqueue, from a script — and the queue file is gone.
     #[test]
     fn queue_unqueue_carries_a_queued_task_back_to_pending() {
-        let repo = fixture("queue-unqueue");
+        let (repo, _root_guard) = fixture("queue-unqueue");
         add(&repo, "login", &[]);
         assert!(repo.queue_dir().join("login.md").exists());
 
@@ -15562,7 +15565,7 @@ body\n";
     /// dependency check between them — the board's own `U`, from a script.
     #[test]
     fn queue_unqueue_all_carries_every_not_started_task() {
-        let repo = fixture("queue-unqueue-all");
+        let (repo, _root_guard) = fixture("queue-unqueue-all");
         add(&repo, "base", &[]);
         add(&repo, "dependent", &["base"]);
 
@@ -15579,7 +15582,7 @@ body\n";
     /// script should be able to reach by accident.
     #[test]
     fn queue_unqueue_all_force_is_refused() {
-        let repo = fixture("queue-unqueue-all-force");
+        let (repo, _root_guard) = fixture("queue-unqueue-all-force");
         add(&repo, "login", &[]);
 
         let err = queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_all_args(true)).unwrap_err();
@@ -15593,7 +15596,7 @@ body\n";
     /// names itself.
     #[test]
     fn queue_unqueue_refuses_a_queued_dependency_and_an_unknown_id() {
-        let repo = fixture("queue-unqueue-refusal");
+        let (repo, _root_guard) = fixture("queue-unqueue-refusal");
         let pipelines = Pipelines::builtin();
         add(&repo, "base", &[]);
         add(&repo, "dependent", &["base"]);
@@ -15617,7 +15620,7 @@ body\n";
     /// reaches pending.
     #[test]
     fn queue_unqueue_refuses_a_started_task_without_force_and_tears_down_with_it() {
-        let repo = fixture("queue-unqueue-started");
+        let (repo, _root_guard) = fixture("queue-unqueue-started");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
 
@@ -15666,7 +15669,7 @@ body\n";
     /// `status::unqueue_task`, which is silent about this.
     #[test]
     fn queue_unqueue_refuses_a_task_already_drafted_in_pending() {
-        let repo = fixture("queue-unqueue-pending-conflict");
+        let (repo, _root_guard) = fixture("queue-unqueue-pending-conflict");
         add(&repo, "login", &[]);
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         std::fs::write(
@@ -15694,7 +15697,7 @@ body\n";
     /// just the final write.
     #[test]
     fn queue_unqueue_force_refuses_a_task_already_drafted_in_pending_before_tearing_down() {
-        let repo = fixture("queue-unqueue-force-pending-conflict");
+        let (repo, _root_guard) = fixture("queue-unqueue-force-pending-conflict");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let worktree = repo.root.join("wt-solo");
@@ -15732,7 +15735,7 @@ body\n";
     /// project's home.
     #[test]
     fn queue_add_dry_run_writes_nothing() {
-        let repo = fixture("queue-add-dry-run");
+        let (repo, _root_guard) = fixture("queue-add-dry-run");
         let text = task_text("login", "group: demo\n", BODY);
         let path = write_doc(&repo, "login.md", &text);
         let mut args = from_args(&[&path]);
@@ -15769,7 +15772,7 @@ body\n";
     /// copy would cause.
     #[test]
     fn queue_add_from_the_pending_directory_removes_its_own_source() {
-        let repo = fixture("queue-add-from-pending");
+        let (repo, _root_guard) = fixture("queue-add-from-pending");
         let text = task_text("beta", "group: one\n", BODY);
         let path = write_pending(&repo, "beta", &text);
 
@@ -15810,7 +15813,7 @@ body\n";
     /// held is ever removed.
     #[test]
     fn queue_add_from_outside_pending_leaves_the_source_alone() {
-        let repo = fixture("queue-add-from-elsewhere");
+        let (repo, _root_guard) = fixture("queue-add-from-elsewhere");
         let text = task_text("login", "group: demo\n", BODY);
         let path = write_doc(&repo, "login.md", &text);
 
@@ -15853,7 +15856,7 @@ body\n";
     /// instead.
     #[test]
     fn a_task_naming_its_own_base_is_cut_from_that_branch() {
-        let repo = fixture("task-base");
+        let (repo, _root_guard) = fixture("task-base");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -15927,7 +15930,7 @@ body\n";
     /// accept, and anything that would reach git as a flag.
     #[test]
     fn a_task_base_that_is_not_a_local_branch_is_refused() {
-        let repo = fixture("task-base-refused");
+        let (repo, _root_guard) = fixture("task-base-refused");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);

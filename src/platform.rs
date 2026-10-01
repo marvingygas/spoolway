@@ -885,7 +885,7 @@ pub(crate) mod test_home {
             let real = super::super::home_dir();
 
             with_home(&scratch, || {
-                assert_eq!(super::super::home_dir(), Some(scratch.clone()));
+                assert_eq!(super::super::home_dir(), Some(scratch.to_path_buf()));
 
                 let seen = std::thread::scope(|s| s.spawn(super::super::home_dir).join().unwrap());
                 assert_eq!(
@@ -911,9 +911,9 @@ pub(crate) mod test_home {
 
             with_home(&outer, || {
                 with_home(&inner, || {
-                    assert_eq!(super::super::home_dir(), Some(inner.clone()));
+                    assert_eq!(super::super::home_dir(), Some(inner.to_path_buf()));
                 });
-                assert_eq!(super::super::home_dir(), Some(outer.clone()));
+                assert_eq!(super::super::home_dir(), Some(outer.to_path_buf()));
             });
         }
     }

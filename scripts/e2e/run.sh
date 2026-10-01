@@ -329,8 +329,29 @@ export PATH
 # anything.
 if [ "$TIER" = pr ]; then
   LOCK="${SPOOLWAY_E2E_PR_LOCK:-${TMPDIR:-/tmp}/spoolway-e2e-pr.lock}"
-  exec {E2E_PR_LOCK_FD}>"$LOCK"
-  flock "$E2E_PR_LOCK_FD"
+  # `cleanup` below unlinks this file while it still holds the lock, so a
+  # run already blocked in `flock` here wakes holding an inode that is no
+  # longer at `$LOCK` at all. Keeping that lock would be wrong: the next
+  # run to open `$LOCK` creates a fresh inode, locks it at once, and runs
+  # alongside us. `-ef` compares the fd against the path once `flock`
+  # returns, and a mismatch means the file we locked is gone from the
+  # path, so we drop it and try again against whatever is there now,
+  # until the two agree. That is the loop a `flock` paired with unlink
+  # always needs, and it only holds because the unlink happens under the
+  # lock: unlinked after `flock -u`, a waiter can wake and pass this check
+  # before the unlink lands, and a third run then slips through on the
+  # fresh inode (reproduced 3 of 3 on 2026-10-01). Bash's own `-ef`, not
+  # `stat -c %d:%i` on `/proc/self/fd/$FD`: that path is a magic symlink
+  # whose own device number does not match the target's real one on every
+  # kernel this runs on, which made the two look permanently unequal and
+  # spun this loop forever — `-ef` resolves both sides as `fstat`/`stat`
+  # normally would and is the one answer that is kernel-portable.
+  while :; do
+    exec {E2E_PR_LOCK_FD}>"$LOCK"
+    flock "$E2E_PR_LOCK_FD"
+    [ "/proc/self/fd/$E2E_PR_LOCK_FD" -ef "$LOCK" ] && break
+    exec {E2E_PR_LOCK_FD}>&-
+  done
   # Test-only, for `lock.sh`: holds the lock this many seconds past
   # acquiring it, so a suite driving two overlapping invocations has
   # something to actually measure the second one waiting on.
@@ -392,6 +413,21 @@ cleanup() {
     echo "kept: $ROOT"
   else
     rm -rf "$ROOT"
+  fi
+  # The `pr` lock file, unlinked and then released explicitly rather than
+  # left for the fd to close on process exit, so a passing run leaves no
+  # lock file behind. The order is the whole point: `rm -f` first, while
+  # this run still holds the lock, then `flock -u`. A waiter blocked on
+  # this inode then wakes to find `$LOCK` already gone or pointing at a
+  # new inode, and the acquire loop above sends it round again. Released
+  # first and unlinked after, the waiter wakes, sees its inode still at
+  # the path, and keeps a lock that this `rm` then orphans — any run that
+  # opens `$LOCK` afterwards gets a fresh, unlocked inode and runs beside
+  # it, the exact regression this lock exists to prevent.
+  if [ -n "${E2E_PR_LOCK_FD:-}" ]; then
+    rm -f "$LOCK"
+    flock -u "$E2E_PR_LOCK_FD" 2>/dev/null
+    exec {E2E_PR_LOCK_FD}>&- 2>/dev/null
   fi
 }
 trap cleanup EXIT

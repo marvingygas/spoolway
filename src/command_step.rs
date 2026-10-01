@@ -587,7 +587,7 @@ mod tests {
     }
 
     struct Fixture {
-        root: PathBuf,
+        root: crate::scratch::ScratchRoot,
         runs: Runs,
     }
 

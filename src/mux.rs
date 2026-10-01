@@ -3790,7 +3790,7 @@ mod tests {
     /// A real git repo with one commit, for the [`project_home`] tests
     /// below — real git throughout, since the stamp this resolves against
     /// lives in a real `.git`, not a fixture that only pretends to have one.
-    fn git_fixture(name: &str) -> PathBuf {
+    fn git_fixture(name: &str) -> crate::scratch::ScratchRoot {
         let work = crate::scratch::root(&format!("mux-test-project-home-{name}"));
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work).unwrap();

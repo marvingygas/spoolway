@@ -241,8 +241,8 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.retention_days = 0;
         let repo = Repo {
-            checkout: base.clone(),
-            root: base.clone(),
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
             config,
             home: base.join(".home"),
         };
@@ -306,8 +306,8 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.retention_days = 30;
         let repo = Repo {
-            checkout: base.clone(),
-            root: base.clone(),
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
             config,
             home: base.join(".home"),
         };
@@ -370,8 +370,8 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.retention_days = 1;
         let repo = Repo {
-            checkout: base.clone(),
-            root: base.clone(),
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
             config,
             home: base.join(".home"),
         };

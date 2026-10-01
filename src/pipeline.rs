@@ -5567,8 +5567,8 @@ mod tests {
             );
 
             let repo = crate::repo::Repo {
-                checkout: root.clone(),
-                root: root.clone(),
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config,
                 home: crate::mux::project_home(&root).unwrap(),
             };

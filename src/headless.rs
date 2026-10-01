@@ -1001,7 +1001,7 @@ mod tests {
     /// Everything below spawns real processes and
     /// reads their real output; nothing here talks to a model.
     struct Fixture {
-        root: PathBuf,
+        root: crate::scratch::ScratchRoot,
         bin: PathBuf,
         mux: Headless,
     }

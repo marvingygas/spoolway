@@ -1792,7 +1792,7 @@ mod tests {
     /// group, which is the only place it can hold once the board is grouped.
     #[test]
     fn rows_group_under_their_group_with_the_ungrouped_last() {
-        let repo = fixture("plan-groups");
+        let (repo, _root_guard) = fixture("plan-groups");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "scratch", &[], Some("implement"), None);
         // `group:` is read verbatim now — a path-shaped value is its own
@@ -1852,7 +1852,7 @@ mod tests {
     /// group boundary of its own to speak of.
     #[test]
     fn the_band_reads_after_the_group_a_stacking_groups_first_task_depends_on() {
-        let repo = fixture("group-stacks-after");
+        let (repo, _root_guard) = fixture("group-stacks-after");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "auth-login", &[], None, Some("auth-api"));
         add_to(
@@ -1905,7 +1905,7 @@ mod tests {
     /// closing line.
     #[test]
     fn the_band_names_the_group_and_the_total_line_carries_the_spend() {
-        let repo = fixture("group-total");
+        let (repo, _root_guard) = fixture("group-total");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
 
@@ -2288,7 +2288,7 @@ mod tests {
     /// about the two has to be the same text.
     #[test]
     fn the_board_and_queue_list_draw_the_same_table() {
-        let repo = fixture("one-renderer");
+        let (repo, _root_guard) = fixture("one-renderer");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -2322,7 +2322,7 @@ mod tests {
     /// reader can actually see.
     #[test]
     fn a_dot_and_a_colour_code_never_shift_a_column() {
-        let repo = fixture("columns");
+        let (repo, _root_guard) = fixture("columns");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         add(&repo, "sessions", &["login"], None);
@@ -2480,7 +2480,7 @@ mod tests {
     /// read as a measurement.
     #[test]
     fn a_row_with_no_figures_shows_a_dash_for_each() {
-        let repo = fixture("no-figures");
+        let (repo, _root_guard) = fixture("no-figures");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -2869,7 +2869,7 @@ mod tests {
     /// can never start a lane on it.
     #[test]
     fn each_agent_profile_gets_its_own_footer_line_of_slots_alone() {
-        let repo = fixture("footer-split");
+        let (repo, _root_guard) = fixture("footer-split");
         let pipelines = Pipelines::builtin();
         let mut used: BTreeMap<&str, usize> = BTreeMap::new();
         used.insert("claude", 1);
@@ -2907,7 +2907,7 @@ mod tests {
     /// being held for an agent the reader had never configured.
     #[test]
     fn a_capped_profile_no_pipeline_names_stays_off_the_footer() {
-        let mut repo = fixture("footer-unnamed-profile");
+        let (mut repo, _root_guard) = fixture("footer-unnamed-profile");
         let mut profile = crate::config::AgentProfile::for_kind("claude");
         profile.concurrency = 1;
         repo.config.agents.insert("unreferenced".into(), profile);
@@ -2959,7 +2959,7 @@ mod tests {
     /// `N hook failures` once something has — see `crate::tracking`.
     #[test]
     fn the_issue_tracking_line_only_appears_once_a_hook_has_failed() {
-        let repo = fixture("footer-issue-tracking");
+        let (repo, _root_guard) = fixture("footer-issue-tracking");
         let pipelines = Pipelines::builtin();
         let empty: Vec<String> = footer(
             &repo,
@@ -3011,7 +3011,7 @@ mod tests {
     /// naming that model, against the model's own cap.
     #[test]
     fn a_models_own_slots_are_counted_in_the_footer() {
-        let mut repo = fixture("footer-model-slots");
+        let (mut repo, _root_guard) = fixture("footer-model-slots");
         // Give the otherwise uncapped Claude profile an explicit limit so
         // this test can distinguish the model override from profile fallback.
         repo.config.agents.get_mut("claude").unwrap().concurrency = 1;
@@ -3060,7 +3060,7 @@ mod tests {
     /// own figure over both lanes beside the pool's figure over the one.
     #[test]
     fn a_profile_with_one_pooled_lane_and_one_unpooled_prints_both_figures() {
-        let mut repo = fixture("footer-mixed-pooled-and-unpooled");
+        let (mut repo, _root_guard) = fixture("footer-mixed-pooled-and-unpooled");
         repo.config.agents.get_mut("pi").unwrap().concurrency = 3;
         repo.config.models.insert(
             "Ornith-1.5-35B-A3B".to_string(),
@@ -3102,7 +3102,7 @@ mod tests {
     /// appended after it, in the order first seen.
     #[test]
     fn a_profile_naming_two_pooled_models_appends_both_to_its_one_line() {
-        let mut repo = fixture("footer-two-pools");
+        let (mut repo, _root_guard) = fixture("footer-two-pools");
         repo.config.models.insert(
             "ornith/Ornith-1.5-35B-A3B".to_string(),
             crate::usage::ModelPrice {
@@ -3167,7 +3167,7 @@ mod tests {
     /// entry of its own, not the line count.
     #[test]
     fn two_names_resolving_to_the_same_pool_draw_one_pool_figure() {
-        let mut repo = fixture("footer-shared-glob");
+        let (mut repo, _root_guard) = fixture("footer-shared-glob");
         repo.config.models.insert(
             "ornith/*".to_string(),
             crate::usage::ModelPrice {
@@ -3220,7 +3220,7 @@ mod tests {
     /// pass.
     #[test]
     fn a_qualified_and_a_bare_name_sharing_a_plain_row_draw_one_pool_figure() {
-        let mut repo = fixture("footer-shared-suffix-row");
+        let (mut repo, _root_guard) = fixture("footer-shared-suffix-row");
         repo.config.models.insert(
             "Ornith-1.5-35B-A3B".to_string(),
             crate::usage::ModelPrice {
@@ -3272,7 +3272,7 @@ mod tests {
     /// nothing.
     #[test]
     fn every_enabled_job_draws_one_row_under_the_slots() {
-        let repo = fixture("footer-jobs-ledger");
+        let (repo, _root_guard) = fixture("footer-jobs-ledger");
         let pipelines = Pipelines::builtin();
         let mut used: BTreeMap<&str, usize> = BTreeMap::new();
         used.insert("claude", 1);
@@ -3343,7 +3343,7 @@ mod tests {
     /// to fit whichever label is wider, not just the profile names.
     #[test]
     fn a_short_profile_name_still_lines_up_under_the_jobs_label() {
-        let repo = fixture("footer-jobs-narrow-profile");
+        let (repo, _root_guard) = fixture("footer-jobs-narrow-profile");
         let pipelines = Pipelines::builtin();
         let mut used: BTreeMap<&str, usize> = BTreeMap::new();
         used.insert("pi", 1);
@@ -3537,7 +3537,7 @@ mod tests {
     /// row's own text happened to end.
     #[test]
     fn two_rows_of_different_widths_line_up_their_verdict_and_position() {
-        let repo = fixture("verdict-alignment");
+        let (repo, _root_guard) = fixture("verdict-alignment");
         let pipelines = Pipelines::builtin();
         add(&repo, "task-a", &[], None);
         let mut short = repo.task("task-a").unwrap();
@@ -3602,7 +3602,7 @@ mod tests {
     /// pass to `review`, so this is exactly that move.
     #[test]
     fn a_move_on_the_reporting_steps_on_pass_draws_a_green_pass() {
-        let repo = fixture("verdict-pass");
+        let (repo, _root_guard) = fixture("verdict-pass");
         let pipelines = Pipelines::builtin();
         add(&repo, "gate-board", &[], Some("review"));
         let tasks = repo.tasks().unwrap();
@@ -3636,7 +3636,7 @@ mod tests {
     /// `blocked` — which is exactly what tells this apart from a block.
     #[test]
     fn a_move_on_the_reporting_steps_on_fail_draws_a_red_fail() {
-        let repo = fixture("verdict-fail");
+        let (repo, _root_guard) = fixture("verdict-fail");
         let pipelines = Pipelines::builtin();
         add(&repo, "gate-board", &[], Some("implement"));
         let tasks = repo.tasks().unwrap();
@@ -3670,7 +3670,7 @@ mod tests {
     /// `State::Paused`, so the two can never read differently.
     #[test]
     fn arriving_at_paused_draws_the_word_and_colour_state_uses_naming_the_gate() {
-        let repo = fixture("verdict-paused");
+        let (repo, _root_guard) = fixture("verdict-paused");
         let pipelines = Pipelines::builtin();
         add(&repo, "gate-board", &[], None);
         let mut task = repo.task("gate-board").unwrap();
@@ -3710,7 +3710,7 @@ mod tests {
     /// `paused_at` is absent.
     #[test]
     fn arriving_at_paused_falls_back_to_parked_from_when_there_is_no_gate() {
-        let repo = fixture("verdict-paused-parked-from");
+        let (repo, _root_guard) = fixture("verdict-paused-parked-from");
         let pipelines = Pipelines::builtin();
         add(&repo, "billing", &[], None);
         let mut task = repo.task("billing").unwrap();
@@ -3746,7 +3746,7 @@ mod tests {
     /// draws.
     #[test]
     fn arriving_at_blocked_draws_the_word_and_colour_state_uses_naming_the_stop() {
-        let repo = fixture("verdict-blocked");
+        let (repo, _root_guard) = fixture("verdict-blocked");
         let pipelines = Pipelines::builtin();
         add(&repo, "wall", &[], None);
         let mut task = repo.task("wall").unwrap();
@@ -3785,7 +3785,7 @@ mod tests {
     /// it draws dim, naming the step, with no verdict word at all.
     #[test]
     fn a_move_matching_neither_route_draws_dim_with_no_verdict_word() {
-        let repo = fixture("verdict-neither");
+        let (repo, _root_guard) = fixture("verdict-neither");
         let pipelines = Pipelines::builtin();
         // `implement`'s own routes are `review` (pass) and `blocked` (fail);
         // `handover` is neither, so this move is not explained by either.
@@ -3820,7 +3820,7 @@ mod tests {
     /// draws `—` in its place, verdict and step name unaffected.
     #[test]
     fn a_task_whose_pipeline_cannot_be_read_draws_a_dash_for_its_position() {
-        let repo = fixture("verdict-unreadable-pipeline");
+        let (repo, _root_guard) = fixture("verdict-unreadable-pipeline");
         let pipelines = Pipelines::builtin();
         add(&repo, "gate-board", &[], None);
         let mut task = repo.task("gate-board").unwrap();
@@ -3855,7 +3855,7 @@ mod tests {
     /// balanced rather than corrupting the rest of the frame.
     #[test]
     fn a_recent_line_too_long_for_the_pane_ends_in_an_ellipsis() {
-        let repo = fixture("verdict-too-long");
+        let (repo, _root_guard) = fixture("verdict-too-long");
         let pipelines = Pipelines::builtin();
         add(&repo, "gate-board", &[], Some("review"));
         let tasks = repo.tasks().unwrap();

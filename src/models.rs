@@ -627,7 +627,7 @@ fn price_table_footer(age: PriceTableAge) -> String {
 mod tests {
     use super::*;
 
-    fn fixture_home(name: &str) -> std::path::PathBuf {
+    fn fixture_home(name: &str) -> crate::scratch::ScratchRoot {
         let home = crate::scratch::root(name);
         fs::create_dir_all(home.join(".spoolway")).unwrap();
         home
@@ -764,8 +764,8 @@ mod tests {
     fn vendor_success_reports_only_the_written_path() {
         let checkout = crate::scratch::root("models-vendor-report");
         let repo = Repo {
-            root: checkout.clone(),
-            checkout: checkout.clone(),
+            root: checkout.to_path_buf(),
+            checkout: checkout.to_path_buf(),
             config: Default::default(),
             home: checkout.join("state"),
         };

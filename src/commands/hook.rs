@@ -141,7 +141,7 @@ mod tests {
     /// guessing which lines a script may lean on.
     #[test]
     fn hook_contract_names_every_event_and_its_own_variables() {
-        let repo = crate::commands::testutil::fixture("hook-contract-events");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("hook-contract-events");
         let text = render_hook_contract(&repo);
         for fact in [
             "SPOOLWAY_EVENT",
@@ -184,7 +184,7 @@ mod tests {
     /// wire, with three ordinary ways to do it.
     #[test]
     fn hook_contract_says_done_is_a_handoff_and_names_three_ways_to_close() {
-        let repo = crate::commands::testutil::fixture("hook-contract-done");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("hook-contract-done");
         let text = render_hook_contract(&repo);
         // Each assertion below is a distinct claim the acceptance criteria
         // make: a looser one (just "GitHub" and "Jira" appearing anywhere)
@@ -225,8 +225,8 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: workspace.join("dispatchers").join("api"),
         };

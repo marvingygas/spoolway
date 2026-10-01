@@ -19,9 +19,24 @@
 //! repeats within that process. The name still leads, because a directory
 //! left behind by a crashed run is only useful if you can tell what wrote it.
 //!
-//! That leaves nobody to delete a finished run's directory, since no later run
-//! will ever ask for the same name — see [`reclaim_finished_runs`], which is
-//! what stops them accumulating without number.
+//! A run that crashes, or is killed outright, leaves nobody to delete its
+//! directory on the way out — see [`reclaim_finished_runs`], which is what
+//! stops those accumulating without number.
+//!
+//! A run that finishes normally does not have to wait for that later sweep,
+//! though: [`root`] returns a [`ScratchRoot`] whose [`Drop`] removes the
+//! directory — and any sibling named after it, see [`remove_siblings_of`] —
+//! the moment the value itself goes out of scope. That has to be the
+//! caller's own scope, not a thread-exit hook: libtest gives every `#[test]`
+//! its own OS thread, but it reports that test's outcome from *inside* that
+//! thread, and the whole process can exit as soon as the last outcome is in,
+//! racing — and on a parallel run, usually beating — any cleanup hung off
+//! the thread actually ending. A thread-exit guard was tried here first and
+//! replaced for exactly that reason; with no cleanup at all, one full unit
+//! run left 1,449 of these directories in `/tmp`. A value bound to the test
+//! function's own stack frame
+//! has no such race: Rust runs its destructor as that frame unwinds, panic
+//! or not, before the test thread ever reports anything back.
 //!
 //! [`root`] is not test-only any more: `spoolway doctor`'s own live pane
 //! check opens one on a real machine, to run its trivial command in — see
@@ -29,9 +44,12 @@
 //! now pays [`reclaim_finished_runs`]'s cost too: the first `root` of any
 //! process sweeps up to [`SWEEP_LIMIT`] finished runs' directories out of
 //! the system temporary directory, the same side effect `cargo test` always
-//! had, on a machine that also runs the test suite a lot.
+//! had, on a machine that also runs the test suite a lot. `live_pane` holds
+//! its `ScratchRoot` across the call it makes in that directory and lets it
+//! drop the same as any test does; nothing there is test-only about `Drop`.
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,8 +59,110 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// test calls itself, so reuse is common.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// A [`root`] path, removed — along with any sibling directory named after
+/// it, see [`remove_siblings_of`] — when this value is dropped. See the
+/// module-level doc comment for why that has to be an ordinary scope-bound
+/// `Drop` rather than a thread-exit hook.
+///
+/// `Deref<Target = Path>` and [`AsRef<Path>`] cover the method calls and the
+/// `impl AsRef<Path>` parameters almost every one of this type's several
+/// hundred callers already uses — a join, a display, a `std::fs` call taking
+/// `&root` — so most of them needed no change at all once `root` started
+/// returning this instead of a bare `PathBuf`. A caller that genuinely needs
+/// to hand the path on past this value's own scope — stored in a struct
+/// field, returned up a level, compared against an owned `PathBuf` — takes
+/// `.to_path_buf()` instead, same as it would off a bare `PathBuf`, and
+/// keeps this value itself alive wherever the cleanup should actually
+/// happen: the enclosing `#[test]`'s own stack frame, in every case so far.
+#[must_use = "the directory is removed when this is dropped — a call that only wants the path can still bind it, but one that never names it never gets to clean up on scope exit"]
+pub(crate) struct ScratchRoot(PathBuf);
+
+impl Deref for ScratchRoot {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ScratchRoot {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for ScratchRoot {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ScratchRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PartialEq for ScratchRoot {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialEq<Path> for ScratchRoot {
+    fn eq(&self, other: &Path) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<PathBuf> for ScratchRoot {
+    fn eq(&self, other: &PathBuf) -> bool {
+        &self.0 == other
+    }
+}
+
+impl PartialEq<ScratchRoot> for PathBuf {
+    fn eq(&self, other: &ScratchRoot) -> bool {
+        self == &other.0
+    }
+}
+
+impl Drop for ScratchRoot {
+    fn drop(&mut self) {
+        // Best-effort, same as every other cleanup in this file: a
+        // directory the caller never actually created, or already removed
+        // itself, is not a failure worth reporting from a value that is
+        // already on its way out.
+        let _ = std::fs::remove_dir_all(&self.0);
+        remove_siblings_of(&self.0);
+    }
+}
+
+/// Remove every directory beside `path` that is named after it with a
+/// suffix appended — `<path>-home`, `<path>-worktrees` — the same sibling
+/// convention [`finished_run_pid`]'s own doc comment describes, built by a
+/// fixture that wants a second scratch directory beside the one it asked
+/// `root` for rather than a second unrelated call to `root` itself. Those
+/// never went through `root`, so no [`ScratchRoot`] ever owns them on its
+/// own; this is what still catches them on the way out.
+fn remove_siblings_of(path: &Path) {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}-", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// A path under the system temporary directory that belongs to this call
-/// alone. Nothing is created here; the caller does that, as it did before.
+/// alone, wrapped in a value that removes it — see [`ScratchRoot`] — when
+/// the caller is done with it. Nothing is created here; the caller does
+/// that, as it did before.
 ///
 /// The temporary directory is resolved through [`crate::platform::PathExt`]
 /// before anything is joined onto it, so that every path a fixture builds is
@@ -51,10 +171,10 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// as resolved by anything under test. `temp_dir()` is resolved rather than
 /// the joined path because the joined path does not exist yet; its parent
 /// always does.
-pub(crate) fn root(name: &str) -> PathBuf {
+pub(crate) fn root(name: &str) -> ScratchRoot {
     reclaim_finished_runs();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    temp_root().join(format!("spoolway-{name}-{}-{seq}", std::process::id()))
+    ScratchRoot(temp_root().join(format!("spoolway-{name}-{}-{seq}", std::process::id())))
 }
 
 /// The system temporary directory, in spoolway's one path spelling — see
@@ -245,6 +365,57 @@ pub(crate) fn git_init(root: &Path, args: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of [`ScratchRoot`]: a directory a test created and
+    /// never removed itself is still gone once the value `root` returned
+    /// goes out of scope — here, an inner block standing in for a test
+    /// function's own body, the scope that actually matters.
+    #[test]
+    fn a_roots_directory_is_gone_once_it_goes_out_of_scope() {
+        let dir = {
+            let root = root("scope-owned");
+            std::fs::create_dir_all(&root).unwrap();
+            assert!(root.exists(), "the fixture did not even get created");
+            root.to_path_buf()
+        };
+
+        assert!(
+            !dir.exists(),
+            "the guard went out of scope, but its directory is still on disk: {}",
+            dir.display()
+        );
+    }
+
+    /// The case [`ScratchRoot`] exists for, and the one a thread-exit hook
+    /// got wrong: a test that panics midway through, the way a failed
+    /// assertion does, still has its directory removed — because the value
+    /// is dropped while the stack unwinds through it, not only when it
+    /// returns normally. Driven through `catch_unwind` on a spawned thread
+    /// rather than an actual failing `#[test]`, the same shape libtest runs
+    /// every test in, so the panic is caught here rather than failing the
+    /// suite.
+    #[test]
+    fn a_roots_directory_is_gone_even_when_its_scope_ends_in_a_panic() {
+        let dir = std::thread::spawn(|| {
+            let root = root("panic-owned");
+            std::fs::create_dir_all(&root).unwrap();
+            let dir = root.to_path_buf();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _root = root;
+                panic!("standing in for a failed assertion");
+            }));
+            assert!(outcome.is_err(), "the stand-in panic did not fire");
+            dir
+        })
+        .join()
+        .unwrap();
+
+        assert!(
+            !dir.exists(),
+            "the guard's scope ended in a panic, but its directory is still on disk: {}",
+            dir.display()
+        );
+    }
 
     /// The two things a root has to survive: another process running the same
     /// suite, and the same name being asked for twice in this one.
