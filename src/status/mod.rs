@@ -1794,20 +1794,10 @@ fn render(
     let active_jobs = crate::jobs::active_jobs_cached(repo, jobs_next);
 
     if rows.is_empty() {
-        // A cron job keeps the dispatcher resident on an empty queue, so the
-        // board says why it is still up rather than "nothing queued" — the
-        // same opening and closing the plain run prints, in the board's own
-        // dim style. The "next: ..." line the plain run inserts between them
-        // is left out here: the job ledger in the footer below already names
-        // every enabled job's own next firing, and printing it twice would
-        // read as two answers to the same question.
-        if !active_jobs.is_empty() {
-            for line in crate::jobs::staying_up_resident_lines(active_jobs.len()) {
-                frame.push_str(&format!(" {DIM}{line}{RESET}\n"));
-            }
-        } else {
-            frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
-        }
+        // `nothing queued` either way, enabled job or not — the job ledger
+        // in the footer below already names every enabled job and its next
+        // firing, so there is nothing left for this line to explain.
+        frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
     } else {
         frame.push_str(&table(
             &rows,
@@ -3684,11 +3674,11 @@ mod tests {
         assert!(!version_label(Some("99.0.0")).contains("99.0.0"));
     }
 
-    /// An empty queue with a cron job enabled is why a dispatcher is still
-    /// resident, so the board says so — the same queue-empty / job-count /
-    /// next-fire facts the plain run prints — rather than "nothing queued".
+    /// An empty queue with a cron job enabled still reads "nothing queued"
+    /// on the board — the job ledger in the footer already names the
+    /// enabled job and its next firing, so this line does not repeat it.
     #[test]
-    fn an_empty_queue_with_a_job_enabled_says_the_job_is_holding_the_run_up() {
+    fn an_empty_queue_with_a_job_enabled_says_nothing_queued() {
         let repo = fixture("board-jobs-resident");
         let pipelines = Pipelines::builtin();
         std::fs::create_dir_all(repo.home()).unwrap();
@@ -3711,9 +3701,9 @@ mod tests {
                 )
                 .unwrap(),
         );
-        assert!(frame.contains("1 job enabled"), "{frame}");
-        assert!(frame.contains("staying up"), "{frame}");
-        assert!(!frame.contains("nothing queued"), "{frame}");
+        assert!(frame.contains("nothing queued"), "{frame}");
+        assert!(!frame.contains("staying up"), "{frame}");
+        assert!(!frame.contains("ctrl-c stops."), "{frame}");
         // The next firing is not repeated here — the job ledger in the
         // footer below already names it once, for `nightly` itself.
         assert!(!frame.contains("next: nightly,"), "{frame}");

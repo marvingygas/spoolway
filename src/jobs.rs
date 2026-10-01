@@ -491,11 +491,10 @@ pub fn last_fired(repo: &Repo, name: &str) -> Option<i64> {
         .and_then(|record| record.fired_at)
 }
 
-/// Why the dispatcher is staying up on an empty queue.
+/// Why the dispatcher is staying up on an empty queue: which enabled job
+/// fires soonest, and when.
 #[derive(Clone)]
 pub struct StayingUp {
-    /// How many jobs are enabled across both stores.
-    pub enabled: usize,
     /// The enabled job that fires soonest, and when — `None` if none is
     /// enabled or none will ever fire.
     pub next: Option<(String, chrono::DateTime<Local>)>,
@@ -585,8 +584,8 @@ fn store_mtime(path: &Path) -> Option<std::time::SystemTime> {
         .ok()
 }
 
-/// The enabled-job count and the soonest next firing, for the plain run's
-/// "staying up for them" lines — see [`staying_up_lines`]. Built off
+/// The soonest next firing among enabled jobs, for the plain run's
+/// "nothing queued" / "next: ..." lines — see [`staying_up_lines`]. Built off
 /// [`active_jobs`], which is already sorted by next firing, so the soonest
 /// is whichever the first row names: `None` there only when every row is.
 pub fn staying_up(repo: &Repo) -> StayingUp {
@@ -594,36 +593,16 @@ pub fn staying_up(repo: &Repo) -> StayingUp {
     let next = active
         .first()
         .and_then(|job| job.next.map(|when| (job.name.clone(), when)));
-    StayingUp {
-        enabled: active.len(),
-        next,
-    }
+    StayingUp { next }
 }
 
-/// The two lines common to both the plain run and the board: why the
-/// dispatcher is staying up on an empty queue, and that ctrl-c stops it.
-/// Assumes `enabled > 0`. The plain run's own [`staying_up_lines`] inserts a
-/// "next: ..." line between these two; the board leaves that line out, since
-/// its own job ledger below already names every enabled job's next firing —
-/// see `crate::status::view::footer`.
-pub fn staying_up_resident_lines(enabled: usize) -> Vec<String> {
-    vec![
-        format!(
-            "queue is empty. {enabled} job{s} enabled — staying up for {them}.",
-            s = if enabled == 1 { "" } else { "s" },
-            them = if enabled == 1 { "it" } else { "them" },
-        ),
-        "ctrl-c stops.".to_string(),
-    ]
-}
-
-/// The lines that say a job is keeping the dispatcher resident on an empty
-/// queue — the wording the plan draws, for the plain run alone. The status
-/// board draws [`staying_up_resident_lines`] instead, without the "next: ..."
-/// line these insert, since its own job ledger already carries that fact per
-/// job. Assumes `jobs.enabled > 0`.
+/// The two lines the plain run prints on an empty queue kept resident by a
+/// job: `nothing queued`, then which job fires next and when — or that none
+/// ever will. The board prints its own `nothing queued` line the same way,
+/// but leaves the "next: ..." line out, since its own job ledger below
+/// already names every enabled job's next firing — see
+/// `crate::status::view::footer`. Assumes at least one job is enabled.
 pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
-    let mut lines = staying_up_resident_lines(jobs.enabled);
     let next_line = match &jobs.next {
         Some((name, when)) => format!(
             "next: {name}, {}  ({})",
@@ -632,8 +611,7 @@ pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
         ),
         None => "next: no job will fire — run `spoolway doctor`".to_string(),
     };
-    lines.insert(1, next_line);
-    lines
+    vec!["nothing queued".to_string(), next_line]
 }
 
 /// The next local instant an expression fires, from now. `None` if it will

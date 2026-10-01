@@ -150,10 +150,10 @@ rm -f "$SPOOLWAY_PROJECT_HOME"/queue/*.md
 
 BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
 board_open
-if poll_until 15 screen_drew_since "$BEFORE" "queue is empty"; then
-  ok "an empty board still says why it is resident"
+if poll_until 15 screen_drew_since "$BEFORE" "nothing queued"; then
+  ok "an empty board still says nothing queued while a job keeps it resident"
 else
-  bad "an empty board still says why it is resident"
+  bad "an empty board still says nothing queued while a job keeps it resident"
 fi
 tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/empty-board.out"
 if grep -qaF "2 active" "$LIVE/empty-board.out" \
@@ -164,9 +164,9 @@ else
   bad "the empty board's ledger names both enabled jobs too"
   sed 's/^/        /' "$LIVE/empty-board.out"
 fi
-# The plain run prints a "next: ..." line between its own empty-queue lines;
-# the board leaves it out, since its ledger already names every job's next
-# firing.
+# The plain run prints a "next: ..." line under its own "nothing queued"
+# line; the board leaves it out, since its ledger already names every job's
+# next firing.
 lacks "the empty-queue copy does not repeat a job's next firing the ledger already names" \
   "next: nightly-audit," "$LIVE/empty-board.out"
 screen_stop

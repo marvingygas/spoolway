@@ -38,15 +38,14 @@ is still in the queue skips its window.
 
 ### The resident dispatcher
 
-While any job is enabled, an empty queue does not stop the run. It prints once:
+While any job is enabled, an empty queue does not stop the run. The plain run prints once:
 
 ```
-queue is empty. 2 jobs enabled — staying up for them.
+nothing queued
 next: nightly-audit, Mon 8 Sep 03:00  (in 5h 48m)
-ctrl-c stops.
 ```
 
-The board shows the first and last line. Its job ledger shows the next firing of every job.
+The board shows `nothing queued` alone. Its job ledger shows the next firing of every job.
 With no job enabled, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).
 
