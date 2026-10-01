@@ -10,7 +10,9 @@
 //! share a row — see [`Entry::is_lane`] and [`Entry::dir`]. The lanes table
 //! groups dispatched lanes by one [`EvalBy`]; the directory table groups the
 //! sessions a person ran by hand in a watched root, by directory or one row
-//! per session. Under every `by` only the columns naming a row change: the
+//! per session. The screen adds a third, the trials table, which is not a
+//! population of its own: it lists the trials the lanes were arms of, and
+//! opening one narrows the lanes table to it. Under every `by` only the columns naming a row change: the
 //! figure columns stay put, so two groupings can be read against each other
 //! without relearning where anything is. A `Total` line closes each table
 //! with only what adds up across its rows — a per-run average or a peak
@@ -98,11 +100,9 @@ fn run_to(
         pipeline: args.pipeline.as_deref(),
         step: None,
         version: args.pipeline_version.as_deref(),
+        trial: args.trial.as_deref(),
     };
     entries.retain(|entry| lane_filters.admits(entry));
-    if let Some(trial) = &args.trial {
-        entries.retain(|entry| entry.trial.as_deref() == Some(trial.as_str()));
-    }
 
     if entries.is_empty() {
         if args.trial.is_some() {
@@ -542,6 +542,8 @@ struct LaneFilters<'a> {
     pipeline: Option<&'a str>,
     step: Option<&'a str>,
     version: Option<&'a str>,
+    /// The trial id a lane must have been an arm of — see [`Entry::trial`].
+    trial: Option<&'a str>,
 }
 
 impl LaneFilters<'_> {
@@ -551,6 +553,7 @@ impl LaneFilters<'_> {
             && self.pipeline.is_none_or(|p| e.pipeline == p)
             && self.step.is_none_or(|s| e.step == s)
             && self.version.is_none_or(|v| e.pipeline_version == v)
+            && self.trial.is_none_or(|t| e.trial.as_deref() == Some(t))
     }
 }
 
@@ -866,7 +869,7 @@ struct Table {
     total: String,
 }
 
-/// Separator between two columns everywhere in both tables.
+/// Separator between two columns everywhere in every table.
 const SEP: &str = "  ";
 
 /// The figure columns, identical under every `by`. `RUNS` is drawn one wider
@@ -2179,6 +2182,184 @@ fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String
         .join(",")
 }
 
+// ------------------------------------------------------------------- trials
+//
+// The screen's third table: one row per trial whose arms banked a lane in
+// the window. Read off the ledger alone, because a settled trial's arms are
+// deleted and the ledger is the only record of it left — except `STATE`,
+// which asks the queue whether any arm is still in it.
+
+/// One trial, as the trials table draws it.
+struct TrialRow {
+    /// The trial id every arm's ledger line carries — what `enter` sets the
+    /// `trial` filter to. Never drawn: `t9f3a…` means nothing to a person.
+    id: String,
+    /// The group a person tried — see [`trial_group_of`].
+    group: String,
+    /// The earliest arm line's own timestamp, raw, so two trials started on
+    /// the same day still order by when each began.
+    first_ts: String,
+    /// Every pipeline an arm ran under, in name order.
+    pipelines: Vec<String>,
+    /// Distinct arm tasks — a task banks a line per step, and counting those
+    /// would read a five-step arm as five.
+    arms: usize,
+    /// A queued task still carries this trial's id.
+    running: bool,
+}
+
+impl TrialRow {
+    /// How a trial is named wherever a person picks one: its group and the
+    /// day it started — the `trial` filter row's own spelling.
+    fn name(&self) -> String {
+        format!("{} · {}", self.group, local_date(&self.first_ts))
+    }
+
+    fn state(&self) -> &'static str {
+        match self.running {
+            true => "running",
+            false => "settled",
+        }
+    }
+}
+
+/// The group a trial's arms were forked from, read off `lines` — all one
+/// trial's. [`Entry::trial_group`] names it on every arm minted since the
+/// trial forked a group per pipeline. An older arm ran in the source group
+/// itself, so its own [`Entry::plan`] is the right answer there; and an arm
+/// with neither is named by the trial id, the one thing it is sure to carry.
+fn trial_group_of(id: &str, lines: &[&Entry]) -> String {
+    lines
+        .iter()
+        .find_map(|e| e.trial_group.clone())
+        .or_else(|| lines.iter().find_map(|e| e.plan.clone()))
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// Every trial `entries` hold an arm line of, newest first — by when each
+/// one started, so a trial still running does not jump to the top every
+/// time one of its arms banks a step. `running` holds the trial ids a
+/// queued task still carries — see [`Loaded::running_trials`].
+fn trial_rows(entries: &[Entry], running: &BTreeSet<String>) -> Vec<TrialRow> {
+    let mut by_trial: BTreeMap<&str, Vec<&Entry>> = BTreeMap::new();
+    for entry in entries {
+        if let Some(trial) = entry.trial.as_deref() {
+            by_trial.entry(trial).or_default().push(entry);
+        }
+    }
+    let mut rows: Vec<TrialRow> = by_trial
+        .into_iter()
+        .map(|(id, lines)| TrialRow {
+            id: id.to_string(),
+            group: trial_group_of(id, &lines),
+            first_ts: lines
+                .iter()
+                .map(|e| e.ts.as_str())
+                .min()
+                .unwrap_or_default()
+                .to_string(),
+            pipelines: distinct(lines.iter().copied(), |e| Some(e.pipeline.as_str())),
+            arms: lines
+                .iter()
+                .map(|e| e.task.as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            running: running.contains(id),
+        })
+        .collect();
+    // The id breaks a tie, so two trials begun in the same second keep one
+    // order from draw to draw.
+    rows.sort_by(|a, b| b.first_ts.cmp(&a.first_ts).then_with(|| a.id.cmp(&b.id)));
+    rows
+}
+
+/// The columns the trials table draws, each beside the key its sort reads —
+/// the same shape [`DIR_COLUMNS`] has, though this table has no export: the
+/// key only names the column to [`trial_sort_value`].
+const TRIAL_COLUMNS: [(&str, &str); 5] = [
+    ("GROUP", "group"),
+    ("WHEN", "when"),
+    ("PIPELINES", "pipelines"),
+    ("ARMS", "arms"),
+    ("STATE", "state"),
+];
+
+/// One trials row's raw figure under `key`. `WHEN` sorts on the raw start,
+/// not the drawn day, for the reason [`trial_rows`] orders by it.
+fn trial_sort_value(row: &TrialRow, key: &str) -> Option<SortValue> {
+    match key {
+        "group" => SortValue::text(&row.group),
+        "when" => SortValue::text(&row.first_ts),
+        "pipelines" => SortValue::text(&row.pipelines.join(", ")),
+        "arms" => SortValue::figure(row.arms as f64),
+        "state" => SortValue::text(row.state()),
+        _ => None,
+    }
+}
+
+/// `PIPELINES` is fixed rather than measured, as the mockup draws it: a
+/// trial can tick every pipeline a project has, and one long list would
+/// push `ARMS` and `STATE` off the right of the frame.
+const TRIAL_PIPELINES_WIDTH: usize = 18;
+
+/// `pipelines` joined into [`TRIAL_PIPELINES_WIDTH`] columns, dropping whole
+/// names from the end behind a `…` rather than cutting one in half — a
+/// clipped `impl_t…` could be any of several pipelines. Only a first name
+/// too long on its own is cut, since there is nothing shorter to show.
+fn pipelines_cell(pipelines: &[String]) -> String {
+    let all = pipelines.join(", ");
+    if all.chars().count() <= TRIAL_PIPELINES_WIDTH {
+        return all;
+    }
+    (1..pipelines.len())
+        .rev()
+        .map(|k| format!("{}, …", pipelines[..k].join(", ")))
+        .find(|cell| cell.chars().count() <= TRIAL_PIPELINES_WIDTH)
+        .unwrap_or_else(|| clip_cell(&all, TRIAL_PIPELINES_WIDTH))
+}
+
+fn trial_line(
+    gw: usize,
+    group: &str,
+    when: &str,
+    pipelines: &str,
+    arms: &str,
+    state: &str,
+) -> String {
+    format!(
+        "{group:<gw$}{SEP}{when:<10}{SEP}{pipelines:<pw$}{SEP}{arms:>4}{SEP}{state}",
+        pw = TRIAL_PIPELINES_WIDTH,
+    )
+}
+
+/// The trials table over `rows`, in the order they are given — `sort` only
+/// marks its header, as [`lanes_table`]'s does. No `Total` line: a trial is
+/// a comparison of its own, and adding arms across trials answers nothing.
+fn trials_table(rows: &[TrialRow], sort: Option<&Sort>) -> Vec<Line> {
+    let gw = rows
+        .iter()
+        .map(|r| r.group.chars().count())
+        .chain(["GROUP".len()])
+        .max()
+        .unwrap_or(0);
+    let header = trial_line(gw, "GROUP", "WHEN", "PIPELINES", "ARMS", "STATE");
+    let (header, lead) = marked_header(header, &TRIAL_COLUMNS, sort);
+    let mut out = vec![Line::Head(lead, header)];
+    out.extend(rows.iter().map(|row| {
+        Line::Row(Row {
+            text: trial_line(
+                gw,
+                &row.group,
+                &local_date(&row.first_ts),
+                &pipelines_cell(&row.pipelines),
+                &row.arms.to_string(),
+                row.state(),
+            ),
+        })
+    }));
+    out
+}
+
 // ----------------------------------------------------------------- the screen
 //
 // Bare `spoolway`'s eval tab, the one place left that reaches this any more
@@ -2188,35 +2369,45 @@ fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String
 // end-to-end suite is scripting drive it identically, and the screen ends
 // the moment either runs out.
 //
-// Two tables and no drilling in: `tab` moves between the lanes and the
-// watched directories, which `by` and which filter are rows on the filter
-// panel, and the sort is the popup `a` or `d` opens. Every table is built by the same functions the
+// Three tables: `tab` cycles from the lanes to the watched directories to
+// the trials and back, which `by` and which filter are rows on the filter
+// panel, and the sort is the popup `a` or `d` opens. The one drill-in is
+// `enter` on a trial, which is nothing but a filter set for the person: the
+// lanes table, narrowed to that trial and grouped by pipeline. Every lanes
+// and directory table is built by the same functions the
 // printing path uses (`lanes_table`, `dirs_table`, `sessions_table`), so the
 // screen and a pasted `spoolway eval --by step` can never disagree about a
 // column. Rendered without colour throughout: `pad_to` counts every
 // character as one column, and an ANSI escape slipped into a row would throw
 // the frame's own border out of line with it.
 
-/// Which of the two tables is on screen.
+/// Which of the three tables is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TableKind {
     Lanes,
     Dirs,
+    Trials,
 }
 
 impl TableKind {
-    fn other(self) -> TableKind {
+    /// The table `tab` moves to: the trials table last, so `tab` from an
+    /// opened trial's lanes table runs through the directories back to the
+    /// list it was opened from.
+    fn next(self) -> TableKind {
         match self {
             TableKind::Lanes => TableKind::Dirs,
-            TableKind::Dirs => TableKind::Lanes,
+            TableKind::Dirs => TableKind::Trials,
+            TableKind::Trials => TableKind::Lanes,
         }
     }
 
-    /// What `tab` names this table as, in the key line of the other one.
+    /// What `tab` names this table as, in the key line of the one before it.
+    /// The lanes table is `runs` on screen, as its own `RUNS` column counts.
     fn label(self) -> &'static str {
         match self {
-            TableKind::Lanes => "lanes",
+            TableKind::Lanes => "runs",
             TableKind::Dirs => "dirs",
+            TableKind::Trials => "trials",
         }
     }
 }
@@ -2248,15 +2439,15 @@ impl Scope {
     }
 }
 
-/// Every row of both filter panels, as currently applied — what `load`
+/// Every row of every filter panel, as currently applied — what `load`
 /// reads the ledger through and what each table narrows it by. `since` and
 /// `until` hold a plain `YYYY-MM-DD` the calendar wrote in, or a duration
 /// (`7d`, `24h`) passed on the command line — not yet parsed either way:
 /// parsing happens once, in `load`, so a bad value is reported in one place.
 ///
-/// The two tables keep their own `by` and their own narrowing rows, so
+/// The tables keep their own `by` and their own narrowing rows, so
 /// `tab` back to a table finds it the way it was left; `since` and `until`
-/// are shared, since a window bounds both populations the same way.
+/// are shared, since a window bounds every table the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Filters {
     by: EvalBy,
@@ -2266,6 +2457,10 @@ struct Filters {
     pipeline: Option<String>,
     step: Option<String>,
     version: Option<String>,
+    /// The trial id a lane must have been an arm of — see [`Entry::trial`].
+    /// Held as the id, which is what the ledger matches on; drawn through
+    /// [`find_trial`] as the group a person knows it by.
+    trial: Option<String>,
     /// The watched root a directory row must have banked under — see
     /// [`Entry::dir`].
     dir: Option<String>,
@@ -2283,11 +2478,12 @@ struct Filters {
     /// is set aside there, not cleared — see [`shown_sort`].
     lane_sort: Option<Sort>,
     dir_sort: Option<Sort>,
+    trial_sort: Option<Sort>,
 }
 
 impl Filters {
     /// What the screen opens with: by pipeline and by dir, every row blank,
-    /// both tables in their default order — the screen has no `--sort` of
+    /// every table in its default order — the screen has no `--sort` of
     /// its own to start from, since only `spoolway eval` prints one.
     fn from_args(args: &EvalArgs) -> Filters {
         let scope = match (&args.project, args.all) {
@@ -2303,6 +2499,7 @@ impl Filters {
             pipeline: args.pipeline.clone(),
             step: args.step.clone(),
             version: args.pipeline_version.clone(),
+            trial: args.trial.clone(),
             dir: None,
             skill: None,
             since: args.since.clone().unwrap_or_default(),
@@ -2310,6 +2507,7 @@ impl Filters {
             scope,
             lane_sort: None,
             dir_sort: None,
+            trial_sort: None,
         }
     }
 
@@ -2320,6 +2518,7 @@ impl Filters {
             pipeline: self.pipeline.as_deref(),
             step: self.step.as_deref(),
             version: self.version.as_deref(),
+            trial: self.trial.as_deref(),
         }
     }
 }
@@ -2370,6 +2569,12 @@ struct Loaded {
     spans_by_session: Spans,
     fallback: HashMap<(String, String), String>,
     models: BTreeMap<String, ModelPrice>,
+    /// Every trial id a task in this project's queue still carries — what
+    /// tells a trial's `STATE` `running` from `settled`. Read once here for
+    /// the reason `skills_by_session` is. Empty under any other scope: the
+    /// screen only reaches this project's own queue, and the tab it opens in
+    /// always reads this project.
+    running_trials: BTreeSet<String>,
 }
 
 fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
@@ -2471,6 +2676,16 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         Scope::Named(_) | Scope::All => Vec::new(),
     };
 
+    let running_trials = match filters.scope {
+        Scope::Mine => repo
+            .tasks()
+            .context("reading the queue for running trials")?
+            .into_iter()
+            .filter_map(|task| task.front.trial)
+            .collect(),
+        Scope::Named(_) | Scope::All => BTreeSet::new(),
+    };
+
     Ok(Loaded {
         entries,
         dirs,
@@ -2479,6 +2694,7 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         spans_by_session,
         fallback,
         models: repo.config.models.clone(),
+        running_trials,
     })
 }
 
@@ -2571,6 +2787,28 @@ fn version_candidates(loaded: &Loaded, filters: &Filters) -> Vec<String> {
             .filter(|e| pipeline.is_none_or(|p| e.pipeline == p)),
         |e| Some(e.pipeline_version.as_str()),
     )
+}
+
+/// Every trial in the window, newest first, by id — the list the `trial`
+/// row cycles over. Newest first because a project can hold many trials,
+/// and the one a person is looking for is most likely the one just run.
+fn trial_candidates(loaded: &Loaded) -> Vec<String> {
+    trial_rows(&loaded.entries, &loaded.running_trials)
+        .into_iter()
+        .map(|row| row.id)
+        .collect()
+}
+
+/// The trial `id`'s row, where the window holds a line of it — what the
+/// filter row and the top border name it by. `None` before the first load
+/// lands, or once a `since`/`until` has moved the trial out of the window;
+/// both callers fall back to the id, which is still better than naming
+/// nothing.
+fn find_trial(loaded: Option<&Loaded>, id: &str) -> Option<TrialRow> {
+    let loaded = loaded?;
+    trial_rows(&loaded.entries, &loaded.running_trials)
+        .into_iter()
+        .find(|row| row.id == id)
 }
 
 /// Every directory the table can show — the watched roots and every
@@ -2791,8 +3029,24 @@ fn screen_sessions<'a>(
     (rows, sort)
 }
 
+/// The trials table's rows as the screen shows them — newest first by
+/// default, see [`trial_rows`], then the trials sort. Shared by the view and
+/// by `enter`, so the trial opened is always the one the cursor was on.
+fn screen_trial_rows<'a>(
+    loaded: &Loaded,
+    filters: &'a Filters,
+) -> (Vec<TrialRow>, Option<&'a Sort>) {
+    let mut rows = trial_rows(&loaded.entries, &loaded.running_trials);
+    let sort = shown_sort(filters.trial_sort.as_ref(), &TRIAL_COLUMNS);
+    if let Some(sort) = sort {
+        sort_rows(&mut rows, sort, |row| trial_sort_value(row, &sort.key));
+    }
+    (rows, sort)
+}
+
 /// The table on screen, built from the same functions the printing path
-/// prints with.
+/// prints with — bar the trials table, which the printing path has no
+/// counterpart of.
 fn view_lines(
     loaded: &Loaded,
     filters: &Filters,
@@ -2831,6 +3085,13 @@ fn view_lines(
                     table_lines(sessions_table(&rows, sort))
                 }
             }
+        }
+        TableKind::Trials => {
+            let (rows, sort) = screen_trial_rows(loaded, filters);
+            if rows.is_empty() {
+                return vec![Line::Text("No trials in this window.".to_string())];
+            }
+            trials_table(&rows, sort)
         }
     }
 }
@@ -2873,15 +3134,27 @@ fn export_rows(
                 }
             }
         }
+        TableKind::Trials => unreachable!("the trials table has no export: `e` is not read there"),
     }
 }
 
 /// The `by` the table on screen is grouped by — what its title, its export's
-/// file name and the export confirmation all name it as.
+/// file name and the export confirmation all name it as. The trials table
+/// has no `by`: it is always one row per trial, which is what this names.
 fn by_label(filters: &Filters, table: TableKind) -> &'static str {
     match table {
         TableKind::Lanes => filters.by.label(),
         TableKind::Dirs => filters.dir_by.label(),
+        TableKind::Trials => "trials",
+    }
+}
+
+/// The left side of the top border: `by <by>`, or plain `trials` for the
+/// table that has no `by` to name.
+fn frame_title(filters: &Filters, table: TableKind) -> String {
+    match table {
+        TableKind::Trials => "trials".to_string(),
+        _ => format!("by {}", by_label(filters, table)),
     }
 }
 
@@ -3086,9 +3359,22 @@ fn cursor_line_index(lines: &[Line], cursor: usize) -> usize {
 /// on screen has narrowed by, and the window — so a frame read on its own
 /// still says what it is a table of. The left side names only the `by`.
 /// `scope` is the screen's own [`Scope::label`], not [`Loaded`]'s: the
-/// frame is drawn before the first load has landed.
-fn filters_label(scope: &str, filters: &Filters, table: TableKind) -> String {
+/// frame is drawn before the first load has landed. `loaded` is only read
+/// to name a `trial` by its group rather than its id.
+fn filters_label(
+    scope: &str,
+    filters: &Filters,
+    table: TableKind,
+    loaded: Option<&Loaded>,
+) -> String {
     let mut parts = vec![scope.to_string()];
+    // Only the group, without the day the filter row adds: the parts here
+    // are already joined by ` · `, and a date after it would read as a
+    // filter of its own.
+    let trial = filters
+        .trial
+        .as_deref()
+        .map(|id| find_trial(loaded, id).map_or_else(|| id.to_string(), |row| row.group));
     let named: Vec<(&str, &Option<String>)> = match table {
         TableKind::Lanes => vec![
             ("group", &filters.group),
@@ -3096,8 +3382,10 @@ fn filters_label(scope: &str, filters: &Filters, table: TableKind) -> String {
             ("pipeline", &filters.pipeline),
             ("step", &filters.step),
             ("version", &filters.version),
+            ("trial", &trial),
         ],
         TableKind::Dirs => vec![("dir", &filters.dir), ("skill", &filters.skill)],
+        TableKind::Trials => Vec::new(),
     };
     for (name, value) in named {
         if let Some(value) = value {
@@ -3130,21 +3418,33 @@ fn plural(n: usize, noun: &str) -> String {
 /// bracketed the way the board brackets its own by [`key_hint`]. The frame
 /// sits one column in from the key line's own leading space, so one more is
 /// added in front to line `[↑↓]` up under the frame's first column of
-/// content, as the mockup draws it.
+/// content, as the mockup draws it. The trials table trades `[e] export`
+/// for `[enter] open`: it has nothing to export, and a trial to open.
 fn footer(table: TableKind) -> String {
-    format!(
-        " {}",
-        key_hint(&[
+    let tab = ("tab", table.next().label());
+    let keys: &[(&str, &str)] = match table {
+        TableKind::Trials => &[
+            ("↑↓", "move"),
+            ("enter", "open"),
+            ("a", "ascending"),
+            ("d", "descending"),
+            tab,
+            ("f", "filters"),
+            ("r", "refresh"),
+            ("q", "quit"),
+        ],
+        TableKind::Lanes | TableKind::Dirs => &[
             ("↑↓", "move"),
             ("a", "ascending"),
             ("d", "descending"),
-            ("tab", table.other().label()),
+            tab,
             ("f", "filters"),
             ("e", "export"),
             ("r", "refresh"),
             ("q", "quit"),
-        ])
-    )
+        ],
+    };
+    format!(" {}", key_hint(keys))
 }
 
 /// One frame, painted through `writer` — see [`eval_frame_rows`] for the
@@ -3186,8 +3486,8 @@ fn eval_frame_rows(
     let lines = loaded.map_or_else(Vec::new, |loaded| {
         view_lines(loaded, &state.filters, pipelines, state.table)
     });
-    let right = filters_label(&state.scope_label, &state.filters, state.table);
-    let title = format!("by {}", by_label(&state.filters, state.table));
+    let right = filters_label(&state.scope_label, &state.filters, state.table, loaded);
+    let title = frame_title(&state.filters, state.table);
     // Wide enough for the widest line plus its marker column, and for the
     // top border's own title and label with a dash or two between them.
     let content = lines
@@ -3213,7 +3513,7 @@ fn eval_frame_rows(
     // about to be drawn on it needs padding the other way, or `overlay`
     // writes past the frame's own last row and the panel loses its bottom
     // border. Reproduced on a small ledger, where the table itself is only a
-    // few lines tall and the filter panel is twelve.
+    // few lines tall and the filter panel is thirteen.
     let overlay_panel: Option<Vec<String>> = match &state.mode {
         // Wrapped to the frame's own width, not just split on the newlines
         // `body` already carries: an error message from `load` — a bad
@@ -3288,6 +3588,8 @@ fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, table: TableKind) ->
     match table {
         TableKind::Lanes => unpriced_note(scoped_entries(loaded, filters).into_iter()),
         TableKind::Dirs => unpriced_note(scoped_dirs(loaded, filters).into_iter()),
+        // No cost is drawn on the trials table for the note to qualify.
+        TableKind::Trials => None,
     }
 }
 
@@ -3300,13 +3602,15 @@ fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, table: TableKind) ->
 /// default it opened with, and a row with a single possible answer is not a
 /// question. Nor are `group` and `task`: a project can hold tens of
 /// thousands of either, far too many to step through one `→` at a time, so
-/// only `--group` and `--task` set them.
+/// only `--group` and `--task` set them. `trial` is a row despite the same
+/// worry, because it only cycles over the trials inside the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterField {
     By,
     Pipeline,
     Step,
     Version,
+    Trial,
     Dir,
     Skill,
     Since,
@@ -3315,7 +3619,9 @@ enum FilterField {
 
 /// The rows the filter panel draws for `table`, in order: `by` first, since
 /// it decides what every row below it is a filter *of*, and the window last
-/// on both, since it bounds both populations the same way.
+/// on every table, since it bounds them all the same way. The trials table
+/// has the window alone: it has no `by`, and a trial is narrowed by opening
+/// it, not by a row here.
 fn filter_fields(table: TableKind) -> &'static [FilterField] {
     match table {
         TableKind::Lanes => &[
@@ -3323,6 +3629,7 @@ fn filter_fields(table: TableKind) -> &'static [FilterField] {
             FilterField::Pipeline,
             FilterField::Step,
             FilterField::Version,
+            FilterField::Trial,
             FilterField::Since,
             FilterField::Until,
         ],
@@ -3333,6 +3640,7 @@ fn filter_fields(table: TableKind) -> &'static [FilterField] {
             FilterField::Since,
             FilterField::Until,
         ],
+        TableKind::Trials => &[FilterField::Since, FilterField::Until],
     }
 }
 
@@ -3773,6 +4081,7 @@ fn run_screen_with(
                     match state.table {
                         TableKind::Lanes => state.filters.lane_sort = sort,
                         TableKind::Dirs => state.filters.dir_sort = sort,
+                        TableKind::Trials => state.filters.trial_sort = sort,
                     }
                     // The row the cursor was on has moved somewhere else in
                     // the new order; the top is the one place still worth
@@ -3786,8 +4095,24 @@ fn run_screen_with(
                 Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
                 Key::Down | Key::Char('j') => state.cursor += 1,
                 Key::Tab => {
-                    state.table = state.table.other();
+                    state.table = state.table.next();
                     state.cursor = 0;
+                }
+                // Opening a trial is only a filter set for the person, so
+                // `tab` and the `trial` row's `all` are what leave it. The
+                // `pipeline` and `version` rows are cleared with it: either
+                // could hide one of the trial's own pipelines, and showing
+                // every one of those side by side is the point of opening it.
+                Key::Enter if state.table == TableKind::Trials => {
+                    let (rows, _) = screen_trial_rows(loaded, &state.filters);
+                    if let Some(row) = rows.get(state.cursor.min(rows.len().saturating_sub(1))) {
+                        state.filters.trial = Some(row.id.clone());
+                        state.filters.by = EvalBy::Pipeline;
+                        state.filters.pipeline = None;
+                        state.filters.version = None;
+                        state.table = TableKind::Lanes;
+                        state.cursor = 0;
+                    }
                 }
                 Key::Char('f') => {
                     state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
@@ -3797,6 +4122,7 @@ fn run_screen_with(
                     let current = match state.table {
                         TableKind::Lanes => state.filters.lane_sort.as_ref(),
                         TableKind::Dirs => state.filters.dir_sort.as_ref(),
+                        TableKind::Trials => state.filters.trial_sort.as_ref(),
                     };
                     // Opens on the column already sorted, so flipping its
                     // direction is `d` and `enter`; on `default order` when
@@ -3813,7 +4139,7 @@ fn run_screen_with(
                 Key::Char('r') => {
                     state.start_loading(&mut start, state.filters.clone(), false);
                 }
-                Key::Char('e') => {
+                Key::Char('e') if state.table != TableKind::Trials => {
                     match export(repo, loaded, &state.filters, pipelines, state.table) {
                         Ok((path, rows)) => {
                             state.mode = Mode::Notice {
@@ -3862,6 +4188,8 @@ fn handle_filter_change(loaded: &Loaded, draft: &mut Draft, forward: bool) {
         FilterField::By => match table {
             TableKind::Lanes => f.by = cycle_by(&EvalBy::ALL, f.by, forward),
             TableKind::Dirs => f.dir_by = cycle_by(&DirBy::ALL, f.dir_by, forward),
+            // Never reached: the trials panel draws no `by` row.
+            TableKind::Trials => {}
         },
         FilterField::Pipeline => {
             f.pipeline = cycle_option(&pipeline_candidates(loaded), &f.pipeline, forward);
@@ -3869,6 +4197,9 @@ fn handle_filter_change(loaded: &Loaded, draft: &mut Draft, forward: bool) {
         FilterField::Step => f.step = cycle_option(&step_candidates(loaded, f), &f.step, forward),
         FilterField::Version => {
             f.version = cycle_option(&version_candidates(loaded, f), &f.version, forward);
+        }
+        FilterField::Trial => {
+            f.trial = cycle_option(&trial_candidates(loaded), &f.trial, forward);
         }
         FilterField::Dir => f.dir = cycle_option(&dir_candidates(loaded), &f.dir, forward),
         FilterField::Skill => f.skill = cycle_option(&skill_candidates(loaded), &f.skill, forward),
@@ -3905,6 +4236,7 @@ fn filter_field_label(field: FilterField) -> &'static str {
         FilterField::Pipeline => "pipeline",
         FilterField::Step => "step",
         FilterField::Version => "version",
+        FilterField::Trial => "trial",
         FilterField::Dir => "dir",
         FilterField::Skill => "skill",
         FilterField::Since => "since",
@@ -3938,6 +4270,20 @@ fn filter_field_value(loaded: &Loaded, draft: &Draft, field: FilterField) -> Str
         FilterField::Pipeline => cycled(pipeline_candidates(loaded), &f.pipeline),
         FilterField::Step => cycled(step_candidates(loaded, f), &f.step),
         FilterField::Version => cycled(version_candidates(loaded, f), &f.version),
+        // Cycled over ids like every other row, but drawn as the group and
+        // day a person knows the trial by.
+        FilterField::Trial => {
+            let candidates = trial_candidates(loaded);
+            let shown = f.trial.as_deref().map_or_else(
+                || "all".to_string(),
+                |id| find_trial(Some(loaded), id).map_or_else(|| id.to_string(), |row| row.name()),
+            );
+            chevrons(
+                &shown,
+                cycle_option(&candidates, &f.trial, false) != f.trial,
+                cycle_option(&candidates, &f.trial, true) != f.trial,
+            )
+        }
         FilterField::Dir => cycled(dir_candidates(loaded), &f.dir),
         FilterField::Skill => cycled(skill_candidates(loaded), &f.skill),
         FilterField::Since => date_field_value(&f.since, "(blank — the start)"),
@@ -3951,6 +4297,7 @@ fn by_moves(f: &Filters, table: TableKind, forward: bool) -> bool {
     match table {
         TableKind::Lanes => cycle_by(&EvalBy::ALL, f.by, forward) != f.by,
         TableKind::Dirs => cycle_by(&DirBy::ALL, f.dir_by, forward) != f.dir_by,
+        TableKind::Trials => false,
     }
 }
 
@@ -4015,6 +4362,7 @@ fn view_columns(
             drawn_lane_columns(filters.by, &rows)
         }
         TableKind::Dirs => dir_columns(filters.dir_by).to_vec(),
+        TableKind::Trials => TRIAL_COLUMNS.to_vec(),
     }
 }
 
@@ -4633,6 +4981,7 @@ mod tests {
         let mut e = lane("login", "review", 1, Some("pass"));
         e.plan = Some("audits".into());
         e.pipeline_version = "1.1".into();
+        e.trial = Some("t1".into());
         assert!(LaneFilters::default().admits(&e));
         let all = LaneFilters {
             group: Some("audits"),
@@ -4640,6 +4989,7 @@ mod tests {
             pipeline: Some("default"),
             step: Some("review"),
             version: Some("1.1"),
+            trial: Some("t1"),
         };
         assert!(all.admits(&e));
         for miss in [
@@ -4661,6 +5011,10 @@ mod tests {
             },
             LaneFilters {
                 version: Some("1.0"),
+                ..Default::default()
+            },
+            LaneFilters {
+                trial: Some("t2"),
                 ..Default::default()
             },
         ] {
@@ -5370,6 +5724,7 @@ mod screen_tests {
             skills_by_session: HashMap::new(),
             spans_by_session: HashMap::new(),
             models: BTreeMap::new(),
+            running_trials: BTreeSet::new(),
         }
     }
 
@@ -5909,11 +6264,11 @@ mod screen_tests {
             ..no_filters()
         };
         assert_eq!(
-            filters_label("demo", &filters, TableKind::Lanes),
+            filters_label("demo", &filters, TableKind::Lanes, None),
             "demo · step review · 2026-08-01 → now"
         );
         assert_eq!(
-            filters_label("demo", &filters, TableKind::Dirs),
+            filters_label("demo", &filters, TableKind::Dirs, None),
             "demo · skill /x · 2026-08-01 → now"
         );
     }
@@ -5955,7 +6310,7 @@ mod screen_tests {
     }
 
     /// The screen opens on the lanes table by pipeline, with its `Total`
-    /// line and the bracketed key line naming `tab`'s other table.
+    /// line and the bracketed key line naming the table `tab` moves to.
     #[test]
     fn the_screen_opens_by_pipeline_with_a_total_and_bracketed_keys() {
         let repo = fixture_with_one_run("screen-opens");
@@ -5973,22 +6328,33 @@ mod screen_tests {
         );
     }
 
-    /// `tab` moves between the two tables and back, nothing else.
+    /// `tab` cycles the runs, the directories and the trials and back,
+    /// nothing else.
     #[test]
-    fn tab_switches_between_the_lanes_and_the_directories() {
+    fn tab_cycles_the_runs_the_directories_and_the_trials() {
         let repo = fixture_with_one_run("screen-tab");
         let text = screen(&repo, "\t");
         let dirs = last_frame(&text);
         assert!(dirs.contains("┌─ eval · by dir "), "{dirs}");
         assert!(dirs.contains("│ DIR"), "{dirs}");
-        assert!(dirs.contains("[tab] lanes"), "{dirs}");
+        assert!(dirs.contains("[tab] trials"), "{dirs}");
         let root = repo.root.canonicalize().unwrap();
         assert!(
             dirs.contains(&*root.to_string_lossy()),
             "the project's own directory is a row even with no sessions\n{dirs}"
         );
 
-        let text = screen(&repo, "\t\t");
+        let trials = last_frame(&screen(&repo, "\t\t")).to_string();
+        assert!(trials.contains("┌─ eval · trials "), "{trials}");
+        assert!(trials.contains("No trials in this window."), "{trials}");
+        assert!(
+            trials.contains(
+                "[↑↓] move   [enter] open   [a] ascending   [d] descending   [tab] runs   [f] filters   [r] refresh   [q] quit"
+            ),
+            "{trials}"
+        );
+
+        let text = screen(&repo, "\t\t\t");
         assert!(
             last_frame(&text).contains("┌─ eval · by pipeline "),
             "{text}"
@@ -6093,7 +6459,7 @@ mod screen_tests {
         assert!(last.contains("└───"), "{last}");
     }
 
-    /// The lanes panel draws its six rows in order, `by` first, every one
+    /// The lanes panel draws its seven rows in order, `by` first, every one
     /// blank when the screen opens, and the directory panel its five. A
     /// chevron is drawn only where its key still moves the row, a space
     /// holding its place otherwise.
@@ -6117,6 +6483,7 @@ mod screen_tests {
                 "  pipeline    all ›",
                 "  step        all ›",
                 "  version     all ›",
+                "  trial       all",
                 "  since     (blank — the start)",
                 "  until     (blank — now)",
             ]
@@ -6215,8 +6582,8 @@ mod screen_tests {
         assert!(!last.contains("other"), "{last}");
     }
 
-    /// The calendar still opens from the date rows, now the fifth and
-    /// sixth: `esc` hands the row back untouched, `enter` picks the day it
+    /// The calendar still opens from the date rows, now the sixth and
+    /// seventh: `esc` hands the row back untouched, `enter` picks the day it
     /// opened on, and `x` clears it.
     #[test]
     fn esc_leaves_the_row_untouched_enter_picks_the_day_x_clears_it() {
@@ -6225,7 +6592,7 @@ mod screen_tests {
             .date_naive()
             .format("%Y-%m-%d")
             .to_string();
-        let to_since = format!("f{}", DOWN.repeat(4));
+        let to_since = format!("f{}", DOWN.repeat(5));
 
         // No trailing `q` after a bare `Esc`: its own lookahead read would
         // silently eat it, so the input running out ends the loop here.
@@ -6245,7 +6612,7 @@ mod screen_tests {
     #[test]
     fn a_short_table_still_fits_the_calendars_whole_height_key_line_included() {
         let repo = fixture_with_one_run("screen-short-table-calendar");
-        let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(4)));
+        let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(5)));
         let last = last_frame(&text);
         assert!(last.contains("┌─ since ─"), "{last}");
         assert!(last.contains("[enter] pick   [esc] back"), "{last}");
@@ -6257,7 +6624,7 @@ mod screen_tests {
     #[test]
     fn typing_on_a_date_row_does_nothing_and_enter_still_opens_the_calendar() {
         let repo = fixture("screen-bad-since");
-        let text = screen(&repo, &format!("f{}notadate\rq", DOWN.repeat(4)));
+        let text = screen(&repo, &format!("f{}notadate\rq", DOWN.repeat(5)));
         assert!(last_frame(&text).contains("┌─ since ─"), "{text}");
         assert!(!text.contains("notadate"), "{text}");
     }
@@ -6703,7 +7070,7 @@ mod screen_tests {
         assert!(!last.contains('▼') && !last.contains("┌─ sort "), "{last}");
     }
 
-    /// A sort on `USD` outlives `tab` there and back, `r`, and a change of
+    /// A sort on `USD` outlives `tab` round every table, `r`, and a change of
     /// `by` on the filter panel — and the directory table, which has its
     /// own sort, is left in its default order meanwhile.
     #[test]
@@ -6711,7 +7078,7 @@ mod screen_tests {
         let repo = fixture_to_sort("screen-sort-survives");
         // `USD` is the eleventh column under `by pipeline`.
         let to_usd = DOWN.repeat(11);
-        let text = screen(&repo, &format!("d{to_usd}\r\t\trf{RIGHT}\rq"));
+        let text = screen(&repo, &format!("d{to_usd}\r\t\t\trf{RIGHT}\rq"));
         let all = frames(&text);
         let sorted = |f: &str| f.contains("▼USD");
 
@@ -6954,5 +7321,284 @@ mod screen_tests {
             lines[0].starts_with("beta-1"),
             "deltas follow the order shown: {text}"
         );
+    }
+
+    // --------------------------------------------------------------- trials
+
+    const LEFT: &str = "\x1b[D";
+
+    /// One arm's lane: `task` under `pipeline`, banked at `ts` as an arm of
+    /// `trial` forked from `group`.
+    fn arm(task: &str, step: &str, pipeline: &str, ts: &str, trial: &str, group: &str) -> Entry {
+        Entry {
+            ts: ts.into(),
+            pipeline: pipeline.into(),
+            plan: Some(format!("{group}-{pipeline}")),
+            trial: Some(trial.into()),
+            trial_group: Some(group.into()),
+            ..lane_entry(task, step)
+        }
+    }
+
+    /// Two trials and an ordinary lane: `t1`, `retire-worktree-root` on
+    /// 2026-10-02, two arms over three lines; and `t2`, an older one whose
+    /// line predates `trial_group` and so names its group by its own plan.
+    fn two_trials() -> Vec<Entry> {
+        let mut old = arm(
+            "grace-1",
+            "implement",
+            "impl_tdd",
+            "2026-09-30T09:00:00+00:00",
+            "t2",
+            "unused",
+        );
+        old.trial_group = None;
+        old.plan = Some("board-step-grace-window".into());
+        vec![
+            old,
+            lane_entry("ordinary", "implement"),
+            arm(
+                "rwr-1",
+                "implement",
+                "impl",
+                "2026-10-02T09:00:00+00:00",
+                "t1",
+                "retire-worktree-root",
+            ),
+            arm(
+                "rwr-1",
+                "review",
+                "impl",
+                "2026-10-02T10:00:00+00:00",
+                "t1",
+                "retire-worktree-root",
+            ),
+            arm(
+                "rwr-2",
+                "implement",
+                "impl_ui",
+                "2026-10-02T09:05:00+00:00",
+                "t1",
+                "retire-worktree-root",
+            ),
+        ]
+    }
+
+    /// A trial is one row named by its source group, newest first by when
+    /// it started; `ARMS` counts tasks, not lines; and `STATE` reads
+    /// `running` only for a trial a queued task still carries.
+    #[test]
+    fn trial_rows_name_each_trial_by_its_source_group_newest_first() {
+        let running = BTreeSet::from(["t2".to_string()]);
+        let rows = trial_rows(&two_trials(), &running);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["t1", "t2"], "the ordinary lane is no trial");
+
+        assert_eq!(rows[0].group, "retire-worktree-root");
+        assert_eq!(rows[0].pipelines, ["impl", "impl_ui"]);
+        assert_eq!(rows[0].arms, 2, "three lines, two arms");
+        assert_eq!(rows[0].state(), "settled");
+        assert_eq!(
+            rows[0].name(),
+            format!(
+                "retire-worktree-root · {}",
+                local_date("2026-10-02T09:00:00+00:00")
+            )
+        );
+
+        assert_eq!(rows[1].group, "board-step-grace-window", "from its plan");
+        assert_eq!(rows[1].state(), "running");
+
+        let mut bare = lane_entry("x-1", "implement");
+        bare.trial = Some("t3".into());
+        assert_eq!(trial_rows(&[bare], &BTreeSet::new())[0].group, "t3");
+    }
+
+    /// The table draws the mockup's columns, and a pipeline list too wide
+    /// for its column drops whole names behind `…`.
+    #[test]
+    fn the_trials_table_draws_group_when_pipelines_arms_and_state() {
+        let rows = trial_rows(&two_trials(), &BTreeSet::new());
+        let lines = trials_table(&rows, None);
+        let Line::Head(' ', header) = &lines[0] else {
+            panic!("a header first");
+        };
+        assert_eq!(
+            header,
+            "GROUP                    WHEN        PIPELINES           ARMS  STATE"
+        );
+        let Line::Row(first) = &lines[1] else {
+            panic!("a row next");
+        };
+        assert_eq!(
+            first.text,
+            format!(
+                "retire-worktree-root     {}  impl, impl_ui          2  settled",
+                local_date("2026-10-02T09:00:00+00:00")
+            )
+        );
+        assert_eq!(lines.len(), 3, "no `Total` line");
+
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            pipelines_cell(&names(&["impl", "impl_tdd", "impl_ui"])),
+            "impl, impl_tdd, …"
+        );
+        assert_eq!(
+            pipelines_cell(&names(&["a_very_long_pipeline_name"])),
+            "a_very_long_pipel…"
+        );
+    }
+
+    /// The `trial` row sits after `version`, cycles the trials newest first
+    /// by group and date, and `←` back past the first lands on `all`.
+    #[test]
+    fn the_trial_row_cycles_newest_first_by_group_and_date_and_all_clears_it() {
+        let fields = filter_fields(TableKind::Lanes);
+        let at = fields
+            .iter()
+            .position(|f| *f == FilterField::Trial)
+            .expect("a trial row");
+        assert_eq!(fields[at - 1], FilterField::Version);
+
+        let loaded = loaded(two_trials());
+        let mut draft = Draft::new(TableKind::Lanes, no_filters());
+        draft.field = at;
+        let row = |draft: &Draft| {
+            filter_panel(&loaded, draft)[1 + at]
+                .trim_matches('│')
+                .trim()
+                .to_string()
+        };
+        assert_eq!(row(&draft), "> trial       all ›");
+
+        handle_filter_change(&loaded, &mut draft, true);
+        assert_eq!(draft.filters.trial.as_deref(), Some("t1"));
+        assert_eq!(
+            row(&draft),
+            format!(
+                "> trial     ‹ retire-worktree-root · {} ›",
+                local_date("2026-10-02T09:00:00+00:00")
+            )
+        );
+        handle_filter_change(&loaded, &mut draft, true);
+        assert_eq!(draft.filters.trial.as_deref(), Some("t2"));
+        handle_filter_change(&loaded, &mut draft, true);
+        assert_eq!(draft.filters.trial.as_deref(), Some("t2"), "clamped");
+
+        handle_filter_change(&loaded, &mut draft, false);
+        handle_filter_change(&loaded, &mut draft, false);
+        assert_eq!(draft.filters.trial, None, "`all` clears it");
+    }
+
+    /// `trial` narrows the lanes table and names the trial by its group in
+    /// the right border.
+    #[test]
+    fn a_set_trial_narrows_the_runs_and_shows_in_the_right_border() {
+        let loaded = loaded(two_trials());
+        let filters = Filters {
+            trial: Some("t1".into()),
+            ..no_filters()
+        };
+        let tasks: BTreeSet<&str> = scoped_entries(&loaded, &filters)
+            .iter()
+            .map(|e| e.task.as_str())
+            .collect();
+        assert_eq!(tasks, BTreeSet::from(["rwr-1", "rwr-2"]));
+        assert_eq!(
+            filters_label("demo", &filters, TableKind::Lanes, Some(&loaded)),
+            "demo · trial retire-worktree-root"
+        );
+        assert_eq!(
+            filters_label("demo", &filters, TableKind::Dirs, Some(&loaded)),
+            "demo"
+        );
+    }
+
+    fn bank_two_trials(repo: &Repo) {
+        for entry in two_trials() {
+            crate::usage::append(repo, &entry).unwrap();
+        }
+    }
+
+    /// `enter` on a trial opens the runs table by pipeline, narrowed to it:
+    /// one row per pipeline the trial ticked, whatever `by` and `pipeline`
+    /// were before. `all` on the `trial` row then clears it.
+    #[test]
+    fn enter_on_a_trial_shows_its_pipelines_side_by_side() {
+        let repo = fixture("screen-trial-open");
+        bank_two_trials(&repo);
+        let args = EvalArgs {
+            by: EvalBy::Step,
+            pipeline: Some("impl".into()),
+            ..no_args()
+        };
+        let open = "\t\t\r";
+        let mut input = keys(&format!("{open}q"));
+        let mut out = Vec::new();
+        run_now(&repo, &args, &mut input, &mut out);
+        let text = String::from_utf8(out).unwrap();
+        let last = last_frame(&text);
+        assert!(last.contains("┌─ eval · by pipeline "), "{last}");
+        assert!(last.contains(" · trial retire-worktree-root ─┐"), "{last}");
+        assert!(last.contains("│>impl "), "{last}");
+        assert!(last.contains("│ impl_ui "), "{last}");
+        assert!(!last.contains("impl_tdd"), "the other trial: {last}");
+        assert!(!last.contains("default"), "the ordinary lane: {last}");
+        assert!(last.contains("[tab] dirs"), "{last}");
+
+        let to_trial = DOWN.repeat(4);
+        let mut input = keys(&format!("{open}f{to_trial}{LEFT}\rq"));
+        let mut out = Vec::new();
+        run_now(&repo, &args, &mut input, &mut out);
+        let text = String::from_utf8(out).unwrap();
+        let last = last_frame(&text);
+        assert!(!last.contains("trial retire"), "{last}");
+        assert!(last.contains("│ default "), "{last}");
+    }
+
+    /// The trials table is bounded by `since`, sorts on `a`/`d` like the
+    /// others, and reads `running` for a trial a queued task still carries.
+    #[test]
+    fn the_trials_table_is_windowed_sorted_and_reads_a_queued_arm_as_running() {
+        let repo = fixture("screen-trials");
+        bank_two_trials(&repo);
+        std::fs::write(
+            repo.queue_dir().join("rwr-2.md"),
+            "---\nid: rwr-2\nstage: implement\ntrial: t1\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.tasks().unwrap()[0].front.trial.as_deref(),
+            Some("t1"),
+            "the queued arm parses"
+        );
+
+        let last = last_frame(&screen(&repo, "\t\tq")).to_string();
+        assert!(last.contains("┌─ eval · trials "), "{last}");
+        let newer = last.find("retire-worktree-root").expect("t1's row");
+        let older = last.find("board-step-grace-window").expect("t2's row");
+        assert!(newer < older, "newest first: {last}");
+        assert!(last.contains("impl, impl_ui          2  running"), "{last}");
+        assert!(last.contains("impl_tdd               1  settled"), "{last}");
+
+        // `WHEN` is the second column: `a`, `↓` twice, `enter`.
+        let last = last_frame(&screen(&repo, &format!("\t\ta{DOWN}{DOWN}\rq"))).to_string();
+        assert!(last.contains(" ▲WHEN"), "{last}");
+        let newer = last.find("retire-worktree-root").expect("t1's row");
+        let older = last.find("board-step-grace-window").expect("t2's row");
+        assert!(older < newer, "oldest first once ascending: {last}");
+
+        let args = EvalArgs {
+            since: Some("2026-10-01".into()),
+            ..no_args()
+        };
+        let mut input = keys("\t\tq");
+        let mut out = Vec::new();
+        run_now(&repo, &args, &mut input, &mut out);
+        let text = String::from_utf8(out).unwrap();
+        let last = last_frame(&text);
+        assert!(last.contains("retire-worktree-root"), "{last}");
+        assert!(!last.contains("board-step-grace-window"), "{last}");
     }
 }

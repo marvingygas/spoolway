@@ -460,7 +460,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 
 | Key | What it does |
 |---|---|
-| `[tab]` | Switch between the lanes table and the directory table |
+| `[tab]` | Cycle through the lanes, directory and trials tables |
 | `[↑↓]` | Move the cursor |
 | `[a]` / `[d]` | Open the sort popup, ascending or descending |
 | `[f]` | Open the filter panel |

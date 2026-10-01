@@ -274,9 +274,9 @@ saved.
 A trial answers one question: which pipeline fits this group best? Press `t` on a group in the
 queue screen, tick any number of pipelines to compare, and tick any steps to skip. Each ticked
 pipeline gets one full copy of the whole group, and all arms share one trial id. Compare them
-with `spoolway eval --by task --trial <id>`. An arm never pushes a branch or opens a pull
-request. When the last arm finishes, every arm's copy is removed. The source group and the
-ledger rows stay.
+with `spoolway eval --by task --trial <id>`, or open the trial from the eval tab's trials
+table. An arm never pushes a branch or opens a pull request. When the last arm finishes, every
+arm's copy is removed. The source group and the ledger rows stay.
 
 ## Issue tracker
 
@@ -379,7 +379,7 @@ spoolway eval
 
 `spoolway eval` prints the lanes table, grouped by pipeline. `spoolway eval --by version`
 compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table interactively:
-`tab` switches to the directory table, `f` filters, and `e` exports CSV.
+`tab` cycles to the directory table and the trials table, `f` filters, and `e` exports CSV.
 
 ## Documentation
 
