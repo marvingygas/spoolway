@@ -171,7 +171,10 @@ Add `src/notes.md`: one sentence saying what this repository is.
 
 - `docs/cli.md` — what this repository is
 BODY
-task_doc identity.md identity identity-body.md "group: demo"
+# A group of its own: `selfsweep` may still sit in the queue, and a group is
+# one chain, so a second unrelated task under `demo` would be refused as a
+# second root before the identity check this case is about ever ran.
+task_doc identity.md identity identity-body.md "group: identity"
 must "a task queues" "$SPOOLWAY" queue add --from identity.md
 
 exit_code "no git identity refuses outright, not an empty queue" 1 \

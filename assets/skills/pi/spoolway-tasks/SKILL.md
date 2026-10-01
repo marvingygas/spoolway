@@ -57,9 +57,44 @@ reading the file whole.
    with what it now reports, without asking the person first — say one line about it, `Installed
    the two shipped pipelines; routing against them.`, ahead of the ballot in step 2.
 
-2. **Route each subject to a pipeline, then decompose against that pipeline's own shape.**
-   Read the pipelines before choosing task boundaries. Let their purpose and steps shape the
-   split instead of fitting pipelines onto an already-cut list.
+2. **Settle the groups first, as one printed ballot, before anything is sized.**
+
+   **A group is always one chain**, so work that would not chain goes in a group of its own
+   instead of a fan inside one. Cut groups so that no two of them touch the same files: two
+   pieces of work that share no changes run side by side, each in its own group. Where two
+   pieces would conflict, keep them in one group, or, when one plainly must land after the
+   other's own work, let the later piece's group stack on the earlier one instead, naming its
+   last task in its own first task's `depends_on`. A group may stack on at most one other
+   group, since two would be a join. Lean towards one group — most plans need it, and a split
+   group costs an extra `last:` run. A split group is named `<plan-slug>-<part>`, `<part>` a
+   short word for what it holds, never a number.
+
+   Give `1 group (Recommended)` its own lettered section first, always, drawing the one line
+   the plan stays as. Give each split worth offering its own lettered section after it, each
+   drawing this layout, every group its own header line and its own sentence beneath it, one
+   blank line between groups, in dependency order:
+
+   ```
+   <group-id>                    base  <branch>
+      One sentence on what the group holds.
+
+   <group-id>               after <group-id>
+      One sentence on what the group holds.
+   ```
+
+   A group that stacks on no other carries a `base` line — the branch from step 1, unless the
+   plan argues another. A group stacked on another carries `after <group-id>` instead, never a
+   `base` line of its own. Open with `Split this into groups?` and say that the person answers
+   with a letter. When the skill sees no split worth making, skip the ballot: say `Keeping one
+   group.` and go straight on, with every task in one group.
+
+   **Print the ballot and end the turn there**, the same way the task ballot below does. The
+   answer arrives as the person's next prompt.
+
+   **Then, for each group, in dependency order, route each subject inside it to a pipeline and
+   decompose against that pipeline's own shape.** Read the pipelines before choosing task
+   boundaries. Let their purpose and steps shape the split instead of fitting pipelines onto
+   an already-cut list.
 
    Each task: **independently completable**, one model, one worktree, no
    coordination; **whole enough that one lane holds the change at once**, split by *subject*
@@ -67,9 +102,8 @@ reading the file whole.
    `depends_on` (a **join** — one task depending on two — rebases onto only one parent,
    shipping silently missing the other's work). Whether two tasks may run side by side is
    judged from what each one actually changes, never from a shared file — a shared file
-   alone is no reason to chain them. **A genuine fan is deliberate, not a default**: tasks
-   whose changes do not step on each other may skip the chain, but mark both `parallel: true`
-   when they do.
+   alone is no reason to chain them; work that would not chain is a group of its own, decided
+   above, not a fan inside this one.
 
    **Route each subject before sizing it, yourself.** Match each subject against step 1's
    contract — a bug found mid-plan wants `bugfix`, feature work beside it wants `default`,
@@ -85,12 +119,13 @@ reading the file whole.
    — cut a reasonable number of tasks for the shape at hand, judged by subject, with each
    task's criteria kept under five bullets or split again.
 
-   **Offer the shape, as one printed ballot.** Settle on a recommended count first, then put
-   **that count and the three below it** on the ballot, floored at 1 — a recommendation of 6
-   names 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3, floored rather than padded back
-   up to four. Open with the line that names every member — `Split this shape: 3, 4, 5 or 6
-   tasks` — then give every count its own lettered section, largest first, the recommended one
-   marked as such, and say that the person answers with a letter.
+   **Offer this group's shape, as one printed ballot.** Settle on a recommended count first,
+   then put **that count and the three below it** on the ballot, floored at 1 — a
+   recommendation of 6 names 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3, floored
+   rather than padded back up to four. Open with the line that names every member and the
+   group — `Split <group>: 3, 4, 5 or 6 tasks` — then give every count its own lettered
+   section, largest first, the recommended one marked as such, and say that the person answers
+   with a letter.
 
    **Print the ballot and end the turn there.** Do not reach for a dialog tool: pi has none
    of its own, and what a given install's plugins offer is not something this skill can count
@@ -176,11 +211,12 @@ reading the file whole.
      commit's subject, as the pull request's title where nothing else sets one, and as the line
      the queue screen draws under the task — so the sentence still has to say what the task is
      for on its own.
-   - `group` — **the same string on every task of this breakdown**, read verbatim and
-     never a path. It is what makes them one row on the queue screen, one selection, and one
-     tab at run time. The plan's own slug is the obvious value — the slug alone, with the
-     `<YYYY-MM-DD>-` of the plan file's own name off it. A group carrying a date pins the
-     whole breakdown to the morning it was cut.
+   - `group` — **the same string on every task of its own group**, read verbatim and never a
+     path. It is what makes them one row on the queue screen, one selection, and one tab at
+     run time. The plan's own slug is the obvious value when the plan stays one group — the
+     slug alone, with the `<YYYY-MM-DD>-` of the plan file's own name off it. A split group is
+     named `<plan-slug>-<part>` instead, from step 2's own ballot. A group carrying a date pins
+     the whole breakdown to the morning it was cut.
    - `source` — the issue's own URL, from `spoolway issue show`, when this breakdown started
      at one; the calling page's own absolute path otherwise, where one exists. The screen's
      `o` key opens a `source:` that is a URL; a path is carried for the reader rather than
@@ -190,7 +226,7 @@ reading the file whole.
      does a page with no issue behind it, since `source:` already carries its path there.
    - `base` — on every task, a dependent included: its chain's base from step 2, which is
      step 1's `base` unless a note changed it. A dependency and its dependent must share one.
-   - `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate fan.
+   - `depends_on` and `pipeline`.
    - `labels` — the plain words this task proposed on the ballot, carried through unchanged: the
      plan's own words, or the source issue's own labels when this breakdown started at one.
      Dropped for a task that proposed none.
@@ -223,26 +259,26 @@ reading the file whole.
    a thing the way the code names it, and spell out anything the repo has not already named.
    Complete is the bar rather than terse — but a sentence that adds no fact is still cut.
 
-4. **Verify the shape.** Walk the `depends_on` of the tasks you just wrote: a line —
-   exactly one task with no dependency, one with no dependent — except where two are
-   `parallel: true`, a chosen gap. **A join has to be fixed before you go on**: re-run step 2
-   rather than patch ids after the fact.
+4. **Verify the shape.** Walk each group as one line, in dependency order: exactly one task
+   in it with no dependency inside the group, one with no dependent inside the group, and,
+   for a group stacked on another, its first task naming that other group's own last task and
+   nothing else across the two. **A join, or a group with two roots, has to be fixed before you
+   go on**: re-run step 2 rather than patch ids after the fact.
 
-   Whether two tasks are safe to run side by side is yours to judge from what each one
+   Whether two groups are safe to run side by side is yours to judge from what each one
    changes, not from a shared file — spoolway reports no overlap of its own, and `enter`
-   writes both tasks straight through with no `depends_on` invented. So say the pair out
+   writes both groups straight through with no `depends_on` invented. So say the pair out
    loud to the caller if you judged them safe beside each other on a shared file, and never
    tell them something downstream will check it; do not invent a section for it.
 
-   **Then check the top of the chain carries its own `last:` step.** The task with no
-   dependent — the one nothing else in this breakdown depends on, or the only task where
-   there is no chain at all — is the only one whose run of the pipeline ever reaches a step
-   marked `last-of-chain` in step 1's contract. When that task's own routed pipeline
-   carries none, the whole group loses that step silently: nobody after it ever runs it, since
-   every other task in the chain walks straight past. Re-route that one task to the first
-   pipeline from step 1's gathering that carries a `last-of-chain` step — there is no project
-   default to prefer over the rest — and say the swap out loud to the caller instead of just
-   writing a different `pipeline:` into its task.
+   **Then check each group's own last task carries a `last:` step.** A group's last task —
+   the one nothing else in its own group depends on — is the only one whose run of the
+   pipeline ever reaches a step marked `last-of-chain` in step 1's contract. When that task's
+   own routed pipeline carries none, that group loses the step silently: nobody after it ever
+   runs it, since every other task in the group walks straight past. Re-route that one task to
+   the first pipeline from step 1's gathering that carries a `last-of-chain` step — there is no
+   project default to prefer over the rest — and say the swap out loud to the caller instead of
+   just writing a different `pipeline:` into its task.
 
 5. **Prove the tasks.** `spoolway task contract --from <home>/pending` —
    the same validation `queue add --from` runs, stopping short of the save. Fix what it

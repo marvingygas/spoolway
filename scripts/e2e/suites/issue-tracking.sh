@@ -309,7 +309,12 @@ has "and on the dependent, which set no group_description of its own" \
 # the same two documents resumes rather than opening a second set.
 task_doc "$LIVE/opened-ok.md" opened-ok "$BODY" "group: opened-fail-batch" \
   "group_description: a batch that fails partway through"
-task_doc "$LIVE/opened-fails.md" opened-fails "$BODY" "group: opened-fail-batch"
+# Chained on `opened-ok`: a group is one chain, and two unrelated tasks in it
+# would be refused as two roots before the hook this case is about ran at all
+# — and that refusal names `opened-fails` too, so the check below would pass
+# on the wrong message.
+task_doc "$LIVE/opened-fails.md" opened-fails "$BODY" "group: opened-fail-batch" \
+  "depends_on: [opened-ok]"
 refuses "a mid-batch hook failure queues nothing" "opened-fails" \
   "$SPOOLWAY" queue add --from "$LIVE/opened-ok.md" --from "$LIVE/opened-fails.md"
 if [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md" ] \

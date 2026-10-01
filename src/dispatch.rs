@@ -718,17 +718,23 @@ enum FallThrough {
 /// `last: true` says this step belongs to the chain rather than to any one
 /// task in it, so only the task at the top runs it.
 ///
-/// The question is whether anything is still open *above* this task — an
-/// unfinished task that depends on it, at any depth. `Graph`'s reverse edges
-/// are built from the queue, which is the open set: a finished task is
-/// archived out of it, so a dependent that counts here is one that has yet
-/// to run. That is the whole difference from the retired `when: last`, which
-/// asked whether the pipeline's *declared* graph gave this task dependents
-/// and so found none at the top and everything below it forever.
+/// The question is whether anything is still open *above* this task, *in its
+/// own group* — an unfinished task that depends on it, at any depth, whose
+/// bare group (see the caller's own use of [`Graph::dependents_where`])
+/// matches this task's own. A finished task is archived out of the open set,
+/// so a dependent that counts here is one that has yet to run. That is the
+/// whole difference from the retired `when: last`, which asked whether the
+/// pipeline's *declared* graph gave this task dependents and so found none at
+/// the top and everything below it forever.
 ///
-/// A chain names one task. A fan names all of them, because no branch there
-/// contains another and each pull request stands alone. A task with no
-/// dependents and no group runs it too: there is no chain to be last in.
+/// Scoped to the task's own group — rather than the whole open set, as
+/// [`Graph::dependents`] once counted it — because a group may now stack onto
+/// another: without this, a group's `last:` step would walk past for every
+/// task once anything stacked on top of it, and its own suite would never
+/// run at all. Each group still gets its own tail. A chain names one task.
+/// A fan names all of them, because no branch there contains another and
+/// each pull request stands alone. A task with no dependents and no group
+/// runs it too: there is no chain to be last in.
 ///
 /// `first: true` asks the opposite question, and asks it a different way: is
 /// this task itself the declared root, rather than whether anything is open
@@ -1263,11 +1269,26 @@ impl<'a> Dispatcher<'a> {
                     continue;
                 }
 
-                match fall_through(
-                    &this_step,
-                    &tasks[index],
-                    graph.dependents(tasks[index].id()),
-                ) {
+                // Only a dependent in this task's own group can hold its
+                // `last:` step back — see `fall_through`'s own doc, updated
+                // for groups that may now stack on one another. Bare
+                // groups, compared the same slug-stripped way
+                // `commands::queue::check_dependencies_set` already does,
+                // so a task with no group (its own group of one) never
+                // matches a dependent that also has none.
+                let mine = crate::commands::bare_group(self.repo, &tasks[index]);
+                let same_group_dependents = match &mine {
+                    Some(mine) => graph.dependents_where(tasks[index].id(), |dep| {
+                        tasks
+                            .iter()
+                            .find(|t| t.id() == dep)
+                            .and_then(|t| crate::commands::bare_group(self.repo, t))
+                            .is_some_and(|theirs| &theirs == mine)
+                    }),
+                    None => 0,
+                };
+
+                match fall_through(&this_step, &tasks[index], same_group_dependents) {
                     FallThrough::Runs => {
                         step = Some(this_step);
                         break;
@@ -7329,7 +7350,6 @@ mod tests {
             title: String::new(),
             stage: stage.to_string(),
             depends_on: Vec::new(),
-            parallel: false,
             borrowed: false,
             last_report: None,
             blocked_from: None,
@@ -8677,7 +8697,6 @@ mod tests {
         for id in ["one", "two", "three"] {
             add_task_with(&repo, id, "suite", |f| {
                 f.group = Some("spread".into());
-                f.parallel = true;
             });
         }
 
@@ -8712,6 +8731,45 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("alone") && a.contains("running `suite`")),
             "a task with no group should have started `suite`: {:?}",
+            report.actions
+        );
+    }
+
+    /// A group's own tail still runs its `last:` step once another group
+    /// stacks on top of it — the cross-group dependent must not count, or
+    /// the tail would walk past believing something in its own chain was
+    /// still open above it, and its group's suite would never run.
+    #[test]
+    fn a_stacked_on_groups_tail_still_runs_its_own_last_step() {
+        let repo = fixture("last-stacked");
+        let pipelines = last_pipelines();
+        let mux = FakeMux::new(vec![]);
+
+        add_task_with(&repo, "api-login", "suite", |f| {
+            f.group = Some("api".into());
+        });
+        add_task_with(&repo, "ui-form", "suite", |f| {
+            f.group = Some("ui".into());
+            f.depends_on = vec!["api-login".to_string()];
+        });
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("api-login") && a.contains("running `suite`")),
+            "the stacked-on group's own tail should still run `suite`: {:?}",
+            report.actions
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("ui-form") && a.contains("running `suite`")),
+            "the stacking group's own root, with nothing above it in its own group, \
+             should run `suite` too: {:?}",
             report.actions
         );
     }
@@ -8779,7 +8837,6 @@ mod tests {
         for id in ["one", "two", "three"] {
             add_task_with(&repo, id, "setup", |f| {
                 f.group = Some("spread".into());
-                f.parallel = true;
             });
         }
 

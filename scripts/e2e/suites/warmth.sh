@@ -274,7 +274,7 @@ carried() {
 at_the_gate() {
   local task=$1 secs=$2 doctor=$3
   task_doc "$LIVE/$task.md" "$task" "$BODY" \
-    "group: live" "pipeline: warmth"
+    "group: $task" "pipeline: warmth"
   must "a task for $task" "$SPOOLWAY" queue add --from "$LIVE/$task.md"
   if ! drive "$task" paused "$secs"; then
     bad "$task: the first real lane reached the gate (at \`$(stage_of "$task")\`)"

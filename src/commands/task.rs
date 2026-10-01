@@ -32,7 +32,6 @@ const OPTIONAL_KEYS: &[&str] = &[
     "source",
     "plan",
     "depends_on",
-    "parallel",
     "gate_at",
     "epic",
     "ticket",
@@ -131,13 +130,11 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "depends_on",
-        "Task ids that must finish before this one may start.",
-    ),
-    (
-        "parallel",
-        "Set true to mark a deliberate fan the planner judged independent — a \
-         group's tasks may run side by side by nothing more than that \
-         judgement, not a missing `depends_on`.",
+        "Task ids that must finish before this one may start. A group is one \
+         chain: every id named here must be in this task's own group, unless \
+         this is that group's first task, in which case it may instead name \
+         exactly one other group's own last task, stacking this group on top \
+         of it.",
     ),
     (
         "pipeline",

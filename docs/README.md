@@ -17,7 +17,7 @@ Each page covers one part of the system. The order below is the order most peopl
 
 | Page | What it covers |
 |---|---|
-| [Tasks and the queue](tasks.md) | The task file, queueing, dependencies, parallel fans |
+| [Tasks and the queue](tasks.md) | The task file, queueing, dependencies, stacking a group on another |
 | [Planning](planning.md) | The plan skills, the queue screen, trials, routines |
 | [The dispatcher](dispatcher.md) | The board, scheduling, gates, pane layouts, stepping into a lane |
 | [Jobs](jobs.md) | Running a routine on a cron schedule |

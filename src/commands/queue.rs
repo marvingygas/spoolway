@@ -1,7 +1,7 @@
 //! The queue and the pending tasks over it: listing, adding, dependency
 //! checks, and write conflicts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::platform::PathExt;
@@ -68,7 +68,9 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
 struct QueueRowJson {
     id: String,
     group: Option<String>,
-    parallel: bool,
+    /// The other group this row's own group stacks on — see
+    /// [`crate::status::Row::after`].
+    after: Option<String>,
     stage: String,
     pipeline: String,
     state: &'static str,
@@ -89,7 +91,7 @@ impl From<&crate::status::Row> for QueueRowJson {
         QueueRowJson {
             id: row.id.clone(),
             group: row.group.clone(),
-            parallel: row.parallel,
+            after: row.after.clone(),
             stage: row.stage.clone(),
             pipeline: row.pipeline.clone(),
             state: state_label(row.state),
@@ -670,6 +672,19 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
                  remove it from the task"
             );
         }
+    }
+
+    // `parallel:` is gone: a group is one chain now, checked outright by
+    // `check_dependencies_set` rather than left to a planner's own
+    // judgement. Caught here, with its own friendly message, rather than
+    // left to land in `extra` the way any other unrecognised key would —
+    // `Frontmatter` dropped the typed field, so nothing downstream would
+    // ever refuse it again once it did.
+    if mapping.contains_key("parallel") {
+        bail!(
+            "{name} sets `parallel:`, which is gone — a group is one chain. Give it a \
+             `depends_on`, or move it to a group of its own."
+        );
     }
 
     // `stage` is the one field `Frontmatter` requires that a task never
@@ -1892,6 +1907,42 @@ fn strip_slug_prefix<'a>(group: &'a str, slug: &str) -> &'a str {
         .unwrap_or(group)
 }
 
+/// The bare `group:` a task belongs to, with `issue_tracking.key_in_names`'
+/// slug prefix stripped the same way the cross-group refusal in
+/// [`check_dependencies_set`] always has — see [`strip_slug_prefix`]'s own
+/// doc. Shared with `commands::stack`'s own conflict check, so a group
+/// compared there and a group compared here can never disagree about what
+/// counts as "the same group".
+pub(crate) fn bare_group(repo: &Repo, t: &Task) -> Option<String> {
+    let group = t.front.group.as_deref()?;
+    if !repo.config.issue_tracking.key_in_names {
+        return Some(group.to_string());
+    }
+    let slug = t.extra_str("slug");
+    let slug = if accept_slug(slug) { slug } else { "" };
+    Some(strip_slug_prefix(group, slug).to_string())
+}
+
+/// The `group:` a still-pending task named `id` declares, read straight off
+/// its raw frontmatter YAML rather than through [`crate::task::Task::parse`]
+/// — a task waiting in the pending directory has not been through `queue
+/// add` yet and so has no `stage:` of its own, which [`crate::task::
+/// Frontmatter`] requires and a pending file never carries. Only used to put
+/// a name on a dependency [`Graph`] already read as unresolvable, so a
+/// missing or unparsable pending file answers `None` exactly as an id with
+/// no pending file at all does — [`check_dependencies_set`] falls back to
+/// its ordinary "neither the queue nor the archive" refusal either way.
+fn pending_task_group(repo: &Repo, id: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(repo.pending_dir().join(format!("{id}.md"))).ok()?;
+    let (yaml, _) = crate::task::split_fence(&raw).ok()?;
+    let value: serde_norway::Value = serde_norway::from_str(yaml).ok()?;
+    value
+        .as_mapping()?
+        .get("group")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Whether a slug a hook or a task offered is one spoolway will build a
 /// name out of: non-blank and inside [`crate::config::check_id`]'s alphabet,
 /// the same one every task id, group and branch already uses.
@@ -2109,8 +2160,126 @@ fn ends_with_newline(mut body: String) -> String {
 /// for hand-edited files.
 fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     let mut tasks = repo.tasks()?;
+
+    // Every group comparison in this function goes through [`bare_group`],
+    // so the one-chain, stacking and pending-group checks below can never
+    // drift from what counts as "the same group" here.
+    let bare_group = |t: &Task| -> Option<String> { self::bare_group(repo, t) };
+
+    // Groups with a member still in the queue *before* this batch lands —
+    // read here, before archived or batch tasks join `tasks` below, so nothing
+    // this call is about to write can answer its own question. A routine or a
+    // scheduled job mints a fresh id on every run but leaves `group:`
+    // untouched (`mint_routine_batch`), so the same group name is queued
+    // again and again, each time as its own one-task chain — once a run
+    // lands and is archived, that name is free to be reused. Without this, a
+    // second run would find its own predecessor's tail still sitting in
+    // `by_group` below with nothing depending on it, and refuse itself as a
+    // second root of a group whose first "root" already finished and left.
+    let groups_still_queued: BTreeSet<String> = tasks.iter().filter_map(&bare_group).collect();
+
+    // The one-chain and stacking rules below both read a group's whole shape
+    // — every task it has ever had, not only what is still queued — because
+    // a task that already landed and was archived still counts as that
+    // group's root or tail, as long as the group is still open (see
+    // `groups_still_queued` above). Loaded once, here, rather than through
+    // `status::mod`'s own `cached_archive`: that cache is tuned for a
+    // per-second board redraw, and this runs once per `queue add` or `task
+    // contract` call.
+    let (archived, _) = crate::task::load_dir(&repo.archive_dir())?;
+    let archived_ids: BTreeSet<String> = archived.iter().map(|t| t.id().to_string()).collect();
+    tasks.extend(archived);
+    // A caller may hand this an id that is already on disk — a task
+    // re-validated after `queue add` already wrote it, or a batch that
+    // overlaps a sibling `--from` already queued in a run. `by_group` below
+    // collects one `Vec` per group and would otherwise count such an id
+    // twice within it, reading a lone root as a fan of one against itself.
+    // The batch's own copy always wins: it is what a caller is asking this
+    // to check right now.
+    let batch_ids: BTreeSet<&str> = batch.iter().map(|t| t.id()).collect();
+    tasks.retain(|t| !batch_ids.contains(t.id()));
     tasks.extend(batch.iter().cloned());
     let graph = Graph::build(&tasks, &repo.archive_dir());
+
+    // Every task this batch can see, bare-grouped — the set the one-chain
+    // and stacking checks below both walk. A trial arm is left out: it
+    // forks a whole group for a side-by-side comparison run and has its own
+    // `depends_on` emptied on the way in (`queue_routine_target_with`,
+    // `begin_trial`) precisely so it never waits on the source it was
+    // forked from — counting it here would read that deliberate fan as a
+    // second root of the group it forked from.
+    let mut by_group: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
+    for t in &tasks {
+        if t.front.trial.is_some() {
+            continue;
+        }
+        let Some(g) = bare_group(t) else { continue };
+        // An archived task of a group with no live queue member before this
+        // batch is a past, closed instance of that name — see
+        // `groups_still_queued` above — left out so a fresh batch under the
+        // same name starts its own chain rather than inheriting a finished
+        // one's shape.
+        if archived_ids.contains(t.id()) && !groups_still_queued.contains(&g) {
+            continue;
+        }
+        by_group.entry(g).or_default().push(t);
+    }
+
+    // A group's tasks depending on each other, restricted to edges that stay
+    // inside `group` — a cross-group edge is the stacking check's business,
+    // not this one's. A plain fn rather than a closure: a closure over
+    // `by_group` cannot also be generic over the lifetime of whichever
+    // `&Task` a caller hands it, and every caller below needs `t`'s own
+    // lifetime to outlive the `Vec<&str>` this returns.
+    fn in_group_deps<'a>(
+        by_group: &BTreeMap<String, Vec<&'a Task>>,
+        group: &str,
+        t: &'a Task,
+    ) -> Vec<&'a str> {
+        let ids: BTreeSet<&str> = by_group
+            .get(group)
+            .into_iter()
+            .flatten()
+            .map(|m| m.id())
+            .collect();
+        t.front
+            .depends_on
+            .iter()
+            .map(String::as_str)
+            .filter(|d| ids.contains(d))
+            .collect()
+    }
+
+    // The task with nothing depending on it inside `group` — the sink a
+    // stacking edge is allowed to name. `None` for a group with more than
+    // one, which the one-chain check below refuses before a stacking check
+    // ever has to ask.
+    let tail_of = |group: &str| -> Option<&str> {
+        let members = by_group.get(group)?;
+        let depended_on: BTreeSet<&str> = members
+            .iter()
+            .flat_map(|m| in_group_deps(&by_group, group, m))
+            .collect();
+        let mut tails = members
+            .iter()
+            .map(|m| m.id())
+            .filter(|id| !depended_on.contains(id));
+        let first = tails.next()?;
+        match tails.next() {
+            None => Some(first),
+            Some(_) => None,
+        }
+    };
+
+    // A group's own words for a count, matching the mockup's "two tasks" —
+    // spelled out only for the common case, since a group this tangled is
+    // rare enough that a bare digit is still plain English.
+    let count_word = |n: usize| -> String {
+        match n {
+            2 => "two".to_string(),
+            _ => n.to_string(),
+        }
+    };
 
     for task in batch.iter_mut() {
         let id = task.id().to_string();
@@ -2119,8 +2288,27 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
             bail!("`{id}` cannot depend on itself");
         }
 
+        let mine = bare_group(task);
+        // Cross-group ids this task names — theirs, resolved once, so the
+        // "one other group" and "that group's own last task" checks below
+        // read the same answer the pending-directory check already used to
+        // decide a dependency is unresolvable rather than merely elsewhere.
+        let mut cross: Vec<(&str, String)> = Vec::new();
+        let mut same_group_dep_count = 0usize;
+
         for dep in &task.front.depends_on {
             if graph.state(dep) == DepState::Unknown {
+                // A dependency named on a task still sitting in the pending
+                // directory — not yet run through `queue add` at all — reads
+                // exactly like a typo to `Graph`, which only ever sees the
+                // queue, the archive and this batch. Naming the group here
+                // is what tells the two apart for whoever reads the refusal.
+                if let Some(group) = pending_task_group(repo, dep) {
+                    bail!(
+                        "`{id}` depends on `{dep}`, in group `{group}`, which is still in the \
+                         pending directory — queue `{group}` first."
+                    );
+                }
                 let days = repo.config.housekeeping.retention_days;
                 if days > 0 {
                     // `retain` deletes an `archive/` entry once it is this
@@ -2140,40 +2328,17 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                 );
             }
 
-            // With no collision walk left to invent an edge from an
-            // overlapping `touches` glob (see `chains-not-fans`), every edge
-            // left comes from a plan page, and a plan cuts one group at a
-            // time. A dependency naming another group is always a mistake,
-            // and queue time is the cheapest place to say so.
-            //
-            // Compared bare: a queued sibling's `group:` already carries the
-            // `<slug>-` prefix its own `queue add` applied when
-            // `issue_tracking.key_in_names` is on, while this task still
-            // reads what the person wrote — `open_tickets` runs after this
-            // check. The same strip `open_tickets` uses for its epic lookup,
-            // so a group that spans two `queue add` calls chains the way it
-            // was meant to.
+            // A group is one chain, and a group's first task may stack it
+            // onto exactly one other group's own last task — see
+            // `d-group-stacks-on-group` in the plan this shipped from. Every
+            // other cross-group edge is refused below, once every dependency
+            // has been sorted into "mine" or "theirs".
             let sibling = tasks.iter().find(|t| t.id() == dep);
-            let (mine, theirs) = (
-                task.front.group.as_deref(),
-                sibling.and_then(|t| t.front.group.as_deref()),
-            );
-            if let (Some(mine), Some(theirs)) = (mine, theirs)
-                && mine != theirs
-                && (!repo.config.issue_tracking.key_in_names
-                    || strip_slug_prefix(
-                        theirs,
-                        sibling
-                            .map(|t| t.extra_str("slug"))
-                            .filter(|slug| accept_slug(slug))
-                            .unwrap_or(""),
-                    ) != mine)
-            {
-                bail!(
-                    "`{id}` is in group `{mine}` but depends on `{dep}`, which is in group \
-                     `{theirs}` — a chain does not cross a group. Queue one group, let it \
-                     land, then queue the other."
-                );
+            let theirs = sibling.and_then(bare_group);
+            match (&mine, &theirs) {
+                (Some(mine), Some(theirs)) if mine == theirs => same_group_dep_count += 1,
+                (Some(_), Some(theirs)) => cross.push((dep.as_str(), theirs.clone())),
+                _ => {}
             }
 
             // A dependent is cut straight from its dependency's branch now,
@@ -2198,6 +2363,84 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                          `{theirs}` — work only merges into its own base, so that wait would never \
                          put it in reach. Queue both from the same worktree."
                 );
+            }
+        }
+
+        // A cross-group edge is only ever a stacking edge: written on a
+        // group's own first task (nothing else it names inside its own
+        // group), naming exactly one other group, and naming that group's
+        // own last task — the tail nothing else in it depends on. Anything
+        // short of that shape is refused here, once every dependency this
+        // task named has been sorted above into `cross` or counted against
+        // `same_group_dep_count`.
+        if !cross.is_empty() {
+            if same_group_dep_count > 0 {
+                bail!(
+                    "`{id}` depends on `{}`, in another group, but also depends on a task in \
+                     its own group `{}` — only a group's first task may stack onto another \
+                     group. Move the cross-group `depends_on` onto the first task, or drop it.",
+                    cross[0].0,
+                    mine.as_deref().unwrap_or("")
+                );
+            }
+
+            let mut groups: Vec<&str> = cross.iter().map(|(_, g)| g.as_str()).collect();
+            groups.sort_unstable();
+            groups.dedup();
+            if groups.len() > 1 {
+                bail!(
+                    "`{id}` depends on tasks in {} other groups ({}) — a group may stack onto \
+                     only one other group.",
+                    groups.len(),
+                    groups.join(", ")
+                );
+            }
+
+            let their_group = groups[0];
+            if cross.len() > 1 {
+                bail!(
+                    "`{id}` names {} tasks in group `{their_group}` — a group may stack onto \
+                     another group's own last task, and no more than that one task.",
+                    cross.len()
+                );
+            }
+
+            let dep = cross[0].0;
+            // A group that has fully landed — every task archived, nothing
+            // left in the queue — is kept out of `by_group` above so a
+            // routine can reuse its name, which leaves `tail_of` nothing to
+            // read. Stacking onto it is still the ordinary order, though: the
+            // pending-directory refusal tells people to queue the other group
+            // first, and it may well land before the dependent is queued
+            // (seen 2026-09-30, refused as "not one chain itself"). So an
+            // archived task of a landed group counts as its last task as long
+            // as nothing of that group depends on it. A routine's name may
+            // hold many archived one-task runs, each its own tail, so this
+            // asks about `dep` alone rather than for the group's one tail.
+            if archived_ids.contains(dep) && !groups_still_queued.contains(their_group) {
+                if let Some(next) = tasks.iter().find(|t| {
+                    bare_group(t).as_deref() == Some(their_group)
+                        && t.front.depends_on.iter().any(|d| d == dep)
+                }) {
+                    bail!(
+                        "`{id}` depends on `{dep}`, but `{}` in group `{their_group}` depends \
+                         on `{dep}` in turn — a group may only stack onto another group's own \
+                         last task.",
+                        next.id()
+                    );
+                }
+            } else {
+                match tail_of(their_group) {
+                    Some(tail) if tail == dep => {}
+                    Some(tail) => bail!(
+                        "`{id}` depends on `{dep}`, but group `{their_group}`'s own last task is \
+                     `{tail}` — a group may only stack onto another group's own last task."
+                    ),
+                    None => bail!(
+                        "`{id}` depends on `{dep}` in group `{their_group}`, which is not one \
+                     chain itself — fix `{their_group}` before stacking another group onto it."
+                    ),
+                }
             }
         }
 
@@ -2244,12 +2487,87 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                     let parents = deps.join("`, `");
                     let missing = missing.join("`, `");
                     bail!(
-                        "`{id}` depends on `{parents}`, but none of them reaches all the \
-                         others — its worktree would be cut from `{first}`, and `{missing}` \
-                         would not be in it. A depends_on must start with the id that \
-                         contains the rest."
+                        "`{id}` depends on `{parents}`, in its own group{group}, but none of \
+                         them reaches all the others — a group is one chain, and a task \
+                         joining two of it is not one. Its worktree would be cut from \
+                         `{first}`, and `{missing}` would not be in it. A depends_on must \
+                         start with the id that contains the rest, or drop one.",
+                        group = mine
+                            .as_deref()
+                            .map(|g| format!(" `{g}`"))
+                            .unwrap_or_default(),
                     );
                 }
+            }
+        }
+    }
+
+    // A group is one chain: at most one root (no in-group dependency), and at
+    // most one dependent per in-group task (no fan). Checked once per group,
+    // after every task above has had its own `depends_on` validated and
+    // reordered, over the whole set `by_group` already gathered — the queue,
+    // the archive and this batch together — so a group split across two
+    // `queue add` calls is caught exactly as a single-call fan would be.
+    //
+    // Only the groups this batch puts a task into, though. A group the batch
+    // never touches is not this call's to judge: one already broken on disk —
+    // hand-placed, or queued before groups were chains — would otherwise
+    // refuse every unrelated `queue add` in the project by its own name, and
+    // `spoolway doctor` is the backstop for those. A group the batch only
+    // stacks onto is still checked, by `tail_of` above.
+    //
+    // A join — one task naming two in-group parents that do not reach each
+    // other — never reaches here: the reorder loop above already refused it,
+    // the moment such a task's own `depends_on.len() > 1` found no id
+    // reaching every other one named beside it. What *does* reach here is a
+    // task naming several in-group ids that *do* all chain through one of
+    // them — not a join, just a verbose way of saying "wait for the tip of
+    // the chain" — so a fan is counted against that one effective parent,
+    // not against every id the task happened to list.
+    let batch_groups: BTreeSet<String> = batch.iter().filter_map(&bare_group).collect();
+    for (group, members) in by_group.iter().filter(|(g, _)| batch_groups.contains(*g)) {
+        let roots: Vec<&str> = members
+            .iter()
+            .filter(|t| in_group_deps(&by_group, group, t).is_empty())
+            .map(|t| t.id())
+            .collect();
+        if roots.len() > 1 {
+            bail!(
+                "group `{group}` has {} tasks with no dependency in it: {} — a group is one \
+                 chain. Give one a `depends_on`, or move it to a group of its own.",
+                count_word(roots.len()),
+                roots.join(" and ")
+            );
+        }
+
+        let mut dependents_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for t in members {
+            let deps = in_group_deps(&by_group, group, t);
+            // The one dependency the rest of `deps` all lead to — the same
+            // "head" the reorder loop above already found for this very
+            // list, so a task past that loop is guaranteed one here too.
+            let effective_parent = match deps.len() {
+                0 => None,
+                1 => Some(deps[0]),
+                _ => deps.iter().copied().find(|&candidate| {
+                    deps.iter()
+                        .copied()
+                        .all(|other| other == candidate || graph.reaches(candidate, other))
+                }),
+            };
+            if let Some(parent) = effective_parent {
+                dependents_of.entry(parent).or_default().push(t.id());
+            }
+        }
+        for (dep, dependents) in &dependents_of {
+            if dependents.len() > 1 {
+                bail!(
+                    "group `{group}` has {} tasks depending on `{dep}`: {} — a group is one \
+                     chain. Give one a `depends_on` on the other, or move it to a group of \
+                     its own.",
+                    count_word(dependents.len()),
+                    dependents.join(" and ")
+                );
             }
         }
     }
@@ -6079,7 +6397,6 @@ const AUTHORED_FIELDS: &[&str] = &[
     "id",
     "title",
     "depends_on",
-    "parallel",
     "pipeline",
     "group",
     "source",
@@ -7076,7 +7393,7 @@ mod tests {
             [
                 "id",
                 "group",
-                "parallel",
+                "after",
                 "stage",
                 "pipeline",
                 "state",
@@ -7416,6 +7733,221 @@ mod tests {
         );
     }
 
+    /// `parallel:` is gone — a group is one chain, checked outright rather
+    /// than left to a planner's own judgement — and a task still setting it
+    /// is refused by name, with the fix named too.
+    #[test]
+    fn a_task_setting_parallel_is_refused() {
+        let repo = fixture("parallel-is-gone");
+        let text = task_text("cart-empty", "group: cart\nparallel: true\n", BODY);
+        let path = write_doc(&repo, "cart-empty.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("parallel"), "{msg}");
+        assert!(msg.contains("depends_on"), "{msg}");
+        assert!(
+            !repo.queue_dir().join("cart-empty.md").exists(),
+            "a task setting a gone key must not be written"
+        );
+    }
+
+    /// A group with two tasks that depend on nothing in it — two roots — is
+    /// refused, naming both tasks and the group, matching the plan's own
+    /// mockup verbatim.
+    #[test]
+    fn a_group_with_two_roots_is_refused() {
+        let repo = fixture("two-roots");
+        let a = write_doc(
+            &repo,
+            "cart-totals.md",
+            &task_text("cart-totals", "group: cart\n", BODY),
+        );
+        let b = write_doc(
+            &repo,
+            "cart-empty.md",
+            &task_text("cart-empty", "group: cart\n", BODY),
+        );
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&a, &b]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "group `cart` has two tasks with no dependency in it: cart-totals and cart-empty \
+             — a group is one chain. Give one a `depends_on`, or move it to a group of its \
+             own."
+        );
+    }
+
+    /// A group already broken on disk — two roots, placed by hand or queued
+    /// before groups were chains — is not a reason to refuse a task in a
+    /// different group: the one-chain check judges only the groups the batch
+    /// puts a task into, and `doctor` is the backstop for the rest.
+    #[test]
+    fn a_broken_group_on_disk_does_not_refuse_a_task_in_another_group() {
+        let repo = fixture("unrelated-broken-group");
+        for id in ["live-a", "live-b"] {
+            std::fs::write(
+                repo.queue_dir().join(format!("{id}.md")),
+                format!("---\nid: {id}\ntitle: {id}\ngroup: live\nstage: paused\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+
+        let text = task_text("gate", "group: gate\n", BODY);
+        let path = write_doc(&repo, "gate.md", &text);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("group `live`'s own shape is not this batch's to judge");
+        assert!(repo.queue_dir().join("gate.md").exists());
+    }
+
+    /// A routine or a scheduled job mints a fresh id every run but leaves
+    /// `group:` untouched (`mint_routine_batch`), so the same group name is
+    /// queued again and again — once a run lands and is archived, with
+    /// nothing of its own left in the queue, that name has to be free to
+    /// start a fresh one-task chain, or no grouped routine could ever run a
+    /// second time.
+    #[test]
+    fn a_group_reused_after_its_only_task_is_archived_is_not_a_second_root() {
+        let repo = fixture("group-reused-after-archive");
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("audit-deps-1.md"),
+            "---\nid: audit-deps-1\ntitle: audit-deps-1\ngroup: nightly\nstage: done\n---\nbody\n",
+        )
+        .unwrap();
+
+        let text = task_text("audit-deps-2", "group: nightly\n", BODY);
+        let path = write_doc(&repo, "audit-deps-2.md", &text);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect(
+            "a group whose only earlier task already landed and archived is free to start \
+             a fresh chain",
+        );
+    }
+
+    /// The same reuse, but the earlier run is still sitting in the queue —
+    /// a genuine second root of a group that has not landed yet, not a
+    /// closed name being picked up again, and still refused.
+    #[test]
+    fn a_second_root_is_refused_while_the_groups_first_task_is_still_queued() {
+        let repo = fixture("group-still-queued-two-roots");
+        add(&repo, "audit-deps-1", &[]);
+
+        let text = task_text("audit-deps-2", "group: demo\n", BODY);
+        let path = write_doc(&repo, "audit-deps-2.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("has two tasks with no dependency in it"),
+            "{err:#}"
+        );
+    }
+
+    /// A group with two tasks depending on the same one task — a fan — is
+    /// refused, naming both dependents and the group.
+    #[test]
+    fn a_group_with_a_fan_is_refused() {
+        let repo = fixture("group-fan");
+        add(&repo, "cart-totals", &[]);
+        let left = write_doc(
+            &repo,
+            "cart-discounts.md",
+            &task_text(
+                "cart-discounts",
+                "group: demo\ndepends_on: [cart-totals]\n",
+                BODY,
+            ),
+        );
+        let right = write_doc(
+            &repo,
+            "cart-copy.md",
+            &task_text(
+                "cart-copy",
+                "group: demo\ndepends_on: [cart-totals]\n",
+                BODY,
+            ),
+        );
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&left, &right]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("group `demo`"), "{msg}");
+        assert!(msg.contains("`cart-totals`"), "{msg}");
+        assert!(
+            msg.contains("cart-copy") && msg.contains("cart-discounts"),
+            "{msg}"
+        );
+        assert!(msg.contains("a group is one chain"), "{msg}");
+    }
+
+    /// A dependent group queued while the group it stacks on is still in the
+    /// pending directory — not yet run through `queue add` at all — is
+    /// refused, naming that group rather than reading like a typo.
+    #[test]
+    fn a_dependency_on_a_group_still_in_the_pending_directory_is_refused() {
+        let repo = fixture("pending-group-dep");
+        write_pending(
+            &repo,
+            "login",
+            &task_text("login", "group: auth-api\n", BODY),
+        );
+
+        let text = task_text("auth-form", "group: auth-ui\ndepends_on: [login]\n", BODY);
+        let path = write_doc(&repo, "auth-form.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("`auth-api`"), "{msg}");
+        assert!(msg.contains("pending directory"), "{msg}");
+    }
+
     #[test]
     fn a_dependency_that_would_close_a_cycle_is_refused() {
         let repo = fixture("cycle-dep");
@@ -7447,13 +7979,16 @@ mod tests {
         assert!(err.to_string().contains("depend on itself"), "{err:#}");
     }
 
-    /// With the collision walk gone, every edge left comes from a plan page,
-    /// and a plan cuts one group at a time — so a `depends_on` reaching into
-    /// another group is always a mistake, not a real chain.
+    /// A group's own first task may stack onto another group's own last
+    /// task — see `a_group_stacks_onto_anothers_last_task_is_accepted` — but
+    /// naming anything else in that group is still refused: a stack has
+    /// exactly one join point, the tail nothing else in the other group
+    /// depends on.
     #[test]
-    fn a_dependency_on_a_task_of_another_group_is_refused() {
+    fn a_dependency_on_a_task_of_another_group_that_is_not_its_last_is_refused() {
         let repo = fixture("cross-group-dep");
         add(&repo, "login", &[]);
+        add(&repo, "profile", &["login"]);
 
         let text = task_text("sessions", "group: other\ndepends_on: [login]\n", BODY);
         let path = write_doc(&repo, "sessions.md", &text);
@@ -7471,8 +8006,287 @@ mod tests {
             msg.contains("`sessions`") && msg.contains("`login`"),
             "{msg}"
         );
-        assert!(msg.contains("`other`") && msg.contains("`demo`"), "{msg}");
-        assert!(msg.contains("a chain does not cross a group"), "{msg}");
+        assert!(msg.contains("`profile`"), "{msg}");
+        assert!(msg.contains("own last task"), "{msg}");
+    }
+
+    /// The shape `d-group-stacks-on-group` actually asks for: a group's own
+    /// first task naming another group's own last task is accepted outright,
+    /// cut from that task's branch like any other dependency.
+    #[test]
+    fn a_group_stacks_onto_anothers_last_task_is_accepted() {
+        let repo = fixture("group-stacks-on-group");
+        add(&repo, "login", &[]);
+
+        let text = task_text("sessions", "group: other\ndepends_on: [login]\n", BODY);
+        let path = write_doc(&repo, "sessions.md", &text);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("a group's first task may stack onto another group's own last task");
+
+        assert_eq!(
+            queued(&repo, "sessions").front.depends_on,
+            vec!["login".to_string()]
+        );
+    }
+
+    /// A non-first task of its own naming a cross-group dependency alongside
+    /// an in-group one is refused: only a group's own first task — the one
+    /// with no dependency inside its own group — may stack onto another.
+    /// `a_task_naming_two_other_groups_is_refused` and the tests beside it
+    /// below cover the rest of this shape.
+    #[test]
+    fn a_task_naming_a_cross_group_dependency_alongside_an_in_group_one_is_refused() {
+        let repo = fixture("cross-group-plus-in-group");
+        add(&repo, "billing", &[]);
+        let text = task_text("login", "group: other\n", BODY);
+        let path = write_doc(&repo, "login.md", &text);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+
+        let text = task_text(
+            "sessions",
+            "group: demo\ndepends_on: [billing, login]\n",
+            BODY,
+        );
+        let path = write_doc(&repo, "sessions.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("only a group's first task"),
+            "{err:#}"
+        );
+    }
+
+    /// A group naming two other groups is refused: a group may stack onto
+    /// at most one, since two would be a join across groups.
+    #[test]
+    fn a_task_naming_two_other_groups_is_refused() {
+        let repo = fixture("cross-group-two-groups");
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&write_doc(
+                &repo,
+                "billing.md",
+                &task_text("billing", "group: billing\n", BODY),
+            )]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&write_doc(
+                &repo,
+                "login.md",
+                &task_text("login", "group: auth\n", BODY),
+            )]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+
+        let text = task_text(
+            "sessions",
+            "group: demo\ndepends_on: [billing, login]\n",
+            BODY,
+        );
+        let path = write_doc(&repo, "sessions.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("2 other groups"), "{err:#}");
+        assert!(err.to_string().contains("only one other group"), "{err:#}");
+    }
+
+    /// A group naming more than one task of the *same* other group is
+    /// refused too — a stack has exactly one join point, that group's own
+    /// last task, and no more than that one task.
+    #[test]
+    fn a_task_naming_two_tasks_of_the_same_other_group_is_refused() {
+        let repo = fixture("cross-group-two-tasks-one-group");
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&write_doc(
+                &repo,
+                "auth-login.md",
+                &task_text("auth-login", "group: auth\n", BODY),
+            )]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&write_doc(
+                &repo,
+                "auth-sessions.md",
+                &task_text(
+                    "auth-sessions",
+                    "group: auth\ndepends_on: [auth-login]\n",
+                    BODY,
+                ),
+            )]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+
+        let text = task_text(
+            "billing",
+            "group: demo\ndepends_on: [auth-login, auth-sessions]\n",
+            BODY,
+        );
+        let path = write_doc(&repo, "billing.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("names 2 tasks in group `auth`"),
+            "{err:#}"
+        );
+    }
+
+    /// Stacking onto a group that has fully landed — every task archived,
+    /// nothing left in the queue — is accepted: that group's archived tail
+    /// is its last task. This is the order the pending-directory refusal
+    /// itself asks for ("queue `auth-api` first"), and the other group may
+    /// land before the dependent is ever queued.
+    #[test]
+    fn stacking_onto_a_group_that_has_fully_landed_is_accepted() {
+        let repo = fixture("stack-onto-landed-group");
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("auth-login.md"),
+            "---\nid: auth-login\ntitle: auth-login\ngroup: auth-api\nstage: done\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.archive_dir().join("auth-sessions.md"),
+            "---\nid: auth-sessions\ntitle: auth-sessions\ngroup: auth-api\n\
+             depends_on: [auth-login]\nstage: done\n---\nbody\n",
+        )
+        .unwrap();
+
+        let text = task_text(
+            "auth-form",
+            "group: auth-ui\ndepends_on: [auth-sessions]\n",
+            BODY,
+        );
+        let path = write_doc(&repo, "auth-form.md", &text);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("a group may stack onto another group that has already landed");
+    }
+
+    /// The same landed group, but naming its first task rather than its last
+    /// is still refused, naming the task that depends on it in turn.
+    #[test]
+    fn stacking_onto_a_landed_groups_non_last_task_is_refused() {
+        let repo = fixture("stack-onto-landed-non-tail");
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("auth-login.md"),
+            "---\nid: auth-login\ntitle: auth-login\ngroup: auth-api\nstage: done\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.archive_dir().join("auth-sessions.md"),
+            "---\nid: auth-sessions\ntitle: auth-sessions\ngroup: auth-api\n\
+             depends_on: [auth-login]\nstage: done\n---\nbody\n",
+        )
+        .unwrap();
+
+        let text = task_text(
+            "auth-form",
+            "group: auth-ui\ndepends_on: [auth-login]\n",
+            BODY,
+        );
+        let path = write_doc(&repo, "auth-form.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("`auth-sessions` in group `auth-api`"), "{msg}");
+        assert!(msg.contains("own last task"), "{msg}");
+    }
+
+    /// Stacking onto a group that is not one chain itself — here, a group
+    /// with two roots — is refused: fix the other group before building on
+    /// top of it. `auth`'s two tasks are written straight to disk rather
+    /// than through `queue_add`, which would refuse the broken shape
+    /// outright before this test ever got to stack `demo` onto it.
+    #[test]
+    fn stacking_onto_a_group_that_is_not_one_chain_is_refused() {
+        let repo = fixture("cross-group-not-a-chain");
+        std::fs::write(
+            repo.queue_dir().join("auth-one.md"),
+            "---\nid: auth-one\ntitle: auth-one\ngroup: auth\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.queue_dir().join("auth-two.md"),
+            "---\nid: auth-two\ntitle: auth-two\ngroup: auth\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+
+        let text = task_text("billing", "group: demo\ndepends_on: [auth-one]\n", BODY);
+        let path = write_doc(&repo, "billing.md", &text);
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not one chain itself"), "{err:#}");
     }
 
     /// With `issue_tracking.key_in_names` on, a sibling queued by an
@@ -7483,7 +8297,7 @@ mod tests {
     /// on: with it off the same two groups are still two groups.
     #[test]
     fn a_dependency_on_a_sibling_whose_group_carries_the_slug_prefix_is_accepted() {
-        let mut repo = fixture("cross-batch-slug-prefix");
+        let repo = fixture("cross-batch-slug-prefix");
         add(&repo, "auth-01", &[]);
         // What the first `queue add` left behind with the flag on.
         let mut parent = queued(&repo, "auth-01");
@@ -7494,22 +8308,50 @@ mod tests {
             .insert("slug".into(), serde_norway::Value::String("proj-12".into()));
         parent.save().unwrap();
 
+        // With the flag off, the prefix means nothing — `demo` and
+        // `proj-12-demo` really are two different groups, and this is now
+        // simply a group's first task stacking onto the other group's own
+        // last task, accepted the same way
+        // `a_group_stacks_onto_anothers_last_task_is_accepted` is.
         let text = task_text("auth-02", "group: demo\ndepends_on: [auth-01]\n", BODY);
         let path = write_doc(&repo, "auth-02.md", &text);
         let args = from_args(&[&path]);
-
-        let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap_err();
-        assert!(
-            err.to_string().contains("a chain does not cross a group"),
-            "with the flag off the prefix means nothing: {err:#}"
-        );
-
-        repo.config.issue_tracking.key_in_names = true;
         queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
-            .expect("the bare group and its prefixed sibling are one group");
+            .expect("a stack across two literally different groups is still accepted");
         assert_eq!(
             queued(&repo, "auth-02").front.depends_on,
             vec!["auth-01".to_string()]
+        );
+    }
+
+    /// [`bare_group`] strips a recognised `<slug>-` prefix only with the flag
+    /// on — the comparison every cross-group and one-chain check in
+    /// `check_dependencies_set` goes through, so a chain spanning two `queue
+    /// add` calls under `issue_tracking.key_in_names` reads as one group
+    /// rather than a two-group stack (jobs review finding 3).
+    #[test]
+    fn bare_group_strips_a_recognised_slug_prefix_only_with_the_flag_on() {
+        let mut repo = fixture("bare-group-slug");
+        add(&repo, "auth-01", &[]);
+        let mut parent = queued(&repo, "auth-01");
+        parent.front.group = Some("proj-12-demo".into());
+        parent
+            .front
+            .extra
+            .insert("slug".into(), serde_norway::Value::String("proj-12".into()));
+        parent.save().unwrap();
+
+        assert_eq!(
+            bare_group(&repo, &parent).as_deref(),
+            Some("proj-12-demo"),
+            "off: the prefix means nothing"
+        );
+
+        repo.config.issue_tracking.key_in_names = true;
+        assert_eq!(
+            bare_group(&repo, &parent).as_deref(),
+            Some("demo"),
+            "on: the recognised prefix strips"
         );
     }
 
@@ -7563,16 +8405,24 @@ mod tests {
     /// work rather than just the first one named.
     #[test]
     fn a_depends_on_with_no_id_reaching_the_rest_is_refused() {
+        // `a` and `b` have to be queued in the same call as `c`: each on its
+        // own, with no dependency between them, is already refused as a
+        // group with two roots — see `a_group_with_two_roots_is_refused` —
+        // so the three go in one submission, the one shape that can still
+        // reach `c`'s own reorder check before the group-shape check ever
+        // gets a look at `a` and `b` alone.
         let repo = fixture("no-head-dep");
-        add(&repo, "a", &[]);
-        add(&repo, "b", &[]);
-
-        let text = task_text("c", "group: demo\ndepends_on: [a, b]\n", BODY);
-        let path = write_doc(&repo, "c.md", &text);
+        let a = write_doc(&repo, "a.md", &task_text("a", "group: demo\n", BODY));
+        let b = write_doc(&repo, "b.md", &task_text("b", "group: demo\n", BODY));
+        let c = write_doc(
+            &repo,
+            "c.md",
+            &task_text("c", "group: demo\ndepends_on: [a, b]\n", BODY),
+        );
         let err = queue_add(
             &repo,
             &Pipelines::builtin(),
-            &from_args(&[&path]),
+            &from_args(&[&a, &b, &c]),
             &repo.root,
             false,
         )
@@ -9624,7 +10474,14 @@ mod tests {
     #[test]
     fn queueing_a_group_leaves_its_queued_sibling_alone_and_queues_the_pending_task() {
         let repo = fixture("screen-requeue-group");
-        let beta_path = write_pending(&repo, "beta", &task_text("beta", "group: one\n", BODY));
+        // `beta` depends on `alpha`: a group is one chain now, so the second
+        // half of a group queued in two passes has to say how it continues
+        // the first — see `a_group_with_two_roots_is_refused`.
+        let beta_path = write_pending(
+            &repo,
+            "beta",
+            &task_text("beta", "group: one\ndepends_on: [alpha]\n", BODY),
+        );
         let alpha_path = repo.queue_dir().join("alpha.md");
         std::fs::write(
             &alpha_path,
@@ -9675,7 +10532,14 @@ mod tests {
     #[test]
     fn queueing_a_group_leaves_its_archived_sibling_alone_and_names_it() {
         let repo = fixture("screen-requeue-group-archived");
-        let beta_path = write_pending(&repo, "beta", &task_text("beta", "group: one\n", BODY));
+        // `beta` depends on `alpha`, same reason as the queued-sibling test
+        // above: a group is one chain, archived tasks counted the same as
+        // queued ones.
+        let beta_path = write_pending(
+            &repo,
+            "beta",
+            &task_text("beta", "group: one\ndepends_on: [alpha]\n", BODY),
+        );
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         let alpha_path = repo.archive_dir().join("alpha.md");
         std::fs::write(
@@ -12046,11 +12910,14 @@ mod tests {
             "sweep",
             &task_text("sweep", "group: maintenance\n", BODY),
         );
+        // `prune` depends on `sweep`: a group is one chain, and both share
+        // `group: maintenance` here — nesting is what this test is
+        // actually about, not whether the two run independently.
         write_routine(
             &repo,
             "maintenance/weekly",
             "prune",
-            &task_text("prune", "group: maintenance\n", BODY),
+            &task_text("prune", "group: maintenance\ndepends_on: [sweep]\n", BODY),
         );
 
         let (exit, drawn) = routines_exit(&repo, " \r");
@@ -12574,6 +13441,13 @@ mod tests {
     /// same routine twice.
     #[test]
     fn closing_the_queued_popup_goes_back_to_the_routine_list_unticked() {
+        // Two fixtures, not one: a group is one chain now, and re-queuing
+        // the same routine into a repo that already holds an open run of it
+        // would be a second root in `nightly` — see
+        // `a_group_with_two_roots_is_refused`. Each `routines_screen` call
+        // below replays its own keys from a bare screen, so a shared repo
+        // between them would be queuing the routine twice into one group,
+        // which is not what either half of this test is about.
         let repo = fixture("routines-queued-close");
         write_routine(
             &repo,
@@ -12586,6 +13460,13 @@ mod tests {
         assert!(under.contains("queued 1 task"), "{under}");
         assert!(under.contains("routines  1 of 1"), "over the list: {under}");
 
+        let repo = fixture("routines-queued-close-2");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
         let drawn = routines_screen(&repo, " \r\r");
         let last = last_frame(&drawn);
         assert!(last.contains("> [ ] nightly"), "{last}");
@@ -12626,11 +13507,19 @@ mod tests {
             "audit-deps",
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
+        // `audit-docs` depends on `audit-deps`: a group is one chain, and a
+        // folder's tasks sharing one group have to say how they order —
+        // `mint_routine_batch` remaps the id either way, which is the one
+        // thing this test is actually about.
         let docs = write_routine(
             &repo,
             "nightly",
             "audit-docs",
-            &task_text("audit-docs", "group: nightly\n", BODY),
+            &task_text(
+                "audit-docs",
+                "group: nightly\ndepends_on: [audit-deps]\n",
+                BODY,
+            ),
         );
         let deps_text = std::fs::read_to_string(&deps).unwrap();
         let docs_text = std::fs::read_to_string(&docs).unwrap();
@@ -13133,7 +14022,11 @@ mod tests {
                 BODY,
             );
             let first_path = write_doc(&repo, "scan-pending.md", &first);
-            let second = task_text("split-fields", "group: scanner-rework\n", BODY);
+            let second = task_text(
+                "split-fields",
+                "group: scanner-rework\ndepends_on: [scan-pending]\n",
+                BODY,
+            );
             let second_path = write_doc(&repo, "split-fields.md", &second);
 
             let err = queue_add(
@@ -13266,7 +14159,11 @@ mod tests {
                 BODY,
             );
             let a_path = write_doc(&repo, "auth-01.md", &a);
-            let b = task_text("auth-02", "group: auth-rework\n", BODY);
+            let b = task_text(
+                "auth-02",
+                "group: auth-rework\ndepends_on: [auth-01]\n",
+                BODY,
+            );
             let b_path = write_doc(&repo, "auth-02.md", &b);
             queue_add(
                 &repo,
@@ -13779,7 +14676,11 @@ mod tests {
                 BODY,
             );
             let a_path = write_doc(&repo, "auth-01.md", &a);
-            let b = task_text("auth-02", "group: auth-rework\n", BODY);
+            let b = task_text(
+                "auth-02",
+                "group: auth-rework\ndepends_on: [auth-01]\n",
+                BODY,
+            );
             let b_path = write_doc(&repo, "auth-02.md", &b);
             queue_add(
                 &repo,
@@ -13792,8 +14693,13 @@ mod tests {
             assert_eq!(queued(&repo, "auth-01").extra_str("epic"), "PROJ-12");
 
             // A second call, naming the bare group the way a person always
-            // writes it.
-            let c = task_text("auth-03", "group: auth-rework\n", BODY);
+            // writes it — chained onto `auth-02`, the group's own last task,
+            // since a group is one chain now.
+            let c = task_text(
+                "auth-03",
+                "group: auth-rework\ndepends_on: [auth-02]\n",
+                BODY,
+            );
             let c_path = write_doc(&repo, "auth-03.md", &c);
             queue_add(
                 &repo,
@@ -14958,15 +15864,17 @@ body\n";
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         git(&["branch", "release/1.x"]);
 
+        // Two groups of one, not one group of two — a group is one chain
+        // now, and neither task here depends on the other.
         let own = write_doc(
             &repo,
             "own.md",
-            &task_text("own", "group: demo\nbase: release/1.x\n", BODY),
+            &task_text("own", "group: own-group\nbase: release/1.x\n", BODY),
         );
         let plain = write_doc(
             &repo,
             "plain.md",
-            &task_text("plain", "group: demo\n", BODY),
+            &task_text("plain", "group: plain-group\n", BODY),
         );
         queue_add(
             &repo,

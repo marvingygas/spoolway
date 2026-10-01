@@ -228,14 +228,23 @@ impl Graph {
     /// The tie-break that decides which of two otherwise equal tasks to start:
     /// the one that releases more work.
     pub fn dependents(&self, id: &str) -> usize {
+        self.dependents_where(id, |_| true)
+    }
+
+    /// Same walk as [`Self::dependents`], counting only ids `keep` accepts —
+    /// [`crate::dispatch::fall_through`]'s own use, restricted to this
+    /// task's own group: once a dependent falls outside it, whatever it in
+    /// turn holds up is another group's business, not this task's `last:`
+    /// step.
+    pub fn dependents_where(&self, id: &str, keep: impl Fn(&str) -> bool) -> usize {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
-        let mut queue: VecDeque<&str> = self.dependents_of(id).collect();
+        let mut queue: VecDeque<&str> = self.dependents_of(id).filter(|d| keep(d)).collect();
 
         while let Some(next) = queue.pop_front() {
             if !seen.insert(next) {
                 continue;
             }
-            queue.extend(self.dependents_of(next));
+            queue.extend(self.dependents_of(next).filter(|d| keep(d)));
         }
         seen.len()
     }
@@ -493,7 +502,6 @@ mod tests {
                 title: String::new(),
                 stage: stage.into(),
                 depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
-                parallel: false,
                 borrowed: false,
                 last_report: None,
                 blocked_from: None,

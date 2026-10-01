@@ -13,6 +13,7 @@
 //! real forge can point it at a stub script and still exercise everything
 //! else — the commit, the squash, the push, the body and its trailer.
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -304,12 +305,12 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     }
     report_line("push", format!("{branch} → origin      --force-with-lease"));
 
-    let conflicts = parallel_conflicts(repo, &worktree, &id);
+    let conflicts = group_conflicts(repo, &worktree, &task, &id);
     report_line(
-        "siblings",
+        "conflicts",
         match conflicts.is_empty() {
             true => "none open".to_string(),
-            false => format!("conflicts with {}", conflicts.join(", ")),
+            false => conflicts.join(", "),
         },
     );
 
@@ -383,20 +384,37 @@ fn remote_ref(worktree: &Path, branch: &str) -> String {
     }
 }
 
-/// Every open task, marked `parallel: true`, whose branch `git merge-tree
-/// --write-tree` predicts a real conflict with this one.
+/// Every open task of another group — outside this task's own stack — whose
+/// branch `git merge-tree --write-tree` predicts a real conflict with this
+/// one.
+///
+/// "This task's own stack" is this task's own bare group, plus every group
+/// reached by walking a first task's cross-group `depends_on` edge in either
+/// direction — the chain of groups whose pull requests already form one
+/// stack, and so can never conflict with each other in the sense this checks:
+/// a downstream branch already contains its upstream's changes. Everything
+/// else open, with a branch of its own, is fair game — replacing the
+/// `parallel: true` filter this once ran, now that fan is no longer a thing a
+/// task declares.
 ///
 /// Best-effort throughout: a task with no branch yet, a git old enough to
 /// lack `merge-tree --write-tree`, or a queue this process cannot read all
 /// fall through to "nothing found" rather than failing the command — this is
 /// the trailer's business, not a reason to refuse the pull request.
-fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
+fn group_conflicts(repo: &Repo, worktree: &Path, task: &Task, id: &str) -> Vec<String> {
     let Ok(tasks) = repo.tasks() else {
         return Vec::new();
     };
+    let own_stack = stack_groups(repo, &tasks, task);
     let mut conflicts = Vec::new();
-    for other in tasks {
-        if other.id() == id || !other.front.parallel {
+    for other in &tasks {
+        if other.id() == id {
+            continue;
+        }
+        let Some(other_group) = super::queue::bare_group(repo, other) else {
+            continue;
+        };
+        if own_stack.contains(&other_group) {
             continue;
         }
         let Some(branch) = other.front.branch.clone() else {
@@ -434,10 +452,63 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
             continue;
         };
         if output.status.code() == Some(1) {
-            conflicts.push(other.id().to_string());
+            conflicts.push(format!("{} (group {other_group})", other.id()));
         }
     }
     conflicts
+}
+
+/// Every bare group reached from `task`'s own, walking a first task's
+/// cross-group `depends_on` edge in either direction — see
+/// [`group_conflicts`]'s own doc for why this is the set excluded from it.
+///
+/// A cycle cannot occur here: [`crate::commands::queue::check_dependencies_set`]
+/// refuses a group naming more than one other group, and a group's first
+/// task is the only place a cross-group edge is ever written, so the "after"
+/// relation this walks is a tree, never a loop back onto a group already
+/// visited.
+fn stack_groups(repo: &Repo, tasks: &[Task], task: &Task) -> std::collections::BTreeSet<String> {
+    let Some(mine) = super::queue::bare_group(repo, task) else {
+        return std::collections::BTreeSet::new();
+    };
+
+    // group -> the one other group its own first task stacks onto, if any.
+    let mut after: BTreeMap<String, String> = BTreeMap::new();
+    for t in tasks {
+        let Some(group) = super::queue::bare_group(repo, t) else {
+            continue;
+        };
+        for dep in &t.front.depends_on {
+            let Some(dep_task) = tasks.iter().find(|d| d.id() == dep) else {
+                continue;
+            };
+            let Some(dep_group) = super::queue::bare_group(repo, dep_task) else {
+                continue;
+            };
+            if dep_group != group {
+                after.insert(group.clone(), dep_group);
+                break;
+            }
+        }
+    }
+
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    queue.push_back(mine);
+    while let Some(group) = queue.pop_front() {
+        if !seen.insert(group.clone()) {
+            continue;
+        }
+        if let Some(target) = after.get(&group) {
+            queue.push_back(target.clone());
+        }
+        for (from, to) in &after {
+            if to == &group {
+                queue.push_back(from.clone());
+            }
+        }
+    }
+    seen
 }
 
 /// The pull request's body, with the co-authorship tag below it, cut to fit
@@ -449,7 +520,7 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
 /// and `## Hook error` are lifted out into one closed `<details>` fold just
 /// above the tag; see `extract_run_history` below.
 ///
-/// Which open `parallel: true` task this branch is predicted to conflict
+/// Which open task of another group this branch is predicted to conflict
 /// with is reported on the console by `spoolway stack` as it runs; it is
 /// not repeated in the pull request a reviewer opens.
 fn compose_body(task_body: &str) -> String {
@@ -1197,21 +1268,21 @@ mod tests {
         assert_eq!(parse_owner_repo("https://gitlab.com/a/b"), None);
     }
 
-    /// A `parallel: true` task whose `branch:` was stamped at queue time but
-    /// never actually cut is not a conflict — it is a ref `git merge-tree`
-    /// cannot even resolve, and that failure exits 1 the same way a real
-    /// conflict does, so `parallel_conflicts` must not trust the exit code
-    /// alone. `queue_add` stamps a `branch:` on every task — `task/<id>`, or
-    /// `task/<slug>-<id>` under `issue_tracking.key_in_names`; this one is
-    /// simply never cut.
+    /// An open task of another group whose `branch:` was stamped at queue
+    /// time but never actually cut is not a conflict — it is a ref `git
+    /// merge-tree` cannot even resolve, and that failure exits 1 the same
+    /// way a real conflict does, so `group_conflicts` must not trust the
+    /// exit code alone. `queue_add` stamps a `branch:` on every task —
+    /// `task/<id>`, or `task/<slug>-<id>` under `issue_tracking.key_in_names`;
+    /// this one is simply never cut.
     #[test]
     fn a_queued_task_with_no_branch_yet_is_not_a_predicted_conflict() {
-        let repo = crate::commands::testutil::fixture("parallel-conflicts-no-ref");
+        let repo = crate::commands::testutil::fixture("group-conflicts-no-ref");
         std::fs::write(repo.root.join("file.txt"), "one\n").unwrap();
         crate::repo::run(&repo.root, "git", &["add", "-A"]).unwrap();
         crate::repo::run(&repo.root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
 
-        let doc = "---\nid: other\ntitle: other, done\ngroup: demo\nparallel: true\n\
+        let doc = "---\nid: other\ntitle: other, done\ngroup: demo\n\
                    pipeline: default\n---\n## Goal\n\nDo the thing.\n";
         let path = repo.root.join(".other-doc.md");
         std::fs::write(&path, doc).unwrap();
@@ -1228,10 +1299,70 @@ mod tests {
         )
         .unwrap();
 
-        let conflicts = parallel_conflicts(&repo, &repo.root, "self");
+        let this = Task::parse(
+            std::path::PathBuf::from("self.md"),
+            "---\nid: self\ngroup: mine\nstage: implement\npipeline: default\n---\n## Goal\n",
+        )
+        .unwrap();
+        let conflicts = group_conflicts(&repo, &repo.root, &this, "self");
         assert!(
             conflicts.is_empty(),
             "an unresolvable branch must not be reported as a conflict: {conflicts:?}"
+        );
+    }
+
+    /// `stack_groups` walks the "after" edge in both directions: a group's
+    /// own stack is itself, plus whatever it stacks onto, plus whatever
+    /// stacks onto it — `auth-ui` stacks onto `auth-api`, so asking from
+    /// either group's own task returns both, and an unrelated `billing`
+    /// group is never pulled in.
+    #[test]
+    fn stack_groups_walks_the_after_edge_both_ways_and_leaves_unrelated_groups_out() {
+        let repo = crate::commands::testutil::fixture("stack-groups-walk");
+        let parse = |yaml: &str| Task::parse(PathBuf::from("t.md"), yaml).unwrap();
+
+        let auth_login = parse(
+            "---\nid: auth-login\ngroup: auth-api\nstage: implement\npipeline: default\n---\n",
+        );
+        let auth_sessions = parse(
+            "---\nid: auth-sessions\ngroup: auth-api\ndepends_on: [auth-login]\nstage: implement\n\
+             pipeline: default\n---\n",
+        );
+        // Its own group's first task, stacking onto `auth-api`'s own last
+        // task — the one shape `check_dependencies_set` accepts.
+        let auth_form = parse(
+            "---\nid: auth-form\ngroup: auth-ui\ndepends_on: [auth-sessions]\nstage: implement\n\
+             pipeline: default\n---\n",
+        );
+        let billing =
+            parse("---\nid: billing\ngroup: billing\nstage: implement\npipeline: default\n---\n");
+        let tasks = vec![auth_login, auth_sessions, auth_form, billing];
+
+        let from_login = stack_groups(&repo, &tasks, &tasks[0]);
+        assert_eq!(
+            from_login,
+            ["auth-api", "auth-ui"]
+                .map(String::from)
+                .into_iter()
+                .collect(),
+            "the base group's own stack reaches forward to what stacks onto it"
+        );
+
+        let from_form = stack_groups(&repo, &tasks, &tasks[2]);
+        assert_eq!(
+            from_form,
+            ["auth-api", "auth-ui"]
+                .map(String::from)
+                .into_iter()
+                .collect(),
+            "the stacking group's own stack reaches back to what it stacks onto"
+        );
+
+        let from_billing = stack_groups(&repo, &tasks, &tasks[3]);
+        assert_eq!(
+            from_billing,
+            ["billing"].map(String::from).into_iter().collect(),
+            "an unrelated group's stack is itself alone"
         );
     }
 

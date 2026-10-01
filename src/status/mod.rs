@@ -169,11 +169,13 @@ pub struct Row {
     /// board's group band takes the first row of the group that has one as
     /// its hyperlink target — see the `group_urls` map in [`view::table`].
     pub issue_url: Option<String>,
-    /// Whether this task declared `parallel: true` — a deliberate fan the
-    /// planner judged independent, not a missing `depends_on`. Marked on the
-    /// row so a reader of the board sees the same judgement the planner
-    /// made.
-    pub parallel: bool,
+    /// The other group this row's own group stacks on, named on whichever
+    /// row is that group's first task — the one whose `depends_on` crosses
+    /// into another group's chain rather than staying inside its own. `None`
+    /// on every other row, and on a group that stacks on nothing. The
+    /// board's band reads the first `Some` any row of a group carries, the
+    /// same way it already does for [`Self::issue_url`]'s `group_urls`.
+    pub after: Option<String>,
     pub stage: String,
     /// How many times this task has arrived at the step it is on now —
     /// [`crate::task::Frontmatter::arrivals`]'s own entry for it,
@@ -2475,7 +2477,7 @@ fn build_rows(
             id: task.id().to_string(),
             group: task.front.group.clone(),
             issue_url: issue_url_of(task),
-            parallel: task.front.parallel,
+            after: stacked_after(repo, tasks, task),
             stage: shown_stage.to_string(),
             arrivals,
             pipeline: pipeline.name.clone(),
@@ -2700,6 +2702,39 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
     Ok(Arc::new(crate::task::load_dir(dir)?.0))
 }
 
+/// The other group `task`'s own group stacks on, if any — the bare group its
+/// `depends_on` crosses into, only ever set when `task` is its own group's
+/// first task (no dependency inside its own group). `None` for a task with
+/// no group, one with an in-group dependency (not first), or one whose
+/// `depends_on` never leaves its own group — read by the board's group band
+/// to draw `after <group>`, mirroring the shape `commands::queue::
+/// check_dependencies_set` already refuses anything else than.
+fn stacked_after(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    task: &crate::task::Task,
+) -> Option<String> {
+    let mine = crate::commands::bare_group(repo, task)?;
+    let group_of = |id: &str| -> Option<String> {
+        tasks
+            .iter()
+            .find(|t| t.id() == id)
+            .and_then(|t| crate::commands::bare_group(repo, t))
+    };
+    let has_in_group_dep = task
+        .front
+        .depends_on
+        .iter()
+        .any(|dep| group_of(dep).is_some_and(|g| g == mine));
+    if has_in_group_dep {
+        return None;
+    }
+    task.front
+        .depends_on
+        .iter()
+        .find_map(|dep| group_of(dep).filter(|g| g != &mine))
+}
+
 /// The issue URL a task carries as `url:`, or `None` when it carries none —
 /// `key-in-names` owns storing it, off the tracker hook's `open` answer. The
 /// board reads it only to point the group band's hyperlink somewhere.
@@ -2730,7 +2765,12 @@ fn done_rows(
                 id: task.id().to_string(),
                 group: Some(group),
                 issue_url: issue_url_of(task),
-                parallel: task.front.parallel,
+                // An archived task's own group has already landed, so the
+                // board has nothing left to say about what it stacked onto —
+                // `stacked_after` is not even asked, since `done_rows` never
+                // holds the live queue this would need to look a dependency
+                // up in.
+                after: None,
                 stage: task.stage().to_string(),
                 // Read the same way a live row's is: an archived task's
                 // `rounds` are on file same as any other, and `step_text`
@@ -3282,7 +3322,10 @@ mod tests {
             ("blocked-one", crate::pipeline::BLOCKED),
             ("paused-one", crate::pipeline::PAUSED),
         ] {
-            add(&repo, id, &[], Some(stage));
+            // Each its own group: two tasks with no dependency between them
+            // is now a two-root group, refused by `queue add` — these two
+            // are independent tasks, not a chain.
+            add_to(&repo, id, &[], Some(stage), Some(id));
         }
 
         let tasks = repo.tasks().unwrap();
@@ -3382,8 +3425,9 @@ mod tests {
         // Blocked, parked for a person: the step a pass out of `blocked`
         // would actually carry it to — `cleared_block_target`'s own answer —
         // key first, then the command, since every dependency is met and no
-        // lane of its own is busy.
-        add(&repo, "wall", &[], None);
+        // lane of its own is busy. Its own group: unrelated to `login`'s
+        // chain, and a group is one chain now.
+        add_to(&repo, "wall", &[], None, Some("wall"));
         let mut wall = repo.task("wall").unwrap();
         wall.front.blocked_from = Some("implement".into());
         wall.append_to_section("## Blocker", "waiting on a person\n");
@@ -3392,7 +3436,7 @@ mod tests {
 
         // Paused at a gate: the step passing it would carry the task to,
         // with the resume hint after it.
-        add(&repo, "ship", &[], None);
+        add_to(&repo, "ship", &[], None, Some("ship"));
         let mut ship = repo.task("ship").unwrap();
         ship.front.paused_at = Some("implement".into());
         ship.set_stage(crate::pipeline::PAUSED, None);
@@ -3400,7 +3444,7 @@ mod tests {
 
         // A second arrival at `review`. `add`'s own `set_stage` already
         // banked one; this stands in for a hand-edited second visit.
-        add(&repo, "spinner", &[], Some("review"));
+        add_to(&repo, "spinner", &[], Some("review"), Some("spinner"));
         let mut spinner = repo.task("spinner").unwrap();
         spinner.front.arrivals.insert("review".into(), 2);
         spinner.save().unwrap();
@@ -3437,7 +3481,7 @@ mod tests {
         let repo = fixture("paused-next-caught");
         let pipelines = Pipelines::builtin();
 
-        add(&repo, "pause-reach", &[], None);
+        add_to(&repo, "pause-reach", &[], None, Some("pause-reach"));
         let mut fail = repo.task("pause-reach").unwrap();
         fail.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
@@ -3448,7 +3492,7 @@ mod tests {
         fail.set_stage(crate::pipeline::PAUSED, None);
         fail.save().unwrap();
 
-        add(&repo, "look-holds", &[], None);
+        add_to(&repo, "look-holds", &[], None, Some("look-holds"));
         let mut blocked = repo.task("look-holds").unwrap();
         blocked.front.last_report = Some(crate::task::LastReport {
             step: "review".into(),
@@ -3460,7 +3504,7 @@ mod tests {
         blocked.set_stage(crate::pipeline::PAUSED, None);
         blocked.save().unwrap();
 
-        add(&repo, "sweep-own-tabs", &[], None);
+        add_to(&repo, "sweep-own-tabs", &[], None, Some("sweep-own-tabs"));
         let mut passed = repo.task("sweep-own-tabs").unwrap();
         passed.front.last_report = Some(crate::task::LastReport {
             step: "implement".into(),
@@ -3556,12 +3600,12 @@ mod tests {
 
         // A route the shipped pipeline does bound: the arrival count is
         // banked all the same, since it carries no budget of its own.
-        add(&repo, "once", &[], Some("review"));
+        add_to(&repo, "once", &[], Some("review"), Some("once"));
 
         // Several arrivals at `implement`, however many different routes
         // carried them — the shipped pipeline gives `implement` no `loop:`
         // of its own, so there is no budget behind this count either.
-        add(&repo, "twice", &[], Some("implement"));
+        add_to(&repo, "twice", &[], Some("implement"), Some("twice"));
         let mut twice = repo.task("twice").unwrap();
         twice.front.arrivals.insert("implement".into(), 5);
         twice.save().unwrap();
@@ -3853,7 +3897,7 @@ mod tests {
         ];
         let mut lanes = Vec::new();
         for (id, status) in statuses {
-            add(&repo, id, &[], Some("implement"));
+            add_to(&repo, id, &[], Some("implement"), Some(id));
             let mut l = lane(&format!("{id} · implement"), &repo.root);
             l.status = status;
             lanes.push(l);
@@ -4068,8 +4112,20 @@ mod tests {
     fn a_claimed_task_reads_starting_on_its_claimed_step() {
         let repo = fixture("claimed-starting");
         let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
-        add(&repo, "profile", &[], Some(crate::pipeline::QUEUED));
+        add_to(
+            &repo,
+            "login",
+            &[],
+            Some(crate::pipeline::QUEUED),
+            Some("login"),
+        );
+        add_to(
+            &repo,
+            "profile",
+            &[],
+            Some(crate::pipeline::QUEUED),
+            Some("profile"),
+        );
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         let mut claims = crate::claim::Claims::new(&repo);
         claims.claim("login", "implement");
@@ -4196,8 +4252,12 @@ mod tests {
             .find(|s| s.id == "handover")
             .unwrap();
         step.serial = true;
-        add(&repo, "a-login", &[], Some("handover"));
-        add(&repo, "b-export", &[], Some("handover"));
+        // Different groups, and named so neither's own band line contains
+        // the other's id — `table.lines().find(|l| l.contains("b-export"))`
+        // below would otherwise match `b-export`'s own group band instead of
+        // its row.
+        add_to(&repo, "a-login", &[], Some("handover"), Some("group-one"));
+        add_to(&repo, "b-export", &[], Some("handover"), Some("group-two"));
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
@@ -4432,7 +4492,9 @@ mod tests {
         let repo = fixture("pipeline-column-name");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
-        add_to(&repo, "hotfix", &[], Some("implement"), Some("auth"));
+        // Its own group: `login` and `hotfix` have no dependency between
+        // them, and a group is one chain now.
+        add_to(&repo, "hotfix", &[], Some("implement"), Some("hotfix"));
         let mut hotfix = repo.task("hotfix").unwrap();
         hotfix.front.pipeline = Some("bugfix".into());
         hotfix.save().unwrap();
@@ -4440,6 +4502,8 @@ mod tests {
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("signup.md"),
+            // Same group as `login`, which stays active — `done_rows` only
+            // shows an archived task whose group is still in the queue.
             "---\nid: signup\nstage: done\ngroup: auth\npipeline: retired\n---\n",
         )
         .unwrap();
@@ -4807,7 +4871,7 @@ mod tests {
     fn a_task_entering_the_queue_or_archiving_pushes_no_ticker_entry() {
         let repo = fixture("queue-and-archive-silent");
         let pipelines = Pipelines::builtin();
-        add(&repo, "steady", &[], Some("implement"));
+        add_to(&repo, "steady", &[], Some("implement"), Some("steady"));
 
         let mut board = Board::for_test();
         board
@@ -4826,7 +4890,7 @@ mod tests {
         );
 
         // A new task enters the queue.
-        add(&repo, "newcomer", &[], None);
+        add_to(&repo, "newcomer", &[], None, Some("newcomer"));
         board
             .frame(
                 &repo,
@@ -4960,8 +5024,8 @@ mod tests {
     fn an_arrow_walks_the_last_frame_even_with_the_queue_gone_from_disk() {
         let repo = fixture("cursor-walks-the-drawn-frame");
         let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some("implement"));
-        add(&repo, "signup", &[], Some("implement"));
+        add_to(&repo, "login", &[], Some("implement"), Some("login"));
+        add_to(&repo, "signup", &[], Some("implement"), Some("signup"));
 
         let mut board = Board::for_test();
         board
@@ -5120,7 +5184,7 @@ mod tests {
     fn a_paused_row_is_not_resumable_while_its_lane_is_busy() {
         let repo = fixture("resume-busy");
         let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
         task.front.paused_at = Some("implement".into());
         task.set_stage(crate::pipeline::PAUSED, None);
@@ -5207,7 +5271,7 @@ mod tests {
     fn r_on_a_resumable_paused_row_releases_it() {
         let repo = fixture("resume-key-release");
         let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
         task.front.paused_at = Some("implement".into());
         task.set_stage(crate::pipeline::PAUSED, None);
@@ -5413,7 +5477,7 @@ mod tests {
     fn enter_and_q_are_ignored_while_browsing() {
         let repo = fixture("enter-and-q-ignored");
         let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
         task.front.paused_at = Some("implement".into());
         task.set_stage(crate::pipeline::PAUSED, None);
@@ -5533,7 +5597,7 @@ mod tests {
     fn a_confirm_panel_never_slices_a_coloured_rows_escape_sequence() {
         let repo = fixture("panel-colour-safe");
         let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
         task.front.paused_at = Some("implement".into());
         task.set_stage(crate::pipeline::PAUSED, None);
@@ -5594,8 +5658,8 @@ mod tests {
         let repo = fixture("stop-interrupt-command-step");
         let pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
-        add(&repo, "login", &[], Some("handover"));
-        add(&repo, "idle", &[], Some("implement"));
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        add_to(&repo, "idle", &[], Some("implement"), Some("idle"));
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("handover", "login");
@@ -5627,8 +5691,8 @@ mod tests {
         let repo = fixture("pause-cursor-command-step");
         let pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
-        add(&repo, "login", &[], Some("handover"));
-        add(&repo, "other", &[], Some("implement"));
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        add_to(&repo, "other", &[], Some("implement"), Some("other"));
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("handover", "login");
@@ -5726,7 +5790,7 @@ mod tests {
         let repo = fixture("stop-resume-only-marked");
         let pipelines = Pipelines::builtin();
         for id in ["stopped", "by-hand", "escaped"] {
-            add(&repo, id, &[], Some("implement"));
+            add_to(&repo, id, &[], Some("implement"), Some(id));
         }
         park_under_lock(&repo, "stopped", true).unwrap();
         park_under_lock(&repo, "by-hand", false).unwrap();
@@ -5779,8 +5843,8 @@ mod tests {
     fn a_stop_parked_row_says_it_resumes_when_dispatching_starts() {
         let repo = fixture("stop-parked-next");
         let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some("implement"));
-        add(&repo, "by-hand", &[], Some("implement"));
+        add_to(&repo, "login", &[], Some("implement"), Some("login"));
+        add_to(&repo, "by-hand", &[], Some("implement"), Some("by-hand"));
         park_under_lock(&repo, "login", true).unwrap();
         park_under_lock(&repo, "by-hand", false).unwrap();
 
@@ -6118,8 +6182,8 @@ mod tests {
     fn pressing_p_with_nothing_live_parks_at_once_from_every_such_state() {
         let repo = fixture("pause-nothing-live");
         let pipelines = Pipelines::builtin();
-        add(&repo, "queued-task", &[], None);
-        add(&repo, "gap-task", &[], Some("implement"));
+        add_to(&repo, "queued-task", &[], None, Some("queued-task"));
+        add_to(&repo, "gap-task", &[], Some("implement"), Some("gap-task"));
 
         let mut board = Board::for_test();
         let cases = [("queued-task", None), ("gap-task", Some("implement"))];
@@ -6497,7 +6561,7 @@ mod tests {
         add(&repo, "alpha", &[], None);
         add(&repo, "beta", &["alpha"], None);
         add(&repo, "gamma", &["beta"], None);
-        add(&repo, "unrelated", &[], None);
+        add_to(&repo, "unrelated", &[], None, Some("unrelated"));
 
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
@@ -6555,8 +6619,8 @@ mod tests {
     fn pressing_u_moves_the_cursor_to_the_row_underneath() {
         let repo = fixture("unqueue-cursor-advances");
         let pipelines = Pipelines::builtin();
-        add(&repo, "chain-refusals", &[], None);
-        add(&repo, "month-instant", &[], None);
+        add_to(&repo, "chain-refusals", &[], None, Some("chain-refusals"));
+        add_to(&repo, "month-instant", &[], None, Some("month-instant"));
 
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
@@ -6628,8 +6692,8 @@ mod tests {
     fn pressing_shift_u_moves_every_unstarted_task_to_pending() {
         let repo = fixture("unqueue-all");
         let pipelines = Pipelines::builtin();
-        add(&repo, "chain-refusals", &[], None);
-        add(&repo, "month-instant", &[], None);
+        add_to(&repo, "chain-refusals", &[], None, Some("chain-refusals"));
+        add_to(&repo, "month-instant", &[], None, Some("month-instant"));
         add(&repo, "already-running", &[], Some("implement"));
 
         let mut board = Board::for_test();
@@ -6709,13 +6773,13 @@ mod tests {
     fn pressing_shift_r_gates_on_a_paused_at_but_resumes_a_plain_park_freely() {
         let repo = fixture("resume-all");
         let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut gated = repo.task("gate-board").unwrap();
         gated.front.paused_at = Some("implement".into());
         gated.set_stage(crate::pipeline::PAUSED, None);
         gated.save().unwrap();
 
-        add(&repo, "quiet-pane", &[], None);
+        add_to(&repo, "quiet-pane", &[], None, Some("quiet-pane"));
         let mut parked = repo.task("quiet-pane").unwrap();
         parked.front.parked_from = Some("review".into());
         parked.set_stage(crate::pipeline::PAUSED, None);
@@ -6787,12 +6851,12 @@ mod tests {
     fn the_old_confirming_letter_no_longer_answers_any_panel() {
         let repo = fixture("panels-ignore-their-own-letter");
         let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut gated = repo.task("gate-board").unwrap();
         gated.front.paused_at = Some("implement".into());
         gated.set_stage(crate::pipeline::PAUSED, None);
         gated.save().unwrap();
-        add(&repo, "solo", &[], None);
+        add_to(&repo, "solo", &[], None, Some("solo"));
 
         let mut board = Board::for_test();
 

@@ -288,9 +288,9 @@ stands, until the task reaches the step again or is cleaned up.
 ### `last:` — a step the chain runs once
 
 The top task of a chain carries every change beneath it, so a suite the whole stack must pass
-runs once, there. A task is last when no unfinished task depends on it. Any other task walks
-past the step to its `on_pass`. In a fan, every task is last. `last:` is allowed on command
-steps only.
+runs once, there. A task is last when no unfinished task in its own group depends on it. Any
+other task walks past the step to its `on_pass`. Each group gets its own `last:` run, whatever
+stacks on top of it. `last:` is allowed on command steps only.
 
 ### `first:` — a step only a chain's root runs
 
@@ -347,9 +347,10 @@ flowchart LR
   task file's body plus a co-authorship tag. `## Status Log`, `## Handoff`, `## Blocker` and
   `## Hook error` move out of the plan and into one closed "Run history" section at the foot
   of the body, above the tag, so a reviewer opens on the plan sections alone. A body with none
-  of the four gets no such section. Which open `parallel: true` task this branch is predicted
-  to conflict with is printed to the console as `spoolway stack` runs, not repeated in the
-  pull request.
+  of the four gets no such section.
+- `spoolway stack` prints a `conflicts` line to the console, naming every open task of another
+  group, outside this task's own stack, whose branch `git merge-tree` predicts a conflict with:
+  `conflicts   billing-copy (group billing-copy)`. The pull request body never repeats it.
 - A base branch that exists locally but not on `origin` is pushed to `origin` before the pull
   request is opened. A base that cannot be published refuses before the task's own branch is
   force-pushed, so a failed run leaves nothing published.

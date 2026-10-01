@@ -208,19 +208,26 @@ else
 fi
 
 # ------------------------------------------- the fact stack reports itself
-# `rival` — a sibling `parallel: true` task nothing here ever runs `stack`
-# for — sits on a branch that changes the same file `edge` does, differently,
-# off the same base. That is not a reason to refuse the pull request, so what
-# is checked is that the predicted conflict is *reported* rather than that
-# anything stops.
+# `rival` — an open task of another group, which nothing here ever runs
+# `stack` for — sits on a branch that changes the same file `edge` does,
+# differently, off the same base. That is not a reason to refuse the pull
+# request, so what is checked is that the predicted conflict is *reported*
+# rather than that anything stops.
+#
+# `twin` changes that same file a third way, but sits in `edge`'s own group,
+# one step further up its chain. A group is one chain, and a later task of it
+# is cut from the earlier one's branch, so the two are one stack and never
+# conflict in the sense `stack` checks. The `conflicts` line walks only other
+# groups: it has to name `rival` and leave `twin` out, and only a real
+# `git merge-tree` over two real conflicting branches can show the second half.
 #
 # Reported on the console, and nowhere else. e761a22 cut the pull request
-# trailer down to the co-author tag: the predicted sibling conflict is for
-# whoever is watching the lane run, and repeating it under the task only
-# crowded the body a reviewer opens. So this asserts both halves — that
-# `stack` says it on its own output, and that the body stays clear of it —
-# because a check that only watched the console would let the line drift
-# back into the pull request unnoticed.
+# trailer down to the co-author tag: the predicted conflict is for whoever is
+# watching the lane run, and repeating it under the task only crowded the body
+# a reviewer opens. So this asserts both halves — that `stack` says it on its
+# own output, and that the body stays clear of it — because a check that only
+# watched the console would let the line drift back into the pull request
+# unnoticed.
 must "rival's branch, off main" git branch task/rival main
 must "its worktree" git worktree add -q "$WORKTREES/rival" task/rival
 (
@@ -230,7 +237,19 @@ must "its worktree" git worktree add -q "$WORKTREES/rival" task/rival
   git add -A
   git commit -qm "wip(rival): implement"
 )
-queue_task rival "parallel: true" "base: main" "branch: task/rival"
+queue_task rival "group: rival-group" "base: main" "branch: task/rival"
+
+must "twin's branch, off main" git branch task/twin main
+must "its worktree" git worktree add -q "$WORKTREES/twin" task/twin
+(
+  cd "$WORKTREES/twin" || exit 1
+  mkdir -p notes
+  echo "# edge, twin's own idea" > notes/edge.md
+  git add -A
+  git commit -qm "wip(twin): implement"
+)
+queue_task twin "group: edge-group" "depends_on: [edge]" \
+  "base: main" "branch: task/twin"
 
 must "edge's branch, off main" git branch task/edge main
 must "its worktree" git worktree add -q "$WORKTREES/edge" task/edge
@@ -241,20 +260,33 @@ must "its worktree" git worktree add -q "$WORKTREES/edge" task/edge
   git add -A
   git commit -qm "wip(edge): implement"
 )
-queue_task edge "base: main" "branch: task/edge"
+queue_task edge "group: edge-group" "base: main" "branch: task/edge"
 
 edge_out=$(cd "$WORKTREES/edge" && "$SPOOLWAY" stack edge 2>&1)
-if [ $? -eq 0 ]; then ok "and for a task with a conflicting sibling"
-else bad "and for a task with a conflicting sibling"; sed 's/^/        /' <<<"$edge_out"; fi
+if [ $? -eq 0 ]; then ok "and for a task another group's open branch conflicts with"
+else bad "and for a task another group's open branch conflicts with"; sed 's/^/        /' <<<"$edge_out"; fi
 
 edge_pr=$(grep -l '^head=task/edge$' "$LIVE/prs"/[0-9]* 2>/dev/null | head -1)
-if grep -qF "conflicts with rival" <<<"$edge_out"; then
-  ok "and its \`siblings\` line names the parallel task it will conflict with"
+conflicts_line=$(grep -E '^[[:space:]]*conflicts[[:space:]]' <<<"$edge_out")
+if grep -qF "rival (group rival-group)" <<<"$conflicts_line"; then
+  ok "and its \`conflicts\` line names the other group's task, and that group"
 else
-  bad "and its \`siblings\` line names the parallel task it will conflict with"
+  bad "and its \`conflicts\` line names the other group's task, and that group"
   sed 's/^/        /' <<<"$edge_out"
 fi
-if [ -n "$edge_pr" ] && ! grep -qiF "will conflict with" "${edge_pr}.body" 2>/dev/null; then
+if [ -n "$conflicts_line" ] && ! grep -qF "twin" <<<"$conflicts_line"; then
+  ok "but leaves out a conflicting task of its own group"
+else
+  bad "but leaves out a conflicting task of its own group"
+  sed 's/^/        /' <<<"$edge_out"
+fi
+if grep -qE '^[[:space:]]*siblings[[:space:]]' <<<"$edge_out"; then
+  bad "and no \`siblings\` line is printed any more"
+  sed 's/^/        /' <<<"$edge_out"
+else
+  ok "and no \`siblings\` line is printed any more"
+fi
+if [ -n "$edge_pr" ] && ! grep -qF "rival" "${edge_pr}.body" 2>/dev/null; then
   ok "and the prediction is not repeated in the pull request body"
 else
   bad "and the prediction is not repeated in the pull request body"

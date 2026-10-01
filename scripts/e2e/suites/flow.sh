@@ -40,7 +40,7 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # ------------------------------------------------------- queued to archived
-# The body asks for a file of the task's own: the two parallel tasks below
+# The body asks for a file of the task's own: the two side-by-side tasks below
 # run at once, and this suite is about the pipeline rather than about what
 # happens when two lanes want one file.
 task_doc "$LIVE/land.md" land "$BODY" "group: live"
@@ -182,11 +182,14 @@ must "one slot" "$SPOOLWAY" config set agents.pi.concurrency 1
 # Queued one at a time under a running one, the first could be started, done
 # and out of the way before the second existed — and a slot nothing is
 # contending for is not a slot counter under test.
+#
+# Two groups, one task each: a group is one chain, so two tasks with no order
+# between them are two groups side by side, never two roots of one.
 dispatcher_stop
-task_doc "$LIVE/par-one.md" par-one "$BODY" "group: live"
-must "a first parallel task"  "$SPOOLWAY" queue add --from "$LIVE/par-one.md"
-task_doc "$LIVE/par-two.md" par-two "$BODY" "group: live"
-must "a second parallel task" "$SPOOLWAY" queue add --from "$LIVE/par-two.md"
+task_doc "$LIVE/par-one.md" par-one "$BODY" "group: par-one"
+must "a first task, a group of its own"  "$SPOOLWAY" queue add --from "$LIVE/par-one.md"
+task_doc "$LIVE/par-two.md" par-two "$BODY" "group: par-two"
+must "a second task, beside it in another group" "$SPOOLWAY" queue add --from "$LIVE/par-two.md"
 dispatcher_start
 if wait_for_text 30 "$E2E_DISPATCH_LOG" "waiting for a \`pi\` slot"; then
   ok "one slot admits one lane and says so"
@@ -207,9 +210,9 @@ git diff --cached --quiet .spoolway/config.toml \
   || must "committing the slot change" git commit -qm "e2e: back to two slots"
 
 if drive par-one gone 180 && drive par-two gone 180; then
-  ok "both parallel tasks land once the slot frees"
+  ok "both side-by-side tasks land once the slot frees"
 else
-  bad "both parallel tasks land once the slot frees"
+  bad "both side-by-side tasks land once the slot frees"
 fi
 
 # ------------------------------------------------- the group gate ranks, it does not reserve

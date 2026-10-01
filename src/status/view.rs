@@ -725,18 +725,6 @@ pub(super) fn group_totals(
         .collect()
 }
 
-/// A row's TASK column: the id, with `∥` appended for a task declared
-/// `parallel: true` — the planner's own judgement that it is safe beside
-/// its group's other declared-parallel tasks, so a reader of the board
-/// sees which tasks are meant to run beside each other rather than in
-/// sequence.
-fn task_label(row: &Row) -> String {
-    match row.parallel {
-        true => format!("{} ∥", row.id),
-        false => row.id.clone(),
-    }
-}
-
 /// Below this many arrivals the count is not yet worth a reader's notice, so
 /// the step id stays bare.
 const ARRIVAL_FLOOR: u32 = 2;
@@ -788,7 +776,7 @@ pub(super) fn table(
     let total_width =
         |of: &dyn Fn(&GroupTotal) -> usize| totals.values().map(of).max().unwrap_or(0);
 
-    let id_w_natural = width(&|r| task_label(r).chars().count(), 4);
+    let id_w_natural = width(&|r| r.id.chars().count(), 4);
     // "PIPELINE", 8 characters — the widest thing in the column on almost
     // every board, since a project's pipeline names are usually shorter than
     // the header naming them.
@@ -1051,7 +1039,7 @@ pub(super) fn table(
     // heading rather than a row of its own. Drawn for both readings of the
     // table, figures or none. Nothing for the `no group` block — there is no
     // name for it to carry.
-    let band = |out: &mut String, group: &str, url: Option<&str>| {
+    let band = |out: &mut String, group: &str, url: Option<&str>, after: Option<&str>| {
         if group == NO_GROUP {
             return;
         }
@@ -1069,13 +1057,19 @@ pub(super) fn table(
         // terminal to resolve a link against. `plain` ends with `group`
         // verbatim, so the byte length of everything before it is a char
         // boundary.
-        let composed = match url.filter(|_| style.colour) {
+        let mut composed = match url.filter(|_| style.colour) {
             Some(url) => {
                 let before = &plain[..plain.len() - group.len()];
                 format!("{before}{OSC8}{url}{ST}{group}{OSC8}{ST}")
             }
             None => plain,
         };
+        // `after <group>` names the one other group this group's first task
+        // stacks onto — see `Row::after`. Outside any hyperlink span, plain
+        // words beside the band's own name rather than a second link.
+        if let Some(after) = after {
+            composed.push_str(&format!("  after {after}"));
+        }
         out.push_str(&style.paint(DIM, &composed));
         out.push('\n');
     };
@@ -1132,9 +1126,17 @@ pub(super) fn table(
     // `key-in-names` writes the same issue's url onto every task of a group
     // it opens, so the first one found stands for the whole group.
     let mut group_urls: BTreeMap<&str, &str> = BTreeMap::new();
+    // The other group a group's own band names, `after <group>` — the first
+    // task's own cross-group `depends_on`, stamped only on that one row (see
+    // `Row::after`), so the first row of the group to carry one stands for
+    // the whole band, the same way `group_urls` reads its first `issue_url`.
+    let mut group_after: BTreeMap<&str, &str> = BTreeMap::new();
     for row in rows {
         if let Some(url) = row.issue_url.as_deref() {
             group_urls.entry(row.group()).or_insert(url);
+        }
+        if let Some(after) = row.after.as_deref() {
+            group_after.entry(row.group()).or_insert(after);
         }
     }
 
@@ -1150,6 +1152,7 @@ pub(super) fn table(
                 &mut out,
                 group.unwrap(),
                 group_urls.get(group.unwrap()).copied(),
+                group_after.get(group.unwrap()).copied(),
             );
         }
 
@@ -1162,7 +1165,7 @@ pub(super) fn table(
                 false => padded,
             }
         };
-        let id_text = clip(&task_label(row), id_w);
+        let id_text = clip(&row.id, id_w);
         let id_cell = cell(&id_text, id_w);
         // Always dim, on the board and nowhere else — the same `paint` every
         // other plain-text cell uses, just never conditioned on the row's
@@ -1841,6 +1844,59 @@ mod tests {
         );
     }
 
+    /// A group whose own first task depends on another group's own last
+    /// task stacks on it — the band reads `after <group>`, matching the
+    /// `m-board-waits` mockup's `▌auth-ui  after auth-api`. A task that is
+    /// not its own group's first — `auth-sessions`, depending in-group on
+    /// `auth-login` — sets no `after` at all, even though it too crosses no
+    /// group boundary of its own to speak of.
+    #[test]
+    fn the_band_reads_after_the_group_a_stacking_groups_first_task_depends_on() {
+        let repo = fixture("group-stacks-after");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "auth-login", &[], None, Some("auth-api"));
+        add_to(
+            &repo,
+            "auth-sessions",
+            &["auth-login"],
+            None,
+            Some("auth-api"),
+        );
+        // `auth-ui`'s own first task: no dependency inside `auth-ui` itself,
+        // and its one `depends_on` crosses into `auth-api`, onto that
+        // group's own last task.
+        add_to(
+            &repo,
+            "auth-form",
+            &["auth-sessions"],
+            None,
+            Some("auth-ui"),
+        );
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let sessions = rows.iter().find(|r| r.id == "auth-sessions").unwrap();
+        assert_eq!(
+            sessions.after, None,
+            "not the stacking group's own first task, and not itself crossing a group"
+        );
+        let form = rows.iter().find(|r| r.id == "auth-form").unwrap();
+        assert_eq!(form.after.as_deref(), Some("auth-api"));
+
+        let table = plain_table(&rows);
+        assert!(
+            table
+                .lines()
+                .any(|l| l.trim_start().starts_with("▌auth-ui") && l.contains("after auth-api")),
+            "{table}"
+        );
+        assert!(
+            !table
+                .lines()
+                .any(|l| l.trim_start().starts_with("▌auth-api") && l.contains("after")),
+            "the base group names nothing it stacks on: {table}"
+        );
+    }
+
     /// The band opening a group's block names it and nothing else; the line
     /// closing it carries that group's whole OUT, COST and LANE TIME under
     /// an unlabelled run of blanks — a group-by straight off the ledger's own
@@ -2225,30 +2281,6 @@ mod tests {
         assert_eq!(auth.out, Some(500 + 200 + 300));
         assert_eq!(auth.cost, Some(1.25 + 0.50 + 2.00));
         assert_eq!(auth.lane_time, Some(42 + 18 + 30));
-    }
-
-    /// `queue list` marks a declared-parallel task within its group, so a
-    /// reader sees the same fan the planner judged safe to run side by side.
-    #[test]
-    fn queue_list_marks_a_declared_parallel_task() {
-        let repo = fixture("parallel-marker");
-        let pipelines = Pipelines::builtin();
-        add_to(&repo, "left", &[], Some("implement"), Some("fan"));
-        add_to(&repo, "right", &[], Some("implement"), Some("fan"));
-        let mut task = repo.task("right").unwrap();
-        task.front.parallel = true;
-        task.save().unwrap();
-
-        let rows = rows(&repo, &pipelines).unwrap();
-        let table = plain_table(&rows);
-        assert!(
-            table.lines().any(|l| l.trim_start().starts_with("right ∥")),
-            "{table}"
-        );
-        assert!(
-            !table.lines().any(|l| l.trim_start().starts_with("left ∥")),
-            "{table}"
-        );
     }
 
     /// One reading of the queue, two places it is shown. The board dyes it and
@@ -3513,7 +3545,9 @@ mod tests {
         short.set_stage(crate::pipeline::PAUSED, None);
         short.save().unwrap();
 
-        add(&repo, "task-bravo-long", &[], None);
+        // A different group from `task-a`: a group is one chain now, and
+        // these two have no dependency between them.
+        add_to(&repo, "task-bravo-long", &[], None, Some("other"));
         let mut long = repo.task("task-bravo-long").unwrap();
         long.front.blocked_from = Some("implement".into());
         long.set_stage(crate::pipeline::BLOCKED, None);
