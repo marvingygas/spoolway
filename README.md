@@ -234,26 +234,7 @@ The `/spoolway-config` skill can write and edit pipelines for you.
 A job runs a routine on a schedule. It has three parts: a cron expression, a pipeline, and a
 routine saved under `.spoolway/routines/`.
 
-The dispatcher fires a due job at the start of its pass. While any job is enabled, the
-dispatcher stays up on an empty queue. A `spoolway dispatch` left running overnight is all a
-job needs.
-
-```
-spoolway jobs list         # every job, its schedule, and when it fires next
-spoolway jobs run <name>   # fire one now, ignoring its schedule
-```
-
-Bare `spoolway` opens the jobs tab, the only place a job is edited, paused, resumed or deleted.
-The routines tab can also write one, with `n` on a routine.
-
-<img src="docs/screenshots/jobs.png" alt="the jobs screen">
-
-*The jobs screen. `n` asks for three things: the routine, the cron expression, and the
-pipeline. A job fires once per matching minute. It skips a window while its previous run is
-still in the queue. A window that passes while no dispatcher runs is not caught up later.*
-
-A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`. Put one in
-`.spoolway/jobs.toml` inside the checkout to share it with the team.
+A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`:
 
 ```toml
 [jobs.nightly-audit]
@@ -279,8 +260,7 @@ the last arm finishes, every arm's copy is removed. The source group and the led
 
 ## Issue tracker
 
-Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and Jira ship with
-`spoolway init`; neither integration is required.
+Event hooks can sync tasks with an issue tracker.
 
 | Event | When it fires |
 |---|---|
@@ -291,12 +271,6 @@ Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and 
 | `blocked` | A task comes to rest on `blocked` |
 | `paused` | A task arrives on the persisted `paused` stage |
 | `done` | A task finishes |
-
-The sample GitHub flow creates one group issue and one child issue per task, comments when a
-task blocks or pauses, and marks the task issue ready for review when the pipeline hands it to
-a pull request. Closing that issue after the pull request merges is left to your own merge
-automation; spoolway's own repository keeps a close-on-merge GitHub Actions workflow you can
-copy in.
 
 **The two shipped scripts are editable samples.** Choosing a tracker in `spoolway init` copies
 `github.sh` and `jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change
