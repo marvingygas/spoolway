@@ -2510,6 +2510,21 @@ fn adopt_workspace_clone(root: &Path, workspace_name: &str, dispatcher: &str) ->
     }
     let workspace = crate::mux::state_root().join(workspace_name);
     let record_path = workspace.join(BINDING_FILE);
+    // Checked before locking — see `join_workspace`'s own comment on why:
+    // a mistyped `--adopt <workspace>/<dispatcher>` must not `mkdir` the
+    // workspace folder just to find out it never existed.
+    if !record_path.is_file() {
+        bail!(
+            "no workspace named {workspace_name} exists under {} — check `ls {}` for the name \
+             actually there",
+            crate::mux::state_root().display(),
+            crate::mux::state_root().display(),
+        );
+    }
+    // Same read-modify-write race `join_workspace` closes, and the same
+    // lock — an `--adopt` racing a join on this workspace must not read the
+    // clone list the other is about to overwrite.
+    let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(&workspace))?;
     let raw = std::fs::read_to_string(&record_path).with_context(|| {
         format!(
             "no workspace named {workspace_name} exists under {} — check `ls {}` for the name \
@@ -2627,6 +2642,15 @@ fn adopt_workspace_clone(root: &Path, workspace_name: &str, dispatcher: &str) ->
     Ok(dispatcher_home)
 }
 
+/// The advisory lock [`crate::lock::WorkspaceLock`] takes over `workspace`'s
+/// `project.toml` read-modify-write — see that type's doc. Named off
+/// `BINDING_FILE` itself and left inside `workspace`, not a folder of its
+/// own, so it adds nothing for [`all_workspaces`] or any other walk of
+/// `~/.spoolway/` to trip over.
+fn workspace_lock_path(workspace: &Path) -> PathBuf {
+    workspace.join(format!("{BINDING_FILE}.lock"))
+}
+
 /// Write `workspace`'s `project.toml` whole, in the same explained-header
 /// style [`write_binding`] uses for a repo-mode home's own record. The one
 /// place a workspace's own file is ever written by this binary: by `init`,
@@ -2646,7 +2670,8 @@ fn write_workspace(workspace: &Path, toml_value: &WorkspaceToml) -> Result<()> {
          # delete the line to skip that check for one entry.\n{}",
         toml::to_string_pretty(toml_value).context("serialising project.toml")?
     );
-    crate::task::write_atomic(&workspace.join(BINDING_FILE), body)
+    let path = workspace.join(BINDING_FILE);
+    crate::task::write_atomic(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
 /// One workspace as `init`'s "Which workspace should this checkout use?"
@@ -2751,6 +2776,21 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
     }
     let workspace = crate::mux::state_root().join(name);
     let record_path = workspace.join(BINDING_FILE);
+    // Checked before `WorkspaceLock::acquire`, which does not create the
+    // lock file's parent — `workspace` itself — and so needs it there
+    // already. Checking here also turns a typo'd `--workspace` name into a
+    // plain "no workspace named …" rather than a failed lock write.
+    if !record_path.is_file() {
+        bail!(
+            "no workspace named {name} exists under {}",
+            crate::mux::state_root().display()
+        );
+    }
+    // Held across the whole read-modify-write below, so a second join
+    // racing this one on the same workspace waits rather than reading the
+    // same `parsed.clones` this call is about to write back on top of —
+    // see `WorkspaceLock`'s own doc for the lost-entry bug this closes.
+    let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(&workspace))?;
     let raw = std::fs::read_to_string(&record_path).with_context(|| {
         format!(
             "no workspace named {name} exists under {}",
@@ -2768,6 +2808,18 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
             workspace,
             dispatcher: existing.dispatcher.clone(),
         });
+    }
+    // `create_workspace` writes `config/` before `project.toml`, so a
+    // workspace without one has lost it since — deleted by hand, or left by
+    // an older failed run. Joining it would hand this clone a dispatcher
+    // folder that reads no setup at all.
+    let config = workspace.join("config");
+    if !config.is_dir() {
+        bail!(
+            "workspace {name} has no setup: {} is missing — restore it, or start a new \
+             workspace with `spoolway init --workspace new`",
+            config.display()
+        );
     }
     let base = sanitize_label(&crate::mux::project_label(root));
     let taken = |candidate: &str| {
@@ -2797,7 +2849,13 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
         dispatcher,
         root_commit: root_commit(root),
     });
-    write_workspace(&workspace, &parsed)?;
+    // A failure here has already created `home` above — remove it rather
+    // than leave a dispatcher folder no entry in `project.toml` ever claims,
+    // which would otherwise just draw `<dispatcher>-2` on the retry.
+    if let Err(err) = write_workspace(&workspace, &parsed) {
+        let _ = std::fs::remove_dir_all(&home);
+        return Err(err);
+    }
     Ok(clone)
 }
 
@@ -3175,6 +3233,70 @@ fn branch_or_detached(dir: &Path) -> String {
         Ok(branch) if !branch.trim().is_empty() => branch.trim().to_string(),
         _ => "(detached HEAD)".to_string(),
     }
+}
+
+/// `dir`'s best-guess default branch, without switching it off whatever is
+/// actually checked out: `origin`'s own recorded `HEAD` when there is one —
+/// set by an ordinary `git clone`, and by nothing this binary writes — or
+/// else whichever of `main`/`master` exists as a local branch. A guess:
+/// a repo whose default branch is named otherwise, with no `origin/HEAD`,
+/// is not caught.
+/// `None` when neither answers, which callers read as "nothing to check".
+fn default_branch(dir: &Path) -> Option<String> {
+    if let Ok(out) = run(
+        dir,
+        "git",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        let name = out.trim();
+        if let Some(branch) = name.strip_prefix("origin/") {
+            return Some(branch.to_string());
+        }
+    }
+    ["main", "master"]
+        .into_iter()
+        .find(|candidate| {
+            run(
+                dir,
+                "git",
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{candidate}"),
+                ],
+            )
+            .is_ok()
+        })
+        .map(str::to_string)
+}
+
+/// `dir`'s default branch, if it tracks `.spoolway/` there — asked with
+/// `git cat-file`, against the branch's own tree, so a checkout sitting on
+/// some other branch right now never has to switch onto it to find out.
+/// `require_git_repository` has already refused anything with no git
+/// repository behind it by the time [`Placement::choose_any`] calls this, so
+/// `dir` always resolves a toplevel here.
+///
+/// Acceptance criterion: a repo-mode project's `.spoolway/` only has to be
+/// *tracked* on the default branch to make a home-mode setup here wrong,
+/// not checked out on it right now — a checkout on an orphan or feature
+/// branch, with no `.spoolway/` of its own, used to pass the ordinary
+/// [`crate::config::tracked_setup_dir_in`] check and accept `--setup home`,
+/// breaking every command the moment the default branch came back.
+pub(crate) fn default_branch_tracking_spoolway(dir: &Path) -> Option<String> {
+    let branch = default_branch(dir)?;
+    run(
+        dir,
+        "git",
+        &[
+            "cat-file",
+            "-e",
+            &format!("{branch}:{}", crate::config::STATE_DIR),
+        ],
+    )
+    .ok()
+    .map(|_| branch)
 }
 
 fn git_toplevel(dir: &Path) -> Result<PathBuf> {
@@ -6401,6 +6523,190 @@ mod tests {
         assert!(
             said.contains("spoolway init --adopt home-mode-stale-ws/api"),
             "{said}"
+        );
+    }
+
+    /// Six clones joining one workspace at once must all end up listed:
+    /// [`join_workspace`] reads `project.toml`, adds its own entry, and
+    /// writes the whole file back, with nothing serializing that
+    /// read-modify-write against a sibling doing the same thing at the same
+    /// time. Two joins racing between the read and the write each write
+    /// back a `clones` list that is missing whichever entries landed after
+    /// their own read — a lost update, not a crash, so every racer still
+    /// reports success.
+    #[test]
+    fn six_concurrent_joins_all_end_up_listed() {
+        let home = scratch_home("concurrent-joins");
+        let first = crate::scratch::root("concurrent-joins-root-0");
+        let _ = std::fs::remove_dir_all(&first);
+        std::fs::create_dir_all(&first).unwrap();
+        crate::scratch::git_init(&first, &["-q", "-b", "main"]);
+
+        let workspace_name = crate::platform::test_home::with_home(&home, || {
+            let clone = create_workspace(&first).expect("the first clone creates the workspace");
+            clone
+                .workspace
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        });
+
+        let joiners = 5;
+        let roots: Vec<PathBuf> = (0..joiners)
+            .map(|n| {
+                let root = crate::scratch::root(&format!("concurrent-joins-root-{}", n + 1));
+                let _ = std::fs::remove_dir_all(&root);
+                std::fs::create_dir_all(&root).unwrap();
+                crate::scratch::git_init(&root, &["-q", "-b", "main"]);
+                root
+            })
+            .collect();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(joiners));
+        let handles: Vec<_> = roots
+            .iter()
+            .cloned()
+            .map(|root| {
+                let home = home.clone();
+                let name = workspace_name.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    crate::platform::test_home::with_home(&home, || join_workspace(&root, &name))
+                })
+            })
+            .collect();
+        let results: Vec<Result<WorkspaceClone>> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        for result in &results {
+            assert!(
+                result.is_ok(),
+                "no joiner sees an error: {:?}",
+                result.as_ref().err().map(|e| format!("{e:#}"))
+            );
+        }
+
+        let workspace = home.join(".spoolway").join(&workspace_name);
+        let parsed: WorkspaceToml =
+            toml::from_str(&std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap())
+                .unwrap();
+        let listed: std::collections::BTreeSet<PathBuf> =
+            parsed.clones.iter().map(|c| c.root.clone()).collect();
+        let expected: std::collections::BTreeSet<PathBuf> = std::iter::once(first.clone())
+            .chain(roots.iter().cloned())
+            .collect();
+        assert_eq!(
+            listed, expected,
+            "every racing join must still be listed, not lost to a concurrent write"
+        );
+    }
+
+    /// `WorkspaceLock::acquire` no longer `mkdir -p`s its lock file's
+    /// parent, and both `join_workspace` and `adopt_workspace_clone` check
+    /// a workspace exists before ever reaching it — so naming a workspace
+    /// that was never created leaves nothing under `~/.spoolway/`, not even
+    /// the folder the lock file would have sat in.
+    #[test]
+    fn joining_a_workspace_that_does_not_exist_creates_no_folder() {
+        let home = scratch_home("join-missing-workspace");
+        let root = crate::scratch::root("join-missing-workspace-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-q", "-b", "main"]);
+
+        crate::platform::test_home::with_home(&home, || {
+            let err = join_workspace(&root, "never-created").err().unwrap();
+            assert!(
+                format!("{err:#}").contains("no workspace named never-created"),
+                "{err:#}"
+            );
+        });
+        assert!(
+            !home.join(".spoolway").join("never-created").exists(),
+            "a missing workspace must not be minted into existence by trying to join it"
+        );
+    }
+
+    /// Acceptance: a join into a workspace whose `config/` has gone missing
+    /// is refused, naming that path, rather than handed a dispatcher folder
+    /// that reads nothing.
+    #[test]
+    fn joining_a_workspace_with_no_config_is_refused() {
+        let home = scratch_home("join-no-config");
+        let workspace = home.join(".spoolway").join("half-made");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join(BINDING_FILE),
+            "id = \"half-made\"\nclones = []\n",
+        )
+        .unwrap();
+        let root = crate::scratch::root("join-no-config-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-q", "-b", "main"]);
+
+        crate::platform::test_home::with_home(&home, || {
+            let err = join_workspace(&root, "half-made").err().unwrap();
+            assert!(
+                format!("{err:#}").contains(&workspace.join("config").display().to_string()),
+                "the refusal names the missing config/ path: {err:#}"
+            );
+        });
+        assert!(
+            !workspace.join("dispatchers").exists(),
+            "no dispatcher folder is created for a workspace with no config/"
+        );
+    }
+
+    /// The task's read-only case: a join into a workspace folder it cannot
+    /// write fails naming a path inside that workspace, and leaves no
+    /// `dispatchers/<name>` behind for a retry to step around as `<name>-2`.
+    #[cfg(unix)]
+    #[test]
+    fn joining_a_read_only_workspace_names_the_path_and_leaves_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::scratch::root("join-read-only-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-q", "-b", "main"]);
+        let home = workspace_fixture("join-read-only", Path::new("/elsewhere"), "other");
+        let workspace = home.join(".spoolway").join("join-read-only-ws");
+        std::fs::create_dir_all(workspace.join("dispatchers")).unwrap();
+        let before = std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap();
+
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores the mode bits, so there is nothing to test there.
+        let writable = std::fs::write(workspace.join("probe"), "").is_ok();
+        let result = (!writable).then(|| {
+            crate::platform::test_home::with_home(&home, || {
+                join_workspace(&root, "join-read-only-ws")
+            })
+        });
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(result) = result else { return };
+
+        let err = format!(
+            "{:#}",
+            result
+                .err()
+                .expect("a read-only workspace refuses the join")
+        );
+        assert!(
+            err.contains(&workspace.display().to_string()),
+            "the error names a path in the workspace: {err}"
+        );
+        assert_eq!(
+            std::fs::read_dir(workspace.join("dispatchers"))
+                .unwrap()
+                .count(),
+            0,
+            "no dispatcher folder is left behind"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap(),
+            before,
+            "project.toml is untouched"
         );
     }
 }

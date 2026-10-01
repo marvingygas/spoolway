@@ -393,6 +393,23 @@ impl Placement {
             return Ok(Self::Repo);
         }
 
+        // The current branch carries no tracked `.spoolway/` — checked
+        // above, or this checkout would already be `Self::Repo` — but a
+        // home-mode setup here still conflicts with one tracked on the
+        // project's default branch: switching back finds `.spoolway/`
+        // again, and every command run meanwhile wrote its state into
+        // `~/.spoolway/` instead. See
+        // `crate::repo::default_branch_tracking_spoolway`'s own doc.
+        if let Some(branch) = crate::repo::default_branch_tracking_spoolway(root) {
+            bail!(
+                "{} tracks `.spoolway/` on its default branch, `{branch}` — this checkout is \
+                 not on it now, but a home-mode setup here would still conflict with it once \
+                 `{branch}` is checked out again\n  check out `{branch}` and run `spoolway \
+                 init` there instead",
+                root.display(),
+            );
+        }
+
         let workspaces = crate::repo::workspaces();
         match args.workspace.as_deref() {
             Some(NEW_WORKSPACE) => Ok(Self::New),
@@ -756,16 +773,27 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     }
 
     // Where the setup lives comes first, because every path below depends on
-    // it. A home-mode checkout is listed in its workspace's `project.toml`
-    // here, before anything else is resolved: from that moment on
-    // `crate::config::setup_dir_in` answers the workspace's `config/` and
-    // `bind` answers its dispatcher folder, so every write below lands in the
-    // workspace without being told, and `bind` never reads or stamps `.git`.
-    // `joined` is what the rest of the run keys the joining case off: that
-    // workspace's setup is shared and already chosen, so nothing below writes
-    // into `config/`.
+    // it — but `choose` only decides, it never writes, so working this out
+    // does not yet commit the checkout to anything. `joined` is what the
+    // rest of the run keys the joining case off: that workspace's setup is
+    // shared and already chosen, so nothing below writes into `config/`.
     let placement = Placement::choose(root, args)?;
     let joined = matches!(placement, Placement::Join(_));
+
+    // Every flag validated and every question answered before the first
+    // write below — `Answers::gather`/`Answers::joining` only read and ask,
+    // they never touch disk. A bad `--tracker` value, or a Ctrl-C at the
+    // agent menu, used to be caught only after `create_workspace`/
+    // `join_workspace` had already listed this checkout and `bind` had
+    // already stamped its `.git`, leaving a project half set up that the
+    // next `init` then refused. Settling every answer first means a run
+    // that fails here has written nothing at all.
+    let answers = if joined {
+        Answers::joining(args)?
+    } else {
+        Answers::gather(root, args)?
+    };
+
     let placed = match &placement {
         Placement::New => Some(crate::repo::create_workspace(root)?),
         Placement::Join(name) => Some(crate::repo::join_workspace(root, name)?),
@@ -838,12 +866,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // and after binding, so a home-mode clone `--adopt` just re-attached reads
     // its workspace's existing `config.toml` rather than the checkout's none.
     let already_initialized = Config::path_in(root).exists() && !args.force;
-
-    let answers = if joined {
-        Answers::joining(args)?
-    } else {
-        Answers::gather(root, args)?
-    };
 
     let state = crate::config::setup_dir_in(root);
     let mut config = Config::default();
@@ -1100,6 +1122,47 @@ mod tests {
         root
     }
 
+    /// Acceptance criterion 6: a repo-mode project `init` already set up —
+    /// a home under `~/.spoolway/` holding a plain `id`/`root` binding with
+    /// no `clones` key, and `.git/spoolway-id` stamped to match, exactly
+    /// the shape spoolway 0.6.0 wrote and the only shape repo mode has ever
+    /// written — still binds on a repeat run after the reorder that moved
+    /// `Answers::gather` ahead of `bind`, and that reorder adds no new
+    /// folder directly under `~/.spoolway/`: `Answers::gather`'s own
+    /// questions never touch the home directory at all for a project in
+    /// repo mode.
+    #[test]
+    fn a_repeat_init_on_a_0_6_0_shaped_repo_mode_home_still_binds_to_it() {
+        let root = scaffold("repo-mode-0-6-0", &confirmed());
+        let home = home_for(&root);
+        let bound_before = crate::platform::test_home::with_home(&home, || {
+            crate::mux::project_home(&root).unwrap()
+        });
+        let before: std::collections::BTreeSet<String> = std::fs::read_dir(home.join(".spoolway"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+
+        run_init(&root, &confirmed()).expect("a repeat init still succeeds");
+
+        let bound_after = crate::platform::test_home::with_home(&home, || {
+            crate::mux::project_home(&root).unwrap()
+        });
+        assert_eq!(
+            bound_before, bound_after,
+            "the repeat run binds to the same home"
+        );
+        let after: std::collections::BTreeSet<String> = std::fs::read_dir(home.join(".spoolway"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            before, after,
+            "the repeat run — and the workspace lock it never takes in repo mode — adds no \
+             folder directly under ~/.spoolway/"
+        );
+    }
+
     /// Every pipeline file `init` wrote, concatenated. What a step names is
     /// the question every test below asks of them, and which file it is in is
     /// not.
@@ -1195,6 +1258,44 @@ mod tests {
         assert!(
             crate::repo::workspace_clone(&root).is_none(),
             "a refused checkout must never end up listed in a workspace"
+        );
+    }
+
+    /// Acceptance: `.spoolway/` tracked on the repository's default branch
+    /// refuses `--setup home` even from a branch that carries no
+    /// `.spoolway/` of its own — an orphan branch's empty working tree used
+    /// to pass the ordinary "is there a `.spoolway/` here" check and accept
+    /// a home-mode setup that broke the moment the default branch came
+    /// back.
+    #[test]
+    fn home_mode_is_refused_when_the_default_branch_tracks_spoolway() {
+        let root = crate::scratch::root("init-home-tracked-on-default");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+        std::fs::write(root.join(".spoolway").join("config.toml"), "").unwrap();
+        crate::repo::run(&root, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&root, "git", &["commit", "-q", "-m", "init"]).unwrap();
+        crate::repo::run(&root, "git", &["checkout", "-q", "--orphan", "scratch"]).unwrap();
+        crate::repo::run(&root, "git", &["rm", "-rf", "-q", "."]).unwrap();
+        assert!(
+            !root.join(".spoolway").exists(),
+            "the orphan branch has none"
+        );
+
+        let home = crate::scratch::root("init-home-tracked-on-default-home");
+        let err =
+            crate::platform::test_home::with_home(&home, || init(&root, &home_args(NEW_WORKSPACE)))
+                .expect_err("a home-mode setup must not ignore .spoolway/ tracked on main");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("default branch") && said.contains("main"),
+            "the refusal names the branch: {said}"
+        );
+        assert!(
+            crate::repo::workspace_clone(&root).is_none(),
+            "nothing is joined when the refusal fires"
         );
     }
 
@@ -2038,6 +2139,39 @@ mod tests {
             git_before,
             ".git gained nothing from spoolway"
         );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Acceptance: a bad `--tracker` value is still refused after every
+    /// answer is gathered before any write — a home-mode run that fails
+    /// here must not have listed the checkout in any workspace, exactly
+    /// the task's own observed bug (a clone left joined to a workspace
+    /// with no `config/`, because the old order joined first and only
+    /// found the bad value while asking the tracker question afterwards).
+    #[test]
+    fn a_bad_tracker_value_in_home_mode_joins_no_workspace() {
+        let parent = crate::scratch::root("init-home-bad-tracker");
+        let home = parent.join("home");
+        let root = home_mode_checkout(&parent, "api");
+        crate::platform::test_home::with_home(&home, || {
+            let args = InitArgs {
+                tracker: Some("gitlab".to_string()),
+                ..home_args(NEW_WORKSPACE)
+            };
+            let err = init(&root, &args).unwrap_err();
+            assert!(
+                err.to_string().contains("--tracker"),
+                "the refusal names the bad flag: {err}"
+            );
+            assert!(
+                crate::repo::workspace_clone(&root).is_none(),
+                "a run that fails validation must not have joined any workspace"
+            );
+            assert!(
+                !home.join(".spoolway").is_dir(),
+                "nothing under ~/.spoolway/ either, not even a workspace with no config/"
+            );
+        });
         let _ = std::fs::remove_dir_all(&parent);
     }
 

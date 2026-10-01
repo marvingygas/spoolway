@@ -61,6 +61,11 @@ and leaves the workspace's `config/` exactly as it is. Nothing is written into t
 its `.git` either way, and skills install into the coding agent's user folder instead of the
 project's own.
 
+`--setup home` is refused when the repository's default branch tracks a `.spoolway/` of its
+own, even from a checkout on some other branch that carries none: switching back to the default
+branch would find a tracked setup in conflict with the home-mode one. The refusal names that
+branch.
+
 A home-mode checkout reads its config, pipelines and prompts from the workspace's `config/`.
 Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place of the
 `~/.spoolway/<label>-<id>/` a repo-mode project uses. Nothing is read from or written to the
@@ -72,6 +77,9 @@ The error names both paths.
 A workspace's `project.toml` that cannot be read or parsed is refused by every command that
 scans workspaces. The error names the file. `spoolway init` refuses the same way instead of
 falling back to repo mode for a checkout that file would have listed.
+
+A workspace whose `config/` is missing — deleted, or left behind by a join that failed before
+writing it — refuses a new join, naming the missing path.
 
 A checkout listed more than once, in one workspace's `clones` or across several, is refused,
 naming every file and entry. A clone's `dispatcher` must be one plain name, with no path

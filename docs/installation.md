@@ -173,9 +173,12 @@ project skill folder sits inside a checkout that home mode promises to leave unt
 pipeline skills](#the-pipeline-skills).
 
 Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`,
+`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own, and
 `--workspace <name>` naming a workspace other than the one a checkout already uses. Each
 refusal names the command to run instead. See [Home mode](concepts.md#home-mode).
+
+Joining a workspace whose `config/` has gone missing is refused too, naming the missing path.
 
 ```
 $ spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes

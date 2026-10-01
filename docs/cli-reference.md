@@ -936,9 +936,12 @@ project's tracked setup. The refusal says to run `--setup home` instead, or to r
 actual project checkout. Home mode is unaffected, since it never writes into the checkout.
 
 Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`,
+`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own, and
 `--workspace <name>` naming a workspace other than the one a checkout already uses. Each
 refusal names the command to run instead.
+
+Joining a workspace whose `config/` has gone missing is refused too, naming the missing path.
 
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
