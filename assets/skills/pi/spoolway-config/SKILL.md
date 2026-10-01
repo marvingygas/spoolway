@@ -119,8 +119,8 @@ whole prompt, or any key `spoolway config contract` lists:
   already the go to run `init`; what still needs asking is whatever it did
   not answer.
 - Ask "Where should this project's setup live?" if the person has not said,
-  then always pass `--setup repo` or `--setup home` — never leave it for
-  `init` to ask at a terminal an agent cannot answer.
+  then always pass `--setup repo` or `--setup home` and `--yes` — never leave
+  either for `init` to ask at a terminal an agent cannot answer.
 - In home mode, ask which workspace: the name of an existing one under
   `~/.spoolway/` to join, or a new one — then pass `--workspace <name>` or
   `--workspace new`.
@@ -156,7 +156,8 @@ whole prompt, or any key `spoolway config contract` lists:
   to is printed from inside them; a setting outside them is not spoolway's
   to change.
 - Never let `init` run with no terminal to answer its questions. Always ask
-  the person which setup place they want first, and always pass `--setup`.
+  the person which setup place they want first, and always pass `--setup`
+  and `--yes`.
 - Never move a private file into the tracked setup, or run `init`, without
   the person's own go — but an explicit request already is that go: "make it
   part of the repo" is enough to run `pipeline promote` right away, and

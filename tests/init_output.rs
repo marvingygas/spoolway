@@ -50,6 +50,34 @@ impl Project {
     fn init(&self, provider: &str) -> Output {
         self.run(&["init", "--yes", "--provider", provider, "--tracker", "none"])
     }
+
+    /// [`Project::run`], but without asserting success — for a command
+    /// whose outcome, pass or fail, the test asserts on itself rather than
+    /// have it swallowed by an `assert!` that only prints it and panics.
+    fn run_allowing_failure(&self, args: &[&str]) -> Output {
+        let home = self.0.join("home");
+        Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(args)
+            .current_dir(&self.0)
+            .env("HOME", home)
+            .output()
+            .expect("run spoolway")
+    }
+
+    /// `init` with no `--yes` and nothing on stdin — the shape an agent with
+    /// no terminal runs it in, and the one `crate::ask::confirm` cannot ask
+    /// a question through.
+    fn init_with_no_terminal_and_no_yes(&self) -> Output {
+        use std::process::Stdio;
+        let home = self.0.join("home");
+        Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(["init"])
+            .current_dir(&self.0)
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run spoolway")
+    }
 }
 
 impl AsRef<Path> for Project {
@@ -830,4 +858,71 @@ fn prompt_contract_in_a_linked_worktree_reads_the_worktrees_own_pipeline() {
         .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
         .current_dir(&root)
         .status();
+}
+
+/// `init --no-examples` leaves `pipelines/` empty, and the skill's own next
+/// step — `spoolway pipeline contract` and `spoolway prompt contract` — has
+/// to work in exactly that project, since those are the two commands that
+/// print the formats it writes the first pipeline from. Neither command's
+/// own output depends on a project pipeline existing, so an empty
+/// `pipelines/` directory must not fail them — see
+/// `crate::pipeline::Pipelines::load_or_empty`.
+#[test]
+fn pipeline_contract_and_prompt_contract_succeed_with_no_pipelines_defined() {
+    let project = Project::new("contract-no-pipelines");
+    project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--no-examples",
+        "--tracker",
+        "none",
+    ]);
+    assert_eq!(
+        std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
+            .unwrap()
+            .count(),
+        0,
+        "fixture must start with no project pipelines defined"
+    );
+
+    let pipeline_out = project.run_allowing_failure(&["pipeline", "contract"]);
+    assert!(
+        pipeline_out.status.success(),
+        "pipeline contract failed with no project pipelines: {}",
+        stderr(&pipeline_out)
+    );
+
+    let prompt_out = project.run_allowing_failure(&["prompt", "contract"]);
+    assert!(
+        prompt_out.status.success(),
+        "prompt contract failed with no project pipelines: {}",
+        stderr(&prompt_out)
+    );
+}
+
+/// `init` with nobody to answer its confirmation writes nothing — the
+/// declared-default path `crate::ask::confirm` takes when stdin is not a
+/// terminal. An agent has no terminal either, so writing nothing has to
+/// come with a word of explanation rather than pass for success: a line
+/// saying nothing was written and that `--yes` is how to answer the
+/// confirmation.
+#[test]
+fn init_with_no_terminal_and_no_yes_says_nothing_was_written() {
+    let project = Project::new("no-terminal-no-yes");
+
+    let result = project.init_with_no_terminal_and_no_yes();
+    let out = stdout(&result);
+
+    assert!(result.status.success(), "{}", stderr(&result));
+    assert!(
+        !project.as_ref().join(".spoolway").exists(),
+        "nothing should have been written:\n{out}"
+    );
+    assert!(
+        out.lines().any(|line| line.contains("--yes")
+            && (line.contains("nothing") || line.contains("wrote nothing"))),
+        "expected a line saying nothing was written and naming --yes, got:\n{out}"
+    );
 }

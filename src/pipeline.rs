@@ -2453,7 +2453,7 @@ impl Pipelines {
     /// should have to know a second source exists.
     pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
         let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides))
+        Pipelines::load_impl(root, config, Some(&overrides), true)
     }
 
     /// [`Pipelines::load`], with no patch layer applied — for a caller that
@@ -2461,7 +2461,21 @@ impl Pipelines {
     /// check a step id and a key against what the tracked file actually
     /// has, and `commands::override_promote`'s own read of it.
     pub fn load_tracked(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        Pipelines::load_impl(root, config, None)
+        Pipelines::load_impl(root, config, None, true)
+    }
+
+    /// [`Pipelines::load`], but an empty `pipelines/` is not an error —
+    /// for `pipeline contract` and `prompt contract`, which print a format
+    /// rather than report on this project's own pipelines, and so have no
+    /// need of one existing. `spoolway init --no-examples` leaves exactly
+    /// that empty directory, and the skill route that is supposed to write
+    /// the first pipeline from this contract could not even read it.
+    /// Every other caller of `load` still needs real pipelines to run
+    /// against, so only these two opt into this; a file that is there but
+    /// fails to parse is still a real problem and still fails here.
+    pub fn load_or_empty(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
+        let overrides = crate::overrides::dir_for(root)?;
+        Pipelines::load_impl(root, config, Some(&overrides), false)
     }
 
     /// One source: the directory. A missing directory and an empty one now
@@ -2469,10 +2483,15 @@ impl Pipelines {
     /// [`Pipelines::validate`] — a project with neither has nothing to run,
     /// and it hears that where it happens rather than the built-ins standing
     /// in and the gap surfacing three commands later at dispatch, once a
-    /// step needs a `PROMPT.md` that was never written. The old single
+    /// step needs a `PROMPT.md` that was never written.
+    /// [`Pipelines::load_or_empty`] is the one caller that does not want
+    /// that bail: `pipeline contract` and `prompt contract` print a format
+    /// rather than run anything, so an empty directory is a legitimate
+    /// project state for them rather than an error. The old single
     /// `pipeline.yml` is still called out on its own, so a project carrying
     /// one is told what to do with it rather than reading a generic
-    /// "no pipelines defined" for a file that is actually right there.
+    /// "no pipelines defined" for a file that is
+    /// actually right there.
     ///
     /// `overrides` is applied to each pipeline right after it is parsed and
     /// before [`Pipelines::assemble`] runs — assembling first would
@@ -2483,6 +2502,7 @@ impl Pipelines {
         root: &Path,
         config: &crate::config::Config,
         overrides: Option<&Path>,
+        require_nonempty: bool,
     ) -> Result<Pipelines> {
         let dir = Pipelines::dir_in(root);
         let files = match read_pipeline_dir(&dir)? {
@@ -2553,15 +2573,14 @@ impl Pipelines {
         // own `pipeline \`{name}\`` context) can just as well be a private
         // pipeline's, and pointing only at `dir` there would send a person
         // to a file that was never the problem.
-        let set =
-            Pipelines::assemble(pipelines, config, ignored).with_context(
-                || match &private_dir {
-                    Some(private_dir) => {
-                        format!("in {} or {}", dir.display(), private_dir.display())
-                    }
-                    None => format!("in {}", dir.display()),
-                },
-            )?;
+        let set = Pipelines::assemble(pipelines, config, ignored, require_nonempty).with_context(
+            || match &private_dir {
+                Some(private_dir) => {
+                    format!("in {} or {}", dir.display(), private_dir.display())
+                }
+                None => format!("in {}", dir.display()),
+            },
+        )?;
         if overrides.is_some() {
             crate::overrides::print_ignored_notices(&set.ignored_overrides);
         }
@@ -2583,6 +2602,7 @@ impl Pipelines {
         mut pipelines: BTreeMap<String, Pipeline>,
         config: &crate::config::Config,
         ignored_overrides: Vec<crate::overrides::Ignored>,
+        require_nonempty: bool,
     ) -> Result<Pipelines> {
         for (name, pipeline) in pipelines.iter_mut() {
             match pipeline.steps.iter_mut().find(|s| s.id == BLOCKED) {
@@ -2608,7 +2628,7 @@ impl Pipelines {
             pipelines,
             ignored_overrides,
         };
-        set.validate()?;
+        set.validate_impl(require_nonempty)?;
 
         // Every `blocked` step's description is still `None` here: a
         // declared override's own `description:` was already refused above,
@@ -2635,6 +2655,7 @@ impl Pipelines {
             builtin_pipelines().expect("built-in pipelines must parse"),
             &crate::config::Config::default(),
             Vec::new(),
+            true,
         )
         .expect("built-in pipelines must be valid");
 
@@ -2669,7 +2690,7 @@ impl Pipelines {
     /// choices.
     #[cfg(test)]
     pub(crate) fn shipped(config: &crate::config::Config) -> Result<Pipelines> {
-        Pipelines::assemble(builtin_pipelines()?, config, Vec::new())
+        Pipelines::assemble(builtin_pipelines()?, config, Vec::new(), true)
     }
 
     /// Look up a pipeline by name, with an error listing the defined ones.
@@ -2749,7 +2770,13 @@ impl Pipelines {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.pipelines.is_empty() {
+        self.validate_impl(true)
+    }
+
+    /// [`Pipelines::validate`], with the empty-set bail made optional — see
+    /// [`Pipelines::load_or_empty`], the only caller that passes `false`.
+    fn validate_impl(&self, require_nonempty: bool) -> Result<()> {
+        if require_nonempty && self.pipelines.is_empty() {
             bail!("no pipelines defined");
         }
         for (name, pipeline) in &self.pipelines {
@@ -3438,7 +3465,8 @@ mod tests {
         config.unattended.blocked_prompt = "clearer".into();
         config.unattended.blocked_session = false;
 
-        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new()).unwrap();
+        let set =
+            Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new(), true).unwrap();
         let pipeline = set.get("solo").unwrap();
 
         assert!(
@@ -3471,6 +3499,7 @@ mod tests {
             one_step_pipeline("ui", "  - id: blocked\n    model: override-model\n"),
             &config,
             Vec::new(),
+            true,
         )
         .unwrap();
         let pipeline = set.get("ui").unwrap();
@@ -3500,7 +3529,7 @@ mod tests {
         ];
         for (key, message) in cases {
             let pipelines = one_step_pipeline("p", &format!("  - id: blocked\n    {key}"));
-            let err = Pipelines::assemble(pipelines, &config, Vec::new()).unwrap_err();
+            let err = Pipelines::assemble(pipelines, &config, Vec::new(), true).unwrap_err();
             // The context `assemble` wraps this in (`pipeline \`p\``) only
             // shows up under the alternate `{:#}` format — anyhow's plain
             // `Display` prints just the outermost message.
@@ -3517,7 +3546,8 @@ mod tests {
     #[test]
     fn revalidating_an_assembled_pipeline_does_not_refuse_its_own_blocked_description() {
         let config = crate::config::Config::default();
-        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new()).unwrap();
+        let set =
+            Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new(), true).unwrap();
         set.validate()
             .expect("an assembled set must validate again cleanly");
     }
@@ -3531,7 +3561,8 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.unattended.blocked_model = String::new();
 
-        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new()).unwrap();
+        let set =
+            Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new(), true).unwrap();
         assert_eq!(set.get("solo").unwrap().step(BLOCKED).unwrap().model, None);
     }
 

@@ -594,7 +594,8 @@ A missing or overlong `description:` is a warning, not a failure.
 ### `spoolway pipeline contract`
 
 Print the pipeline format: every key, every rule refused at load, this project's agent
-profiles and prompts, and a blank pipeline to copy.
+profiles and prompts, and a blank pipeline to copy. It runs even when `.spoolway/pipelines/`
+is empty, since the format it prints needs no pipeline of this project's own.
 
 Copy the blank to `.spoolway/pipelines/<name>.yml`, delete what you do not need, and run
 `spoolway pipeline check`.
@@ -707,6 +708,10 @@ spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
 | `--step <STEP>` | `--pipeline`'s first agent step | Which step to render for |
 | `--pipeline <PIPELINE>` | required unless `--task` names one | Which pipeline the step belongs to |
 | `--task <TASK>` | a sample task | Render against a real queued task |
+
+With neither `--pipeline` nor `--task`, and no pipeline yet in the project, it prints a line
+pointing at `spoolway pipeline contract` instead of a step's contract: there is no step yet to
+render against.
 
 ### `spoolway prompt list`
 
@@ -912,8 +917,9 @@ the tracker and the project key. With no terminal it takes the defaults.
 Before any of that, it prints the project directory it resolved and waits for a yes — a path you
 do not recognise is the whole of the check, and it matters most when `init` was reached from a
 keybinding rather than typed in a directory you were looking at. Answering no writes nothing and
-exits 0. With nobody there to answer, that question takes its default, which is no, so a script
-or CI runner passes `--yes`.
+exits 0. With no terminal to answer, that question takes its default, which is no; `init` then
+prints one line saying nothing was written and that `--yes` answers it, so a script, CI runner
+or agent passes `--yes`.
 
 Run from a linked worktree, the directory it resolves to is the main checkout the worktree was
 cut from, never the worktree itself — `init` never writes into a worktree or binds it as its own

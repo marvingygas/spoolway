@@ -127,6 +127,23 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
         note.print(false)?;
     }
 
+    // A project `init --no-examples` left with nothing under `pipelines/`
+    // has no step to render this contract against yet, and `subject` would
+    // otherwise bail asking for a `--pipeline` there is none of. Say so and
+    // stop rather than refuse: the skill route this command exists for
+    // reads it right after `init`, before any pipeline has been written.
+    if args.task.is_none() && args.pipeline.is_none() && pipelines.names().is_empty() {
+        println!(
+            "No pipeline exists in this project yet, so there is no step to render a lane \
+             contract against."
+        );
+        println!(
+            "Write the first one from `spoolway pipeline contract`, then rerun this with \
+             `--pipeline <name>` — or `--task <id>` once a task runs on it."
+        );
+        return Ok(());
+    }
+
     let (pipeline, step, task, sampled) = subject(repo, pipelines, args)?;
 
     let profile = step

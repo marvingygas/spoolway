@@ -809,6 +809,22 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     println!();
     println!("{}", report_row("project", &root.display().to_string()));
     if !args.yes && !crate::ask::confirm("Set up this project?", false)? {
+        // With no terminal to answer, `confirm` already took its declared
+        // default (decline) in silence — the one shape an agent actually
+        // hits, since it has no terminal either. A real person who typed
+        // "no" at a real prompt just watched themselves decline, so this
+        // line is only for the silent case: it names the flag that skips
+        // asking, the one the `spoolway-config` skill's `init` route must
+        // pass for exactly this reason.
+        if !crate::ask::interactive() {
+            println!(
+                "{}",
+                report_row(
+                    "wrote",
+                    "nothing — pass --yes to confirm with nobody here to answer"
+                )
+            );
+        }
         return Ok(());
     }
 

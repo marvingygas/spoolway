@@ -449,7 +449,10 @@ fn run() -> Result<()> {
                     commands::pipeline_list(&repo, &read, cli.json)
                 }
                 Command::Pipeline(PipelineCommand::Contract) => {
-                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
+                    // Not plain `load`: this command prints the pipeline
+                    // file format, which needs no pipeline of this
+                    // project's own to exist — see `Pipelines::load_or_empty`.
+                    let read = Pipelines::load_or_empty(&repo.checkout, &repo.config)?;
                     commands::pipeline_contract(&repo, &read)
                 }
                 Command::Pipeline(PipelineCommand::Override(args)) => {
@@ -468,7 +471,11 @@ fn run() -> Result<()> {
                 // yet, and `prompt contract` exists to preview exactly that
                 // edit before it does.
                 Command::Prompt(PromptCommand::Contract(args)) => {
-                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
+                    // Not plain `load`: a project with no pipelines yet
+                    // gets a pointer to `pipeline contract` instead of a
+                    // load failure — see `Pipelines::load_or_empty` and
+                    // `prompt::contract`.
+                    let read = Pipelines::load_or_empty(&repo.checkout, &repo.config)?;
                     prompt::contract(&repo, &read, args)
                 }
                 Command::Prompt(PromptCommand::List) => {
