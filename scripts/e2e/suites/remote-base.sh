@@ -29,7 +29,7 @@ new_forge "$LIVE/forge"
 install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
-configure_project plan/live "$LIVE/worktrees"
+configure_project plan/live
 publish plan/live
 
 # A branch made straight in the bare origin, on top of what `publish` already

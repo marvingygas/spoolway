@@ -1047,14 +1047,45 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
 /// practice. Both spellings still parse and both are dropped on the next
 /// save; the only way a project finds out is here.
 fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
     if names_key(checkout, "max_attempts") || names_key(checkout, "max_launches") {
-        vec![Finding::Note(
+        findings.push(Finding::Note(
             "dispatch.max_launches (and its old name, max_attempts) is retired in this \
              checkout's config"
                 .into(),
-        )]
-    } else {
-        Vec::new()
+        ));
+    }
+    findings.extend(worktree_root_note(checkout));
+    findings
+}
+
+/// `dispatch.worktree_root` is retired, dropped unconditionally by the next
+/// `spoolway sync`. A blank value was never a real decision — nothing
+/// configured there a project would want to clean up — so this says nothing
+/// until the file actually names a path, and then names that path, the same
+/// way `spoolway sync` itself does once it runs (see [`crate::sync::config`]).
+/// Read off the raw file rather than the loaded [`Config`]: the struct keeps
+/// the retired field only so an existing file still parses, not as something
+/// any other part of this command should read.
+fn worktree_root_note(checkout: &Path) -> Vec<Finding> {
+    let configured = std::fs::read_to_string(Config::path_in(checkout))
+        .ok()
+        .and_then(|raw| raw.parse::<toml::Value>().ok())
+        .and_then(|doc| {
+            doc.get("dispatch")?
+                .get("worktree_root")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|path| !path.trim().is_empty());
+    match configured {
+        Some(path) => vec![Finding::Note(format!(
+            "dispatch.worktree_root in this checkout's config names {path} — the setting is \
+             retired, every worktree now lands under the project home, and the next \
+             `spoolway sync` drops the key; worktrees already cut at the old path are yours \
+             to remove"
+        ))],
+        None => Vec::new(),
     }
 }
 
@@ -2327,6 +2358,51 @@ mod tests {
         );
     }
 
+    /// A real path left in `dispatch.worktree_root` is worth a note — it is
+    /// where worktrees already cut under the old setting still are, and
+    /// nothing else tells a project they are there to clean up.
+    #[test]
+    fn worktree_root_note_names_a_real_path() {
+        let root = crate::scratch::root("doctor-worktree-root-note-path");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&root),
+            "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+        )
+        .unwrap();
+
+        let notes = worktree_root_note(&root);
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        let Finding::Note(text) = &notes[0] else {
+            panic!("{notes:#?}")
+        };
+        assert!(text.contains("/old/worktrees"), "{text}");
+        assert!(text.contains("retired"), "{text}");
+    }
+
+    /// A blank value was never anybody's decision — nothing to clean up, so
+    /// nothing to say until the ordinary dropped-key report on `sync` covers
+    /// it.
+    #[test]
+    fn worktree_root_note_is_quiet_on_a_blank_value() {
+        let root = crate::scratch::root("doctor-worktree-root-note-blank");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&root), "[dispatch]\nworktree_root = \"\"\n").unwrap();
+
+        assert!(worktree_root_note(&root).is_empty());
+    }
+
+    /// No key at all — the ordinary case for a project that never set it —
+    /// is just as quiet.
+    #[test]
+    fn worktree_root_note_is_quiet_when_absent() {
+        let root = crate::scratch::root("doctor-worktree-root-note-absent");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&root), "[dispatch]\n").unwrap();
+
+        assert!(worktree_root_note(&root).is_empty());
+    }
+
     fn single_step_pipelines(step_yaml: &str) -> Pipelines {
         let raw = format!("steps:\n{step_yaml}");
         let pipeline: Pipeline = serde_norway::from_str(&raw).unwrap();
@@ -2879,12 +2955,7 @@ mod tests {
         let root = crate::scratch::root(&format!("doctor-live-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        crate::headless::Headless::new(
-            &root,
-            &crate::config::DispatchConfig::default(),
-            root.clone(),
-        )
-        .unwrap()
+        crate::headless::Headless::new(&root, root.clone()).unwrap()
     }
 
     /// `--no-live` skips the row outright, without asking the backend

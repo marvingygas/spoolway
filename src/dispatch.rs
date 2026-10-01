@@ -5267,8 +5267,7 @@ fn ensure_workspace(
                         // own for `Mux::create_workspace` to cut one under —
                         // see `Mux::remove_checkout`, the removal this pairs
                         // with.
-                        let path = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)?
-                            .join(task.id());
+                        let path = crate::mux::worktree_root(&repo.root)?.join(task.id());
                         crate::mux::cut_worktree(&repo.root, &path, &branch, &cut_from)?;
                         // Opened on this exact worktree — the first task
                         // through here gives the project's shared tab a real
@@ -7294,21 +7293,22 @@ mod tests {
         // on demand, so nothing about this fixture depends on `$HOME`.
         let home = root.join(".home");
 
-        // The one thing `home` above does *not* answer for. A worktree root is
-        // read from the config by `crate::mux::worktree_root`, not from
-        // `Repo::home`, and the fallback it takes when the config names none is
-        // `~/.spoolway/<basename>/worktrees` in the real home. A fixture root's
-        // basename carries a fresh process id every run, so that fallback could
-        // never reuse or clean what the last run left: it put one directory per
-        // run in the developer's home and kept it there. Naming a root here is
-        // what stops it, and `no_fixture_cuts_a_worktree_in_the_real_home`
-        // fails if this line goes away.
-        //
-        // A sibling of `root`, not a child: `worktree_root`'s own doc comment
-        // gives the reason a cut checkout stays out of the project checkout,
-        // and a fixture that put one inside would be testing a layout the
-        // product never uses.
-        config.dispatch.worktree_root = sibling(&root, "worktrees").display().to_string();
+        // The one thing `home` above does *not* answer for on its own.
+        // `dispatch.worktree_root` is retired — there is no longer a config
+        // key to point at a scratch sibling directly — so a worktree is cut
+        // wherever `crate::mux::worktree_root` resolves `project_home` to,
+        // and that falls back to `~/.spoolway/<basename>/` in the *real*
+        // home the moment nothing has stamped an id into this fixture's
+        // `.git` (nothing here calls `spoolway init`). A fixture root's
+        // basename carries a fresh process id every run, so that fallback
+        // could never reuse or clean what the last run left: it put one
+        // directory per run in the developer's home and kept it there.
+        // Pinning `$HOME` to a scratch directory for the rest of this
+        // thread — this fixture's own, never restored — is what stops it;
+        // see `crate::platform::test_home::pin`'s own doc for why that is
+        // safe here. `no_fixture_cuts_a_worktree_in_the_real_home` fails if
+        // this line goes away.
+        crate::platform::test_home::pin(&sibling(&root, "home"));
 
         Repo {
             checkout: root.clone(),
@@ -15039,15 +15039,23 @@ mod tests {
     /// clean what the last one made. Two tests here reached that path and left
     /// 945 directories in one developer's home before anybody looked.
     ///
-    /// `fixture` names a root of its own now. This is the test that fails if
-    /// that line is ever removed, rather than the home filling up again in
-    /// silence.
+    /// `fixture` pins `$HOME` to a scratch directory of its own now, for the
+    /// rest of this test's thread — see `crate::platform::test_home::pin`.
+    /// This is the test that fails if that line is ever removed, rather
+    /// than the home filling up again in silence.
     #[test]
     fn no_fixture_cuts_a_worktree_in_the_real_home() {
         let repo = fixture("home-leak-guard");
-        let cut = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).unwrap();
+        let cut = crate::mux::worktree_root(&repo.root).unwrap();
 
-        let real_home = crate::mux::home();
+        // The literal `$HOME` this process was actually started with, not
+        // `crate::mux::home()` — that reads back the very pin this test is
+        // checking `fixture` made, so it would always agree with `cut` and
+        // prove nothing.
+        let real_home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .expect("the real $HOME must be set for this process");
         assert!(
             !cut.starts_with(real_home.join(".spoolway")),
             "a fixture would cut worktrees in the real home: {}",
@@ -15081,7 +15089,7 @@ mod tests {
         // sibling this lands in, and
         // `no_fixture_cuts_a_worktree_in_the_real_home` is what keeps it out
         // of the real `~/.spoolway/`.
-        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)
+        let worktree = crate::mux::worktree_root(&repo.root)
             .unwrap()
             .join("second");
         let _ = std::fs::remove_dir_all(&worktree);
@@ -15145,7 +15153,7 @@ mod tests {
     #[test]
     fn a_dependency_that_cannot_be_found_fails_by_name_not_at_the_worktree_cut() {
         let repo = fixture("dep-not-found");
-        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)
+        let worktree = crate::mux::worktree_root(&repo.root)
             .unwrap()
             .join("second");
         let _ = std::fs::remove_dir_all(&worktree);

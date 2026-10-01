@@ -59,13 +59,6 @@ pub const REFERENCE: &[Reference] = &[
                     tab, or a row of its own per task.",
     },
     Reference {
-        key: "dispatch.worktree_root",
-        values: "<path>",
-        default: "(blank)",
-        sentence: "Where a dispatched task's worktree is cut, whatever the backend; \
-                    blank means `~/.spoolway/<project>/worktrees`.",
-    },
-    Reference {
         key: "dispatch.lane_quiet",
         values: "<duration>",
         default: "15m",
@@ -1020,6 +1013,18 @@ mod tests {
     #[test]
     fn tmux_mode_is_refused_rather_than_resolved() {
         let err = get(&Config::default(), "dispatch.tmux_mode").unwrap_err();
+        assert!(err.to_string().contains("no config key"), "{err}");
+    }
+
+    /// `dispatch.worktree_root` retired along with the setting it named —
+    /// every worktree lands under the project home now, with no way to
+    /// move it. The field stays on `DispatchConfig` so a config still
+    /// holding it parses — see [`crate::config::DispatchConfig`] — but it
+    /// left `REFERENCE`, so `get`/`set` never resolve it and a person naming
+    /// it is told so rather than handed a value nothing reads.
+    #[test]
+    fn worktree_root_is_refused_rather_than_resolved() {
+        let err = get(&Config::default(), "dispatch.worktree_root").unwrap_err();
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 

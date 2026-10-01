@@ -11,7 +11,6 @@
 # to report on, and not so much that the suite is a benchmark of the model.
 #
 # covers: agents.<profile>.concurrency — one slot admits one lane and the pass says what waits
-# covers: dispatch.worktree_root — the task`s worktree is cut there, and is gone after cleanup
 # covers: step.on_pass — the route a task took is on the record, step by step
 # covers: dispatch.priority — an open group with no ready work of its own no longer holds slots from never-run groups
 set -uo pipefail
@@ -33,7 +32,7 @@ new_forge "$LIVE/forge"
 install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
-configure_project plan/live "$LIVE/worktrees"
+configure_project plan/live
 publish plan/live
 
 BODY="$LIVE/body.md"
@@ -56,7 +55,7 @@ else bad "the change is handed over as a pushed branch and a pull request"; ls "
 if stacked_on land plan/live; then ok "and its pull request targets the branch it sits on"
 else bad "and its pull request targets the branch it sits on"; cat "$FORGE"/prs/[0-9]* | sed 's/^/        /'; fi
 
-if [ -e "$LIVE/worktrees/task-land" ]; then bad "the task's worktree is gone after cleanup"
+if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-land" ]; then bad "the task's worktree is gone after cleanup"
 else ok "the task's worktree is gone after cleanup"; fi
 if git rev-parse --verify -q task/land >/dev/null; then bad "the task's branch is gone after cleanup"
 else ok "the task's branch is gone after cleanup"; fi

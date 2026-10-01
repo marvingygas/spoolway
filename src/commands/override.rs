@@ -801,7 +801,7 @@ mod tests {
             .unwrap();
             write_atomic(
                 &crate::overrides::config_patch_path(&dir),
-                "[dispatch]\nworktree_root = \"/patched\"\n",
+                "[unattended]\nblocked_agent = \"patched\"\n",
             )
             .unwrap();
 
@@ -817,7 +817,7 @@ mod tests {
             assert_eq!(rows[1].kind, "whole file");
             assert_eq!(rows[1].overrides, "—");
             assert_eq!(rows[2].kind, "patch");
-            assert_eq!(rows[2].overrides, "dispatch.worktree_root");
+            assert_eq!(rows[2].overrides, "unattended.blocked_agent");
         });
     }
 
@@ -1162,14 +1162,14 @@ mod tests {
         with_repo("promote-config", |repo| {
             write_atomic(
                 &crate::overrides::config_patch_path(&repo.overrides_dir()),
-                "[dispatch]\nworktree_root = \"/promoted\"\n",
+                "[unattended]\nblocked_agent = \"promoted\"\n",
             )
             .unwrap();
 
             override_promote(repo, "config.toml").unwrap();
 
             let tracked_config = std::fs::read_to_string(Config::path_in(&repo.root)).unwrap();
-            assert!(tracked_config.contains("worktree_root = \"/promoted\""));
+            assert!(tracked_config.contains("blocked_agent = \"promoted\""));
             assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).is_file());
         });
     }

@@ -1798,25 +1798,16 @@ fn migrate_legacy_home(root: &Path, legacy: &Path) -> Result<PathBuf> {
     // Every worktree cut under the legacy home, by its own current absolute
     // path — read before anything moves, since after the rename below
     // `legacy` no longer resolves to anything a `git worktree list` call
-    // could look up. Only the plain default location is ever a *worktree*
-    // of this home rather than an unrelated directory a person happened to
-    // create beside `queue/`: a configured `dispatch.worktree_root` is an
-    // absolute path of its own, outside `legacy` entirely, and never moves
-    // with it — nothing under it needs repairing at all.
-    let default_worktrees = !Config::load_tracked(root)
-        .map(|config| !config.dispatch.worktree_root.trim().is_empty())
-        .unwrap_or(false);
-    let moved_worktrees: Vec<PathBuf> = if default_worktrees {
-        std::fs::read_dir(legacy.join("worktrees"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // could look up. `dispatch.worktree_root` is retired — there is no
+    // longer a configured root that could sit outside `legacy` and need no
+    // repair — so this is always the plain default location.
+    let moved_worktrees: Vec<PathBuf> = std::fs::read_dir(legacy.join("worktrees"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
 
     let moved = rename_onto_home(legacy, &home)?;
 
@@ -1882,7 +1873,7 @@ fn migrate_legacy_home(root: &Path, legacy: &Path) -> Result<PathBuf> {
         println!("  moved  {}  ->  {}/", legacy.display(), home.display());
         println!(
             "         {}",
-            crate::commands::init::home_inventory_line(root, &home)
+            crate::commands::init::home_inventory_line(&home)
         );
     }
     Ok(home)

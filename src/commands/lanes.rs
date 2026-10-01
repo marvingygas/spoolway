@@ -344,9 +344,7 @@ mod tests {
     fn lane_m_refuses_from_inside_a_lanes_own_environment() {
         let repo = fixture("lane-m-in-lane");
         let pipelines = Pipelines::builtin();
-        let headless =
-            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir())
-                .unwrap();
+        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
 
         let err = lane_cmd(
             &repo,

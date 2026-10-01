@@ -1411,7 +1411,7 @@ agent: pi
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
         std::fs::write(
             Config::path_in(&root),
-            "[dispatch]\n# chosen for this project\nworktree_root = \"/one\"\n",
+            "[unattended]\n# chosen for this project\nblocked_agent = \"one\"\n",
         )
         .unwrap();
 
@@ -1424,19 +1424,19 @@ agent: pi
             std::fs::create_dir_all(&overrides).unwrap();
             std::fs::write(
                 config_patch_path(&overrides),
-                "[dispatch]\nworktree_root = \"/two\"\n",
+                "[unattended]\nblocked_agent = \"two\"\n",
             )
             .unwrap();
 
             let changes = promote_config_patch(&root).unwrap();
             assert_eq!(
                 changes,
-                vec![("dispatch.worktree_root".to_string(), "/two".to_string())]
+                vec![("unattended.blocked_agent".to_string(), "two".to_string())]
             );
 
             let written = std::fs::read_to_string(Config::path_in(&root)).unwrap();
             assert!(written.contains("# chosen for this project"));
-            assert!(written.contains("worktree_root = \"/two\""));
+            assert!(written.contains("blocked_agent = \"two\""));
         });
     }
 

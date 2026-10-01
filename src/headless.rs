@@ -47,7 +47,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::config::DispatchConfig;
 use crate::mux::{
     Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree, worktree_root,
 };
@@ -126,10 +125,10 @@ struct Record {
 impl Headless {
     /// `lane_dir` is where lane records and logs live —
     /// [`crate::repo::Repo::headless_dir`] for every real caller.
-    pub fn new(root: &Path, config: &DispatchConfig, lane_dir: PathBuf) -> Result<Headless> {
+    pub fn new(root: &Path, lane_dir: PathBuf) -> Result<Headless> {
         Ok(Headless {
             root: root.to_path_buf(),
-            worktree_root: worktree_root(root, config)?,
+            worktree_root: worktree_root(root)?,
             lanes_dir: lane_dir,
         })
     }
@@ -919,7 +918,6 @@ fn headless_kinds() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mux::home;
 
     /// A lane record shaped exactly as `Headless` itself writes one, at
     /// `dir/<name>.json`, naming this test's own pid — indisputably alive
@@ -1013,14 +1011,19 @@ mod tests {
             let bin = root.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
 
-            let mut config = DispatchConfig::default();
-            config.worktree_root = root.join("worktrees").display().to_string();
+            // No `dispatch.worktree_root` left to point this at the scratch
+            // root directly — the worktree root now always falls out of
+            // `project_home`, which reads `$HOME`. Standing this thread's
+            // `HOME` on the scratch root for just the `new` call keeps this
+            // fixture's worktrees under its own directory and away from
+            // every other test's, the same way `mux`'s own home-mode test
+            // does.
+            let mux = crate::platform::test_home::with_home(&root, || {
+                Headless::new(&root, root.join(LANE_DIR))
+            })
+            .unwrap();
 
-            Fixture {
-                mux: Headless::new(&root, &config, root.join(LANE_DIR)).unwrap(),
-                root,
-                bin,
-            }
+            Fixture { mux, root, bin }
         }
 
         /// Put a script on the lane's PATH under the name of a real agent kind,
@@ -1533,7 +1536,7 @@ mod tests {
     #[test]
     fn worktrees_are_cut_outside_the_project() {
         let root = Path::new("/home/x/dev/myproject");
-        let default = worktree_root(root, &DispatchConfig::default()).unwrap();
+        let default = worktree_root(root).unwrap();
         assert!(
             !default.starts_with(root),
             "worktrees landed inside the checkout: {}",
@@ -1543,13 +1546,6 @@ mod tests {
             default.ends_with("myproject/worktrees"),
             "{}",
             default.display()
-        );
-
-        let mut config = DispatchConfig::default();
-        config.worktree_root = "~/elsewhere".into();
-        assert_eq!(
-            worktree_root(root, &config).unwrap(),
-            home().join("elsewhere")
         );
     }
 

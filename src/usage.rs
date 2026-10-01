@@ -2497,7 +2497,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
     // covers) is still found this way, even once removed: this is a string
     // prefix test against the transcript's own recorded `cwd`, never a check
     // that the directory still exists.
-    let wt_root = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).ok();
+    let wt_root = crate::mux::worktree_root(&repo.root).ok();
 
     let mut lane_sessions: HashSet<&str> = HashSet::new();
     // The most recent line of each hand session in a task's worktree — the
@@ -2727,7 +2727,7 @@ fn task_worktree_roots(repo: &Repo) -> Vec<(PathBuf, String)> {
                 out.push((recorded, task.id().to_string()));
                 continue;
             }
-            let Ok(root) = crate::mux::worktree_root(&repo.root, &repo.config.dispatch) else {
+            let Ok(root) = crate::mux::worktree_root(&repo.root) else {
                 continue;
             };
             let branch = task
@@ -6082,7 +6082,7 @@ mod tests {
         let home = crate::scratch::root("dir-sweep-wt-root-orphan");
         std::fs::create_dir_all(&home).unwrap();
         let wt_root = crate::platform::test_home::with_home(&home, || {
-            crate::mux::worktree_root(&repo.root, &repo.config.dispatch).expect("a worktree root")
+            crate::mux::worktree_root(&repo.root).expect("a worktree root")
         });
         // No task recorded this directory — it stands for one already
         // deleted, or cut before this project used the current naming.

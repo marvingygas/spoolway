@@ -60,7 +60,7 @@ SOLUTIONS="$LIVE/solutions"
 # this suite installs its agents with a solutions directory at all.
 install_agents "$LIVE/bin" "$CTL" "$SOLUTIONS"
 new_repo "$LIVE/proj"
-configure_project plan/board "$LIVE/worktrees"
+configure_project plan/board
 
 BODY="$LIVE/body.md"
 task_body "$BODY"

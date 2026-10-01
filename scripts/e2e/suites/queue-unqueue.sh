@@ -28,7 +28,7 @@ CTL="$LIVE/ctl"
 
 install_agents "$LIVE/bin" "$CTL"
 new_repo "$LIVE/proj"
-configure_project plan/unqueue "$LIVE/worktrees"
+configure_project plan/unqueue
 
 BODY="$LIVE/body.md"
 task_body "$BODY"

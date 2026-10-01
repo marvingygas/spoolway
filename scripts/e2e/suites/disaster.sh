@@ -33,7 +33,7 @@ CTL="$LIVE/ctl"
 
 install_agents "$LIVE/bin" "$CTL"
 new_repo "$LIVE/proj"
-configure_project plan/disaster "$LIVE/worktrees"
+configure_project plan/disaster
 
 BODY="$LIVE/body.md"
 task_body "$BODY"

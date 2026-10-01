@@ -139,7 +139,7 @@ new_repo "$LIVE/proj"
 # `SPOOLWAY_PROJECT_HOME` (still the pre-init, id-less guess at this point)
 # is no help either; glob the real family instead.
 rm -rf "$HOME"/.spoolway/proj-*
-configure_project plan/live "$LIVE/worktrees" --take-over
+configure_project plan/live --take-over
 publish plan/live
 
 # A real lane, so it needs to be able to run its tools without a person to

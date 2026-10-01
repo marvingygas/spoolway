@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.6.x to 0.7.x | `dispatch.worktree_root` is gone; every worktree lands under the project home. | Delete the key, or let `spoolway sync` drop it and name the old directory when it held a path. |
 | 0.5.x to 0.6.x | Retired pipeline shapes are migrated on update; `loop:` counts arrivals; installed skills are always rewritten; `/spoolway-doctor` and `spoolway spend` are gone; `spoolway eval` flags change. | Open spoolway, apply the update, read what it migrated, and update scripts that call `spend` or the removed `eval` flags. |
 | 0.4.x to 0.5.x | `sync` takes over from `update`; `dispatch.interval`, `dispatch.default_pipeline` and the tmux backend are gone; tasks name their own `pipeline:` and `base:`. | Delete the retired keys, set `pipeline:` and `base:` on every task, and apply the update. |
 | 0.3.x to 0.4.x | Retired config, template and pipeline-generation features are removed. | Remove the retired entries described below. |
@@ -37,6 +38,14 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.6.x to 0.7.x
+
+- `dispatch.worktree_root` is retired: every dispatched worktree now lands under the project
+  home, with no setting to move it. Delete any `dispatch.worktree_root = ...` line from
+  `.spoolway/config.toml`; a config that still sets it loads, and `spoolway sync` drops the
+  key on the next save, naming the old directory when it held a real path. Worktrees already
+  cut there are yours to remove.
 
 ## 0.5.x to 0.6.x
 

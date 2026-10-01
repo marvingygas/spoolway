@@ -78,7 +78,7 @@ new_forge "$LIVE/forge"
 install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
-configure_project plan/live "$LIVE/worktrees"
+configure_project plan/live
 publish plan/live
 
 # ---------------------------------------------------------- model price refresh
@@ -1050,7 +1050,7 @@ WT="$LIVE/worktrees/config-wt"
 must "cutting a worktree for a config of its own" \
   git worktree add -q -b task/config-diff "$WT" plan/live
 must "giving the worktree's own config a value the project's does not have" \
-  sed -i 's|^worktree_root = .*|worktree_root = "from-the-worktree"|' \
+  sed -i 's|^blocked_agent = .*|blocked_agent = "from-the-worktree"|' \
   "$WT/.spoolway/config.toml"
 must "committing the worktree's own config" \
   git -C "$WT" add .spoolway/config.toml
@@ -1058,22 +1058,22 @@ must "committing the worktree's own config" \
   git -C "$WT" commit -qm "e2e: a config value only this worktree has"
 
 says "config get in the worktree reads its own value" "from-the-worktree" \
-  "$SPOOLWAY" -C "$WT" config get dispatch.worktree_root
+  "$SPOOLWAY" -C "$WT" config get unattended.blocked_agent
 silent_about "config get in the main checkout does not see it" "from-the-worktree" \
-  "$SPOOLWAY" config get dispatch.worktree_root
+  "$SPOOLWAY" config get unattended.blocked_agent
 says "config path in the worktree names its own setup folder, not the project's" \
   "setup:     $WT/.spoolway" "$SPOOLWAY" -C "$WT" config path
 
 BEFORE_ROOT=$(cat .spoolway/config.toml)
 BEFORE_WT=$(cat "$WT/.spoolway/config.toml")
-OUT=$("$SPOOLWAY" -C "$WT" config set dispatch.worktree_root "should-not-land" 2>&1)
+OUT=$("$SPOOLWAY" -C "$WT" config set unattended.blocked_agent "should-not-land" 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then ok "config set in the worktree exits non-zero"
 else bad "config set in the worktree exits non-zero"; sed 's/^/        /' <<<"$OUT"; fi
 if grep -qF "the dispatcher reads the project's config, not this worktree's." <<<"$OUT"; then
   ok "and says why"
 else bad "and says why"; sed 's/^/        /' <<<"$OUT"; fi
-if grep -qF -- "-C $PROJECT config set dispatch.worktree_root should-not-land" <<<"$OUT"; then
+if grep -qF -- "-C $PROJECT config set unattended.blocked_agent should-not-land" <<<"$OUT"; then
   ok "and names the exact -C invocation that would write to the project"
 else bad "and names the exact -C invocation that would write to the project"; sed 's/^/        /' <<<"$OUT"; fi
 if [ "$(cat .spoolway/config.toml)" = "$BEFORE_ROOT" ]; then
