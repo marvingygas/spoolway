@@ -554,14 +554,18 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/$LONG_ID.md"
 # compiled into the binary; an empty one was already a hard `no pipelines
 # defined` error. Both now reach that same error, naming the directory, so
 # the broken state is visible where it happens rather than surfacing three
-# commands later at dispatch on a `PROMPT.md` that was never written.
+# commands later at dispatch on a `PROMPT.md` that was never written. A
+# repo-mode project also reads private pipelines from its home's `local/`,
+# so the error names both places a pipeline could have come from.
 mv .spoolway/pipelines "$LIVE/pipelines.bak"
 refuses "task contract with no pipelines/ reports the shared error" \
-  ".spoolway/pipelines: no pipelines defined" "$SPOOLWAY" task contract
+  "\.spoolway/pipelines or .*/local/pipelines: no pipelines defined" \
+  "$SPOOLWAY" task contract
 
 DOCTOR_OUT=$("$SPOOLWAY" doctor 2>&1)
 if grep -qF "FAIL  pipelines load: in " <<<"$DOCTOR_OUT" \
-  && grep -qF ".spoolway/pipelines: no pipelines defined" <<<"$DOCTOR_OUT"; then
+  && grep -q "\.spoolway/pipelines or .*/local/pipelines: no pipelines defined" \
+    <<<"$DOCTOR_OUT"; then
   ok "doctor's own pipelines check fails the same way, naming the same directory"
 else
   bad "doctor's own pipelines check fails the same way, naming the same directory"
