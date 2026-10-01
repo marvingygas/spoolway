@@ -347,6 +347,15 @@ pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> 
     write_planned(&provider.plan(root), provider.caveat(), force)
 }
 
+/// The one proof `sync` trusts that a provider's user-level folder is
+/// spoolway's to manage — written by [`install_user`] alongside the skill
+/// files themselves, directly under [`Provider::user_skills_dir`]. No
+/// release before #576 wrote anything at user level, so a folder there with
+/// no marker is a person's own, whatever it is named: a planned file
+/// existing, or a directory sharing a retired skill's name, proves nothing
+/// on its own. Only its presence is read; the contents carry no meaning.
+pub const USER_INSTALL_MARKER: &str = ".installed-by-spoolway";
+
 /// [`install`], into the provider's user-level folder rather than a
 /// project's — a home-mode `init`, and `spoolway install --user`. Refused
 /// when there is no home directory to install under, rather than writing a
@@ -363,7 +372,17 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     };
     // No caveat: pi's is about trusting a project before it loads that
     // project's skills, and a user folder is loaded without asking.
-    write_planned(&provider.plan_user(&home), None, force)
+    let outcome = write_planned(&provider.plan_user(&home), None, force)?;
+    // Written every time, force or not: the marker is not a skill file a
+    // person could have edited, just proof this command ran here, and a
+    // `--user` install that never writes it would look, to `sync`, exactly
+    // like a folder it never touched.
+    write_atomic(
+        &provider.user_skills_dir(&home).join(USER_INSTALL_MARKER),
+        "this folder is kept current by `spoolway sync`; delete this file to make spoolway \
+         leave it alone\n",
+    )?;
+    Ok(outcome)
 }
 
 /// The home directory user-level skills are installed under and synced in.
@@ -498,7 +517,11 @@ mod tests {
     }
 
     /// `install --user` writes the same files a project install would, under
-    /// the user folder of the home it runs in, and nothing anywhere else.
+    /// the user folder of the home it runs in, and nothing anywhere else —
+    /// plus the marker `sync::user_skills` reads back to know this folder is
+    /// spoolway's to manage. A build that stopped writing that marker would
+    /// pass every other test here while `sync` silently stopped refreshing
+    /// every user-level install.
     #[test]
     fn install_user_writes_every_skill_under_the_user_folder() {
         let home = crate::scratch::root("install-user");
@@ -510,6 +533,13 @@ mod tests {
         for planned in Provider::Codex.plan_user(&home) {
             assert!(planned.path.is_file(), "{} missing", planned.path.display());
         }
+        assert!(
+            Provider::Codex
+                .user_skills_dir(&home)
+                .join(USER_INSTALL_MARKER)
+                .is_file(),
+            "install_user must leave sync's own marker behind"
+        );
         assert!(!home.join(".claude").exists());
         let _ = std::fs::remove_dir_all(&home);
     }

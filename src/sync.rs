@@ -1020,7 +1020,9 @@ fn provider_installed(
 /// Whether a provider's skills are installed in the one folder `dir`, whose
 /// files `planned` lists: any file this binary ships already there, or a
 /// skill directory it has since retired. [`provider_installed`] asks it of a
-/// project's folder, and [`user_skills`] of the user's.
+/// project's folder only — a user-level one is never something a release
+/// before #576 could have left a retired-name trace in, so [`user_skills`]
+/// checks its own marker instead; see that function's doc.
 fn installed_at(dir: &Path, planned: &[crate::install::Planned]) -> bool {
     planned.iter().any(|file| file.path.exists())
         || crate::install::RETIRED_SKILLS
@@ -1034,8 +1036,20 @@ fn installed_at(dir: &Path, planned: &[crate::install::Planned]) -> bool {
 /// directory, and — inside the test binary — unless a test set a scratch
 /// one; see [`crate::install::user_home`].
 ///
-/// Read by [`skills`], [`retired_skills`] and [`text_fingerprint`] alike, so
-/// the three can never disagree about which user folders count.
+/// Unlike [`installed_at`], a planned file on disk proves nothing here: no
+/// release before #576 ever installed skills at user level, so a folder
+/// there belongs to the person who made it unless
+/// [`crate::install::USER_INSTALL_MARKER`] says `install_user` wrote it.
+/// Checking the marker alone, rather than inferring installation from what
+/// is on disk the way a project folder's own check does, is what keeps
+/// [`skills`] from writing spoolway's set into a folder nobody asked for it
+/// in. [`retired_skills`] does not call this at all, marker or not: both
+/// retired names predate #576, so a retired-name directory at user level
+/// can never be spoolway's own rename leftover — see that function's own
+/// comment.
+///
+/// Read by [`skills`] and [`text_fingerprint`] alike, so the two can never
+/// disagree about which user folders count.
 fn user_skills() -> Vec<(PathBuf, Vec<crate::install::Planned>)> {
     let Some(home) = crate::install::user_home() else {
         return Vec::new();
@@ -1043,7 +1057,7 @@ fn user_skills() -> Vec<(PathBuf, Vec<crate::install::Planned>)> {
     <crate::cli::Provider as clap::ValueEnum>::value_variants()
         .iter()
         .map(|provider| (provider.user_skills_dir(&home), provider.plan_user(&home)))
-        .filter(|(dir, planned)| installed_at(dir, planned))
+        .filter(|(dir, _)| dir.join(crate::install::USER_INSTALL_MARKER).is_file())
         .collect()
 }
 
@@ -1184,11 +1198,14 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
 /// touched: this only ever joins a provider's skills directory onto a name
 /// this project once shipped and no longer does.
 fn retired_skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
-    // Every project folder, then every user folder [`user_skills`] counts.
+    // Project folders only. Both retired names predate #576 — the release
+    // that first wrote anything under a user folder at all — so a
+    // retired-name directory there can never be a rename this binary left
+    // behind; it is always a person's own, marker or not, and must never be
+    // removed.
     let dirs = <crate::cli::Provider as clap::ValueEnum>::value_variants()
         .iter()
-        .map(|provider| provider.skills_dir(&repo.checkout))
-        .chain(user_skills().into_iter().map(|(dir, _)| dir));
+        .map(|provider| provider.skills_dir(&repo.checkout));
     for dir in dirs {
         for (name, why) in crate::install::RETIRED_SKILLS {
             let stale = dir.join(name);
@@ -2505,7 +2522,12 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let planned = crate::cli::Provider::Claude.plan_user(&home);
         let (stale, missing) = (&planned[0], &planned[planned.len() - 1]);
-        std::fs::create_dir_all(stale.path.parent().unwrap()).unwrap();
+        // A real `install --user`, which is what actually leaves the marker
+        // `user_skills` looks for — not a hand-written stand-in for it.
+        crate::platform::test_home::with_home(&home, || {
+            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
+        });
+        std::fs::remove_file(&missing.path).unwrap();
         std::fs::write(&stale.path, "an older copy").unwrap();
 
         let mut outcomes = Vec::new();
@@ -2527,6 +2549,83 @@ mod tests {
             "user-level paths are named with ~: {lines:?}"
         );
         assert!(!crate::cli::Provider::Pi.user_skills_dir(&home).exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A person's own folder at user level, never written by `spoolway
+    /// install --user`, happens to share a name with a skill spoolway has
+    /// since retired. `sync` must leave it alone and must not install
+    /// spoolway's skills there either — nobody asked for that. Before the
+    /// fix, `installed_at` counts the retired-named folder as proof the
+    /// provider is installed at user level, so `retired_skills` deletes the
+    /// folder (and everything a person put inside it) and `skills` then
+    /// writes spoolway's whole current set into that same directory.
+    #[test]
+    fn sync_leaves_a_hand_made_user_level_folder_with_a_retired_name_alone() {
+        let repo = fixture("skills-user-level");
+        let home = crate::scratch::root("sync-user-home-owned-only");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        // Nobody ever ran `spoolway install --user` here: there is no
+        // planned file on disk at all. The only thing in this user-level
+        // folder is a directory a person wrote by hand that happens to
+        // share a name with a skill spoolway has since retired.
+        let claude_dir = crate::cli::Provider::Claude.user_skills_dir(&home);
+        let owned = claude_dir.join(crate::install::RETIRED_SKILLS[0].0);
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::write(owned.join("notes.md"), "a person's own notes\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        crate::platform::test_home::with_home(&home, || {
+            skills(&repo, &args(), &mut outcomes).unwrap();
+            retired_skills(&repo, &args(), &mut outcomes).unwrap();
+        });
+
+        assert!(
+            owned.join("notes.md").is_file(),
+            "a folder spoolway never installed must never be removed, \
+             retired name or not"
+        );
+        assert!(
+            !claude_dir.join("spoolway-plan").exists(),
+            "sync must not install skills at user level when nobody ran \
+             `install --user` there"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The marker alone must not be read as blanket permission to delete
+    /// anything under a user folder: a real `install --user` ran here, so
+    /// the folder is spoolway's to refresh, but the retired-name directory
+    /// sitting beside the installed skills still predates #576 and is still
+    /// a person's own. Before this fix, `retired_skills` chained every
+    /// marked user folder into its removal loop and deleted it anyway.
+    #[test]
+    fn a_marked_user_folder_still_keeps_a_hand_made_retired_name_directory() {
+        let repo = fixture("skills-user-level");
+        let home = crate::scratch::root("sync-user-home-marked-and-owned");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            crate::install::install_user(crate::cli::Provider::Claude, false).unwrap();
+        });
+        let claude_dir = crate::cli::Provider::Claude.user_skills_dir(&home);
+        let owned = claude_dir.join(crate::install::RETIRED_SKILLS[0].0);
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::write(owned.join("notes.md"), "a person's own notes\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        crate::platform::test_home::with_home(&home, || {
+            retired_skills(&repo, &args(), &mut outcomes).unwrap();
+        });
+
+        assert!(
+            owned.join("notes.md").is_file(),
+            "a retired-name directory predating #576 must never be removed \
+             from a user folder, marker or not"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
