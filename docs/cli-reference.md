@@ -971,13 +971,13 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 |---|---|---|
 | `--setup <repo\|home>` | `repo` | Answer `Where should this project's setup live?` without asking |
 | `--workspace <NAME\|new>` | | Answer `Which workspace should this checkout use?` without asking. Implies `--setup home`. `new` starts a workspace; a name joins one that already exists |
-| `--provider <claude\|codex>` | `claude` | The coding agent whose skills are installed and which becomes the project's agent profile |
+| `--provider <claude\|codex\|pi>` | the project's own provider, or `claude` on a fresh one | The coding agent whose skills are installed and which becomes the project's agent profile |
 | `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts, task templates and ticket templates. Also the answer with nobody to ask |
 | `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
-| `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira |
+| `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |
 | `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
-| `--force` | | Overwrite existing config, pipeline and prompt files |
+| `--force` | | Overwrite existing config, pipeline and prompt files. In a home-mode clone, names the other clones that share that config before rewriting it |
 | `--adopt <NAME>` | | Bind this checkout to the home already at `~/.spoolway/<NAME>/` and stamp it with that home's id. `NAME` is the home's directory name, such as `api-8w4r2c`. Prints what that home already holds |
 | `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
 | `--take-over` | | Accepted and ignored |
@@ -988,10 +988,13 @@ a repo-mode home: it rewrites that `dispatcher` clone entry's path, in the named
 Nothing is stamped into `.git` either way. This is the exact command the "no spoolway project
 found" error prints for a clone whose folder moved. See [Home mode](concepts.md#home-mode).
 
-Run again in a project that already has a config, it installs skills, restores any example file
-that went missing, and otherwise changes nothing. Hook scripts are written only when a tracker
-is chosen, whichever one, so switching trackers later is a `spoolway config set
-issue_tracking.hook` away. See [Installation and setup](installation.md#scaffolding-a-project).
+Run again in a project that already has a config, it installs skills for the project's own
+configured provider, restores any example file that went missing, and otherwise changes
+nothing: with no `--provider`, it keeps the provider already configured rather than falling
+back to `claude`, and a `--tracker` with no `--project-key` keeps the project's existing key
+instead of blanking it. Hook scripts are written only when a tracker is chosen, whichever one,
+so switching trackers later is a `spoolway config set issue_tracking.hook` away. See
+[Installation and setup](installation.md#scaffolding-a-project).
 
 ### `spoolway workspace move <to>`
 

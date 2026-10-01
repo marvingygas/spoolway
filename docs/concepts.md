@@ -71,6 +71,9 @@ Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place
 `~/.spoolway/<label>-<id>/` a repo-mode project uses. Nothing is read from or written to the
 checkout's own `.git`.
 
+`spoolway init --force` in one clone rewrites that shared `config/` for every clone in the
+workspace, so it names the other clones that share it before rewriting it.
+
 A checkout that has both a tracked `.spoolway/` and a clone entry in some workspace is refused.
 The error names both paths.
 

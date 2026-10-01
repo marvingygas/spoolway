@@ -1257,8 +1257,9 @@ impl Default for AgentProfile {
 
 impl AgentProfile {
     /// The built-in profile definitions. Fresh-project init retains only the
-    /// selected Claude or Codex row; defaults kept in memory still include Pi
-    /// for older projects and test/runtime assembly.
+    /// selected provider's row, whichever of Claude, Codex or Pi it is; the
+    /// defaults kept in memory still carry all three for test and runtime
+    /// assembly.
     ///
     /// None carries a `concurrency`: a fresh project does not know the
     /// account or model capacity it would need to assert one. See the field's

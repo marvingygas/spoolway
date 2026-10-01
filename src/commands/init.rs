@@ -46,7 +46,7 @@ impl Answers {
         // is what makes these questions worth asking.
         let fresh = args.force || !Config::path_in(root).exists();
 
-        let provider = Self::provider(args)?;
+        let provider = Self::provider(root, args, fresh)?;
         let examples = Self::examples(root, args, fresh)?;
 
         // Tracker and project key are asked, or answered outright, whenever a
@@ -73,7 +73,7 @@ impl Answers {
             });
         }
 
-        match Self::tracker(args, fresh)? {
+        match Self::tracker(root, args, fresh)? {
             Some((tracker, project_key)) => Ok(Self {
                 provider,
                 examples,
@@ -108,9 +108,14 @@ impl Answers {
     /// already chosen — its examples, its tracker — so asking either again
     /// would take an answer this run has nowhere to put, and writing one into
     /// the shared `config/` would change every other clone's setup from here.
-    fn joining(args: &InitArgs) -> Result<Self> {
+    fn joining(root: &Path, args: &InitArgs) -> Result<Self> {
         Ok(Self {
-            provider: Self::provider(args)?,
+            // A checkout joining a workspace has no own-checkout config to
+            // read an existing provider off — the workspace's shared config
+            // lives elsewhere — so this is `fresh` from `provider`'s point of
+            // view: nobody to ask falls to the menu's default, as it always
+            // did.
+            provider: Self::provider(root, args, true)?,
             examples: false,
             tracker: Tracker::None,
             project_key: String::new(),
@@ -118,23 +123,55 @@ impl Answers {
         })
     }
 
-    /// The coding agent: `--provider`, or the menu.
-    fn provider(args: &InitArgs) -> Result<Provider> {
-        Ok(match args.provider {
-            Some(provider) => provider,
-            None => {
-                // Straight off clap's own list, so the menu and `--provider`
-                // cannot come to offer different things. Names alone, with no
-                // note beside them, as the mockup draws it.
-                let providers = <PlanningAgent as clap::ValueEnum>::value_variants();
-                let menu: Vec<(&str, &str)> = providers
-                    .iter()
-                    .map(|provider| (provider.name(), ""))
-                    .collect();
-                providers[crate::ask::choose("Select your agent", &menu, 0)?]
-            }
+    /// The coding agent: `--provider`, or the menu — except on an established
+    /// project, which prefers the provider it already has over the menu's
+    /// first entry.
+    ///
+    /// A repeat `init` with no `--provider` is how a project restores a
+    /// missing `pipelines/` folder (see [`Answers::examples`]), and with
+    /// nobody to answer the menu it used to fall to the menu's first entry,
+    /// `claude`, restoring claude's pipelines — and `fill`'s skills install —
+    /// onto a project set up for codex. `--provider` is checked first and
+    /// always wins; failing that, with nobody to ask, the existing provider
+    /// is taken outright, and with a person at the terminal it is only the
+    /// menu's default, highlighted but not forced, so a person can still
+    /// pick a different provider to add its skills.
+    ///
+    /// The existing provider is read off `config.unattended.blocked_agent`
+    /// rather than `config.agents`' own keys, because that is the one field
+    /// `init` writes to name the project's chosen profile (below, where
+    /// `profile` is bound) — `config.agents` itself is free-form and a
+    /// project may have added more profiles since. If the unblocker has
+    /// since been pointed at a different or custom profile by hand, this
+    /// reads that instead and falls back to the menu's default, `claude`,
+    /// the same as a project with no provider configured at all.
+    fn provider(root: &Path, args: &InitArgs, fresh: bool) -> Result<Provider> {
+        if let Some(provider) = args.provider {
+            return Ok(provider.provider());
         }
-        .provider())
+        let existing = if fresh {
+            None
+        } else {
+            Config::load(root).ok().and_then(|config| {
+                <PlanningAgent as clap::ValueEnum>::from_str(&config.unattended.blocked_agent, true)
+                    .ok()
+            })
+        };
+        if !crate::ask::interactive() {
+            return Ok(existing.unwrap_or(PlanningAgent::Claude).provider());
+        }
+        // Straight off clap's own list, so the menu and `--provider` cannot
+        // come to offer different things. Names alone, with no note beside
+        // them, as the mockup draws it.
+        let providers = <PlanningAgent as clap::ValueEnum>::value_variants();
+        let menu: Vec<(&str, &str)> = providers
+            .iter()
+            .map(|provider| (provider.name(), ""))
+            .collect();
+        let default = existing
+            .and_then(|agent| providers.iter().position(|candidate| *candidate == agent))
+            .unwrap_or(0);
+        Ok(providers[crate::ask::choose("Select your agent", &menu, default)?].provider())
     }
 
     /// Whether to place the example setup: the flags first, then — on a fresh
@@ -185,7 +222,7 @@ impl Answers {
     /// is the menu's default: a script with nobody to ask gets the same "no
     /// issue tracking" behaviour a project had before this existed, not a
     /// `gh` hook nobody asked for.
-    fn tracker(args: &InitArgs, fresh: bool) -> Result<Option<(Tracker, String)>> {
+    fn tracker(root: &Path, args: &InitArgs, fresh: bool) -> Result<Option<(Tracker, String)>> {
         let tracker = match args.tracker.as_deref() {
             // A value answers outright — `--tracker github` — parsed by the
             // same case-insensitive rule clap's own `value_enum` uses, since
@@ -245,11 +282,41 @@ impl Answers {
 
         let project_key = match &args.project_key {
             Some(key) => key.clone(),
-            None => crate::ask::line(
-                "Which project does it file into?",
-                "owner/repo for github, project key for jira",
-            )?
-            .unwrap_or_default(),
+            // No answer on the line — either there was nobody to ask, or a
+            // person answered with nothing. Either way there is no new key,
+            // so fall back to the one the project already has rather than
+            // blanking it: that was the bug a repeat `--tracker` with no
+            // `--project-key` had, losing a key like `acme/app` on every
+            // established project that re-ran init to add a provider's
+            // skills. Only an established project has an existing key worth
+            // keeping; a fresh one has nothing to fall back on.
+            None => {
+                let answer = crate::ask::line(
+                    "Which project does it file into?",
+                    "owner/repo for github, project key for jira",
+                )?;
+                match answer {
+                    Some(key) => key,
+                    None => {
+                        let existing = if fresh {
+                            String::new()
+                        } else {
+                            Config::load(root)
+                                .map(|config| config.issue_tracking.project_key)
+                                .unwrap_or_default()
+                        };
+                        if existing.is_empty() {
+                            println!(
+                                "  note  {} was chosen with no project key, and there is none \
+                                 to keep — issue_tracking.project_key was left empty; answer \
+                                 with --project-key <key>",
+                                tracker.name()
+                            );
+                        }
+                        existing
+                    }
+                }
+            }
         };
         Ok(Some((tracker, project_key)))
     }
@@ -845,7 +912,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // next `init` then refused. Settling every answer first means a run
     // that fails here has written nothing at all.
     let answers = if joined {
-        Answers::joining(args)?
+        Answers::joining(root, args)?
     } else {
         Answers::gather(root, args)?
     };
@@ -966,6 +1033,28 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             .rows
             .push(report_row("kept", &format!("{}/", shown(root, &setup))));
     } else {
+        // `--force` in a home-mode clone rewrites `state` — this workspace's
+        // shared `config/`, read by every other clone's own `init`/`sync` —
+        // not just this checkout's own setup. Naming the others first is the
+        // one thing standing between a person meaning to reset their own
+        // config and silently resetting a teammate's `lane_quiet` too.
+        if args.force
+            && let Some(clone) = crate::repo::workspace_clone(root)
+        {
+            let siblings = crate::repo::sibling_clones(&clone.workspace, root);
+            if !siblings.is_empty() {
+                println!(
+                    "  note  --force rewrites {}, shared by every clone below — their setup \
+                     resets too:\n{}",
+                    shown(root, &state),
+                    siblings
+                        .iter()
+                        .map(|clone_root| format!("           {}", clone_root.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+        }
         wrote_any |= place_setup(root, &state, &config, &answers, &mut placer)?;
     }
 
@@ -1545,6 +1634,29 @@ mod tests {
         );
     }
 
+    /// `--provider pi` is accepted at `init`, the same as `install` and the
+    /// docs already list it — `PlanningAgent` used to offer only Claude and
+    /// Codex, rejecting it outright.
+    #[test]
+    fn init_accepts_provider_pi_and_scaffolds_its_profile() {
+        let root = scaffold(
+            "provider-pi",
+            &InitArgs {
+                provider: Some(PlanningAgent::Pi),
+                ..confirmed()
+            },
+        );
+
+        let config = Config::load(&root).unwrap();
+        assert_eq!(config.unattended.blocked_agent, "pi");
+
+        let pipelines = pipelines_on_disk(&root);
+        assert!(pipelines.contains("agent: pi"), "{pipelines}");
+        assert!(!pipelines.contains("agent: claude"), "{pipelines}");
+
+        assert!(root.join(".pi").join("skills").is_dir());
+    }
+
     /// `init` run again is a project asking for skills, not for its settings
     /// back. The config it has been running on for a month is not rewritten,
     /// and — the point of running it again — the new provider's skills land
@@ -1952,6 +2064,71 @@ mod tests {
         assert!(config.contains("hook = \"\""), "{config}");
         assert!(config.contains("project_key = \"\""), "{config}");
         assert!(!crate::tracking::hooks_dir_in(&root).exists());
+    }
+
+    /// A repeat `--tracker github` with no `--project-key` and nobody to
+    /// answer the free-text question must keep the project's own key,
+    /// guarding `Answers::tracker`'s fallback to the key already on disk
+    /// rather than the blank `ask::line` itself returns with nobody there.
+    #[test]
+    fn a_repeat_tracker_answer_with_no_project_key_keeps_the_existing_one() {
+        let root = scaffold(
+            "tracker-repeat-key",
+            &InitArgs {
+                tracker: Some("github".into()),
+                project_key: Some("acme/app".into()),
+                ..confirmed()
+            },
+        );
+
+        run_init(
+            &root,
+            &InitArgs {
+                tracker: Some("github".into()),
+                ..confirmed()
+            },
+        )
+        .expect("repeat init");
+
+        let config = std::fs::read_to_string(Config::path_in(&root)).unwrap();
+        assert!(
+            config.contains("project_key = \"acme/app\""),
+            "a repeat --tracker with no --project-key and nobody to ask must keep the \
+             project's own key instead of blanking it: {config}"
+        );
+    }
+
+    /// A repeat `init` with no `--provider` and a missing `pipelines/`
+    /// folder is documented as the way to restore it, and must restore it
+    /// for the project's own configured agent — guarding
+    /// `Answers::provider`'s fallback to `config.unattended.blocked_agent`
+    /// with nobody to ask, rather than the menu's first entry, `claude`,
+    /// which would restore claude pipelines (and install claude skills) onto
+    /// a project set up for codex.
+    #[test]
+    fn a_repeat_init_restores_the_projects_own_provider_not_claude() {
+        let root = scaffold(
+            "repeat-provider",
+            &InitArgs {
+                provider: Some(PlanningAgent::Codex),
+                ..confirmed()
+            },
+        );
+        std::fs::remove_dir_all(Pipelines::dir_in(&root)).unwrap();
+
+        run_init(&root, &confirmed()).expect("repeat init restores the missing pipelines");
+
+        let pipelines = pipelines_on_disk(&root);
+        assert!(
+            pipelines.contains("agent: codex"),
+            "a repeat init with no --provider must restore files for the project's own \
+             configured provider, not fall back to claude: {pipelines}"
+        );
+        assert!(
+            !root.join(".claude").join("skills").is_dir(),
+            "and must install only that provider's skills: {}",
+            root.display()
+        );
     }
 
     /// With nobody to ask, `Install the example setup?` answers yes — what

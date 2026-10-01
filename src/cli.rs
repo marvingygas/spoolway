@@ -697,7 +697,9 @@ pub struct InitArgs {
     pub new_id: bool,
 
     /// The coding agent you plan in, whose convention the skills are installed
-    /// under. Asked at a terminal; `claude` when there is nobody to ask.
+    /// under. Asked at a terminal; with nobody to ask, an established
+    /// project keeps its own configured provider and a fresh one gets
+    /// `claude`, the menu's first entry.
     #[arg(long, value_enum)]
     pub provider: Option<PlanningAgent>,
 
@@ -779,13 +781,15 @@ pub struct InstallArgs {
 
 /// A coding agent that can be the identity of a freshly scaffolded project.
 ///
-/// Kept separate from [`Provider`]: Pi skills remain installable for existing
-/// projects, but a new scaffold deliberately starts from one Claude or Codex
-/// profile instead of recreating the old mixed Pi/hosted arrangement.
+/// Kept separate from [`Provider`] in name only: every variant [`Provider`]
+/// has, this one has too, since `--provider`/the `init` menu and `install`
+/// now offer the same three agents — `install` just also accepts a `--user`
+/// flag that has no analogue at `init` time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PlanningAgent {
     Claude,
     Codex,
+    Pi,
 }
 
 impl PlanningAgent {
@@ -793,6 +797,7 @@ impl PlanningAgent {
         match self {
             Self::Claude => Provider::Claude,
             Self::Codex => Provider::Codex,
+            Self::Pi => Provider::Pi,
         }
     }
 

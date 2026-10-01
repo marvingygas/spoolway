@@ -1774,6 +1774,27 @@ pub(crate) fn workspace_clone(root: &Path) -> Option<WorkspaceClone> {
     workspace_clone_checked(root).unwrap_or(None)
 }
 
+/// Every checkout `workspace`'s own `project.toml` lists, other than
+/// `except` — the clones that share its `config/`, so `init --force` can
+/// name them before rewriting a file every one of them reads. Best-effort
+/// like [`workspace_clone`]: a workspace file that cannot be read or parsed
+/// answers no siblings rather than turning a warning into a reason `init`
+/// itself fails.
+pub(crate) fn sibling_clones(workspace: &Path, except: &Path) -> Vec<PathBuf> {
+    let record_path = workspace.join(BINDING_FILE);
+    let Ok(raw) = std::fs::read_to_string(&record_path) else {
+        return Vec::new();
+    };
+    let Ok(toml) = toml::from_str::<WorkspaceToml>(&raw) else {
+        return Vec::new();
+    };
+    toml.clones
+        .into_iter()
+        .map(|clone| clone.root)
+        .filter(|clone_root| clone_root != except)
+        .collect()
+}
+
 /// A `spoolway init --adopt <workspace>/<dispatcher>` line for every clone
 /// entry, across every workspace, whose folder no longer exists — the hint
 /// [`Repo::root`]'s own "no spoolway project found" appends when it has one,

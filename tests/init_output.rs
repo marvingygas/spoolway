@@ -902,6 +902,172 @@ fn pipeline_contract_and_prompt_contract_succeed_with_no_pipelines_defined() {
     );
 }
 
+/// A repeat `init` with no `--provider` and a missing `pipelines/` folder
+/// restores it for the project's own configured provider, not the menu's
+/// first entry (`claude`), and installs only that provider's skills.
+#[test]
+fn a_repeat_init_with_no_provider_restores_the_projects_own_provider() {
+    let project = Project::new("repeat-no-provider");
+    project.init("codex");
+    std::fs::remove_dir_all(project.as_ref().join(".spoolway/pipelines")).unwrap();
+
+    project.run(&["init", "--yes"]);
+
+    let pipeline =
+        std::fs::read_to_string(project.as_ref().join(".spoolway/pipelines/default.yml")).unwrap();
+    assert!(pipeline.contains("agent: codex"), "{pipeline}");
+    assert!(!pipeline.contains("agent: claude"), "{pipeline}");
+    assert!(
+        !project.as_ref().join(".claude/skills").exists(),
+        "only the project's own provider's skills should be installed"
+    );
+    assert!(project.as_ref().join(".agents/skills").is_dir());
+}
+
+/// A fresh project has no existing key to fall back on, so choosing a
+/// tracker with no `--project-key` and nobody to ask warns, naming
+/// `--project-key`, and still writes the empty key rather than refusing.
+#[test]
+fn a_fresh_tracker_with_no_project_key_warns_and_writes_an_empty_key() {
+    let project = Project::new("tracker-no-key-fresh");
+
+    let out = stdout(&project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+    ]));
+
+    assert!(out.contains("--project-key"), "{out}");
+    let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
+    assert!(config.contains("project_key = \"\""), "{config}");
+}
+
+/// The established-project half of the same bug: a repeat `--tracker` with
+/// no `--project-key` and nobody to ask keeps the key the project already
+/// has, and — since there is one to keep — prints no warning about it.
+#[test]
+fn a_repeat_tracker_with_no_project_key_keeps_the_existing_one_and_warns_only_when_none() {
+    let project = Project::new("tracker-no-key-repeat");
+    project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+        "--project-key",
+        "acme/app",
+    ]);
+
+    let out = stdout(&project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+    ]));
+
+    assert!(!out.contains("--project-key"), "{out}");
+    let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
+    assert!(config.contains("project_key = \"acme/app\""), "{config}");
+}
+
+/// `init --force` in a home-mode clone rewrites `config/`, shared by every
+/// clone in that workspace — so it must name the others sharing it before
+/// doing that, not reset a teammate's setup with no warning at all.
+#[test]
+fn force_in_a_home_mode_clone_names_the_other_clones_before_rewriting_their_config() {
+    let base = std::env::temp_dir().join(format!(
+        "spoolway-init-output-force-home-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = base.join("home");
+    let first = base.join("first");
+    let second = base.join("second");
+    for root in [&first, &second] {
+        std::fs::create_dir_all(root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    let run = |root: &Path, args: &[&str]| -> Output {
+        let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(args)
+            .current_dir(root)
+            .env("HOME", &home)
+            .output()
+            .expect("run spoolway");
+        assert!(
+            output.status.success(),
+            "spoolway failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    run(
+        &first,
+        &[
+            "init",
+            "--yes",
+            "--setup",
+            "home",
+            "--workspace",
+            "new",
+            "--provider",
+            "claude",
+            "--tracker",
+            "none",
+        ],
+    );
+    let workspace_name = std::fs::read_dir(home.join(".spoolway"))
+        .expect("read ~/.spoolway")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("first-"))
+        .expect("the fresh workspace folder, labelled after the first clone");
+    run(
+        &second,
+        &[
+            "init",
+            "--yes",
+            "--workspace",
+            &workspace_name,
+            "--provider",
+            "claude",
+            "--tracker",
+            "none",
+        ],
+    );
+
+    let out = stdout(&run(
+        &second,
+        &["init", "--force", "--yes", "--provider", "claude"],
+    ));
+
+    assert!(
+        out.contains(&first.canonicalize().unwrap().display().to_string())
+            || out.contains(&first.display().to_string()),
+        "expected the first clone's path named before the shared config was rewritten:\n{out}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
 /// `init` with nobody to answer its confirmation writes nothing — the
 /// declared-default path `crate::ask::confirm` takes when stdin is not a
 /// terminal. An agent has no terminal either, so writing nothing has to
