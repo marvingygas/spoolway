@@ -258,14 +258,19 @@ fn run() -> Result<()> {
             commands::config_override(&repo, home_error.as_ref())
         }
         command => {
-            // `sync` is the one command below that has to survive a
-            // `config.toml` that no longer parses, for the same reason
-            // `doctor` and `config edit`/`config override` read leniently
-            // above: it is the command that brings a config like that
-            // forward — most sharply, one still carrying a key this binary
-            // retired hard enough that `Config::load` now refuses it
-            // outright (see `crate::sync::config`). Every other command
-            // reaching this arm still dies on a config it cannot read.
+            // `sync` is the one command below that has to survive long
+            // enough to reach its own read of `config.toml`, for the same
+            // reason `doctor` and `config edit`/`config override` read
+            // leniently above: `Repo::discover` would otherwise refuse a
+            // file still naming a key this binary retired hard enough that
+            // `Config::load` rejects it outright, before `sync` ever got
+            // the chance to be the one command that brings a file like that
+            // forward (see `crate::sync::config`). A file this lenient
+            // `Repo` still cannot even parse as TOML is a different case:
+            // `sync::config` fails loudly on that one itself, naming the
+            // file, rather than leaving it to look like nothing was wrong.
+            // Every other command reaching this arm still dies on a config
+            // it cannot read.
             let repo = if matches!(command, Command::Sync(_)) {
                 let (repo, _, _) = Repo::discover_lenient(&cwd)?;
                 repo

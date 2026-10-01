@@ -151,7 +151,8 @@ checkout still carries a stamp no home holds. Run `spoolway init --new-id` to st
 [Runtime state](configuration.md#runtime-state).
 
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
-version wrote there.
+version wrote there, outside home mode. A home-mode checkout keeps its `.gitignore`
+untouched, matching home mode's own promise to write nothing into the checkout.
 
 ### Home mode
 
@@ -346,12 +347,19 @@ What `sync` replaces, file by file:
 |---|---|
 | `config.toml` | The comments and the settings reference. Your values stay. |
 | Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
-| `.gitignore` | Only the old marked block, removed once. |
-| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder marked by `.installed-by-spoolway`. |
+| `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
+| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder marked by `.installed-by-spoolway`. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |
 | A retired template | Removed, with the reason it is gone. |
+
+In home mode, this leaves the checkout untouched: nothing under it is read, written or
+removed. See [Home mode](concepts.md#home-mode).
+
+A `config.toml` that `sync` cannot read fails the whole command, naming the file and pointing
+at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
+edit` instead.
 
 `sync` never merges. A marked block you edited by hand stops the sync on that file, and it is
 reported, not overwritten. A skill file has no such block: sync always rewrites it to match the

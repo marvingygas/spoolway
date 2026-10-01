@@ -46,7 +46,16 @@ fn behind(repo: &Repo) -> Result<bool> {
         dry_run: true,
         replace: Vec::new(),
     };
-    let outcomes = crate::sync::scan(repo, &dry)?;
+    // Not `?`: `crate::sync::config` now fails the whole scan outright on a
+    // `config.toml` it cannot even parse, naming the file — the right thing
+    // for `sync` itself to say, but the wrong thing for this module, whose
+    // own doc promises that nothing here stops a command. An ordinary
+    // command hitting that in passing, on a checkout a stamp already calls
+    // behind, reads as "not behind" instead: `sync` is still the thing that
+    // will say so, the moment somebody actually runs it.
+    let Ok(outcomes) = crate::sync::scan(repo, &dry) else {
+        return Ok(false);
+    };
     let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
     Ok(!wrote.is_empty() || !removed.is_empty())
 }
@@ -221,6 +230,21 @@ mod tests {
         std::fs::write(Config::path_in(&repo.checkout), rendered).unwrap();
         assert_eq!(notified(&repo, false, false, true), "");
         assert!(sync_popup(&repo).unwrap().is_none());
+    }
+
+    /// A stale stamp over a `config.toml` this binary cannot even parse
+    /// prints nothing and does not fail the command: `crate::sync::config`
+    /// now fails the whole scan on a file like this, which is right for
+    /// `sync` itself to say but wrong for this module's own promise that
+    /// nothing here stops a command — `sync` is still the thing that will
+    /// say so, the moment somebody actually runs it.
+    #[test]
+    fn a_stale_stamp_over_a_config_that_does_not_parse_prints_nothing() {
+        let repo = fixture("stale-unparseable-config");
+        make_stale(&repo);
+        std::fs::write(Config::path_in(&repo.checkout), "garbage = [\n").unwrap();
+        assert_eq!(notified(&repo, false, false, true), "");
+        assert_eq!(sync_popup(&repo).unwrap(), None);
     }
 
     /// Bare `spoolway`'s popup: the one sentence, titled `update installed`,
