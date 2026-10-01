@@ -99,6 +99,8 @@ Platform notes and requirements in full: **[Installation and setup](docs/install
 
 ## Quick start
 
+<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
+
 ### 1. Set up inside the project repo
 
 ```
@@ -125,10 +127,9 @@ spoolway task contract
 spoolway
 ```
 
-<img src="docs/screenshots/queue.png" alt="the queue screen">
-
 Bare `spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
-`enter` to queue it.
+`enter` to queue it. The tab strip runs dispatch, queue, routines, jobs and eval, and `←` and
+`→` move between them.
 
 ### 4. Dispatch
 
@@ -136,8 +137,6 @@ Bare `spoolway` opens on the queue tab, which groups pending tasks. Select a gro
 herdr
 spoolway
 ```
-
-<img src="docs/screenshots/dispatch.png" alt="the dispatcher board">
 
 `←` from the queue tab opens the dispatch tab. Press `enter` there to start dispatching, or run
 `spoolway dispatch` from a script to print a line per pass instead of drawing the board.
