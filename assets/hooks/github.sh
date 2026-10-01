@@ -1,15 +1,77 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Written once by `spoolway init`. Yours after that; `spoolway update`
 # never touches it. Called with `open` as the group is queued, `fetch` when
-# someone runs `spoolway issue show`, `check` from `spoolway doctor` and
-# once more as the dispatcher starts, then on started, blocked, paused and
+# someone runs `spoolway issue show`, then on started, blocked, paused and
 # done.
 #
+# spoolway-requires: bash >= 3.2
 # spoolway-requires: gh >= 2.97.0
+#
+# 3.2 is stock macOS's own bash, not a round number picked for looks: the
+# trap below needs nothing newer — `FUNCNAME`, `BASH_SUBSHELL` and the ERR
+# trap itself are all at least that old — so this asks for the oldest bash
+# that still runs it, not the newest one happened to be tested against.
 #
 # Every command here was checked against that version. The hook treats
 # GitHub as a mirror: issue failures are reported back to spoolway, while
 # config decides whether they should pause delivery.
+#
+# `set -eE` plus the ERR trap below means a command that fails — outside an
+# `if`, a `&&`/`||` list, or one explicitly marked `|| true` — stops the
+# hook and prints the command, its line, the case arm and the call chain
+# that failed, to this run's own log — the same log a paused task's
+# `## Hook error` reads its tail from. There is no `|| exit $?` left
+# anywhere below: bash never fires an ERR trap for a command inside an
+# `||` list, so that old pattern would have hidden the very trace this is
+# for; a call that is meant to be allowed to fail instead carries an
+# explicit `|| true`.
+
+set -eE
+trap 'hook_trace "$LINENO" "$BASH_COMMAND"' ERR
+
+# Prints what failed and where, then exits with the failing command's own
+# code — the one thing `set -e` would otherwise do silently. `FUNCNAME`
+# already holds this trap handler's own frame at index 0 when it runs, so
+# the chain read out below starts one past it; nothing left in the chain
+# means the failing command was never inside a function at all, i.e. a
+# case arm running at the top level of the script, printed as `main`.
+#
+# A command substitution (`x=$(...)`) runs in its own subshell, and this
+# trap is inherited into it — so a call failing inside one fires here
+# twice: once for the real command, deep in the subshell, and once more
+# for the assignment itself once the subshell's own non-zero exit reaches
+# it. `$BASH_SUBSHELL` is what tells the two apart — greater than zero
+# inside the subshell — and it is the deeper, inner firing that names the
+# actual failing command, so that is the one that exits quietly rather
+# than the one this prints from; the outer firing, at the assignment, is
+# what a person actually sees, one trace, naming the whole `x=$(...)` line.
+#
+# `$BASH_COMMAND` is the failing command's own source text, unexpanded —
+# `"$SPOOLWAY_TICKET"`, not the ticket id it actually held. bash has no
+# built-in that hands back the expanded argv of the command that just
+# failed, and reconstructing one by re-expanding the source text risks
+# reading it wrong or re-running a side effect a command substitution
+# inside it already had. The line number is real, and the source text is
+# usually enough to find the call in the file next to it.
+hook_trace() {
+  code=$?
+  line=$1
+  cmd=$2
+  if [ "$BASH_SUBSHELL" -gt 0 ]; then
+    exit "$code"
+  fi
+  printf '%s: command failed (exit %d)\n' "$(basename "$0")" "$code" >&2
+  printf '  at line %s: %s\n' "$line" "$cmd" >&2
+  printf '  in case arm: %s\n' "${SPOOLWAY_EVENT:-}" >&2
+  callers=
+  i=1
+  while [ "$i" -lt "${#FUNCNAME[@]}" ]; do
+    callers="${callers:+$callers -> }${FUNCNAME[$i]}"
+    i=$((i + 1))
+  done
+  printf '  called from %s\n' "${callers:-main}" >&2
+  exit "$code"
+}
 
 repo=$SPOOLWAY_PROJECT_KEY                # `[issue_tracking] project_key`
 
@@ -51,17 +113,21 @@ each_label() {
 # not a new one.
 create_missing_labels() {
   [ -n "$SPOOLWAY_LABELS" ] || return 0
-  existing=$(gh label list -R "$repo" -L 1000 --json name --jq '.[].name') || return $?
+  existing=$(gh label list -R "$repo" -L 1000 --json name --jq '.[].name')
   missing=$(each_label | while IFS= read -r label; do
     printf '%s\n' "$existing" | grep -qiFx "$label" || printf '%s\n' "$label"
   done)
   [ -n "$missing" ] || return 0
-  # A `<<` heredoc, not a pipe: `gh label create`'s exit code has to reach
-  # `exit $?` directly, and the right side of a pipe runs in its own
-  # subshell that `exit` there would only ever leave.
+  # A `<<` heredoc, not `printf ... | while ...`. A pipe would still stop
+  # the hook — the loop is the pipeline's last element, so its status is
+  # the pipeline's — but it runs the loop in a subshell, where the ERR trap
+  # exits quietly, and the trace printed at this level would then
+  # read `at line N: printf ...`, naming the pipe's first command rather
+  # than the `gh label create` that failed (seen 2026-09-30 in review). A
+  # heredoc keeps the loop in this shell, so the trace names the create.
   while IFS= read -r label; do
     [ -n "$label" ] || continue
-    gh label create "$label" -R "$repo" || exit $?
+    gh label create "$label" -R "$repo"
   done <<LABELS
 $missing
 LABELS
@@ -122,9 +188,17 @@ extract_section() {
 # `heading` and its content from `$SPOOLWAY_TASK_FILE`, blank-line-separated
 # the way a task's own headings are — or nothing when the task has
 # no such section, so the ticket body never shows an empty one.
+#
+# `if`/`fi`, not `[ -n "$content" ] && printf ...`: a missing section is
+# the ordinary case, not a failure, but that shape makes an empty match this
+# function's own last, failing command — harmless under plain `sh`, fatal
+# under `set -e` once this runs bare inside `{ ... } > "$body"` below, where
+# nothing wraps the call in an `if` or an `&&`/`||` of its own.
 ticket_section() {
   content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
-  [ -n "$content" ] && printf '%s\n\n%s\n\n' "$1" "$content"
+  if [ -n "$content" ]; then
+    printf '%s\n\n%s\n\n' "$1" "$content"
+  fi
 }
 
 # The same, but tight against its heading — `## Status Log` and `##
@@ -132,7 +206,9 @@ ticket_section() {
 # under the heading, and a comment reproduces that instead of inventing one.
 comment_section() {
   content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
-  [ -n "$content" ] && printf '%s\n%s\n\n' "$1" "$content"
+  if [ -n "$content" ]; then
+    printf '%s\n%s\n\n' "$1" "$content"
+  fi
 }
 
 # GitHub issues only have open/closed as native states. This label means the
@@ -147,7 +223,7 @@ mark_in_progress() {
 # merged. Leave closure to GitHub's merge event: mark the issue for review and
 # put a machine-readable issue marker on the PR for the repository workflow.
 hand_off_for_review() {
-  pr=$(gh pr view "$SPOOLWAY_BRANCH" -R "$repo" --json url --jq .url) || exit $?
+  pr=$(gh pr view "$SPOOLWAY_BRANCH" -R "$repo" --json url --jq .url)
   [ -n "$pr" ] || {
     echo "github.sh: no pull request found for $SPOOLWAY_BRANCH" >&2
     exit 1
@@ -161,11 +237,11 @@ hand_off_for_review() {
   gh pr comment "$pr" -R "$repo" --body \
     "**spoolway:** tracks $SPOOLWAY_TICKET
 
-<!-- spoolway-issue: $SPOOLWAY_TICKET -->" || exit $?
+<!-- spoolway-issue: $SPOOLWAY_TICKET -->"
 
   gh issue edit "$SPOOLWAY_TICKET" -R "$repo" \
     --remove-label spoolway:in-progress \
-    --add-label spoolway:review || exit $?
+    --add-label spoolway:review
 
   gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body \
     "**spoolway** — \`$SPOOLWAY_TASK\` is ready for review in $pr. GitHub will close this issue after the pull request merges."
@@ -182,18 +258,6 @@ comment_snapshot() {
     comment_section "## Handoff"
   } | gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body-file -
 }
-
-if [ "$SPOOLWAY_EVENT" = check ]; then
-  gh auth status >/dev/null 2>&1 || {
-    echo "github.sh check: gh is not logged in — run \`gh auth login\`" >&2
-    exit 1
-  }
-  gh repo view "$repo" >/dev/null 2>&1 || {
-    echo "github.sh check: repository $repo not found, or gh cannot see it" >&2
-    exit 1
-  }
-  exit 0
-fi
 
 if [ "$SPOOLWAY_EVENT" = fetch ]; then
   gh issue view "$SPOOLWAY_REF" -R "$repo" \
@@ -226,7 +290,7 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
 
   # Every label this task names has to exist before either issue below can
   # be created or edited with it.
-  create_missing_labels || exit $?
+  create_missing_labels
 
   # A group issue opens whatever the group's size — a group of one gets one
   # too, rather than folding its lone task straight under `$SPOOLWAY_SOURCE`:
@@ -254,13 +318,13 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
     if same_repo_issue "$SPOOLWAY_SOURCE"; then
       set -- "$@" --parent "$SPOOLWAY_SOURCE"
     fi
-    epic=$("$@") || exit $?
+    epic=$("$@")
     save_state
   elif [ -n "$SPOOLWAY_LABELS" ]; then
     # The epic already exists — a task queued after the group's first still
     # carries its own labels onto it, so the group issue ends up with the
     # union of every task's labels rather than just the first task's.
-    gh issue edit "$epic" -R "$repo" $(label_flags --add-label) || exit $?
+    gh issue edit "$epic" -R "$repo" $(label_flags --add-label)
   fi
 
   body="$SPOOLWAY_OUT.ticket-body.md"
@@ -280,7 +344,7 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
     set -- gh issue create -R "$repo" -t "$SPOOLWAY_TITLE" \
       -F "$body" --label spoolway:task --parent "$epic" $(label_flags --label)
     [ -n "$deps" ] && set -- "$@" --blocked-by "$deps"
-    ticket=$("$@") || exit $?
+    ticket=$("$@")
     save_state
   fi
 

@@ -445,9 +445,9 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
 ///
 /// The body is everything after the task file's frontmatter fence, verbatim
 /// — the only mode `spoolway stack` has now that its optional model summary
-/// turn is gone — except that `## Status Log`, `## Handoff` and `## Blocker`
-/// are lifted out into one closed `<details>` fold just above the tag; see
-/// `extract_run_history` below.
+/// turn is gone — except that `## Status Log`, `## Handoff`, `## Blocker`
+/// and `## Hook error` are lifted out into one closed `<details>` fold just
+/// above the tag; see `extract_run_history` below.
 ///
 /// Which open `parallel: true` task this branch is predicted to conflict
 /// with is reported on the console by `spoolway stack` as it runs; it is
@@ -494,16 +494,19 @@ fn compose_body(task_body: &str) -> String {
     body
 }
 
-/// The three sections `extract_run_history` folds, if present. This says
+/// The four sections `extract_run_history` folds, if present. This says
 /// only which headings fold — the order they end up in the fold is the
 /// order the task file has them, decided by sorting on where each one is
-/// found, not by this list's own order.
-const RUN_HISTORY_HEADINGS: [&str; 3] = ["## Status Log", "## Handoff", "## Blocker"];
+/// found, not by this list's own order. `## Hook error` joins the other
+/// three so a failed hook's own last output never lands loose in a pull
+/// request body.
+const RUN_HISTORY_HEADINGS: [&str; 4] =
+    ["## Status Log", "## Handoff", "## Blocker", "## Hook error"];
 
-/// Pull `## Status Log`, `## Handoff` and `## Blocker` out of `body` in
-/// place and hand back a closed `<details>` fold holding them, in the order
-/// the file had them — or `None` if the body has none of the three, so a
-/// task with no run yet gets no fold at all.
+/// Pull `## Status Log`, `## Handoff`, `## Blocker` and `## Hook error` out
+/// of `body` in place and hand back a closed `<details>` fold holding them,
+/// in the order the file had them — or `None` if the body has none of the
+/// four, so a task with no run yet gets no fold at all.
 ///
 /// GitHub only renders markdown inside `<details>` when a blank line
 /// follows `</summary>`; without it the headings and list items show up as
@@ -529,7 +532,7 @@ fn extract_run_history(body: &mut String) -> Option<String> {
     // heading, or the end of the body), so removing it can only rejoin
     // the blank line already above the heading to what already followed
     // the section — never a new run of blank lines, and never a touch on
-    // text outside the three sections, such as a fenced code block
+    // text outside the four sections, such as a fenced code block
     // elsewhere in the plan.
     for &(start, end) in ranges.iter().rev() {
         body.replace_range(start..end, "");
@@ -1337,7 +1340,30 @@ mod tests {
         );
     }
 
-    /// Extraction only ever removes the three named sections' own ranges —
+    /// `## Hook error` is the fourth section that folds, alongside the
+    /// three a command step's own failure already writes — a failed hook's
+    /// own last output must never land loose in a pull request body.
+    #[test]
+    fn compose_body_folds_hook_error_too() {
+        let body = compose_body(
+            "## Context\n- a thing\n\n\
+             ## Status Log\n- paused\n\n\
+             ## Hook error\n  Last output:\n\n      it broke\n\n\
+             ## Acceptance criteria\n- it works\n",
+        );
+        assert_eq!(
+            body,
+            "## Context\n- a thing\n\n\
+             ## Acceptance criteria\n- it works\n\n\
+             <details>\n<summary>Run history</summary>\n\n\
+             ## Status Log\n- paused\n\n\
+             ## Hook error\n  Last output:\n\n      it broke\n\
+             </details>\n\n\
+             Co-Authored-By: Claude Code\n"
+        );
+    }
+
+    /// Extraction only ever removes the four named sections' own ranges —
     /// plan text elsewhere, including a blank-line run inside a fenced code
     /// block, comes through byte for byte rather than being swept up by a
     /// global normalizing pass.
@@ -1350,7 +1376,7 @@ mod tests {
         );
     }
 
-    /// A body with none of the three sections gets no fold at all — the
+    /// A body with none of the four sections gets no fold at all — the
     /// body is the task body and the tag, same as before this change.
     #[test]
     fn compose_body_has_no_fold_when_no_run_history_sections_exist() {

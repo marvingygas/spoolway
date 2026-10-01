@@ -1,12 +1,17 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Written once by `spoolway init`. Yours after that; `spoolway update`
 # never touches it. Called with `open` as the group is queued, `fetch` when
-# someone runs `spoolway issue show`, `check` from `spoolway doctor` and
-# once more as the dispatcher starts, then on started, blocked, paused and
+# someone runs `spoolway issue show`, then on started, blocked, paused and
 # done.
 #
+# spoolway-requires: bash >= 3.2
 # spoolway-requires: acli >= 1.3.39
 # spoolway-requires: jq >= 1.6
+#
+# 3.2 is stock macOS's own bash, not a round number picked for looks: the
+# trap below needs nothing newer — `FUNCNAME`, `BASH_SUBSHELL` and the ERR
+# trap itself are all at least that old — so this asks for the oldest bash
+# that still runs it, not the newest one happened to be tested against.
 #
 # Every `acli` command below was checked against that version, live, against
 # a real Jira site — including one break between it and the 1.3.30 floor the
@@ -20,10 +25,7 @@
 # proof this shipped with found a Jira site whose board draws an "In
 # Progress" column that no transition ever reaches from Draft; the hook
 # still asks for it, same as any other status here, and a `started` event
-# against a workflow like that is a silent no-op rather than a failure. The
-# `check` branch, below, only proves each status name exists somewhere on
-# the site — it cannot prove a workflow actually reaches it, since that
-# takes an issue already sitting one transition away to test with.
+# against a workflow like that is a silent no-op rather than a failure.
 #
 # The task file itself is deliberately not sent. Jira's REST API would take
 # it as a real attachment, but only against a site, an account email and an
@@ -39,6 +41,63 @@
 # the JSON shape changing underfoot — exits loudly rather than writing an
 # empty `epic=`/`ticket=` line: a lost key is a ticket nothing ever links to
 # again, and this codebase's error style has no room for losing that quietly.
+#
+# `set -eE` plus the ERR trap below means a command that fails — outside an
+# `if`, a `&&`/`||` list, or one explicitly marked `|| true` — stops the
+# hook and prints the command, its line, the case arm and the call chain
+# that failed, to this run's own log — the same log a paused task's
+# `## Hook error` reads its tail from. There is no `|| exit $?` left
+# anywhere below: bash never fires an ERR trap for a command inside an
+# `||` list, so that old pattern would have hidden the very trace this is
+# for; a call that is meant to be allowed to fail instead carries an
+# explicit `|| true`.
+
+set -eE
+trap 'hook_trace "$LINENO" "$BASH_COMMAND"' ERR
+
+# Prints what failed and where, then exits with the failing command's own
+# code — the one thing `set -e` would otherwise do silently. `FUNCNAME`
+# already holds this trap handler's own frame at index 0 when it runs, so
+# the chain read out below starts one past it; nothing left in the chain
+# means the failing command was never inside a function at all, i.e. a
+# case arm running at the top level of the script, printed as `main`.
+#
+# A command substitution (`x=$(...)`) runs in its own subshell, and this
+# trap is inherited into it — so a call failing inside one fires here
+# twice: once for the real command, deep in the subshell, and once more
+# for the assignment itself once the subshell's own non-zero exit reaches
+# it. `$BASH_SUBSHELL` is what tells the two apart — greater than zero
+# inside the subshell — and it is the deeper, inner firing that names the
+# actual failing command, so that is the one that exits quietly rather
+# than the one this prints from; the outer firing, at the assignment, is
+# what a person actually sees, one trace, naming the whole `x=$(...)` line.
+#
+# `$BASH_COMMAND` is the failing command's own source text, unexpanded —
+# `--key "$SPOOLWAY_TICKET"`, not the key it actually held. bash has no
+# built-in that hands back the expanded argv of the command that just
+# failed, and reconstructing one by re-expanding the source text risks
+# reading it wrong or re-running a side effect a command substitution
+# inside it already had. The line number is real, and the source text is
+# usually enough to find the call in the file next to it.
+hook_trace() {
+  code=$?
+  line=$1
+  cmd=$2
+  if [ "$BASH_SUBSHELL" -gt 0 ]; then
+    exit "$code"
+  fi
+  printf '%s: command failed (exit %d)\n' "$(basename "$0")" "$code" >&2
+  printf '  at line %s: %s\n' "$line" "$cmd" >&2
+  printf '  in case arm: %s\n' "${SPOOLWAY_EVENT:-}" >&2
+  callers=
+  i=1
+  while [ "$i" -lt "${#FUNCNAME[@]}" ]; do
+    callers="${callers:+$callers -> }${FUNCNAME[$i]}"
+    i=$((i + 1))
+  done
+  printf '  called from %s\n' "${callers:-main}" >&2
+  exit "$code"
+}
 
 project=$SPOOLWAY_PROJECT_KEY             # `[issue_tracking] project_key`
 
@@ -46,8 +105,9 @@ project=$SPOOLWAY_PROJECT_KEY             # `[issue_tracking] project_key`
 # company-managed project spells the sub-task type `Sub-task`, not
 # `Subtask`, so this is the one edit a project like that needs to make here.
 # The three status names below are the site's own workflow names, not
-# spoolway's: `check` proves each exists, live, before any task can ever
-# pause on a hook that would otherwise fail mid-run. `open` never transitions
+# spoolway's — nothing proves them ahead of time any more; a name this site
+# does not have surfaces as a failed transition on the real event that hits
+# it, with the trace naming the call that failed. `open` never transitions
 # a new Story or Sub-task into `status_draft` itself — it relies on that
 # being whatever status Jira already creates a new work item into, so
 # `status_draft` has to name that status exactly, or a Story that starts
@@ -100,7 +160,11 @@ hang_under() {
     */browse/"$project"-[0-9]*) ;;
     *) return 0 ;;
   esac
-  acli jira workitem link create --out "${1##*/}" --in "$child" --type "$link_relates" --yes
+  # Best-effort, same as before this hook ever traced a failure: a link that
+  # does not take leaves the new issue exactly as good, just not hung under
+  # its source — worth trying, never worth pausing a task over.
+  acli jira workitem link create --out "${1##*/}" --in "$child" --type "$link_relates" --yes \
+    || true
 }
 
 if [ "$SPOOLWAY_EVENT" = fetch ]; then
@@ -114,7 +178,10 @@ if [ "$SPOOLWAY_EVENT" = fetch ]; then
   # against this site found: the bare form iterated the *object's* own
   # values instead, one of which is the comments array itself, and choked
   # trying to read `.author` off it.
-  comments=$(acli jira workitem comment list --key "$SPOOLWAY_REF" --json 2>/dev/null)
+  # Allowed to fail: a Jira site with comments disabled, or a transient
+  # error here, should still answer the issue's own fields — the fallback
+  # below reads as "no comments" rather than losing the whole fetch over it.
+  comments=$(acli jira workitem comment list --key "$SPOOLWAY_REF" --json 2>/dev/null) || true
   [ -n "$comments" ] || comments='{"comments":[]}'
   jq -n --argjson f "$fields" --argjson c "$comments" --arg site "$(site_host)" '{
     ref: $f.key,
@@ -125,40 +192,6 @@ if [ "$SPOOLWAY_EVENT" = fetch ]; then
     body: ($f.fields.description // ""),
     comments: [$c.comments[]? | {author: (.author.name // .author // ""), body: (.body // "")}]
   }' > "$SPOOLWAY_OUT"
-  exit 0
-fi
-
-if [ "$SPOOLWAY_EVENT" = check ]; then
-  acli jira auth status >/dev/null 2>&1 || {
-    echo "jira.sh check: acli is not logged in — run \`acli jira auth login\`" >&2
-    exit 1
-  }
-  project_json=$(acli jira project view --key "$project" --json) || {
-    echo "jira.sh check: project \"$project\" not found, or acli cannot see it" >&2
-    exit 1
-  }
-  printf '%s' "$project_json" | jq -e --arg t "$type_story" 'any(.issueTypes[]?; .name == $t)' \
-    >/dev/null 2>&1 || {
-    echo "jira.sh check: work item type \"$type_story\" does not exist in project $project — \
-set type_story at the head of the hook" >&2
-    exit 1
-  }
-  printf '%s' "$project_json" | jq -e --arg t "$type_subtask" 'any(.issueTypes[]?; .name == $t)' \
-    >/dev/null 2>&1 || {
-    echo "jira.sh check: work item type \"$type_subtask\" does not exist in project $project — \
-set type_subtask at the head of the hook" >&2
-    exit 1
-  }
-  for pair in "status_draft=$status_draft" "status_progress=$status_progress" \
-              "status_review=$status_review"; do
-    name=${pair%%=*}
-    value=${pair#*=}
-    acli jira workitem search --jql "project = $project AND status = \"$value\"" >/dev/null 2>&1 || {
-      echo "jira.sh check: status \"$value\" does not exist in project $project — set $name \
-at the head of the hook" >&2
-      exit 1
-    }
-  done
   exit 0
 fi
 
@@ -202,7 +235,7 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
     # every task's labels rather than just the first task's.
     existing=$(acli jira workitem view "$epic" --fields labels --json | jq -r '.fields.labels | join(",")')
     acli jira workitem edit --key "$epic" --labels "$(union_labels "$existing" "$SPOOLWAY_LABELS")" \
-      --yes || exit $?
+      --yes
   fi
 
   if [ -z "$ticket" ]; then
@@ -214,10 +247,20 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
       echo "jira.sh: acli/jq returned no Sub-task key — is jq installed, and did \`workitem create\` succeed?" >&2
       exit 1
     fi
-    for dep in $SPOOLWAY_DEPENDS_TICKETS; do   # Jira has real issue links
-      acli jira workitem link create --out "$dep" --in "$ticket" --type "$link_blocks" --yes
-    done
+    # The Sub-task is already real once its key comes back — saved before
+    # the Blocks links below are even attempted, so a retry after either of
+    # them fails resumes from the state file instead of creating a second
+    # Sub-task for the same task (review finding: under `set -eE` a failed
+    # link here used to abort before this ever ran).
     save_state
+    # Best-effort, the same as `hang_under`'s own Relates link: a Blocks
+    # link that does not take leaves the Sub-task exactly as real, just
+    # without that one relation — worth trying, never worth losing the
+    # ticket's own key over.
+    for dep in $SPOOLWAY_DEPENDS_TICKETS; do   # Jira has real issue links
+      acli jira workitem link create --out "$dep" --in "$ticket" --type "$link_blocks" --yes \
+        || true
+    done
   fi
 
   # The short handle spoolway puts in generated names, and the issue's web
@@ -237,15 +280,20 @@ case "$SPOOLWAY_EVENT" in
     # The Sub-task always moves. The Story only leaves Draft once — its
     # status is read first, so a second Sub-task starting in the same group
     # never re-fires a transition a first one already made. Both transitions
-    # exit loudly on a real failure (`|| exit $?`, the same rule `github.sh`
-    # follows) — without it, a failed Sub-task move was masked by the `if`
-    # around the Story's own check landing last and exiting 0 regardless.
-    acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_progress" --yes \
-      || exit $?
+    # below are bare: `set -eE` and the trap at the top of this file are what
+    # now exits loudly on a real failure, tracing the command that failed —
+    # without that, a failed Sub-task move was masked by the `if` around the
+    # Story's own check landing last and exiting 0 regardless.
+    acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_progress" --yes
     if [ -n "$SPOOLWAY_EPIC" ]; then
+      # Allowed to fail: this search is only ever a best-effort read of
+      # whether the Story has already left Draft, never the reason a
+      # `started` event should pause a task — `still_draft` reading empty
+      # here just means `[ "$still_draft" = true ]` below is false, the same
+      # as an ordinary "already moved on" answer.
       still_draft=$(acli jira workitem search \
         --jql "project = $project AND key = $SPOOLWAY_EPIC AND status = \"$status_draft\"" \
-        --json 2>/dev/null | jq 'length > 0' 2>/dev/null)
+        --json 2>/dev/null | jq 'length > 0' 2>/dev/null) || true
       # `if`/`fi`, not `[ ... ] &&` — that would leave the whole `started`
       # case arm exiting 1 the moment the Story has already left Draft,
       # which is every started after the group's first: `&&` short-circuits
@@ -255,8 +303,7 @@ case "$SPOOLWAY_EVENT" in
       # since KAN's Story never actually left Draft to begin with (see the
       # header note on `status_progress`).
       if [ "$still_draft" = true ]; then
-        acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_progress" --yes \
-          || exit $?
+        acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_progress" --yes
       fi
     fi
     ;;
@@ -265,11 +312,9 @@ case "$SPOOLWAY_EVENT" in
       "spoolway - $SPOOLWAY_TASK is $SPOOLWAY_EVENT at $SPOOLWAY_FROM"
     ;;
   done)
-    acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_review" --yes \
-      || exit $?
+    acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_review" --yes
     if [ "$SPOOLWAY_GROUP_LAST" = 1 ] && [ -n "$SPOOLWAY_EPIC" ]; then
-      acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_review" --yes \
-        || exit $?
+      acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_review" --yes
     fi
     ;;
 esac

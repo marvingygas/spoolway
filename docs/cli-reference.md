@@ -734,7 +734,6 @@ Print every event an issue-tracking hook runs on and the environment each one ca
 | `queued`, `blocked`, `paused`, `done` | When a task reaches that state |
 | `started` | When a queued task is ready and about to leave `queued` for its entry step |
 | `fetch` | From `spoolway issue show`. Synchronous |
-| `check` | From `spoolway doctor`, and once as the dispatcher starts. Synchronous |
 
 ### `spoolway config contract`
 
@@ -972,7 +971,7 @@ to prove a lane can start.
 
 ```
 $ spoolway doctor
-28 checks passed. Everything checks out.
+28 checks passed.
 ```
 
 | Flag | Default | What it does |

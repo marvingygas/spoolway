@@ -2,7 +2,7 @@
 //! handed, event by event.
 //!
 //! A hook is one script, named by `issue_tracking.hook`, resolved inside
-//! `.spoolway/hooks/` and run on eight events — [`crate::tracking`] is the
+//! `.spoolway/hooks/` and run on seven events — [`crate::tracking`] is the
 //! whole of what calls it. This prints straight from the tables
 //! [`crate::tracking::COMMON_EVENT_VARS`], [`crate::tracking::
 //! OPEN_EVENT_VARS`], [`crate::tracking::DISPATCH_EVENT_VARS`] and
@@ -11,8 +11,9 @@
 //! list — `tracking::tests::open_dispatch_and_fetch_vars_match_a_real_environment`
 //! is what checks those tables against a real call. `started` reuses
 //! [`crate::tracking::DISPATCH_EVENT_VARS`], the same table `queued`,
-//! `blocked`, `paused` and `done` do; `check` carries nothing beyond
-//! [`crate::tracking::COMMON_EVENT_VARS`], so it gets no table of its own.
+//! `blocked`, `paused` and `done` do. A hook proves itself only on these
+//! real events — there is no `check` event asking it to prove itself ahead
+//! of time.
 
 use super::*;
 
@@ -42,7 +43,7 @@ fn render_hook_contract() -> String {
     out.push_str("=================\n\n");
     out.push_str(
         "One script, named by `issue_tracking.hook`, resolved inside .spoolway/hooks/ — a\n\
-         bare filename only, never a path. Run on eight events, `SPOOLWAY_EVENT` naming which.\n\n",
+         bare filename only, never a path. Run on seven events, `SPOOLWAY_EVENT` naming which.\n\n",
     );
 
     out.push_str("EVERY EVENT CARRIES\n");
@@ -91,28 +92,11 @@ fn render_hook_contract() -> String {
     );
 
     out.push_str(
-        "check       — synchronous, from `spoolway doctor` and once more as the dispatcher \
-         starts\n",
-    );
-    out.push_str(
-        "  Carries nothing beyond SPOOLWAY_EVENT and SPOOLWAY_PROJECT_KEY, above — no \
-         SPOOLWAY_OUT.\n  Never run at all, the same way `fetch` is not, when the script's own \
-         text never\n  mentions `check` — a `doctor` note then, not a FAIL row, since nothing \
-         was actually\n  asked to run. Run and failing is different: a non-zero exit from a \
-         script that does\n  have the branch is one `doctor` FAIL row carrying the hook's own \
-         stderr; from the\n  dispatcher it is a warning read before the run starts, never a \
-         refusal — nothing here\n  ever stops a task pausing on `queued`, `started` or `done` \
-         later if the tracker\n  really is down.\n\n",
-    );
-
-    out.push_str(
-        "spoolway doctor  checks the script names `fetch` and `check` when either event is \
-         used,\n",
-    );
-    out.push_str(
-        "                 writes a `slug=` line when `issue_tracking.key_in_names` is on, and \
-         runs\n                 `check` itself once when the branch exists, reporting a \
-         non-zero exit as a\n                 FAIL row.\n\n",
+        "spoolway doctor  checks the script names `fetch` when it is used, and writes a \
+         `slug=`\n                 line when `issue_tracking.key_in_names` is on. A hook \
+         proves itself only on\n                 a real event: `queued`, `started` or `done` \
+         failing pauses the task, with the\n                 hook's own last output under \
+         `## Hook error` on the task file.\n\n",
     );
 
     out.push_str(
@@ -154,7 +138,6 @@ mod tests {
             "started     —",
             "fetch       —",
             "SPOOLWAY_REF",
-            "check       —",
         ] {
             assert!(text.contains(fact), "hook contract drops `{fact}`");
         }
@@ -163,6 +146,21 @@ mod tests {
         // see `SPOOLWAY_OUT`, since nothing reads an answer back from them.
         let open_section = text.split("queued, blocked").next().unwrap();
         assert!(!open_section.contains("SPOOLWAY_FROM"));
+        assert!(!text.contains("check       —"), "no `check` event remains");
+        assert!(
+            !text.contains("SPOOLWAY_EVENT=check"),
+            "no `check` event remains"
+        );
+        // The count in the gloss line has to move with the count in the
+        // opening paragraph — review finding: `COMMON_EVENT_VARS`' own
+        // `SPOOLWAY_EVENT` gloss still said "eight events" after `check`
+        // was dropped everywhere else, so `hook contract` disagreed with
+        // itself between its own two counts.
+        assert!(
+            !text.contains("eight"),
+            "the contract still counts eight events somewhere: {text}"
+        );
+        assert!(text.contains("seven events"), "the contract's own count");
     }
 
     /// The acceptance criterion behind the whole task this contract text was

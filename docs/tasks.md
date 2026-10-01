@@ -146,13 +146,14 @@ spoolway never reads the body. It is written once, from the skeleton in
 | `## End-to-end coverage` | The end-to-end test the change adds or updates, or "none" and why. |
 | `## References` | Paths to read before starting. |
 
-Three sections are appended as the task runs. spoolway creates them if they are missing.
+Four sections are appended as the task runs. spoolway creates them if they are missing.
 
 | Section | Who writes it |
 |---|---|
 | `## Status Log` | Every step. One timestamped line per transition. |
 | `## Handoff` | Any step, with `spoolway report --handoff`. What the next step should know. |
 | `## Blocker` | The dispatcher. Why the task needs a person. |
+| `## Hook error` | The dispatcher, on a failing `[issue_tracking]` hook. The run's own last output. |
 
 The wording under each heading is fixed and built into spoolway. It is sent to the lane as
 the `WHAT YOU WRITE DOWN` block of its system prompt. See

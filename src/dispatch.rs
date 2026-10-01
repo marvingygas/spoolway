@@ -1929,14 +1929,32 @@ impl<'a> Dispatcher<'a> {
     /// case: the task never left `queued` at all, so it has no worktree, no
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
+    ///
+    /// The pause reason keeps only the exit code now — the hook's own last
+    /// output, not a log path a person has to go find, is what explains it:
+    /// the last 15 lines of its combined stdout and stderr, indented the way
+    /// a failed command step's own `## Blocker` tail already is (see the
+    /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
+    /// under `## Hook error` so a second failure on the same task grows the
+    /// section rather than overwriting it.
     fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, code: i32) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
+        let runs = crate::command_step::Runs::new(&self.repo.tracking_dir());
+        let log = std::fs::read_to_string(runs.log_path(&key)).unwrap_or_default();
+        let tail: String = log
+            .lines()
+            .rev()
+            .take(15)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|l| format!("      {l}\n"))
+            .collect();
+        task.append_to_section("## Hook error", &format!("  Last output:\n\n{tail}\n"));
         task.front.hook_paused = Some(stage.to_string());
         task.set_stage(
             crate::pipeline::PAUSED,
-            Some(&format!(
-                "issue_tracking hook exited {code} on `{stage}` — see tracking/{key}"
-            )),
+            Some(&format!("issue_tracking hook exited {code}")),
         );
         self.persist(task)?;
         Ok(())
@@ -18125,11 +18143,23 @@ mod tests {
             "the task must never have started a lane: {:?}",
             mux.calls()
         );
+        let task = reload(&path);
         assert_eq!(
-            reload(&path).front.hook_paused.as_deref(),
+            task.front.hook_paused.as_deref(),
             Some(crate::pipeline::QUEUED),
             "resume needs to know which event's run to forget"
         );
+        let status_log = task.section("## Status Log").unwrap();
+        assert!(
+            status_log.contains("issue_tracking hook exited 1"),
+            "{status_log}"
+        );
+        assert!(
+            !status_log.contains("tracking/"),
+            "the reason no longer names a log path: {status_log}"
+        );
+        let hook_error = task.section("## Hook error").unwrap();
+        assert!(hook_error.contains("Last output:"), "{hook_error}");
     }
 
     /// Acceptance criterion: a trial arm never fires `[issue_tracking]` at

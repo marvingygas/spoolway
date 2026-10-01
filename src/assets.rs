@@ -164,9 +164,8 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// a file its own.
 ///
 /// `github.sh` treats GitHub as a mirror: `open` opens the group's epic (if
-/// any) and the task's own ticket, `check` proves the `gh` login and the
-/// repository before doctor or a dispatch run trusts either, `started`
-/// labels the ticket in progress once the task actually leaves `queued`,
+/// any) and the task's own ticket, `started` labels the ticket in progress
+/// once the task actually leaves `queued`,
 /// `blocked`/`paused` comment a snapshot of the task file's own status log
 /// and handoff, and `done` — reached when `spoolway stack` has already
 /// opened this task's own pull request, not when it merges — leaves a
@@ -326,26 +325,25 @@ mod tests {
         ] {
             assert!(sh.contains(marker), "hook script drops `{marker}`");
         }
-        // The branch lookup, the marker comment and the label swap are each
-        // checked with `|| exit $?` — a failed lookup, comment or edit must
-        // stop the handoff rather than let a later step run against a
-        // pull request or ticket the earlier one never actually reached.
-        // The closing "ready for review" comment needs no `|| exit $?` of
-        // its own: it is the function's last command, so its own exit
-        // status is already `hand_off_for_review`'s. Scoped to that
-        // function's own body — `open`'s `epic=$(...)`/`ticket=$(...)` use
-        // the same guard for the same reason and would otherwise inflate
-        // the count without proving anything about `done`.
+        // The branch lookup, the marker comment, the label swap and the
+        // closing comment are each bare now: `set -eE` and the ERR trap at
+        // the top of the file stop the handoff on any one of them failing,
+        // tracing the command that did — `|| exit $?` would hide that trace,
+        // since bash never fires an ERR trap for a command inside an `||`
+        // list, so none may appear in this function's own body.
         let done_branch = sh
             .split("hand_off_for_review() {")
             .nth(1)
             .expect("github.sh still defines hand_off_for_review");
         let done_branch = &done_branch[..done_branch.find("\n}\n").unwrap_or(done_branch.len())];
-        assert_eq!(
-            done_branch.matches("|| exit $?").count(),
-            3,
-            "github.sh no longer checks all three of the branch lookup, the marker comment \
-             and the label swap in its done branch"
+        assert!(
+            !done_branch.contains("|| exit $?"),
+            "github.sh's done branch must rely on the ERR trap, not `|| exit $?`, to stop on \
+             a failed call"
+        );
+        assert!(
+            sh.contains("set -eE") && sh.contains("trap 'hook_trace"),
+            "github.sh no longer runs under set -eE with its own ERR trap"
         );
         // The branch lookup can also succeed with nothing to report — a
         // `done` this hook fires for always has a pull request behind it by

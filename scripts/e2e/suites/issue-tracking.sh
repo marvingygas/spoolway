@@ -23,11 +23,10 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) pauses the task, naming the hook's own log under tracking/; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
+# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) pauses the task with the reason `issue_tracking hook exited N`, and the task gains a `## Hook error` section holding the run's last output; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a `done` pause back to `done` and a `queued` pause back to `queued`
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
-# covers: the shipped github.sh's `check` branch passes with gh logged in and the repository visible, and fails on each of the two alone
-# covers: `spoolway doctor` runs the hook with SPOOLWAY_EVENT=check, synchronously; a non-zero exit is one FAIL row carrying the hook's own stderr, not the merged stdout+stderr log a detached run leaves under tracking/
+# covers: the shipped github.sh and jira.sh run in bash under `set -eE` with an ERR trap, no `check` branch and no `|| exit $?`; a failing command's trace — command, line, case arm, callers — lands in the hook's own log, which `## Hook error` reads its tail from
 # covers: a task's `labels:` reaches every event with a task behind it as SPOOLWAY_LABELS, comma-joined and empty when the task has none; `queue add` refuses a label holding whitespace or a comma, naming the task and the label
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -88,17 +87,8 @@ mkdir -p .spoolway/hooks
 cat > .spoolway/hooks/record.sh <<'EOF'
 #!/bin/sh
 # Handles every event the same way, queued/started/blocked/paused/done/
-# open/fetch alike — there is no branch here to miss. `check` gets one
-# real, no-op `case` arm below: `has_check_branch` matches the actual
-# shapes a branch is spelled in (`check)`, `= check`, ...), not the bare
-# word, so a comment naming the event is not enough any more — and this
-# hook is meant to prove `spoolway doctor` really runs `check` against a
-# script that has grown the branch. `check` carries no task and so no
-# $SPOOLWAY_TASK_FILE — guarded rather than left to write a stray
-# "$PWD/.env.check" on every doctor run in this suite's own checkout.
-case "$SPOOLWAY_EVENT" in
-  check) : ;;
-esac
+# open/fetch alike — there is no branch here to miss, and no `check` event
+# left to miss one for either.
 [ -n "$SPOOLWAY_TASK_FILE" ] && env | sort > "$SPOOLWAY_TASK_FILE.env.$SPOOLWAY_EVENT"
 # On `started`, also the stage every task still in the queue stands at, as
 # the hook saw it: what a dependency had reached when its dependent started
@@ -137,27 +127,6 @@ says "doctor refuses a hook name that is not a bare filename" \
   "which is not a bare filename" \
   "$SPOOLWAY" doctor
 must "hook is restored to the bare name" \
-  "$SPOOLWAY" config set issue_tracking.hook record.sh
-
-# `check` proves the hook works before any task can ever pause on it —
-# `doctor` runs it synchronously, once, and a non-zero exit is one FAIL row
-# carrying the hook's own stderr, not the merged stdout+stderr log a
-# detached run under `tracking/` would leave.
-cat > .spoolway/hooks/check-fails.sh <<'EOF'
-#!/bin/sh
-if [ "$SPOOLWAY_EVENT" = check ]; then
-  echo 'status "Review" does not exist in project KAN' >&2
-  exit 1
-fi
-exit 0
-EOF
-chmod +x .spoolway/hooks/check-fails.sh
-must "the hook is switched to one whose check branch fails" \
-  "$SPOOLWAY" config set issue_tracking.hook check-fails.sh
-says "doctor reports the failing check as one FAIL row carrying its own stderr" \
-  'FAIL  check-fails.sh check: status "Review" does not exist in project KAN' \
-  "$SPOOLWAY" doctor
-must "the hook is restored to the recording one" \
   "$SPOOLWAY" config set issue_tracking.hook record.sh
 
 # `handover` is `spoolway stack`, and the second task of a group is the second
@@ -529,8 +498,9 @@ must "the hook is switched back to the one that only answers open" \
 
 # ------------------------------------------------- a failing hook pauses
 # A hook that always fails, on each of the four events by hand: a non-zero
-# exit on `queued` or `done` pauses the task now, naming the hook's own log
-# under tracking/ in the reason, and only records the failure on `blocked`
+# exit on `queued` or `done` pauses the task now, with the reason keeping
+# only the exit code and the hook's own last output landing under the
+# task's `## Hook error` instead, and only records the failure on `blocked`
 # and `paused` — both already stopped for a person, so nothing about pausing
 # them again would mean anything.
 #
@@ -556,8 +526,16 @@ if drive hook-queued paused 60; then
 else
   bad "a failing queued hook lands the task on paused (at \`$(stage_of hook-queued)\`)"
 fi
-has "the reason names the hook's own log under tracking/" "tracking/hook-queued" \
+has "the reason keeps only the exit code" "issue_tracking hook exited 1" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
+# The old reason began with these same words, so the line above alone would
+# pass against it too; what it no longer carries is the log path.
+lacks "and no longer points at a log under tracking/" "see tracking/" \
+  "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
+has "the task gains a Hook error section holding the hook's own last output" \
+  "## Hook error" "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
+has "headed Last output, the shape a failed command step's Blocker uses" \
+  "  Last output:" "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
 
 # Placed by hand at the other three stages, the same way flow.sh's own
 # hand-blocked scenario proves a road through `blocked` without spending a
@@ -684,20 +662,6 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 # show up here and nowhere else.
 silent_about "doctor is quiet about the shipped github.sh's own declared gh version" \
   "requires gh >=" "$SPOOLWAY" doctor
-
-# The shipped script's own `check` branch, run by `doctor` against the same
-# double: it passes while `gh` is logged in and can see `acme/app`, and each
-# of the two things it tests fails it on its own, with the script's own
-# stderr as the row. A branch that only ever said yes would pass the first
-# of these three and neither of the others.
-says "doctor runs the shipped github.sh's check branch, and it passes" \
-  "ok    github.sh check" "$SPOOLWAY" doctor --verbose
-says "a logged-out gh fails github.sh's check, naming the login" \
-  "FAIL  github.sh check: github.sh check: gh is not logged in" \
-  env GH_STUB_LOGGED_OUT=1 "$SPOOLWAY" doctor
-says "a repository gh cannot see fails github.sh's check, naming the repository" \
-  "FAIL  github.sh check: github.sh check: repository acme/app not found" \
-  env GH_STUB_NO_REPO=1 "$SPOOLWAY" doctor
 
 # ------------------------------------------- gh below the floor: the submit gate
 # `queue add --from` is the non-interactive route the gate's own mockup
@@ -869,6 +833,36 @@ has "the blocked event's comment names the task" \
   "github-blocked" "$GH_STUB_ISSUES/$ISSUE_NUM.comment"
 has "and carries the status log section, not the whole task file" \
   "## Status Log" "$GH_STUB_ISSUES/$ISSUE_NUM.comment"
+
+# ----------------------------------------- a real trace lands in Hook error
+# The shipped `github.sh`, unaltered, run through its own `set -eE`/ERR trap:
+# `GH_STUB_FAIL_EDIT` makes the stub's `issue edit` fail the way a real `gh`
+# would over a permissions error, which is the one call `mark_in_progress`
+# makes on `started`. No hand-written fixture hook here — this is what proves
+# the trace this task added actually reaches a paused task's own file.
+export GH_STUB_FAIL_EDIT=1
+dispatcher_restart
+task_doc "$LIVE/github-trace.md" github-trace "$BODY" \
+  "group: github-trace" \
+  "group_description: proving the ERR trap's own trace reaches Hook error"
+must "queuing it opens a ticket; open never calls the failing edit" \
+  "$SPOOLWAY" queue add --from "$LIVE/github-trace.md"
+if drive github-trace paused 60; then
+  ok "the real github.sh's started event fails and pauses the task"
+else
+  bad "the real github.sh's started event fails and pauses the task (at \`$(stage_of github-trace)\`)"
+fi
+TRACE_TASK="$SPOOLWAY_PROJECT_HOME/queue/github-trace.md"
+has "the reason keeps only the exit code" "issue_tracking hook exited 1" "$TRACE_TASK"
+lacks "and no longer points at a log under tracking/" "see tracking/" "$TRACE_TASK"
+has "the Hook error section holds the trap's command-failed line" \
+  "github.sh: command failed (exit 1)" "$TRACE_TASK"
+has "and the line the failing command ran at" "at line " "$TRACE_TASK"
+has "naming the case arm it failed in" "in case arm: started" "$TRACE_TASK"
+has "and the call chain that reached it" "called from mark_in_progress" "$TRACE_TASK"
+
+unset GH_STUB_FAIL_EDIT
+dispatcher_restart
 
 # --------------------------------------------------------------- fetch, real
 # A person's own issue, filed on the tracker before spoolway ever touched
