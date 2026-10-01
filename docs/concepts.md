@@ -68,6 +68,16 @@ checkout's own `.git`.
 A checkout that has both a tracked `.spoolway/` and a clone entry in some workspace is refused.
 The error names both paths.
 
+A workspace's `project.toml` that cannot be read or parsed is refused by every command that
+scans workspaces. The error names the file. `spoolway init` refuses the same way instead of
+falling back to repo mode for a checkout that file would have listed.
+
+A checkout listed more than once, in one workspace's `clones` or across several, is refused,
+naming every file and entry. A clone's `dispatcher` must be one plain name, with no path
+separator and no `..`; any other value is refused, naming the file and the entry. A clone's
+path must be valid UTF-8; `spoolway init` refuses a checkout path that is not, rather than
+storing a path that can never match it again.
+
 Re-attach a clone that moved or was re-cloned with `spoolway init --adopt
 <workspace>/<dispatcher>`. It rewrites that clone's path in the workspace's `project.toml` and
 keeps its dispatcher folder. The "no spoolway project found" error lists this exact command for

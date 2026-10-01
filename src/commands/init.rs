@@ -304,7 +304,12 @@ impl Placement {
             bail!("--workspace sets a project up in home mode, so it cannot go with --setup repo");
         }
 
-        if let Some(clone) = crate::repo::workspace_clone(root) {
+        // Fallible, not the ordinary lenient `workspace_clone`: a broken
+        // workspace file silently answering `None` here is exactly the
+        // `workspace-scan-strict` bug — `init` falls through to `Placement::
+        // New`/`Repo` below and converts the clone it could not read about
+        // to repo mode instead of reporting what is actually wrong.
+        if let Some(clone) = crate::repo::workspace_clone_checked(root)? {
             let name = clone
                 .workspace
                 .file_name()
@@ -1923,6 +1928,47 @@ mod tests {
         });
         let porcelain = crate::repo::run(&second, "git", &["status", "--porcelain"]).unwrap();
         assert_eq!(porcelain.trim(), "");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// `workspace-scan-strict` acceptance: a broken workspace file is
+    /// refused by `init`, not silently read as "this checkout belongs to no
+    /// workspace" — which is exactly what used to send `Placement::choose`
+    /// down to `Placement::Repo`/`New` and convert a home-mode clone to repo
+    /// mode, stamping `.git` and writing a tracked `.spoolway/` into a
+    /// checkout that already had a home, just one `init` could not read
+    /// about.
+    #[test]
+    fn init_refuses_rather_than_converting_a_clone_whose_workspace_file_is_broken() {
+        let parent = crate::scratch::root("init-home-broken");
+        let home = parent.join("home");
+        let first = home_mode_checkout(&parent, "api");
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let workspace = crate::repo::workspace_clone(&first).unwrap().workspace;
+            let record = workspace.join("project.toml");
+            let mut broken = std::fs::read_to_string(&record).unwrap();
+            broken.push_str("garbage = [\n");
+            std::fs::write(&record, broken).unwrap();
+
+            let err = init(&first, &home_args(NEW_WORKSPACE))
+                .expect_err("a workspace file that fails to parse must refuse, not fall back")
+                .to_string();
+            assert!(
+                err.contains(&record.display().to_string()),
+                "error must name the broken file {}, got: {err}",
+                record.display(),
+            );
+            assert!(
+                !crate::config::tracked_setup_dir_in(&first).is_dir(),
+                "must not fall back to writing a tracked .spoolway/ into this clone"
+            );
+        });
+        assert!(
+            std::fs::read_to_string(first.join(".git").join("spoolway-id")).is_err(),
+            "must not stamp .git either"
+        );
         let _ = std::fs::remove_dir_all(&parent);
     }
 

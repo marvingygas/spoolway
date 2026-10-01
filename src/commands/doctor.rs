@@ -614,18 +614,23 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
         "bound to its home".into(),
         match home_error {
             Some(err) => Err(anyhow::anyhow!("{err:#}")),
-            // The mode is named here, not as a row of its own, so it reads
-            // exactly where a person already looks to see what this
-            // checkout is bound to — see the `home-mode-discovery` task's
-            // "doctor says which mode the project is in", which names both
-            // modes, not only home mode.
-            None => Ok(Some(match crate::repo::workspace_clone(&repo.checkout) {
-                Some(_) => format!(
+            // The fallible scan, not the lenient `workspace_clone`: a
+            // workspace file elsewhere that cannot be read or parsed is
+            // exactly what `doctor` exists to name, so it is reported here
+            // rather than silently read as "repo mode" instead.
+            None => match crate::repo::workspace_clone_checked(&repo.checkout) {
+                Err(err) => Err(err),
+                // The mode is named here, not as a row of its own, so it reads
+                // exactly where a person already looks to see what this
+                // checkout is bound to — see the `home-mode-discovery` task's
+                // "doctor says which mode the project is in", which names both
+                // modes, not only home mode.
+                Ok(Some(_)) => Ok(Some(format!(
                     "{} — home mode, setup read from {}",
                     repo.home.display(),
                     repo.setup_dir().display()
-                ),
-                None => match crate::repo::binding_at(&repo.home) {
+                ))),
+                Ok(None) => Ok(Some(match crate::repo::binding_at(&repo.home) {
                     Some((id, root)) => {
                         format!(
                             "{} — repo mode, id {id}, root {}",
@@ -634,8 +639,8 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
                         )
                     }
                     None => format!("{} — repo mode", repo.home.display()),
-                },
-            })),
+                })),
+            },
         },
     )
 }
@@ -3321,6 +3326,58 @@ mod tests {
         assert!(
             outcome.is_ok(),
             "the tracked config itself is perfectly fine: {outcome:?}"
+        );
+    }
+
+    /// Acceptance criterion 6 of `workspace-scan-strict`, `doctor`'s own
+    /// corner: `registration_check` now reaches
+    /// `crate::repo::workspace_clone_checked`, the strict scan, for every
+    /// project — repo mode included. A `~/.spoolway/` holding everything a
+    /// 0.6.0 (or legacy) install could leave beside a real workspace must
+    /// not turn into a finding here either.
+    #[test]
+    fn registration_check_is_unaffected_by_a_mixed_home_from_older_installs() {
+        let root = crate::scratch::root("doctor-mixed-home");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("doctor-mixed-home-dollar-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let state = home.join(".spoolway");
+        std::fs::create_dir_all(&state).unwrap();
+
+        // A 0.6.0 repo-mode home: an ordinary `Binding`, no `clones`, no
+        // `config/`/`dispatchers/` beside it.
+        let repo_mode = state.join("repo-mode-home-abc123");
+        std::fs::create_dir_all(&repo_mode).unwrap();
+        std::fs::write(
+            repo_mode.join("project.toml"),
+            "id = \"abc123\"\nroot = \"/some/other/checkout\"\n",
+        )
+        .unwrap();
+        // A legacy home: no `project.toml` at all.
+        std::fs::create_dir_all(state.join("spoolway")).unwrap();
+        // A folder that is no home at all.
+        std::fs::create_dir_all(state.join("logs")).unwrap();
+
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+
+        let finding =
+            crate::platform::test_home::with_home(&home, || registration_check(&repo, None));
+        let Finding::Check(label, outcome) = finding else {
+            panic!("registration_check always returns a Check");
+        };
+        assert_eq!(label, "bound to its home");
+        let message = outcome.expect(
+            "a mixed ~/.spoolway/ must not turn into a finding for a project none of it lists",
+        );
+        assert!(
+            message.is_some_and(|m| m.contains("repo mode")),
+            "this checkout is in repo mode and none of the mixed siblings should change that"
         );
     }
 

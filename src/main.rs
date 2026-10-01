@@ -602,8 +602,8 @@ fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
 /// Where `spoolway init` should place `.spoolway/`: the git toplevel if there is
 /// one, otherwise here.
 fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
-    match repo::run(cwd, "git", &["rev-parse", "--show-toplevel"]) {
-        Ok(out) => Ok(PathBuf::from(out.trim())),
+    match repo::toplevel_raw(cwd) {
+        Ok(top) => Ok(top),
         Err(_) => Ok(cwd.to_path_buf()),
     }
 }
