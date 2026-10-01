@@ -546,6 +546,13 @@ because a home-mode project's whole setup is already private to the machine it r
   [`spoolway pipeline list`](cli-reference.md#spoolway-pipeline-list).
 - `spoolway pipeline check` validates a private pipeline the same way it validates a tracked
   one.
+- `spoolway pipeline override` and `spoolway prompt override` find a private pipeline or prompt
+  the same way `list` and `show` do, and write a patch or fork for it. That patch or fork only
+  starts applying once `spoolway pipeline promote` makes the target tracked; until then it sits
+  in the overrides layer, named as waiting on the promote rather than reported as a missing
+  name. `spoolway pipeline promote <name>` itself names any override file — for the pipeline or
+  for a prompt it carries — that starts applying because of the move. See [The overrides
+  layer](configuration.md#the-overrides-layer).
 - A lane running in a worktree reads the same `local/` the main checkout does.
 
 ## Adding a step

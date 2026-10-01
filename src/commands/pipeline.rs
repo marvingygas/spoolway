@@ -1007,10 +1007,23 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
 
     let tracked = Pipelines::load_tracked(&repo.checkout, &repo.config)
         .with_context(|| format!("reading the tracked pipeline `{name}`"))?;
-    let pipeline = tracked
-        .pipelines
-        .get(name)
-        .with_context(|| format!("no pipeline named `{name}`"))?;
+    // A private pipeline is never in `tracked` — `load_tracked` never reads
+    // `local/` — so it is looked up there separately before giving up. The
+    // patch this writes only ever merges onto a *tracked* pipeline at load
+    // (`merge_private` never applies one to a private file), so a private
+    // pipeline's patch sits waiting rather than taking effect the moment
+    // this command writes it — `spoolway pipeline promote` is what starts
+    // it applying. `private` is kept past this match to tell that case
+    // apart from a tracked one below, for the closing message.
+    let private = if tracked.pipelines.contains_key(name) {
+        None
+    } else {
+        crate::pipeline::Pipelines::private(&repo.checkout, name)?
+    };
+    let pipeline = match tracked.pipelines.get(name).or(private.as_ref()) {
+        Some(pipeline) => pipeline,
+        None => bail!("no pipeline named `{name}`"),
+    };
     let step = pipeline.steps.iter().find(|s| s.id == step_id).with_context(|| {
         format!(
             "pipeline `{name}` has no step `{step_id}` — a patch may only set a value on a step \
@@ -1057,7 +1070,16 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     println!("  wrote {}", path.display());
     println!("    {step_id}.{key}   {old} -> {new}");
     println!();
-    println!("  active on the next dispatcher pass. `spoolway override drop {name}` to clear it.");
+    if private.is_some() {
+        println!(
+            "  waiting on `spoolway pipeline promote {name}` — a private pipeline's patch only \
+             starts applying once it is tracked. `spoolway override drop {name}` to clear it."
+        );
+    } else {
+        println!(
+            "  active on the next dispatcher pass. `spoolway override drop {name}` to clear it."
+        );
+    }
     Ok(())
 }
 
@@ -1571,6 +1593,13 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
     prompt_names.sort_unstable();
     prompt_names.dedup();
 
+    // The subset of `prompt_names` this promote actually moves — the ones
+    // with no private directory of their own (a tracked prompt the pipeline
+    // already named, nothing to move) never reach `plan`, so they are kept
+    // out of this list too: an override waiting on one of those was never
+    // waiting on this promote to begin with.
+    let mut promoted_prompt_names: Vec<&str> = Vec::new();
+
     for prompt_name in prompt_names {
         // Read off the pipeline's own parsed steps rather than typed at a
         // prompt, so nothing before this ever checked it — unlike
@@ -1585,6 +1614,7 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         if !private_dir.is_dir() {
             continue;
         }
+        promoted_prompt_names.push(prompt_name);
         // `directory_form`'s own parent, not `repo.prompts_dir().join(…)` —
         // `commands::tests::nothing_builds_a_prompt_path_except_the_one_function_that_should`
         // refuses that shape outright, `crate::prompt::path_for` being the
@@ -1702,7 +1732,46 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         }
     }
 
-    print_moved(repo, json, &plan)
+    print_moved(repo, json, &plan)?;
+
+    // Only a tracked pipeline or prompt is ever patched by the override
+    // layer — see `merge_private`'s own comment. A patch or fork written
+    // while `name` (or one of its prompts) was still private was already
+    // named as such — `Ignored::private_pipeline`/`private_prompt`, not
+    // silence — by every `override list` and every load since it was
+    // written. Promoting is the moment it stops being merely named and
+    // starts actually applying, which is worth a line of its own, here,
+    // rather than left for the next load to notice as a quiet behaviour
+    // change. `json` output stays exactly what `print_moved` wrote above —
+    // a second, differently-shaped line appended after it would not parse
+    // as the same document.
+    if !json {
+        let mut starting = Vec::new();
+        if crate::overrides::read_pipeline_patch(&repo.overrides_dir(), name)?.is_some() {
+            starting.push(
+                crate::overrides::pipeline_patch_path(&repo.overrides_dir(), name)
+                    .display()
+                    .to_string(),
+            );
+        }
+        for prompt_name in &promoted_prompt_names {
+            if crate::overrides::prompt_override(&repo.overrides_dir(), prompt_name).is_some() {
+                starting.push(
+                    crate::overrides::prompt_patch_path(&repo.overrides_dir(), prompt_name)
+                        .display()
+                        .to_string(),
+                );
+            }
+        }
+        if !starting.is_empty() {
+            println!();
+            for path in &starting {
+                println!("  {path} already exists and will start applying now that it is tracked");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3508,6 +3577,136 @@ mod tests {
         with_repo_and_pipeline("unknown-pipeline", "demo", DEMO_PIPELINE, |repo| {
             let err = pipeline_override(repo, "nosuchpipeline", "implement.model=x").unwrap_err();
             assert!(err.to_string().contains("no pipeline named"), "{err}");
+        });
+    }
+
+    /// `pipeline override` probes `Pipelines::load_tracked` alone, so a
+    /// private pipeline — one `pipeline list` and `pipeline show` both find —
+    /// is refused as "no pipeline named", exactly as if it did not exist.
+    #[test]
+    fn pipeline_override_accepts_a_private_pipeline() {
+        with_repo_and_pipeline("private-pipeline", "demo", DEMO_PIPELINE, |repo| {
+            let local = crate::local::dir_for(&repo.root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("strict.yml"),
+                "steps:\n  - id: implement\n    agent: pi\n    model: base-model\n    on_pass: \
+                 done\n",
+            )
+            .unwrap();
+
+            pipeline_override(repo, "strict", "implement.model=x")
+                .expect("a private pipeline must patch, not be refused");
+            let patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "strict")
+                .unwrap()
+                .unwrap();
+            assert_eq!(patch.steps["implement"]["model"].as_str(), Some("x"));
+        });
+    }
+
+    /// `promote` is what starts a private pipeline's waiting patch applying
+    /// — see `pipeline_override_accepts_a_private_pipeline` above, which
+    /// only writes it. Before `promote`, `Pipelines::load` carries the patch
+    /// as waiting (`Ignored::private_pipeline`, not silence); after, the
+    /// same load actually carries the patched value.
+    #[test]
+    fn pipeline_promote_starts_an_override_file_applying() {
+        let (repo, home) = repo_for_home_aware("promote-starts-applying");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            pipeline_override(&repo, "default-strict", "implement.model=claude-opus-5").unwrap();
+
+            // Still waiting: the tracked load never even reaches the patch,
+            // since `load_tracked` never merges the private pipeline it
+            // targets in the first place.
+            let before = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+            assert!(
+                before.ignored_overrides.iter().any(
+                    |i| i.notice().contains("default-strict") && i.notice().contains("private")
+                ),
+                "{:?}",
+                before
+                    .ignored_overrides
+                    .iter()
+                    .map(|i| i.notice())
+                    .collect::<Vec<_>>()
+            );
+            assert_ne!(
+                before.pipelines["default-strict"]
+                    .step("implement")
+                    .unwrap()
+                    .model
+                    .as_deref(),
+                Some("claude-opus-5"),
+            );
+
+            pipeline_promote(&repo, "default-strict", false).unwrap();
+
+            let after = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+            assert!(
+                !after
+                    .ignored_overrides
+                    .iter()
+                    .any(|i| i.notice().contains("default-strict")),
+                "{:?}",
+                after
+                    .ignored_overrides
+                    .iter()
+                    .map(|i| i.notice())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                after.pipelines["default-strict"]
+                    .step("implement")
+                    .unwrap()
+                    .model
+                    .as_deref(),
+                Some("claude-opus-5"),
+            );
+        });
+    }
+
+    /// The prompt twin of the test above: a fork of a *private* prompt also
+    /// waits on the promote of the pipeline that runs it, named rather than
+    /// silent while it waits, and starts applying once that promote lands.
+    #[test]
+    fn pipeline_promote_starts_a_prompt_fork_applying_too() {
+        let (repo, home) = repo_for_home_aware("promote-starts-prompt-applying");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap();
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: implementer-strict");
+            assert!(raw.contains("implementer-strict"), "{raw}");
+            std::fs::write(&pipeline_path, raw).unwrap();
+
+            prompt_override(&repo, "implementer-strict").expect("a private prompt must fork");
+            std::fs::write(
+                crate::overrides::prompt_patch_path(&repo.overrides_dir(), "implementer-strict"),
+                "the patched prose",
+            )
+            .unwrap();
+
+            // Still waiting: `prompt::path_for` never applies a fork onto a
+            // private prompt, only a tracked one.
+            assert_ne!(
+                std::fs::read_to_string(crate::prompt::path_for(&repo, "implementer-strict"))
+                    .unwrap(),
+                "the patched prose",
+            );
+
+            pipeline_promote(&repo, "default-strict", false).expect("promote");
+
+            assert_eq!(
+                std::fs::read_to_string(crate::prompt::path_for(&repo, "implementer-strict"))
+                    .unwrap(),
+                "the patched prose",
+            );
         });
     }
 }

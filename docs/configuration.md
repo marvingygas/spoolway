@@ -103,8 +103,11 @@ merged, for example a step that already runs a command and gets `agent:` added o
 stale entry is left out of the merge. The step stays exactly as the tracked file wrote it, and
 every other entry, in this file and in every other, still applies. A config patch key the
 tracked config would refuse is left out the same way, with every other key in the patch still
-applied. A prompt override for a prompt the checkout no longer has is left out too. The
-override file itself is never changed.
+applied. A prompt override for a prompt the checkout no longer has is left out too. A pipeline
+patch or a prompt override written for a private target is also left out of the merge — a
+patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
+promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
+itself is never changed.
 
 Outside a lane, each command that loads prints one stderr line per entry it leaves out:
 

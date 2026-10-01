@@ -25,6 +25,12 @@ in the directory shape above: a flat `local/prompts/<name>.md` is not read.
 
 A private prompt whose name matches a tracked one is refused, naming both files.
 
+`spoolway prompt list` and `spoolway prompt override` find a private prompt the same way
+`spoolway prompt show` does. `prompt list` marks its row `private`. `prompt override` forks it
+into the overrides layer, but the fork only starts applying once the pipeline that runs it is
+promoted, since an override patches a tracked file and a private prompt is not one. See [The
+overrides layer](configuration.md#the-overrides-layer).
+
 ## A prompt is prose, and nothing else
 
 spoolway never parses a prompt. There is no format and no generated region:

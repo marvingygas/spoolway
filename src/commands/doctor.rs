@@ -1664,8 +1664,9 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
             if used.contains_key(&entry.name) {
                 continue;
             }
+            let label = if entry.private { " (private)" } else { "" };
             findings.push(Finding::Note(format!(
-                "prompt `{}` is run by no step",
+                "prompt `{}`{label} is run by no step",
                 entry.name
             )));
         }

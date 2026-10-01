@@ -84,6 +84,36 @@ impl Ignored {
         }
     }
 
+    /// A whole pipeline patch left out not because the name is missing —
+    /// it exists, privately — but because the patch layer only ever merges
+    /// onto a *tracked* pipeline; see `merge_private`'s own doc. Told apart
+    /// from [`Ignored::missing_pipeline`] so a person sees it is waiting on
+    /// `pipeline promote`, not that they mistyped the name.
+    pub(crate) fn private_pipeline(name: &str) -> Ignored {
+        Ignored {
+            target: format!("pipelines/{name}.yml"),
+            fields: String::new(),
+            reason: format!(
+                "names pipeline `{name}`, which is private — it applies once `spoolway pipeline \
+                 promote {name}` makes it tracked"
+            ),
+        }
+    }
+
+    /// [`Ignored::private_pipeline`]'s own prompt twin: a private prompt
+    /// with a fork waiting in the layer, told apart from
+    /// [`Ignored::missing_prompt`] for the same reason.
+    pub(crate) fn private_prompt(name: &str) -> Ignored {
+        Ignored {
+            target: format!("prompts/{name}"),
+            fields: String::new(),
+            reason: format!(
+                "names prompt `{name}`, which is private — it applies once the pipeline that \
+                 runs it is promoted"
+            ),
+        }
+    }
+
     /// The Mockup's own stderr line.
     pub(crate) fn notice(&self) -> String {
         format!(

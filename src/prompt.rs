@@ -93,6 +93,11 @@ pub const ENVIRONMENT: &[(&str, &str)] = &[
 pub struct Entry {
     pub name: String,
     pub path: PathBuf,
+    /// Found only under `local/prompts/`, with no tracked file of the same
+    /// name — see [`path_for`]. A reader that lists entries by name must say
+    /// so, since a private prompt works everywhere `prompt show` finds one
+    /// but is invisible to anyone reading only the tracked checkout.
+    pub private: bool,
 }
 
 /// One problem with a prompt, found by reading it against the step that runs it.
@@ -102,8 +107,10 @@ pub struct Entry {
 /// minutes into a lane, as a refusal in a pane nobody is watching.
 pub struct Finding {
     pub prompt: String,
-    /// Where the prompt is used, as `pipeline/step`, or empty for a file-level
-    /// finding that holds wherever it runs.
+    /// Where the prompt is used, as `pipeline/step`; `"private"` for a
+    /// file-level finding on a prompt no tracked file names (see
+    /// [`Entry::private`]); or empty for a file-level finding on a tracked
+    /// prompt, which holds wherever it runs.
     pub at: String,
     pub message: String,
 }
@@ -457,21 +464,20 @@ fn prompt_flag(profile: &crate::config::AgentProfile) -> Option<String> {
 /// points at where a prompt belongs rather than where it used to.
 pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
     let tracked = path_for_tracked(repo, name);
-    if let Some(overridden) = crate::overrides::prompt_override(&repo.overrides_dir(), name) {
-        // A whole-file override for a prompt the checkout no longer has —
-        // renamed or removed — is stale: it replaces nothing, so it is left
-        // out, exactly as if it had never been written.
-        if tracked.is_file() {
-            return overridden;
-        }
-        crate::overrides::print_ignored_notices(&[crate::overrides::Ignored::missing_prompt(name)]);
-    }
+    let overridden = crate::overrides::prompt_override(&repo.overrides_dir(), name);
+
     // Only a plain name is ever resolved privately — the same shape
     // `local_names_in` enumerates, direct children only. A name holding `/`
     // would otherwise join straight through into a nested directory the
     // private layer never lists, letting a tracked pipeline reach a prompt
     // `merge_private`'s own clash check never saw and a private-only name
     // never meant to publish — see `crate::local::is_plain_name`.
+    //
+    // Checked before the override below, since a private prompt is the
+    // reason an override here does not apply — an override patches a
+    // *tracked* file, and a private prompt is not one — so it must be told
+    // apart from a name the checkout genuinely has nothing by, which is
+    // `Ignored::missing_prompt`'s own case.
     if !tracked.is_file()
         && crate::local::is_repo_mode(&repo.checkout)
         && crate::local::is_plain_name(name)
@@ -480,8 +486,23 @@ pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
             .join(name)
             .join(crate::assets::PROMPT_FILE);
         if private.is_file() {
+            if overridden.is_some() {
+                crate::overrides::print_ignored_notices(&[
+                    crate::overrides::Ignored::private_prompt(name),
+                ]);
+            }
             return private;
         }
+    }
+
+    if let Some(overridden) = overridden {
+        // A whole-file override for a prompt the checkout no longer has —
+        // renamed or removed — is stale: it replaces nothing, so it is left
+        // out, exactly as if it had never been written.
+        if tracked.is_file() {
+            return overridden;
+        }
+        crate::overrides::print_ignored_notices(&[crate::overrides::Ignored::missing_prompt(name)]);
     }
     tracked
 }
@@ -499,6 +520,24 @@ pub fn path_for_tracked(repo: &Repo, name: &str) -> PathBuf {
         return flat;
     }
     nested
+}
+
+/// The private prompt [`path_for_tracked`] cannot see, for a caller that
+/// must tell a genuinely missing name apart from one that merely has no
+/// tracked file: `commands::prompt_override` reads it as the source to fork
+/// when no tracked file exists, and `collect_override_rows` uses it to
+/// report a whole-file override as waiting on a private prompt rather than
+/// naming one the checkout does not have.
+/// Directory shape only, the same as [`path_for`]'s own private fallback,
+/// and `None` outside repo mode or for a name holding `/`.
+pub(crate) fn private_only_path(repo: &Repo, name: &str) -> Option<PathBuf> {
+    if !crate::local::is_repo_mode(&repo.checkout) || !crate::local::is_plain_name(name) {
+        return None;
+    }
+    let private = crate::local::prompts_dir(&repo.local_dir())
+        .join(name)
+        .join(crate::assets::PROMPT_FILE);
+    private.is_file().then_some(private)
 }
 
 /// The directory shape of a prompt's file — `<prompts>/<name>/PROMPT.md` —
@@ -613,12 +652,38 @@ fn scan(dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
     Ok(found)
 }
 
-/// Every prompt file this project has, with where it came from.
+/// Every prompt file this project has, with where it came from — the
+/// tracked directory, plus, in repo mode, any private prompt
+/// (`local/prompts/<name>/PROMPT.md`) with no tracked file of the same
+/// name. A tracked file always wins the name, the same precedence
+/// [`path_for`] gives it, so a private prompt never hides one a pipeline
+/// actually runs.
 pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
-    Ok(scan(&repo.prompts_dir())?
-        .into_iter()
-        .map(|(name, path)| Entry { name, path })
-        .collect())
+    let tracked = scan(&repo.prompts_dir())?;
+    let mut found: Vec<Entry> = tracked
+        .iter()
+        .map(|(name, path)| Entry {
+            name: name.clone(),
+            path: path.clone(),
+            private: false,
+        })
+        .collect();
+
+    if crate::local::is_repo_mode(&repo.checkout) {
+        let private_dir = crate::local::prompts_dir(&repo.local_dir());
+        for name in local_names_in(&private_dir)? {
+            if tracked.contains_key(&name) {
+                continue;
+            }
+            found.push(Entry {
+                path: private_dir.join(&name).join(crate::assets::PROMPT_FILE),
+                name,
+                private: true,
+            });
+        }
+    }
+
+    Ok(found)
 }
 
 /// Which `pipeline/step` pairs run each prompt. "Used by nothing" is what
@@ -668,6 +733,14 @@ pub fn list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
         let used = match users.get(&entry.name) {
             Some(steps) => steps.join(", "),
             None => "— nothing runs it".to_string(),
+        };
+        // A private prompt lives only on this machine's local/, so it is
+        // worth saying so right beside it — nothing else in the row marks
+        // where a prompt's file actually is.
+        let used = if entry.private {
+            format!("private, {used}")
+        } else {
+            used
         };
         println!("{:<width$}  {}", entry.name, used);
     }
@@ -758,7 +831,8 @@ fn read_prompts(
             continue;
         }
         let body = std::fs::read_to_string(&entry.path)?;
-        for finding in rule(&entry.name, &body, "") {
+        let at = if entry.private { "private" } else { "" };
+        for finding in rule(&entry.name, &body, at) {
             if seen.insert((finding.prompt.clone(), finding.message.clone())) {
                 findings.push(finding);
             }
@@ -1429,6 +1503,29 @@ mod tests {
             path_for(&repo, "nest/inner"),
             path_for_tracked(&repo, "nest/inner"),
             "a nested name must never resolve through the private layer"
+        );
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// `entries` — the list `prompt list`, doctor's unused-prompt note and
+    /// the unused-prompt lint all read — scans only the tracked directory,
+    /// so a private-only prompt never appears in any of them, and is
+    /// reported missing even though `prompt show` finds it fine.
+    #[test]
+    fn entries_include_a_private_prompt_the_tracked_folder_does_not_have() {
+        let repo = fixture("entries-see-private");
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join("impl2")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "the private prompt").unwrap();
+
+        let found = entries(&repo).unwrap();
+        let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"impl2"),
+            "a private-only prompt must still be listed: {names:?}"
         );
 
         std::fs::remove_dir_all(&repo.checkout).ok();

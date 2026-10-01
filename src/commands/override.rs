@@ -82,7 +82,20 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
         note.print(false)?;
     }
     let tracked = crate::prompt::path_for_tracked(repo, name);
-    let body = std::fs::read_to_string(&tracked)
+    // A private prompt is never tracked, so forking from it reads
+    // `local/prompts/` instead — but the layer this writes into only ever
+    // replaces a *tracked* file at `prompt::path_for` (it never shadows a
+    // private one), so a private prompt's fork sits waiting rather than
+    // taking effect the moment this command writes it — promoting the
+    // pipeline that runs it is what starts it applying.
+    let (source, private) = if tracked.is_file() {
+        (tracked.clone(), false)
+    } else if let Some(private) = crate::prompt::private_only_path(repo, name) {
+        (private, true)
+    } else {
+        (tracked.clone(), false)
+    };
+    let body = std::fs::read_to_string(&source)
         .with_context(|| format!("no prompt named `{name}` at {}", tracked.display()))?;
 
     let overrides_dir = repo.overrides_dir();
@@ -91,7 +104,14 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
 
     println!("  wrote {}", target.display());
     println!();
-    println!("  active on the next lane. `spoolway override drop prompts/{name}` to clear it.");
+    if private {
+        println!(
+            "  waiting on a promote — prompt `{name}` is private; this fork only starts applying \
+             once it is tracked. `spoolway override drop prompts/{name}` to clear it."
+        );
+    } else {
+        println!("  active on the next lane. `spoolway override drop prompts/{name}` to clear it.");
+    }
     Ok(())
 }
 
@@ -200,20 +220,25 @@ pub(crate) fn collect_override_rows(repo: &Repo) -> Result<Vec<OverrideRow>> {
             keys.push("task_template".to_string());
         }
 
-        // Three answers, not two: the tracked pipelines failed to load at
+        // Four answers, not three: the tracked pipelines failed to load at
         // all (`None` — that tracked file's own problem, not this patch's to
         // report, so staleness here is undetermined rather than assumed),
         // they loaded and have this pipeline (dry-run the patch against it,
-        // step by step, same as `Pipelines::load` does for real), or they
-        // loaded and do not — the whole patch is stale, by the identical
-        // reason `Pipelines::load` would have skipped it for, from
-        // [`Ignored::missing_pipeline`].
+        // step by step, same as `Pipelines::load` does for real), they
+        // loaded and do not but a private pipeline of the same name is
+        // waiting on `pipeline promote` — [`Ignored::private_pipeline`], not
+        // [`Ignored::missing_pipeline`], since the name is not wrong, only
+        // not tracked yet — or the name is nowhere at all, the identical
+        // reason `Pipelines::load` would have skipped it for.
         let ignored = match &tracked {
             None => Vec::new(),
             Some(tracked) => match tracked.pipelines.get(&name) {
                 Some(pipeline) => {
                     let mut probe = pipeline.clone();
                     crate::overrides::apply_pipeline_patch(&mut probe, &dir)?
+                }
+                None if crate::pipeline::Pipelines::private(&repo.checkout, &name)?.is_some() => {
+                    vec![crate::overrides::Ignored::private_pipeline(&name)]
                 }
                 None => vec![crate::overrides::Ignored::missing_pipeline(&name)],
             },
@@ -250,6 +275,8 @@ pub(crate) fn collect_override_rows(repo: &Repo) -> Result<Vec<OverrideRow>> {
     for name in crate::overrides::list_prompt_overrides(&dir)? {
         let ignored = if crate::prompt::path_for_tracked(repo, &name).is_file() {
             Vec::new()
+        } else if crate::prompt::private_only_path(repo, &name).is_some() {
+            vec![crate::overrides::Ignored::private_prompt(&name)]
         } else {
             vec![crate::overrides::Ignored::missing_prompt(&name)]
         };
@@ -1096,6 +1123,30 @@ mod tests {
         with_repo("prompt-fork-missing", |repo| {
             let err = prompt_override(repo, "nosuchprompt").unwrap_err();
             assert!(err.to_string().contains("no prompt named"), "{err}");
+        });
+    }
+
+    /// `prompt override` reads straight off [`crate::prompt::path_for_tracked`],
+    /// so a private prompt — one that `prompt show` and `prompt list` both
+    /// find — is refused as though it did not exist at all. `prompt_override`
+    /// must find it the way every other reader of the private layer does.
+    #[test]
+    fn prompt_override_accepts_a_private_prompt() {
+        with_repo("prompt-fork-private", |repo| {
+            let local = crate::local::dir_for(&repo.root).unwrap();
+            let private = crate::local::prompts_dir(&local)
+                .join("impl2")
+                .join(crate::assets::PROMPT_FILE);
+            std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+            std::fs::write(&private, "the private prompt").unwrap();
+
+            prompt_override(repo, "impl2").expect("a private prompt must fork, not be refused");
+            let forked = std::fs::read_to_string(crate::overrides::prompt_patch_path(
+                &repo.overrides_dir(),
+                "impl2",
+            ))
+            .unwrap();
+            assert_eq!(forked, "the private prompt");
         });
     }
 

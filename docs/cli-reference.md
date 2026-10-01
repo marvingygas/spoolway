@@ -652,6 +652,20 @@ A step the pipeline does not have, a key the merge refuses, or `id:` set on the 
 out of the merge instead: the command still runs, and prints one stderr line naming what it
 left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
 
+`<name>` may also name a private pipeline. The patch is written the same way, but it only
+starts applying once [`spoolway pipeline promote <name>`](#spoolway-pipeline-promote-name)
+makes the pipeline tracked:
+
+```
+$ spoolway pipeline override strict --set implement.model=x
+
+  wrote ~/.spoolway/spoolway/overrides/pipelines/strict.yml
+    implement.model   claude-sonnet-5 -> x
+
+  waiting on `spoolway pipeline promote strict` — a private pipeline's patch only starts
+  applying once it is tracked. `spoolway override drop strict` to clear it.
+```
+
 ### `spoolway pipeline copy <from> <to>`
 
 Copy a pipeline and its task skeleton into the private layer.
@@ -691,9 +705,17 @@ promote into. Nothing is committed.
 A promote that fails partway through puts every file back where it was. Nothing is left tracked
 or deleted halfway, and the same `spoolway pipeline promote <name>` can be run again.
 
+If an override file was already waiting on this pipeline, or on a prompt it names — written by
+`pipeline override` or `prompt override` while the target was still private — promote names it
+once the move starts it applying:
+
+```
+  ~/.spoolway/proj-ab12cd34/overrides/pipelines/impl-strict.yml already exists and will start applying now that it is tracked
+```
+
 `--json` prints `{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and
-`to` relative to the checkout, matching the two columns above. See [Private
-pipelines](pipelines.md#private-pipelines).
+`to` relative to the checkout, matching the two columns above. It carries no line for a
+waiting override file. See [Private pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway prompt contract`
 
@@ -715,7 +737,16 @@ render against.
 
 ### `spoolway prompt list`
 
-Print every prompt and which steps run it.
+Print every prompt and which steps run it. A private prompt — one with no tracked file of the
+same name, see [Private prompts](prompts.md#private-prompts) — is listed too, with `private`
+first in its row:
+
+```
+PROMPT       USED BY
+implementer  impl/implement
+reviewer     impl/review, bugfix/review
+impl2        private, — nothing runs it
+```
 
 ### `spoolway prompt show <name>`
 
@@ -725,6 +756,10 @@ Print one prompt file.
 
 Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md` to edit there. An override
 replaces the whole file. See the [overrides layer](configuration.md#the-overrides-layer).
+
+`<name>` may also be a private prompt. The fork is written the same way, but it only starts
+applying once the pipeline that runs it is promoted. See [Private
+prompts](prompts.md#private-prompts).
 
 ### `spoolway prompt copy <from> <to>`
 
