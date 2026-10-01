@@ -449,7 +449,16 @@ pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
         }
         crate::overrides::print_ignored_notices(&[crate::overrides::Ignored::missing_prompt(name)]);
     }
-    if !tracked.is_file() && crate::local::is_repo_mode(&repo.checkout) {
+    // Only a plain name is ever resolved privately — the same shape
+    // `local_names_in` enumerates, direct children only. A name holding `/`
+    // would otherwise join straight through into a nested directory the
+    // private layer never lists, letting a tracked pipeline reach a prompt
+    // `merge_private`'s own clash check never saw and a private-only name
+    // never meant to publish — see `crate::local::is_plain_name`.
+    if !tracked.is_file()
+        && crate::local::is_repo_mode(&repo.checkout)
+        && crate::local::is_plain_name(name)
+    {
         let private = crate::local::prompts_dir(&repo.local_dir())
             .join(name)
             .join(crate::assets::PROMPT_FILE);
@@ -1379,6 +1388,31 @@ mod tests {
         std::fs::write(&private, "the private prompt").unwrap();
 
         assert_eq!(path_for(&repo, "implementer"), private);
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A nested name like `nest/inner` is never resolved through the
+    /// private layer, even when a file sits exactly where the straight join
+    /// would land — `local_names_in` only ever lists direct children, so a
+    /// tracked pipeline naming `nest/inner` must see it as missing, the same
+    /// as `path_for_tracked` alone would answer, rather than reaching a
+    /// private file its own loader does not know exists.
+    #[test]
+    fn a_private_prompt_name_holding_a_slash_is_never_resolved() {
+        let repo = fixture("nested-private-name-refused");
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join("nest")
+            .join("inner")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "a nested private prompt").unwrap();
+
+        assert_eq!(
+            path_for(&repo, "nest/inner"),
+            path_for_tracked(&repo, "nest/inner"),
+            "a nested name must never resolve through the private layer"
+        );
 
         std::fs::remove_dir_all(&repo.checkout).ok();
     }

@@ -1206,6 +1206,11 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
         note.print(json)?;
     }
 
+    // Caught before `from` is ever looked up or `to` ever joined onto a
+    // directory — see `crate::local::refuse_unless_plain_name`.
+    crate::local::refuse_unless_plain_name("pipeline", from)?;
+    crate::local::refuse_unless_plain_name("pipeline", to)?;
+
     let source = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), from)
         .or_else(|| {
             crate::local::is_repo_mode(&repo.checkout)
@@ -1240,6 +1245,11 @@ pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> 
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
+
+    // Caught before `from` is ever looked up or `to` ever joined onto a
+    // directory — see `crate::local::refuse_unless_plain_name`.
+    crate::local::refuse_unless_plain_name("prompt", from)?;
+    crate::local::refuse_unless_plain_name("prompt", to)?;
 
     let tracked = crate::prompt::path_for_tracked(repo, from);
     let source = if tracked.is_file() {
@@ -1440,6 +1450,15 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
     prompt_names.dedup();
 
     for prompt_name in prompt_names {
+        // Read off the pipeline's own parsed steps rather than typed at a
+        // prompt, so nothing before this ever checked it — unlike
+        // `pipeline_copy`/`prompt_copy`'s own `<from>`/`<to>`, caught before
+        // either is ever joined onto a directory. The same refusal, run
+        // here before `prompt_name` is joined onto `local/prompts/` at all:
+        // a private pipeline naming `prompt: ../../evil` would otherwise
+        // move a directory from outside `local/prompts/` straight into (or
+        // out of) the tracked control plane.
+        crate::local::refuse_unless_plain_name("prompt", prompt_name)?;
         let private_dir = crate::local::prompts_dir(&local).join(prompt_name);
         if !private_dir.is_dir() {
             continue;
@@ -1643,6 +1662,78 @@ mod tests {
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
     }
 
+    /// A `<to>` that is empty, absolute, or holds `/`, `\` or `..` must be
+    /// refused — not joined onto the private directory, which is what lets
+    /// it write outside `local/`. See the task's "How to see it": `..` walks
+    /// out to `$HOME`, an absolute path writes wherever it points, `""`
+    /// writes `local/pipelines/.yml`, and `a/b` writes a nested file the
+    /// loader never reads.
+    #[test]
+    fn pipeline_copy_refuses_a_to_that_is_not_one_plain_name() {
+        let repo = repo_for("copy-bad-to");
+        let pipelines_dir = crate::local::pipelines_dir(&repo.local_dir());
+        let templates_dir = crate::local::task_templates_dir(&repo.local_dir());
+
+        for bad in [
+            "",
+            "/etc/passwd",
+            "a/b",
+            "..",
+            "../../../../escaped",
+            "a\\b",
+        ] {
+            let err = pipeline_copy(&repo, "default", bad, false)
+                .expect_err(&format!("`{bad}` should have been refused"));
+            assert!(
+                format!("{err:#}").to_lowercase().contains("name"),
+                "refusal for `{bad}` should name the problem: {err:#}"
+            );
+        }
+
+        // Nothing was written anywhere a bad `<to>` could have reached —
+        // not even inside the private directory itself.
+        assert!(
+            !pipelines_dir.exists() || std::fs::read_dir(&pipelines_dir).unwrap().next().is_none()
+        );
+        assert!(
+            !templates_dir.exists() || std::fs::read_dir(&templates_dir).unwrap().next().is_none()
+        );
+        assert!(!repo.home.join("escaped.yml").exists());
+        assert!(!PathBuf::from("/etc/passwd.yml").exists());
+    }
+
+    /// The same refusal, on the prompt side — a bad `<to>` must not reach
+    /// `prompt_copy_dest`, which `repo_for` runs in repo mode, where it
+    /// joins `<to>` straight onto `local/prompts/`. `prompt_copy`'s own
+    /// `refuse_unless_plain_name` call runs before `prompt_copy_dest` is
+    /// ever reached at all, so the same refusal holds in home mode too,
+    /// where that function instead joins onto the tracked directory shape
+    /// through `crate::prompt::directory_form` — untested here, since
+    /// nothing about the join itself differs by mode.
+    #[test]
+    fn prompt_copy_refuses_a_to_that_is_not_one_plain_name() {
+        let repo = repo_for("prompt-copy-bad-to");
+        let prompts_dir = crate::local::prompts_dir(&repo.local_dir());
+
+        for bad in [
+            "",
+            "/etc/passwd",
+            "nest/inner",
+            "..",
+            "../../../../../evilp",
+            "a\\b",
+        ] {
+            let err = prompt_copy(&repo, "implementer", bad, false)
+                .expect_err(&format!("`{bad}` should have been refused"));
+            assert!(
+                format!("{err:#}").to_lowercase().contains("name"),
+                "refusal for `{bad}` should name the problem: {err:#}"
+            );
+        }
+
+        assert!(!prompts_dir.exists() || std::fs::read_dir(&prompts_dir).unwrap().next().is_none());
+    }
+
     /// The end-to-end shape the task's own acceptance criteria name: copy a
     /// pipeline and a prompt, point the copy at the private prompt, promote
     /// it, and find the pipeline, the prompt and the skeleton under
@@ -1769,6 +1860,50 @@ mod tests {
 
         let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// A private pipeline's own `prompt:` is never typed through
+    /// `pipeline_copy`'s or `prompt_copy`'s `<from>`/`<to>`, so nothing
+    /// catches it earlier — a name like `../evil` walking outside
+    /// `local/prompts/` must still be refused the moment `pipeline_promote`
+    /// goes to resolve it privately, before anything is moved.
+    ///
+    /// `pipeline_promote` reads the private pipeline back through
+    /// `Pipelines::load`, path-based, so this needs the same `with_home`
+    /// `repo_for_home_aware` sets up for the clash tests below.
+    #[test]
+    fn pipeline_promote_refuses_a_pipeline_naming_a_non_plain_prompt() {
+        let (repo, home) = repo_for_home_aware("promote-bad-prompt-name");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = raw.replace("prompt: implementer", "prompt: ../evil");
+            assert!(raw.contains("../evil"), "{raw}");
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("is not a valid prompt name"),
+                "{err:#}"
+            );
+
+            assert!(
+                !Pipelines::file_in(&repo.root, "default-strict").is_file(),
+                "a refused prompt name must leave the pipeline file exactly where it was"
+            );
+            assert!(
+                pipeline_path.is_file(),
+                "the private pipeline file must still be there to retry from"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&pipeline_path).unwrap(),
+                raw,
+                "nothing in the private pipeline itself was touched"
+            );
+        });
     }
 
     /// A clash found only on the *last* destination `pipeline_promote`

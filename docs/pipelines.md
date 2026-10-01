@@ -524,19 +524,23 @@ in `.yml` or `.yaml`. This works in repo mode only; home mode has no private lay
 because a home-mode project's whole setup is already private to the machine it runs on.
 
 - `spoolway pipeline copy <from> <to>` writes a new private pipeline and its task skeleton.
-  `spoolway prompt copy <from> <to>` writes a new private prompt. Both refuse a `<to>` that
-  already exists, tracked or private. In home mode they write into the workspace's own
-  `config/` instead, since there is no private layer to add there. `spoolway pipeline promote
-  <name>` moves a private pipeline, the private prompts it names and its private skeleton into
-  `.spoolway/`, then deletes the private files. It refuses inside a linked worktree, refuses any
-  clash with a tracked file, and is refused outright in home mode. See [`pipeline
+  `spoolway prompt copy <from> <to>` writes a new private prompt. Both require `<from>` and
+  `<to>` to be one plain name each: not empty, not absolute, and holding none of `/`, `\` or
+  `..`. Both also refuse a `<to>` that already exists, tracked or private. In home mode they
+  write into the workspace's own `config/` instead, since there is no private layer to add
+  there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
+  names and its private skeleton into `.spoolway/`, then deletes the private files. It refuses
+  inside a linked worktree, refuses any clash with a tracked file, refuses a step whose prompt
+  name is not one plain name, and is refused outright in home mode. See [`pipeline
   copy`](cli-reference.md#spoolway-pipeline-copy-from-to), [`prompt
   copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).
 - A private pipeline whose name matches a tracked one is refused, naming both files.
 - A private pipeline may name a tracked prompt or a private one. A tracked pipeline whose step
   names a prompt that exists only privately is refused, because that pipeline would break the
-  moment it ran on a machine with no copy of the private prompt.
+  moment it ran on a machine with no copy of the private prompt. A prompt name holding `/` is
+  never resolved in the private layer, so a step naming one is treated as missing even when a
+  file sits where the name would otherwise point.
 - `spoolway pipeline list` and `spoolway pipeline show` print `private · <file>` after a private
   pipeline's name, naming the file it came from. A tracked pipeline prints nothing extra. See
   [`spoolway pipeline list`](cli-reference.md#spoolway-pipeline-list).

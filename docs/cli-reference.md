@@ -661,11 +661,12 @@ wrote    ~/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
 wrote    ~/.spoolway/proj-ab12cd34/local/templates/tasks/impl-strict.md
 ```
 
-`<from>` may already be tracked or private. A `<to>` that already names a pipeline, tracked or
-private, is refused, naming `spoolway pipeline list`. In home mode, where the whole setup is
-already private, this writes into the workspace's own `config/` instead. `--json` prints
-`{"wrote": [<path>, ...]}`, with each path in full. See [Private
-pipelines](pipelines.md#private-pipelines).
+`<from>` may already be tracked or private. Both `<from>` and `<to>` must be one plain name:
+not empty, not absolute, and holding none of `/`, `\` or `..`; anything else is refused, naming
+the bad name. A `<to>` that already names a pipeline, tracked or private, is also refused,
+naming `spoolway pipeline list`. In home mode, where the whole setup is already private, this
+writes into the workspace's own `config/` instead. `--json` prints `{"wrote": [<path>, ...]}`,
+with each path in full. See [Private pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway pipeline promote <name>`
 
@@ -681,8 +682,9 @@ moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/imp
 
 Refused inside a linked worktree, naming the command to run in the main checkout instead — the
 dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
-against a clash with any tracked file, naming it. Refused in home mode, where the whole setup
-is already private and there is nothing to promote into. Nothing is committed. `--json` prints
+against a clash with any tracked file, naming it. Refused if a step names a prompt that is not
+one plain name, before anything is moved. Refused in home mode, where the whole setup is
+already private and there is nothing to promote into. Nothing is committed. `--json` prints
 `{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and `to` relative to
 the checkout, matching the two columns above. See [Private
 pipelines](pipelines.md#private-pipelines).
@@ -723,10 +725,12 @@ $ spoolway prompt copy reviewer reviewer-strict
 wrote    ~/.spoolway/proj-ab12cd34/local/prompts/reviewer-strict/PROMPT.md
 ```
 
-`<from>` may already be tracked or private. A `<to>` that already names a prompt, tracked or
-private, is refused, naming `spoolway prompt list`. In home mode, where the whole setup is
-already private, this writes into the workspace's own `config/prompts/<to>/` instead. `--json`
-prints `{"wrote": [<path>]}`, with the path in full. See [Private
+`<from>` may already be tracked or private. Both `<from>` and `<to>` must be one plain name:
+not empty, not absolute, and holding none of `/`, `\` or `..`; anything else is refused, naming
+the bad name. A `<to>` that already names a prompt, tracked or private, is also refused, naming
+`spoolway prompt list`. In home mode, where the whole setup is already private, this writes
+into the workspace's own `config/prompts/<to>/` instead. `--json` prints `{"wrote": [<path>]}`,
+with the path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway agent list`

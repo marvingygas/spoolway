@@ -759,6 +759,26 @@ fi
 has "and reports only the pipeline this project actually loaded" '["default"]' "$PICHECK_OUT"
 lacks "with no mention of the bundled sample it dropped" "bugfix" "$PICHECK_OUT"
 
+# --------------------------------------------- copy commands refuse escaping names
+# `pipeline copy` and `prompt copy` join `<from>`/`<to>` straight onto a
+# directory with nothing else standing between the string and the
+# filesystem, so a traversal name has to be refused before anything is
+# written — proven here against the real project home under
+# `$SPOOLWAY_PROJECT_HOME`, which no unit test ever constructs.
+refuses "pipeline copy refuses a traversal <to>" "is not a valid pipeline name" \
+  "$SPOOLWAY" pipeline copy default ../../../../escaped
+# `pipelines_dir.join("<to>.yml")` under `$SPOOLWAY_PROJECT_HOME/local/pipelines/`
+# is exactly four levels up from there — `$HOME/escaped.yml` — the same path
+# the task's own repro names a bad `<to>` reaching before this fix.
+works "and nothing escaped into home" test ! -e "$HOME/escaped.yml"
+refuses "prompt copy refuses a traversal <to>" "is not a valid prompt name" \
+  "$SPOOLWAY" prompt copy builder ../../../../../evilp
+# `prompts_dir.join("<to>").join("PROMPT.md")` under the same `local/prompts/`
+# is one level deeper than the pipeline case above, so five levels up from
+# there lands one above `$HOME` — `$(dirname "$HOME")/evilp/PROMPT.md` —
+# never inside the tracked `.spoolway/prompts/` a looser check might assume.
+works "and nothing escaped above home" test ! -e "$(dirname "$HOME")/evilp"
+
 # ---------------------------------------------------------- prompt contract
 # `prompt contract` gains a seventh section, on every call, whatever
 # `--step` names — the prompt skeleton, not a paraphrase of it. There is no
