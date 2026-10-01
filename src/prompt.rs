@@ -43,7 +43,7 @@
 //! lint over prose.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -429,8 +429,15 @@ fn prompt_flag(profile: &crate::config::AgentProfile) -> Option<String> {
 /// upgrade that stopped finding a project's prompts would fail at dispatch,
 /// having been given no chance to say so first.
 ///
-/// When neither exists this names the directory shape, so an error points at
-/// where a prompt belongs rather than where it used to.
+/// `local/prompts/<name>/PROMPT.md` — see [`crate::local`] — is tried only
+/// once the tracked file is confirmed absent, so a private prompt can never
+/// shadow a tracked one of the same name; [`crate::pipeline::Pipelines::load_impl`]
+/// refuses that clash outright, before a pipeline naming either ever reaches
+/// this function. Read only in repo mode: in home mode the whole setup is
+/// already private, and there is no `local/` beside it to read.
+///
+/// When none of the three exists this names the directory shape, so an error
+/// points at where a prompt belongs rather than where it used to.
 pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
     let tracked = path_for_tracked(repo, name);
     if let Some(overridden) = crate::overrides::prompt_override(&repo.overrides_dir(), name) {
@@ -441,6 +448,14 @@ pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
             return overridden;
         }
         crate::overrides::print_ignored_notices(&[crate::overrides::Ignored::missing_prompt(name)]);
+    }
+    if !tracked.is_file() && crate::local::is_repo_mode(&repo.checkout) {
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join(name)
+            .join(crate::assets::PROMPT_FILE);
+        if private.is_file() {
+            return private;
+        }
     }
     tracked
 }
@@ -474,14 +489,71 @@ pub fn directory_form(repo: &Repo, name: &str) -> PathBuf {
         .join(crate::assets::PROMPT_FILE)
 }
 
-/// Every prompt file this project has, with where it came from.
-pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
-    let dir = repo.prompts_dir();
+/// [`directory_form`], from a bare checkout path rather than a [`Repo`] — for
+/// [`crate::pipeline::Pipelines::load_impl`], which has not built one yet
+/// when it checks a private prompt against the tracked directory it would
+/// clash with.
+pub(crate) fn directory_form_in(checkout: &Path, name: &str) -> PathBuf {
+    tracked_prompts_dir_in(checkout)
+        .join(name)
+        .join(crate::assets::PROMPT_FILE)
+}
+
+/// `.spoolway/prompts` (or a home-mode workspace's own `config/prompts`) for
+/// `checkout` — [`Repo::prompts_dir`]'s own join, resolved from a bare path
+/// for the one caller that has no [`Repo`] to ask.
+fn tracked_prompts_dir_in(checkout: &Path) -> PathBuf {
+    let setup = crate::config::setup_dir_in(checkout);
+    crate::config::under_setup(&setup, crate::config::PROMPTS_DIR)
+}
+
+/// Every tracked prompt name for `checkout`, with neither the override layer
+/// nor the private layer consulted — the root-path twin of [`entries`], for
+/// [`crate::pipeline::Pipelines::load_impl`].
+pub(crate) fn tracked_names_in(checkout: &Path) -> Result<BTreeSet<String>> {
+    Ok(scan(&tracked_prompts_dir_in(checkout))?
+        .into_keys()
+        .collect())
+}
+
+/// Every private prompt name found directly under `dir` — directory shape
+/// only, `<name>/PROMPT.md`. Unlike the tracked side ([`tracked_names_in`]),
+/// never the legacy flat `<name>.md`: that shape exists only so an
+/// already-upgraded tracked project keeps reading what it wrote before the
+/// directory shape, and a private prompt has never been anything else, so
+/// [`path_for`]'s own private fallback never looks for one — this has to
+/// agree with it, or a tracked pipeline could be refused over a flat
+/// `local/prompts/<name>.md` that a private pipeline naming the same prompt
+/// would then fail to find.
+pub(crate) fn local_names_in(dir: &Path) -> Result<BTreeSet<String>> {
+    let mut found = BTreeSet::new();
+    let listing = match std::fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
+    };
+    for entry in listing {
+        let path = entry?.path();
+        if path.is_dir()
+            && path.join(crate::assets::PROMPT_FILE).is_file()
+            && let Some(name) = path.file_name().and_then(|s| s.to_str())
+        {
+            found.insert(name.to_string());
+        }
+    }
+    Ok(found)
+}
+
+/// Every prompt entry directly under `dir`, whichever of the two shapes each
+/// one takes, by name — the one directory scan [`entries`] and
+/// [`tracked_names_in`] both build on, so a shape either one recognizes can
+/// never silently drop out of the other.
+fn scan(dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
     let mut found: BTreeMap<String, PathBuf> = BTreeMap::new();
 
-    let listing = match std::fs::read_dir(&dir) {
+    let listing = match std::fs::read_dir(dir) {
         Ok(listing) => listing,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
         Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
     };
 
@@ -512,7 +584,12 @@ pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
         found.entry(name.to_string()).or_insert(path);
     }
 
-    Ok(found
+    Ok(found)
+}
+
+/// Every prompt file this project has, with where it came from.
+pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
+    Ok(scan(&repo.prompts_dir())?
         .into_iter()
         .map(|(name, path)| Entry { name, path })
         .collect())
@@ -1285,6 +1362,43 @@ mod tests {
             path_for(&repo, "implementer"),
             path_for_tracked(&repo, "implementer")
         );
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// `local/prompts/<name>/PROMPT.md` — the private layer, see
+    /// `crate::local` — answers when the tracked file is absent, in repo
+    /// mode.
+    #[test]
+    fn a_private_prompt_is_used_when_the_tracked_file_is_absent() {
+        let repo = fixture("private-prompt-used");
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join("implementer")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "the private prompt").unwrap();
+
+        assert_eq!(path_for(&repo, "implementer"), private);
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A tracked prompt is never shadowed by a private one of the same
+    /// name — nothing private ever replaces a tracked file.
+    #[test]
+    fn a_tracked_prompt_wins_over_a_private_one_of_the_same_name() {
+        let repo = fixture("tracked-wins-over-private");
+        let tracked = directory_form(&repo, "implementer");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "the tracked prompt").unwrap();
+
+        let private = crate::local::prompts_dir(&repo.local_dir())
+            .join("implementer")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "the private prompt").unwrap();
+
+        assert_eq!(path_for(&repo, "implementer"), tracked);
 
         std::fs::remove_dir_all(&repo.checkout).ok();
     }

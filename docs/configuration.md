@@ -1,6 +1,6 @@
 ---
 domain: configuration
-covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "assets/tracking/**", "assets/hooks/**"]
+covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/tracking/**", "assets/hooks/**"]
 ---
 
 # Configuration
@@ -16,7 +16,7 @@ spoolway config contract       # every setting, its values and its default
 spoolway config edit           # open the file in $EDITOR, checked on save
 spoolway config show           # the whole config
 spoolway config list           # every scalar key, as `key = value`
-spoolway config path           # where the file is
+spoolway config path           # where the setup, local/ and overrides folders live
 spoolway config get agents.pi.kind
 spoolway config set models.claude-opus-5.input 5.0
 ```
@@ -30,6 +30,10 @@ Run `config set` from the main checkout. The dispatcher reads the project's own 
 a linked worktree the command refuses and prints the `-C` form to run instead.
 
 ## Runtime state
+
+This section describes repo mode, where the checkout itself holds the tracked files. A
+checkout with no `.spoolway/` can run in home mode instead, reading its config from a
+workspace elsewhere on the machine. See [Home mode](concepts.md#home-mode).
 
 The checkout holds the tracked files: `config.toml`, `.spoolway/pipelines/` and
 `.spoolway/prompts/`. Everything spoolway writes while it runs lives at
@@ -58,13 +62,16 @@ project](dispatcher.md#one-home-for-every-run-in-every-project).
 
 | Directory | Holds | Swept by `retention_days` |
 |---|---|---|
-| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `claims/` | Work in flight | No |
+| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | No |
 | `archive/`, `scratch/`, `headless/`, `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | Yes |
 | `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
 turned off. See [The overrides layer](#the-overrides-layer).
+
+`local/` holds a project's own private pipelines, prompts and task skeletons, read only in
+repo mode. See [Private pipelines](pipelines.md#private-pipelines).
 
 Delete `~/.spoolway/<label>-<id>/` to forget every task, plan and lane. The checkout is
 untouched. The next command in that checkout refuses, because the checkout still carries a stamp
@@ -335,11 +342,11 @@ failing `queued` hook does. `spoolway resume` runs the hook again. A trial arm n
 
 ### The shipped hook scripts
 
-`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`.
-They are project-owned starting points, not required integrations: edit either script, replace
-it with any executable that follows `spoolway hook contract`, or leave `hook` blank. `spoolway
-sync` never changes them. Switch trackers with
-`spoolway config set issue_tracking.hook <file>`.
+`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`, but only
+when a tracker is chosen; answering `none` leaves that folder unwritten. They are project-owned
+starting points, not required integrations: edit either script, replace it with any executable
+that follows `spoolway hook contract`, or leave `hook` blank. `spoolway sync` never changes
+them. Switch trackers with `spoolway config set issue_tracking.hook <file>`.
 
 A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
 comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's
@@ -382,8 +389,9 @@ Instead the `done` branch leaves a comment on the pull request carrying a
 `<!-- spoolway-issue: URL -->` marker, and on the issue it swaps the `spoolway:in-progress`
 label for `spoolway:review`. Closing the issue waits for the pull request to merge.
 
-`spoolway init` writes `.github/workflows/spoolway-issues.yml` into the project when the
-tracker is github. The workflow triggers on `pull_request: closed` and runs only when
+spoolway's own repository keeps this workflow at `.github/workflows/spoolway-issues.yml`.
+Neither `init` nor `sync` writes or checks it in a project; copy the file in by hand for the
+same close-on-merge automation. It triggers on `pull_request: closed` and runs only when
 `github.event.pull_request.merged` is true. It reads the pull request's comments for a marker
 left by a trusted author — one whose association is OWNER, MEMBER or COLLABORATOR — checks
 that the marked issue carries the `spoolway:task` label, then closes that issue and removes

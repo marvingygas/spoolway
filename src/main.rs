@@ -27,6 +27,7 @@ mod headless;
 mod install;
 mod jobs;
 mod lane_alias;
+mod local;
 mod lock;
 mod models;
 mod mux;
@@ -153,6 +154,14 @@ fn run() -> Result<()> {
         Command::Herdr(HerdrCommand::Bind(args)) => commands::herdr_bind(args),
         Command::Herdr(HerdrCommand::Unbind(args)) => commands::herdr_unbind(args),
 
+        // A user-level install is a fact about this person's home, not about
+        // any project, so like `update` it runs before a project is looked
+        // for — a person can take the skills without ever running `init`.
+        Command::Install(args) if args.user => {
+            crate::install::report(crate::install::install_user(args.provider, args.force)?);
+            Ok(())
+        }
+
         // The one command that has to survive a config it cannot read, because
         // it is the command you run to find out what is wrong with it. Every
         // other command below dies on the parse error; `doctor` reports it and
@@ -227,12 +236,7 @@ fn run() -> Result<()> {
             commands::config_list(&Repo::discover(&cwd)?, cli.json)
         }
         Command::Config(ConfigCommand::Path) => {
-            let repo = Repo::discover(&cwd)?;
-            if let Some(note) = repo.checkout_note()? {
-                note.print(cli.json)?;
-            }
-            println!("{}", config::Config::path_in(&repo.checkout).display());
-            Ok(())
+            commands::config_path(&Repo::discover(&cwd)?, cli.json)
         }
         Command::Config(ConfigCommand::Get { key }) => {
             commands::config_get(&Repo::discover(&cwd)?, key, cli.json)
@@ -446,6 +450,12 @@ fn run() -> Result<()> {
                 Command::Pipeline(PipelineCommand::Override(args)) => {
                     commands::pipeline_override(&repo, &args.name, &args.set)
                 }
+                Command::Pipeline(PipelineCommand::Copy(args)) => {
+                    commands::pipeline_copy(&repo, &args.from, &args.to, cli.json)
+                }
+                Command::Pipeline(PipelineCommand::Promote(args)) => {
+                    commands::pipeline_promote(&repo, &args.name, cli.json)
+                }
 
                 // Read out of the checkout, like `pipeline show` and the
                 // other file readers below — not `routing(&graph)`. A pipeline
@@ -463,6 +473,9 @@ fn run() -> Result<()> {
                 Command::Prompt(PromptCommand::Show { name }) => prompt::show(&repo, name),
                 Command::Prompt(PromptCommand::Override { name }) => {
                     commands::prompt_override(&repo, name)
+                }
+                Command::Prompt(PromptCommand::Copy(args)) => {
+                    commands::prompt_copy(&repo, &args.from, &args.to, cli.json)
                 }
 
                 Command::Override(OverrideCommand::Contract) => commands::override_contract(),
@@ -493,7 +506,14 @@ fn run() -> Result<()> {
                     exit_dispatch(commands::dispatch(&repo, routing(&graph)?, args))
                 }
                 Command::Install(args) => {
-                    let installed = crate::install::install(&repo.root, args.provider, args.force)?;
+                    // A home-mode project promises to write nothing into its
+                    // checkout, and a project skill folder sits inside it, so
+                    // its skills go to the user folder with or without `--user`.
+                    let installed = if crate::repo::workspace_clone(&repo.root).is_some() {
+                        crate::install::install_user(args.provider, args.force)?
+                    } else {
+                        crate::install::install(&repo.root, args.provider, args.force)?
+                    };
                     crate::install::report(installed);
                     Ok(())
                 }

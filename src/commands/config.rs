@@ -1,6 +1,10 @@
 //! `spoolway config`: reading and editing `config.toml` through the same
 //! deserialiser that loads it.
 
+use std::path::PathBuf;
+
+use serde::Serialize;
+
 use super::*;
 
 /// Reads the checkout's own file — see [`config_get`] for why.
@@ -95,6 +99,59 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// `spoolway config path`: the three places a project's setup can live —
+/// the setup folder (`.spoolway/` in repo mode, a workspace's `config/` in
+/// home mode), the private layer's `local/` (repo mode only — home mode has
+/// none, since the whole setup is already private) and the override
+/// layer's `overrides/`.
+///
+/// This is what `spoolway-config`'s "never reach past" rule names, and the
+/// skill reads these three paths from here instead of building them itself,
+/// so a project laid out differently from the skill's own assumptions still
+/// routes correctly.
+pub fn config_path(repo: &Repo, json: bool) -> Result<()> {
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+    }
+    let paths = SetupPaths::for_repo(repo);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&paths)?);
+        return Ok(());
+    }
+
+    println!("setup:     {}", paths.setup.display());
+    if let Some(local) = &paths.local {
+        println!("local:     {}", local.display());
+    }
+    println!("overrides: {}", paths.overrides.display());
+    Ok(())
+}
+
+/// The three folders [`config_path`] prints and `spoolway-config`'s "never
+/// reach past" rule names — a plain struct so a test can build one and
+/// assert its fields directly, the same way [`render_config_contract`] lets
+/// a test assert a string without capturing stdout.
+#[derive(Debug, PartialEq, Serialize)]
+struct SetupPaths {
+    setup: PathBuf,
+    /// `None` in home mode: the whole setup is already private there, so
+    /// there is no second private layer to report — see
+    /// [`crate::local::is_repo_mode`].
+    local: Option<PathBuf>,
+    overrides: PathBuf,
+}
+
+impl SetupPaths {
+    fn for_repo(repo: &Repo) -> Self {
+        SetupPaths {
+            setup: repo.setup_dir(),
+            local: crate::local::is_repo_mode(&repo.checkout).then(|| repo.local_dir()),
+            overrides: repo.overrides_dir(),
+        }
+    }
+}
+
 /// `spoolway config contract`: every setting `config.toml` may carry, its
 /// values, its default and one sentence about it — rendered from
 /// [`crate::confkv::reference_table`], the same register the file's own
@@ -120,7 +177,10 @@ fn render_config_contract() -> String {
         ),
         ("spoolway config list", "every settable key, one per line"),
         ("spoolway config show", "the whole file"),
-        ("spoolway config path", "the path to it"),
+        (
+            "spoolway config path",
+            "where the setup, local/ and overrides folders live",
+        ),
         (
             "spoolway config edit",
             "open it in $EDITOR, re-validated on save",
@@ -323,12 +383,77 @@ mod tests {
     }
 
     #[test]
-    fn config_path_names_the_worktrees_own_file() {
+    fn config_path_names_the_worktrees_own_setup_folder() {
         let (repo, _root) = worktree_fixture("path");
+        assert_eq!(repo.setup_dir(), repo.checkout.join(".spoolway"));
+    }
+
+    /// `spoolway-config`'s "never reach past" rule names the setup folder,
+    /// `local/` and `overrides/` — this is the command it reads all three
+    /// from, so the payload it serialises has to actually carry them, and
+    /// `local` has to be present in the ordinary repo-mode case.
+    #[test]
+    fn config_path_reports_setup_local_and_overrides_in_repo_mode() {
+        let repo = crate::commands::testutil::fixture("config-path-json");
+        // `config_path` itself only prints — exercised here too, so a panic
+        // in its own printing path still fails this test — but the
+        // assertions below are against [`SetupPaths`], the payload it
+        // serialises, since that is what a caller of `--json` actually reads.
+        config_path(&repo, false).unwrap();
+        config_path(&repo, true).unwrap();
+
+        assert!(crate::local::is_repo_mode(&repo.checkout));
+        let paths = SetupPaths::for_repo(&repo);
+        assert_eq!(paths.setup, repo.checkout.join(".spoolway"));
+        assert_eq!(paths.overrides, repo.home.join("overrides"));
+        assert_eq!(paths.local, Some(repo.home.join("local")));
+
+        let json = serde_json::to_value(&paths).unwrap();
+        assert_eq!(json["setup"], repo.setup_dir().display().to_string());
         assert_eq!(
-            Config::path_in(&repo.checkout),
-            repo.checkout.join(".spoolway/config.toml")
+            json["overrides"],
+            repo.overrides_dir().display().to_string()
         );
+        assert_eq!(json["local"], repo.local_dir().display().to_string());
+    }
+
+    /// Home mode's whole setup is already private, so there is no second
+    /// private layer for `config path` to report — `local` has to come back
+    /// `null`, not the ordinary directory a repo-mode reader would expect.
+    #[test]
+    fn config_path_reports_no_local_folder_in_home_mode() {
+        let root = crate::scratch::root("config-path-home-mode");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fake_home = root.parent().unwrap().join(format!(
+            "{}-realhome",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&fake_home);
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            let clone = crate::repo::create_workspace(&root).unwrap();
+            std::fs::create_dir_all(clone.config_dir()).unwrap();
+            let home = crate::mux::project_home(&root).unwrap();
+            let repo = Repo {
+                checkout: root.clone(),
+                root: root.clone(),
+                config: Config::default(),
+                home,
+            };
+
+            assert!(!crate::local::is_repo_mode(&repo.checkout));
+            config_path(&repo, true).unwrap();
+            let paths = SetupPaths::for_repo(&repo);
+            assert_eq!(paths.setup, clone.config_dir());
+            assert_eq!(paths.local, None);
+
+            let json = serde_json::to_value(&paths).unwrap();
+            assert!(json["local"].is_null());
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&fake_home).ok();
     }
 
     #[test]

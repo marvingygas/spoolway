@@ -64,6 +64,14 @@ pipeline, selected by filename: a task on the `bugfix` pipeline is written from 
 or from `default.md` when there is no `bugfix.md`. A pipeline can name another skeleton with
 its `task_template:` key.
 
+A private pipeline's skeleton can live at `local/templates/tasks/<pipeline>.md`, the same
+private layer [Private pipelines](pipelines.md#private-pipelines) uses for pipelines and
+prompts, read only in repo mode. For a private pipeline with no `<pipeline>.md` of its own,
+it answers before the tracked `default.md` does. A *tracked* pipeline with no skeleton of its
+own never reads this file: it falls through to the tracked `default.md` instead, even when a
+private file happens to share its name. `local/templates/tasks/default.md` is the last private
+fallback, read after the tracked `default.md` and before the built-in skeleton.
+
 spoolway never reads a task's body. No heading in it is required.
 
 ## Keeping the skeletons current

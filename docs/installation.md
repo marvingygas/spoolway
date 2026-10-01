@@ -81,18 +81,28 @@ It opens by printing the project directory it resolved and waiting for a yes —
 is the one you meant, especially when `init` was reached from a keybinding rather than typed
 where you were standing. Answering no writes nothing and exits 0.
 
-Then, at a terminal, it asks three more questions. Each one has a flag, and a given flag skips
-its question. Without a terminal, the defaults apply: `claude` and no tracker.
+Then, at a terminal, it asks more questions. Each one has a flag, and a given flag skips its
+question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the checkout,
+`claude`, the example setup, and no tracker.
 
 | Question | Flag | Default |
 |---|---|---|
 | Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
+| Where should this project's setup live? | `--setup repo\|home` | `repo` |
+| Which workspace should this checkout use? (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
 | The coding agent you plan in | `--provider claude\|codex` | `claude` |
-| The issue tracker | `--tracker github\|jira\|none` | `none` |
+| Install the example setup? (skipped when joining a workspace) | `--examples`/`--no-examples` | yes |
+| The issue tracker (skipped when joining a workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
 and effort are left blank on every step, and you fill them in before dispatching.
+
+Answering yes to the example setup writes the shipped pipelines, prompts, task templates and
+ticket templates. Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
+and `templates/` folders instead, for the `spoolway-config` skill to fill. An established
+project is not asked again: it keeps whatever its own files already show, and a repeat run
+restores any of its example files that went missing.
 
 ```mermaid
 flowchart LR
@@ -101,7 +111,6 @@ flowchart LR
   I --> R[.spoolway/prompts/&lt;name&gt;/PROMPT.md]
   I --> T[.spoolway/templates/]
   I --> H[.spoolway/hooks/]
-  I --> W[.github/workflows/spoolway-issues.yml]
   I --> S[provider skills directory]
   I --> N[~/.spoolway/&lt;project&gt;/project.toml]
 ```
@@ -109,20 +118,19 @@ flowchart LR
 | Path | What it is |
 |---|---|
 | `.spoolway/config.toml` | Every setting, with defaults and comments. |
-| `.spoolway/pipelines/` | The two sample pipelines. Edit or replace them. |
-| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts. Updates never touch them. |
-| `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills. |
-| `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline. |
-| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
-| `.spoolway/hooks/` | `github.sh` and `jira.sh`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
-| `.github/workflows/spoolway-issues.yml` | Closes an issue once its pull request merges. Written only when the tracker is github. |
+| `.spoolway/pipelines/` | The two sample pipelines, with the example setup. Edit or replace them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts, with the example setup. Updates never touch them. |
+| `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
+| `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
+| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders, with the example setup. |
+| `.spoolway/hooks/` | `github.sh` and `jira.sh`, written only when a tracker is chosen. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
 Existing files are kept. `--force` overwrites them.
 
-Running `init` again in a set-up project installs skills and changes nothing else. To change
-settings later, use `spoolway config set`.
+Running `init` again in a set-up project installs skills, restores any example file that went
+missing, and otherwise changes nothing. To change settings later, use `spoolway config set`.
 
 Everything spoolway writes while it runs lives outside the checkout, at
 `~/.spoolway/<label>-<id>/`: the queue, the archive, plans, lane records and the usage ledger.
@@ -145,6 +153,52 @@ checkout still carries a stamp no home holds. Run `spoolway init --new-id` to st
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
 version wrote there.
 
+### Home mode
+
+`--setup home` puts the setup in a workspace under `~/.spoolway/` instead of the checkout, and
+`init` writes nothing into the checkout or its `.git`. With no workspace yet, or with
+`--workspace new`, it creates `~/.spoolway/<label>-<id>/` holding an empty `config/`, a
+`dispatchers/<name>/` for this clone, and a `project.toml` listing it. `<label>` and `<id>`
+take the same shape a repo-mode home's own folder does.
+
+With workspaces already there, `init` also asks which one this checkout uses, listing each with
+the clones that already use it, plus `new`. Joining one keeps its `config/` exactly as it is,
+skips the example and tracker questions, and adds this clone to its `project.toml` with a
+dispatcher folder of its own — the clone's directory name, with `-2` added when that name is
+taken. With nobody to ask and no `--workspace`, `init` starts a new workspace rather than
+joining one unasked.
+
+Skills install into the coding agent's user folder instead of the project's own, since a
+project skill folder sits inside a checkout that home mode promises to leave untouched. See [The
+pipeline skills](#the-pipeline-skills).
+
+Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+`--workspace <name>` naming a workspace other than the one a checkout already uses. Each
+refusal names the command to run instead. See [Home mode](concepts.md#home-mode).
+
+```
+$ spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes
+...
+  wrote  ~/.spoolway/api-k7f2q9/config/config.toml
+  wrote  ~/.spoolway/api-k7f2q9/config/pipelines/default.yml
+  ...
+  bound  /home/you/work/api  ->  ~/.spoolway/api-k7f2q9/dispatchers/api/
+Skills installed successfully.
+Project initialized successfully.
+```
+
+A second clone joining that workspace keeps its `config/`:
+
+```
+$ spoolway init --setup home --workspace api-k7f2q9 --provider claude --yes
+...
+  kept   ~/.spoolway/api-k7f2q9/config/
+  bound  /home/you/work/api-review  ->  ~/.spoolway/api-k7f2q9/dispatchers/api-review/
+Skills installed successfully.
+Project initialized successfully.
+```
+
 ### The pipeline skills
 
 `init` installs the skills. Run this to add another provider or to take newer skills:
@@ -157,7 +211,7 @@ spoolway install codex
 |---|---|
 | `spoolway-plan` | Turns one goal into a plan page. After you approve it, it cuts the tasks into the pending directory. |
 | `spoolway-tasks` | Cuts an agreed shape into tasks: pipeline, size, ids, globs, dependency order. |
-| `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. Also repairs a project that is broken, refused or behind. |
+| `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. Also sets a repo up, joins a workspace, tries a pipeline privately, and repairs a project that is broken, refused or behind. |
 | `spoolway-calibrate` | Compares archived tasks, step-level evaluation results and spend data against the prompts and pipelines that produced them, then applies the changes you pick. |
 
 Each skill is one directory holding a `SKILL.md`. All three providers read that layout.
@@ -169,6 +223,21 @@ Each skill is one directory holding a `SKILL.md`. All three providers read that 
 | `pi` | `.pi/skills/`. pi loads them once the project is trusted, so answer its trust prompt or start it with `--approve`. |
 
 Start a fresh agent session after installing so it picks the skills up.
+
+`spoolway install <provider> --user` installs into the agent's user folder instead, which it
+loads in every project. It needs no project and writes nothing into any checkout. A home-mode
+project's plain `init` and `install` both use the user folder too, since a project skill
+folder sits inside a checkout that home mode promises to leave untouched.
+
+| Provider | User folder |
+|---|---|
+| `claude` | `~/.claude/skills/` |
+| `codex` | `~/.agents/skills/` |
+| `pi` | `~/.pi/agent/skills/`. pi also reads `~/.agents/skills/`, so installing both codex and pi at user level shows pi each skill twice. |
+
+pi's trust note is not printed for a user-level install, since a user folder loads without
+being asked. `spoolway sync` keeps user-level copies current the same way it keeps a project's
+own current.
 
 ### Checking the setup
 
@@ -258,7 +327,7 @@ What `sync` replaces, file by file:
 | `config.toml` | The comments and the settings reference. Your values stay. |
 | Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
 | `.gitignore` | Only the old marked block, removed once. |
-| Skills | Every installed provider's skill file that differs from the shipped copy. |
+| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any agent's user folder installed there. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |

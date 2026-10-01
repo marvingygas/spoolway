@@ -294,13 +294,14 @@ Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and 
 
 The sample GitHub flow creates one group issue and one child issue per task, comments when a
 task blocks or pauses, and marks the task issue ready for review when the pipeline hands it to
-a pull request. A sample GitHub Actions workflow closes that task issue after the pull request
-merges, then closes the group issue when all of its children are done.
+a pull request. Closing that issue after the pull request merges is left to your own merge
+automation; spoolway's own repository keeps a close-on-merge GitHub Actions workflow you can
+copy in.
 
-**The two shipped scripts are editable samples.** `spoolway init` copies `github.sh` and
-`jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change them, replace
-them, or leave issue tracking disabled; `spoolway hook contract` describes the events and
-environment available to any custom script.
+**The two shipped scripts are editable samples.** Choosing a tracker in `spoolway init` copies
+`github.sh` and `jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change
+them, replace them, or leave issue tracking disabled; `spoolway hook contract` describes the
+events and environment available to any custom script.
 
 See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
 

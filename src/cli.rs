@@ -54,7 +54,7 @@ pub enum Command {
         file's fenced key reference — documentation of this binary's contract, not anything \
         you meant — is refreshed in place, with every other line copied through unread. The \
         old `.gitignore` block spoolway used to manage is removed. Skills for every provider \
-        you have installed are refreshed too.\n\n\
+        you have installed are refreshed too, in this project and in your user folder.\n\n\
         Prompts, their assets, and task skeletons are not touched, ever. They are prose a \
         project owns outright, with nothing generated inside them; `spoolway pipeline check` \
         is what tells you when one names a command this binary no longer has, and `--replace` \
@@ -581,6 +581,14 @@ pub struct EvalArgs {
 #[command(
     long_about = "Scaffold a project: config, pipelines, prompts, skeletons, ignore rules \
         — and the three answers that would otherwise be edited in afterwards.\n\n\
+        The first question is where the setup lives, and `--setup` answers it. `repo`, the \
+        default and the answer when there is nobody to ask, writes a tracked `.spoolway/` \
+        into the checkout. `home` keeps the setup in a workspace under `~/.spoolway/` and \
+        writes nothing into the checkout or its `.git`; skills go to the agent's user \
+        folder. When workspaces already exist, `init` asks which one this checkout uses, and \
+        `--workspace <name>` or `--workspace new` answers it. Joining one keeps its \
+        `config/` as it is and skips the example and tracker questions. With nobody to ask \
+        and no `--workspace`, a new workspace is started.\n\n\
         Every run prints the project directory it resolved and waits for a yes before it \
         writes anything: a path you do not recognise is the whole of the check. With nobody \
         there to answer, that question takes its default — no — and nothing is written, so a \
@@ -597,12 +605,16 @@ pub struct EvalArgs {
         provider's skills, creates its one agent profile, and points every scaffolded lane \
         at it. Model and effort stay blank for each step because spoolway cannot choose \
         either for you. Add or change profiles with `spoolway config set`.\n\n\
+        `--examples` and `--no-examples` answer \"Install the example setup?\", asked after \
+        the agent question on a fresh project and yes when there is nobody to ask. Yes \
+        writes the shipped pipelines, prompts, task templates and ticket templates. No \
+        writes `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders, \
+        for the spoolway-config skill to fill.\n\n\
         `--tracker` names the issue tracker `[issue_tracking]` points at — `github`, `jira` \
-        or `none` — and `--project-key` is the project its tickets open into. Every hook \
-        script is written whichever answer this is, so switching trackers later is a \
-        `spoolway config set issue_tracking.hook` away, not a second `init`. Answering \
-        `github` also writes `.github/workflows/spoolway-issues.yml`, the workflow that \
-        closes a mirrored issue once its pull request merges."
+        or `none` — and `--project-key` is the project its tickets open into. Choosing a \
+        tracker writes `hooks/` into the setup folder with every hook script in it, so switching \
+        between trackers later is a `spoolway config set issue_tracking.hook` away. \
+        Choosing `none` writes no `hooks/` folder at all."
 )]
 pub struct InitArgs {
     /// Answer the opening `Set up this project?` confirmation yes without
@@ -631,6 +643,13 @@ pub struct InitArgs {
     /// name, `<label>-<id>` (for example `api-8w4r2c`), not the bare id
     /// alone. One of the only two ways (with `--new-id`) to write a
     /// binding over one that already exists.
+    ///
+    /// `NAME` in the form `<workspace>/<dispatcher>` re-attaches a
+    /// home-mode clone instead: the workspace's own `project.toml` has its
+    /// `dispatcher` clone entry rewritten to this checkout's current path,
+    /// keeping that dispatcher's queue, archive and worktrees — nothing
+    /// stamped into `.git` either way. This is the line the "no spoolway
+    /// project found" error prints for a clone whose folder moved.
     #[arg(long, value_name = "NAME", conflicts_with = "new_id")]
     pub adopt: Option<String>,
 
@@ -663,6 +682,43 @@ pub struct InitArgs {
     /// `none` or is not given at all.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
+
+    /// Answer `Install the example setup?` yes without asking: write the
+    /// shipped pipelines, prompts, task templates and ticket templates.
+    /// Yes is also the answer when there is nobody to ask.
+    #[arg(long, conflicts_with = "no_examples")]
+    pub examples: bool,
+
+    /// Answer `Install the example setup?` no without asking: write
+    /// `config.toml` and empty `pipelines/`, `prompts/` and `templates/`
+    /// folders instead of the shipped examples.
+    #[arg(long)]
+    pub no_examples: bool,
+
+    /// Answer `Where should this project's setup live?` without asking:
+    /// `repo` for a tracked `.spoolway/` in this checkout, `home` for a
+    /// workspace under `~/.spoolway/` that writes nothing into the checkout.
+    /// `repo` is also the answer when there is nobody to ask.
+    #[arg(long, value_enum, conflicts_with_all = ["adopt", "new_id"])]
+    pub setup: Option<Setup>,
+
+    /// Answer `Which workspace should this checkout use?` without asking:
+    /// the name of a workspace folder under `~/.spoolway/` to join, or `new`
+    /// to start one. Implies `--setup home`. With nobody to ask and no flag,
+    /// a new workspace is started rather than joining one unasked.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["adopt", "new_id"])]
+    pub workspace: Option<String>,
+}
+
+/// Where `spoolway init` puts a project's setup — the answer to "Where
+/// should this project's setup live?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Setup {
+    /// `.spoolway/` in the checkout, tracked by git.
+    Repo,
+    /// A workspace under `~/.spoolway/`, with nothing written into the
+    /// checkout or its `.git`.
+    Home,
 }
 
 #[derive(Debug, Args)]
@@ -674,6 +730,14 @@ pub struct InstallArgs {
     /// Overwrite files that already exist.
     #[arg(long)]
     pub force: bool,
+
+    /// Install into the agent's user folder — `~/.claude/skills/`,
+    /// `~/.agents/skills/` or `~/.pi/agent/skills/` — which it loads in
+    /// every project, instead of this project's own. Needs no project, and
+    /// writes nothing into any checkout. A home-mode project installs there
+    /// with or without it.
+    #[arg(long)]
+    pub user: bool,
 }
 
 /// A coding agent that can be the identity of a freshly scaffolded project.
@@ -735,9 +799,8 @@ pub enum Tracker {
     Github,
     /// `.spoolway/hooks/jira.sh`, calling `acli`.
     Jira,
-    /// No hook is named. The scripts are written all the same — see
-    /// `commands::init` — so turning tracking on later is a config edit, not
-    /// a second `init`.
+    /// No hook is named, and `init` writes no `.spoolway/hooks/` folder —
+    /// see `commands::init`.
     None,
 }
 
@@ -1204,6 +1267,28 @@ pub enum PipelineCommand {
     /// list` to see what is layered, `override promote` to keep it, `override
     /// drop` to clear it.
     Override(PipelineOverrideArgs),
+
+    /// Copy a pipeline, task skeleton included, into the private layer —
+    /// `local/pipelines/<to>.yml` and `local/templates/tasks/<to>.md`,
+    /// beside the tracked ones rather than in place of them. In home mode,
+    /// where the whole setup is already private, this writes straight into
+    /// the workspace's own `config/` instead.
+    ///
+    /// `<from>` may already be tracked or private; `<to>` is refused, and
+    /// nothing written, when it names a pipeline that already exists either
+    /// way.
+    Copy(PipelineCopyArgs),
+
+    /// Move a private pipeline — the private prompts it names and its
+    /// private skeleton included — into `.spoolway/`, then delete the
+    /// private files. The reverse of `pipeline copy`.
+    ///
+    /// Refused inside a linked worktree, for the same reason `override
+    /// promote` refuses there: the dispatcher reads the project's tracked
+    /// files, never a worktree's own copy. Refused against any clash with a
+    /// tracked file, and refused outright in home mode, where the setup is
+    /// already private and there is nothing to promote into.
+    Promote(PipelinePromoteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1214,6 +1299,22 @@ pub struct PipelineOverrideArgs {
     /// `<step>.<key>=<value>`, e.g. `implement.model=claude-opus-5`.
     #[arg(long = "set", value_name = "STEP.KEY=VALUE")]
     pub set: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelineCopyArgs {
+    /// The pipeline to copy from — tracked or already private.
+    pub from: String,
+
+    /// The new pipeline's name. Refused if it already exists, tracked or
+    /// private.
+    pub to: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelinePromoteArgs {
+    /// The private pipeline to promote.
+    pub name: String,
 }
 
 /// What spoolway can run, and whether it really can.
@@ -1300,6 +1401,27 @@ pub enum PromptCommand {
         /// The prompt to fork.
         name: String,
     },
+
+    /// Copy a prompt into the private layer — `local/prompts/<to>/PROMPT.md`,
+    /// beside the tracked ones rather than in place of them. In home mode,
+    /// where the whole setup is already private, this writes straight into
+    /// the workspace's own `config/prompts/<to>/` instead.
+    ///
+    /// `<from>` may already be tracked or private; `<to>` is refused, and
+    /// nothing written, when it names a prompt that already exists either
+    /// way. See `pipeline promote`, which moves a private prompt a private
+    /// pipeline names into `.spoolway/` too.
+    Copy(PromptCopyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PromptCopyArgs {
+    /// The prompt to copy from — tracked or already private.
+    pub from: String,
+
+    /// The new prompt's name. Refused if it already exists, tracked or
+    /// private.
+    pub to: String,
 }
 
 /// Printing the shapes that are prose, not a pipeline: a task's own body, a
@@ -1390,7 +1512,8 @@ pub enum ConfigCommand {
     /// `[models]` glob nobody has named yet is settable but not listed.
     List,
 
-    /// Print the path to the config file.
+    /// Print where the setup folder, the private `local/` folder (repo mode
+    /// only) and the override folder each live for this project.
     Path,
 
     /// Read one value, e.g. `agents.pi.kind`.
@@ -1719,6 +1842,47 @@ mod tests {
         {
             Command::Prompt(PromptCommand::Override { name }) => assert_eq!(name, "reviewer"),
             other => panic!("expected Command::Prompt(Override), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_copy_reads_from_and_to() {
+        match Cli::try_parse_from(["spoolway", "pipeline", "copy", "impl", "impl-strict"])
+            .unwrap()
+            .command
+        {
+            Command::Pipeline(PipelineCommand::Copy(args)) => {
+                assert_eq!(args.from, "impl");
+                assert_eq!(args.to, "impl-strict");
+            }
+            other => panic!("expected Command::Pipeline(Copy), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_promote_reads_the_name() {
+        match Cli::try_parse_from(["spoolway", "pipeline", "promote", "impl-strict"])
+            .unwrap()
+            .command
+        {
+            Command::Pipeline(PipelineCommand::Promote(args)) => {
+                assert_eq!(args.name, "impl-strict")
+            }
+            other => panic!("expected Command::Pipeline(Promote), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_copy_reads_from_and_to() {
+        match Cli::try_parse_from(["spoolway", "prompt", "copy", "reviewer", "reviewer-strict"])
+            .unwrap()
+            .command
+        {
+            Command::Prompt(PromptCommand::Copy(args)) => {
+                assert_eq!(args.from, "reviewer");
+                assert_eq!(args.to, "reviewer-strict");
+            }
+            other => panic!("expected Command::Prompt(Copy), got {other:?}"),
         }
     }
 

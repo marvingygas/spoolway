@@ -9,7 +9,7 @@ The terms spoolway uses. Every other page assumes them.
 
 | Term | Meaning |
 |---|---|
-| Project | A git repository with a `.spoolway/` directory. |
+| Project | A git repository spoolway runs on: one with a tracked `.spoolway/` directory (repo mode), or one a workspace elsewhere lists by path (home mode). |
 | Task | One unit of work, stored as one Markdown file in the queue. |
 | Plan | A group of tasks queued together from one branch. |
 | Pipeline | A named graph of steps in `.spoolway/pipelines/`. |
@@ -42,6 +42,38 @@ shares one queue and one dispatcher.
 
 A command reads `.spoolway/` from the checkout it runs in. When that differs from the main
 checkout, the command prints a [`checkout:` line](cli-reference.md#the-checkout-line) first.
+
+## Home mode
+
+A checkout with no `.spoolway/` can still be a project. This works when some workspace under
+`~/.spoolway/` lists the checkout's path. A workspace is an ordinary folder there, holding a
+`config/` and a `project.toml`. The `project.toml` lists a `clones` entry for each checkout
+that shares it: the checkout's absolute path, and the name of a `dispatchers/` subfolder that
+holds its queue, archive, worktrees and lock.
+
+`spoolway init --setup home` puts a checkout into home mode. With no workspace yet, or with
+`--workspace new`, it creates one: `~/.spoolway/<label>-<id>/`, the same name shape a repo-mode
+home takes, with an empty `config/` and a `dispatchers/<name>/` for this checkout. With
+`--workspace <name>`, it adds this checkout to that workspace instead, with a dispatcher folder
+of its own — the checkout's directory name, with `-2` added when that name is already taken —
+and leaves the workspace's `config/` exactly as it is. Nothing is written into the checkout or
+its `.git` either way, and skills install into the coding agent's user folder instead of the
+project's own.
+
+A home-mode checkout reads its config, pipelines and prompts from the workspace's `config/`.
+Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place of the
+`~/.spoolway/<label>-<id>/` a repo-mode project uses. Nothing is read from or written to the
+checkout's own `.git`.
+
+A checkout that has both a tracked `.spoolway/` and a clone entry in some workspace is refused.
+The error names both paths.
+
+Re-attach a clone that moved or was re-cloned with `spoolway init --adopt
+<workspace>/<dispatcher>`. It rewrites that clone's path in the workspace's `project.toml` and
+keeps its dispatcher folder. The "no spoolway project found" error lists this exact command for
+every clone entry whose folder is gone.
+
+`spoolway doctor` names which mode a project runs in, repo mode or home mode.
 
 ## Task
 

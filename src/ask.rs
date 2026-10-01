@@ -30,8 +30,9 @@ pub fn interactive() -> bool {
 /// One question with a fixed set of answers, as an interactive selector.
 ///
 /// `options` are `(value, note)`; the note is what the value means, shown
-/// beside it. The default starts highlighted, arrow keys move the highlight,
-/// and Enter or Space accepts it. Returns the chosen value's index.
+/// beside it, and an empty note shows the value alone. The default starts
+/// highlighted, arrow keys move the highlight, and Enter or Space accepts it.
+/// Returns the chosen value's index.
 pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Result<usize> {
     debug_assert!(default < options.len(), "the default must be on the menu");
     if !interactive() {
@@ -45,9 +46,26 @@ pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Resul
         .unwrap_or(0);
     let items: Vec<String> = options
         .iter()
-        .map(|(value, note)| format!("{value:width$}  {note}"))
+        .map(|(value, note)| {
+            if note.is_empty() {
+                value.to_string()
+            } else {
+                format!("{value:width$}  {note}")
+            }
+        })
         .collect();
     let term = dialoguer::console::Term::stdout();
+    // One screen row per item, cut to fit. The selector erases its menu by
+    // counting the lines it wrote, not the rows they took, so an item that
+    // wraps — a note naming long clone paths — leaves rows of the menu
+    // behind on the screen once the question is answered. Two columns go to
+    // the selector's own marker, and one more keeps a line that exactly
+    // fills the width from wrapping on terminals that wrap eagerly.
+    let fit = usize::from(term.size().1).saturating_sub(3).max(1);
+    let items: Vec<String> = items
+        .iter()
+        .map(|item| dialoguer::console::truncate_str(item, fit, "…").into_owned())
+        .collect();
     Ok(dialoguer::Select::new()
         .with_prompt(question)
         .items(&items)

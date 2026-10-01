@@ -12,6 +12,11 @@ struct Answers {
     /// The coding agent a person plans in and a fresh scaffold runs. Always
     /// settled — installing skills is worth doing for an established project.
     provider: Provider,
+    /// Whether the shipped pipelines, prompts, task templates and ticket
+    /// templates are placed. Asked only on a fresh project; an established
+    /// one reads it off its own pipelines unless a flag answers it — see
+    /// [`Answers::examples`].
+    examples: bool,
     /// The tracker `[issue_tracking]` names — `Tracker::None` when the
     /// config is staying as it is, because there is nothing to land it in.
     tracker: Tracker,
@@ -23,8 +28,8 @@ struct Answers {
     /// established one when `--tracker` was given a value, or given bare
     /// with somebody there to answer the picker. False means
     /// `tracker`/`project_key` are the untouched placeholders above, and
-    /// whoever decides what `.github/workflows/spoolway-issues.yml` gets
-    /// written for has to read the tracker already on disk instead — which
+    /// whoever decides whether the hook scripts are placed has to read the
+    /// tracker already on disk instead — which
     /// also covers a bare `--tracker` on an established project with nobody
     /// to ask: there is no answer to apply, so nothing about
     /// `[issue_tracking]` is touched, the same as the flag being absent.
@@ -35,37 +40,14 @@ impl Answers {
     /// Flags first, then the person, then the default — and the person is
     /// skipped whenever [`crate::ask::interactive`] says there is not one.
     fn gather(root: &Path, args: &InitArgs) -> Result<Self> {
-        // Whether the config this run renders will actually be written. `place`
-        // below decides the same thing for every file; this is the one case
-        // where the decision has to be made early, because it is what makes two
-        // of these questions worth asking.
+        // Whether the config this run renders will actually be written.
+        // `Placer::file` decides the same thing for every file later on; this
+        // is the one case where the decision has to be made early, because it
+        // is what makes these questions worth asking.
         let fresh = args.force || !Config::path_in(root).exists();
 
-        let provider = match args.provider {
-            Some(provider) => provider,
-            None => {
-                // Straight off clap's own list, so the menu and `--provider`
-                // cannot come to offer different things.
-                let providers = <PlanningAgent as clap::ValueEnum>::value_variants();
-                let notes: Vec<String> = providers
-                    .iter()
-                    .map(|provider| {
-                        // Against the project's own root, so the note names the
-                        // directory that will actually be written, separators
-                        // and all.
-                        let dir = provider.provider().skills_dir(root);
-                        format!("skills go in {}", crate::platform::relative(root, &dir))
-                    })
-                    .collect();
-                let menu: Vec<(&str, &str)> = providers
-                    .iter()
-                    .zip(&notes)
-                    .map(|(provider, note)| (provider.name(), note.as_str()))
-                    .collect();
-                providers[crate::ask::choose("Which coding agent will you plan in?", &menu, 0)?]
-            }
-        }
-        .provider();
+        let provider = Self::provider(args)?;
+        let examples = Self::examples(root, args, fresh)?;
 
         // Tracker and project key are asked, or answered outright, whenever a
         // config is going to be written (a fresh project) or `--tracker` was
@@ -84,6 +66,7 @@ impl Answers {
             }
             return Ok(Self {
                 provider,
+                examples,
                 tracker: Tracker::None,
                 project_key: String::new(),
                 tracker_touched: false,
@@ -93,6 +76,7 @@ impl Answers {
         match Self::tracker(args, fresh)? {
             Some((tracker, project_key)) => Ok(Self {
                 provider,
+                examples,
                 tracker,
                 project_key,
                 tracker_touched: true,
@@ -110,12 +94,82 @@ impl Answers {
                 );
                 Ok(Self {
                     provider,
+                    examples,
                     tracker: Tracker::None,
                     project_key: String::new(),
                     tracker_touched: false,
                 })
             }
         }
+    }
+
+    /// The answers for a checkout joining a workspace: the agent question
+    /// alone, as the mockup draws it. The setup is the workspace's and
+    /// already chosen — its examples, its tracker — so asking either again
+    /// would take an answer this run has nowhere to put, and writing one into
+    /// the shared `config/` would change every other clone's setup from here.
+    fn joining(args: &InitArgs) -> Result<Self> {
+        Ok(Self {
+            provider: Self::provider(args)?,
+            examples: false,
+            tracker: Tracker::None,
+            project_key: String::new(),
+            tracker_touched: false,
+        })
+    }
+
+    /// The coding agent: `--provider`, or the menu.
+    fn provider(args: &InitArgs) -> Result<Provider> {
+        Ok(match args.provider {
+            Some(provider) => provider,
+            None => {
+                // Straight off clap's own list, so the menu and `--provider`
+                // cannot come to offer different things. Names alone, with no
+                // note beside them, as the mockup draws it.
+                let providers = <PlanningAgent as clap::ValueEnum>::value_variants();
+                let menu: Vec<(&str, &str)> = providers
+                    .iter()
+                    .map(|provider| (provider.name(), ""))
+                    .collect();
+                providers[crate::ask::choose("Select your agent", &menu, 0)?]
+            }
+        }
+        .provider())
+    }
+
+    /// Whether to place the example setup: the flags first, then — on a fresh
+    /// project only — the person, whose default is yes because that is what
+    /// every `init` wrote before this question existed.
+    ///
+    /// An established project is not asked, for the same reason the tracker
+    /// question is skipped there: its setup is already chosen, and it keeps
+    /// the answer its own files give. One that still has any shipped
+    /// pipeline or shipped prompt took the examples, so a repeat run restores
+    /// whatever of them went missing — the documented way back from a
+    /// deleted `pipelines/` folder, which leaves the prompts behind. One
+    /// with neither declined them, and a repeat run, say to add another
+    /// agent's skills, must not drop the examples in now.
+    fn examples(root: &Path, args: &InitArgs, fresh: bool) -> Result<bool> {
+        if args.examples {
+            return Ok(true);
+        }
+        if args.no_examples {
+            return Ok(false);
+        }
+        if !fresh {
+            let prompts = crate::config::under_setup(
+                &crate::config::setup_dir_in(root),
+                crate::config::PROMPTS_DIR,
+            );
+            return Ok(crate::pipeline::BUILTIN_PIPELINES
+                .iter()
+                .any(|(name, _)| Pipelines::file_in(root, name).exists())
+                || assets::PROMPTS
+                    .iter()
+                    .any(|prompt| prompts.join(prompt.name).exists()));
+        }
+        let menu = [("yes", ""), ("no", "")];
+        Ok(crate::ask::choose("Install the example setup?", &menu, 0)? == 0)
     }
 
     /// The tracker `[issue_tracking]` names, and the project it files into —
@@ -165,7 +219,7 @@ impl Answers {
                             Some(path) => format!("{bin} on PATH, at {path}"),
                             None => format!("{bin} not on PATH — install it before dispatching"),
                         },
-                        None => "hooks are still written; the table stays empty".to_string(),
+                        None => "no hooks are written; the table stays empty".to_string(),
                     })
                     .collect();
                 let menu: Vec<(&str, &str)> = trackers
@@ -215,6 +269,169 @@ impl Answers {
     }
 }
 
+/// Where this run puts the project's setup, settled before anything is
+/// written — the answers to "Where should this project's setup live?" and,
+/// in home mode, "Which workspace should this checkout use?".
+enum Placement {
+    /// A tracked `.spoolway/` in the checkout, as `init` always did — or a
+    /// checkout whose setup `--adopt`/`--new-id` settles on its own.
+    Repo,
+    /// A checkout some workspace already lists: a repeat run, set up in
+    /// that workspace's `config/` exactly as a repeat repo-mode run is.
+    Listed,
+    /// Start a new workspace for this checkout.
+    New,
+    /// Add this checkout to the workspace with this folder name.
+    Join(String),
+}
+
+impl Placement {
+    /// Flags first, then the person, then the default — the same order
+    /// [`Answers::gather`] takes.
+    ///
+    /// A checkout whose setup already lives somewhere is not asked at all:
+    /// one a workspace lists stays in home mode, and one with a tracked
+    /// `.spoolway/` stays in repo mode. A flag asking to move either is
+    /// refused rather than ignored, because moving a project between the two
+    /// is not something `init` does, and a silent repeat run would read as
+    /// if it had.
+    fn choose(root: &Path, args: &InitArgs) -> Result<Self> {
+        if args.adopt.is_some() || args.new_id {
+            return Ok(Self::Repo);
+        }
+        let asked_home = args.setup == Some(Setup::Home) || args.workspace.is_some();
+        if args.setup == Some(Setup::Repo) && args.workspace.is_some() {
+            bail!("--workspace sets a project up in home mode, so it cannot go with --setup repo");
+        }
+
+        if let Some(clone) = crate::repo::workspace_clone(root) {
+            let name = clone
+                .workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if args.setup == Some(Setup::Repo) {
+                bail!(
+                    "{} is already set up in home mode, in workspace {name} — init does not \
+                     move a project out of its workspace\n  run `spoolway init` without \
+                     --setup to repeat the setup in workspace {name}",
+                    root.display()
+                );
+            }
+            if let Some(wanted) = &args.workspace
+                && *wanted != name
+            {
+                bail!(
+                    "{} already uses workspace {name} — init does not move a checkout to \
+                     another workspace\n  run `spoolway init` without --workspace, or with \
+                     `--workspace {name}`, to repeat the setup in its own workspace",
+                    root.display()
+                );
+            }
+            return Ok(Self::Listed);
+        }
+        if crate::config::tracked_setup_dir_in(root).is_dir() {
+            if asked_home {
+                bail!(
+                    "{} already has a tracked `.spoolway/` — init does not move a repo-mode \
+                     project into a home workspace\n  run `spoolway init` without --setup home \
+                     or --workspace to repeat the repo-mode setup",
+                    root.display()
+                );
+            }
+            return Ok(Self::Repo);
+        }
+
+        let setup = match args.setup {
+            Some(setup) => setup,
+            None if asked_home => Setup::Home,
+            None => {
+                // `repo` first and the default: it is what `init` did before
+                // this question existed, so a script with nobody to answer
+                // gets the same tracked `.spoolway/` it always did.
+                let setups = <Setup as clap::ValueEnum>::value_variants();
+                let menu: Vec<(&str, &str)> = setups
+                    .iter()
+                    .map(|setup| match setup {
+                        Setup::Repo => ("repo", ".spoolway/ in this checkout, tracked by git"),
+                        Setup::Home => ("home", "~/.spoolway/"),
+                    })
+                    .collect();
+                setups[crate::ask::choose("Where should this project's setup live?", &menu, 0)?]
+            }
+        };
+        if setup == Setup::Repo {
+            return Ok(Self::Repo);
+        }
+
+        let workspaces = crate::repo::workspaces();
+        match args.workspace.as_deref() {
+            Some(NEW_WORKSPACE) => Ok(Self::New),
+            Some(name) => {
+                if workspaces.iter().any(|workspace| workspace.name == name) {
+                    Ok(Self::Join(name.to_string()))
+                } else {
+                    let known: Vec<&str> = workspaces.iter().map(|w| w.name.as_str()).collect();
+                    bail!(
+                        "--workspace {name}: no workspace by that name under {} — pick one of \
+                         [{}], or `new`",
+                        crate::repo::shorten_home(&crate::mux::state_root()),
+                        known.join(", ")
+                    )
+                }
+            }
+            None if workspaces.is_empty() => Ok(Self::New),
+            // Nobody to ask: a new workspace rather than the menu's default.
+            // Joining shares one setup with every clone already in it, which
+            // is a choice to see made, not one to take for a script that
+            // named no workspace — a spare workspace costs a folder, while
+            // a wrong join edits another clone's pipelines from this one.
+            None if !crate::ask::interactive() => Ok(Self::New),
+            None => {
+                let notes: Vec<String> = workspaces
+                    .iter()
+                    .map(|workspace| {
+                        let clones: Vec<String> = workspace
+                            .clones
+                            .iter()
+                            .map(|clone| clone.display().to_string())
+                            .collect();
+                        format!("used by {}", clones.join(", "))
+                    })
+                    .collect();
+                let mut menu: Vec<(&str, &str)> = workspaces
+                    .iter()
+                    .zip(&notes)
+                    .map(|(workspace, note)| (workspace.name.as_str(), note.as_str()))
+                    .collect();
+                menu.push((NEW_WORKSPACE, "start a new workspace"));
+                let picked =
+                    crate::ask::choose("Which workspace should this checkout use?", &menu, 0)?;
+                Ok(match workspaces.get(picked) {
+                    Some(workspace) => Self::Join(workspace.name.clone()),
+                    None => Self::New,
+                })
+            }
+        }
+    }
+}
+
+/// The answer to "Which workspace should this checkout use?", and the
+/// `--workspace` value, that starts a new workspace rather than naming one.
+const NEW_WORKSPACE: &str = "new";
+
+/// `path` as `init`'s report rows name it: relative to the checkout when it
+/// sits inside it, as every repo-mode row always has, and with `~` for the
+/// home directory otherwise — a home-mode workspace's files, and nothing
+/// else `init` writes, sit outside the checkout.
+fn shown(root: &Path, path: &Path) -> String {
+    if path.starts_with(root) {
+        relative(root, path)
+    } else {
+        crate::repo::shorten_home(path)
+    }
+}
+
 /// How wide the path column is on the `stamped` line `init` prints, so that
 /// the id lands in the same column as the value on every `wrote` row above
 /// it rather than one space after a path of whatever length. Eleven
@@ -240,12 +457,12 @@ fn pad_to_value_column(path: &str) -> String {
     }
 }
 
-/// One row of the mockup's report block: `verb` (`project`, `wrote`, `kept`
-/// or `set`) against `what` — the resolved root for `project`, a path
-/// relative to the project root for `wrote`/`kept`, or — for `set` — a
+/// One row of the mockup's report block: `verb` (`project`, `wrote`, `kept`,
+/// `made` or `set`) against `what` — the resolved root for `project`, a path
+/// relative to the project root for `wrote`/`kept`/`made`, or — for `set` — a
 /// `key = value` pair. Every verb is left-padded to nine columns — `project`
-/// plus two spaces, `wrote` plus four, `kept` plus five, `set` plus six — so
-/// all four line up whichever one a row starts with.
+/// plus two spaces, `wrote` plus four, `kept` and `made` plus five, `set`
+/// plus six — so all five line up whichever one a row starts with.
 fn report_row(verb: &str, what: &str) -> String {
     format!("  {verb:<9}{what}")
 }
@@ -300,6 +517,189 @@ pub(crate) fn home_inventory_line(root: &Path, home: &Path) -> String {
     )
 }
 
+/// Writes what `init` places and keeps the report rows for it.
+///
+/// Every file or folder considered gets one row, in call order, rather than
+/// an aggregate count: a repeat `init` that adds nothing new reports `kept`
+/// for everything it considered, and a project adding its own pipeline or
+/// prompt directory later means a fixed set of buckets could not name it.
+/// A struct rather than a closure so the empty-folder rows and the `set`
+/// rows can land in the same list between file writes.
+struct Placer {
+    /// `--force`: rewrite a file that already exists instead of keeping it.
+    force: bool,
+    /// One `wrote`/`kept`/`made`/`set` row per thing considered.
+    rows: Vec<String>,
+}
+
+impl Placer {
+    /// Write `contents` to `path` unless it exists and `force` is off.
+    /// Whether it was actually written.
+    fn file(
+        &mut self,
+        path: std::path::PathBuf,
+        rel: &str,
+        contents: &[u8],
+        exec: bool,
+    ) -> Result<bool> {
+        if path.exists() && !self.force {
+            self.rows.push(report_row("kept", rel));
+            return Ok(false);
+        }
+        write_atomic(&path, contents)?;
+        if exec {
+            // A hook is invoked as a bare command line — see
+            // `crate::tracking::hook_path` — so it needs the execute bit
+            // itself; nothing else `init` writes is ever run rather than
+            // read.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms)?;
+            }
+        }
+        self.rows.push(report_row("wrote", rel));
+        Ok(true)
+    }
+
+    /// Create the empty folder `dir`: `made` when this run created it, `kept`
+    /// when it was already there, the same pair a file gets. Whether it was
+    /// actually created.
+    fn dir(&mut self, dir: &Path, rel: &str) -> Result<bool> {
+        if dir.is_dir() {
+            self.rows.push(report_row("kept", rel));
+            return Ok(false);
+        }
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        self.rows.push(report_row("made", rel));
+        Ok(true)
+    }
+}
+
+/// The example setup: the shipped pipelines, prompts, task templates and
+/// ticket templates, each handed to [`Placer::file`] so it reports `wrote` or `kept`
+/// in call order. Whether anything was actually written.
+fn place_examples(
+    root: &Path,
+    state: &Path,
+    answers: &Answers,
+    placer: &mut Placer,
+) -> Result<bool> {
+    let mut wrote = false;
+    // One file per pipeline, named for the pipeline it holds. A project adds
+    // its own by writing another file here and nothing else.
+    for (name, body) in crate::pipeline::BUILTIN_PIPELINES {
+        let path = Pipelines::file_in(root, name);
+        let rel = shown(root, &path);
+        wrote |= placer.file(path, &rel, answers.fill(body).as_bytes(), false)?;
+    }
+    // Written whole, and never looked at again. A prompt is the project's from
+    // the moment `init` finishes: no sync rewrites one, so nothing here has to
+    // be a shape a later binary can still find its way around in.
+    for prompt in assets::PROMPTS {
+        let dir = state.join("prompts").join(prompt.name);
+        let path = dir.join(assets::PROMPT_FILE);
+        let rel = shown(root, &path);
+        wrote |= placer.file(path, &rel, prompt.body.as_bytes(), false)?;
+        // A prompt's belongings follow its prose: written once, never updated,
+        // and the project's to restyle from here on. No setting names them —
+        // the prompt that fills them is the only thing that reads them.
+        for (name, body) in prompt.assets {
+            let path = dir.join(assets::PROMPT_ASSETS).join(name);
+            let rel = shown(root, &path);
+            wrote |= placer.file(path, &rel, body.as_bytes(), false)?;
+        }
+    }
+    // One task skeleton per shipped pipeline, named for the pipeline that takes
+    // it. A project adds a pipeline's shape by writing a file beside these, and
+    // one that writes nothing takes `default`.
+    for (name, skeleton) in assets::TASK_TEMPLATES {
+        let path = crate::config::under_setup(state, crate::config::TASK_TEMPLATES_DIR)
+            .join(format!("{name}.md"));
+        let rel = shown(root, &path);
+        wrote |= placer.file(path, &rel, skeleton.as_bytes(), false)?;
+    }
+    // The two ticket-body templates a tracker hook renders and hands to its
+    // own `gh`/`acli` call — seeded once, like a task skeleton, and never
+    // looked at again by `sync`. A project with neither file written gets
+    // a single line naming the task instead of this prose; see
+    // `crate::task_template::resolve_tracking`.
+    for (name, body) in assets::TRACKING_TEMPLATES {
+        let path = crate::config::under_setup(state, crate::config::TRACKING_TEMPLATES_DIR)
+            .join(format!("{name}.md"));
+        let rel = shown(root, &path);
+        wrote |= placer.file(path, &rel, body.as_bytes(), false)?;
+    }
+    Ok(wrote)
+}
+
+/// A fresh or repeat run's own setup: `config.toml`, the example setup or
+/// the empty folders standing in for it, and the hook scripts for a project
+/// with a tracker — each handed to [`Placer`] so it reports in call order.
+/// Whether anything was actually written. Not called for a checkout joining
+/// a workspace, whose setup is the workspace's and already there.
+fn place_setup(
+    root: &Path,
+    state: &Path,
+    config: &Config,
+    answers: &Answers,
+    placer: &mut Placer,
+) -> Result<bool> {
+    let mut wrote_any = placer.file(
+        Config::path_in(root),
+        &shown(root, &Config::path_in(root)),
+        config
+            .render()
+            .context("rendering default config")?
+            .as_bytes(),
+        false,
+    )?;
+    if answers.examples {
+        wrote_any |= place_examples(root, state, answers, placer)?;
+    } else {
+        // The folders the examples would have filled, empty, so the
+        // spoolway-config skill the closing line names has somewhere to
+        // write.
+        for dir in [
+            Pipelines::dir_in(root),
+            crate::config::under_setup(state, crate::config::PROMPTS_DIR),
+            state.join("templates"),
+        ] {
+            let rel = format!("{}/", shown(root, &dir));
+            wrote_any |= placer.dir(&dir, &rel)?;
+        }
+    }
+    // The hook scripts, every one of them, but only for a project with a
+    // tracker: `hooks/` exists exactly when a tracker is chosen, and with
+    // `none` there is no folder at all. Every script rather than only the
+    // chosen one, so switching trackers later is a `spoolway config set
+    // issue_tracking.hook` away, not a second `init`. Driven by the tracker
+    // actually in force, not only one just answered: a bare repeat `init`
+    // never touches `answers.tracker` (see `Answers::tracker_touched`) but
+    // still reports `kept` for the scripts an earlier run wrote.
+    let tracker_in_force = if answers.tracker_touched {
+        answers.tracker != Tracker::None
+    } else {
+        Config::load_tracked(root)
+            .map(|existing| !existing.issue_tracking.hook.trim().is_empty())
+            .unwrap_or(false)
+    };
+    if tracker_in_force {
+        for (name, body) in assets::HOOK_SCRIPTS {
+            let path = crate::tracking::hooks_dir_in(root).join(name);
+            let rel = shown(root, &path);
+            wrote_any |= placer.file(path, &rel, body.as_bytes(), true)?;
+        }
+    }
+    // No plan skeleton here any more. spoolway-plan carries its own, under the
+    // skill's own `assets/`, and writes a self-contained page with it — there
+    // is nothing left for `init` to place in the project.
+
+    Ok(wrote_any)
+}
+
 pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Before anything is written or asked, because this is the one command a
     // person runs without knowing yet what they have got hold of.
@@ -326,10 +726,22 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // A repeat run is how a project adds another provider's skills. Keep that
-    // successful outcome distinct from creating (or deliberately replacing)
-    // the project's scaffold. Read before anything below writes `config.toml`.
-    let already_initialized = Config::path_in(root).exists() && !args.force;
+    // Where the setup lives comes first, because every path below depends on
+    // it. A home-mode checkout is listed in its workspace's `project.toml`
+    // here, before anything else is resolved: from that moment on
+    // `crate::config::setup_dir_in` answers the workspace's `config/` and
+    // `bind` answers its dispatcher folder, so every write below lands in the
+    // workspace without being told, and `bind` never reads or stamps `.git`.
+    // `joined` is what the rest of the run keys the joining case off: that
+    // workspace's setup is shared and already chosen, so nothing below writes
+    // into `config/`.
+    let placement = Placement::choose(root, args)?;
+    let joined = matches!(placement, Placement::Join(_));
+    let placed = match &placement {
+        Placement::New => Some(crate::repo::create_workspace(root)?),
+        Placement::Join(name) => Some(crate::repo::join_workspace(root, name)?),
+        Placement::Repo | Placement::Listed => None,
+    };
 
     // A project's home is keyed off an id stamped into its own common git
     // directory, checked against that home's own record of which checkout
@@ -386,9 +798,25 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             )
         });
 
-    let answers = Answers::gather(root, args)?;
+    // Read after binding rather than off `placement`, so a checkout
+    // `--adopt <workspace>/<dispatcher>` just re-attached counts as home mode
+    // too, and is kept out of its checkout exactly as a fresh one is.
+    let home_mode = crate::repo::workspace_clone(root).is_some();
 
-    let state = root.join(STATE_DIR);
+    // A repeat run is how a project adds another provider's skills. Keep that
+    // successful outcome distinct from creating (or deliberately replacing)
+    // the project's scaffold. Read before anything below writes `config.toml`,
+    // and after binding, so a home-mode clone `--adopt` just re-attached reads
+    // its workspace's existing `config.toml` rather than the checkout's none.
+    let already_initialized = Config::path_in(root).exists() && !args.force;
+
+    let answers = if joined {
+        Answers::joining(args)?
+    } else {
+        Answers::gather(root, args)?
+    };
+
+    let state = crate::config::setup_dir_in(root);
     let mut config = Config::default();
     let profile = answers.provider.name();
     // A fresh scaffold has one identity, not a menu of hypothetical profiles:
@@ -411,132 +839,31 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Only the tracked control plane. `queue/` and `archive/` moved out of the
     // checkout — see `crate::repo::Repo::home` — and are created silently by
     // the accessors that resolve them, the first time anything asks for one.
-    std::fs::create_dir_all(state.join("prompts"))
-        .with_context(|| format!("creating {}", state.join("prompts").display()))?;
+    // The setup folders themselves are made below, by whatever lands in them
+    // or, without the examples, as the empty folders the mockup draws.
 
-    // Whether `place` actually wrote `path`, so `wrote_rows` and `wrote_any`
-    // below report only what a run actually did — a repeat `init` that adds
-    // nothing new reports `kept` for everything it considered, the same way
-    // `claim` and the stamped line already say nothing on a repeat run.
-    // `wrote_rows` collects one `kept`/`wrote` row per file `place` is asked
-    // about, in call order, rather than an aggregate count: acceptance
-    // criterion 3 asks for every file it considered, and a project adding
-    // its own pipeline or prompt directory later means a fixed set of
-    // aggregate buckets could not have named it anyway.
-    let mut wrote_rows: Vec<String> = Vec::new();
-    let mut wrote_any = false;
-    let mut place =
-        |path: std::path::PathBuf, rel: &str, contents: &[u8], exec: bool| -> Result<bool> {
-            if path.exists() && !args.force {
-                wrote_rows.push(report_row("kept", rel));
-                return Ok(false);
-            }
-            write_atomic(&path, contents)?;
-            if exec {
-                // A hook is invoked as a bare command line — see
-                // `crate::tracking::hook_path` — so it needs the execute bit
-                // itself; nothing else `init` writes is ever run rather than
-                // read.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&path)?.permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&path, perms)?;
-                }
-            }
-            wrote_rows.push(report_row("wrote", rel));
-            Ok(true)
-        };
-
-    wrote_any |= place(
-        Config::path_in(root),
-        ".spoolway/config.toml",
-        config
-            .render()
-            .context("rendering default config")?
-            .as_bytes(),
-        false,
-    )?;
-    // One file per pipeline, named for the pipeline it holds. A project adds
-    // its own by writing another file here and nothing else.
-    for (name, body) in crate::pipeline::BUILTIN_PIPELINES {
-        let path = Pipelines::file_in(root, name);
-        let rel = relative(root, &path);
-        wrote_any |= place(path, &rel, answers.fill(body).as_bytes(), false)?;
-    }
-    // Written whole, and never looked at again. A prompt is the project's from
-    // the moment `init` finishes: no sync rewrites one, so nothing here has to
-    // be a shape a later binary can still find its way around in.
-    for prompt in assets::PROMPTS {
-        let dir = state.join("prompts").join(prompt.name);
-        let path = dir.join(assets::PROMPT_FILE);
-        let rel = relative(root, &path);
-        wrote_any |= place(path, &rel, prompt.body.as_bytes(), false)?;
-        // A prompt's belongings follow its prose: written once, never updated,
-        // and the project's to restyle from here on. No setting names them —
-        // the prompt that fills them is the only thing that reads them.
-        for (name, body) in prompt.assets {
-            let path = dir.join(assets::PROMPT_ASSETS).join(name);
-            let rel = relative(root, &path);
-            wrote_any |= place(path, &rel, body.as_bytes(), false)?;
-        }
-    }
-    // One task skeleton per shipped pipeline, named for the pipeline that takes
-    // it. A project adds a pipeline's shape by writing a file beside these, and
-    // one that writes nothing takes `default`.
-    for (name, skeleton) in assets::TASK_TEMPLATES {
-        let path = root
-            .join(crate::config::TASK_TEMPLATES_DIR)
-            .join(format!("{name}.md"));
-        let rel = relative(root, &path);
-        wrote_any |= place(path, &rel, skeleton.as_bytes(), false)?;
-    }
-    // The two ticket-body templates a tracker hook renders and hands to its
-    // own `gh`/`acli` call — seeded once, like a task skeleton, and never
-    // looked at again by `sync`. A project with neither file written gets
-    // a single line naming the task instead of this prose; see
-    // `crate::task_template::resolve_tracking`.
-    for (name, body) in assets::TRACKING_TEMPLATES {
-        let path = root
-            .join(crate::config::TRACKING_TEMPLATES_DIR)
-            .join(format!("{name}.md"));
-        let rel = relative(root, &path);
-        wrote_any |= place(path, &rel, body.as_bytes(), false)?;
-    }
-    // The hook scripts every project gets, whichever tracker it answered —
-    // switching later is a `spoolway config set issue_tracking.hook` away,
-    // not a second `init`.
-    for (name, body) in assets::HOOK_SCRIPTS {
-        let path = root.join(".spoolway/hooks").join(name);
-        let rel = relative(root, &path);
-        wrote_any |= place(path, &rel, body.as_bytes(), true)?;
-    }
-    // The workflow that closes a mirrored issue once its pull request
-    // merges, written only for github — see `.github/workflows/
-    // spoolway-issues.yml` in this repository, unchanged. Driven by the
-    // tracker actually in force, not only one just answered: a bare repeat
-    // `init` never touches `answers.tracker` (see `Answers::tracker_touched`)
-    // but still has to report `kept` for a workflow an earlier run already
-    // wrote, per the mockup's own bare-rerun transcript.
-    let github_in_force = if answers.tracker_touched {
-        answers.tracker == Tracker::Github
-    } else {
-        Config::load_tracked(root)
-            .map(|existing| existing.issue_tracking.hook == Tracker::Github.hook_name())
-            .unwrap_or(false)
+    // `placer.rows` collects one row per file or folder `init` considered,
+    // in call order — see [`Placer`] — and `wrote_any` whether any of them
+    // was actually written.
+    let mut placer = Placer {
+        force: args.force,
+        rows: Vec::new(),
     };
-    if github_in_force {
-        let path = root.join(".github/workflows/spoolway-issues.yml");
-        let rel = relative(root, &path);
-        wrote_any |= place(path, &rel, assets::GITHUB_ISSUE_WORKFLOW.as_bytes(), false)?;
+    let mut wrote_any = false;
+
+    if joined {
+        // The workspace's setup, shared with every clone already in it and
+        // left exactly as it is: one row for the folder, as the mockup draws.
+        let setup = crate::config::setup_dir_in(root);
+        placer
+            .rows
+            .push(report_row("kept", &format!("{}/", shown(root, &setup))));
+    } else {
+        wrote_any |= place_setup(root, &state, &config, &answers, &mut placer)?;
     }
-    // No plan skeleton here any more. spoolway-plan carries its own, under the
-    // skill's own `assets/`, and writes a self-contained page with it — there
-    // is nothing left for `init` to place in the project.
 
     // `--tracker`, given bare or with a value, answers `[issue_tracking]`
-    // even on a project that already has a `config.toml` — `place` above
+    // even on a project that already has a `config.toml` — `Placer::file` above
     // leaves that file `kept` rather than rewriting it wholesale, so the
     // two keys the tracker question settles are edited into it directly,
     // the same narrow edit `spoolway config set` itself makes.
@@ -548,7 +875,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             &config.issue_tracking.hook,
         )?;
         updated.save_key(root, "issue_tracking.hook")?;
-        wrote_rows.push(report_row(
+        placer.rows.push(report_row(
             "set",
             &format!(
                 "issue_tracking.hook = {}",
@@ -560,7 +887,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             let updated =
                 crate::confkv::set(&updated, "issue_tracking.project_key", &answers.project_key)?;
             updated.save_key(root, "issue_tracking.project_key")?;
-            wrote_rows.push(report_row(
+            placer.rows.push(report_row(
                 "set",
                 &format!(
                     "issue_tracking.project_key = {}",
@@ -570,19 +897,26 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         }
     }
 
-    // Not written through `place` either: this only ever removes, and never
+    // Not written through `Placer` either: this only ever removes, and never
     // creates a `.gitignore` a project did not already have. See
     // [`crate::gitignore`] — runtime state moved out of the checkout, so
     // there are no rules left to write, only an old block to take back out.
+    // Not in home mode, which promises to write nothing into the checkout:
+    // taking an old block out is still an edit to a tracked file there.
     let mut notes = Vec::new();
-    let shown = relative(root, &crate::gitignore::file(root));
-    match crate::gitignore::remove(root, false)? {
-        crate::gitignore::Removed::Gone => {
-            notes.push(format!("  removed {shown} (spoolway's rules are gone)"))
-        }
+    let ignore_file = relative(root, &crate::gitignore::file(root));
+    let removed = if home_mode {
+        crate::gitignore::Removed::Absent
+    } else {
+        crate::gitignore::remove(root, false)?
+    };
+    match removed {
+        crate::gitignore::Removed::Gone => notes.push(format!(
+            "  removed {ignore_file} (spoolway's rules are gone)"
+        )),
         crate::gitignore::Removed::Absent => {}
         crate::gitignore::Removed::Unterminated => notes.push(format!(
-            "  !       {shown}: `{}` with no `{}` — left alone, restore the marker \
+            "  !       {ignore_file}: `{}` with no `{}` — left alone, restore the marker \
              or delete the block",
             assets::IGNORE_BEGIN,
             assets::IGNORE_END
@@ -591,7 +925,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     crate::usage::registry::register(root);
 
-    for row in &wrote_rows {
+    for row in &placer.rows {
         println!("{row}");
     }
     for note in &notes {
@@ -599,6 +933,21 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     }
     if let Some(line) = &stamped_line {
         println!("{line}");
+    }
+    // Home mode's counterpart to the `stamped` line: the workspace entry this
+    // run added is the whole of the binding, so it is named instead.
+    if let Some(clone) = &placed {
+        println!(
+            "{}",
+            report_row(
+                "bound",
+                &format!(
+                    "{}  ->  {}/",
+                    root.display(),
+                    crate::repo::shorten_home(&clone.home_dir())
+                )
+            )
+        );
     }
     // Resolved once and shared: `write_stamp` below records this checkout's
     // fact against it. Best-effort, and never printed: a project's home
@@ -609,8 +958,14 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // The skills, in the provider's own convention. Run from here rather than
     // suggested, because "and now run this other command" is the manual step
     // this exists to remove — and a project that skipped it had skills that
-    // were shipped, documented, and never installed.
-    let installed = crate::install::install(root, answers.provider, args.force)?;
+    // were shipped, documented, and never installed. A home-mode project
+    // takes them in the agent's user folder, since its project folder sits
+    // inside the checkout.
+    let installed = if home_mode {
+        crate::install::install_user(answers.provider, args.force)?
+    } else {
+        crate::install::install(root, answers.provider, args.force)?
+    };
     crate::install::report(installed);
     // A fresh (or freshly `--force`d) project is, by construction, exactly
     // what this binary would write — so it is stamped the same fact
@@ -629,12 +984,24 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // one place `init` says what to do next, so they stay on stdout where
     // they were. Nothing in this task's acceptance criteria asks about
     // them.
-    if !already_initialized {
+    if joined {
+        // A clone joining a workspace is a new project for this checkout,
+        // but its setup — and whatever it still needs — is the workspace's
+        // and was settled by whoever started it, so the next-step lines
+        // below are not this run's to repeat.
         println!("Project initialized successfully.");
-        println!(
-            "Set model and effort on every agent step in .spoolway/pipelines/*.yml before \
-             dispatching."
-        );
+    } else if !already_initialized {
+        println!("Project initialized successfully.");
+        if answers.examples {
+            println!(
+                "Set model and effort on every agent step in {}/*.yml before dispatching.",
+                shown(root, &Pipelines::dir_in(root))
+            );
+        } else {
+            // No pipeline exists yet, so there is no step to set anything on:
+            // the one next step is writing a pipeline, and the skill does it.
+            println!("Use the spoolway-config skill to create pipelines.");
+        }
     } else if answers.tracker_touched && answers.tracker != Tracker::None {
         // The one closing line an established project's tracker question
         // gets: it never sees "Project initialized successfully." above,
@@ -708,7 +1075,7 @@ mod tests {
     /// the question every test below asks of them, and which file it is in is
     /// not.
     fn pipelines_on_disk(root: &Path) -> String {
-        let dir = root.join(STATE_DIR).join("pipelines");
+        let dir = root.join(crate::config::STATE_DIR).join("pipelines");
         let mut all = String::new();
         for entry in std::fs::read_dir(&dir).expect("pipelines dir").flatten() {
             all.push_str(&std::fs::read_to_string(entry.path()).unwrap());
@@ -1152,8 +1519,12 @@ mod tests {
             )
         })
         .expect_err("a name that could escape ~/.spoolway/ must be refused");
+        // `../../evil` carries a `/`, so this is refused by
+        // `adopt_workspace_clone`'s own check now — the `<workspace>/
+        // <dispatcher>` route `home-mode-discovery` added, tried before the
+        // single-component repo-mode form below ever sees it.
         assert!(
-            format!("{err:#}").contains("not a plain directory name"),
+            format!("{err:#}").contains("not a plain `<workspace>/<dispatcher>` name"),
             "{err:#}"
         );
         // And nothing was built from it: no directory escaping the scratch
@@ -1211,8 +1582,8 @@ mod tests {
     /// `[issue_tracking]`, and the executable script it names actually lands
     /// on disk, chmod'd so `crate::tracking`'s hook runner can exec it
     /// directly rather than being handed a path with no execute bit. Every
-    /// script is written whichever tracker was answered, not only the
-    /// chosen one — switching later is a config edit, not a second `init`.
+    /// script is written, not only the chosen one's — switching between
+    /// trackers later is a config edit, not a second `init`.
     #[test]
     fn answering_github_writes_the_hook_and_project_key() {
         let root = scaffold(
@@ -1240,12 +1611,12 @@ mod tests {
         assert!(root.join(".spoolway/hooks").join(&jira).is_file());
     }
 
-    /// Answering `none` still writes every hook script — the whole point of
-    /// writing all of them regardless of the answer — but the table stays
-    /// empty, which is what turns issue tracking off in `crate::tracking`. A
-    /// `--project-key` given alongside `none` is dropped, not half-applied.
+    /// Answering `none` leaves the table empty, which is what turns issue
+    /// tracking off in `crate::tracking`, and writes no `hooks/` folder at
+    /// all. A `--project-key` given alongside `none` is dropped, not
+    /// half-applied.
     #[test]
-    fn answering_none_writes_scripts_but_leaves_the_table_empty() {
+    fn answering_none_writes_no_hooks_and_leaves_the_table_empty() {
         let root = scaffold(
             "tracker-none",
             &InitArgs {
@@ -1258,9 +1629,28 @@ mod tests {
         let config = std::fs::read_to_string(Config::path_in(&root)).unwrap();
         assert!(config.contains("hook = \"\""), "{config}");
         assert!(config.contains("project_key = \"\""), "{config}");
-        let hooks = root.join(".spoolway/hooks");
-        assert!(hooks.join(Tracker::Github.hook_name()).is_file());
-        assert!(hooks.join(Tracker::Jira.hook_name()).is_file());
+        assert!(!crate::tracking::hooks_dir_in(&root).exists());
+    }
+
+    /// With nobody to ask, `Install the example setup?` answers yes — what
+    /// every `init` wrote before the question existed — and `--no-examples`
+    /// answers no without asking.
+    #[test]
+    fn the_example_setup_is_yes_with_nobody_to_ask_and_no_when_declined() {
+        let with = scaffold("examples-default", &confirmed());
+        assert!(Pipelines::file_in(&with, "default").is_file());
+
+        let without = scaffold(
+            "examples-declined",
+            &InitArgs {
+                no_examples: true,
+                ..confirmed()
+            },
+        );
+        assert!(Config::path_in(&without).is_file());
+        let pipelines = Pipelines::dir_in(&without);
+        assert!(pipelines.is_dir());
+        assert_eq!(std::fs::read_dir(&pipelines).unwrap().count(), 0);
     }
 
     /// The rule a prompt or a task skeleton already follows, proven for a
@@ -1364,7 +1754,10 @@ mod tests {
         run_init(&root, &InitArgs::default()).expect("a declined init is not an error");
 
         assert!(!Config::path_in(&root).exists(), "no config was written");
-        assert!(!root.join(STATE_DIR).exists(), "no .spoolway/ at all");
+        assert!(
+            !root.join(crate::config::STATE_DIR).exists(),
+            "no .spoolway/ at all"
+        );
         assert!(!root.join(".claude").exists(), "no skills were installed");
         assert!(
             !home.join(".spoolway").exists(),
@@ -1381,5 +1774,255 @@ mod tests {
         let root = scaffold("confirm-yes", &confirmed());
         assert!(Config::path_in(&root).exists());
         assert!(root.join(".claude").join("skills").is_dir());
+    }
+
+    /// A fresh git checkout named `name` under its own scratch folder, for
+    /// the home-mode tests below, which share one scratch `$HOME` between
+    /// two clones rather than taking [`home_for`]'s one per root.
+    fn home_mode_checkout(parent: &Path, name: &str) -> std::path::PathBuf {
+        let root = parent.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        root
+    }
+
+    /// Every path under `dir`, relative to it and sorted — how the home-mode
+    /// tests tell that `.git` gained nothing from `init`.
+    fn listing(dir: &Path) -> Vec<String> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                out.push(relative(base, &path));
+                if path.is_dir() {
+                    walk(base, &path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    /// `InitArgs` for the task's own scripted home-mode line:
+    /// `--setup home --workspace <workspace> --provider claude --examples
+    /// --tracker none --yes`.
+    fn home_args(workspace: &str) -> InitArgs {
+        InitArgs {
+            yes: true,
+            setup: Some(Setup::Home),
+            workspace: Some(workspace.to_string()),
+            provider: Some(PlanningAgent::Claude),
+            examples: true,
+            tracker: Some("none".to_string()),
+            ..InitArgs::default()
+        }
+    }
+
+    /// Acceptance: a home-mode `init` with `new` creates
+    /// `~/.spoolway/<label>-<id>/` with `config/`, `dispatchers/<name>/` and
+    /// a `project.toml` listing the clone; the example setup lands in
+    /// `config/`; skills land in the user folder; and the checkout and its
+    /// `.git` are exactly as they were.
+    #[test]
+    fn a_home_mode_init_creates_a_workspace_and_leaves_the_checkout_untouched() {
+        let parent = crate::scratch::root("init-home-new");
+        let home = parent.join("home");
+        let root = home_mode_checkout(&parent, "api");
+        let git_before = listing(&root.join(".git"));
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&root, &home_args(NEW_WORKSPACE)).expect("init");
+
+            let clone = crate::repo::workspace_clone(&root).expect("the clone is listed");
+            let name = clone.workspace.file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with("api-"), "workspace {name} is <label>-<id>");
+            assert_eq!(
+                clone.workspace.parent(),
+                Some(home.join(".spoolway").as_path())
+            );
+            assert_eq!(clone.dispatcher, "api");
+            assert!(clone.home_dir().is_dir(), "dispatchers/api/ is made");
+            assert!(clone.config_dir().join("config.toml").is_file());
+            assert!(
+                clone
+                    .config_dir()
+                    .join("pipelines")
+                    .join("default.yml")
+                    .is_file(),
+                "the examples land in the workspace's config/"
+            );
+            assert!(
+                !clone.config_dir().join("hooks").exists(),
+                "no tracker, no hooks/"
+            );
+            assert!(
+                crate::cli::Provider::Claude
+                    .user_skills_dir(&home)
+                    .join("spoolway-plan")
+                    .join("SKILL.md")
+                    .is_file(),
+                "skills go to the user folder"
+            );
+        });
+
+        let porcelain = crate::repo::run(&root, "git", &["status", "--porcelain"]).unwrap();
+        assert_eq!(porcelain.trim(), "", "the checkout gained nothing");
+        assert_eq!(
+            listing(&root.join(".git")),
+            git_before,
+            ".git gained nothing from spoolway"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Acceptance: a second clone joins with `--workspace <name>`, is added
+    /// to that `project.toml` with a dispatcher folder of its own, and the
+    /// shared `config/` is kept exactly as it was — including against the
+    /// example and tracker flags, which a joining run does not apply.
+    #[test]
+    fn a_second_clone_joins_the_workspace_and_keeps_its_config() {
+        let parent = crate::scratch::root("init-home-join");
+        let home = parent.join("home");
+        let first = home_mode_checkout(&parent, "api");
+        let second = home_mode_checkout(&parent.join("elsewhere"), "api");
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let workspace = crate::repo::workspace_clone(&first).unwrap().workspace;
+            let name = workspace
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let config = workspace.join("config").join("config.toml");
+            std::fs::write(&config, "# edited by a person\n").unwrap();
+
+            let joining = InitArgs {
+                tracker: Some("github".to_string()),
+                project_key: Some("o/r".to_string()),
+                ..home_args(&name)
+            };
+            init(&second, &joining).expect("second init");
+
+            let clone = crate::repo::workspace_clone(&second).expect("the second clone is listed");
+            assert_eq!(clone.workspace, workspace);
+            assert_eq!(clone.dispatcher, "api-2", "a taken dispatcher name gets -2");
+            assert!(clone.home_dir().is_dir());
+            assert_eq!(
+                crate::repo::workspace_clone(&first).unwrap().dispatcher,
+                "api",
+                "the first clone keeps its own entry"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                "# edited by a person\n",
+                "joining leaves the shared config alone"
+            );
+            assert!(!workspace.join("config").join("hooks").exists());
+        });
+        let porcelain = crate::repo::run(&second, "git", &["status", "--porcelain"]).unwrap();
+        assert_eq!(porcelain.trim(), "");
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// With nobody to ask and no flag, the setup question answers `repo`:
+    /// what `init` always did, so a script is unchanged by this question.
+    #[test]
+    fn the_setup_question_defaults_to_repo_with_nobody_to_ask() {
+        let root = scaffold("setup-default", &confirmed());
+        assert!(
+            crate::config::tracked_setup_dir_in(&root)
+                .join("config.toml")
+                .is_file()
+        );
+        crate::platform::test_home::with_home(&home_for(&root), || {
+            assert!(crate::repo::workspace_clone(&root).is_none());
+        });
+    }
+
+    /// With nobody to ask and no `--workspace`, a home-mode run starts a
+    /// new workspace rather than joining the one already there unasked.
+    #[test]
+    fn with_nobody_to_ask_a_home_mode_run_starts_its_own_workspace() {
+        let parent = crate::scratch::root("init-home-unasked");
+        let home = parent.join("home");
+        let first = home_mode_checkout(&parent, "api");
+        let second = home_mode_checkout(&parent, "api-review");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).unwrap();
+            let unasked = InitArgs {
+                workspace: None,
+                ..home_args(NEW_WORKSPACE)
+            };
+            init(&second, &unasked).unwrap();
+            assert_ne!(
+                crate::repo::workspace_clone(&first).unwrap().workspace,
+                crate::repo::workspace_clone(&second).unwrap().workspace
+            );
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Moving a project between the two modes is not something `init` does,
+    /// so a flag asking for it is refused before anything is written, and a
+    /// `--workspace` naming nothing is refused naming what is there.
+    #[test]
+    fn a_setup_flag_that_would_move_a_project_is_refused() {
+        let parent = crate::scratch::root("init-home-refused");
+        let home = parent.join("home");
+        let repo_mode = home_mode_checkout(&parent, "tracked");
+        let home_mode = home_mode_checkout(&parent, "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&repo_mode, &confirmed()).unwrap();
+            let err = init(&repo_mode, &home_args(NEW_WORKSPACE)).unwrap_err();
+            assert!(err.to_string().contains("tracked `.spoolway/`"), "{err}");
+            assert!(
+                err.to_string()
+                    .contains("run `spoolway init` without --setup home"),
+                "the refusal names what to run instead: {err}"
+            );
+
+            init(&home_mode, &home_args(NEW_WORKSPACE)).unwrap();
+            let back = InitArgs {
+                setup: Some(Setup::Repo),
+                workspace: None,
+                ..home_args(NEW_WORKSPACE)
+            };
+            let err = init(&home_mode, &back).unwrap_err();
+            assert!(
+                err.to_string().contains("already set up in home mode"),
+                "{err}"
+            );
+            assert!(
+                err.to_string()
+                    .contains("run `spoolway init` without --setup"),
+                "the refusal names what to run instead: {err}"
+            );
+            assert!(!crate::config::tracked_setup_dir_in(&home_mode).exists());
+
+            let name = crate::repo::workspace_clone(&home_mode)
+                .unwrap()
+                .workspace
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let err = init(&home_mode, &home_args("elsewhere")).unwrap_err();
+            assert!(err.to_string().contains("already uses workspace"), "{err}");
+            assert!(
+                err.to_string().contains(&format!("`--workspace {name}`")),
+                "the refusal names the checkout's own workspace: {err}"
+            );
+
+            let other = home_mode_checkout(&parent, "other");
+            let err = init(&other, &home_args("nope")).unwrap_err();
+            assert!(
+                err.to_string().contains("no workspace by that name"),
+                "{err}"
+            );
+            assert!(crate::repo::workspace_clone(&other).is_none());
+        });
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

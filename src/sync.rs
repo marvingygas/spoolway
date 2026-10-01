@@ -44,7 +44,8 @@
 //! is documentation of the binary's contract rather than anything a project
 //! meant. A skill file is the whole-file version of the same bargain: nothing
 //! in one is a project's to have meant, so [`skills`] rewrites it outright
-//! wherever it differs from the shipped copy, hand edit or not.
+//! wherever it differs from the shipped copy, hand edit or not — in the
+//! project's own skill folders and in the agent's user folder alike.
 //!
 //! This used to be `spoolway update`'s job, along with installing the binary
 //! itself. The two were split apart so `update` can run from any directory,
@@ -818,7 +819,7 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             continue;
         };
 
-        let is_hook = path.starts_with(repo.checkout.join(".spoolway/hooks"));
+        let is_hook = path.starts_with(crate::tracking::hooks_dir_in(&repo.checkout));
 
         let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
         if on_disk == shipped {
@@ -954,18 +955,11 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
 
     // The hook scripts `init` seeds into `.spoolway/hooks/` — same rule:
     // never touched by an ordinary sync, `--replace` only.
-    if path.starts_with(repo.checkout.join(".spoolway/hooks")) {
+    if path.starts_with(crate::tracking::hooks_dir_in(&repo.checkout)) {
         return crate::assets::HOOK_SCRIPTS
             .iter()
             .find(|(known, _)| Path::new(known).file_stem().and_then(|s| s.to_str()) == Some(stem))
             .map(|(_, body)| body.to_string());
-    }
-
-    // The workflow `init` writes into `.github/workflows/` only for
-    // `github` — the one shipped asset outside `.spoolway/` entirely, and
-    // still never touched by an ordinary sync.
-    if path == repo.checkout.join(".github/workflows/spoolway-issues.yml") {
-        return Some(crate::assets::GITHUB_ISSUE_WORKFLOW.to_string());
     }
 
     // The ignore rules are deliberately not here. They are a block in a file the
@@ -1020,10 +1014,63 @@ fn provider_installed(
     planned: &[crate::install::Planned],
 ) -> bool {
     provider_needs_codex_migration(provider, checkout, planned)
-        || planned.iter().any(|file| file.path.exists())
+        || installed_at(&provider.skills_dir(checkout), planned)
+}
+
+/// Whether a provider's skills are installed in the one folder `dir`, whose
+/// files `planned` lists: any file this binary ships already there, or a
+/// skill directory it has since retired. [`provider_installed`] asks it of a
+/// project's folder, and [`user_skills`] of the user's.
+fn installed_at(dir: &Path, planned: &[crate::install::Planned]) -> bool {
+    planned.iter().any(|file| file.path.exists())
         || crate::install::RETIRED_SKILLS
             .iter()
-            .any(|(name, _)| provider.skills_dir(checkout).join(name).is_dir())
+            .any(|(name, _)| dir.join(name).is_dir())
+}
+
+/// Each provider's user-level skill folder that holds spoolway's skills, with
+/// the files this binary would write there — the copies a home-mode `init`
+/// or `spoolway install --user` placed. Empty when there is no home
+/// directory, and — inside the test binary — unless a test set a scratch
+/// one; see [`crate::install::user_home`].
+///
+/// Read by [`skills`], [`retired_skills`] and [`text_fingerprint`] alike, so
+/// the three can never disagree about which user folders count.
+fn user_skills() -> Vec<(PathBuf, Vec<crate::install::Planned>)> {
+    let Some(home) = crate::install::user_home() else {
+        return Vec::new();
+    };
+    <crate::cli::Provider as clap::ValueEnum>::value_variants()
+        .iter()
+        .map(|provider| (provider.user_skills_dir(&home), provider.plan_user(&home)))
+        .filter(|(dir, planned)| installed_at(dir, planned))
+        .collect()
+}
+
+/// Rewrite each of `planned` that differs from the shipped copy, or is
+/// missing, naming it as `shown` gives it — the half of [`skills`] a
+/// project folder and a user folder share.
+fn refresh(
+    planned: Vec<crate::install::Planned>,
+    shown: impl Fn(&Path) -> String,
+    args: &SyncArgs,
+    outcomes: &mut Vec<Outcome>,
+) -> Result<()> {
+    for planned in planned {
+        let detail = match std::fs::read_to_string(&planned.path) {
+            Ok(on_disk) if on_disk == planned.contents => {
+                outcomes.push(Outcome::Kept);
+                continue;
+            }
+            Ok(_) => "rewritten",
+            Err(_) => "added",
+        };
+        if !args.dry_run {
+            write_atomic(&planned.path, planned.contents)?;
+        }
+        outcomes.push(Outcome::wrote(shown(&planned.path), detail));
+    }
+    Ok(())
 }
 
 /// Skills are rewritten to the shipped copy wherever a project installed
@@ -1061,27 +1108,12 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             continue;
         }
 
-        for planned in planned {
-            let shown = crate::platform::relative(&repo.checkout, &planned.path);
-            match std::fs::read_to_string(&planned.path) {
-                Ok(on_disk) if on_disk == planned.contents => {
-                    outcomes.push(Outcome::Kept);
-                    continue;
-                }
-                Ok(_) => {
-                    if !args.dry_run {
-                        write_atomic(&planned.path, planned.contents)?;
-                    }
-                    outcomes.push(Outcome::wrote(&shown, "rewritten"));
-                }
-                Err(_) => {
-                    if !args.dry_run {
-                        write_atomic(&planned.path, planned.contents)?;
-                    }
-                    outcomes.push(Outcome::wrote(&shown, "added"));
-                }
-            }
-        }
+        refresh(
+            planned,
+            |path| crate::platform::relative(&repo.checkout, path),
+            args,
+            outcomes,
+        )?;
 
         if migrate_codex {
             let mut names: Vec<String> = provider
@@ -1130,6 +1162,13 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             }
         }
     }
+    // The user-level copies too, the same way: a home-mode project keeps its
+    // skills only there, and a person who ran `spoolway install --user` from
+    // a repo-mode one would otherwise keep whichever release they last
+    // installed. Named with `~`, since they sit outside the checkout.
+    for (_, planned) in user_skills() {
+        refresh(planned, crate::repo::shorten_home, args, outcomes)?;
+    }
     Ok(())
 }
 
@@ -1145,14 +1184,22 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
 /// touched: this only ever joins a provider's skills directory onto a name
 /// this project once shipped and no longer does.
 fn retired_skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
-    for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
-        let dir = provider.skills_dir(&repo.checkout);
+    // Every project folder, then every user folder [`user_skills`] counts.
+    let dirs = <crate::cli::Provider as clap::ValueEnum>::value_variants()
+        .iter()
+        .map(|provider| provider.skills_dir(&repo.checkout))
+        .chain(user_skills().into_iter().map(|(dir, _)| dir));
+    for dir in dirs {
         for (name, why) in crate::install::RETIRED_SKILLS {
             let stale = dir.join(name);
             if !stale.is_dir() {
                 continue;
             }
-            let shown = crate::platform::relative(&repo.checkout, &stale);
+            let shown = if stale.starts_with(&repo.checkout) {
+                crate::platform::relative(&repo.checkout, &stale)
+            } else {
+                crate::repo::shorten_home(&stale)
+            };
             if !args.dry_run {
                 std::fs::remove_dir_all(&stale)
                     .with_context(|| format!("removing {}", stale.display()))?;
@@ -1171,7 +1218,7 @@ fn retired_skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> 
 /// touched.
 fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for (name, why) in crate::install::RETIRED_TEMPLATES {
-        let path = repo.checkout.join(name);
+        let path = crate::config::under_setup(&repo.setup_dir(), name);
         if !path.is_file() {
             continue;
         }
@@ -1422,6 +1469,13 @@ fn text_fingerprint(checkout: &Path) -> String {
         if !provider_installed(*provider, checkout, &planned) {
             continue;
         }
+        for planned in planned {
+            material.push_str(planned.contents);
+        }
+    }
+    // The user-level copies [`skills`] also rewrites, so a user folder
+    // installed since the last sync reads as something to bring current.
+    for (_, planned) in user_skills() {
         for planned in planned {
             material.push_str(planned.contents);
         }
@@ -2405,10 +2459,6 @@ mod tests {
                 repo.checkout.join(".spoolway/hooks/github.sh"),
                 "hand_off_for_review",
             ),
-            (
-                repo.checkout.join(".github/workflows/spoolway-issues.yml"),
-                "close-issue",
-            ),
         ] {
             let shipped = shipped_for(&repo, &path)
                 .unwrap_or_else(|| panic!("nothing shipped for {}", path.display()));
@@ -2442,6 +2492,42 @@ mod tests {
         std::fs::write(&nested, "# reviewer\n").unwrap();
         assert!(shipped_for(&repo, &flat).is_none());
         assert!(shipped_for(&repo, &nested).is_some());
+    }
+
+    /// `sync` keeps a user-level install current too: a stale file there is
+    /// rewritten and a missing one added, while a provider nobody installed
+    /// at user level is left without a folder.
+    #[test]
+    fn skills_refreshes_a_user_level_install() {
+        let repo = fixture("skills-user-level");
+        let home = crate::scratch::root("sync-user-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let planned = crate::cli::Provider::Claude.plan_user(&home);
+        let (stale, missing) = (&planned[0], &planned[planned.len() - 1]);
+        std::fs::create_dir_all(stale.path.parent().unwrap()).unwrap();
+        std::fs::write(&stale.path, "an older copy").unwrap();
+
+        let mut outcomes = Vec::new();
+        crate::platform::test_home::with_home(&home, || {
+            skills(&repo, &args(), &mut outcomes).unwrap();
+        });
+
+        assert_eq!(
+            std::fs::read_to_string(&stale.path).unwrap(),
+            stale.contents
+        );
+        assert_eq!(
+            std::fs::read_to_string(&missing.path).unwrap(),
+            missing.contents
+        );
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines.iter().any(|line| line.contains("~/.claude/skills/")),
+            "user-level paths are named with ~: {lines:?}"
+        );
+        assert!(!crate::cli::Provider::Pi.user_skills_dir(&home).exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// `sync::skills` refreshes every installed provider, not `claude` alone —

@@ -34,8 +34,9 @@ object:
 ```
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `prompt contract`, `prompt list`, `prompt override`, `config show`, `config list`,
-`config get`, `config path`, `config override`, `doctor` and `sync`.
+override`, `pipeline copy`, `prompt contract`, `prompt list`, `prompt override`, `prompt copy`,
+`config show`, `config list`, `config get`, `config path`, `config override`, `doctor` and
+`sync`.
 
 ## Your work
 
@@ -573,11 +574,15 @@ pipeline `impl`  entry: implement
 ```
 
 A command step marked `first: true` prints `first-of-chain` the same way, in place of
-`last-of-chain`. See [`first:`](pipelines.md#first--a-step-only-a-chains-root-runs).
+`last-of-chain`. A pipeline loaded from `local/pipelines/` prints `private · <file>` after its
+`entry:` line, naming the file it came from. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway pipeline check`
 
-Validate every pipeline file, its agent references and its prompts against the config.
+Validate every pipeline file, its agent references and its prompts against the config. This
+covers a private pipeline in `local/pipelines/` and a private prompt in `local/prompts/` the
+same way it covers a tracked one.
 
 ```
 $ spoolway pipeline check
@@ -596,7 +601,9 @@ Copy the blank to `.spoolway/pipelines/<name>.yml`, delete what you do not need,
 
 ### `spoolway pipeline list`
 
-Print every pipeline's name and description.
+Print every pipeline's name and description. A pipeline loaded from `local/pipelines/` prints
+`private · <file>` after its name, naming the file it came from. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ```
 $ spoolway pipeline list
@@ -605,6 +612,8 @@ bugfix
 
 impl
     One unit of feature work, start to finish: implement against the acceptance criteria, review the diff, carry the change into the end-to-end suites, then document and hand over.
+
+impl-strict  private · /home/you/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
 ```
 
 ### `spoolway pipeline list --json`
@@ -613,10 +622,12 @@ The same list as JSON, one entry per pipeline.
 
 ```
 $ spoolway pipeline list --json
-{"pipelines": [{"name": "bugfix", "description": "..."}, ...]}
+{"pipelines": [{"name": "bugfix", "description": "...", "source": "tracked", "file": null}, ...]}
 ```
 
-A pipeline with no `description:` carries `"description": null`.
+A pipeline with no `description:` carries `"description": null`. `source` is `"tracked"` for a
+pipeline from `.spoolway/pipelines/` or `"private"` for one from `local/pipelines/`. `file`
+names the private file a private pipeline came from, and is `null` for a tracked one.
 
 ### `spoolway pipeline override <name> --set <step>.<key>=<value>`
 
@@ -639,6 +650,42 @@ $ spoolway pipeline override impl --set implement.model=claude-opus-5
 A step the pipeline does not have, a key the merge refuses, or `id:` set on the step is left
 out of the merge instead: the command still runs, and prints one stderr line naming what it
 left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
+
+### `spoolway pipeline copy <from> <to>`
+
+Copy a pipeline and its task skeleton into the private layer.
+
+```
+$ spoolway pipeline copy impl impl-strict
+wrote    ~/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
+wrote    ~/.spoolway/proj-ab12cd34/local/templates/tasks/impl-strict.md
+```
+
+`<from>` may already be tracked or private. A `<to>` that already names a pipeline, tracked or
+private, is refused, naming `spoolway pipeline list`. In home mode, where the whole setup is
+already private, this writes into the workspace's own `config/` instead. `--json` prints
+`{"wrote": [<path>, ...]}`, with each path in full. See [Private
+pipelines](pipelines.md#private-pipelines).
+
+### `spoolway pipeline promote <name>`
+
+Move a private pipeline, the private prompts it names, and its private task skeleton into the
+tracked `.spoolway/`, then delete the private files.
+
+```
+$ spoolway pipeline promote impl-strict
+moved    local/pipelines/impl-strict.yml       ->  .spoolway/pipelines/impl-strict.yml
+moved    local/prompts/reviewer-strict/        ->  .spoolway/prompts/reviewer-strict/
+moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/impl-strict.md
+```
+
+Refused inside a linked worktree, naming the command to run in the main checkout instead — the
+dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
+against a clash with any tracked file, naming it. Refused in home mode, where the whole setup
+is already private and there is nothing to promote into. Nothing is committed. `--json` prints
+`{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and `to` relative to
+the checkout, matching the two columns above. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway prompt contract`
 
@@ -666,6 +713,21 @@ Print one prompt file.
 
 Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md` to edit there. An override
 replaces the whole file. See the [overrides layer](configuration.md#the-overrides-layer).
+
+### `spoolway prompt copy <from> <to>`
+
+Copy a prompt into the private layer.
+
+```
+$ spoolway prompt copy reviewer reviewer-strict
+wrote    ~/.spoolway/proj-ab12cd34/local/prompts/reviewer-strict/PROMPT.md
+```
+
+`<from>` may already be tracked or private. A `<to>` that already names a prompt, tracked or
+private, is refused, naming `spoolway prompt list`. In home mode, where the whole setup is
+already private, this writes into the workspace's own `config/prompts/<to>/` instead. `--json`
+prints `{"wrote": [<path>]}`, with the path in full. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway agent list`
 
@@ -756,7 +818,7 @@ spoolway config edit
 |---|---|
 | `show` | Print the whole file |
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
-| `path` | Print the file's path |
+| `path` | Print the setup folder, the private `local/` folder (repo mode only) and the overrides folder. `--json` prints them as `{"setup","local","overrides"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree |
 | `edit` | Open the file in `$EDITOR` and validate it on save |
@@ -834,9 +896,9 @@ See [Pricing](cost.md#pricing).
 
 ### `spoolway init`
 
-Scaffold `.spoolway/` in a repository: config, pipelines, prompts, templates, hook scripts and
-skills. At a terminal it asks for the agent, the tracker and the project key. With no terminal
-it takes the defaults.
+Scaffold a project's setup: config, pipelines, prompts, templates, hook scripts and skills. At
+a terminal it asks where the setup lives, for the agent, whether to install the example setup,
+the tracker and the project key. With no terminal it takes the defaults.
 
 Before any of that, it prints the project directory it resolved and waits for a yes — a path you
 do not recognise is the whole of the check, and it matters most when `init` was reached from a
@@ -844,20 +906,40 @@ keybinding rather than typed in a directory you were looking at. Answering no wr
 exits 0. With nobody there to answer, that question takes its default, which is no, so a script
 or CI runner passes `--yes`.
 
+`Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
+default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
+`home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
+checkout or its `.git`. With no workspace yet, home mode creates one; with workspaces already
+there, `init` also asks `Which workspace should this checkout use?`, and `--workspace <name>`
+or `--workspace new` answers it. Joining a workspace keeps its `config/` exactly as it is and
+skips the example and tracker questions. With nobody to ask and no `--workspace`, `init` starts
+a new workspace rather than joining one unasked. See [Home mode](concepts.md#home-mode).
+
+Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+`--workspace <name>` naming a workspace other than the one a checkout already uses. Each
+refusal names the command to run instead.
+
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
 that id and the checkout's path. A fresh clone binds itself on whatever command it runs first.
-`--adopt` and `--new-id` write a binding over one that already exists. See [Runtime
+`--adopt` and `--new-id` write a binding over one that already exists. A home-mode checkout is
+listed in its workspace's `project.toml` instead, with nothing stamped into `.git`. See [Runtime
 state](configuration.md#runtime-state).
 
 ```
 spoolway init
 spoolway init --yes --provider codex --tracker github --project-key owner/repo
+spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
+| `--setup <repo\|home>` | `repo` | Answer `Where should this project's setup live?` without asking |
+| `--workspace <NAME\|new>` | | Answer `Which workspace should this checkout use?` without asking. Implies `--setup home`. `new` starts a workspace; a name joins one that already exists |
 | `--provider <claude\|codex>` | `claude` | The coding agent whose skills are installed and which becomes the project's agent profile |
+| `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts, task templates and ticket templates. Also the answer with nobody to ask |
+| `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira |
 | `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
@@ -866,9 +948,16 @@ spoolway init --yes --provider codex --tracker github --project-key owner/repo
 | `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
 | `--take-over` | | Accepted and ignored |
 
-Run again in a project that already has a config, it installs skills and changes nothing else.
-Every hook script is written whatever the tracker answer. See [Installation and
-setup](installation.md#scaffolding-a-project).
+`NAME` in the form `<workspace>/<dispatcher>` re-attaches a home-mode clone instead of binding
+a repo-mode home: it rewrites that `dispatcher` clone entry's path, in the named workspace's
+`project.toml`, to this checkout, and keeps that dispatcher's queue, archive and worktrees.
+Nothing is stamped into `.git` either way. This is the exact command the "no spoolway project
+found" error prints for a clone whose folder moved. See [Home mode](concepts.md#home-mode).
+
+Run again in a project that already has a config, it installs skills, restores any example file
+that went missing, and otherwise changes nothing. Hook scripts are written only when a tracker
+is chosen, whichever one, so switching trackers later is a `spoolway config set
+issue_tracking.hook` away. See [Installation and setup](installation.md#scaffolding-a-project).
 
 ### `spoolway install <provider>`
 
@@ -876,6 +965,7 @@ Install the pipeline skills for one coding agent. `init` runs this for you.
 
 ```
 spoolway install codex
+spoolway install claude --user
 ```
 
 | Provider | Skills go in |
@@ -884,9 +974,18 @@ spoolway install codex
 | `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/`. Loaded once the project is trusted |
 
+`--user` installs into the agent's user folder instead — `~/.claude/skills/`,
+`~/.agents/skills/` or `~/.pi/agent/skills/` — which it loads in every project. It needs no
+project and writes nothing into any checkout. A home-mode project's plain `install` goes there
+too, with or without `--user`, since its project skill folder sits inside a checkout that home
+mode promises to leave untouched. pi's project-trust note is not printed for a user-level install,
+since a user folder loads without being asked. See [The pipeline
+skills](installation.md#the-pipeline-skills).
+
 | Flag | Default | What it does |
 |---|---|---|
 | `--force` | | Overwrite files that already exist |
+| `--user` | | Install into the agent's user folder instead of the project's |
 
 ### `spoolway update`
 
@@ -980,7 +1079,8 @@ $ spoolway doctor
 | `--no-live` | | Skip the throwaway-pane check |
 
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
-`--json` prints the findings as one object.
+`--json` prints the findings as one object. The `bound to its home` check, under `-v`, names
+whether the project runs in repo mode or home mode. See [Home mode](concepts.md#home-mode).
 
 ### `spoolway herdr bind`
 

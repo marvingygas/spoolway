@@ -201,7 +201,11 @@ works "paused-route's checkout is untouched by either refusal" \
 # exists to keep uncalled is never asked for anything else. `esc` returns to
 # the queue screen with nothing queued and nothing opened; `enter` over the
 # gate queues the batch anyway, with `open_tickets` never reached at all —
-# no `ticket:`, no `epic:`, on the task that lands in the queue.
+# no `ticket:`, no `epic:`, on the task that lands in the queue. `init` ran
+# with no tracker and wrote no hooks, so the shipped `github.sh` goes on disk
+# first.
+must "the shipped github.sh is written" \
+  "$SPOOLWAY" sync --replace .spoolway/hooks/github.sh
 must "the hook is set to github.sh" \
   "$SPOOLWAY" config set issue_tracking.hook github.sh
 must "and a project key" \

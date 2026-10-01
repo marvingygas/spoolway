@@ -2440,7 +2440,7 @@ fn by_label(filters: &Filters, table: TableKind) -> &'static str {
 /// project's own line to add, like every other directory a person's own run
 /// fills in rather than the project's tracked setup.
 fn evals_dir(repo: &Repo) -> std::path::PathBuf {
-    repo.root.join(crate::config::STATE_DIR).join("evals")
+    crate::config::setup_dir_in(&repo.root).join("evals")
 }
 
 /// Write the table currently on screen to

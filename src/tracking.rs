@@ -72,7 +72,14 @@ pub fn hook_path_in(checkout: &Path, hook: &str) -> Option<PathBuf> {
     if named.is_empty() || !is_bare_filename(named) {
         return None;
     }
-    Some(checkout.join(".spoolway/hooks").join(named))
+    Some(hooks_dir_in(checkout).join(named))
+}
+
+/// `.spoolway/hooks/` under `checkout` — the one place that subdirectory is
+/// ever joined onto one. Every reader of a specific hook script goes through
+/// [`hook_path_in`], which joins onto this rather than repeating the literal.
+pub(crate) fn hooks_dir_in(checkout: &Path) -> PathBuf {
+    crate::config::setup_dir_in(checkout).join("hooks")
 }
 
 /// Whether `name` is exactly one ordinary path component, which is the whole
@@ -622,7 +629,7 @@ pub(crate) fn missing_slug_line(
     if name.is_empty() || !is_bare_filename(name) {
         return None;
     }
-    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    let script = std::fs::read_to_string(hooks_dir_in(checkout).join(name)).ok()?;
     (!writes_slug_line(&script)).then(|| name.to_string())
 }
 
@@ -640,7 +647,7 @@ pub(crate) fn missing_fetch_branch(checkout: &Path, hook_name: &str) -> Option<S
     if name.is_empty() || !is_bare_filename(name) {
         return None;
     }
-    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    let script = std::fs::read_to_string(hooks_dir_in(checkout).join(name)).ok()?;
     (!has_fetch_branch(&script)).then(|| name.to_string())
 }
 
@@ -1891,10 +1898,10 @@ exit 0
     }
 
     /// Acceptance criterion: `done` leaves the ticket open, marks the pull
-    /// request with the marker `.github/workflows/spoolway-issues.yml`
-    /// trusts, relabels the ticket for review, and closes nothing itself —
-    /// closing is that workflow's job, once the pull request actually
-    /// merges.
+    /// request with the marker a close-on-merge workflow such as spoolway's
+    /// own `.github/workflows/spoolway-issues.yml` trusts, relabels the
+    /// ticket for review, and closes nothing itself — closing is that
+    /// workflow's job, once the pull request actually merges.
     #[test]
     fn github_sh_done_hands_the_ticket_to_its_pull_request_without_closing_it() {
         let (repo, t, stub) =
@@ -1988,7 +1995,7 @@ exit 0
 
     /// A failed marker comment must stop the handoff outright — the ticket
     /// is not yet relabelled or told anything, so nothing here claims a
-    /// handoff `.github/workflows/spoolway-issues.yml` cannot yet see.
+    /// handoff a close-on-merge workflow cannot yet see.
     #[test]
     fn github_sh_done_stops_when_the_marker_comment_fails() {
         let (repo, t, stub) =

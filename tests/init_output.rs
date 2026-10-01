@@ -120,7 +120,7 @@ fn assert_scaffold(project: &Project, agent: &str) {
     }
 }
 
-/// One `kept`/`wrote`/`set` row, in the column every such row shares.
+/// One `kept`/`wrote`/`made`/`set` row, in the column every such row shares.
 fn row(verb: &str, what: &str) -> String {
     format!("  {verb:<9}{what}")
 }
@@ -132,9 +132,13 @@ fn row(verb: &str, what: &str) -> String {
 /// present rather than pinning the whole transcript's line order. What
 /// paths actually exist is read off disk rather than duplicated here from
 /// `assets::PROMPTS` and friends: this project's own prompt and hook lists
-/// are not this test's to keep in sync by hand.
+/// are not this test's to keep in sync by hand. A directory that does not
+/// exist has no paths — `hooks/` is written only for a tracker.
 fn files_under(project: &Project, rel: &str) -> Vec<String> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        if !dir.exists() {
+            return;
+        }
         for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -154,9 +158,8 @@ fn files_under(project: &Project, rel: &str) -> Vec<String> {
     out
 }
 
-/// Every file `init` places outside `.github/`, whatever tracker was
-/// answered — the workflow is conditional on `github` and each call site
-/// below adds it separately when it applies.
+/// Every file `init` placed, read off disk: the config, the example setup,
+/// and the hook scripts when a tracker was answered.
 fn scaffold_paths(project: &Project) -> Vec<String> {
     let mut paths = vec![".spoolway/config.toml".to_string()];
     for dir in [
@@ -302,7 +305,7 @@ fn repeat_init_still_refuses_a_bare_project_key() {
 /// Acceptance criterion 4: `--tracker` with a value answers `[issue_tracking]`
 /// outright on an established project, editing the two keys into
 /// `config.toml` in place rather than refusing — and answering `github`
-/// also writes the workflow that closes a mirrored issue.
+/// writes the hook scripts, but no workflow under `.github/`.
 #[test]
 fn repeat_init_with_a_tracker_value_applies_it_to_an_existing_config() {
     let project = Project::new("tracker-apply");
@@ -329,21 +332,21 @@ fn repeat_init_with_a_tracker_value_applies_it_to_an_existing_config() {
         "{out}"
     );
     assert!(
-        out.contains(&row("wrote", ".github/workflows/spoolway-issues.yml")),
+        out.contains(&row("wrote", ".spoolway/hooks/github.sh")),
         "{out}"
     );
+    assert!(
+        out.contains(&row("wrote", ".spoolway/hooks/jira.sh")),
+        "{out}"
+    );
+    assert!(!out.contains("spoolway-issues.yml"), "{out}");
     assert!(out.trim_end().ends_with("issue tracking is on."), "{out}");
     assert!(!out.contains("Project initialized successfully."));
 
     let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
     assert!(config.contains("hook = \"github.sh\""), "{config}");
     assert!(config.contains("project_key = \"acme/app\""), "{config}");
-    assert!(
-        project
-            .as_ref()
-            .join(".github/workflows/spoolway-issues.yml")
-            .exists()
-    );
+    assert!(!project.as_ref().join(".github").exists());
 }
 
 /// Review finding 4: `--tracker` with no value opens the picker whatever
@@ -379,13 +382,12 @@ fn repeat_init_with_a_bare_tracker_flag_and_nobody_to_ask_leaves_an_established_
     );
 }
 
-/// Review finding 2: `spoolway init` answering `github` must leave an
-/// existing `.github/workflows/spoolway-issues.yml` exactly as a project
-/// left it — the same rule a hook or a tracking template already follows —
-/// proven with sentinel bytes a shipped workflow would never itself
-/// contain.
+/// `init` no longer ships the close-on-merge workflow, and it does not
+/// delete or rewrite one a project already has either: answering `github`
+/// leaves the file exactly as the project left it and never names it in
+/// the report.
 #[test]
-fn repeat_init_with_tracker_github_never_overwrites_an_existing_workflow_file() {
+fn init_with_tracker_github_neither_writes_nor_touches_a_workflow_file() {
     let project = Project::new("workflow-untouched");
     project.init("claude");
     let workflow = project
@@ -406,22 +408,19 @@ fn repeat_init_with_tracker_github_never_overwrites_an_existing_workflow_file() 
         "acme/app",
     ]));
 
-    assert!(
-        out.contains(&row("kept", ".github/workflows/spoolway-issues.yml")),
-        "{out}"
-    );
+    assert!(!out.contains("spoolway-issues.yml"), "{out}");
     assert_eq!(std::fs::read_to_string(&workflow).unwrap(), mine);
 }
 
-/// Review finding 3: a bare re-run with no `--tracker` at all never touches
-/// `[issue_tracking]` (`tracker_touched` is false), so whether the
-/// workflow row reads `kept` has to come from the tracker already on disk
-/// — `Config::load_tracked` in `github_in_force` — not from an answer this
-/// run gave. Nothing else in this file starts from a project whose tracker
-/// is already `github`, so nothing else exercises that fallback.
+/// A bare re-run with no `--tracker` at all never touches
+/// `[issue_tracking]` (`tracker_touched` is false), so whether the hook
+/// rows appear has to come from the tracker already on disk, not from an
+/// answer this run gave. Nothing else in this file starts from a project
+/// whose tracker is already `github`, so nothing else exercises that
+/// fallback.
 #[test]
-fn a_bare_repeat_init_reports_the_workflow_kept_from_the_tracker_already_on_disk() {
-    let project = Project::new("workflow-kept-from-disk");
+fn a_bare_repeat_init_reports_the_hooks_kept_from_the_tracker_already_on_disk() {
+    let project = Project::new("hooks-kept-from-disk");
     project.run(&[
         "init",
         "--yes",
@@ -435,7 +434,106 @@ fn a_bare_repeat_init_reports_the_workflow_kept_from_the_tracker_already_on_disk
 
     let out = stdout(&project.run(&["init", "--yes", "--provider", "claude"]));
     assert!(
-        out.contains(&row("kept", ".github/workflows/spoolway-issues.yml")),
+        out.contains(&row("kept", ".spoolway/hooks/github.sh")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&row("kept", ".spoolway/hooks/jira.sh")),
+        "{out}"
+    );
+}
+
+/// With `none` there is no `hooks/` folder at all, and no hook row.
+#[test]
+fn a_fresh_init_with_no_tracker_writes_no_hooks_folder() {
+    let project = Project::new("no-hooks");
+    let out = stdout(&project.init("claude"));
+
+    assert!(!project.as_ref().join(".spoolway/hooks").exists());
+    assert!(!out.contains(".spoolway/hooks"), "{out}");
+}
+
+/// `--no-examples` writes the config and three empty folders, reports each
+/// folder as `made`, and closes on the line naming the skill that writes a
+/// pipeline rather than the model-and-effort line, which has no step to
+/// point at.
+#[test]
+fn a_fresh_init_without_examples_makes_empty_folders_and_names_the_skill() {
+    let project = Project::new("no-examples");
+    let result = project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--no-examples",
+        "--tracker",
+        "none",
+    ]);
+    let out = stdout(&result);
+
+    assert_eq!(stderr(&result), "");
+    assert!(
+        out.contains(&row("wrote", ".spoolway/config.toml")),
+        "{out}"
+    );
+    for dir in ["pipelines", "prompts", "templates"] {
+        let rel = format!(".spoolway/{dir}/");
+        assert!(out.contains(&row("made", &rel)), "{out}");
+        let on_disk = project.as_ref().join(".spoolway").join(dir);
+        assert!(on_disk.is_dir(), "{rel} is not a folder");
+        assert_eq!(std::fs::read_dir(&on_disk).unwrap().count(), 0, "{rel}");
+    }
+    assert!(!project.as_ref().join(".spoolway/hooks").exists());
+    assert!(
+        out.ends_with(
+            "Skills installed successfully.\n\
+             Project initialized successfully.\n\
+             Use the spoolway-config skill to create pipelines.\n"
+        ),
+        "{out}"
+    );
+
+    // A repeat run keeps the choice: nothing brings the examples in behind
+    // the person's back.
+    let again = stdout(&project.run(&["init", "--yes", "--provider", "claude"]));
+    assert!(
+        again.contains(&row("kept", ".spoolway/pipelines/")),
+        "{again}"
+    );
+    assert!(
+        std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+/// `--examples` with `--tracker github` writes the example setup and the
+/// hook scripts together, and closes on the model-and-effort line.
+#[test]
+fn a_fresh_init_with_examples_and_github_writes_both() {
+    let project = Project::new("examples-github");
+    let result = project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--examples",
+        "--tracker",
+        "github",
+        "--project-key",
+        "acme/app",
+    ]);
+    let out = stdout(&result);
+
+    let paths = scaffold_paths(&project);
+    assert!(paths.iter().any(|p| p == ".spoolway/pipelines/default.yml"));
+    assert!(paths.iter().any(|p| p == ".spoolway/hooks/github.sh"));
+    assert!(paths.iter().any(|p| p == ".spoolway/hooks/jira.sh"));
+    assert_report_rows(&out, "wrote", &paths);
+    assert!(!project.as_ref().join(".github").exists());
+    assert!(
+        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
         "{out}"
     );
 }
