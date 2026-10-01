@@ -304,7 +304,7 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> 
         .iter()
         .map(|(name, pipeline)| {
             let longest = super::queue::longest_agent_step(pipeline);
-            let body = crate::task_template::resolve(repo, pipeline.task_template_name());
+            let body = crate::task_template::resolve_for(repo, pipeline);
             let last_of_chain = pipeline
                 .steps
                 .iter()

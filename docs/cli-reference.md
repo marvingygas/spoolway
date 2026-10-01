@@ -668,7 +668,7 @@ $ spoolway pipeline override strict --set implement.model=x
 
 ### `spoolway pipeline copy <from> <to>`
 
-Copy a pipeline and its task skeleton into the private layer.
+Copy a pipeline into the private layer, along with a task skeleton to read from.
 
 ```
 $ spoolway pipeline copy impl impl-strict
@@ -676,12 +676,19 @@ wrote    ~/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
 wrote    ~/.spoolway/proj-ab12cd34/local/templates/tasks/impl-strict.md
 ```
 
+The skeleton written is whatever `from` would hand a task queued on it right now: `from`'s own
+file if it has one, down to the built-in. When `from` names an explicit `task_template:`, the
+copy keeps that same `task_template:` and shares the named skeleton instead of writing a new
+one, so `--json` then lists only the pipeline file.
+
 `<from>` may already be tracked or private. Both `<from>` and `<to>` must be one plain name:
 not empty, not absolute, and holding none of `/`, `\` or `..`; anything else is refused, naming
 the bad name. A `<to>` that already names a pipeline, tracked or private, is also refused,
-naming `spoolway pipeline list`. In home mode, where the whole setup is already private, this
-writes into the workspace's own `config/` instead. `--json` prints `{"wrote": [<path>, ...]}`,
-with each path in full. See [Private pipelines](pipelines.md#private-pipelines).
+naming `spoolway pipeline list`. A `<to>` whose skeleton already exists, tracked or private, is
+refused the same way, so a copy never replaces an existing skeleton. In home mode, where the
+whole setup is already private, this writes into the workspace's own `config/` instead.
+`--json` prints `{"wrote": [<path>, ...]}`, with each path in full. See [Private
+pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway pipeline promote <name>`
 
@@ -695,11 +702,16 @@ moved    local/prompts/reviewer-strict/        ->  .spoolway/prompts/reviewer-st
 moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/impl-strict.md
 ```
 
+The skeleton moved is the one `task_template:` names, the pipeline's own name when it sets
+none — the same file a task queued on it would read.
+
 Refused inside a linked worktree, naming the command to run in the main checkout instead — the
 dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
-against a clash with any tracked file, naming it. Refused if a step names a prompt that is not
-one plain name, or if a private prompt's folder holds a symlinked directory, before anything is
-moved. Refused in home mode, where the whole setup is already private and there is nothing to
+against a clash with any tracked file, naming it. Refused if a step names a prompt, or the
+pipeline names a `task_template:`, that is not one plain name, or if a private prompt's folder
+holds a symlinked directory, before anything is moved. Refused if another private pipeline
+names the same skeleton, naming it — promoting one must not pull the file out from under the
+other. Refused in home mode, where the whole setup is already private and there is nothing to
 promote into. Nothing is committed.
 
 A promote that fails partway through puts every file back where it was. Nothing is left tracked

@@ -389,7 +389,7 @@ fn subject<'a>(
     };
 
     agent_step(pipeline, step)?;
-    let sample = sample_task(repo, pipeline.task_template_name(), &step.id)?;
+    let sample = sample_task(repo, pipeline, &step.id)?;
     Ok((pipeline, step, sample, true))
 }
 
@@ -423,8 +423,8 @@ fn agent_step(pipeline: &Pipeline, step: &Step) -> Result<()> {
 /// the same reason: a prompt author reading the contract should see the shape
 /// of the task files their lane will actually open, not the shape spoolway
 /// would have picked.
-fn sample_task(repo: &Repo, pipeline: &str, stage: &str) -> Result<Task> {
-    let skeleton = crate::task_template::resolve(repo, pipeline);
+fn sample_task(repo: &Repo, pipeline: &Pipeline, stage: &str) -> Result<Task> {
+    let skeleton = crate::task_template::resolve_for(repo, pipeline);
     let raw = format!("---\nid: example\nstage: {stage}\n---\n{skeleton}");
     Task::parse(repo.queue_dir().join("example.md"), &raw)
 }

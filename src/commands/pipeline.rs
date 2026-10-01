@@ -700,17 +700,17 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
         // file: it takes its own name, and `default.md` answers when there is
         // nothing under it. One that names a skeleton meant that name, so a
         // file that is not there is a typo rather than an intention.
-        if let Some(named) = &pipeline.task_template {
+        if let Some(named) = &pipeline.task_template
+            && !crate::task_template::exists_for(repo, pipeline)
+        {
             let path = repo.task_templates_dir().join(format!("{named}.md"));
-            if !path.exists() {
-                problems.push(format!(
-                    "pipeline `{}` names task skeleton `{named}`, and {} is not there — write \
-                     it, or drop the `task_template:` to take `{}`",
-                    pipeline.name,
-                    relative(&repo.checkout, &path),
-                    crate::task_template::FALLBACK
-                ));
-            }
+            problems.push(format!(
+                "pipeline `{}` names task skeleton `{named}`, and {} is not there — write \
+                 it, or drop the `task_template:` to take `{}`",
+                pipeline.name,
+                relative(&repo.checkout, &path),
+                crate::task_template::FALLBACK
+            ));
         }
 
         for step in &pipeline.steps {
@@ -1165,6 +1165,34 @@ fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse `name` as a `<to>` whose skeleton already exists — tracked
+/// `<name>.md` or, in repo mode, a private `local/templates/tasks/<name>.md`
+/// — the clash `refuse_pipeline_clash` cannot see, since a skeleton is a
+/// file of its own that can exist with no pipeline of that name at all (the
+/// task's own repro: `echo MINE > local/templates/tasks/foo.md` with no
+/// `foo` pipeline anywhere). Checked before `pipeline_copy` writes anything,
+/// so a person's skeleton is never silently replaced.
+fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
+    let tracked = repo.task_templates_dir().join(format!("{name}.md"));
+    if tracked.is_file() {
+        bail!(
+            "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
+            tracked.display()
+        );
+    }
+    if crate::local::is_repo_mode(&repo.checkout) {
+        let private =
+            crate::local::task_templates_dir(&repo.local_dir()).join(format!("{name}.md"));
+        if private.is_file() {
+            bail!(
+                "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
+                private.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Refuse `name` as a `<to>` that already names a prompt — tracked (nested
 /// or the legacy flat shape, same as [`crate::prompt::path_for_tracked`]) or
 /// private.
@@ -1218,11 +1246,19 @@ fn print_wrote(json: bool, paths: &[&Path]) -> Result<()> {
 /// first, the private one only once that is confirmed absent, the same
 /// order every other private-layer reader in this project uses. The
 /// skeleton copied alongside it is whatever
-/// [`crate::task_template::resolve`] would hand a task queued on `from`
+/// [`crate::task_template::resolve_for`] would hand a task queued on `from`
 /// right now, following the identical fallback chain a queued task gets —
 /// `from`'s own file if it has one, down to the built-in — so a pipeline
 /// copied from one with no skeleton of its own still gets a real file to
 /// diverge from, not an empty one.
+///
+/// Only a `from` with no `task_template:` of its own gets a skeleton
+/// written, as `<to>.md` — the name its copy resolves through once it takes
+/// `to`'s identity. `raw` is copied byte for byte, so a `from` that names an
+/// explicit `task_template:` leaves the copy naming that identical skeleton:
+/// the two share it, exactly as the YAML says, and nothing is written —
+/// `<to>.md` would be a file neither reads, and rewriting the shared file
+/// would change what `from` reads too.
 pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
@@ -1242,14 +1278,30 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
         .with_context(|| format!("no pipeline named `{from}` — see `spoolway pipeline list`"))?;
     let raw = std::fs::read_to_string(&source)
         .with_context(|| format!("reading {}", source.display()))?;
+    // Unchecked, the same trust level `Pipelines::load` itself gives every
+    // file before `assemble`/`validate` run on the whole set — read only
+    // for `task_template:`, never run, so an unrelated broken pipeline file
+    // elsewhere must not stop this copy the way loading the full set would.
+    let from_pipeline = crate::pipeline::parse_unchecked(from, &raw)
+        .with_context(|| format!("parsing {}", source.display()))?;
+
+    // An explicit `task_template:` is shared, not copied — see the doc
+    // comment above.
+    let shares_skeleton = from_pipeline.task_template.is_some();
 
     refuse_pipeline_clash(repo, to)?;
+    if !shares_skeleton {
+        refuse_skeleton_clash(repo, to)?;
+    }
 
     let (pipelines_dir, templates_dir) = copy_target_dirs(repo);
     let pipeline_dest = pipelines_dir.join(format!("{to}.yml"));
     write_atomic(&pipeline_dest, &raw)?;
+    if shares_skeleton {
+        return print_wrote(json, &[&pipeline_dest]);
+    }
 
-    let skeleton = crate::task_template::resolve(repo, from);
+    let skeleton = crate::task_template::resolve_for(repo, &from_pipeline);
     let skeleton_dest = templates_dir.join(format!("{to}.md"));
     write_atomic(&skeleton_dest, &skeleton)?;
 
@@ -1654,12 +1706,43 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         });
     }
 
-    let skeleton_source = crate::local::task_templates_dir(&local).join(format!("{name}.md"));
+    // The skeleton this pipeline actually names — `task_template:` when it
+    // sets one, its own name otherwise, exactly what
+    // `crate::task_template::resolve` would read a task's body from — never
+    // the hardcoded `<name>.md` a promote used to move regardless of
+    // `task_template:`, which left a pipeline naming a differently-named
+    // private skeleton with that file still private after promote, and the
+    // promoted pipeline now depending on it from across the tracked/private
+    // line.
+    let skel_name = pipeline.task_template_name();
+    // `task_template:` is raw YAML the pipeline parser never validates as a
+    // filename — unlike `prompt_name` just above, read off a parsed step
+    // rather than typed free text, this is read straight from the
+    // pipeline's own frontmatter. Refused here, before it is ever joined
+    // onto `local/` or the tracked tree, for the identical reason the
+    // prompt loop refuses one above: a private pipeline naming
+    // `task_template: ../../../x` must not move an arbitrary `.md` from
+    // outside `local/` into, or out of, the tracked control plane.
+    crate::local::refuse_unless_plain_name("task template", skel_name)?;
+    let skeleton_source = crate::local::task_templates_dir(&local).join(format!("{skel_name}.md"));
     if skeleton_source.is_file() {
-        let skeleton_dest = repo.task_templates_dir().join(format!("{name}.md"));
+        // A skeleton another private pipeline also names is not this
+        // promote's alone to move — doing so would silently pull it out
+        // from under whichever private pipeline still needs it there.
+        if let Some(sharer) = pipelines.pipelines.values().find(|p| {
+            p.name != name && p.private_file.is_some() && p.task_template_name() == skel_name
+        }) {
+            bail!(
+                "`{skel_name}` is also the skeleton for the private pipeline `{}` — rename one \
+                 of the two before promoting `{name}`",
+                sharer.name
+            );
+        }
+        let skeleton_dest = repo.task_templates_dir().join(format!("{skel_name}.md"));
         if skeleton_dest.is_file() {
             bail!(
-                "`{name}` already has a tracked skeleton — {} — rename the private one first",
+                "`{skel_name}` already has a tracked skeleton — {} — rename the private one \
+                 first",
                 skeleton_dest.display()
             );
         }
@@ -1852,6 +1935,59 @@ mod tests {
         assert_eq!(skeleton, crate::task_template::resolve(&repo, "default"));
     }
 
+    /// `from` naming an explicit `task_template:` used to get copied with a
+    /// skeleton written as `<to>.md` — a file the copied YAML, which still
+    /// names the original `task_template:`, would never actually read. The
+    /// copy now shares the named skeleton and writes none: not refused when
+    /// that skeleton exists, private or tracked, and the existing file left
+    /// as it was.
+    #[test]
+    fn pipeline_copy_shares_an_explicit_task_template_it_names() {
+        for tracked in [false, true] {
+            let repo = repo_for(&format!("copy-explicit-task-template-{tracked}"));
+
+            let default_raw = std::fs::read_to_string(
+                crate::pipeline::Pipelines::dir_in(&repo.checkout).join("default.yml"),
+            )
+            .unwrap();
+            std::fs::create_dir_all(crate::local::pipelines_dir(&repo.local_dir())).unwrap();
+            std::fs::write(
+                crate::local::pipelines_dir(&repo.local_dir()).join("withtemplate.yml"),
+                format!("task_template: myskel\n{default_raw}"),
+            )
+            .unwrap();
+            let skel_dir = if tracked {
+                repo.task_templates_dir()
+            } else {
+                crate::local::task_templates_dir(&repo.local_dir())
+            };
+            std::fs::create_dir_all(&skel_dir).unwrap();
+            std::fs::write(skel_dir.join("myskel.md"), "MINE\n").unwrap();
+
+            pipeline_copy(&repo, "withtemplate", "copy1", false).unwrap();
+
+            let copy_raw = std::fs::read_to_string(
+                crate::local::pipelines_dir(&repo.local_dir()).join("copy1.yml"),
+            )
+            .unwrap();
+            assert!(copy_raw.contains("task_template: myskel"), "{copy_raw}");
+            assert_eq!(
+                std::fs::read_to_string(skel_dir.join("myskel.md")).unwrap(),
+                "MINE\n",
+                "the shared skeleton must be left as it was"
+            );
+            assert!(
+                !crate::local::task_templates_dir(&repo.local_dir())
+                    .join("copy1.md")
+                    .exists(),
+                "nothing must be written under `copy1.md`, which nobody reads"
+            );
+
+            let copy1 = Pipeline::parse("copy1", &copy_raw).unwrap();
+            assert_eq!(crate::task_template::resolve_for(&repo, &copy1), "MINE\n");
+        }
+    }
+
     /// Both spellings of a clash are refused: a `<to>` that already names a
     /// tracked pipeline, and one that already names a private one.
     #[test]
@@ -1864,6 +2000,32 @@ mod tests {
         pipeline_copy(&repo, "default", "default-strict", false).unwrap();
         let err = pipeline_copy(&repo, "default", "default-strict", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// `refuse_pipeline_clash` only checks for a `<to>` that already names a
+    /// pipeline — never for a `<to>` whose skeleton already exists on its
+    /// own, private or tracked. `pipeline copy` must refuse that too, rather
+    /// than silently overwriting a skeleton nobody asked to replace. See the
+    /// task's "How to see it": `echo MINE > local/templates/tasks/foo.md;
+    /// spoolway pipeline copy default foo` currently replaces the file with
+    /// no warning.
+    // covers: pipeline copy refuses when the destination skeleton already exists, private or tracked
+    #[test]
+    fn pipeline_copy_refuses_when_the_destination_skeleton_already_exists() {
+        let repo = repo_for("copy-skeleton-clash");
+
+        let private_skeleton = crate::local::task_templates_dir(&repo.local_dir()).join("foo.md");
+        std::fs::create_dir_all(private_skeleton.parent().unwrap()).unwrap();
+        std::fs::write(&private_skeleton, "MINE\n").unwrap();
+
+        let err = pipeline_copy(&repo, "default", "foo", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+
+        assert_eq!(
+            std::fs::read_to_string(&private_skeleton).unwrap(),
+            "MINE\n",
+            "pipeline copy must not overwrite an existing private skeleton"
+        );
     }
 
     /// A private pipeline may itself be `from` — copying a copy.
@@ -2527,6 +2689,42 @@ mod tests {
         });
     }
 
+    /// `task_template:` is raw YAML the pipeline parser never validates as
+    /// a filename, and `pipeline_promote` joins it straight onto both
+    /// `local/templates/tasks/` and the tracked templates directory. A
+    /// private pipeline naming `task_template: ../../../evil` must be
+    /// refused the same way a non-plain `prompt:` already is, before
+    /// either join ever happens — see `refuse_unless_plain_name`.
+    // covers: standards — path traversal through an unvalidated task_template:
+    #[test]
+    fn pipeline_promote_refuses_a_pipeline_naming_a_non_plain_task_template() {
+        let (repo, home) = repo_for_home_aware("promote-bad-task-template-name");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            let raw = format!("task_template: ../../../evil\n{raw}");
+            std::fs::write(&pipeline_path, &raw).unwrap();
+
+            let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("is not a valid task template name"),
+                "{err:#}"
+            );
+
+            assert!(
+                !Pipelines::file_in(&repo.root, "default-strict").is_file(),
+                "a refused task_template name must leave the pipeline file exactly where it was"
+            );
+            assert!(
+                pipeline_path.is_file(),
+                "the private pipeline file must still be there to retry from"
+            );
+        });
+    }
+
     /// A clash found only on the *last* destination `pipeline_promote`
     /// checks — the skeleton, after the pipeline itself (and any private
     /// prompt) would already have passed their own checks — must still
@@ -2576,6 +2774,88 @@ mod tests {
                     .unwrap(),
                 "the tracked skeleton\n",
                 "the tracked skeleton that caused the refusal must be untouched"
+            );
+        });
+    }
+
+    /// `pipeline_promote` used to move `<name>.md` regardless of what the
+    /// pipeline's own `task_template:` named, which left a pipeline naming
+    /// a differently-named private skeleton still depending on it privately
+    /// after promote. It must move the skeleton the pipeline actually
+    /// names instead.
+    // covers: promote moves the skeleton the pipeline actually names
+    #[test]
+    fn pipeline_promote_moves_the_skeleton_task_template_names_not_the_pipelines_own_name() {
+        let (repo, home) = repo_for_home_aware("promote-task-template-name");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+
+            let pipeline_path =
+                crate::local::pipelines_dir(&repo.local_dir()).join("default-strict.yml");
+            let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+            std::fs::write(&pipeline_path, format!("task_template: myskel\n{raw}")).unwrap();
+
+            let skeleton_dir = crate::local::task_templates_dir(&repo.local_dir());
+            std::fs::rename(
+                skeleton_dir.join("default-strict.md"),
+                skeleton_dir.join("myskel.md"),
+            )
+            .unwrap();
+
+            pipeline_promote(&repo, "default-strict", false).expect("promote");
+
+            assert!(
+                repo.task_templates_dir().join("myskel.md").is_file(),
+                "the skeleton `task_template:` names must move, not `default-strict.md`"
+            );
+            assert!(
+                !repo.task_templates_dir().join("default-strict.md").exists(),
+                "nothing must be written under the pipeline's own name instead"
+            );
+            assert!(
+                !skeleton_dir.join("myskel.md").exists(),
+                "the private skeleton must be gone"
+            );
+        });
+    }
+
+    /// A skeleton another private pipeline also names is not this promote's
+    /// alone to move — doing so would silently pull it out from under the
+    /// private pipeline still depending on it.
+    // covers: promote refuses when that skeleton is shared
+    #[test]
+    fn pipeline_promote_refuses_a_skeleton_shared_with_another_private_pipeline() {
+        let (repo, home) = repo_for_home_aware("promote-skeleton-shared");
+
+        crate::platform::test_home::with_home(&home, || {
+            pipeline_copy(&repo, "default", "default-strict", false).unwrap();
+            pipeline_copy(&repo, "default", "default-stricter", false).unwrap();
+
+            let local = repo.local_dir();
+            let skeleton_dir = crate::local::task_templates_dir(&local);
+            std::fs::remove_file(skeleton_dir.join("default-stricter.md")).unwrap();
+            std::fs::rename(
+                skeleton_dir.join("default-strict.md"),
+                skeleton_dir.join("myskel.md"),
+            )
+            .unwrap();
+
+            for to in ["default-strict", "default-stricter"] {
+                let pipeline_path = crate::local::pipelines_dir(&local).join(format!("{to}.yml"));
+                let raw = std::fs::read_to_string(&pipeline_path).unwrap();
+                std::fs::write(&pipeline_path, format!("task_template: myskel\n{raw}")).unwrap();
+            }
+
+            let err = pipeline_promote(&repo, "default-strict", false).unwrap_err();
+            assert!(format!("{err:#}").contains("also the skeleton"), "{err:#}");
+            assert!(
+                !Pipelines::file_in(&repo.root, "default-strict").exists(),
+                "the refusal must leave nothing moved"
+            );
+            assert!(
+                skeleton_dir.join("myskel.md").is_file(),
+                "the shared skeleton must still be private"
             );
         });
     }
@@ -3023,6 +3303,83 @@ mod tests {
 
         pipeline_check(&repo, Ok(pipelines), false)
             .expect("a prompt only the embedded bugfix sample needs must not leak in");
+    }
+
+    /// `step_problems` used to look for a `task_template:` skeleton in the
+    /// tracked directory only, so a pipeline naming a private one — exactly
+    /// what `task_contract` and a queued task both resolve through
+    /// `crate::task_template::resolve` — was reported missing even though it
+    /// was right there, privately. `pipeline check` must agree with the
+    /// resolver it is checking, not its own separate, tracked-only lookup.
+    // covers: pipeline check and the task commands resolve a pipeline's skeleton through one shared function
+    #[test]
+    fn pipeline_check_sees_a_private_skeleton_a_pipeline_names() {
+        let repo = repo_for("check-private-skeleton");
+
+        let private_skeleton =
+            crate::local::task_templates_dir(&repo.local_dir()).join("myskel.md");
+        std::fs::create_dir_all(private_skeleton.parent().unwrap()).unwrap();
+        std::fs::write(&private_skeleton, "our private skeleton\n").unwrap();
+
+        let pipeline = Pipeline::parse(
+            "solo",
+            "task_template: myskel\n\
+             steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
+             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
+        };
+
+        pipeline_check(&repo, Ok(pipelines), false)
+            .expect("the private skeleton `myskel` names must satisfy the check");
+    }
+
+    /// The reverse of the test above: a pipeline that is genuinely tracked
+    /// (a real `.yml` file on disk, not just an in-memory one `pipeline
+    /// check` happens to be handed) naming `task_template: foo`, where
+    /// `foo` is private and not itself a tracked pipeline, must still be
+    /// reported — never silently satisfied by the private file.
+    /// `exists_for` used to decide trackedness from `task_template_name()`
+    /// (`foo`, not a tracked pipeline) rather than the pipeline's own name
+    /// (`impl`, which is), so it passed exactly the case AC4 forbids.
+    // covers: a tracked pipeline never resolves to a private skeleton
+    #[test]
+    fn pipeline_check_still_reports_a_tracked_pipelines_private_skeleton_missing() {
+        let repo = repo_for("check-tracked-pipeline-private-skeleton");
+
+        std::fs::write(
+            Pipelines::dir_in(&repo.checkout).join("impl.yml"),
+            "task_template: foo\n\
+             steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
+             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+
+        let private_skeleton = crate::local::task_templates_dir(&repo.local_dir()).join("foo.md");
+        std::fs::create_dir_all(private_skeleton.parent().unwrap()).unwrap();
+        std::fs::write(&private_skeleton, "an unrelated private foo\n").unwrap();
+
+        // Only `impl` itself is handed to `pipeline_check` — the shipped
+        // `default`/`bugfix` samples this project's own `init_at` writes
+        // carry unrelated problems (no `model:` on their steps) that would
+        // otherwise drown out the one count assertion below is checking.
+        let pipeline = Pipeline::parse(
+            "impl",
+            "task_template: foo\n\
+             steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
+             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            pipelines: [("impl".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
+        };
+
+        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
+        assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
     /// A gate with no `on_fail` is a warning, not a refusal: `Pipeline::validate`

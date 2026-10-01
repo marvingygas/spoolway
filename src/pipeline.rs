@@ -1894,7 +1894,13 @@ impl Pipeline {
 /// keys on purpose, and validating before [`Pipelines::assemble`] has filled
 /// the rest in from config would refuse a step that is about to become a
 /// perfectly good one.
-fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
+///
+/// `pub(crate)` for `pipeline_copy` too — reading `from`'s own
+/// `task_template:` without pulling in the whole project's set (which a
+/// broken, unrelated pipeline file elsewhere would then refuse to load)
+/// needs exactly this same unchecked parse, at exactly this same trust
+/// level: good enough to read a field off, not yet proven to run.
+pub(crate) fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
     let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
     pipeline.name = name.to_string();
     refuse_retired_step_keys(&pipeline)?;

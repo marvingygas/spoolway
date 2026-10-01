@@ -523,17 +523,21 @@ field it would use for a tracked pipeline. The file name is the pipeline name, a
 in `.yml` or `.yaml`. This works in repo mode only; home mode has no private layer of its own,
 because a home-mode project's whole setup is already private to the machine it runs on.
 
-- `spoolway pipeline copy <from> <to>` writes a new private pipeline and its task skeleton.
-  `spoolway prompt copy <from> <to>` writes a new private prompt. Both require `<from>` and
-  `<to>` to be one plain name each: not empty, not absolute, and holding none of `/`, `\` or
-  `..`. Both also refuse a `<to>` that already exists, tracked or private. In home mode they
-  write into the workspace's own `config/` instead, since there is no private layer to add
-  there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
-  names and its private skeleton into `.spoolway/`, then deletes the private files. It refuses
-  inside a linked worktree, refuses any clash with a tracked file, refuses a step whose prompt
-  name is not one plain name, and is refused outright in home mode. See [`pipeline
-  copy`](cli-reference.md#spoolway-pipeline-copy-from-to), [`prompt
-  copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
+- `spoolway pipeline copy <from> <to>` writes a new private pipeline and, when `from` names no
+  `task_template:` of its own, a task skeleton to go with it; when `from` does name one, the
+  copy shares that same skeleton instead of writing a new one. `spoolway prompt copy <from>
+  <to>` writes a new private prompt. Both require `<from>` and `<to>` to be one plain name
+  each: not empty, not absolute, and holding none of `/`, `\` or `..`. Both also refuse a
+  `<to>` that already exists, tracked or private; `pipeline copy` also refuses a `<to>` whose
+  skeleton already exists on its own. In home mode they write into the workspace's own
+  `config/` instead, since there is no private layer to add there. `spoolway pipeline promote
+  <name>` moves a private pipeline, the private prompts it names and the skeleton its
+  `task_template:` names (the pipeline's own name when it sets none) into `.spoolway/`, then
+  deletes the private files. It refuses inside a linked worktree, refuses any clash with a
+  tracked file, refuses a step's prompt name or the pipeline's `task_template:` that is not one
+  plain name, refuses when another private pipeline names the same skeleton, and is refused
+  outright in home mode. See [`pipeline copy`](cli-reference.md#spoolway-pipeline-copy-from-to),
+  [`prompt copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).
 - A private pipeline whose name matches a tracked one is refused, naming both files.
 - A private pipeline may name a tracked prompt or a private one. A tracked pipeline whose step

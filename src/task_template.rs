@@ -28,13 +28,33 @@ pub const FALLBACK: &str = "default";
 
 /// The skeleton a task queued on `pipeline` is written from.
 ///
-/// `<pipeline>.md`, then `local/templates/tasks/<pipeline>.md` (repo mode
-/// only, and only when `pipeline` is not itself a tracked one — see below),
-/// then `default.md` and its own private fallback, then the built-in — the
-/// same shape as a step's `prompt:` fallback, and the same refusal to treat
-/// a missing file as an error. A skeleton that is not there is a project
-/// that has not written one, which is the normal state of most projects and
-/// no reason to stop a queue.
+/// Reads through [`resolve_named`] as `pipeline.name` naming the pipeline
+/// itself and [`crate::pipeline::Pipeline::task_template_name`] naming the
+/// file — see there for the chain and why those two names are not always
+/// the same one.
+pub fn resolve_for(repo: &Repo, pipeline: &crate::pipeline::Pipeline) -> String {
+    resolve_named(repo, &pipeline.name, pipeline.task_template_name())
+}
+
+/// [`resolve_for`] for a bare name with no `task_template:` of its own to
+/// consult — `pipeline` names both the pipeline and the skeleton it reads,
+/// which is exactly right for [`FALLBACK`] itself and for any caller with
+/// only a name in hand and no loaded [`crate::pipeline::Pipeline`] to ask.
+pub fn resolve(repo: &Repo, pipeline: &str) -> String {
+    resolve_named(repo, pipeline, pipeline)
+}
+
+/// The skeleton a task queued on the pipeline named `pipeline_name` is
+/// written from, where `skeleton_name` is the file to look for —
+/// `pipeline_name` itself unless `task_template:` names something else.
+///
+/// `<skeleton_name>.md`, then `local/templates/tasks/<skeleton_name>.md`
+/// (repo mode only, and only when *`pipeline_name`* is not itself a tracked
+/// pipeline — see below), then `default.md` and its own private fallback,
+/// then the built-in — the same shape as a step's `prompt:` fallback, and
+/// the same refusal to treat a missing file as an error. A skeleton that is
+/// not there is a project that has not written one, which is the normal
+/// state of most projects and no reason to stop a queue.
 ///
 /// `local/templates/tasks/<name>.md` belongs to the private pipeline named
 /// `<name>` — the skeleton `pipeline copy` writes beside a private pipeline
@@ -46,28 +66,55 @@ pub const FALLBACK: &str = "default";
 /// different the two filenames are. Every private fallback below is tried
 /// only once its tracked counterpart is confirmed absent, for the same
 /// reason.
-pub fn resolve(repo: &Repo, pipeline: &str) -> String {
+///
+/// The guard is decided from `pipeline_name`, never `skeleton_name` — a
+/// tracked pipeline `impl` naming `task_template: foo` must still never
+/// reach a private `foo.md`, even though `foo` itself is not a tracked
+/// pipeline's own name. Deciding it from `skeleton_name` instead was the
+/// bug: every caller already hands this `task_template_name()`, the
+/// *skeleton* name, so a trackedness check made from that argument alone
+/// was really asking "is `foo` a tracked pipeline", never the question that
+/// actually matters, "is `impl` one" — which is exactly how a private
+/// skeleton kept leaking into a tracked pipeline even after the fallback
+/// lookup below was first guarded.
+fn resolve_named(repo: &Repo, pipeline_name: &str, skeleton_name: &str) -> String {
     let dir = repo.task_templates_dir();
+    let tracked = is_tracked_pipeline(repo, pipeline_name);
 
-    if let Some(contents) = read(&dir.join(format!("{pipeline}.md"))) {
+    if let Some(contents) = read(&dir.join(format!("{skeleton_name}.md"))) {
         return contents;
     }
-    if !is_tracked_pipeline(repo, pipeline)
-        && let Some(contents) = local(repo, pipeline)
-    {
+    if !tracked && let Some(contents) = local(repo, skeleton_name) {
         return contents;
     }
     if let Some(contents) = read(&dir.join(format!("{FALLBACK}.md"))) {
         return contents;
     }
-    if let Some(contents) = local(repo, FALLBACK) {
+    if !tracked && let Some(contents) = local(repo, FALLBACK) {
         return contents;
     }
 
-    crate::assets::task_template(pipeline)
+    crate::assets::task_template(skeleton_name)
         .or_else(|| crate::assets::task_template(FALLBACK))
         .unwrap_or_default()
         .to_string()
+}
+
+/// Whether `pipeline` has a skeleton of its own — the first half of
+/// [`resolve_named`]'s own chain, pulled out so `pipeline check`'s
+/// `step_problems` can ask the identical question
+/// [`resolve_for`] is actually answered with, rather than looking in the
+/// tracked directory alone (reporting a private skeleton missing) or
+/// guarding trackedness from the skeleton name rather than the pipeline's
+/// own (letting a tracked pipeline reach a private skeleton that merely
+/// shares its `task_template:` value with no tracked pipeline of its own).
+pub fn exists_for(repo: &Repo, pipeline: &crate::pipeline::Pipeline) -> bool {
+    let skeleton_name = pipeline.task_template_name();
+    let dir = repo.task_templates_dir();
+    if dir.join(format!("{skeleton_name}.md")).is_file() {
+        return true;
+    }
+    !is_tracked_pipeline(repo, &pipeline.name) && local(repo, skeleton_name).is_some()
 }
 
 /// Whether `pipeline` names a pipeline the tracked `.spoolway/pipelines/`
@@ -327,6 +374,97 @@ mod tests {
         std::fs::write(&private, "a private file that only shares impl's name\n").unwrap();
 
         assert_eq!(resolve(&repo, "impl"), "the tracked default\n");
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A tracked pipeline naming `task_template: foo`, where `foo` is not
+    /// itself a tracked pipeline's own name, used to leak the private
+    /// `foo.md`: the old guard decided trackedness from the *skeleton*
+    /// name (`foo`) rather than the *pipeline's* (`impl`), so
+    /// `is_tracked_pipeline(repo, "foo")` came back false and let the
+    /// private lookup through. [`resolve_for`] must decide the guard from
+    /// `pipeline.name`, never from `task_template_name()`.
+    #[test]
+    fn a_tracked_pipeline_naming_a_private_skeleton_never_reaches_it() {
+        let root = crate::scratch::root("task-template-tracked-pipeline-names-private-skeleton");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let pipelines_dir = crate::pipeline::Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        std::fs::write(
+            pipelines_dir.join("impl.yml"),
+            "task_template: foo\n\
+             steps:\n  - id: a\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let repo = Repo {
+            checkout: root.clone(),
+            home: root.join(".home"),
+            root,
+            config: crate::config::Config::default(),
+        };
+
+        // No tracked `foo.md` and no tracked `default.md` either — only a
+        // private `foo.md`, written for some unrelated private pipeline
+        // that happens to share the name `impl` asks for.
+        let private = crate::local::task_templates_dir(&repo.local_dir()).join("foo.md");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "an unrelated private foo\n").unwrap();
+
+        let pipeline = crate::pipeline::Pipeline::parse(
+            "impl",
+            "task_template: foo\n\
+             steps:\n  - id: a\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_for(&repo, &pipeline),
+            crate::assets::task_template(FALLBACK).unwrap()
+        );
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// The fallback's own private lookup — `local/templates/tasks/default.md`
+    /// — used to run unguarded: a tracked pipeline with no skeleton of its
+    /// own, and no tracked `default.md` either, fell through to whatever
+    /// private `default.md` happened to exist for some unrelated private
+    /// pipeline. Nothing private may ever answer for a tracked pipeline,
+    /// the fallback included, so this must reach the built-in instead.
+    #[test]
+    fn a_tracked_pipeline_never_falls_through_to_a_private_default_either() {
+        let root = crate::scratch::root("task-template-tracked-pipeline-skips-private-fallback");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let pipelines_dir = crate::pipeline::Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        std::fs::write(
+            pipelines_dir.join("impl.yml"),
+            "steps:\n  - id: a\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let repo = Repo {
+            checkout: root.clone(),
+            home: root.join(".home"),
+            root,
+            config: crate::config::Config::default(),
+        };
+
+        // No tracked `default.md` at all — only a private one, written for
+        // an unrelated private pipeline that merely happens to be named
+        // `default`.
+        let private = crate::local::task_templates_dir(&repo.local_dir()).join("default.md");
+        std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+        std::fs::write(&private, "an unrelated private default\n").unwrap();
+
+        assert_eq!(
+            resolve(&repo, "impl"),
+            crate::assets::task_template(FALLBACK).unwrap()
+        );
 
         std::fs::remove_dir_all(&repo.checkout).ok();
     }
