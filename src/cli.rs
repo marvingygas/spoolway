@@ -284,6 +284,17 @@ pub struct DoctorArgs {
     /// running.
     #[arg(long)]
     pub no_live: bool,
+
+    /// Open the throwaway pane even when this process is not inside the
+    /// herdr session it would open it in.
+    ///
+    /// `doctor` otherwise skips the pane check there on its own: a herdr
+    /// server answers from any shell, with or without `HERDR_*` set, so
+    /// without this flag the only way to run the check at all is from
+    /// inside the pane whose herdr it would open in. Conflicts with
+    /// `--no-live`, which skips the same check the other way.
+    #[arg(long, conflicts_with = "no_live")]
+    pub live: bool,
 }
 
 /// Operations on the model price table.

@@ -333,6 +333,23 @@ fn cheap_branch_checks(repo: &Repo, tasks: &[Task]) -> Vec<Finding> {
     }
 }
 
+/// How `doctor` should treat the live pane check — one argument standing in
+/// for `--no-live` and `--live`, which `clap` already keeps mutually
+/// exclusive (see `DoctorArgs`), rather than two separate bools that would
+/// push [`doctor`] over `clippy::too_many_arguments` for a distinction
+/// [`live_check`] alone needs to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveCheckMode {
+    /// Run the check only when [`Mux::in_own_pane`] says this process
+    /// actually is one.
+    Default,
+    /// `--no-live`: never run it, whatever `in_own_pane` answers.
+    Skip,
+    /// `--live`: run it even when `in_own_pane` says this process is
+    /// outside the backend's own pane.
+    Forced,
+}
+
 /// Check that everything the configured pipeline needs is actually present,
 /// before a dispatch pass discovers it the hard way.
 ///
@@ -355,7 +372,7 @@ pub fn doctor(
     home_error: Option<anyhow::Error>,
     verbose: bool,
     json: bool,
-    no_live: bool,
+    live: LiveCheckMode,
 ) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
@@ -438,7 +455,7 @@ pub fn doctor(
     ));
     report.record(mux_finding(&mux));
     match &mux {
-        Ok(m) => report.record(live_check(m.as_ref(), no_live)),
+        Ok(m) => report.record(live_check(m.as_ref(), live)),
         Err(_) => report.record(Finding::NoteVerbose(
             "no live pane check: the backend could not be resolved".into(),
         )),
@@ -1228,20 +1245,45 @@ fn mux_finding(mux: &Result<Box<dyn Mux>>) -> Finding {
 /// [`crate::command_step::Runs`] gives a real command step, so this is
 /// exactly the path a lane's own turn takes, not a stand-in for it.
 ///
-/// `no_live` is `--no-live`: skips this row alone, leaving every other check
-/// unchanged, for a machine where opening a real pane is slow or noisy
-/// (CI, say) but the rest of `doctor` is still worth running.
+/// `live` is [`LiveCheckMode::Skip`] for `--no-live`: skips this row alone,
+/// leaving every other check unchanged, for a machine where opening a real
+/// pane is slow or noisy (CI, say) but the rest of `doctor` is still worth
+/// running.
 ///
 /// A backend with no real pane to test — headless, whose panes are names
 /// rather than processes — answers with a note instead of a check: nothing
 /// was opened, so there is nothing to say passed or failed.
-fn live_check(mux: &dyn Mux, no_live: bool) -> Finding {
-    if no_live {
+///
+/// Also skipped, with its own note, when [`Mux::in_own_pane`] says this
+/// process is not actually inside the backend it is about to open a pane
+/// in — a herdr server answers `is_available` from any shell, with or
+/// without `HERDR_*` set, so without this gate a plain `doctor` run outside
+/// herdr would open a throwaway pane in the caller's real session instead
+/// of a sandbox nobody is watching. [`LiveCheckMode::Forced`] (`--live`) is
+/// the only way past that gate, for the one caller who really is asking to
+/// reach into a herdr session from outside a pane in it.
+fn live_check(mux: &dyn Mux, live: LiveCheckMode) -> Finding {
+    if live == LiveCheckMode::Skip {
         return Finding::NoteVerbose("--no-live: skipped the live pane check".into());
     }
     if !mux.is_available() {
         // Already a `FAIL` on `lanes can be started` — nothing more to say.
         return Finding::NoteVerbose("no live pane check: this backend is not available".into());
+    }
+    // A herdr server answers `agent list` (and so `is_available`) from any
+    // shell, with or without `HERDR_*` set — the same reason
+    // `commands::dispatch`'s own pane gate reads `in_own_pane` rather than
+    // `is_available` before it will start a lane. Opening a throwaway pane
+    // here for a caller not actually inside this session would land it in
+    // the person's real herdr instead of a sandbox nobody is watching.
+    // `--live` is the deliberate override for the caller who means to reach
+    // outside their own pane anyway.
+    if live != LiveCheckMode::Forced && !mux.in_own_pane() {
+        return Finding::NoteVerbose(
+            "no live pane check: not inside a herdr pane — run doctor from inside herdr, or \
+             pass --live, to check this"
+                .into(),
+        );
     }
     match live_pane(mux) {
         Ok(Some(note)) => Finding::Check("a lane really starts".into(), Ok(Some(note))),
@@ -1262,23 +1304,38 @@ fn live_check(mux: &dyn Mux, no_live: bool) -> Finding {
 /// `Ok(None)` from a backend whose [`Workspace::tab_id`] is absent —
 /// headless, which hands back a pane id that names no real process — since
 /// there is nothing here for [`Mux::run_in_pane`] to run a script in.
+///
+/// The scratch directory is removed on every way out — the early `Ok(None)`,
+/// every `?` that bails before that, and the final outcome whether it is
+/// `Ok` or `Err` — rather than left for [`crate::scratch::root`]'s own later
+/// sweep: that sweep is for a run a crash cut short, not for a check that
+/// ran to completion and has nothing left to explain by leaving its folder
+/// behind.
 fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
     let dir = crate::scratch::root("doctor-live");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let result = live_pane_in(&dir, mux);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
 
-    let workspace = mux.create_pane(&dir, "doctor")?;
+/// [`live_pane`]'s own body, pulled apart so the directory it works in can be
+/// cleaned up on every exit from that function alike, including the ones
+/// this inner call reaches through `?`.
+fn live_pane_in(dir: &Path, mux: &dyn Mux) -> Result<Option<String>> {
+    let workspace = mux.create_pane(dir, "doctor")?;
     let Some(tab_id) = workspace.tab_id.clone() else {
         return Ok(None);
     };
 
-    let runs = crate::command_step::Runs::new(&dir);
+    let runs = crate::command_step::Runs::new(dir);
     let key = "doctor · live";
     let env = std::collections::BTreeMap::new();
     let script = runs.script_for_pane(key, "true", &env)?;
 
     let started = std::time::Instant::now();
     let outcome = mux
-        .run_in_pane(&tab_id, &dir, "doctor", "doctor", &script, &env)
+        .run_in_pane(&tab_id, dir, "doctor", "doctor", &script, &env)
         .and_then(|pane| {
             pane.ok_or_else(|| {
                 anyhow::anyhow!("{} reports panes but ran nothing in one", mux.name())
@@ -2969,7 +3026,7 @@ mod tests {
     fn no_live_skips_the_row_without_touching_the_backend() {
         let mux = headless_mux("no-live");
         assert!(matches!(
-            live_check(&mux, true),
+            live_check(&mux, LiveCheckMode::Skip),
             Finding::NoteVerbose(text) if text.contains("--no-live")
         ));
     }
@@ -2986,9 +3043,252 @@ mod tests {
     fn a_backend_with_no_real_pane_is_a_note_not_a_check() {
         let mux = headless_mux("no-real-pane");
         assert!(matches!(
-            live_check(&mux, false),
+            live_check(&mux, LiveCheckMode::Default),
             Finding::NoteVerbose(text) if text.contains("no real pane")
         ));
+    }
+
+    /// Stands in for a herdr server the caller is not actually inside: it
+    /// answers `agent list` fine (`is_available` is `true`, exactly as a
+    /// server reachable from any shell does, with or without `HERDR_*` set),
+    /// but `in_own_pane` is `false`, the signal `commands::dispatch`'s own
+    /// pane gate already reads for the same fact. Every pane-opening call
+    /// panics: if `live_check` ever reaches one of them for a caller outside
+    /// herdr, that is the bug this stands in to catch, not something to
+    /// quietly tolerate.
+    struct OutsideHerdr;
+
+    impl Mux for OutsideHerdr {
+        fn name(&self) -> &'static str {
+            "herdr"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable(&self) -> String {
+            unimplemented!()
+        }
+        fn in_own_pane(&self) -> bool {
+            false
+        }
+        fn resident_while_waiting(&self) -> bool {
+            true
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            unimplemented!()
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &std::path::Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(
+            &self,
+            _cwd: &std::path::Path,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            panic!("live_check opened a pane in a herdr server the caller is not inside");
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &std::path::Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// A caller outside herdr altogether — no `HERDR_*` variables, just a
+    /// server that happens to answer — gets no live pane opened in the
+    /// person's real session. `live_check` should read `in_own_pane`, the
+    /// exact signal `commands::dispatch`'s own pane gate already trusts for
+    /// this, and skip with a note instead of calling through to
+    /// `live_pane`.
+    #[test]
+    fn live_check_skips_a_herdr_server_the_caller_is_not_inside() {
+        let mux = OutsideHerdr;
+        assert!(matches!(
+            live_check(&mux, LiveCheckMode::Default),
+            Finding::NoteVerbose(text) if text.contains("not inside") || text.contains("herdr")
+        ));
+    }
+
+    /// The same herdr-shaped backend as [`OutsideHerdr`], but reachable on
+    /// purpose: `create_pane` records the directory it was handed in `seen`
+    /// and answers with an error instead of panicking. That lets a test tell
+    /// `--live` apart from the unforced path by what comes back — a `Check`
+    /// naming `live_pane`'s own failure, not the skip note — and lets
+    /// `live_pane_removes_its_scratch_directory_even_on_failure` find the
+    /// directory without scanning the shared temporary one.
+    struct FailsToCreatePane {
+        /// What `Mux::in_own_pane` answers — `false` for a caller outside
+        /// this herdr session, the case `--live` exists to override.
+        in_own_pane: bool,
+        seen: std::sync::Mutex<Option<std::path::PathBuf>>,
+    }
+
+    impl FailsToCreatePane {
+        fn new(in_own_pane: bool) -> Self {
+            Self {
+                in_own_pane,
+                seen: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl Mux for FailsToCreatePane {
+        fn name(&self) -> &'static str {
+            "herdr"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable(&self) -> String {
+            unimplemented!()
+        }
+        fn in_own_pane(&self) -> bool {
+            self.in_own_pane
+        }
+        fn resident_while_waiting(&self) -> bool {
+            true
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            unimplemented!()
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &std::path::Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(
+            &self,
+            cwd: &std::path::Path,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            *self.seen.lock().unwrap() = Some(cwd.to_path_buf());
+            Err(anyhow::anyhow!("deliberate failure"))
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &std::path::Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// `--live` is the override: it reaches `live_pane` even for a caller
+    /// `in_own_pane` says is outside this herdr session, rather than taking
+    /// the skip `live_check_skips_a_herdr_server_the_caller_is_not_inside`
+    /// proves for the unforced path.
+    #[test]
+    fn force_live_bypasses_the_in_own_pane_gate() {
+        let mux = FailsToCreatePane::new(false);
+        assert!(matches!(
+            live_check(&mux, LiveCheckMode::Forced),
+            Finding::Check(label, Err(_)) if label == "a lane really starts"
+        ));
+    }
+
+    /// `live_pane`'s own scratch directory is gone once the check is over,
+    /// whether or not it ever got as far as opening a pane — here,
+    /// `create_pane` fails immediately, the earliest a real check can fail,
+    /// and the directory `live_pane` made before calling it must still be
+    /// cleaned up. [`FailsToCreatePane`] records the directory it was handed
+    /// in `seen`, rather than this test scanning the shared temporary
+    /// directory for it: several `cargo test` processes walk that directory at once —
+    /// see `scratch`'s own module doc — so reading it back here would be
+    /// exactly the race that module exists to avoid.
+    #[test]
+    fn live_pane_removes_its_scratch_directory_even_on_failure() {
+        let mux = FailsToCreatePane::new(true);
+        assert!(live_pane(&mux).is_err());
+
+        let dir = mux
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("live_pane must call create_pane before failing");
+        assert!(
+            !dir.exists(),
+            "live_pane left its scratch directory behind: {}",
+            dir.display()
+        );
     }
 
     /// A file missing from a project `init` never wrote is not *behind* —
@@ -3319,7 +3619,7 @@ mod tests {
             Some(home_error),
             false,
             false,
-            true,
+            LiveCheckMode::Skip,
         );
 
         assert!(

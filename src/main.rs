@@ -173,6 +173,15 @@ fn run() -> Result<()> {
             // failure is handed in as a finding, the same way `config_error`
             // is, rather than aborting the command on it.
             let pipelines = Pipelines::load(&repo.checkout, &repo.config);
+            // `clap` already refuses `--no-live` together with `--live` (see
+            // `DoctorArgs`), so exactly one of these can be true here.
+            let live = if args.no_live {
+                commands::LiveCheckMode::Skip
+            } else if args.live {
+                commands::LiveCheckMode::Forced
+            } else {
+                commands::LiveCheckMode::Default
+            };
             // `config_error` is about `repo.root`'s file — the one
             // `discover_lenient` reads. `doctor` loads `repo.checkout`'s own
             // copy again for everything it checks, and folds this one in as
@@ -184,7 +193,7 @@ fn run() -> Result<()> {
                 home_error,
                 args.verbose,
                 cli.json,
-                args.no_live,
+                live,
             )
         }
 

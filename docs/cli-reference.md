@@ -1218,10 +1218,18 @@ $ spoolway doctor
 |---|---|---|
 | `-v`, `--verbose` | | Print every check, including the ones that passed |
 | `--no-live` | | Skip the throwaway-pane check |
+| `--live` | | Run the throwaway-pane check even from outside the herdr pane it would open a pane in |
 
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
 `--json` prints the findings as one object. The `bound to its home` check, under `-v`, names
 whether the project runs in repo mode or home mode. See [Home mode](concepts.md#home-mode).
+
+The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
+open one in. From any other shell — a script, a test sandbox, another agent's terminal — it
+skips the check with a note instead. A running herdr server answers even without `HERDR_*`
+set, so without this skip the check would open its pane in the caller's own real herdr
+session. `--live` runs the check anyway; `--no-live` always skips it. The two flags conflict
+and cannot be combined.
 
 ### `spoolway herdr bind`
 

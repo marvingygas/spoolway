@@ -210,11 +210,14 @@ pub trait Mux: Sync {
     /// Is this process running in a pane the backend itself would recognise,
     /// right now?
     ///
-    /// Used only by `commands::dispatch`'s own pane gate, which refuses to
-    /// start a run this answers `false` for: a board with nowhere to draw is
-    /// a run nobody can see. `true` by default — the right answer for
-    /// headless, which has no pane concept at all and is gated on its own
-    /// test marker instead, never on this.
+    /// Read by `commands::dispatch`'s own pane gate, which refuses to start a
+    /// run this answers `false` for: a board with nowhere to draw is a run
+    /// nobody can see. `commands::doctor`'s own live pane check reads it the
+    /// same way, to skip opening its throwaway pane for a herdr server this
+    /// process answers `is_available` for but is not actually running
+    /// inside. `true` by default — the right answer for headless, which has
+    /// no pane concept at all and is gated on its own test marker instead,
+    /// never on this.
     fn in_own_pane(&self) -> bool {
         true
     }
