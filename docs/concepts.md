@@ -73,6 +73,14 @@ Re-attach a clone that moved or was re-cloned with `spoolway init --adopt
 keeps its dispatcher folder. The "no spoolway project found" error lists this exact command for
 every clone entry whose folder is gone.
 
+`--adopt <workspace>/<dispatcher>` is refused when the entry's current root still exists as a
+live git checkout, when the checkout being adopted is already listed in any workspace, when it
+has a tracked `.spoolway/`, or when it is a different repository from the one the entry was set
+up for. Each refusal says why, and what to run instead.
+
+`--new-id`, and `--adopt <name>` with no workspace prefix, are also refused on a checkout a
+workspace already lists. Stamping a repo-mode id into its `.git` would claim it a second way.
+
 `spoolway doctor` names which mode a project runs in, repo mode or home mode.
 
 ## Task
