@@ -924,11 +924,15 @@ the main checkout, or to pass `-C <main checkout>`.
 default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
 `home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
 checkout or its `.git`. With no workspace yet, home mode creates one; with workspaces already
-there, `init` also asks `Which workspace should this checkout use?`, and `--workspace <name>`
-or `--workspace new` answers it. Joining a workspace keeps its `config/` exactly as it is and
-skips the example and tracker questions. With nobody to ask and no `--workspace`, `init` starts
-a new workspace rather than joining one unasked. See [Home mode](concepts.md#home-mode). Either
-mode needs a real git repository behind the checkout; a plain folder is refused.
+there, `init` also asks `Which workspace should this checkout use?`, naming each workspace's
+repository and sorting one already holding a clone of this repository to the top, and
+`--workspace <name>` or `--workspace new` answers it without asking. `new` is always the
+default. Joining a workspace keeps its `config/` exactly as it is and skips the example and
+tracker questions. With nobody to ask and no `--workspace`, `init` starts a new workspace, the
+same default the menu takes; when a workspace already holds a clone of this repository, it
+prints that workspace's name and how to join it first. See [Home
+mode](concepts.md#home-mode). Either mode needs a real git repository behind the checkout; a
+plain folder is refused.
 
 Repo mode refuses outright, before writing anything, when the checkout is your home directory:
 `~/.spoolway` there is already spoolway's own state directory, so it can never also hold a
@@ -939,7 +943,8 @@ Moving a project between the two modes is refused: `--setup repo` on a checkout 
 already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`,
 `--setup home` on a repository whose default branch tracks a `.spoolway/` of its own, and
 `--workspace <name>` naming a workspace other than the one a checkout already uses. Each
-refusal names the command to run instead.
+refusal names the command to run instead. To actually move a clone from the workspace it uses
+now to another, run [`spoolway workspace move`](#spoolway-workspace-move-to).
 
 Joining a workspace whose `config/` has gone missing is refused too, naming the missing path.
 
@@ -981,6 +986,30 @@ Run again in a project that already has a config, it installs skills, restores a
 that went missing, and otherwise changes nothing. Hook scripts are written only when a tracker
 is chosen, whichever one, so switching trackers later is a `spoolway config set
 issue_tracking.hook` away. See [Installation and setup](installation.md#scaffolding-a-project).
+
+### `spoolway workspace move <to>`
+
+Move this checkout from the home-mode workspace it is listed in now to `to`, taking its
+dispatcher folder — queue, archive and worktrees — along with it. The folder keeps its current
+name at `to` unless that name is already taken there, in which case the move is refused; pass
+`--dispatcher <name>` to choose a different name.
+
+Refused while a dispatcher is running over the clone's current dispatcher folder, or while a
+live process is working in one of its worktrees. An idle worktree — one nothing is currently
+working in — moves along with the rest of the folder and is repaired in place afterwards. `to`
+must be a workspace `spoolway init --setup home` has listed; a 0.6.0 repo-mode home is refused
+as a destination, the same as it is left out of `init`'s own workspace menu.
+
+```
+spoolway workspace move other-workspace
+spoolway workspace move other-workspace --dispatcher api-2
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--dispatcher <NAME>` | the clone's current dispatcher name | The dispatcher folder's name at `to`, when the name it already has there is taken |
+
+See [Home mode](concepts.md#home-mode).
 
 ### `spoolway install <provider>`
 

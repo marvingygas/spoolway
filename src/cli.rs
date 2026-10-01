@@ -211,6 +211,42 @@ pub enum Command {
     /// them in.
     #[command(subcommand)]
     Herdr(HerdrCommand),
+
+    /// Move a home-mode clone from the workspace it uses now to another.
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
+}
+
+/// `spoolway workspace move`.
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Move this checkout from the workspace it is listed in now to `to`,
+    /// taking its dispatcher folder — queue, archive and worktrees — along
+    /// with it. The folder keeps its name unless that name is already taken
+    /// at `to`, in which case this refuses rather than silently drawing
+    /// `-2` the way joining a workspace does: pass `--dispatcher <name>` to
+    /// choose the new name yourself.
+    ///
+    /// Refused while a dispatcher is running over this clone's current
+    /// dispatcher folder, or while a live process is still working in one
+    /// of its worktrees — moving the folder out from under either would
+    /// pull the ground out from under real, live work. An idle worktree —
+    /// one nothing is actively working in, paused, blocked or held — moves
+    /// along with everything else and is repaired in place afterwards.
+    Move(WorkspaceMoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WorkspaceMoveArgs {
+    /// The workspace to move this checkout into, by its folder name under
+    /// `~/.spoolway/`, as `spoolway init --setup home` lists it.
+    pub to: String,
+
+    /// The dispatcher folder's name at `to`, when the name this clone's
+    /// folder already has there is taken. Without it, a name already taken
+    /// at the destination is refused rather than silently renamed.
+    #[arg(long)]
+    pub dispatcher: Option<String>,
 }
 
 /// `spoolway herdr bind`/`unbind`.
@@ -289,6 +325,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
         "Setting up:",
         &[
             "init",
+            "workspace",
             "install",
             "update",
             "sync",

@@ -410,7 +410,21 @@ impl Placement {
             );
         }
 
-        let workspaces = crate::repo::workspaces();
+        let mut workspaces = crate::repo::workspaces();
+        // This checkout's own repository, so a workspace already holding a
+        // clone of it can be sorted to the top of the menu and marked, and a
+        // non-interactive run can say it exists rather than quietly starting
+        // a second one next to it. A stable sort: `workspaces()` is already
+        // sorted by name, and nothing here should reorder two workspaces
+        // that agree on whether they match.
+        let this_repo = crate::repo::repo_identity(root);
+        let same_repo = |workspace: &crate::repo::WorkspaceSummary| {
+            matches!(
+                (&this_repo, &workspace.repo_identity),
+                (Some(this), Some(theirs)) if this.same_as(theirs)
+            )
+        };
+        workspaces.sort_by_key(|workspace| !same_repo(workspace));
         match args.workspace.as_deref() {
             Some(NEW_WORKSPACE) => Ok(Self::New),
             Some(name) => {
@@ -427,22 +441,41 @@ impl Placement {
                 }
             }
             None if workspaces.is_empty() => Ok(Self::New),
-            // Nobody to ask: a new workspace rather than the menu's default.
-            // Joining shares one setup with every clone already in it, which
-            // is a choice to see made, not one to take for a script that
-            // named no workspace — a spare workspace costs a folder, while
-            // a wrong join edits another clone's pipelines from this one.
-            None if !crate::ask::interactive() => Ok(Self::New),
+            // Nobody to ask: a new workspace rather than the menu's default
+            // — the same default the interactive menu below takes when
+            // Enter is pressed without reading it, so the two agree even
+            // when a workspace already holds this very repository. That
+            // case still gets said out loud, since criterion 3 asks for it,
+            // but as a note rather than a refusal: a script that used to
+            // get a new workspace here must still get one, only now told
+            // there was another way.
+            None if !crate::ask::interactive() => {
+                if let Some(existing) = workspaces.iter().find(|workspace| same_repo(workspace)) {
+                    println!(
+                        "  workspace {} already holds a clone of this repository — join it \
+                         with `spoolway init --setup home --workspace {}`, or pass `--workspace \
+                         new` to start a separate one on purpose",
+                        existing.name, existing.name,
+                    );
+                }
+                Ok(Self::New)
+            }
             None => {
                 let notes: Vec<String> = workspaces
                     .iter()
                     .map(|workspace| {
-                        let clones: Vec<String> = workspace
-                            .clones
-                            .iter()
-                            .map(|clone| clone.display().to_string())
-                            .collect();
-                        format!("used by {}", clones.join(", "))
+                        let repo = workspace.repo_display.as_deref().unwrap_or("no clones");
+                        // The marker goes first: `crate::ask::choose` cuts
+                        // every row to the terminal's width from the right,
+                        // so anything appended after a long repository
+                        // string — an origin URL, most often — would be the
+                        // first thing lost to it instead of the thing a
+                        // person most needs to see at a glance.
+                        if same_repo(workspace) {
+                            format!("this repository — used by {repo}")
+                        } else {
+                            format!("used by {repo}")
+                        }
                     })
                     .collect();
                 let mut menu: Vec<(&str, &str)> = workspaces
@@ -451,8 +484,15 @@ impl Placement {
                     .map(|(workspace, note)| (workspace.name.as_str(), note.as_str()))
                     .collect();
                 menu.push((NEW_WORKSPACE, "start a new workspace"));
-                let picked =
-                    crate::ask::choose("Which workspace should this checkout use?", &menu, 0)?;
+                // `new` is the safe default: joining shares one setup with
+                // every clone already in the chosen workspace, so pressing
+                // Enter without reading the menu must never land there.
+                let default = workspaces.len();
+                let picked = crate::ask::choose(
+                    "Which workspace should this checkout use?",
+                    &menu,
+                    default,
+                )?;
                 Ok(match workspaces.get(picked) {
                     Some(workspace) => Self::Join(workspace.name.clone()),
                     None => Self::New,
@@ -2299,6 +2339,42 @@ mod tests {
             assert_ne!(
                 crate::repo::workspace_clone(&first).unwrap().workspace,
                 crate::repo::workspace_clone(&second).unwrap().workspace
+            );
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// With nobody to ask and no `--workspace`, a second clone of a
+    /// repository a workspace already holds still starts its own new
+    /// workspace — the same default the interactive menu takes on Enter, so
+    /// criterion 1's "the interactive and non-interactive defaults agree"
+    /// holds even in this case. (`Placement::choose_any` also prints a note
+    /// naming the existing workspace and how to join it instead, satisfying
+    /// criterion 3's "says it exists and how to join it" — not asserted
+    /// here, since nothing in this crate's unit tests captures `init`'s own
+    /// stdout; `tests/init_output.rs` is where printed output is checked,
+    /// through a real subprocess.)
+    #[test]
+    fn non_interactive_home_mode_still_starts_a_new_workspace_for_the_same_repository() {
+        let parent = crate::scratch::root("init-home-same-repo");
+        let home = parent.join("home");
+        let first = home_mode_checkout(&parent, "api");
+        let second = home_mode_checkout(&parent, "api-review");
+        let origin = "https://example.com/api.git";
+        crate::repo::run(&first, "git", &["remote", "add", "origin", origin]).unwrap();
+        crate::repo::run(&second, "git", &["remote", "add", "origin", origin]).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).unwrap();
+            let unasked = InitArgs {
+                workspace: None,
+                ..home_args(NEW_WORKSPACE)
+            };
+            init(&second, &unasked).unwrap();
+            assert_ne!(
+                crate::repo::workspace_clone(&first).unwrap().workspace,
+                crate::repo::workspace_clone(&second).unwrap().workspace,
+                "told about the existing workspace or not, a script that named none of its own \
+                 still gets a fresh one rather than being joined to it unasked"
             );
         });
         let _ = std::fs::remove_dir_all(&parent);

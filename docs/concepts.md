@@ -98,6 +98,12 @@ the checkout being adopted is already listed in any workspace, when it has a tra
 `.spoolway/`, or when it is a different repository from the one the entry was set
 up for. Each refusal says why, and what to run instead.
 
+A clone moves from the workspace it is listed in to another with `spoolway workspace move
+<to>`, carrying its dispatcher folder along under its current name unless `--dispatcher <name>`
+picks a different one. It refuses while a dispatcher is running over that folder, or while a
+live process is working in one of its worktrees. `to` must be a workspace `spoolway init
+--setup home` has listed; a 0.6.0 repo-mode home is refused as a destination.
+
 `--new-id`, and `--adopt <name>` with no workspace prefix, are also refused on a checkout a
 workspace already lists. Stamping a repo-mode id into its `.git` would claim it a second way.
 
