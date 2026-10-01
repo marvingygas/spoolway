@@ -275,9 +275,13 @@ _strip_ansi() { sed -E $'s/\x1b\\[[0-9;]*[a-zA-Z]//g'; }
 # shapes — on the row naming it. Empty when the row shows a dash instead of
 # a figure (nothing banked yet), which a caller comparing two reads of this
 # treats as "still nothing" rather than a match worth trusting.
+#
+# The group's own header line, marked `▌`, is skipped: `queue_hang` names a
+# task's group after the task, so that header names it too, carries no
+# TIME, and sits above the row this wants.
 _row_time() {
   local task=$1
-  _last_frame | _strip_ansi | grep -F "$task" | head -1 |
+  _last_frame | _strip_ansi | grep -F "$task" | grep -vF '▌' | head -1 |
     grep -Eo '[0-9]+h [0-9]{2}m|[0-9]+m [0-9]{2}s|[0-9]+s' | tail -1
 }
 

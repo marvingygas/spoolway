@@ -2509,6 +2509,13 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     // the archive and this batch together — so a group split across two
     // `queue add` calls is caught exactly as a single-call fan would be.
     //
+    // Only the groups this batch puts a task into, though. A group the batch
+    // never touches is not this call's to judge: one already broken on disk —
+    // hand-placed, or queued before groups were chains — would otherwise
+    // refuse every unrelated `queue add` in the project by its own name, and
+    // `spoolway doctor` is the backstop for those. A group the batch only
+    // stacks onto is still checked, by `tail_of` above.
+    //
     // A join — one task naming two in-group parents that do not reach each
     // other — never reaches here: the reorder loop above already refused it,
     // the moment such a task's own `depends_on.len() > 1` found no id
@@ -2517,7 +2524,8 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     // them — not a join, just a verbose way of saying "wait for the tip of
     // the chain" — so a fan is counted against that one effective parent,
     // not against every id the task happened to list.
-    for (group, members) in &by_group {
+    let batch_groups: BTreeSet<String> = batch.iter().filter_map(&bare_group).collect();
+    for (group, members) in by_group.iter().filter(|(g, _)| batch_groups.contains(*g)) {
         let roots: Vec<&str> = members
             .iter()
             .filter(|t| in_group_deps(&by_group, group, t).is_empty())
@@ -7474,6 +7482,34 @@ mod tests {
              — a group is one chain. Give one a `depends_on`, or move it to a group of its \
              own."
         );
+    }
+
+    /// A group already broken on disk — two roots, placed by hand or queued
+    /// before groups were chains — is not a reason to refuse a task in a
+    /// different group: the one-chain check judges only the groups the batch
+    /// puts a task into, and `doctor` is the backstop for the rest.
+    #[test]
+    fn a_broken_group_on_disk_does_not_refuse_a_task_in_another_group() {
+        let repo = fixture("unrelated-broken-group");
+        for id in ["live-a", "live-b"] {
+            std::fs::write(
+                repo.queue_dir().join(format!("{id}.md")),
+                format!("---\nid: {id}\ntitle: {id}\ngroup: live\nstage: paused\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+
+        let text = task_text("gate", "group: gate\n", BODY);
+        let path = write_doc(&repo, "gate.md", &text);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("group `live`'s own shape is not this batch's to judge");
+        assert!(repo.queue_dir().join("gate.md").exists());
     }
 
     /// A routine or a scheduled job mints a fresh id every run but leaves
