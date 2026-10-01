@@ -6038,6 +6038,84 @@ mod screen_tests {
         );
     }
 
+    /// A second `load` over the same `repo` with nothing changed on disk
+    /// must not pay to read every transcript again — see the task's own
+    /// account of `[r]` and the filter panel's `enter`, both of which call
+    /// `load` again through the very same `repo` the first call used. Timed
+    /// the same way as
+    /// `load_reads_each_transcript_once_so_its_time_grows_about_linearly_with_sessions`,
+    /// but against a second load over the same unchanged files rather than
+    /// against a larger session count.
+    ///
+    /// Also checks the two cases a cache has to get right rather than just
+    /// go fast: a transcript that changed since the last load is read again
+    /// and its new skill shows up, and a transcript removed since the last
+    /// load no longer contributes a skill or a span at all.
+    #[test]
+    fn a_second_load_with_nothing_changed_rereads_no_transcript() {
+        const N: usize = 120;
+        const LINES_PER_SESSION: usize = 40;
+
+        let repo = fixture("eval-load-reuse");
+        let home = many_sessions_home("reuse", &repo, N, LINES_PER_SESSION);
+        let project = home.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+
+        let (first, second, changed, deleted_gone) =
+            crate::platform::test_home::with_home(&home, || {
+                let start = std::time::Instant::now();
+                let loaded = load(&repo, &no_filters()).unwrap();
+                assert_eq!(loaded.dirs.len(), N * 2);
+                let first = start.elapsed();
+
+                let start = std::time::Instant::now();
+                let loaded = load(&repo, &no_filters()).unwrap();
+                assert_eq!(loaded.dirs.len(), N * 2);
+                let second = start.elapsed();
+
+                // perf-0000's transcript grows a new skill marker — its size
+                // and mtime both move.
+                std::fs::write(
+                    project.join("perf-0000.jsonl"),
+                    perf_lines("perf-0000", LINES_PER_SESSION) + &perf_lines("new", 1),
+                )
+                .unwrap();
+                // perf-0001's own transcript and its one subagent's are both
+                // gone entirely, though their ledger lines are still there —
+                // see `bank_dir` in `many_sessions_home`.
+                std::fs::remove_file(project.join("perf-0001.jsonl")).unwrap();
+                std::fs::remove_dir_all(project.join("perf-0001")).unwrap();
+
+                let loaded = load(&repo, &no_filters()).unwrap();
+                let changed = loaded
+                    .skills_by_session
+                    .get("perf-0000")
+                    .is_some_and(|skills| skills.contains("/perf-new-0"));
+                let deleted_gone = loaded
+                    .skills_by_session
+                    .get("perf-0001")
+                    .is_none_or(BTreeSet::is_empty)
+                    && !loaded.spans_by_session.contains_key("perf-0001");
+                (first, second, changed, deleted_gone)
+            });
+
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(
+            second.as_secs_f64() < first.as_secs_f64() / 2.0,
+            "a second load with nothing changed on disk took {second:?}, against {first:?} for \
+             the first, over the same {N} sessions and their subagents — it should have reused \
+             every transcript it already read instead of reading all of them again",
+        );
+        assert!(
+            changed,
+            "perf-0000's new skill marker did not show up after it changed"
+        );
+        assert!(
+            deleted_gone,
+            "perf-0001's skills or span survived its transcript being deleted"
+        );
+    }
+
     /// A notice's own overlay must never draw wider than the frame it sits
     /// on — `overlay` cannot place a panel that does not fit. This is the
     /// exact message an incomplete `--since` produces, one long sentence

@@ -21,7 +21,7 @@
 //! nothing a crash mid-pass can corrupt; it also means the record outlives the
 //! task file, which `cleanup` archives.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -3128,7 +3128,7 @@ fn markers_in_raw(raw: &str) -> BTreeSet<String> {
 /// for [`parent_session`], [`skill_markers`] and [`session_span`]
 /// separately — each of which walks the store and rereads the transcript on
 /// its own.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SessionRead {
     /// See [`parent_session`]. `None` for a root session, same as there.
     pub parent: Option<String>,
@@ -3140,15 +3140,92 @@ pub struct SessionRead {
 }
 
 /// [`parent_session`], [`skill_markers`] and [`session_span`], answered
-/// together from one `session_file` walk and one `read_to_string` — see
-/// [`SessionRead`]. A session whose transcript cannot be located or read
-/// comes back as [`SessionRead::default`], the same absence each of the
-/// three functions this replaces reports on its own.
+/// together from one `session_file` walk and at most one `read_to_string` —
+/// see [`SessionRead`]. None at all when the transcript is unchanged since
+/// the last call for this path — see [`cached_session_read_from_path`]. A
+/// session whose transcript cannot be located or read comes back as
+/// [`SessionRead::default`], the same absence each of the three functions
+/// this replaces reports on its own.
 pub fn read_session(kind: &str, session: &str) -> SessionRead {
     match session_file(kind, session) {
-        Some(path) => session_read_from_path(&path),
+        Some(path) => cached_session_read_from_path(&path),
         None => SessionRead::default(),
     }
+}
+
+/// [`session_read_from_path`], cached process-wide and gated on the
+/// transcript's length and modification time — the same shape of problem
+/// [`read_cached`] solves for the ledger. `eval::load` calls [`read_sessions`]
+/// fresh on every `[r]` and every filter-panel commit, over the very same
+/// transcripts each time, and a file that has not changed since the last
+/// call costs nothing to answer again here.
+///
+/// Keyed by the resolved path rather than by `(kind, session)`: a session's
+/// path can itself change (a transcript rolled onto a fresh shard), and the
+/// old path's cached read must never stand in for the new one. A path this
+/// call is never asked about again — because its session was deleted, or
+/// moved to another path — is simply never looked up again; nothing here
+/// needs to notice the deletion itself; see `eval`'s own repro for the case
+/// a session loses its transcript between loads.
+///
+/// The lock is only ever held for a map lookup or a map insert, never across
+/// the read itself: `eval::load_in_background` leaves a superseded load
+/// running on its own thread rather than cancel it, so two loads can call
+/// this at once over the very same files. Holding the lock across
+/// `session_read_from_path` would make a read of one file block every other
+/// thread's lookups and reads of other files, so a superseded load would slow
+/// the newer one down file by file. A transcript whose
+/// read is already in flight on another thread can still be read twice here
+/// as the price of that: both finish with the same answer, and the second to
+/// finish simply overwrites the cache entry the first one just wrote.
+fn cached_session_read_from_path(path: &Path) -> SessionRead {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, CachedSessionRead>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+
+    let (len_now, mtime_now) = std::fs::metadata(path)
+        .map(|meta| (meta.len(), meta.modified().ok()))
+        .unwrap_or((0, None));
+
+    {
+        let Ok(guard) = cache.lock() else {
+            // A poisoned lock still answers correctly, just without the
+            // cache's speed — never wrong, only slow, same as a cold cache.
+            return session_read_from_path(path);
+        };
+        if let Some(cached) = guard.get(path)
+            && cached.len == len_now
+            && cached.mtime == mtime_now
+        {
+            return cached.read.clone();
+        }
+    }
+    // Read unlocked, so a slow parse on one thread never blocks every other
+    // thread's cache hits — see this function's own doc comment.
+    let read = session_read_from_path(path);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            path.to_path_buf(),
+            CachedSessionRead {
+                len: len_now,
+                mtime: mtime_now,
+                read: read.clone(),
+            },
+        );
+    }
+    read
+}
+
+/// One transcript's entry in [`cached_session_read_from_path`]'s cache.
+struct CachedSessionRead {
+    /// The transcript's length when `read` was taken.
+    len: u64,
+    /// The transcript's modification time when `read` was taken; `None` where
+    /// the filesystem reports none, which only ever matches another `None`.
+    mtime: Option<std::time::SystemTime>,
+    /// What [`session_read_from_path`] answered for the file at that length
+    /// and modification time.
+    read: SessionRead,
 }
 
 /// [`read_session`]'s own read, once the transcript's path is already known
@@ -3208,7 +3285,7 @@ pub fn read_sessions<'a>(
         let paths = session_files_in(&home, kind_name, sessions.iter().copied());
         for session in sessions {
             let read = match paths.get(session) {
-                Some(path) => session_read_from_path(path),
+                Some(path) => cached_session_read_from_path(path),
                 None => SessionRead::default(),
             };
             out.insert(session.to_string(), read);
