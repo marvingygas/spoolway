@@ -578,6 +578,20 @@ A command step marked `first: true` prints `first-of-chain` the same way, in pla
 `entry:` line, naming the file it came from. See [Private
 pipelines](pipelines.md#private-pipelines).
 
+### `spoolway pipeline show --json`
+
+The same pipelines as JSON, each with its full list of steps.
+
+```
+$ spoolway pipeline show --json
+{"pipelines": [{"name": "bugfix", "entry": "reproduce", "description": "...", "source": "tracked", "file": null, "steps": [{"id": "reproduce", "kind": "agent", "description": "...", "agent": "claude", "prompt": "reproducer", "model": "claude-sonnet-5", "effort": "medium", "session": true, "slot": true, "gate": false, "loop": null, "loop_exit": null, "on_pass": "fix", "on_fail": null, "run": null, "timeout_seconds": null, "background": false, "headless": false, "last": false, "first": false, "serial": false}, ...]}, ...]}
+```
+
+`source` and `file` read the same as [`pipeline list
+--json`](#spoolway-pipeline-list---json). `kind` is `"agent"`, `"command"` or `"terminal"`.
+`loop` is `null` for a step with no `loop:` limit; `timeout_seconds` is `null` for an agent
+step.
+
 ### `spoolway pipeline check`
 
 Validate every pipeline file, its agent references and its prompts against the config. This
@@ -707,6 +721,10 @@ moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/imp
 
 The skeleton moved is the one `task_template:` names, the pipeline's own name when it sets
 none — the same file a task queued on it would read.
+
+Refused when `<name>` names no private pipeline. If `<name>` is already a tracked pipeline's
+name, the message says so plainly and names the tracked file, rather than the generic "no
+private pipeline named" message a name that is missing outright gets.
 
 Refused inside a linked worktree, naming the command to run in the main checkout instead — the
 dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused

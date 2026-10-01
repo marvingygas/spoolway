@@ -102,7 +102,9 @@ Answering yes to the example setup writes the shipped pipelines, prompts, task t
 ticket templates. Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
 and `templates/` folders instead, for the `spoolway-config` skill to fill. An established
 project is not asked again: it keeps whatever its own files already show, and a repeat run
-restores any of its example files that went missing.
+restores any of its example files that went missing. An example pipeline whose name a private
+pipeline already uses is skipped instead: `init` prints a line naming the private file, and
+renaming that private pipeline lets the example come back on the next run.
 
 ```mermaid
 flowchart LR

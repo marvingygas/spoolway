@@ -23,7 +23,13 @@ pipelines](pipelines.md#private-pipelines). It answers only when the tracked pro
 name is absent, only in repo mode, only when `<name>` is one plain name with no `/`, and only
 in the directory shape above: a flat `local/prompts/<name>.md` is not read.
 
-A private prompt whose name matches a tracked one is refused, naming both files.
+A private prompt whose name matches a tracked one is refused, naming both: the private file,
+and the tracked one in whichever shape actually exists, the directory `<name>/PROMPT.md` or
+the flat `<name>.md`.
+
+A private pipeline's step whose prompt is in neither layer is told so by both paths at once —
+the tracked `.spoolway/prompts/<name>/` and the private `local/prompts/<name>/` — with a
+reminder that the private layer never reads a flat `local/prompts/<name>.md`.
 
 `spoolway prompt list` and `spoolway prompt override` find a private prompt the same way
 `spoolway prompt show` does. `prompt list` marks its row `private`. `prompt override` forks it

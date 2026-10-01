@@ -13,10 +13,112 @@ pub fn pipeline_show(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&build_show(pipelines))?);
+        return Ok(());
+    }
     for pipeline in pipelines.pipelines.values() {
         show_one(pipeline)?;
     }
     Ok(())
+}
+
+/// One step, as `--json pipeline show` names it — every key [`show_one`]
+/// prints for a step, read off the struct rather than the text a person
+/// reads, so a script sees the same facts without parsing the flow.
+#[derive(Debug, serde::Serialize)]
+struct StepShowJson {
+    id: String,
+    kind: &'static str,
+    description: Option<String>,
+    agent: Option<String>,
+    prompt: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    session: bool,
+    slot: bool,
+    gate: bool,
+    #[serde(rename = "loop")]
+    loop_limit: Option<u32>,
+    loop_exit: Option<String>,
+    on_pass: Option<String>,
+    on_fail: Option<String>,
+    run: Option<String>,
+    timeout_seconds: Option<u64>,
+    background: bool,
+    headless: bool,
+    last: bool,
+    first: bool,
+    serial: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PipelineShowEntry {
+    name: String,
+    entry: String,
+    description: Option<String>,
+    source: &'static str,
+    file: Option<String>,
+    steps: Vec<StepShowJson>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PipelineShowJson {
+    pipelines: Vec<PipelineShowEntry>,
+}
+
+fn build_show(pipelines: &Pipelines) -> PipelineShowJson {
+    PipelineShowJson {
+        pipelines: pipelines
+            .pipelines
+            .values()
+            .map(|pipeline| PipelineShowEntry {
+                name: pipeline.name.clone(),
+                entry: pipeline.entry().to_string(),
+                description: pipeline.description.clone(),
+                source: if pipeline.private_file.is_some() {
+                    "private"
+                } else {
+                    "tracked"
+                },
+                file: pipeline
+                    .private_file
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                steps: pipeline
+                    .steps
+                    .iter()
+                    .map(|step| StepShowJson {
+                        id: step.id.clone(),
+                        kind: step.kind().as_str(),
+                        description: step.description.clone(),
+                        agent: step.agent.clone(),
+                        prompt: step.agent.as_ref().map(|_| step.prompt_name().to_string()),
+                        model: step.model.clone(),
+                        effort: step.effort.clone(),
+                        session: step.session,
+                        slot: step.slot,
+                        gate: step.gate,
+                        loop_limit: step.r#loop.limit(),
+                        loop_exit: (!step.r#loop.is_unbounded())
+                            .then(|| step.loop_exit().to_string()),
+                        on_pass: step.on_pass.clone(),
+                        on_fail: step.on_fail.clone(),
+                        run: step.run.clone(),
+                        timeout_seconds: step
+                            .run
+                            .is_some()
+                            .then(|| step.command_timeout().as_secs()),
+                        background: step.background,
+                        headless: step.headless,
+                        last: step.last,
+                        first: step.first,
+                        serial: step.serial,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 /// Every pipeline's name, one per line, with its `description:` indented
@@ -735,11 +837,12 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
             }
             let prompt = crate::prompt::path_for(repo, step.prompt_name());
             if !prompt.exists() {
-                problems.push(format!(
-                    "`{}`/`{}` needs prompt {} — run `spoolway init` or write it",
-                    pipeline.name,
-                    step.id,
-                    prompt.display()
+                problems.push(crate::prompt::missing_prompt_message(
+                    repo,
+                    pipeline.private_file.is_some(),
+                    step.prompt_name(),
+                    &format!("`{}`/`{}`", pipeline.name, step.id),
+                    "run `spoolway init` or write it",
                 ));
             }
 
@@ -1102,7 +1205,7 @@ const PIPELINE_EXTS: &[&str] = &["yml", "yaml"];
 
 /// The first of `dir/<name>.yml` and `dir/<name>.yaml` that exists, or
 /// `None` with neither.
-fn pipeline_file_in(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn pipeline_file_in(dir: &Path, name: &str) -> Option<PathBuf> {
     PIPELINE_EXTS
         .iter()
         .map(|ext| dir.join(format!("{name}.{ext}")))
@@ -1684,10 +1787,23 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
     }
 
     let local = repo.local_dir();
-    let source =
-        pipeline_file_in(&crate::local::pipelines_dir(&local), name).with_context(|| {
-            format!("no private pipeline named `{name}` — see `spoolway pipeline list`")
-        })?;
+    let source = match pipeline_file_in(&crate::local::pipelines_dir(&local), name) {
+        Some(source) => source,
+        None => {
+            // `name` may be missing outright, or it may already be the
+            // tracked pipeline a person meant to promote something *into* —
+            // the two read very differently to the person typing the
+            // command, so the generic "no private pipeline" message is
+            // wrong for the second one.
+            if let Some(tracked) = pipeline_file_in(&Pipelines::dir_in(&repo.root), name) {
+                bail!(
+                    "`{name}` is already tracked — {} — nothing to promote",
+                    tracked.display()
+                );
+            }
+            bail!("no private pipeline named `{name}` — see `spoolway pipeline list`");
+        }
+    };
     if let Some(clash) = pipeline_file_in(&Pipelines::dir_in(&repo.root), name) {
         bail!(
             "`{name}` already exists in the tracked pipelines — {} — rename one of the two",
@@ -2834,6 +2950,19 @@ mod tests {
         );
     }
 
+    /// `promote <tracked name>` — a name that is already tracked, with no
+    /// private file of its own at all — says plainly that the name is
+    /// already tracked, rather than the generic "no private pipeline named"
+    /// a person reads the same way whether the name is missing outright or
+    /// already promoted.
+    #[test]
+    fn pipeline_promote_on_an_already_tracked_name_says_so() {
+        let repo = repo_for("promote-already-tracked");
+        let err = pipeline_promote(&repo, "default", false).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("already tracked"), "{message}");
+    }
+
     /// A private pipeline whose name already belongs to a tracked one is
     /// refused rather than overwriting it — `pipeline copy` already
     /// prevents this from `copy`'s own side, but `promote` checks again in
@@ -3254,6 +3383,29 @@ mod tests {
             entries["impl-strict"]["file"],
             "/home/x/.spoolway/proj/local/pipelines/impl-strict.yml"
         );
+    }
+
+    /// `--json pipeline show` honours `--json`: before this fix
+    /// `pipeline_show` took the flag only to decide whether to print the
+    /// checkout note, and always printed the prose flow regardless.
+    #[test]
+    fn build_show_carries_every_pipeline_and_step() {
+        let pipelines = Pipelines::builtin();
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&build_show(&pipelines)).unwrap()).unwrap();
+        let entries = value["pipelines"].as_array().expect("a pipelines array");
+        assert_eq!(entries.len(), pipelines.pipelines.len());
+        for entry in entries {
+            let name = entry["name"].as_str().expect("a name");
+            let pipeline = pipelines.get(name).unwrap();
+            assert_eq!(entry["entry"], pipeline.entry());
+            let steps = entry["steps"].as_array().expect("a steps array");
+            assert_eq!(steps.len(), pipeline.steps.len());
+            for (step_json, step) in steps.iter().zip(&pipeline.steps) {
+                assert_eq!(step_json["id"], step.id);
+                assert_eq!(step_json["kind"], step.kind().as_str());
+            }
+        }
     }
 
     /// `private_marker` — the text `pipeline list` and `pipeline show` both

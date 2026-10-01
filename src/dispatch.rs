@@ -5702,10 +5702,12 @@ fn prepare_boot(
     // rather than one role with a branch in it.
     let prompt_path = crate::prompt::path_for(repo, step.prompt_name());
     let prompt = std::fs::read_to_string(&prompt_path).with_context(|| {
-        format!(
-            "step `{}` needs prompt {} — run `spoolway init`",
-            step.id,
-            prompt_path.display()
+        crate::prompt::missing_prompt_message(
+            repo,
+            pipeline.private_file.is_some(),
+            step.prompt_name(),
+            &format!("step `{}`", step.id),
+            "run `spoolway init`",
         )
     })?;
 

@@ -2843,7 +2843,16 @@ impl Pipelines {
         for (name, pipeline) in &self.pipelines {
             pipeline
                 .validate()
-                .with_context(|| format!("pipeline `{name}`"))?;
+                .with_context(|| match &pipeline.private_file {
+                    // Named by its own file rather than only `pipeline
+                    // \`<name>\``: the generic wrapper `Pipelines::load_impl`
+                    // adds around this ("in <tracked dir> or <private dir>")
+                    // never says which of the two a private pipeline's error
+                    // actually came from, and a person reading only that is
+                    // sent to both directories to find one file.
+                    Some(file) => format!("private pipeline `{name}` ({})", file.display()),
+                    None => format!("pipeline `{name}`"),
+                })?;
         }
         Ok(())
     }
@@ -2889,7 +2898,7 @@ fn merge_private(
             bail!(
                 "private prompt `{name}` clashes with the tracked one — both {} and {} name \
                  `{name}`; rename the private prompt",
-                crate::prompt::directory_form_in(root, name).display(),
+                crate::prompt::tracked_path_in(root, name).display(),
                 local_prompts_dir
                     .join(name)
                     .join(crate::assets::PROMPT_FILE)
@@ -2900,7 +2909,24 @@ fn merge_private(
 
     if let Some(files) = read_pipeline_dir(&local_pipelines_dir)? {
         for (name, file, raw) in files {
-            if pipelines.contains_key(&name) {
+            if let Some(existing) = pipelines.get(&name) {
+                // Two entries can reach this one name two ways: a genuine
+                // clash with the tracked file, or two private files of the
+                // same name under different extensions (`foo.yml` and
+                // `foo.yaml`) — `read_pipeline_dir` returns both, and the
+                // second one to land here would otherwise be blamed on the
+                // tracked file it never touched, naming a tracked path that
+                // does not even exist. `private_file` tells the two apart:
+                // set only once this loop has already inserted one of this
+                // pair, never by the tracked-parsing loop above it.
+                if let Some(other_private) = &existing.private_file {
+                    bail!(
+                        "two private files name the pipeline `{name}` — both {} and {}; keep \
+                         one and rename or delete the other",
+                        other_private.display(),
+                        file.display(),
+                    );
+                }
                 // `file_in` always spells `.yml`; a tracked `.yaml` would be
                 // named as a file that does not exist, the same slip the
                 // private side's own path once made.
@@ -5324,7 +5350,7 @@ mod tests {
 
     /// A private pipeline that fails validation points the person at
     /// `local/pipelines/` too, not only at the tracked directory it never
-    /// came from.
+    /// came from — and names its own exact file, not just the directory.
     #[test]
     fn a_private_pipeline_failing_validation_names_the_private_directory() {
         with_override_fixture("private-invalid", |root| {
@@ -5342,6 +5368,87 @@ mod tests {
             let message = format!("{err:#}");
             assert!(message.contains(&dir.display().to_string()), "{message}");
             assert!(message.contains("impl-strict"), "{message}");
+            assert!(
+                message.contains(&dir.join("impl-strict.yml").display().to_string()),
+                "a private pipeline's validation error must name its own file: {message}"
+            );
+        });
+    }
+
+    /// Two private files of the same name but different extensions —
+    /// `foo.yml` beside `foo.yaml` — are two private files for one name,
+    /// never a clash with a tracked file that was never touched: before this
+    /// fix, the second one to load found the name already taken by the
+    /// first's own insert and blamed it on a tracked path that does not
+    /// exist.
+    #[test]
+    fn two_private_files_for_one_name_are_reported_as_such() {
+        with_override_fixture("private-two-private-files", |root| {
+            let local = crate::local::dir_for(root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("extra.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("extra.yaml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&dir.join("extra.yml").display().to_string()),
+                "{message}"
+            );
+            assert!(
+                message.contains(&dir.join("extra.yaml").display().to_string()),
+                "{message}"
+            );
+            assert!(
+                !message.contains("clashes with the tracked"),
+                "two private files must never be reported as a tracked clash: {message}"
+            );
+        });
+    }
+
+    /// A private prompt clashing with a tracked one names the tracked file
+    /// that actually exists — the legacy flat `<name>.md`, when that is the
+    /// shape on disk, rather than always the directory form nothing there
+    /// uses.
+    #[test]
+    fn a_private_prompt_clashing_with_a_flat_tracked_one_names_the_flat_file() {
+        with_override_fixture("private-prompt-clash-flat", |root| {
+            let flat = crate::config::under_setup(
+                &crate::config::setup_dir_in(root),
+                crate::config::PROMPTS_DIR,
+            )
+            .join("helper.md");
+            std::fs::create_dir_all(flat.parent().unwrap()).unwrap();
+            std::fs::write(&flat, "# flat tracked\n").unwrap();
+
+            std::fs::write(
+                Pipelines::file_in(root, "impl"),
+                "steps:\n  \
+                 - id: implement\n    agent: pi\n    prompt: helper\n    model: base-model\n    \
+                 on_pass: done\n",
+            )
+            .unwrap();
+
+            let local = crate::local::dir_for(root).unwrap();
+            let prompt_dir = crate::local::prompts_dir(&local).join("helper");
+            std::fs::create_dir_all(&prompt_dir).unwrap();
+            std::fs::write(prompt_dir.join(crate::assets::PROMPT_FILE), "# private\n").unwrap();
+
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&flat.display().to_string()),
+                "a flat tracked prompt must be named by its own flat path: {message}"
+            );
         });
     }
 

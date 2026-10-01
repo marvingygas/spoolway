@@ -1188,7 +1188,7 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
 
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let pid = std::process::id();
@@ -1200,11 +1200,19 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
             .unwrap_or("spoolway")
     ));
     {
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, contents.as_ref())?;
-        file.sync_all()?;
+        // Every error here is named by `path`, never `tmp` — `tmp` is a
+        // hidden, pid-and-counter-named file nobody asked for and nothing
+        // reads back, and naming it would send a person to a file that is
+        // never there.
+        let mut file =
+            std::fs::File::create(&tmp).with_context(|| format!("writing {}", path.display()))?;
+        std::io::Write::write_all(&mut file, contents.as_ref())
+            .with_context(|| format!("writing {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("writing {}", path.display()))?;
     }
-    std::fs::rename(&tmp, path)?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
     // The rename itself is a directory-entry change; sync the directory so it
     // survives a power loss too. Best effort — not every platform lets a
     // directory be opened as a file, and a failure here does not mean the
@@ -1325,6 +1333,63 @@ mod tests {
     // passthrough in `extra`, the same as any other key spoolway does not
     // name.
     const SAMPLE: &str = "---\nid: demo\nstage: queued\ntouches: [src/**]\n---\n## Goal\nDo a thing.\n\n## Status Log\n- earlier entry\n";
+
+    /// `write_atomic` names the path it was trying to create a directory
+    /// for when that fails — the "`local` is a file" case a copy or promote
+    /// hits when something that should be a directory is a plain file
+    /// instead. Before this fix the bare `std::io::Error` carried no path at
+    /// all.
+    #[test]
+    fn write_atomic_names_the_path_when_the_parent_cannot_be_created() {
+        let root = crate::scratch::root("write-atomic-parent-is-a-file");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("local");
+        std::fs::write(&blocker, "not a directory").unwrap();
+
+        let target = blocker.join("pipelines").join("foo.yml");
+        let err = write_atomic(&target, "steps: []\n").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&blocker.join("pipelines").display().to_string()),
+            "{message}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `write_atomic` names the destination `path`, never the hidden
+    /// `.<name>.<pid>-<n>.tmp` it actually wrote to, when the write itself
+    /// fails — a name too long for the filesystem is the OS error
+    /// acceptance criterion 4 names for this: the temp file's own longer
+    /// name (prefixed with `.` and suffixed with a pid and a counter) fails
+    /// `File::create` at the same limit a plain `path` this long would.
+    #[test]
+    fn write_atomic_names_the_destination_not_the_hidden_temp_file_when_the_name_is_too_long() {
+        let root = crate::scratch::root("write-atomic-name-too-long");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 255 bytes is the usual per-component limit on Linux/macOS; `tmp`'s
+        // own name adds a `.` prefix and a `.<pid>-<n>.tmp` suffix on top of
+        // this, so 250 `x`s is already too long for the temp file even
+        // though a plain file of that name would just barely fit.
+        let long_name = format!("{}.yml", "x".repeat(250));
+        let target = root.join(&long_name);
+
+        let err = write_atomic(&target, "steps: []\n").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&target.display().to_string()),
+            "the error must name the destination path, not the hidden temp file: {message}"
+        );
+        assert!(
+            !message.contains(".tmp"),
+            "the error must not name the hidden temp file: {message}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn parses_and_round_trips() {

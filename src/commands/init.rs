@@ -611,11 +611,12 @@ fn pad_to_value_column(path: &str) -> String {
 }
 
 /// One row of the mockup's report block: `verb` (`project`, `wrote`, `kept`,
-/// `made` or `set`) against `what` — the resolved root for `project`, a path
-/// relative to the project root for `wrote`/`kept`/`made`, or — for `set` — a
-/// `key = value` pair. Every verb is left-padded to nine columns — `project`
-/// plus two spaces, `wrote` plus four, `kept` and `made` plus five, `set`
-/// plus six — so all five line up whichever one a row starts with.
+/// `made`, `set` or `skipped`) against `what` — the resolved root for
+/// `project`, a path relative to the project root for
+/// `wrote`/`kept`/`made`/`skipped`, or — for `set` — a `key = value` pair.
+/// Every verb is left-padded to nine columns — `project` and `skipped` plus
+/// two spaces, `wrote` plus four, `kept` and `made` plus five, `set` plus
+/// six — so all six line up whichever one a row starts with.
 fn report_row(verb: &str, what: &str) -> String {
     format!("  {verb:<9}{what}")
 }
@@ -732,8 +733,10 @@ impl Placer {
 }
 
 /// The example setup: the shipped pipelines, prompts, task templates and
-/// ticket templates, each handed to [`Placer::file`] so it reports `wrote` or `kept`
-/// in call order. Whether anything was actually written.
+/// ticket templates, each handed to [`Placer::file`] so it reports `wrote` or
+/// `kept` in call order — except a pipeline whose name a private pipeline
+/// already claims, reported `skipped` directly onto [`Placer::rows`] instead,
+/// in the same call order. Whether anything was actually written.
 fn place_examples(
     root: &Path,
     state: &Path,
@@ -744,6 +747,34 @@ fn place_examples(
     // One file per pipeline, named for the pipeline it holds. A project adds
     // its own by writing another file here and nothing else.
     for (name, body) in crate::pipeline::BUILTIN_PIPELINES {
+        // A private pipeline already named this before the tracked file
+        // existed — declined on first `init`, then claimed by `pipeline
+        // copy` or written by hand — would otherwise have the tracked
+        // example land right on top of it: `merge_private` bails on that
+        // clash the moment anything next loads the project's pipelines, and
+        // this run would have caused it rather than caught it. Skip the
+        // shipped example instead; a repeat `init` picks it up again once
+        // the private pipeline is renamed — `pipeline promote` is no
+        // alternative route to the same thing, since promoting *becomes*
+        // the tracked file: a repeat `init` after that would just report it
+        // `kept`, with the shipped example still never restored.
+        if crate::local::is_repo_mode(root)
+            && let Some(private) = pipeline_file_in(
+                &crate::local::pipelines_dir(&crate::local::dir_for(root)?),
+                name,
+            )
+        {
+            let rel = shown(root, &Pipelines::file_in(root, name));
+            placer.rows.push(report_row(
+                "skipped",
+                &format!(
+                    "{rel} — {} already uses the name `{name}`; rename it to restore the \
+                     shipped `{name}`",
+                    shown(root, &private)
+                ),
+            ));
+            continue;
+        }
         let path = Pipelines::file_in(root, name);
         let rel = shown(root, &path);
         wrote |= placer.file(path, &rel, answers.fill(body).as_bytes(), false)?;
@@ -1265,6 +1296,51 @@ mod tests {
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
         run_init(&root, args).expect("init");
         root
+    }
+
+    /// Acceptance criterion 5: `init` restoring an example pipeline whose
+    /// name a private pipeline already uses warns and skips it, rather than
+    /// writing the tracked example right on top of a name `merge_private`
+    /// would then refuse as a clash the moment anything next loads the
+    /// project's pipelines.
+    #[test]
+    fn init_skips_an_example_pipeline_a_private_one_already_names() {
+        let root = scaffold(
+            "examples-skip-private-clash",
+            &InitArgs {
+                no_examples: true,
+                ..confirmed()
+            },
+        );
+        crate::platform::test_home::with_home(&home_for(&root), || {
+            let local = crate::local::dir_for(&root).unwrap();
+            let dir = crate::local::pipelines_dir(&local);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("default.yml"),
+                "steps:\n  - id: solo\n    agent: pi\n    model: m\n    on_pass: done\n",
+            )
+            .unwrap();
+        });
+
+        run_init(
+            &root,
+            &InitArgs {
+                examples: true,
+                ..confirmed()
+            },
+        )
+        .expect("a repeat init with examples still succeeds even when one is skipped");
+
+        assert!(
+            !Pipelines::file_in(&root, "default").exists(),
+            "the tracked `default` example must not be written over the private pipeline \
+             already using that name"
+        );
+        assert!(
+            Pipelines::file_in(&root, "bugfix").exists(),
+            "an example whose name has no private clash is still written"
+        );
     }
 
     /// Acceptance criterion 6: a repo-mode project `init` already set up —

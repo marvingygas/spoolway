@@ -544,7 +544,10 @@ because a home-mode project's whole setup is already private to the machine it r
   outright in home mode. See [`pipeline copy`](cli-reference.md#spoolway-pipeline-copy-from-to),
   [`prompt copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).
-- A private pipeline whose name matches a tracked one is refused, naming both files.
+- A private pipeline whose name matches a tracked one is refused, naming both files. Two
+  private files of the same name but different extensions — `foo.yml` beside `foo.yaml` — are
+  refused the same way, naming both private files; this is never reported as a clash with a
+  tracked file.
 - A private pipeline may name a tracked prompt or a private one. A tracked pipeline whose step
   names a prompt that exists only privately is refused, because that pipeline would break the
   moment it ran on a machine with no copy of the private prompt. A prompt name holding `/` is
@@ -554,7 +557,7 @@ because a home-mode project's whole setup is already private to the machine it r
   pipeline's name, naming the file it came from. A tracked pipeline prints nothing extra. See
   [`spoolway pipeline list`](cli-reference.md#spoolway-pipeline-list).
 - `spoolway pipeline check` validates a private pipeline the same way it validates a tracked
-  one.
+  one. A private pipeline that fails validation is named by its own file, not only by its name.
 - `spoolway pipeline override` and `spoolway prompt override` find a private pipeline or prompt
   the same way `list` and `show` do, and write a patch or fork for it. That patch or fork only
   starts applying once `spoolway pipeline promote` makes the target tracked; until then it sits

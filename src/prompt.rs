@@ -507,15 +507,64 @@ pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
     tracked
 }
 
+/// What a caller says when a step's prompt file does not exist — for
+/// `dispatch::prepare_boot` and `commands::pipeline::step_problems`, the two
+/// places that already report this (a dispatch failure and a `pipeline
+/// check` finding), so the two read the same way.
+///
+/// A private pipeline may read its prompt from either layer — the tracked
+/// `.spoolway/prompts/<name>/` or the private `local/prompts/<name>/` — so a
+/// message naming only the one path [`path_for`] happened to fall back to
+/// (always the tracked directory form) sends a person hunting in the wrong
+/// place, or only half the right one. For a private pipeline, in repo mode,
+/// this names both, and says plainly that the private layer only ever reads
+/// the directory form: a `local/prompts/<name>.md` written flat — the legacy
+/// shape the *tracked* side still accepts, see [`local_names_in`] — is never
+/// read there. Every other pipeline keeps the plain, one-path message: there
+/// is only ever one place its prompt could be.
+pub(crate) fn missing_prompt_message(
+    repo: &Repo,
+    private_pipeline: bool,
+    prompt_name: &str,
+    label: &str,
+    tail: &str,
+) -> String {
+    if private_pipeline && crate::local::is_repo_mode(&repo.checkout) {
+        let tracked_dir = directory_form(repo, prompt_name);
+        let private_dir = crate::local::prompts_dir(&repo.local_dir()).join(prompt_name);
+        format!(
+            "{label} needs prompt `{prompt_name}` — found at neither {} nor {} (the private \
+             layer only reads the directory form; a flat {}.md is not read) — {tail}",
+            tracked_dir.display(),
+            private_dir.display(),
+            private_dir.display(),
+        )
+    } else {
+        format!(
+            "{label} needs prompt {} — {tail}",
+            path_for(repo, prompt_name).display()
+        )
+    }
+}
+
 /// [`path_for`], with no patch layer applied — for a caller that must see
 /// only the tracked file: `commands::prompt_override` reads the source to
 /// fork, and `commands::override_promote` the destination to write.
 pub fn path_for_tracked(repo: &Repo, name: &str) -> PathBuf {
-    let nested = directory_form(repo, name);
+    tracked_path_in(&repo.checkout, name)
+}
+
+/// [`path_for_tracked`], from a bare checkout path rather than a [`Repo`] —
+/// for [`crate::pipeline::Pipelines::load_impl`]/`merge_private`, which has
+/// not built one yet when it names the tracked file a private prompt clashes
+/// with: that message has to say the flat `<name>.md` when that is the shape
+/// actually on disk, not always the directory form nothing there uses.
+pub(crate) fn tracked_path_in(checkout: &Path, name: &str) -> PathBuf {
+    let nested = directory_form_in(checkout, name);
     if nested.is_file() {
         return nested;
     }
-    let flat = repo.prompts_dir().join(format!("{name}.md"));
+    let flat = tracked_prompts_dir_in(checkout).join(format!("{name}.md"));
     if flat.is_file() {
         return flat;
     }
@@ -1155,6 +1204,44 @@ mod tests {
         );
         assert!(message.contains("bugfix"), "{message}");
         assert!(message.contains("default"), "{message}");
+    }
+
+    /// A private pipeline's own missing prompt is named by both layers —
+    /// the tracked directory and the private one — with an explicit note
+    /// that the private layer never reads the flat legacy shape, so a
+    /// person does not write `local/prompts/<name>.md` and wonder why it is
+    /// still not found.
+    #[test]
+    fn a_private_pipelines_missing_prompt_names_both_layers() {
+        let repo = crate::commands::testutil::fixture("missing-prompt-private");
+        let message =
+            missing_prompt_message(&repo, true, "ghost", "step `a`", "run `spoolway init`");
+        let tracked = directory_form(&repo, "ghost");
+        let private = crate::local::prompts_dir(&repo.local_dir()).join("ghost");
+        assert!(
+            message.contains(&tracked.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&private.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("flat"), "{message}");
+    }
+
+    /// A tracked pipeline's missing prompt keeps the plain, one-path
+    /// message — there is only ever one place its prompt could be, so a
+    /// second path would only confuse.
+    #[test]
+    fn a_tracked_pipelines_missing_prompt_names_one_path() {
+        let repo = crate::commands::testutil::fixture("missing-prompt-tracked");
+        let message =
+            missing_prompt_message(&repo, false, "ghost", "step `a`", "run `spoolway init`");
+        let private = crate::local::prompts_dir(&repo.local_dir()).join("ghost");
+        assert!(
+            !message.contains(&private.display().to_string()),
+            "{message}"
+        );
     }
 
     fn messages(findings: &[Finding]) -> Vec<&String> {
