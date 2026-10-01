@@ -685,9 +685,12 @@ one, so `--json` then lists only the pipeline file.
 not empty, not absolute, and holding none of `/`, `\` or `..`; anything else is refused, naming
 the bad name. A `<to>` that already names a pipeline, tracked or private, is also refused,
 naming `spoolway pipeline list`. A `<to>` whose skeleton already exists, tracked or private, is
-refused the same way, so a copy never replaces an existing skeleton. In home mode, where the
-whole setup is already private, this writes into the workspace's own `config/` instead.
-`--json` prints `{"wrote": [<path>, ...]}`, with each path in full. See [Private
+refused the same way, so a copy never replaces an existing skeleton. Run from a linked
+worktree, both checks also cover the main checkout's tracked files, naming the clashing file:
+the main checkout and the dispatcher load those files even when the worktree's own checkout
+has never picked up the commit that added them. In home mode, where the whole setup is already
+private, this writes into the workspace's own `config/` instead. `--json` prints
+`{"wrote": [<path>, ...]}`, with each path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway pipeline promote <name>`
@@ -775,19 +778,24 @@ prompts](prompts.md#private-prompts).
 
 ### `spoolway prompt copy <from> <to>`
 
-Copy a prompt into the private layer.
+Copy a prompt into the private layer, along with any assets it uses.
 
 ```
 $ spoolway prompt copy reviewer reviewer-strict
 wrote    ~/.spoolway/proj-ab12cd34/local/prompts/reviewer-strict/PROMPT.md
 ```
 
-`<from>` may already be tracked or private. Both `<from>` and `<to>` must be one plain name:
-not empty, not absolute, and holding none of `/`, `\` or `..`; anything else is refused, naming
-the bad name. A `<to>` that already names a prompt, tracked or private, is also refused, naming
-`spoolway prompt list`. In home mode, where the whole setup is already private, this writes
-into the workspace's own `config/prompts/<to>/` instead. `--json` prints `{"wrote": [<path>]}`,
-with the path in full. See [Private
+This copies the whole prompt folder `from` names, `assets/` included, not just its
+`PROMPT.md`. A source folder holding a symlinked directory is refused outright, naming it,
+and nothing is copied. `<from>` may already be tracked or private. Both `<from>` and `<to>`
+must be one plain name: not empty, not absolute, and holding none of `/`, `\` or `..`;
+anything else is refused, naming the bad name. A `<to>` that already names a prompt, tracked or
+private, is also refused, naming `spoolway prompt list`. Run from a linked worktree, that check
+also covers the main checkout's tracked prompts, naming the clashing file: the main checkout
+and the dispatcher load those files even when the worktree's own checkout has never picked up
+the commit that added them. In home mode, where the whole setup is already private, this
+writes into the workspace's own `config/prompts/<to>/` instead. `--json` prints
+`{"wrote": [<path>]}`, with the path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway agent list`

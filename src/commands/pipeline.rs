@@ -1143,10 +1143,22 @@ fn prompt_copy_dest(repo: &Repo, to: &str) -> PathBuf {
     }
 }
 
-/// Refuse `name` as a `<to>` that already names a pipeline — tracked or
-/// private, `.yml` or `.yaml`.
+/// Refuse `name` as a `<to>` that already names a pipeline — tracked in
+/// either the checkout a lane runs from or the main checkout, or private,
+/// `.yml` or `.yaml`.
+///
+/// A linked worktree reads the same private `local/` as the main checkout,
+/// but its own tracked `.spoolway/` can sit on an older or newer branch.
+/// Commands run in the main checkout, and the dispatcher, load the main
+/// checkout's tracked files, so a private name clashing with them breaks
+/// those — even though the worktree this copy runs in reads its own tracked
+/// files and may not have the clashing commit at all. For example: `extra`
+/// committed to `.spoolway/pipelines/` on `main`, then `pipeline copy
+/// default extra` run from a worktree that has never fetched that commit.
 fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
-    if let Some(path) = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), name) {
+    if let Some(path) = pipeline_file_in(&Pipelines::dir_in(&repo.checkout), name)
+        .or_else(|| pipeline_file_in(&Pipelines::dir_in(&repo.root), name))
+    {
         bail!(
             "`{name}` already exists — {} — see `spoolway pipeline list` and choose a \
              different `<to>`",
@@ -1165,16 +1177,36 @@ fn refuse_pipeline_clash(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where the tracked `<name>.md` skeleton lives for `root` — [`Repo`]'s own
+/// `task_templates_dir`, resolved from a bare checkout path for the second
+/// checkout `refuse_skeleton_clash` has to check (the main checkout) with no
+/// second `Repo` to build for it.
+fn tracked_skeleton_path_in(root: &Path, name: &str) -> PathBuf {
+    crate::config::under_setup(
+        &crate::config::setup_dir_in(root),
+        crate::config::TASK_TEMPLATES_DIR,
+    )
+    .join(format!("{name}.md"))
+}
+
 /// Refuse `name` as a `<to>` whose skeleton already exists — tracked
-/// `<name>.md` or, in repo mode, a private `local/templates/tasks/<name>.md`
-/// — the clash `refuse_pipeline_clash` cannot see, since a skeleton is a
-/// file of its own that can exist with no pipeline of that name at all (the
-/// task's own repro: `echo MINE > local/templates/tasks/foo.md` with no
-/// `foo` pipeline anywhere). Checked before `pipeline_copy` writes anything,
-/// so a person's skeleton is never silently replaced.
+/// `<name>.md`, checked in both the checkout a lane runs from and the main
+/// checkout (see [`refuse_pipeline_clash`] for why), or, in repo mode, a
+/// private `local/templates/tasks/<name>.md` — the clash
+/// `refuse_pipeline_clash` cannot see, since a skeleton is a file of its own
+/// that can exist with no pipeline of that name at all (the task's own
+/// repro: `echo MINE > local/templates/tasks/foo.md` with no `foo` pipeline
+/// anywhere). Checked before `pipeline_copy` writes anything, so a person's
+/// skeleton is never silently replaced.
 fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
     let tracked = repo.task_templates_dir().join(format!("{name}.md"));
-    if tracked.is_file() {
+    let tracked = if tracked.is_file() {
+        Some(tracked)
+    } else {
+        let root_tracked = tracked_skeleton_path_in(&repo.root, name);
+        root_tracked.is_file().then_some(root_tracked)
+    };
+    if let Some(tracked) = tracked {
         bail!(
             "a skeleton for `{name}` already exists — {} — choose a different `<to>`",
             tracked.display()
@@ -1193,12 +1225,36 @@ fn refuse_skeleton_clash(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`crate::prompt::path_for_tracked`], resolved from a bare checkout path
+/// rather than a [`Repo`] — for the second checkout `refuse_prompt_clash`
+/// has to check (the main checkout) with no second `Repo` to build for it.
+/// Nested shape first, falling back to the legacy flat `<name>.md`, same
+/// order as `path_for_tracked` itself.
+fn tracked_prompt_path_in(root: &Path, name: &str) -> PathBuf {
+    let nested = crate::prompt::directory_form_in(root, name);
+    if nested.is_file() {
+        return nested;
+    }
+    crate::config::under_setup(
+        &crate::config::setup_dir_in(root),
+        crate::config::PROMPTS_DIR,
+    )
+    .join(format!("{name}.md"))
+}
+
 /// Refuse `name` as a `<to>` that already names a prompt — tracked (nested
-/// or the legacy flat shape, same as [`crate::prompt::path_for_tracked`]) or
-/// private.
+/// or the legacy flat shape, same as [`crate::prompt::path_for_tracked`]),
+/// checked in both the checkout a lane runs from and the main checkout (see
+/// [`refuse_pipeline_clash`] for why), or private.
 fn refuse_prompt_clash(repo: &Repo, name: &str) -> Result<()> {
     let tracked = crate::prompt::path_for_tracked(repo, name);
-    if tracked.is_file() {
+    let tracked = if tracked.is_file() {
+        Some(tracked)
+    } else {
+        let root_tracked = tracked_prompt_path_in(&repo.root, name);
+        root_tracked.is_file().then_some(root_tracked)
+    };
+    if let Some(tracked) = tracked {
         bail!(
             "`{name}` already exists — {} — see `spoolway prompt list` and choose a different \
              `<to>`",
@@ -1310,11 +1366,15 @@ pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()
 
 /// `spoolway prompt copy <from> <to>`.
 ///
-/// Reads the tracked or already-private file whole, the same as
-/// `commands::prompt_override` forking a tracked prompt into the patch
-/// layer — never through [`crate::prompt::path_for`], which would also
-/// consult the override layer, a different question from "what does `from`
-/// name, tracked or private" this command answers.
+/// Locates the tracked or already-private source the same way
+/// `commands::prompt_override` forks a tracked prompt into the patch layer —
+/// never through [`crate::prompt::path_for`], which would also consult the
+/// override layer, a different question from "what does `from` name,
+/// tracked or private" this command answers. For the nested shape it then
+/// copies the whole prompt folder the source's `PROMPT.md` sits in —
+/// `assets/` included, the same as [`pipeline_promote`] moves a prompt
+/// whole; the legacy flat `<name>.md` shape has no folder of its own, so it
+/// is copied as the single file it is.
 pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
@@ -1339,13 +1399,46 @@ pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> 
     } else {
         bail!("no prompt named `{from}` — see `spoolway prompt list`");
     };
-    let body = std::fs::read_to_string(&source)
-        .with_context(|| format!("reading {}", source.display()))?;
 
     refuse_prompt_clash(repo, to)?;
 
     let dest = prompt_copy_dest(repo, to);
-    write_atomic(&dest, &body)?;
+    // `source` is `PROMPT.md` itself. In the nested shape that file sits in
+    // a folder of its own — `assets/` included, the archivist prompt's own
+    // folder being the case that matters — so the whole folder is copied,
+    // the way `pipeline_promote` already moves a prompt whole rather than
+    // just its `PROMPT.md`. The legacy flat `<name>.md` shape has no folder
+    // of its own; it is still copied as the one file it is.
+    if source.file_name().and_then(|n| n.to_str()) == Some(crate::assets::PROMPT_FILE) {
+        let source_dir = source
+            .parent()
+            .with_context(|| format!("resolving the folder holding {}", source.display()))?;
+        // Refused here, before anything is written — `copy_dir_all` cannot
+        // copy a symlinked directory correctly (it hands a symlink to
+        // `std::fs::copy`, which errors out on one pointing at a
+        // directory), and failing partway would leave a half-written
+        // `local/prompts/<to>/`, with a retry then refused by
+        // `refuse_prompt_clash` as a clash with the very files this copy
+        // failed to finish writing. The same guard `pipeline_promote` runs
+        // on a private prompt folder before moving it.
+        if dir_contains_symlinked_directory(source_dir)
+            .with_context(|| format!("checking {} for symlinks", source_dir.display()))?
+        {
+            bail!(
+                "`{from}` holds a symlinked directory — {} — prompt copy cannot copy it; move \
+                 the symlink's target in by hand first",
+                source_dir.display()
+            );
+        }
+        let dest_dir = dest
+            .parent()
+            .with_context(|| format!("resolving the folder holding {}", dest.display()))?;
+        copy_dir_all(source_dir, dest_dir)?;
+    } else {
+        let body = std::fs::read_to_string(&source)
+            .with_context(|| format!("reading {}", source.display()))?;
+        write_atomic(&dest, &body)?;
+    }
 
     print_wrote(json, &[&dest])
 }
@@ -2051,6 +2144,33 @@ mod tests {
         assert!(format!("{err:#}").contains("no pipeline named"), "{err:#}");
     }
 
+    /// A linked worktree reads the same private `local/` as the main
+    /// checkout, but its own tracked files can be an older or newer branch
+    /// than the main checkout's — so a `<to>` the main checkout already
+    /// tracks must still be refused even when the worktree's own checkout
+    /// has never heard of it. See the task's "How to see it": `extra.yml`
+    /// committed on `main` must still block `pipeline copy default extra`
+    /// run from a worktree that has not picked up that commit.
+    #[test]
+    fn pipeline_copy_refuses_a_to_the_main_checkout_tracks_even_run_from_a_worktree() {
+        let repo = repo_for("copy-worktree-clash");
+        // The main checkout already tracks `extra`.
+        std::fs::write(
+            Pipelines::file_in(&repo.root, "extra"),
+            std::fs::read_to_string(Pipelines::file_in(&repo.root, "default")).unwrap(),
+        )
+        .unwrap();
+
+        // A linked worktree: its own tracked checkout, which never got
+        // that commit, so `extra` is not among its own tracked pipelines.
+        let other = repo_for("copy-worktree-clash-wt");
+        let mut worktree = repo.clone();
+        worktree.checkout = other.checkout;
+
+        let err = pipeline_copy(&worktree, "default", "extra", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
     /// `prompt copy` writes the tracked prompt's own body under
     /// `local/prompts/<to>/PROMPT.md`.
     #[test]
@@ -2081,6 +2201,95 @@ mod tests {
         prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap();
         let err = prompt_copy(&repo, "implementer", "implementer-strict", false).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// The same cross-checkout clash `pipeline copy` must refuse, on the
+    /// prompt side: a `<to>` the main checkout already tracks must still
+    /// be refused when run from a worktree whose own checkout has never
+    /// heard of it.
+    #[test]
+    fn prompt_copy_refuses_a_to_the_main_checkout_tracks_even_run_from_a_worktree() {
+        let repo = repo_for("prompt-copy-worktree-clash");
+        // The main checkout already tracks `arch2`.
+        let tracked_dir = crate::prompt::directory_form(&repo, "arch2")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(&tracked_dir).unwrap();
+        std::fs::write(tracked_dir.join(crate::assets::PROMPT_FILE), "whatever\n").unwrap();
+
+        // A linked worktree: its own tracked checkout, which never got
+        // that commit.
+        let other = repo_for("prompt-copy-worktree-clash-wt");
+        let mut worktree = repo.clone();
+        worktree.checkout = other.checkout;
+
+        let err = prompt_copy(&worktree, "implementer", "arch2", false).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    }
+
+    /// `prompt copy` must bring a prompt's whole directory, not just its
+    /// `PROMPT.md` — the archivist's own prompt refers to its `assets/`
+    /// folder, and a copy that drops it points at files that are not
+    /// there. See the task's "How to see it": `spoolway prompt copy
+    /// archivist arch2` currently writes only
+    /// `local/prompts/arch2/PROMPT.md`.
+    #[test]
+    fn prompt_copy_copies_the_whole_prompt_folder_assets_included() {
+        let repo = repo_for("prompt-copy-assets");
+
+        prompt_copy(&repo, "archivist", "arch2", false).expect("copy");
+
+        let dest_dir = crate::local::prompts_dir(&repo.local_dir()).join("arch2");
+        assert!(
+            dest_dir.join(crate::assets::PROMPT_FILE).is_file(),
+            "the prompt's own PROMPT.md must still be there"
+        );
+        assert!(
+            dest_dir
+                .join(crate::assets::PROMPT_ASSETS)
+                .join("document.md")
+                .is_file(),
+            "prompt copy must bring the prompt's assets/ folder with it"
+        );
+        assert!(
+            dest_dir
+                .join(crate::assets::PROMPT_ASSETS)
+                .join("landing-page.md")
+                .is_file(),
+            "prompt copy must bring every file under the prompt's assets/"
+        );
+    }
+
+    /// `prompt copy` must refuse a source folder holding a symlinked
+    /// directory rather than copy it partway — the same guard
+    /// `pipeline_promote` already runs on a private prompt folder before
+    /// moving it, see `dir_contains_symlinked_directory`. Without this,
+    /// `copy_dir_all` fails mid-copy on the symlink, leaving a half-written
+    /// `local/prompts/<to>/` that a retry's own `refuse_prompt_clash` then
+    /// refuses as a clash with the very files the failed copy left behind.
+    #[test]
+    fn prompt_copy_refuses_a_prompt_holding_a_symlinked_directory() {
+        let repo = repo_for("prompt-copy-symlink");
+
+        let source_assets = crate::prompt::path_for_tracked(&repo, "archivist")
+            .parent()
+            .unwrap()
+            .join(crate::assets::PROMPT_ASSETS);
+        let target_dir = source_assets.parent().unwrap().join("elsewhere");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::os::unix::fs::symlink(&target_dir, source_assets.join("linked")).unwrap();
+
+        let err = prompt_copy(&repo, "archivist", "arch2", false)
+            .expect_err("a symlinked directory inside the prompt must be refused");
+        assert!(format!("{err:#}").contains("archivist"), "{err:#}");
+
+        assert!(
+            !crate::local::prompts_dir(&repo.local_dir())
+                .join("arch2")
+                .exists(),
+            "a refused copy must leave nothing behind"
+        );
     }
 
     /// A `<to>` that is empty, absolute, or holds `/`, `\` or `..` must be

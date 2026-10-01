@@ -526,13 +526,18 @@ because a home-mode project's whole setup is already private to the machine it r
 - `spoolway pipeline copy <from> <to>` writes a new private pipeline and, when `from` names no
   `task_template:` of its own, a task skeleton to go with it; when `from` does name one, the
   copy shares that same skeleton instead of writing a new one. `spoolway prompt copy <from>
-  <to>` writes a new private prompt. Both require `<from>` and `<to>` to be one plain name
-  each: not empty, not absolute, and holding none of `/`, `\` or `..`. Both also refuse a
-  `<to>` that already exists, tracked or private; `pipeline copy` also refuses a `<to>` whose
-  skeleton already exists on its own. In home mode they write into the workspace's own
-  `config/` instead, since there is no private layer to add there. `spoolway pipeline promote
-  <name>` moves a private pipeline, the private prompts it names and the skeleton its
-  `task_template:` names (the pipeline's own name when it sets none) into `.spoolway/`, then
+  <to>` writes a new private prompt, copying the whole prompt folder `from` names, `assets/`
+  included; a source folder holding a symlinked directory is refused outright, naming it. Both
+  require `<from>` and `<to>` to be one plain name each: not empty, not absolute, and holding
+  none of `/`, `\` or `..`. Both also refuse a `<to>` that already exists, tracked or private;
+  `pipeline copy` also refuses a `<to>` whose skeleton already exists on its own. Run from a
+  linked worktree, those checks also cover the main checkout's tracked files, naming the
+  clashing file, since the main checkout and the dispatcher load those files even when the
+  worktree's own checkout has never picked up the commit that added them. In home mode they
+  write into the workspace's own `config/` instead, since there is no private layer to add
+  there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
+  names and the skeleton its `task_template:` names (the pipeline's own name when it sets
+  none) into `.spoolway/`, then
   deletes the private files. It refuses inside a linked worktree, refuses any clash with a
   tracked file, refuses a step's prompt name or the pipeline's `task_template:` that is not one
   plain name, refuses when another private pipeline names the same skeleton, and is refused
