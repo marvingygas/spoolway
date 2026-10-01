@@ -725,7 +725,10 @@ pub(crate) fn shorten_home(path: &Path) -> String {
 /// The main checkout of the repo containing `dir`.
 ///
 /// In a linked worktree, `--git-common-dir` resolves to the main checkout's
-/// `.git`, so its parent is that checkout. In the main checkout the two git
+/// `.git`. Its parent *usually* is that checkout — true whenever `.git`
+/// sits directly inside it, the ordinary layout — but not always: see
+/// [`recorded_or_parent`] for the `--separate-git-dir`/submodule case this
+/// verifies first rather than assumes. In the main checkout the two git
 /// dirs are the same and this returns it unchanged.
 ///
 /// `pub(crate)` rather than private: `crate::commands::dispatch::check_backend_checkout`
@@ -741,12 +744,112 @@ pub(crate) fn main_checkout(dir: &Path) -> Option<PathBuf> {
     // Pre-existing behaviour, unchanged by the `Result` `common_git_dir` now
     // carries: every caller of `main_checkout` already treats any failure to
     // resolve as "not a linked worktree of anything", so a real error here
-    // collapses to `None` exactly as it always did.
+    // collapses to `None` exactly as it always did. `recorded_or_parent`
+    // answering `None` is folded into that same case rather than guessed
+    // past with a wrong path — see its own doc for why a guess here would be
+    // worse than admitting there is no answer yet.
     common_git_dir(dir)
         .ok()
-        .flatten()?
-        .parent()
-        .map(Path::to_path_buf)
+        .flatten()
+        .and_then(|common| recorded_or_parent(&common))
+}
+
+/// The checkout a common git directory belongs to: the common directory's
+/// own parent, verified, or whatever [`stamped_id`] recorded there when the
+/// parent is not it, or the workspace clone entry sharing this common
+/// directory (see [`listed_checkout_of`]). `None` when none of the three
+/// holds — a fresh `--separate-git-dir` clone or submodule nothing has
+/// stamped or listed yet.
+///
+/// The parent is right for the ordinary layout, where `.git` sits directly
+/// inside the checkout — but *verified*, not assumed, by asking what
+/// `common_git_dir` answers for the parent in turn: a renamed or copied
+/// checkout must resolve fresh off wherever it is now (the id and label
+/// stay frozen at their first stamp, but a *location* has to track the
+/// truth or a copy carrying a stale recorded path would read as the
+/// original it was copied from) rather than trusting whatever `stamped_id`
+/// wrote the last time this checkout's common directory was reachable from
+/// its own parent.
+///
+/// The parent is wrong, and the recorded path is the only answer there is,
+/// for a `--separate-git-dir` clone or a submodule: there the common
+/// directory can sit anywhere at all, and git itself tracks no path back
+/// from it to the checkout, so the parent is not even a git repository —
+/// `common_git_dir` on it answers `None`, or `Some` of some unrelated
+/// repository's own common directory, never this one's.
+///
+/// Returning the *unverified* parent as a last resort used to be this
+/// function's own fallback — wrong for exactly the case it exists to fix:
+/// the very first `spoolway init` in a fresh `--separate-git-dir` clone,
+/// before anything is recorded, would resolve to the git directory's own
+/// parent (wherever `--separate-git-dir` happened to point) rather than the
+/// checkout, stamping the wrong folder and refusing to ever stamp the real
+/// one. `None` here instead lets every caller fall back to whatever it
+/// already does when a checkout carries no linked-worktree relationship at
+/// all — `main_checkout`'s own callers, and [`crate::main::init_root`],
+/// already treat that case correctly.
+fn recorded_or_parent(common: &Path) -> Option<PathBuf> {
+    if let Some(parent) = common.parent()
+        && common_git_dir(parent).ok().flatten().as_deref() == Some(common)
+    {
+        return Some(parent.to_path_buf());
+    }
+    read_recorded_root(common).or_else(|| listed_checkout_of(common))
+}
+
+/// The checkout a workspace's `project.toml` lists whose common git
+/// directory is `common` — how a home-mode `--separate-git-dir` clone's
+/// linked worktrees find their main checkout. Home mode stamps nothing into
+/// a clone, so [`read_recorded_root`] has nothing to read there, and
+/// matching the worktree's own path against the clone entries can never
+/// hit: the entry names the main checkout. Seen 2026-10-01: `spoolway init
+/// --setup home` in such a clone worked from the checkout, and every lane
+/// worktree cut from it got "no spoolway project found".
+///
+/// Only reached once the parent check and the recorded path have both
+/// failed, so the one `git rev-parse` per listed clone is paid by that rare
+/// layout alone. Best-effort like [`workspace_clone`]: a broken workspace
+/// file reads as "not listed", and [`Repo::root`]'s own last-resort
+/// `workspace_clone_checked` is what reports it.
+fn listed_checkout_of(common: &Path) -> Option<PathBuf> {
+    all_workspaces()
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|(_, toml)| toml.clones)
+        .map(|clone| clone.root)
+        .find(|root| common_git_dir(root).ok().flatten().as_deref() == Some(common))
+}
+
+/// Whether `dir` is inside a linked worktree rather than a main checkout:
+/// git's own `--git-dir` for it differs from its `--git-common-dir`. False
+/// for anything git cannot answer about — a non-git folder is no linked
+/// worktree of anything.
+///
+/// Asked of git rather than read off [`main_checkout`], because this is for
+/// the one case `main_checkout` answers `None` for a real repository: a
+/// worktree of a `--separate-git-dir` clone nothing has stamped or listed,
+/// where `crate::main::init_root` must refuse rather than set the worktree
+/// up as a project of its own.
+pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
+    let ask = |flag: &str| {
+        run(dir, "git", &["rev-parse", "--path-format=absolute", flag])
+            .ok()
+            .and_then(|out| PathBuf::from(out.trim()).canonical().ok())
+    };
+    match (ask("--git-dir"), ask("--git-common-dir")) {
+        (Some(own), Some(common)) => own != common,
+        _ => false,
+    }
+}
+
+/// What [`stamped_id`] last recorded as `common`'s checkout — `None` when
+/// nothing has stamped it yet, or the recorded path no longer exists (a
+/// stale record is no better an answer than the parent trick already
+/// falls back to).
+fn read_recorded_root(common: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(common.join(ROOT_FILE)).ok()?;
+    let path = PathBuf::from(raw.trim());
+    path.is_dir().then_some(path)
 }
 
 /// The common git directory itself behind `dir` — `Ok(None)` for a bare
@@ -794,10 +897,17 @@ fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
     };
     let common = PathBuf::from(common.trim());
     // A bare repo has no checkout to speak of — a real fact about it, not a
-    // failure to resolve one.
-    let is_git_dir =
-        common.file_name().is_some_and(|name| name == "git") || common.ends_with(".git");
-    if !is_git_dir {
+    // failure to resolve one. Asked of git directly, not guessed from the
+    // common directory's name: a `--separate-git-dir` clone can name its
+    // git directory anything at all (`repos/foo.git`, a bare `elsewhere`,
+    // …), and a name-based guess read every one of those as "not a git
+    // repository" — refusing a real repository for a "has no git
+    // repository behind it" reason that was simply false.
+    // The first `run` above already proved `git` runs and `dir` is inside a
+    // repository, so a failure here is a real one — the same `Err`, never
+    // `None`, every other unexpected failure in this function already is.
+    let is_bare = run(dir, "git", &["rev-parse", "--is-bare-repository"])?.trim() == "true";
+    if is_bare {
         return Ok(None);
     }
     // Canonicalized so it compares against the `start` every caller has
@@ -858,6 +968,12 @@ fn commit_exists(dir: &Path, commit: &str) -> bool {
 /// git directory — see [`stamped_id`] and [`project_identity`].
 const ID_FILE: &str = "spoolway-id";
 const LABEL_FILE: &str = "spoolway-label";
+/// Where [`stamped_id`] records the checkout it was called on, inside the
+/// same common git directory — the one thing neither `.git`'s own layout nor
+/// any `git rev-parse` flag answers for a `--separate-git-dir` clone or a
+/// submodule, where the common directory need not sit inside the checkout
+/// at all, so its parent is not reliably the checkout. See [`main_checkout`].
+const ROOT_FILE: &str = "spoolway-root";
 
 /// How many characters a stamped id is drawn to. Six lowercase-alphanumeric
 /// characters is short enough to read comfortably in a directory name
@@ -895,10 +1011,15 @@ pub fn stamped_id(dir: &Path) -> Result<Option<(String, bool)>> {
     let Some(common) = common_git_dir(dir)? else {
         return Ok(None);
     };
-    let checkout = common
-        .parent()
-        .with_context(|| format!("{} has no parent directory", common.display()))?
-        .to_path_buf();
+    // `dir` *is* the checkout being stamped — every caller passes the
+    // directory `spoolway init` (or `bind_unstamped`) is actually running
+    // on. Deriving it instead from `common`'s parent used to be how this
+    // read back a different directory entirely for a `--separate-git-dir`
+    // clone or a submodule, where the common git directory need not sit
+    // inside the checkout at all.
+    let checkout = dir
+        .canonical()
+        .with_context(|| format!("resolving {}", dir.display()))?;
     let (id, minted) = read_or_mint(&common.join(ID_FILE), is_valid_id, generate_id)?;
     // Established alongside the id, not read back until later: `stamped_id`
     // is the one call that is allowed to write at all, so this is where the
@@ -912,6 +1033,12 @@ pub fn stamped_id(dir: &Path) -> Result<Option<(String, bool)>> {
     read_or_mint(&common.join(LABEL_FILE), is_valid_label, || {
         sanitize_label(&crate::mux::project_label(&checkout))
     })?;
+    // Recorded fresh on every call, unlike the id and label above: this is
+    // a locator, not an identity, and it is the only way a later call made
+    // from a linked worktree — whose own `--git-common-dir` points at this
+    // same file — can find the checkout again when `common`'s parent does
+    // not name it. See [`main_checkout`].
+    crate::task::write_atomic(&common.join(ROOT_FILE), checkout.display().to_string())?;
     Ok(Some((id, minted)))
 }
 
@@ -948,10 +1075,14 @@ pub fn project_identity(dir: &Path) -> Result<Option<(PathBuf, String, String)>>
     let Some(common) = common_git_dir(dir)? else {
         return Ok(None);
     };
-    let checkout = common
-        .parent()
-        .with_context(|| format!("{} has no parent directory", common.display()))?
-        .to_path_buf();
+    // `recorded_or_parent` only fails to resolve a checkout that has never
+    // been stamped — the same checkout `peek` below would answer `None` for
+    // anyway, since `stamped_id` always writes the recorded path alongside
+    // the id and label in the one call that writes either. Folded into the
+    // same "nothing stamped here yet" answer rather than guessed past.
+    let Some(checkout) = recorded_or_parent(&common) else {
+        return Ok(None);
+    };
     let Some(id) = peek(&common.join(ID_FILE), is_valid_id)? else {
         return Ok(None);
     };
@@ -2366,6 +2497,7 @@ pub(crate) fn adopt(root: &Path, name: &str) -> Result<PathBuf> {
 /// `is_bare_filename` then refuses.
 fn adopt_workspace_clone(root: &Path, workspace_name: &str, dispatcher: &str) -> Result<PathBuf> {
     require_utf8_root(root)?;
+    require_git_repository(root)?;
     if !crate::tracking::is_bare_filename(workspace_name)
         || !crate::tracking::is_bare_filename(dispatcher)
     {
@@ -2560,6 +2692,7 @@ pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
 /// `project.toml` is the whole of the binding.
 pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
     require_utf8_root(root)?;
+    require_git_repository(root)?;
     let state = crate::mux::state_root();
     std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
     let label = sanitize_label(&crate::mux::project_label(root));
@@ -2612,6 +2745,7 @@ pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
 /// to. A checkout the workspace already lists keeps its own entry.
 pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> {
     require_utf8_root(root)?;
+    require_git_repository(root)?;
     if !crate::tracking::is_bare_filename(name) {
         bail!("`{name}` is not a workspace name — it cannot carry a path separator or a `..`");
     }
@@ -2755,6 +2889,28 @@ fn require_utf8_root(root: &Path) -> Result<()> {
              losslessly and would stop matching this checkout on every later command\n  rename \
              the checkout, or the directory it sits in, to a UTF-8-safe path first",
             root.display(),
+        );
+    }
+    Ok(())
+}
+
+/// Refuse `root` for home mode exactly as repo mode already does: with no
+/// git repository behind it, `common_git_dir` never resolves, and the
+/// ancestor walk in [`Repo::root`] that `.spoolway/`'s discovery relies on to
+/// stop somewhere has no git toplevel to bound it at either — a non-git
+/// folder accepted into a workspace here would read "no spoolway project
+/// found" from any subdirectory walked past the folder itself, exactly the
+/// unbounded walk that check exists to prevent. Called by every write that
+/// lists a checkout in a workspace: [`create_workspace`], [`join_workspace`]
+/// and [`adopt_workspace_clone`] — the three places `--setup home` and
+/// `--adopt <workspace>/<dispatcher>` reach.
+fn require_git_repository(root: &Path) -> Result<()> {
+    if common_git_dir(root)?.is_none() {
+        bail!(
+            "{} has no git repository behind it — spoolway finds a home-mode checkout again \
+             through its git toplevel, so there is nowhere to bound that search without one. \
+             Run `git init` here first.",
+            root.display()
         );
     }
     Ok(())
@@ -3408,6 +3564,74 @@ mod tests {
         );
     }
 
+    /// A project stamped by a spoolway built before `spoolway-root` existed
+    /// carries only the id and label files in its common git directory —
+    /// `main_checkout`'s verified parent trick has to be what resolves it,
+    /// never a recorded path that was never written. Both the main checkout
+    /// and a linked worktree of it must still bind to the one home already
+    /// on record, and a repeat `init` must never mint a second one.
+    #[test]
+    fn a_project_stamped_before_spoolway_root_existed_still_binds_from_every_checkout() {
+        let (_origin, work) = fixture("pre-root-file-stamp");
+        let common = work.join(".git");
+        let home = scratch_home("pre-root-file-stamp");
+
+        let home_dir = crate::platform::test_home::with_home(&home, || {
+            // Set up for real first, exactly as a 0.6.0 binary would, then
+            // take away only what 0.6.0 never wrote — the recorded path a
+            // newer binary's `stamped_id` adds alongside the id and label.
+            let home_dir = Repo::discover(&work).unwrap().home;
+            std::fs::remove_file(common.join(ROOT_FILE)).unwrap();
+            home_dir
+        });
+
+        let wt = work.parent().unwrap().join("pre-root-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        crate::platform::test_home::with_home(&home, || {
+            let home_from_main = Repo::discover(&work).unwrap().home;
+            let home_from_worktree = Repo::discover(&wt).unwrap().home;
+            assert_eq!(
+                home_from_main, home_dir,
+                "the main checkout must still bind to the home already on record"
+            );
+            assert_eq!(
+                home_from_worktree, home_dir,
+                "a linked worktree of a pre-upgrade stamp must bind to the same home, \
+                 not mint a second one"
+            );
+
+            // A repeat `init` must read the same stamp back, not mint a
+            // second id alongside it.
+            let (id_again, minted_again) = stamped_id(&work).unwrap().unwrap();
+            assert!(
+                !minted_again,
+                "a pre-upgrade stamp must be read, not re-minted"
+            );
+            assert_eq!(
+                std::fs::read_to_string(common.join(ID_FILE))
+                    .unwrap()
+                    .trim(),
+                id_again
+            );
+        });
+
+        git(
+            &work,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+    }
+
     /// A linked worktree's own git dir, `.git/worktrees/<name>`, holds
     /// `index.lock` — but not the objects a `git add` writes or the branch
     /// ref a `git commit` moves, which live in the main checkout's shared
@@ -3473,6 +3697,141 @@ mod tests {
         git(
             &work,
             &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+    }
+
+    /// A `--separate-git-dir` clone's common git directory can sit anywhere
+    /// at all, so `main_checkout`'s old parent-of-common-dir trick named the
+    /// wrong directory for every linked worktree of one. `spoolway init`
+    /// records the real checkout once, via `stamped_id`, and this is that
+    /// record surviving a lookup made from a linked worktree whose own
+    /// `--git-common-dir` points at the very same file.
+    #[test]
+    fn main_checkout_resolves_a_separate_git_dirs_linked_worktree() {
+        let base = crate::scratch::root("repo-test-separate-git-dir");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Named `git` on purpose, not `foo.git`: the parent `elsewhere` is
+        // then plainly no checkout. A conventionally named one is covered by
+        // `common_git_dir_tells_bare_from_a_separate_git_dir_by_asking_git_not_the_name`.
+        let git_dir = base.join("elsewhere").join("git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        run(
+            &base,
+            "git",
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+
+        // Before `spoolway init` has ever run here, there is nothing
+        // recorded yet, and the parent trick does not verify (the common
+        // directory's parent is not itself a git repository) — so this must
+        // answer `None`, not a wrong guess. Guessing the unverified parent
+        // here used to be `main_checkout`'s own fallback, and it broke the
+        // very first `spoolway init` in a fresh clone like this one: `None`
+        // is what lets `init_root` fall through to `toplevel_raw` instead,
+        // which answers `work` correctly — see
+        // `init_root_falls_through_to_toplevel_for_an_unstamped_separate_git_dir_clone`
+        // below for that end-to-end path.
+        assert!(
+            main_checkout(&work).is_none(),
+            "sanity check: an unstamped --separate-git-dir checkout must \
+             resolve to nothing yet, not a wrong guess"
+        );
+
+        stamped_id(&work).unwrap(); // stands in for `spoolway init`
+
+        assert_eq!(
+            main_checkout(&work).unwrap().canonical().unwrap(),
+            work.canonical().unwrap(),
+            "the main checkout must resolve to itself once stamped"
+        );
+
+        let wt = base.join("task-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            main_checkout(&wt).unwrap().canonical().unwrap(),
+            work.canonical().unwrap(),
+            "a linked worktree of a --separate-git-dir clone must resolve \
+             to the main checkout, not wherever its common git directory \
+             happens to live"
+        );
+    }
+
+    /// `common_git_dir` used to guess "bare repository" from the common
+    /// directory's own name — anything not literally `.git` or `git` — which
+    /// read a real, non-bare `--separate-git-dir` clone named the ordinary
+    /// way (`repos/foo.git`, a bare `elsewhere`) as having no git repository
+    /// at all. Asked of git directly instead, `--is-bare-repository`, so
+    /// both a conventionally-named separate git directory and a real bare
+    /// repository are told apart correctly regardless of what either is
+    /// called.
+    #[test]
+    fn common_git_dir_tells_bare_from_a_separate_git_dir_by_asking_git_not_the_name() {
+        let base = crate::scratch::root("repo-test-common-git-dir-naming");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("repos")).unwrap();
+
+        // Named the way a person actually would: `foo.git`, not `git`.
+        let git_dir = base.join("repos").join("foo.git");
+        let work = base.join("work");
+        run(
+            &base,
+            "git",
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        assert!(
+            common_git_dir(&work).unwrap().is_some(),
+            "a real, non-bare --separate-git-dir clone must resolve even \
+             when its git directory is not named `.git` or `git`"
+        );
+
+        // A real bare repository, also named `foo.git` — the exact name
+        // that used to be mistaken for a real, resolvable git directory.
+        let bare = base.join("repos").join("bare-example.git");
+        run(
+            &base,
+            "git",
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(
+            common_git_dir(&bare).unwrap().is_none(),
+            "a real bare repository must still answer `None`, whatever it is named"
         );
     }
 

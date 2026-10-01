@@ -425,6 +425,7 @@ mod tests {
         let root = crate::scratch::root("config-path-home-mode");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
         let fake_home = root.parent().unwrap().join(format!(
             "{}-realhome",
             root.file_name().unwrap().to_string_lossy()

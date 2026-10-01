@@ -296,6 +296,30 @@ impl Placement {
     /// is not something `init` does, and a silent repeat run would read as
     /// if it had.
     fn choose(root: &Path, args: &InitArgs) -> Result<Self> {
+        let placement = Self::choose_any(root, args)?;
+        // Repo mode only: `root` being `$HOME` itself means its tracked
+        // `.spoolway/` would be the very directory `crate::mux::state_root()`
+        // names, spoolway's own state root. Home mode writes nothing into the
+        // checkout, so a dotfiles repository in `$HOME` can still be a
+        // home-mode clone. Refused here, before anything is written, because
+        // going on used to fail deep inside `init` with a raw "file name
+        // contained an unexpected NUL byte" — see
+        // `crate::config::tracked_setup_dir_in`.
+        if matches!(placement, Self::Repo) && crate::config::is_state_root_checkout(root) {
+            bail!(
+                "{} is your home directory, and `~/.spoolway` there is spoolway's own state \
+                 directory — it can never also hold a project's tracked setup\n  run `spoolway \
+                 init --setup home` to keep this checkout's setup under `~/.spoolway/` instead, \
+                 or run `spoolway init` inside the actual project checkout",
+                root.display()
+            );
+        }
+        Ok(placement)
+    }
+
+    /// [`Self::choose`] before its one refusal that depends on the mode
+    /// chosen.
+    fn choose_any(root: &Path, args: &InitArgs) -> Result<Self> {
         if args.adopt.is_some() || args.new_id {
             return Ok(Self::Repo);
         }
@@ -1145,6 +1169,142 @@ mod tests {
             said.contains("git repository"),
             "the refusal names the actual reason: {said}"
         );
+    }
+
+    /// Home mode used to call `create_workspace`/`join_workspace` before any
+    /// git check at all — a non-git folder was accepted into a fresh
+    /// workspace, registered by a path that no later command could ever
+    /// walk back up from with a bounded search. `--setup home` must refuse
+    /// it exactly as the ordinary repo-mode case above does.
+    #[test]
+    fn init_setup_home_refuses_a_directory_with_no_git_repository() {
+        let parent = crate::scratch::root("init-home-no-git");
+        let home = parent.join("home");
+        let root = parent.join("nogit");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let err =
+            crate::platform::test_home::with_home(&home, || init(&root, &home_args(NEW_WORKSPACE)))
+                .expect_err("no .git here at all");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("git repository"),
+            "the refusal names the actual reason: {said}"
+        );
+        assert!(
+            crate::repo::workspace_clone(&root).is_none(),
+            "a refused checkout must never end up listed in a workspace"
+        );
+    }
+
+    /// `$HOME` being a real git repository (a dotfiles checkout) used to
+    /// reach `setup_dir_in`'s own fallback for "nothing tracked here yet",
+    /// which joins `.spoolway` onto `$HOME` — exactly
+    /// `crate::mux::state_root()` — and then tried to write project files
+    /// through the NUL-poisoned path `tracked_setup_dir_in` hands back for
+    /// that one identity collision, failing deep inside `init` with a raw
+    /// "file name contained an unexpected NUL byte" rather than a real
+    /// refusal. `Placement::choose` must catch this first, by name, before
+    /// anything is written at all.
+    #[test]
+    fn repo_mode_init_refuses_outright_when_the_checkout_is_home_itself() {
+        let home = crate::scratch::root("init-home-is-the-checkout");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::scratch::git_init(&home, &["-b", "main"]);
+
+        let err = crate::platform::test_home::with_home(&home, || init(&home, &confirmed()))
+            .expect_err("$HOME itself can never be a project checkout");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("your home directory") && said.contains("state directory"),
+            "the refusal names the actual reason, with no raw NUL-byte error: {said}"
+        );
+        assert!(
+            !home.join(".git").join("spoolway-id").exists(),
+            "nothing must be stamped before the refusal"
+        );
+    }
+
+    /// Home mode writes nothing into the checkout, so `~/.spoolway` being
+    /// spoolway's own state directory is no conflict for it. A dotfiles
+    /// repository in `$HOME` must still be set up as a home-mode clone, not
+    /// caught by the refusal the repo-mode test above checks.
+    #[test]
+    fn home_mode_init_in_a_git_home_lists_home_as_a_clone() {
+        let home = crate::scratch::root("init-home-mode-in-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::scratch::git_init(&home, &["-b", "main"]);
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&home, &home_args(NEW_WORKSPACE)).expect("home mode in $HOME");
+            assert!(
+                crate::repo::workspace_clone(&home).is_some(),
+                "$HOME is listed as a clone of the new workspace"
+            );
+        });
+    }
+
+    /// Home mode stamps nothing into a clone, so a `--separate-git-dir`
+    /// clone's linked worktrees have no recorded path to find the main
+    /// checkout by, and the parent of the git directory is not it. They
+    /// have to be matched to the workspace entry by common git directory,
+    /// or every lane worktree cut from such a clone reads "no spoolway
+    /// project found" — the task's own third repro.
+    #[test]
+    fn a_home_mode_separate_git_dir_clone_is_found_from_its_linked_worktree() {
+        let parent = crate::scratch::root("init-home-separate-git-dir");
+        let _ = std::fs::remove_dir_all(&parent);
+        let home = parent.join("home");
+        std::fs::create_dir_all(parent.join("repos")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let work = parent.join("work");
+        let git_dir = parent.join("repos").join("foo.git");
+        crate::repo::run(
+            &parent,
+            "git",
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        for (key, value) in [("user.email", "t@example.com"), ("user.name", "t")] {
+            crate::repo::run(&work, "git", &["config", key, value]).unwrap();
+        }
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        crate::repo::run(&work, "git", &["add", "f.txt"]).unwrap();
+        crate::repo::run(&work, "git", &["commit", "-q", "-m", "x"]).unwrap();
+        let wt = parent.join("task-wt");
+        crate::repo::run(
+            &work,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&work, &home_args(NEW_WORKSPACE)).expect("home-mode init");
+            let repo = crate::repo::Repo::discover(&wt).expect("the worktree finds its project");
+            assert_eq!(
+                crate::platform::PathExt::canonical(&repo.root).unwrap(),
+                crate::platform::PathExt::canonical(&work).unwrap(),
+                "the worktree resolves to the listed main checkout"
+            );
+        });
     }
 
     /// A real git repository whose stamp cannot be written — the common git

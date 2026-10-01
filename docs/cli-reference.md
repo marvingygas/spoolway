@@ -915,6 +915,11 @@ keybinding rather than typed in a directory you were looking at. Answering no wr
 exits 0. With nobody there to answer, that question takes its default, which is no, so a script
 or CI runner passes `--yes`.
 
+Run from a linked worktree, the directory it resolves to is the main checkout the worktree was
+cut from, never the worktree itself — `init` never writes into a worktree or binds it as its own
+project. When the main checkout cannot be found this way, `init` refuses and says to run it in
+the main checkout, or to pass `-C <main checkout>`.
+
 `Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
 default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
 `home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
@@ -922,7 +927,13 @@ checkout or its `.git`. With no workspace yet, home mode creates one; with works
 there, `init` also asks `Which workspace should this checkout use?`, and `--workspace <name>`
 or `--workspace new` answers it. Joining a workspace keeps its `config/` exactly as it is and
 skips the example and tracker questions. With nobody to ask and no `--workspace`, `init` starts
-a new workspace rather than joining one unasked. See [Home mode](concepts.md#home-mode).
+a new workspace rather than joining one unasked. See [Home mode](concepts.md#home-mode). Either
+mode needs a real git repository behind the checkout; a plain folder is refused.
+
+Repo mode refuses outright, before writing anything, when the checkout is your home directory:
+`~/.spoolway` there is already spoolway's own state directory, so it can never also hold a
+project's tracked setup. The refusal says to run `--setup home` instead, or to run `init` in the
+actual project checkout. Home mode is unaffected, since it never writes into the checkout.
 
 Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
 already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and

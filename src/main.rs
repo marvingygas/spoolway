@@ -599,11 +599,185 @@ fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Where `spoolway init` should place `.spoolway/`: the git toplevel if there is
-/// one, otherwise here.
+/// Where `spoolway init` should place `.spoolway/`: the main checkout if
+/// `cwd` is a linked worktree of one, the git toplevel if there is one,
+/// otherwise here.
+///
+/// `repo::main_checkout` first, ahead of `toplevel_raw`: a linked
+/// worktree's own `git rev-parse --show-toplevel` answers with the
+/// worktree itself, which is never where `init` should write — it would
+/// set up a second, ignored project there and still stamp the shared
+/// `.git`. `main_checkout` answers `Some` of the checkout itself for every
+/// ordinary repository too, not only a linked worktree's, so `toplevel_raw`
+/// is reached only for a non-git folder or a checkout `main_checkout`
+/// cannot yet resolve — a fresh `--separate-git-dir` clone or submodule
+/// nothing has stamped or listed in a workspace.
+///
+/// From the main checkout of such a clone, `toplevel_raw` answers the
+/// checkout itself, which is right. From a linked worktree of one it
+/// answers the worktree, and git has no way to name the main checkout
+/// either (`git worktree list` gives the git directory in its place), so
+/// that case is refused: setting up the worktree would register a path the
+/// main checkout and every other worktree never find again.
 fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
+    if let Some(main) = repo::main_checkout(cwd) {
+        return Ok(main);
+    }
+    if repo::is_linked_worktree(cwd) {
+        anyhow::bail!(
+            "{} is a linked worktree, and spoolway cannot tell which checkout it was cut from, \
+             because its git directory sits outside that checkout\n  run `spoolway init` in \
+             the main checkout first, or pass `-C <main checkout>` — every worktree finds the \
+             project from there afterwards",
+            cwd.display()
+        );
+    }
     match repo::toplevel_raw(cwd) {
         Ok(top) => Ok(top),
         Err(_) => Ok(cwd.to_path_buf()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::PathExt;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?}: {e}"));
+        assert!(status.success(), "git {args:?} in {dir:?} failed");
+    }
+
+    /// `init_root` picks the folder `spoolway init` writes into. A linked
+    /// worktree's own `git rev-parse --show-toplevel` answers with the
+    /// worktree itself, not the main checkout it was cut from — so running
+    /// `init` from inside one must still resolve to the main checkout,
+    /// never the worktree, or it sets up a second, ignored project there.
+    #[test]
+    fn init_root_from_a_linked_worktree_resolves_to_the_main_checkout() {
+        let base = crate::scratch::root("init-root-worktree");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+
+        let wt = base.join("task-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let root = init_root(&wt).unwrap();
+        assert_eq!(
+            root.canonical().unwrap(),
+            work.canonical().unwrap(),
+            "`spoolway init` run from a linked worktree must act on the \
+             main checkout {work:?}, not the worktree {wt:?} it was \
+             resolved from — got {root:?}"
+        );
+    }
+
+    /// `repo::main_checkout` answers `None`, not a wrong guess, for a fresh
+    /// `--separate-git-dir` clone nothing has stamped yet — see that
+    /// function's own doc. `init_root` has to fall through to `toplevel_raw`
+    /// for that case, which answers the checkout itself correctly, or the
+    /// very first `spoolway init` in such a clone would write into — and
+    /// stamp — the wrong folder entirely, with no way to ever reach the
+    /// real one afterwards.
+    #[test]
+    fn init_root_falls_through_to_toplevel_for_an_unstamped_separate_git_dir_clone() {
+        let base = crate::scratch::root("init-root-separate-git-dir");
+        let _ = std::fs::remove_dir_all(&base);
+        let git_dir = base.join("elsewhere").join("git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+
+        let root = init_root(&work).unwrap();
+        assert_eq!(
+            root.canonical().unwrap(),
+            work.canonical().unwrap(),
+            "the very first `spoolway init` in a fresh --separate-git-dir \
+             clone must still target the checkout itself, not the git \
+             directory's own parent — got {root:?}"
+        );
+    }
+
+    /// From a linked worktree of a `--separate-git-dir` clone that nothing
+    /// has stamped or listed, neither `main_checkout` nor git can name the
+    /// main checkout, and `toplevel_raw` answers the worktree itself.
+    /// `init_root` must refuse rather than hand that worktree to `init`,
+    /// which registered it as a project no other checkout could find.
+    #[test]
+    fn init_root_refuses_a_linked_worktree_whose_main_checkout_cannot_be_found() {
+        let base = crate::scratch::root("init-root-separate-git-dir-worktree");
+        let _ = std::fs::remove_dir_all(&base);
+        let git_dir = base.join("repos").join("foo.git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+        let wt = base.join("task-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let err = crate::platform::test_home::with_home(&base.join("home"), || init_root(&wt))
+            .expect_err("the worktree must not be taken for the project");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("linked worktree") && said.contains("main checkout"),
+            "the refusal says to run init in the main checkout: {said}"
+        );
     }
 }

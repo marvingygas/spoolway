@@ -46,7 +46,8 @@ checkout, the command prints a [`checkout:` line](cli-reference.md#the-checkout-
 ## Home mode
 
 A checkout with no `.spoolway/` can still be a project. This works when some workspace under
-`~/.spoolway/` lists the checkout's path. A workspace is an ordinary folder there, holding a
+`~/.spoolway/` lists the checkout's path. Home mode refuses a checkout with no git repository
+behind it. A workspace is an ordinary folder there, holding a
 `config/` and a `project.toml`. The `project.toml` lists a `clones` entry for each checkout
 that shares it: the checkout's absolute path, and the name of a `dispatchers/` subfolder that
 holds its queue, archive, worktrees and lock.
@@ -83,9 +84,10 @@ Re-attach a clone that moved or was re-cloned with `spoolway init --adopt
 keeps its dispatcher folder. The "no spoolway project found" error lists this exact command for
 every clone entry whose folder is gone.
 
-`--adopt <workspace>/<dispatcher>` is refused when the entry's current root still exists as a
-live git checkout, when the checkout being adopted is already listed in any workspace, when it
-has a tracked `.spoolway/`, or when it is a different repository from the one the entry was set
+`--adopt <workspace>/<dispatcher>` is refused when the checkout being adopted has no git
+repository behind it, when the entry's current root still exists as a live git checkout, when
+the checkout being adopted is already listed in any workspace, when it has a tracked
+`.spoolway/`, or when it is a different repository from the one the entry was set
 up for. Each refusal says why, and what to run instead.
 
 `--new-id`, and `--adopt <name>` with no workspace prefix, are also refused on a checkout a
