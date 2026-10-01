@@ -462,6 +462,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 |---|---|
 | `[tab]` | Switch between the lanes table and the directory table |
 | `[↑↓]` | Move the cursor |
+| `[a]` / `[d]` | Open the sort popup, ascending or descending |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the rows on screen to `.spoolway/evals/eval-by-<by>-<date>-<time>.csv` |
 | `[r]` | Refresh |
@@ -483,6 +484,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `--discard <ID>` | | Delete a whole trial: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | | Print the lanes table's rows as CSV |
+| `--sort <column>[:asc\|:desc]` | | Sort the rows by one column, descending when the direction is left off. Not with `--discard` |
 
 `--json` prints `{"by", "rows", "total"}` rather than a bare array.
 

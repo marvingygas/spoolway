@@ -37,11 +37,32 @@ it shows.
 | Key | What it does |
 |---|---|
 | `[↑↓]` | Move the cursor |
+| `[a]` | Open the sort popup, ascending |
+| `[d]` | Open the sort popup, descending |
 | `[tab]` | Switch to the other table |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the rows on screen to a CSV file |
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
+
+### The sort popup
+
+`[a]` or `[d]` opens a popup listing `default order`, then every column the table draws.
+`[↑↓]` moves, `[enter]` sorts by the chosen column in that direction, `[esc]` closes the popup
+unchanged. The sorted header shows `▲` (ascending) or `▼` (descending) in the space before its
+name, so no column moves.
+
+The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts correctly against
+`54m` and `54.2k` against `9.1M`. Ties keep the table's default order. A blank figure, such as
+`—` or an unpriced `USD`, sorts last in both directions, and the `Total` line always stays
+last.
+
+The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
+own sort. The cursor moves to the first row after a sort. A view that does not draw the sorted
+column falls back to the default order until that column comes back.
+
+A sort carries into every export of the rows it orders: `[e]` writes whatever order the
+screen shows, and `--sort` orders `--csv` and `--json` the same way.
 
 ## The lanes table
 
@@ -115,6 +136,11 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--force` | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | Print the rows as CSV |
 | `--json` | Print the rows as JSON |
+| `--sort <column>[:asc\|:desc]` | Sort the rows by one column, descending when the direction is left off |
+
+`--sort` takes a column name the way `--csv`'s header spells it, below. An unknown name is
+refused, naming every column `--by`'s current value accepts. It cannot be combined with
+`--discard`.
 
 A trial forks one group into one arm per task, each under its own pipeline, all under one
 trial id. See [Trials](planning.md#trials).
@@ -132,7 +158,8 @@ cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
 
 The delta line reads each later arm against the first, on pass rate, cost and time. The sign
-says which way it moved, not which arm is better.
+says which way it moved, not which arm is better. A `--sort` can put a later arm on top; the
+delta line still reads against the arm that started first.
 
 ## The directory table
 

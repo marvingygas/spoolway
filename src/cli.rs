@@ -564,6 +564,12 @@ pub struct EvalArgs {
     /// The same rows this would print, as CSV.
     #[arg(long)]
     pub csv: bool,
+
+    /// Sort the rows by one column: its name as `--csv` spells it in the
+    /// header, then `:asc` or `:desc` — descending when left off. Every
+    /// output keeps the order: the table, `--csv` and `--json`'s `rows`.
+    #[arg(long, value_name = "COLUMN[:asc|:desc]", conflicts_with = "discard")]
+    pub sort: Option<String>,
 }
 
 // `Default` is what a test scaffolds with, and it is the *non-interactive*

@@ -32,7 +32,7 @@ use crate::cli::{EvalArgs, EvalBy};
 use crate::fmt::csv_field;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-use crate::screen::{Key, PollableRead, boxed, key_hint, overlay, pad_to, panel};
+use crate::screen::{Key, PollableRead, boxed, key_hint, keys, overlay, pad_to, panel};
 use crate::usage::{Entry, ModelPrice, Tokens};
 
 /// The printing path: every `spoolway eval` with a flag of its own. The
@@ -41,9 +41,27 @@ use crate::usage::{Entry, ModelPrice, Tokens};
 /// walk order, and is `None` when the project's pipelines do not load: the
 /// ledger is still worth reading then, with steps falling back to name order.
 pub fn run(repo: &Repo, args: &EvalArgs, json: bool, pipelines: Option<&Pipelines>) -> Result<()> {
+    run_to(repo, args, json, pipelines, &mut std::io::stdout().lock())
+}
+
+/// [`run`], printing to `out` — apart so a test can read what it printed.
+fn run_to(
+    repo: &Repo,
+    args: &EvalArgs,
+    json: bool,
+    pipelines: Option<&Pipelines>,
+    out: &mut impl std::io::Write,
+) -> Result<()> {
     if json && args.csv {
         bail!("`--csv` and `--json` are two different exports of the same rows — pick one");
     }
+    // Checked before the ledger is read, so a typo is refused the same way
+    // whether or not there is anything yet to sort.
+    let sort = args
+        .sort
+        .as_deref()
+        .map(|text| parse_sort(args.by, text))
+        .transpose()?;
 
     // Reading is also what catches the ledger up — see `usage::sweep`.
     crate::usage::sweep(repo);
@@ -88,14 +106,15 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool, pipelines: Option<&Pipeline
 
     if entries.is_empty() {
         if args.trial.is_some() {
-            println!("No runs recorded for that trial yet.");
+            writeln!(out, "No runs recorded for that trial yet.")?;
             return Ok(());
         }
-        println!("Nothing to compare in {} yet.", scope.what);
-        println!(
+        writeln!(out, "Nothing to compare in {} yet.", scope.what)?;
+        writeln!(
+            out,
             "A lane is recorded when a step finishes, so this fills up as `spoolway \
              dispatch` runs."
-        );
+        )?;
         return Ok(());
     }
 
@@ -106,48 +125,65 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool, pipelines: Option<&Pipeline
     // the arm that started first — not whichever finished last, which is
     // what the newest-first order every other `--by task` reads in would put
     // on top.
-    if args.trial.is_some() && args.by == EvalBy::Task {
+    let trial_arms = args.trial.is_some() && args.by == EvalBy::Task;
+    if trial_arms {
         rows.sort_by(|a, b| a.first_ts.cmp(&b.first_ts));
+    }
+    // Named before `--sort` reorders the rows, which may put a later arm on
+    // top: every delta line still reads against the arm that started first.
+    // A run id is unique to its arm, so it finds that arm again afterwards.
+    let baseline_run = trial_arms.then(|| rows[0].keys[0].clone());
+    if let Some(sort) = &sort {
+        sort_lane_rows(args.by, &mut rows, sort);
     }
     let total = LaneTotal::of(&refs, &fallback);
 
     if json {
-        println!(
+        writeln!(
+            out,
             "{}",
             serde_json::to_string_pretty(&lanes_json(args.by, &rows, &total))?
-        );
+        )?;
         return Ok(());
     }
     if args.csv {
-        println!("{}", lanes_csv_header(args.by));
+        writeln!(out, "{}", lanes_csv_header(args.by))?;
         for row in &rows {
-            println!("{}", lanes_csv_row(args.by, row));
+            writeln!(out, "{}", lanes_csv_row(args.by, row))?;
         }
-        println!("{}", lanes_csv_total(args.by, &total));
+        writeln!(out, "{}", lanes_csv_total(args.by, &total))?;
         return Ok(());
     }
 
-    let table = lanes_table(args.by, &rows, &total);
-    println!("{}", dim(&table.header));
+    // No lead column here to carry a sorted first column's mark — see
+    // `mark_column` — so a printed table leaves that one column unmarked
+    // rather than shift every column by one.
+    let table = lanes_table(args.by, &rows, &total, sort.as_ref());
+    writeln!(out, "{}", dim(&table.header))?;
     for row in &table.rows {
-        println!("{row}");
+        writeln!(out, "{row}")?;
     }
-    println!("{}", table.total);
+    writeln!(out, "{}", table.total)?;
 
     // `--trial` asks the question a trial exists to answer: its own
     // comparison, not just a narrower version of the same table. Only under
     // `--by task`, where one row is one arm; under any other `by` a row
     // mixes arms and there is nothing to subtract.
-    if args.trial.is_some() && args.by == EvalBy::Task && rows.len() > 1 {
-        println!();
-        let baseline = &rows[0];
-        for row in &rows[1..] {
-            println!("{}", trial_delta_line(baseline, row));
+    if let Some(run) = baseline_run
+        && rows.len() > 1
+    {
+        writeln!(out)?;
+        let baseline = rows
+            .iter()
+            .find(|row| row.keys[0] == run)
+            .expect("the baseline arm is one of the rows");
+        for row in rows.iter().filter(|row| row.keys[0] != run) {
+            writeln!(out, "{}", trial_delta_line(baseline, row))?;
         }
     }
 
     if let Some(note) = unpriced_note(entries.iter()) {
-        println!("\n{note}");
+        writeln!(out, "\n{note}")?;
     }
     Ok(())
 }
@@ -520,7 +556,7 @@ impl LaneFilters<'_> {
 
 /// One row of the lanes table under whichever `by` built it.
 struct LaneRow {
-    /// The columns naming the row, as drawn — see [`lane_headers`].
+    /// The columns naming the row, as drawn — see [`lane_columns`].
     cells: Vec<String>,
     /// The same row's naming columns as an export spells them — see
     /// [`lane_csv_keys`]. Apart from `cells` because an export carries the
@@ -538,15 +574,58 @@ struct LaneRow {
 }
 
 /// The columns naming a row under each `by` — the only part of the table
-/// that changes with it.
-fn lane_headers(by: EvalBy) -> &'static [&'static str] {
+/// that changes with it — each beside the export column a sort on it reads:
+/// see [`lane_sort_value`].
+fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
     match by {
-        EvalBy::Group => &["GROUP"],
-        EvalBy::Task => &["TASK", "PIPELINE", "VER", "WHEN"],
-        EvalBy::Pipeline => &["PIPELINE"],
-        EvalBy::Step => &["PIPELINE", "STEP"],
-        EvalBy::Version => &["PIPELINE", "VERSION", "FIRST"],
+        EvalBy::Group => &[("GROUP", "group")],
+        EvalBy::Task => &[
+            ("TASK", "task"),
+            ("PIPELINE", "pipeline"),
+            ("VER", "pipeline_version"),
+            ("WHEN", "when"),
+        ],
+        EvalBy::Pipeline => &[("PIPELINE", "pipeline")],
+        EvalBy::Step => &[("PIPELINE", "pipeline"), ("STEP", "step")],
+        EvalBy::Version => &[
+            ("PIPELINE", "pipeline"),
+            ("VERSION", "pipeline_version"),
+            ("FIRST", "first"),
+        ],
     }
+}
+
+/// The figure columns, identical under every `by`, in the order
+/// [`lane_figures`] draws them — each beside the export column a sort on it
+/// reads. A per-run cell sorts on its per-run figure, not the total beside
+/// it in an export.
+const LANE_FIGURE_COLUMNS: [(&str, &str); 12] = [
+    ("RUNS", "runs"),
+    ("PASS", "pass"),
+    ("BLOCKS", "blocks"),
+    ("CTX PEAK AVG", "ctx_peak_avg_pct"),
+    ("CTX PEAK", "ctx_peak_pct"),
+    ("IN/RUN", "in_per_run"),
+    ("OUT/RUN", "out_per_run"),
+    ("CACHE R/RUN", "cache_read_per_run"),
+    ("CACHE W/RUN", "cache_write_per_run"),
+    ("USD", "cost_usd"),
+    ("USD/RUN", "cost_per_run"),
+    ("TIME/RUN", "time_per_run_s"),
+];
+
+/// Every column the lanes table draws over `rows`, left to right: `PROJECT`
+/// where [`spans_more_than_one_project`] gives it one, the `by`'s own, then
+/// the figures. What the sort popup lists, and what decides whether a sort
+/// still applies to the view on screen.
+fn drawn_lane_columns(by: EvalBy, rows: &[LaneRow]) -> Vec<(&'static str, &'static str)> {
+    let mut columns = Vec::new();
+    if spans_more_than_one_project(rows) {
+        columns.push(("PROJECT", "project"));
+    }
+    columns.extend(lane_columns(by));
+    columns.extend(LANE_FIGURE_COLUMNS);
+    columns
 }
 
 /// An export's naming columns under each `by`, between `project,by` and
@@ -567,7 +646,8 @@ fn lane_csv_keys(by: EvalBy) -> &'static [&'static str] {
 /// row name nobody could point at.
 const NO_GROUP: &str = "—";
 
-/// Every row `entries` makes under `by`, in the order the table reads.
+/// Every row `entries` makes under `by`, in the table's default order — the
+/// one it reads in until a sort reorders it, and the one a sort's ties keep.
 ///
 /// Group, task and pipeline read newest first — whichever row's newest lane
 /// is newest leads, so this morning's work heads the table. Step keeps each
@@ -779,6 +859,9 @@ impl LaneTotal {
 /// them as they are.
 struct Table {
     header: String,
+    /// The sort mark for a sorted first column, which has no space of its
+    /// own in `header` to carry one — `' '` otherwise. See [`mark_column`].
+    lead: char,
     rows: Vec<String>,
     total: String,
 }
@@ -831,9 +914,14 @@ fn spans_more_than_one_project(rows: &[LaneRow]) -> bool {
         > 1
 }
 
-fn lanes_table(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> Table {
+/// The lanes table over `rows`, in the order they are given. `sort` only
+/// marks its column's header; the rows are already sorted by then.
+fn lanes_table(by: EvalBy, rows: &[LaneRow], total: &LaneTotal, sort: Option<&Sort>) -> Table {
     let show_project = spans_more_than_one_project(rows);
-    let mut headers: Vec<String> = lane_headers(by).iter().map(|h| h.to_string()).collect();
+    let mut headers: Vec<String> = lane_columns(by)
+        .iter()
+        .map(|(h, _)| h.to_string())
+        .collect();
     let mut body: Vec<Vec<String>> = rows.iter().map(|r| r.cells.clone()).collect();
     if show_project {
         headers.insert(0, "PROJECT".to_string());
@@ -858,21 +946,9 @@ fn lanes_table(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> Table {
     let header = format!(
         "{}{}",
         naming(&headers, &widths),
-        lane_figures([
-            "RUNS",
-            "PASS",
-            "BLOCKS",
-            "CTX PEAK AVG",
-            "CTX PEAK",
-            "IN/RUN",
-            "OUT/RUN",
-            "CACHE R/RUN",
-            "CACHE W/RUN",
-            "USD",
-            "USD/RUN",
-            "TIME/RUN",
-        ])
+        lane_figures(LANE_FIGURE_COLUMNS.map(|(h, _)| h))
     );
+    let (header, lead) = marked_header(header, &drawn_lane_columns(by, rows), sort);
     let lines = body
         .iter()
         .zip(rows)
@@ -924,6 +1000,7 @@ fn lanes_table(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> Table {
     .to_string();
     Table {
         header,
+        lead,
         rows: lines,
         total,
     }
@@ -1105,6 +1182,234 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
             "cost_usd": (total.lines > total.unpriced).then_some(total.cost),
         },
     })
+}
+
+// ------------------------------------------------------------------ sorting
+//
+// Every table prints in one default order — see `lane_rows`, `dir_rows` and
+// `list_sessions` — and a sort only ever reorders what that order already
+// laid out. Rust's `sort_by` is stable, so rows the sorted column ties on
+// keep their default order between them.
+//
+// A sort names its column the way an export's header does (`pass`,
+// `cost_usd`, `time_per_run_s`), never the way the screen's header does
+// (`PASS`, `USD`, `TIME/RUN`): the export spelling is the one `--sort`
+// already has to take, and one key per column is what lets a sort outlive a
+// change of `by` wherever the new view still draws that column.
+//
+// What a row sorts on is its raw figure, never its drawn cell — as text,
+// `1h 20m` sorts under `35m` and `54.2k` under `9.1M`.
+
+/// One table's sort: the export column it reads, and which way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Sort {
+    key: String,
+    descending: bool,
+}
+
+impl Sort {
+    /// The arrow the sorted column's header carries.
+    fn mark(&self) -> char {
+        match self.descending {
+            true => '▼',
+            false => '▲',
+        }
+    }
+}
+
+/// `--sort <column>[:asc|:desc]`, checked against `--by`'s own export
+/// header. An unknown column is an error naming every one there is: a typo
+/// that quietly sorted nothing would print the default order under a flag
+/// that claims otherwise.
+fn parse_sort(by: EvalBy, text: &str) -> Result<Sort> {
+    let (key, descending) = match text.rsplit_once(':') {
+        Some((key, "asc")) => (key, false),
+        Some((key, "desc")) => (key, true),
+        Some((_, other)) => {
+            bail!("`--sort {text}`: the direction after `:` is `asc` or `desc`, not `{other}`")
+        }
+        None => (text, true),
+    };
+    let header = lanes_csv_header(by);
+    if !header.split(',').any(|name| name == key) {
+        bail!(
+            "`--sort` has no column `{key}` under `--by {}` — pick one of: {}",
+            by.label(),
+            header.split(',').collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(Sort {
+        key: key.to_string(),
+        descending,
+    })
+}
+
+/// A row's raw figure under one column.
+enum SortValue {
+    /// A number, in a tier: every row in tier `0` sorts before every row in
+    /// tier `1`, whichever way the sort runs. Only a `CTX PEAK` column uses
+    /// a second tier — see [`ctx_sort_value`].
+    Figure(u8, f64),
+    Text(String),
+    /// A `pipeline_version`, compared through [`version_order`] so `1.10`
+    /// sorts above `1.9`.
+    Version(String),
+}
+
+impl SortValue {
+    fn figure(n: impl Into<f64>) -> Option<SortValue> {
+        Some(SortValue::Figure(0, n.into()))
+    }
+
+    fn text(s: &str) -> Option<SortValue> {
+        Some(SortValue::Text(s.to_string()))
+    }
+
+    /// `a` against `b` the way the sort runs. Tiers always ascend, so the
+    /// direction only ever turns the figures within one.
+    fn compare(a: &SortValue, b: &SortValue, descending: bool) -> std::cmp::Ordering {
+        use SortValue::*;
+        let turn = |o: std::cmp::Ordering| if descending { o.reverse() } else { o };
+        match (a, b) {
+            (Figure(ta, a), Figure(tb, b)) => ta.cmp(tb).then_with(|| turn(a.total_cmp(b))),
+            (Text(a), Text(b)) => turn(a.cmp(b)),
+            (Version(a), Version(b)) => turn(version_order(a).cmp(&version_order(b))),
+            // One column never mixes kinds; equal keeps the default order
+            // should a new column ever get that wrong.
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+}
+
+/// `rows`, reordered by `sort` through `value`. A row without a figure —
+/// drawn `—`, or an unpriced `USD` — sorts after every row with one in both
+/// directions: an unknown is not the smallest value, nor the largest.
+fn sort_rows<T>(rows: &mut [T], sort: &Sort, value: impl Fn(&T) -> Option<SortValue>) {
+    rows.sort_by(|a, b| match (value(a), value(b)) {
+        (Some(a), Some(b)) => SortValue::compare(&a, &b, sort.descending),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// A `CTX PEAK` figure: the share of the window where one resolved, and the
+/// raw peak in tokens where it did not — the same fallback [`ctx_cell`]
+/// draws. The two are not on one scale, so every share sorts before every
+/// raw count, and a row with neither is blank.
+fn ctx_sort_value(tokens: Option<f64>, pct: Option<f64>) -> Option<SortValue> {
+    match (tokens, pct) {
+        (_, Some(pct)) => Some(SortValue::Figure(0, pct)),
+        (Some(tokens), None) => Some(SortValue::Figure(1, tokens)),
+        (None, None) => None,
+    }
+}
+
+/// `sort` where the view on screen draws its column, and `None` — the
+/// default order — where it does not, such as `step` once `by` moved off
+/// step. `columns` are the view's own, in [`lane_columns`]'s shape.
+fn shown_sort<'a>(sort: Option<&'a Sort>, columns: &[(&str, &str)]) -> Option<&'a Sort> {
+    sort.filter(|s| columns.iter().any(|(_, key)| *key == s.key))
+}
+
+/// Where each column of a table's header line starts, in characters. Two
+/// spaces at least separate any two columns — [`SEP`] — and no header name
+/// holds more than one in a row (`CTX PEAK AVG`), so a run of two spaces is
+/// always a column boundary.
+fn column_starts(header: &str) -> Vec<usize> {
+    let chars: Vec<char> = header.chars().collect();
+    (0..chars.len())
+        .filter(|&i| {
+            chars[i] != ' '
+                && (chars[..i].iter().all(|c| *c == ' ') || (i >= 2 && chars[i - 2..i] == [' '; 2]))
+        })
+        .collect()
+}
+
+/// `header` with `mark` in the space just before column `index`'s name, so
+/// no column moves. The first column has no space of its own before it:
+/// its mark is handed back as the lead, for the screen to draw in the
+/// cursor's column to the left — see [`Line::Head`].
+fn mark_column(header: &str, index: usize, mark: char) -> (String, char) {
+    match column_starts(header).get(index) {
+        Some(&start) if start > 0 => {
+            let mut chars: Vec<char> = header.chars().collect();
+            chars[start - 1] = mark;
+            (chars.into_iter().collect(), ' ')
+        }
+        Some(_) => (header.to_string(), mark),
+        None => (header.to_string(), ' '),
+    }
+}
+
+/// `header` marked for `sort` where `columns` draw its column — see
+/// [`mark_column`] — and as it was otherwise.
+fn marked_header(header: String, columns: &[(&str, &str)], sort: Option<&Sort>) -> (String, char) {
+    let index = sort.and_then(|s| columns.iter().position(|(_, key)| *key == s.key));
+    match (sort, index) {
+        (Some(sort), Some(index)) => mark_column(&header, index, sort.mark()),
+        _ => (header, ' '),
+    }
+}
+
+/// One lanes row's raw figure under export column `key`.
+fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
+    let m = &row.metrics;
+    let t = &m.tokens;
+    let priced = m.lines > m.unpriced;
+    let per_run = |n: u64| SortValue::figure(m.tokens_per_run(n) as f64);
+    match key {
+        "project" => SortValue::text(&row.project),
+        // The `VER` and `VERSION` cells name a version where an export's
+        // `pipeline_version` would be blank for a row spanning several —
+        // and the screen is the order a person reads.
+        "pipeline_version" => match by {
+            EvalBy::Task => Some(SortValue::Version(row.cells[2].clone())),
+            EvalBy::Version => Some(SortValue::Version(row.cells[1].clone())),
+            _ => m
+                .single_version()
+                .map(|v| SortValue::Version(v.to_string())),
+        },
+        // Dates as drawn are the local day only; the raw timestamps also
+        // order two runs that ended on the same one.
+        "when" => SortValue::text(&row.last_ts),
+        "first" => SortValue::text(&row.first_ts),
+        "runs" => SortValue::figure(m.runs as f64),
+        "lanes" => SortValue::figure(m.lanes as f64),
+        "pass" => m.pass_share().and_then(SortValue::figure),
+        "blocks" => SortValue::figure(m.blocked as f64),
+        "ctx_peak_tokens" => m.ctx_peak_tokens.and_then(|n| SortValue::figure(n as f64)),
+        "ctx_peak_pct" => ctx_sort_value(m.ctx_peak_tokens.map(|n| n as f64), m.ctx_peak_pct),
+        "ctx_peak_avg_tokens" => m.ctx_avg.tokens.and_then(SortValue::figure),
+        "ctx_peak_avg_pct" => ctx_sort_value(m.ctx_avg.tokens, m.ctx_avg.pct),
+        "in_tokens" => SortValue::figure(t.input as f64),
+        "out_tokens" => SortValue::figure(t.output as f64),
+        "cache_read_tokens" => SortValue::figure(t.cache_read as f64),
+        "cache_write_tokens" => SortValue::figure(t.cache_write() as f64),
+        "in_per_run" => per_run(t.input),
+        "out_per_run" => per_run(t.output),
+        "cache_read_per_run" => per_run(t.cache_read),
+        "cache_write_per_run" => per_run(t.cache_write()),
+        "cost_usd" => priced.then_some(SortValue::Figure(0, m.cost)),
+        "cost_per_run" => priced.then(|| SortValue::Figure(0, m.cost_per_run())),
+        "unpriced" => SortValue::figure(m.unpriced as f64),
+        "time_s" => SortValue::figure(m.time_s as f64),
+        "time_per_run_s" => SortValue::figure(m.time_per_run_s()),
+        // The naming columns left: `group`, `run`, `task`, `pipeline`,
+        // `step` — each read off the row's export keys, where a lane with
+        // no `group:` reads as blank rather than as the text `—`.
+        key => lane_csv_keys(by)
+            .iter()
+            .position(|name| *name == key)
+            .map(|i| row.keys[i].as_str())
+            .filter(|cell| *cell != NO_GROUP)
+            .and_then(SortValue::text),
+    }
+}
+
+/// `rows`, reordered by `sort`.
+fn sort_lane_rows(by: EvalBy, rows: &mut [LaneRow], sort: &Sort) {
+    sort_rows(rows, sort, |row| lane_sort_value(by, row, &sort.key));
 }
 
 // ---------------------------------------------------------------- formatting
@@ -1352,9 +1657,9 @@ struct DirRow {
     ctx_peak_pct: Option<f64>,
     ctx_avg: CtxAvg,
     time_s: i64,
-    /// The latest of its own sessions' `when` — what orders the rows, the
-    /// same "this morning's work heads the table" rule the lanes table
-    /// follows. `None` for a watched root no session has run in yet, which
+    /// The latest of its own sessions' `when` — what orders the rows by
+    /// default, the same "this morning's work heads the table" rule the
+    /// lanes table follows. `None` for a watched root no session has run in yet, which
     /// sorts after every root that has.
     latest: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -1443,7 +1748,98 @@ fn dir_figures(cells: [&str; 10]) -> String {
     )
 }
 
-fn dirs_table(rows: &[DirRow]) -> Table {
+/// The columns `by dir` draws, left to right, each beside the export column
+/// a sort on it reads — see [`dir_sort_value`].
+const DIR_COLUMNS: [(&str, &str); 11] = [
+    ("DIR", "dir"),
+    ("SESSIONS", "sessions"),
+    ("IN/SESSION", "in_per_session"),
+    ("OUT/SESSION", "out_per_session"),
+    ("CACHE R/SESSION", "cache_read_per_session"),
+    ("CACHE W/SESSION", "cache_write_per_session"),
+    ("USD", "cost_usd"),
+    ("USD/SESSION", "cost_per_session"),
+    ("CTX PEAK AVG", "ctx_peak_avg_pct"),
+    ("CTX PEAK", "ctx_peak_pct"),
+    ("TIME/SESSION", "time_per_session_s"),
+];
+
+/// The columns `by session` draws, the same way — see
+/// [`session_sort_value`].
+const SESSION_COLUMNS: [(&str, &str); 10] = [
+    ("WHEN", "when"),
+    ("DIR", "dir"),
+    ("SKILL", "skill"),
+    ("MODEL", "model"),
+    ("IN", "in_tokens"),
+    ("OUT", "out_tokens"),
+    ("CACHE R", "cache_read_tokens"),
+    ("CACHE W", "cache_write_tokens"),
+    ("USD", "cost_usd"),
+    ("TIME", "time_s"),
+];
+
+/// The columns the directory table draws under `by`.
+fn dir_columns(by: DirBy) -> &'static [(&'static str, &'static str)] {
+    match by {
+        DirBy::Dir => &DIR_COLUMNS,
+        DirBy::Session => &SESSION_COLUMNS,
+    }
+}
+
+/// One `by dir` row's raw figure under export column `key`. A per-session
+/// figure is blank for a watched root no session has run in, as its cell is.
+fn dir_sort_value(row: &DirRow, key: &str) -> Option<SortValue> {
+    let t = &row.tokens;
+    let priced = row.lines > row.unpriced;
+    let per = |n: u64| {
+        row.tokens_per_session(n)
+            .map(|n| SortValue::Figure(0, n as f64))
+    };
+    match key {
+        "dir" => SortValue::text(&row.dir),
+        "sessions" => SortValue::figure(row.sessions as f64),
+        "in_per_session" => per(t.input),
+        "out_per_session" => per(t.output),
+        "cache_read_per_session" => per(t.cache_read),
+        "cache_write_per_session" => per(t.cache_write()),
+        "cost_usd" => priced.then_some(SortValue::Figure(0, row.cost)),
+        "cost_per_session" => row
+            .per_session(row.cost)
+            .filter(|_| priced)
+            .and_then(SortValue::figure),
+        "ctx_peak_avg_pct" => ctx_sort_value(row.ctx_avg.tokens, row.ctx_avg.pct),
+        "ctx_peak_pct" => ctx_sort_value(row.ctx_peak_tokens.map(|n| n as f64), row.ctx_peak_pct),
+        "time_per_session_s" => row
+            .per_session(row.time_s as f64)
+            .and_then(SortValue::figure),
+        _ => None,
+    }
+}
+
+/// One `by session` row's raw figure under export column `key`. `DIR` sorts
+/// on the name it draws, not the whole path — the path's shared prefix
+/// would decide nothing.
+fn session_sort_value(row: &SessionRow, key: &str) -> Option<SortValue> {
+    let t = &row.tokens;
+    match key {
+        "when" => SortValue::figure(row.when.timestamp() as f64),
+        "dir" => SortValue::text(&dir_name(&row.dir)),
+        "skill" => (row.skill != "—").then(|| SortValue::Text(row.skill.clone())),
+        "model" => SortValue::text(&row.model),
+        "in_tokens" => SortValue::figure(t.input as f64),
+        "out_tokens" => SortValue::figure(t.output as f64),
+        "cache_read_tokens" => SortValue::figure(t.cache_read as f64),
+        "cache_write_tokens" => SortValue::figure(t.cache_write() as f64),
+        "cost_usd" => (row.lines > row.unpriced).then_some(SortValue::Figure(0, row.cost)),
+        "time_s" => SortValue::figure(row.time_s.max(0) as f64),
+        _ => None,
+    }
+}
+
+/// The `by dir` table over `rows`, in the order they are given — `sort`
+/// only marks its header, as [`lanes_table`]'s does.
+fn dirs_table(rows: &[DirRow], sort: Option<&Sort>) -> Table {
     let dw = rows
         .iter()
         .map(|r| r.dir.chars().count())
@@ -1466,6 +1862,7 @@ fn dirs_table(rows: &[DirRow]) -> Table {
             "TIME/SESSION",
         ])
     );
+    let (header, lead) = marked_header(header, &DIR_COLUMNS, sort);
     let dash = || "—".to_string();
     let lines = rows
         .iter()
@@ -1520,6 +1917,7 @@ fn dirs_table(rows: &[DirRow]) -> Table {
     .to_string();
     Table {
         header,
+        lead,
         rows: lines,
         total,
     }
@@ -1590,7 +1988,9 @@ fn session_line(
     )
 }
 
-fn sessions_table(rows: &[SessionRow]) -> Table {
+/// The `by session` table over `rows`, in the order they are given — `sort`
+/// only marks its header, as [`lanes_table`]'s does.
+fn sessions_table(rows: &[SessionRow], sort: Option<&Sort>) -> Table {
     let dw = rows
         .iter()
         .map(|r| dir_name(&r.dir).chars().count())
@@ -1614,6 +2014,7 @@ fn sessions_table(rows: &[SessionRow]) -> Table {
         "USD",
         "TIME",
     );
+    let (header, lead) = marked_header(header, &SESSION_COLUMNS, sort);
     let lines = rows
         .iter()
         .map(|row| {
@@ -1663,6 +2064,7 @@ fn sessions_table(rows: &[SessionRow]) -> Table {
     );
     Table {
         header,
+        lead,
         rows: lines,
         total,
     }
@@ -1787,8 +2189,8 @@ fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String
 // the moment either runs out.
 //
 // Two tables and no drilling in: `tab` moves between the lanes and the
-// watched directories, and everything else — which `by`, which filter — is a
-// row on the filter panel. Every table is built by the same functions the
+// watched directories, which `by` and which filter are rows on the filter
+// panel, and the sort is the popup `a` or `d` opens. Every table is built by the same functions the
 // printing path uses (`lanes_table`, `dirs_table`, `sessions_table`), so the
 // screen and a pasted `spoolway eval --by step` can never disagree about a
 // column. Rendered without colour throughout: `pad_to` counts every
@@ -1874,10 +2276,19 @@ struct Filters {
     since: String,
     until: String,
     scope: Scope,
+    /// Each table's own sort, picked from the popup `a` or `d` opens — kept
+    /// here rather than on the screen so it rides along with every change of
+    /// `by` or a filter row, and with `r`, exactly as the rows above do.
+    /// `None` is the default order. One a view does not draw the column of
+    /// is set aside there, not cleared — see [`shown_sort`].
+    lane_sort: Option<Sort>,
+    dir_sort: Option<Sort>,
 }
 
 impl Filters {
-    /// What the screen opens with: by pipeline and by dir, every row blank.
+    /// What the screen opens with: by pipeline and by dir, every row blank,
+    /// both tables in their default order — the screen has no `--sort` of
+    /// its own to start from, since only `spoolway eval` prints one.
     fn from_args(args: &EvalArgs) -> Filters {
         let scope = match (&args.project, args.all) {
             (_, true) => Scope::All,
@@ -1897,6 +2308,8 @@ impl Filters {
             since: args.since.clone().unwrap_or_default(),
             until: args.until.clone().unwrap_or_default(),
             scope,
+            lane_sort: None,
+            dir_sort: None,
         }
     }
 
@@ -2233,11 +2646,15 @@ struct Row {
     text: String,
 }
 
-/// One line of a table's body: a row the cursor can land on, or plain text —
-/// the header, the `Total` line, a note that nothing is here — that it skips
+/// One line of a table's body: a row the cursor can land on, or text — the
+/// header, the `Total` line, a note that nothing is here — that it skips
 /// over.
 enum Line {
     Text(String),
+    /// A table's header, drawn after `lead` in the column a row's marker
+    /// takes — a space, or the sort mark of a sorted first column: see
+    /// [`mark_column`].
+    Head(char, String),
     Row(Row),
 }
 
@@ -2266,6 +2683,7 @@ fn render_lines(lines: &[Line], cursor: usize, width: usize) -> Vec<String> {
             // the border, with nothing between it and the row's first
             // character — `>impl`, not `> impl`.
             Line::Text(text) => out.push(pad_to(&format!(" {text}"), width)),
+            Line::Head(lead, text) => out.push(pad_to(&format!("{lead}{text}"), width)),
             Line::Row(row) => {
                 let idx = row_n.expect("a Line::Row always has a row number");
                 let marker = if idx == cursor { ">" } else { " " };
@@ -2276,7 +2694,8 @@ fn render_lines(lines: &[Line], cursor: usize, width: usize) -> Vec<String> {
     out
 }
 
-/// Which row number each of `lines` is, `None` for a [`Line::Text`] — a
+/// Which row number each of `lines` is, `None` for a [`Line::Text`] or a
+/// [`Line::Head`] — a
 /// `Line::Row`'s position among only the other rows, skipping the text lines
 /// in between. What lets [`render_lines`] and [`cursor_line_index`] compare
 /// a line against the cursor without a hand-rolled counter of their own.
@@ -2285,7 +2704,7 @@ fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
     lines
         .iter()
         .map(|line| match line {
-            Line::Text(_) => None,
+            Line::Text(_) | Line::Head(..) => None,
             Line::Row(_) => {
                 let n = next;
                 next += 1;
@@ -2298,10 +2717,78 @@ fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
 /// A [`Table`] as the screen's body lines: its header, a cursor row per
 /// row, and its `Total` line.
 fn table_lines(table: Table) -> Vec<Line> {
-    let mut out = vec![Line::Text(table.header)];
+    let mut out = vec![Line::Head(table.lead, table.header)];
     out.extend(table.rows.into_iter().map(|text| Line::Row(Row { text })));
     out.push(Line::Text(table.total));
     out
+}
+
+/// The lanes rows the screen shows over `entries`: the `by`'s default
+/// order, then the lanes sort where this view draws its column — and that
+/// sort, for the header to mark. Shared by the view and by `e`, so an
+/// export can never write rows in an order the screen did not show.
+fn screen_lane_rows<'a>(
+    loaded: &Loaded,
+    filters: &'a Filters,
+    pipelines: &Pipelines,
+    entries: &[&Entry],
+) -> (Vec<LaneRow>, Option<&'a Sort>) {
+    let mut rows = lane_rows(
+        entries,
+        filters.by,
+        &loaded.fallback,
+        &loaded.models,
+        Some(pipelines),
+    );
+    let sort = shown_sort(
+        filters.lane_sort.as_ref(),
+        &drawn_lane_columns(filters.by, &rows),
+    );
+    if let Some(sort) = sort {
+        sort_lane_rows(filters.by, &mut rows, sort);
+    }
+    (rows, sort)
+}
+
+/// `by dir`'s rows as the screen shows them — see [`screen_lane_rows`].
+fn screen_dir_rows<'a>(
+    loaded: &Loaded,
+    filters: &'a Filters,
+    entries: &[&Entry],
+) -> (Vec<DirRow>, Option<&'a Sort>) {
+    let mut rows = dir_rows(
+        entries,
+        seeded_roots(loaded, filters),
+        &loaded.models,
+        &loaded.spans_by_session,
+    );
+    let sort = shown_sort(filters.dir_sort.as_ref(), &DIR_COLUMNS);
+    if let Some(sort) = sort {
+        sort_rows(&mut rows, sort, |row| dir_sort_value(row, &sort.key));
+    }
+    (rows, sort)
+}
+
+/// `by session`'s rows as the screen shows them — newest first by default,
+/// since a person opening the table wants to know what just ran, not what
+/// ran first. See [`screen_lane_rows`].
+fn screen_sessions<'a>(
+    loaded: &Loaded,
+    filters: &'a Filters,
+    entries: &[&Entry],
+) -> (Vec<SessionRow>, Option<&'a Sort>) {
+    let mut rows = list_sessions(
+        entries,
+        &loaded.models,
+        &loaded.spans_by_session,
+        &loaded.skills_by_session,
+    );
+    rows.reverse();
+    let sort = shown_sort(filters.dir_sort.as_ref(), &SESSION_COLUMNS);
+    if let Some(sort) = sort {
+        sort_rows(&mut rows, sort, |row| session_sort_value(row, &sort.key));
+    }
+    (rows, sort)
 }
 
 /// The table on screen, built from the same functions the printing path
@@ -2318,32 +2805,21 @@ fn view_lines(
             if entries.is_empty() {
                 return vec![Line::Text("Nothing to compare in this window.".to_string())];
             }
-            let rows = lane_rows(
-                &entries,
-                filters.by,
-                &loaded.fallback,
-                &loaded.models,
-                Some(pipelines),
-            );
+            let (rows, sort) = screen_lane_rows(loaded, filters, pipelines, &entries);
             let total = LaneTotal::of(&entries, &loaded.fallback);
-            table_lines(lanes_table(filters.by, &rows, &total))
+            table_lines(lanes_table(filters.by, &rows, &total, sort))
         }
         TableKind::Dirs => {
             let entries = scoped_dirs(loaded, filters);
             match filters.dir_by {
                 DirBy::Dir => {
-                    let rows = dir_rows(
-                        &entries,
-                        seeded_roots(loaded, filters),
-                        &loaded.models,
-                        &loaded.spans_by_session,
-                    );
+                    let (rows, sort) = screen_dir_rows(loaded, filters, &entries);
                     if rows.is_empty() {
                         return vec![Line::Text(
                             "Nothing outside the lanes in this window.".to_string(),
                         )];
                     }
-                    table_lines(dirs_table(&rows))
+                    table_lines(dirs_table(&rows, sort))
                 }
                 DirBy::Session => {
                     if entries.is_empty() {
@@ -2351,16 +2827,8 @@ fn view_lines(
                             "No sessions outside the lanes in that window.".to_string(),
                         )];
                     }
-                    // Newest first: a person opening the table wants to know
-                    // what just ran, not what ran first.
-                    let mut rows = list_sessions(
-                        &entries,
-                        &loaded.models,
-                        &loaded.spans_by_session,
-                        &loaded.skills_by_session,
-                    );
-                    rows.reverse();
-                    table_lines(sessions_table(&rows))
+                    let (rows, sort) = screen_sessions(loaded, filters, &entries);
+                    table_lines(sessions_table(&rows, sort))
                 }
             }
         }
@@ -2381,13 +2849,7 @@ fn export_rows(
     match table {
         TableKind::Lanes => {
             let entries = scoped_entries(loaded, filters);
-            let rows = lane_rows(
-                &entries,
-                filters.by,
-                &loaded.fallback,
-                &loaded.models,
-                Some(pipelines),
-            );
+            let (rows, _) = screen_lane_rows(loaded, filters, pipelines, &entries);
             let total = LaneTotal::of(&entries, &loaded.fallback);
             let mut lines: Vec<String> =
                 rows.iter().map(|r| lanes_csv_row(filters.by, r)).collect();
@@ -2396,21 +2858,10 @@ fn export_rows(
         }
         TableKind::Dirs => {
             let entries = scoped_dirs(loaded, filters);
-            let mut sessions = list_sessions(
-                &entries,
-                &loaded.models,
-                &loaded.spans_by_session,
-                &loaded.skills_by_session,
-            );
-            sessions.reverse();
+            let (sessions, _) = screen_sessions(loaded, filters, &entries);
             match filters.dir_by {
                 DirBy::Dir => {
-                    let rows = dir_rows(
-                        &entries,
-                        seeded_roots(loaded, filters),
-                        &loaded.models,
-                        &loaded.spans_by_session,
-                    );
+                    let (rows, _) = screen_dir_rows(loaded, filters, &entries);
                     let mut lines: Vec<String> = rows.iter().map(csv_dir_row).collect();
                     lines.push(csv_dirs_total(DirBy::Dir, &rows, &sessions));
                     (DIRS_CSV_HEADER.to_string(), lines, rows.len())
@@ -2685,6 +3136,8 @@ fn footer(table: TableKind) -> String {
         " {}",
         key_hint(&[
             ("↑↓", "move"),
+            ("a", "ascending"),
+            ("d", "descending"),
             ("tab", table.other().label()),
             ("f", "filters"),
             ("e", "export"),
@@ -2740,7 +3193,7 @@ fn eval_frame_rows(
     let content = lines
         .iter()
         .map(|l| match l {
-            Line::Text(t) => t.chars().count(),
+            Line::Text(t) | Line::Head(_, t) => t.chars().count(),
             Line::Row(r) => r.text.chars().count(),
         })
         .max()
@@ -2786,6 +3239,11 @@ fn eval_frame_rows(
             day,
             ..
         } => Some(calendar_panel(*field, *year, *month, *day)),
+        Mode::Sort {
+            descending,
+            columns,
+            cursor,
+        } => Some(sort_panel(*descending, columns, *cursor)),
         Mode::Browsing => None,
     };
 
@@ -2956,6 +3414,15 @@ enum Mode {
         filters: Filters,
         reset_cursor: bool,
     },
+    /// The sort popup `a` (ascending) or `d` (descending) opens: `default
+    /// order`, then every column the table on screen draws — `columns`, as
+    /// they were when it opened, since nothing in here changes the view.
+    /// `cursor` is `0` on `default order`, and `n` on `columns[n - 1]`.
+    Sort {
+        descending: bool,
+        columns: Vec<(&'static str, &'static str)>,
+        cursor: usize,
+    },
 }
 
 /// The result of a [`load`] running on its own thread — see
@@ -3106,6 +3573,7 @@ fn bare_args() -> EvalArgs {
         discard: None,
         force: false,
         csv: false,
+        sort: None,
     }
 }
 
@@ -3289,6 +3757,31 @@ fn run_screen_with(
                 Key::PageDown => step_calendar_month(year, month, day, 1),
                 _ => {}
             },
+            Mode::Sort {
+                descending,
+                columns,
+                cursor,
+            } => match key {
+                Key::Esc => state.mode = Mode::Browsing,
+                Key::Up | Key::Char('k') => *cursor = cursor.saturating_sub(1),
+                Key::Down | Key::Char('j') => *cursor = (*cursor + 1).min(columns.len()),
+                Key::Enter => {
+                    let sort = cursor.checked_sub(1).map(|i| Sort {
+                        key: columns[i].1.to_string(),
+                        descending: *descending,
+                    });
+                    match state.table {
+                        TableKind::Lanes => state.filters.lane_sort = sort,
+                        TableKind::Dirs => state.filters.dir_sort = sort,
+                    }
+                    // The row the cursor was on has moved somewhere else in
+                    // the new order; the top is the one place still worth
+                    // reading first.
+                    state.cursor = 0;
+                    state.mode = Mode::Browsing;
+                }
+                _ => {}
+            },
             Mode::Browsing => match key {
                 Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
                 Key::Down | Key::Char('j') => state.cursor += 1,
@@ -3298,6 +3791,24 @@ fn run_screen_with(
                 }
                 Key::Char('f') => {
                     state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
+                }
+                Key::Char(c @ ('a' | 'd')) => {
+                    let columns = view_columns(loaded, &state.filters, pipelines, state.table);
+                    let current = match state.table {
+                        TableKind::Lanes => state.filters.lane_sort.as_ref(),
+                        TableKind::Dirs => state.filters.dir_sort.as_ref(),
+                    };
+                    // Opens on the column already sorted, so flipping its
+                    // direction is `d` and `enter`; on `default order` when
+                    // there is none on this view.
+                    let cursor = current
+                        .and_then(|s| columns.iter().position(|(_, key)| *key == s.key))
+                        .map_or(0, |i| i + 1);
+                    state.mode = Mode::Sort {
+                        descending: c == 'd',
+                        columns,
+                        cursor,
+                    };
                 }
                 Key::Char('r') => {
                     state.start_loading(&mut start, state.filters.clone(), false);
@@ -3481,6 +3992,53 @@ fn filter_panel(loaded: &Loaded, draft: &Draft) -> Vec<String> {
     body.push(String::new());
     body.extend(FILTER_HINTS.iter().map(|h| h.to_string()));
     boxed("filters", &body)
+}
+
+/// Every column the table on screen draws, left to right, each beside the
+/// export column its sort reads — what the sort popup lists.
+fn view_columns(
+    loaded: &Loaded,
+    filters: &Filters,
+    pipelines: &Pipelines,
+    table: TableKind,
+) -> Vec<(&'static str, &'static str)> {
+    match table {
+        TableKind::Lanes => {
+            let entries = scoped_entries(loaded, filters);
+            let rows = lane_rows(
+                &entries,
+                filters.by,
+                &loaded.fallback,
+                &loaded.models,
+                Some(pipelines),
+            );
+            drawn_lane_columns(filters.by, &rows)
+        }
+        TableKind::Dirs => dir_columns(filters.dir_by).to_vec(),
+    }
+}
+
+/// The sort popup — see [`Mode::Sort`] — drawn the way [`filter_panel`]
+/// draws its rows: the cursor marked on the one it is on, the keys under
+/// them one blank row apart.
+fn sort_panel(descending: bool, columns: &[(&str, &str)], cursor: usize) -> Vec<String> {
+    let title = match descending {
+        true => "sort descending",
+        false => "sort ascending",
+    };
+    let names = std::iter::once("default order").chain(columns.iter().map(|(name, _)| *name));
+    let body: Vec<String> = names
+        .enumerate()
+        .map(|(i, name)| {
+            let marker = if i == cursor { ">" } else { " " };
+            format!("{marker} {name}")
+        })
+        .collect();
+    panel(
+        title,
+        &body,
+        &keys(&[("↑↓", "column"), ("enter", "sort"), ("esc", "back")]),
+    )
 }
 
 /// The day a calendar opens on when `enter` first opens it: the row's own
@@ -4161,7 +4719,7 @@ mod tests {
             ),
         ];
         for (by, cells, naming) in cases {
-            let table = lanes_table(by, &[named(cells)], &total);
+            let table = lanes_table(by, &[named(cells)], &total, None);
             assert_eq!(
                 table.header,
                 format!("{naming}{FIGURES}"),
@@ -4192,7 +4750,7 @@ mod tests {
             entries.push(e);
         }
         let rows = rows_by_with(&entries, EvalBy::Pipeline, &sized_models(100_000));
-        let table = lanes_table(EvalBy::Pipeline, &rows, &total_of(&entries));
+        let table = lanes_table(EvalBy::Pipeline, &rows, &total_of(&entries), None);
         assert_eq!(
             table.rows[0],
             "impl          2  100%       0           32%       52%     642   155.8k       \
@@ -4220,7 +4778,7 @@ mod tests {
         assert_eq!(total.runs, 2, "two runs, however many steps they touched");
         assert_eq!(total.blocked, 1);
         assert_eq!(total.cost, 3.0);
-        let table = lanes_table(EvalBy::Step, &rows, &total);
+        let table = lanes_table(EvalBy::Step, &rows, &total, None);
         assert!(table.total.starts_with("Total"), "{:?}", table.total);
         let cells: Vec<&str> = table.total.split_whitespace().collect();
         assert_eq!(cells, ["Total", "2", "1", "3.00"], "{:?}", table.total);
@@ -4237,7 +4795,7 @@ mod tests {
         );
         let total = total_of(&[]);
         assert!(
-            !lanes_table(EvalBy::Pipeline, &one, &total)
+            !lanes_table(EvalBy::Pipeline, &one, &total, None)
                 .header
                 .contains("PROJECT")
         );
@@ -4255,7 +4813,7 @@ mod tests {
             ..lane("logout", "implement", 1, Some("pass"))
         };
         let two = rows_by(&[alpha, beta], EvalBy::Pipeline);
-        let table = lanes_table(EvalBy::Pipeline, &two, &total);
+        let table = lanes_table(EvalBy::Pipeline, &two, &total, None);
         assert!(table.header.starts_with("PROJECT"), "{}", table.header);
     }
 
@@ -4422,7 +4980,7 @@ mod tests {
             "a root with no sessions sorts last"
         );
         assert_eq!(rows[1].sessions, 0);
-        let table = dirs_table(&rows);
+        let table = dirs_table(&rows, None);
         assert!(
             table.rows[1].split_whitespace().skip(2).all(|c| c == "—"),
             "nothing per session to divide: {}",
@@ -4458,7 +5016,7 @@ mod tests {
             0.18,
         );
         let rows = dir_rows(&[&a, &b], &[], &no_models(), &HashMap::new());
-        let table = dirs_table(&rows);
+        let table = dirs_table(&rows, None);
         assert_eq!(
             table.header,
             "DIR                         SESSIONS  IN/SESSION  OUT/SESSION  CACHE R/SESSION  \
@@ -4500,7 +5058,7 @@ mod tests {
         );
         let mut rows = list_sessions(&[&a, &b], &no_models(), &HashMap::new(), &skills);
         rows.reverse();
-        let table = sessions_table(&rows);
+        let table = sessions_table(&rows, None);
         assert_eq!(
             table.header,
             "WHEN           DIR       SKILL              MODEL                 IN      OUT   \
@@ -4542,6 +5100,177 @@ mod tests {
         assert_eq!(csv_session_row(&sessions[0]).split(',').count(), cols);
         let total = csv_dirs_total(DirBy::Session, &[], &sessions);
         assert_eq!(total, "total,,,,,0,10,0,0,0.70,,,,0");
+    }
+
+    // -------------------------------------------------------------- sorting
+
+    fn sorted(key: &str, descending: bool) -> Sort {
+        Sort {
+            key: key.to_string(),
+            descending,
+        }
+    }
+
+    /// The `STEP` cell of every row, top to bottom.
+    fn steps(rows: &[LaneRow]) -> Vec<&str> {
+        rows.iter().map(|r| r.cells[1].as_str()).collect()
+    }
+
+    /// As text, `1h 20m` sorts under `35m` and `54.2k` under `9.10M` — the
+    /// first digit decides. The sort reads the figures behind the cells.
+    #[test]
+    fn a_sort_reads_raw_time_and_token_figures_not_the_drawn_cells() {
+        let mut entries = vec![
+            lane("a", "implement", 1, Some("pass")),
+            lane("a", "review", 1, Some("pass")),
+            lane("a", "document", 1, Some("pass")),
+        ];
+        (entries[0].wall_s, entries[0].tokens.input) = (80 * 60, 54_200);
+        (entries[1].wall_s, entries[1].tokens.input) = (35 * 60, 9_100_000);
+        (entries[2].wall_s, entries[2].tokens.input) = (9 * 60, 800);
+        let mut rows = rows_by(&entries, EvalBy::Step);
+        let drawn = lanes_table(EvalBy::Step, &rows, &total_of(&entries), None).rows;
+        let drawn = drawn.join("\n");
+        for cell in ["1h 20m", "35m", "54.2k", "9.10M"] {
+            assert!(
+                drawn.contains(cell),
+                "the cells a text sort would get wrong: {drawn}"
+            );
+        }
+
+        sort_lane_rows(EvalBy::Step, &mut rows, &sorted("time_per_run_s", true));
+        assert_eq!(steps(&rows), ["implement", "review", "document"]);
+        sort_lane_rows(EvalBy::Step, &mut rows, &sorted("time_per_run_s", false));
+        assert_eq!(steps(&rows), ["document", "review", "implement"]);
+        sort_lane_rows(EvalBy::Step, &mut rows, &sorted("in_per_run", true));
+        assert_eq!(steps(&rows), ["review", "implement", "document"]);
+        sort_lane_rows(EvalBy::Step, &mut rows, &sorted("in_per_run", false));
+        assert_eq!(steps(&rows), ["document", "implement", "review"]);
+    }
+
+    /// Rows the sorted column ties on keep the order they had, and a row
+    /// with no figure at all — `—` drawn — sorts last whichever way.
+    #[test]
+    fn ties_keep_the_default_order_and_a_blank_sorts_last_both_ways() {
+        let mut entries = vec![
+            lane("a", "implement", 1, Some("pass")),
+            lane("a", "review", 1, None),
+            lane("a", "document", 1, Some("pass")),
+            lane("a", "e2e", 1, Some("fail")),
+        ];
+        // Nothing could price `document`: its `USD` is `—`, not `0.00`.
+        entries[2].cost_usd = None;
+        entries[2].tokens.input = 10;
+        let default: Vec<String> = steps(&rows_by(&entries, EvalBy::Step))
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let passed: Vec<&str> = default
+            .iter()
+            .map(String::as_str)
+            .filter(|s| ["implement", "document"].contains(s))
+            .collect();
+
+        let mut rows = rows_by(&entries, EvalBy::Step);
+        sort_lane_rows(EvalBy::Step, &mut rows, &sorted("pass", true));
+        let want: Vec<&str> = passed.iter().copied().chain(["e2e", "review"]).collect();
+        assert_eq!(
+            steps(&rows),
+            want,
+            "review reported nothing: its PASS is blank"
+        );
+
+        let mut rows = rows_by(&entries, EvalBy::Step);
+        sort_lane_rows(EvalBy::Step, &mut rows, &sorted("pass", false));
+        let want: Vec<&str> = ["e2e"]
+            .into_iter()
+            .chain(passed.iter().copied())
+            .chain(["review"])
+            .collect();
+        assert_eq!(steps(&rows), want);
+
+        for descending in [true, false] {
+            let mut rows = rows_by(&entries, EvalBy::Step);
+            sort_lane_rows(EvalBy::Step, &mut rows, &sorted("cost_usd", descending));
+            assert_eq!(
+                steps(&rows).last(),
+                Some(&"document"),
+                "unpriced sorts last"
+            );
+        }
+    }
+
+    /// `--sort` takes an export column, descending unless told otherwise,
+    /// and refuses a name `--by` does not export with every one it does.
+    #[test]
+    fn parse_sort_defaults_to_descending_and_refuses_an_unknown_column() {
+        assert_eq!(
+            parse_sort(EvalBy::Step, "pass").unwrap(),
+            sorted("pass", true)
+        );
+        assert_eq!(
+            parse_sort(EvalBy::Step, "pass:asc").unwrap(),
+            sorted("pass", false)
+        );
+        assert_eq!(
+            parse_sort(EvalBy::Step, "step:desc").unwrap(),
+            sorted("step", true)
+        );
+
+        let err = parse_sort(EvalBy::Pipeline, "step")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no column `step` under `--by pipeline`"),
+            "{err}"
+        );
+        assert!(
+            err.contains(&lanes_csv_header(EvalBy::Pipeline).replace(',', ", ")),
+            "{err}"
+        );
+        let err = parse_sort(EvalBy::Step, "PASS").unwrap_err().to_string();
+        assert!(
+            err.contains("no column `PASS`"),
+            "the header's spelling is not one: {err}"
+        );
+        let err = parse_sort(EvalBy::Step, "pass:up").unwrap_err().to_string();
+        assert!(err.contains("`asc` or `desc`"), "{err}");
+    }
+
+    /// The mark takes the space before the sorted column's name, so no
+    /// column moves; a first column has no such space, and hands its mark
+    /// back as the lead for the screen to draw in the cursor's column.
+    #[test]
+    fn the_sort_mark_takes_the_space_before_its_column() {
+        let entries = vec![lane("a", "implement", 1, Some("pass"))];
+        let rows = rows_by(&entries, EvalBy::Step);
+        let total = total_of(&entries);
+        let plain = lanes_table(EvalBy::Step, &rows, &total, None);
+        assert_eq!(plain.lead, ' ');
+
+        let up = lanes_table(EvalBy::Step, &rows, &total, Some(&sorted("pass", false)));
+        assert!(up.header.contains(" ▲PASS  BLOCKS"), "{}", up.header);
+        assert_eq!(up.header.replace('▲', " "), plain.header, "no column moved");
+        assert_eq!(up.lead, ' ');
+
+        let down = lanes_table(EvalBy::Step, &rows, &total, Some(&sorted("step", true)));
+        assert!(down.header.contains(" ▼STEP"), "{}", down.header);
+        assert_eq!(down.header.replace('▼', " "), plain.header);
+
+        let first = lanes_table(EvalBy::Step, &rows, &total, Some(&sorted("pipeline", true)));
+        assert_eq!(
+            first.header, plain.header,
+            "nowhere in the header to put it"
+        );
+        assert_eq!(first.lead, '▼');
+
+        let undrawn = lanes_table(
+            EvalBy::Step,
+            &rows,
+            &total,
+            Some(&sorted("in_tokens", true)),
+        );
+        assert_eq!((undrawn.header, undrawn.lead), (plain.header, ' '));
     }
 }
 
@@ -4619,6 +5348,7 @@ mod screen_tests {
             discard: None,
             force: false,
             csv: false,
+            sort: None,
         }
     }
 
@@ -4862,7 +5592,10 @@ mod screen_tests {
             assert!(shows_loading(frame), "{frame}");
             assert!(!frame.contains("PIPELINE"), "no table yet: {frame}");
             assert!(!frame.contains("┌─ filters"), "`f` was not read: {frame}");
-            assert!(frame.contains("[↑↓] move   [tab] dirs"), "{frame}");
+            assert!(
+                frame.contains("[↑↓] move   [a] ascending   [d] descending   [tab] dirs"),
+                "{frame}"
+            );
         }
 
         assert_eq!(senders.borrow().len(), 1, "one load, started once");
@@ -5229,7 +5962,7 @@ mod screen_tests {
         assert!(last.contains("│ Total"), "{last}");
         assert!(
             last.contains(
-                "[↑↓] move   [tab] dirs   [f] filters   [e] export   [r] refresh   [q] quit"
+                "[↑↓] move   [a] ascending   [d] descending   [tab] dirs   [f] filters   [e] export   [r] refresh   [q] quit"
             ),
             "{last}"
         );
@@ -5818,5 +6551,401 @@ mod screen_tests {
                 assert!(row.chars().count() <= width + 2, "at {width}: {row:?}");
             }
         }
+    }
+
+    // -------------------------------------------------------------- sorting
+
+    /// One `default` pipeline lane of `task`'s own run, priced and passed —
+    /// for a test to adjust before it banks or loads it.
+    fn lane_entry(task: &str, step: &str) -> Entry {
+        Entry {
+            ts: "2026-08-01T09:00:00+00:00".into(),
+            task: task.into(),
+            plan: None,
+            step: step.into(),
+            pipeline: "default".into(),
+            agent: "pi".into(),
+            kind: "pi".into(),
+            model: "qwen".into(),
+            session: format!("{task}-{step}"),
+            round: 1,
+            wall_s: 60,
+            turns: 1,
+            tokens: Tokens::default(),
+            cost_usd: Some(1.0),
+            ctx_peak: None,
+            pipeline_version: "1.0".into(),
+            outcome: Some("pass".into()),
+            run: Some(format!("r-{task}")),
+            trial: None,
+            dir: None,
+            hand: false,
+            project: String::new(),
+        }
+    }
+
+    /// Three pipelines with three pass rates, banked so the default order
+    /// — newest first — is `alpha`, `gamma`, `beta`, and each costs a
+    /// different amount: `gamma` most, then `beta`, then `alpha`.
+    fn fixture_to_sort(name: &str) -> Repo {
+        let repo = fixture(name);
+        let lanes = [
+            ("2026-08-01T09:00:00+00:00", "b1", "beta", 2.0, "fail"),
+            ("2026-08-01T10:00:00+00:00", "g1", "gamma", 3.0, "pass"),
+            ("2026-08-01T10:30:00+00:00", "g2", "gamma", 3.0, "fail"),
+            ("2026-08-01T11:00:00+00:00", "a1", "alpha", 1.0, "pass"),
+        ];
+        for (ts, task, pipeline, cost, outcome) in lanes {
+            bank(
+                &repo,
+                ts,
+                task,
+                "implement",
+                pipeline,
+                "qwen",
+                cost,
+                Some(outcome),
+            );
+        }
+        repo
+    }
+
+    /// The pipelines a frame's lanes rows name, top to bottom.
+    fn row_order(frame: &str) -> Vec<&'static str> {
+        let mut at: Vec<(usize, &'static str)> = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .filter_map(|p| {
+                frame
+                    .find(&format!(">{p} "))
+                    .or_else(|| frame.find(&format!("│ {p} ")))
+                    .map(|i| (i, p))
+            })
+            .collect();
+        at.sort();
+        at.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// `a` opens the popup on `default order`, `↓` three times walks to
+    /// `PASS`, and `enter` sorts on it: the table reorders on the raw pass
+    /// rate, the header marks `PASS`, and the cursor is on the first row.
+    #[test]
+    fn a_then_a_column_sorts_the_table_and_marks_its_header() {
+        let repo = fixture_to_sort("screen-sort-pick");
+        let text = screen(&repo, &format!("{DOWN}a{DOWN}{DOWN}{DOWN}\rq"));
+        let all = frames(&text);
+
+        let popup = all
+            .iter()
+            .rev()
+            .find(|f| f.contains("┌─ sort ascending "))
+            .expect("`a` opened the popup");
+        let listed: Vec<usize> = [
+            "│    default order",
+            "│    PIPELINE",
+            "│    RUNS",
+            "│  > PASS",
+            "│    TIME/RUN",
+        ]
+        .iter()
+        .map(|line| {
+            popup
+                .find(line)
+                .unwrap_or_else(|| panic!("{line}: {popup}"))
+        })
+        .collect();
+        assert!(
+            listed.is_sorted(),
+            "default order first, then the columns in order: {popup}"
+        );
+        assert!(
+            popup.contains("[↑↓] column   [enter] sort   [esc] back"),
+            "{popup}"
+        );
+
+        let before = all[0..all.len() - 1]
+            .iter()
+            .rev()
+            .find(|f| !f.contains("┌─ sort ") && f.contains("│ PIPELINE"))
+            .unwrap();
+        assert_eq!(row_order(before), ["alpha", "gamma", "beta"], "{before}");
+
+        let last = last_frame(&text);
+        assert_eq!(
+            row_order(last),
+            ["beta", "gamma", "alpha"],
+            "0%, 50%, 100%: {last}"
+        );
+        assert!(
+            last.contains("│>beta "),
+            "the cursor is on the first row: {last}"
+        );
+        assert!(last.contains(" ▲PASS  BLOCKS"), "{last}");
+        assert!(
+            !last.contains("┌─ sort "),
+            "`enter` closed the popup: {last}"
+        );
+    }
+
+    /// `esc` closes the popup and changes nothing.
+    #[test]
+    fn esc_closes_the_sort_popup_without_sorting() {
+        let repo = fixture_to_sort("screen-sort-esc");
+        let text = screen(&repo, &format!("d{DOWN}\x1bq"));
+        let last = last_frame(&text);
+        assert_eq!(row_order(last), ["alpha", "gamma", "beta"], "{last}");
+        assert!(!last.contains('▼') && !last.contains("┌─ sort "), "{last}");
+    }
+
+    /// A sort on `USD` outlives `tab` there and back, `r`, and a change of
+    /// `by` on the filter panel — and the directory table, which has its
+    /// own sort, is left in its default order meanwhile.
+    #[test]
+    fn a_sort_survives_tab_refresh_and_a_new_by_and_each_table_keeps_its_own() {
+        let repo = fixture_to_sort("screen-sort-survives");
+        // `USD` is the eleventh column under `by pipeline`.
+        let to_usd = DOWN.repeat(11);
+        let text = screen(&repo, &format!("d{to_usd}\r\t\trf{RIGHT}\rq"));
+        let all = frames(&text);
+        let sorted = |f: &str| f.contains("▼USD");
+
+        let dirs = all
+            .iter()
+            .find(|f| f.contains("┌─ eval · by dir "))
+            .expect("`tab` reached the directory table");
+        assert!(
+            !dirs.contains('▼'),
+            "the directory table keeps its own sort: {dirs}"
+        );
+
+        let last = last_frame(&text);
+        assert!(last.contains("┌─ eval · by step "), "{last}");
+        assert!(sorted(last), "{last}");
+        let lanes_frames: Vec<&&str> = all
+            .iter()
+            .filter(|f| f.contains("┌─ eval · by pipeline ") || f.contains("┌─ eval · by step "))
+            .filter(|f| !shows_loading(f) && !f.contains("┌─ filters") && !f.contains("┌─ sort "))
+            .collect();
+        let after_pick = lanes_frames
+            .iter()
+            .position(|f| sorted(f))
+            .expect("the sort took");
+        assert!(
+            lanes_frames[after_pick..].iter().all(|f| sorted(f)),
+            "every lanes frame after the pick is still sorted"
+        );
+        assert_eq!(
+            row_order(last),
+            ["gamma", "beta", "alpha"],
+            "6.00, 2.00, 1.00: {last}"
+        );
+    }
+
+    /// A view that does not draw the sorted column shows the default order
+    /// and no mark — and the sort comes back with a view that does.
+    #[test]
+    fn a_view_without_the_sorted_column_falls_back_to_the_default_order() {
+        let mut entries = Vec::new();
+        for (i, step) in ["implement", "review", "document"].into_iter().enumerate() {
+            let mut entry = lane_entry("t", step);
+            entry.ts = format!("2026-08-01T0{i}:00:00+00:00");
+            entries.push(entry);
+        }
+        let loaded = loaded(entries);
+        let pipelines = Pipelines::builtin();
+        let mut filters = no_filters();
+        filters.by = EvalBy::Step;
+        filters.lane_sort = Some(Sort {
+            key: "step".into(),
+            descending: false,
+        });
+        let header = |filters: &Filters| match &view_lines(
+            &loaded,
+            filters,
+            &pipelines,
+            TableKind::Lanes,
+        )[0]
+        {
+            Line::Head(lead, text) => format!("{lead}{text}"),
+            _ => panic!("a table opens on its header"),
+        };
+        assert!(header(&filters).contains("▲STEP"));
+        let (rows, _) = screen_lane_rows(
+            &loaded,
+            &filters,
+            &pipelines,
+            &scoped_entries(&loaded, &filters),
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.cells[1].as_str()).collect::<Vec<_>>(),
+            ["document", "implement", "review"]
+        );
+
+        filters.by = EvalBy::Pipeline;
+        assert!(!header(&filters).contains('▲'), "no STEP column to sort by");
+        filters.by = EvalBy::Step;
+        assert!(
+            header(&filters).contains("▲STEP"),
+            "the sort was set aside, not cleared"
+        );
+    }
+
+    /// `e` writes the rows in the order the screen shows them, on both
+    /// tables, the `Total` line still last.
+    #[test]
+    fn e_writes_rows_in_the_order_shown() {
+        let repo = fixture_to_sort("screen-sort-export");
+        bank_dir(
+            &repo,
+            "2026-09-01T09:00:00+00:00",
+            "spoolway",
+            "cheap",
+            0.10,
+        );
+        bank_dir(&repo, "2026-09-01T10:00:00+00:00", "spoolway", "dear", 0.90);
+        let mut filters = no_filters();
+        let loaded = load(&repo, &filters).unwrap();
+        let pipelines = Pipelines::builtin();
+
+        filters.lane_sort = Some(Sort {
+            key: "pass".into(),
+            descending: false,
+        });
+        let (_, lines, rows) = export_rows(&loaded, &filters, &pipelines, TableKind::Lanes);
+        assert_eq!(rows, 3);
+        let named: Vec<&str> = lines.iter().map(|l| l.split(',').nth(2).unwrap()).collect();
+        assert_eq!(named, ["beta", "gamma", "alpha", ""], "{lines:?}");
+        assert!(lines[3].starts_with(",total,"), "{lines:?}");
+
+        filters.dir_by = DirBy::Session;
+        filters.dir_sort = Some(Sort {
+            key: "cost_usd".into(),
+            descending: false,
+        });
+        let (_, lines, _) = export_rows(&loaded, &filters, &pipelines, TableKind::Dirs);
+        assert!(
+            lines[0].contains(",0.10,") && lines[1].contains(",0.90,"),
+            "{lines:?}"
+        );
+        assert!(lines[2].starts_with("total,"), "{lines:?}");
+        filters.dir_sort = Some(Sort {
+            key: "cost_usd".into(),
+            descending: true,
+        });
+        let (_, lines, _) = export_rows(&loaded, &filters, &pipelines, TableKind::Dirs);
+        assert!(
+            lines[0].contains(",0.90,") && lines[1].contains(",0.10,"),
+            "{lines:?}"
+        );
+    }
+
+    /// `spoolway eval` with `argv`, against `repo`, as it would print.
+    fn print(repo: &Repo, argv: &[&str]) -> Result<String> {
+        use clap::Parser;
+        let full = ["spoolway", "eval"].iter().chain(argv);
+        let crate::cli::Command::Eval(args) = crate::cli::Cli::try_parse_from(full)?.command else {
+            panic!("parsed as `eval`");
+        };
+        let mut out = Vec::new();
+        run_to(repo, &args, false, Some(&Pipelines::builtin()), &mut out)?;
+        Ok(String::from_utf8(out).unwrap())
+    }
+
+    /// `--sort pass:asc --csv` writes the rows the screen's `PASS` sort
+    /// shows, `Total` last; left off, the direction is descending; a name
+    /// the export does not carry is refused with the ones it does.
+    #[test]
+    fn sort_on_the_command_line_orders_the_csv() {
+        let repo = fixture_to_sort("cli-sort-csv");
+        let pipelines_of = |csv: &str| -> Vec<String> {
+            csv.lines()
+                .skip(1)
+                .map(|l| l.split(',').nth(2).unwrap().to_string())
+                .collect()
+        };
+
+        let csv = print(&repo, &["--sort", "pass:asc", "--csv"]).unwrap();
+        assert_eq!(
+            csv.lines().next(),
+            Some(lanes_csv_header(EvalBy::Pipeline).as_str())
+        );
+        assert_eq!(pipelines_of(&csv), ["beta", "gamma", "alpha", ""], "{csv}");
+        assert!(csv.lines().last().unwrap().starts_with(",total,"), "{csv}");
+
+        let csv = print(&repo, &["--sort", "cost_usd", "--csv"]).unwrap();
+        assert_eq!(pipelines_of(&csv), ["gamma", "beta", "alpha", ""], "{csv}");
+
+        let table = print(&repo, &["--sort", "pass:asc"]).unwrap();
+        assert!(table.contains(" ▲PASS  BLOCKS"), "{table}");
+
+        let err = print(&repo, &["--sort", "usd", "--csv"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no column `usd`") && err.contains("cost_usd, cost_per_run"),
+            "{err}"
+        );
+    }
+
+    /// `--json` keeps the sorted order in `rows`, with `total` apart.
+    #[test]
+    fn sort_on_the_command_line_orders_json_rows() {
+        let repo = fixture_to_sort("cli-sort-json");
+        let mut out = Vec::new();
+        let args = EvalArgs {
+            sort: Some("pass:asc".into()),
+            ..no_args()
+        };
+        run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let named: Vec<&str> = json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["pipeline"].as_str().unwrap())
+            .collect();
+        assert_eq!(named, ["beta", "gamma", "alpha"]);
+        assert_eq!(json["total"]["runs"], 4);
+    }
+
+    /// A sort can put a later arm on top; every delta line still reads
+    /// against the arm that started first.
+    #[test]
+    fn a_trial_sorted_still_reads_each_delta_against_the_first_arm() {
+        let repo = fixture("cli-sort-trial");
+        for (ts, task, cost, outcome) in [
+            ("2026-08-01T09:00:00+00:00", "alpha-1", 1.0, "pass"),
+            ("2026-08-01T10:00:00+00:00", "beta-1", 5.0, "fail"),
+            ("2026-08-01T11:00:00+00:00", "gamma-1", 3.0, "pass"),
+        ] {
+            let mut entry = lane_entry(task, "implement");
+            entry.ts = ts.into();
+            entry.cost_usd = Some(cost);
+            entry.outcome = Some(outcome.into());
+            entry.trial = Some("t1".into());
+            crate::usage::append(&repo, &entry).unwrap();
+        }
+        let text = print(
+            &repo,
+            &["--by", "task", "--trial", "t1", "--sort", "cost_usd"],
+        )
+        .unwrap();
+        let beta = text.find("\nbeta-1 ").expect("beta's row");
+        let alpha = text.find("\nalpha-1 ").expect("alpha's row");
+        assert!(beta < alpha, "the sort put the dearest arm on top: {text}");
+        assert!(
+            text.contains("beta-1 vs alpha-1: pass -100pp, cost +$4.00"),
+            "{text}"
+        );
+        assert!(
+            text.contains("gamma-1 vs alpha-1: pass +0pp, cost +$2.00"),
+            "{text}"
+        );
+        assert!(!text.contains("vs beta-1"), "{text}");
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains(" vs ")).collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(
+            lines[0].starts_with("beta-1"),
+            "deltas follow the order shown: {text}"
+        );
     }
 }
