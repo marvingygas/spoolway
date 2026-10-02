@@ -1915,6 +1915,9 @@ mod tests {
             assert_eq!(mode & 0o111, 0o111, "the hook must be executable");
         }
         assert!(root.join(".spoolway/hooks").join(&jira).is_file());
+        // `IssueTrackingConfig::default` now turns this on, so a project
+        // picking a tracker gets names that carry its key from the start.
+        assert!(config.contains("key_in_names = true"), "{config}");
     }
 
     /// Answering `none` leaves the table empty, which is what turns issue

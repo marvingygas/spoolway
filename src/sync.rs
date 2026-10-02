@@ -2938,10 +2938,6 @@ mod tests {
             (prompts.join("reviewer.md"), "## "),
             (repo.task_templates_dir().join("default.md"), "## Intend"),
             (
-                repo.tracking_templates_dir().join("ticket.md"),
-                "${SPOOLWAY_TASK}",
-            ),
-            (
                 repo.checkout.join(".spoolway/hooks/github.sh"),
                 "hand_off_for_review",
             ),
@@ -2950,6 +2946,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("nothing shipped for {}", path.display()));
             assert!(shipped.contains(expected), "{}", path.display());
         }
+
+        // `ticket.md` ships empty now — a project's own body is the task's
+        // `## Context` and `## Acceptance criteria`, not a template — but
+        // `--replace` still has to recognise and reach it rather than
+        // reading a template this blank as "nothing shipped for this path".
+        assert_eq!(
+            shipped_for(&repo, &repo.tracking_templates_dir().join("ticket.md")),
+            Some(String::new())
+        );
 
         // And nothing else: replacing a file spoolway does not write would be
         // this command inventing content for somebody's own work. The project's

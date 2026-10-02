@@ -195,10 +195,11 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "issue_tracking.key_in_names",
         values: "true, false",
-        default: "false",
+        default: "true",
         sentence: "Whether a `slug=` the hook answers prefixes the group, branch and \
-                    worktree name `queue add` generates — `task/<slug>-<id>`. Off changes \
-                    nothing.",
+                    worktree name `queue add` generates — `task/<slug>-<id>`. With no hook, \
+                    or a blank `hook`, there is no `slug=` to prefix with, so this changes \
+                    nothing either way.",
     },
     Reference {
         key: "agents.<profile>.kind",

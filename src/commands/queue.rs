@@ -8425,6 +8425,9 @@ mod tests {
     #[test]
     fn bare_group_strips_a_recognised_slug_prefix_only_with_the_flag_on() {
         let (mut repo, _root_guard) = fixture("bare-group-slug");
+        // `fixture`'s own `Config::default` now turns this on, so the "off"
+        // half of this test has to say so itself rather than inherit it.
+        repo.config.issue_tracking.key_in_names = false;
         add(&repo, "auth-01", &[]);
         let mut parent = queued(&repo, "auth-01");
         parent.front.group = Some("proj-12-demo".into());
@@ -14985,6 +14988,9 @@ mod tests {
         #[test]
         fn with_the_flag_off_a_slug_answer_changes_no_name_but_the_url_is_kept() {
             let (mut repo, _root_guard) = fixture("open-no-prefix");
+            // `fixture`'s own `Config::default` now turns this on; this test
+            // is the "off" half, so it has to say so itself.
+            repo.config.issue_tracking.key_in_names = false;
             with_hook(
                 &mut repo,
                 r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"

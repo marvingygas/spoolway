@@ -291,6 +291,15 @@ must "spoolway sync runs against the 0.6.0 project" "$SPOOLWAY" sync
 
 has "the housekeeping value the 0.6.0 fixture set survives the sync" \
   "retention_days = 45" .spoolway/config.toml
+
+# Every release through 0.6.0 had `init` write `key_in_names = false`, its
+# default then. The default is `true` now, but a project that spelled `false`
+# keeps it until its owner flips it: `sync` refreshes the reference header
+# and leaves the value itself alone.
+has "the 0.6.0 fixture's own key_in_names = false survives the default flip" \
+  "key_in_names = false" .spoolway/config.toml
+lacks "and sync did not flip it on behind the project's back" \
+  "key_in_names = true" .spoolway/config.toml
 byte_for_byte_outside_block \
   "the prose around the key block came back byte for byte — nothing in it changed" \
   "$WORK/0.6.0/before-default.yml" "$PIPELINE"

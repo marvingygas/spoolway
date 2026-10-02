@@ -523,7 +523,7 @@ mod tests {
 
         assert!(
             text.lines()
-                .any(|l| l.starts_with("issue_tracking.key_in_names ") && l.ends_with(" = false")),
+                .any(|l| l.starts_with("issue_tracking.key_in_names ") && l.ends_with(" = true")),
             "key_in_names row missing or not `key = value`:\n{text}"
         );
         // The `=` delimiter the help promises, not a bare column gap — and a

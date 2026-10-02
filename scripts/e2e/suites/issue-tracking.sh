@@ -105,6 +105,11 @@ chmod +x .spoolway/hooks/record.sh
 
 must "the hook is named" "$SPOOLWAY" config set issue_tracking.hook record.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/app
+# `key_in_names` is on by default, and `record.sh` never answers `slug=` —
+# which `doctor` rightly reports. Off here, so everything below starts from
+# unprefixed names; the `key_in_names` section turns it on for itself.
+must "and key_in_names off, since record.sh writes no slug=" \
+  "$SPOOLWAY" config set issue_tracking.key_in_names false
 
 # `doctor` reads the same table straight off a real config.toml on a real
 # checkout, which `doctor()` itself does not decouple from — it also pulls
@@ -738,9 +743,21 @@ ISSUE_NUM=${TICKET##*/}
 EPIC_NUM=${EPIC##*/}
 has "the stub's issue was created against the configured project" \
   "repo=acme/app" "$GH_STUB_ISSUES/$ISSUE_NUM"
-has "with the rendered ticket body, not the template's raw placeholders" \
-  "Mirrors task \`github-open-check\` in group \`github-single\`." \
+# The task's own words alone now — its `## Acceptance criteria` (this
+# fixture's body has no `## Context`, so that heading is skipped entirely),
+# never the ticket template's old "Mirrors task …" line: `ticket.md` ships
+# empty, so nothing of the template survives into the body at all.
+has "the ticket body carries the task's own Acceptance criteria" \
+  '`notes/<id>.md` exists, opens with `# <id>`, and has one sentence under it' \
   "$GH_STUB_ISSUES/$ISSUE_NUM.body"
+lacks "and never the old ticket template's own words" \
+  "Mirrors task" "$GH_STUB_ISSUES/$ISSUE_NUM.body"
+lacks "nor the \`## Intend\` section — the plan's framing, not the task's own words" \
+  "## Intend" "$GH_STUB_ISSUES/$ISSUE_NUM.body"
+# `task_doc` writes `title: <id>, done`, no commit-type prefix on it, so
+# `strip_title_prefix` must leave it exactly as written.
+has "the ticket's own title has no commit prefix to strip, and keeps its title verbatim" \
+  "title=github-open-check, done" "$GH_STUB_ISSUES/$ISSUE_NUM"
 has "the ticket carries the task label" "spoolway:task" "$GH_STUB_ISSUES/$ISSUE_NUM.labels"
 has "the epic carries the group label" "spoolway:group" "$GH_STUB_ISSUES/$EPIC_NUM.labels"
 has "and the ticket is parented under the epic, by native --parent" \
@@ -784,26 +801,23 @@ else
 fi
 
 # Independent substring/line-order checks would still pass with an extra
-# blank line, a missing one, or a swallowed template — none of that proves
-# the exact ordered body the ## Mockup describes. Build the whole expected
+# blank line, a missing one, or a stray template section — none of that
+# proves the exact body the ## Mockup describes. Build the whole expected
 # body and `cmp` the full captured file against it.
 #
-# No `- Source:` line is expected: neither fixture sets `source:`, so
-# `$SPOOLWAY_SOURCE` resolves empty and `task_template::render_tracking`
-# drops a template line whose only placeholder is empty (task_template.rs,
-# `render_tracking`/`render_line`) rather than leaving a bare `- Source: `.
+# The epic body is the full, multiline `group_description:` alone, flat,
+# with nothing appended: `epic.md` ships empty now, so a project that has
+# not written anything of its own into it gets no trailing section at all
+# — not even a blank line for one.
 PAIR_BODY="$GH_STUB_ISSUES/${PAIR_EPIC##*/}.body"
 printf '%s\n' \
   "Proving a shared epic and native parent/blocked-by links." \
   "A second line the title must never swallow." \
-  "" \
-  '- Group: `github-pair`' \
-  '- Tasks queued together: `2`' \
   > "$LIVE/expected-epic-body.txt"
 if cmp -s "$LIVE/expected-epic-body.txt" "$PAIR_BODY"; then
-  ok "the epic's body is exactly the full description, one blank line, then the intact rendered template"
+  ok "the epic's body is exactly the full description, flat, with no empty template section"
 else
-  bad "the epic's body is exactly the full description, one blank line, then the intact rendered template"
+  bad "the epic's body is exactly the full description, flat, with no empty template section"
   diff "$LIVE/expected-epic-body.txt" "$PAIR_BODY" | sed 's/^/        /'
 fi
 has "the first ticket is parented under the shared epic" \
@@ -915,5 +929,224 @@ has "the filed issue is named as the new epic's own parent" \
 works "and github-open-check's own epic, queued with no source: at all, never grew one" \
   test ! -e "$GH_STUB_ISSUES/$EPIC_NUM.parent"
 
+# ------------------------------------------------------ commit prefix stripped
+# A `type(scope):`/`type:`/`type!:` prefix is the pull request's own, not
+# the task's name — `strip_title_prefix` removes it from the ticket's title
+# alone; the group issue keeps the group's own name regardless (proved
+# above: `title=github-pair`, which never had a prefix to strip).
+{
+  echo "---"; echo "id: github-prefixed-title"
+  echo 'title: "fix(status): draw a prefixed title correctly"'
+  echo "group: github-prefixed"
+  echo "group_description: proving the commit prefix is stripped"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "---"
+  cat <<'GHBODY'
+## Intend
+
+INTEND-MARKER the plan's framing, which no issue body may carry.
+
+## Context
+
+- CONTEXT-MARKER the task's own background.
+
+## Acceptance criteria
+
+- ACCEPTANCE-MARKER the task's own bar.
+GHBODY
+} > "$LIVE/github-prefixed-title.md"
+must "queuing a prefixed title still calls the real open branch" \
+  "$SPOOLWAY" queue add --from "$LIVE/github-prefixed-title.md"
+PREFIX_TICKET=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/github-prefixed-title.md" | awk '{print $2}')
+PREFIX_NUM=${PREFIX_TICKET##*/}
+has "the commit prefix is stripped from the ticket's own title" \
+  "title=draw a prefixed title correctly" "$GH_STUB_ISSUES/$PREFIX_NUM"
+lacks "and the raw prefix never reaches the stub" \
+  "fix(status):" "$GH_STUB_ISSUES/$PREFIX_NUM"
+# This body, unlike `task_body`'s, holds a real `## Intend` — without one
+# the check that it is left out would pass whatever the hook copied.
+has "the task issue carries the task's Context" \
+  "CONTEXT-MARKER" "$GH_STUB_ISSUES/$PREFIX_NUM.body"
+has "and its Acceptance criteria" \
+  "ACCEPTANCE-MARKER" "$GH_STUB_ISSUES/$PREFIX_NUM.body"
+lacks "but never the Intend section the task file does hold" \
+  "INTEND-MARKER" "$GH_STUB_ISSUES/$PREFIX_NUM.body"
+lacks "nor its heading" "## Intend" "$GH_STUB_ISSUES/$PREFIX_NUM.body"
+
+# --------------------------------------------- done: no pull request comment
+# This task's own acceptance criterion: `hand_off_for_review` comments the
+# ticket, never the pull request — it used to leave a
+# `<!-- spoolway-issue: … -->` marker there. Placed straight at `done`, the
+# same hand-built shape `hook-blocked`/`hook-paused`/`hook-done` above use,
+# with a fresh ticket and pull request of its own rather than reusing
+# `github-open-check`'s: a `done` comment sharing one ticket with the
+# `blocked` comment already checked above would leave only the later
+# overwrite for this assertion to read.
+DONE_TICKET=$(gh issue create -R acme/app -t "review hand-off check" -F "$BODY")
+DONE_NUM=${DONE_TICKET##*/}
+DONE_BRANCH=task/github-done-check
+DONE_PR=$(gh pr create --base plan/live --head "$DONE_BRANCH" --title "review hand-off check" \
+  --body-file "$BODY")
+DONE_PR_NUM=${DONE_PR##*/}
+
+{
+  echo "---"; echo "id: github-done-check"; echo "title: github-done-check, done"
+  echo "stage: done"; echo "group: github-done"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "ticket: $DONE_TICKET"; echo "branch: $DONE_BRANCH"
+  echo "---"; cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/github-done-check.md"
+
+dispatcher_start
+for _ in $(seq 1 150); do
+  [ -s "$GH_STUB_ISSUES/$DONE_NUM.comment" ] && break
+  sleep 0.2
+done
+has "the ticket's comment reads Ready for review, naming the pull request" \
+  "Ready for review in $DONE_PR" "$GH_STUB_ISSUES/$DONE_NUM.comment"
+has "the review label landed on the ticket" "spoolway:review" "$GH_STUB_ISSUES/$DONE_NUM.labels"
+works "no comment was ever posted on the pull request itself" \
+  test ! -e "$GH_STUB_PRS/$DONE_PR_NUM.comment"
+
+# ------------------------------------------------------- jira.sh, real, open
+# The shipped script itself, not a hand-written stand-in, run through its
+# real `open` branch — `scripts/e2e/acli-stub.sh`'s own header explains why
+# a minimal `acli` double is enough for exactly this one event: `started`,
+# `blocked`, `paused` and `done` lean on this project's own `status_*`/
+# `link_*` names meaning something real, which only a live Jira site can
+# prove — see this task's live proof against KAN for that half. `open` only
+# ever creates, asks for a key back as JSON, and optionally reads labels
+# back, none of which depends on a real workflow at all.
+ACLI_STUBBIN="$LIVE/acli-stub-bin"
+mkdir -p "$ACLI_STUBBIN"
+install -m 755 "$HERE/../acli-stub.sh" "$ACLI_STUBBIN/acli"
+export ACLI_STUB_DIR="$LIVE/acli-items"
+export ACLI_STUB_PROJECT_PREFIX=KAN
+PATH="$ACLI_STUBBIN:$PATH"
+
+must "the shipped jira.sh is written" \
+  "$SPOOLWAY" sync --replace .spoolway/hooks/jira.sh
+must "the hook is switched to the real jira.sh" \
+  "$SPOOLWAY" config set issue_tracking.hook jira.sh
+must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key KAN
+
+# Same Context/Acceptance shape the Jira live proof used, with its own
+# prefixed title too — one task proves the title strip, the Story/Sub-task
+# split, both labels on both items, and the real ADF the hook's own
+# `to_adf_file` builds, all against the real script rather than a filter
+# copied out of it.
+{
+  echo "---"; echo "id: jira-open-check"
+  echo "title: \"feat(status): prove jira.sh's real open branch\""
+  echo "group: jira-single"
+  echo "group_description: proving jira.sh's real open branch"
+  echo 'labels: ["screen", "performance"]'
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "---"
+  cat <<'JIRABODY'
+## Intend
+
+INTEND-MARKER the plan's framing, which the Sub-task must never carry.
+
+## Context
+
+- `jira.sh` builds its description with `jq` instead of plain text.
+- see [the docs](https://example.com/docs) for more.
+
+## Acceptance criteria
+
+1. the Sub-task shows a real heading, a bullet, **bold** text and a link.
+2. `acli jira workitem view` reads the description back as ADF.
+JIRABODY
+} > "$LIVE/jira-open-check.md"
+must "queuing it calls the real jira.sh open branch" \
+  "$SPOOLWAY" queue add --from "$LIVE/jira-open-check.md"
+
+JIRA_EPIC=$(grep '^epic:' "$SPOOLWAY_PROJECT_HOME/queue/jira-open-check.md" | awk '{print $2}')
+JIRA_TICKET=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/jira-open-check.md" | awk '{print $2}')
+if [ -n "$JIRA_EPIC" ] && [ -n "$JIRA_TICKET" ]; then
+  ok "jira.sh answered a Story and a Sub-task key on open"
+else
+  bad "jira.sh answered a Story and a Sub-task key on open"
+fi
+JIRA_EPIC_KEY=${JIRA_EPIC##*/}
+JIRA_TICKET_KEY=${JIRA_TICKET##*/}
+
+has "the Story's own title is the group name, not the description" \
+  "summary=jira-single" "$ACLI_STUB_DIR/$JIRA_EPIC_KEY"
+has "the Sub-task's commit prefix is stripped" \
+  "summary=prove jira.sh's real open branch" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY"
+lacks "and the raw prefix never reaches acli" \
+  "feat(status):" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY"
+has "both labels reach the Story" "labels=screen,performance" "$ACLI_STUB_DIR/$JIRA_EPIC_KEY"
+has "both labels reach the Sub-task" "labels=screen,performance" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY"
+has "the Sub-task is parented under the Story" \
+  "$JIRA_EPIC_KEY" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.parent"
+
+if jq -e '
+     .type == "doc" and
+     ([.content[]] | length == 1) and .content[0].type == "paragraph" and
+     ([.. | objects | select(.type == "text") | .text] | join(" ") ==
+       "proving jira.sh'"'"'s real open branch")
+   ' "$ACLI_STUB_DIR/$JIRA_EPIC_KEY.description.json" >/dev/null 2>&1
+then
+  ok "the Story's description is the group description alone, as ADF, with no trailing template"
+else
+  bad "the Story's description is the group description alone, as ADF, with no trailing template"
+  sed 's/^/        /' "$ACLI_STUB_DIR/$JIRA_EPIC_KEY.description.json"
+fi
+
+if jq -e '
+     (.type == "doc") and
+     ([.content[] | select(.type == "heading" and .attrs.level == 2)] | length == 2) and
+     ([.. | objects | select(.type == "bulletList")] | length == 1) and
+     ([.. | objects | select(.type == "orderedList")] | length == 1) and
+     ([.. | objects | select(.marks[]?.type == "code")] | length > 0) and
+     ([.. | objects | select(.marks[]?.type == "strong")] | length > 0) and
+     ([.. | objects | select(.marks[]?.type == "link" and .marks[0].attrs.href == "https://example.com/docs")] | length > 0) and
+     ([.. | strings | select(test("Intend|INTEND-MARKER"))] | length == 0)
+   ' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.description.json" >/dev/null 2>&1
+then
+  ok "the Sub-task's description is real ADF — headings, lists, code, bold and a link, never Intend"
+else
+  bad "the Sub-task's description is real ADF — headings, lists, code, bold and a link, never Intend"
+  sed 's/^/        /' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.description.json"
+fi
+
+# --------------------------------------------- jira.sh, real, done: no PR comment
+# This task's own acceptance criterion, for jira.sh too: `done` comments the
+# ticket, never the pull request. Run directly against the real, shipped
+# script rather than through the dispatcher — `blocked`/`started`/`done`
+# lean on this project's own status and link names meaning something real,
+# which only a live Jira site proves (this task's own live proof against
+# KAN is that half) — but whether a call lands on the ticket or on the pull
+# request is a shape `acli-stub.sh` and `gh-stub.sh` can check together,
+# against `jira-open-check`'s own Sub-task, already open above.
+JIRA_DONE_BRANCH=task/jira-done-check
+JIRA_DONE_PR=$(gh pr create --base plan/live --head "$JIRA_DONE_BRANCH" \
+  --title "jira review hand-off check" --body-file "$BODY")
+JIRA_DONE_PR_NUM=${JIRA_DONE_PR##*/}
+
+must "jira.sh's real done branch runs against the stubs" env \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-done-check SPOOLWAY_TICKET="$JIRA_TICKET_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_DONE_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC="$JIRA_EPIC_KEY" \
+  SPOOLWAY_GROUP_LAST=0 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+
+if jq -e --arg href "$JIRA_DONE_PR" --arg num "$JIRA_DONE_PR_NUM" '
+     [.. | objects | select(.marks[]?.type == "link")] as $links
+     | ($links | length) == 1
+     and ($links[0].marks[0].attrs.href == $href)
+     and ($links[0].text | endswith("#" + $num))
+   ' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.comment.json" >/dev/null 2>&1
+then
+  ok "the ticket's comment is a real ADF link to the pull request, text ending #<n>"
+else
+  bad "the ticket's comment is a real ADF link to the pull request, text ending #<n>"
+  sed 's/^/        /' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.comment.json" 2>/dev/null
+fi
+has "the Sub-task transitioned to Review" "Review" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.status"
+works "no comment was ever posted on the pull request itself" \
+  test ! -e "$GH_STUB_PRS/$JIRA_DONE_PR_NUM.comment"
 
 finish

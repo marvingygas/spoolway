@@ -1627,15 +1627,15 @@ mod tests {
     /// A `gh` stand-in for the `done`-branch tests below, and the `open`-
     /// branch label tests beside them: it logs every invocation, answers
     /// `pr view`'s `--json url` shape from a file the test writes first,
-    /// captures whatever `--body` argument `gh pr comment` and `gh issue
-    /// comment` are each given, answers `gh label list` from
+    /// captures whatever `--body` argument `gh issue comment` is given
+    /// (`gh pr comment` is still handled, for a test that wants to prove the
+    /// hook never calls it), answers `gh label list` from
     /// `stub/existing_labels` (one name per line, blank when the file is
     /// absent), mints an increasing `https://github.com/o/r/issues/<n>` for
     /// every `gh issue create`, and can be told to fail any of its calls
     /// independently — `stub/pr_view_fail` for the branch lookup,
-    /// `stub/pr_comment_fail` for the marker comment, `stub/issue_edit_fail`
-    /// for the label swap, `stub/issue_comment_fail` for the final "ready
-    /// for review" comment, `stub/label_list_fail` and
+    /// `stub/issue_edit_fail` for the label swap, `stub/issue_comment_fail`
+    /// for the final "Ready for review" comment, `stub/label_list_fail` and
     /// `stub/label_create_fail` for the label tests — which is what the
     /// failure-propagation tests below each need one of.
     fn write_stub_gh(bin_dir: &std::path::Path) {
@@ -1904,11 +1904,11 @@ exit 0
         assert_eq!(issue_log.lines().count(), 1, "{issue_log}");
     }
 
-    /// Acceptance criterion: `done` leaves the ticket open, marks the pull
-    /// request with the marker a close-on-merge workflow such as spoolway's
-    /// own `.github/workflows/spoolway-issues.yml` trusts, relabels the
-    /// ticket for review, and closes nothing itself — closing is that
-    /// workflow's job, once the pull request actually merges.
+    /// Acceptance criterion: `done` leaves the ticket open, never comments on
+    /// the pull request itself, relabels the ticket for review, comments
+    /// "Ready for review in &lt;PR URL&gt;" on it — the line a merge sweep
+    /// reads to tell this ticket's own pull request apart from a sibling's —
+    /// and closes nothing itself.
     #[test]
     fn github_sh_done_hands_the_ticket_to_its_pull_request_without_closing_it() {
         let (repo, t, stub, _root_guard) =
@@ -1921,10 +1921,9 @@ exit 0
             RunState::Exited(0)
         );
 
-        let marker = std::fs::read_to_string(stub.join("pr_comment.received")).unwrap();
         assert!(
-            marker.contains("<!-- spoolway-issue: https://github.com/o/r/issues/12 -->"),
-            "marker missing: {marker}"
+            !stub.join("pr_comment.log").exists(),
+            "github.sh commented on the pull request again"
         );
         let edit = std::fs::read_to_string(stub.join("issue_edit.log")).unwrap();
         assert!(
@@ -1933,8 +1932,8 @@ exit 0
         );
         assert!(edit.contains("--add-label spoolway:review"), "{edit}");
         let ready = std::fs::read_to_string(stub.join("issue_comment.received")).unwrap();
-        assert!(
-            ready.contains("ready for review in https://github.com/o/r/pull/9"),
+        assert_eq!(
+            ready, "Ready for review in https://github.com/o/r/pull/9",
             "{ready}"
         );
         assert!(
@@ -2001,30 +2000,8 @@ exit 0
         assert!(!stub.join("pr_comment.log").exists());
     }
 
-    /// A failed marker comment must stop the handoff outright — the ticket
-    /// is not yet relabelled or told anything, so nothing here claims a
-    /// handoff a close-on-merge workflow cannot yet see.
-    #[test]
-    fn github_sh_done_stops_when_the_marker_comment_fails() {
-        let (repo, t, stub, _root_guard) =
-            github_done_fixture("done-marker-fails", "https://github.com/o/r/issues/12");
-        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("pr_comment_fail"), "").unwrap();
-
-        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
-        assert_eq!(
-            settle(&repo, &t, crate::pipeline::DONE),
-            RunState::Exited(1)
-        );
-
-        assert!(!stub.join("issue_edit.log").exists());
-        assert!(!stub.join("issue_comment.log").exists());
-    }
-
-    /// A failed label swap must stop before the final "ready for review"
-    /// comment — the marker is already posted by this point (see
-    /// `hand_off_for_review`'s own doc: it is written first on purpose), but
-    /// nothing downstream of the failed call runs.
+    /// A failed label swap must stop before the final "Ready for review"
+    /// comment ever posts — nothing downstream of the failed call runs.
     #[test]
     fn github_sh_done_stops_when_the_label_swap_fails() {
         let (repo, t, stub, _root_guard) =
@@ -2038,16 +2015,14 @@ exit 0
             RunState::Exited(1)
         );
 
-        assert!(stub.join("pr_comment.log").exists());
         assert!(!stub.join("issue_comment.log").exists());
     }
 
     /// Review finding, ported: a failed final comment used to be swallowed
     /// by the done branch's own unconditional success, so the hook could
     /// exit clean without ever describing the handoff as the acceptance
-    /// criteria require. The marker and the label swap have already landed
-    /// by this point, so a retry only needs to redo the one comment that
-    /// failed.
+    /// criteria require. The label swap has already landed by this point, so
+    /// a retry only needs to redo the one comment that failed.
     #[test]
     fn github_sh_done_fails_when_the_final_comment_fails() {
         let (repo, t, stub, _root_guard) =
@@ -2061,7 +2036,6 @@ exit 0
             RunState::Exited(1)
         );
 
-        assert!(stub.join("pr_comment.log").exists());
         assert!(stub.join("issue_edit.log").exists());
     }
 }

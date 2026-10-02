@@ -7,6 +7,12 @@
 # spoolway-requires: bash >= 3.2
 # spoolway-requires: acli >= 1.3.39
 # spoolway-requires: jq >= 1.6
+# spoolway-requires: gh >= 2.97.0
+#
+# The `gh` floor is `done`'s own: it looks up the pull request to comment
+# with through `gh pr view`, the same tool and the same floor `github.sh`
+# already declares. Nothing else in this file touches `gh` at all — Jira's
+# own tool is `acli` throughout.
 #
 # 3.2 is stock macOS's own bash, not a round number picked for looks: the
 # trap below needs nothing newer — `FUNCNAME`, `BASH_SUBSHELL` and the ERR
@@ -169,6 +175,232 @@ hang_under() {
     || true
 }
 
+# `$SPOOLWAY_TITLE` with a leading commit prefix taken off, for the title of
+# the Sub-task alone — the Story always keeps the group's own name. The
+# prefix is a lowercase word, an optional `(scope)`, and an optional `!`,
+# the shape this project's own commit convention uses (`perf(status): …`,
+# `fix!: …`); a title with none of that passes through unchanged. This can
+# eat a real title that happens to start the same way (`vendor: drop the old
+# client` reads as a prefix), a trade-off the plan accepted rather than
+# invent a second, narrower pattern.
+strip_title_prefix() {
+  printf '%s' "$1" | sed -E 's/^[a-z]+(\([^()]*\))?!?: //'
+}
+
+# `$1`'s rendered contents, printed only when they hold more than blank
+# lines. `epic.md` and `ticket.md` ship empty now, so a project that has not
+# added lines of its own to either gets no trailing empty section — only a
+# project that has written something there sees it appended.
+nonblank_template() {
+  content=$(cat "$1")
+  stripped=$(printf '%s' "$content" | tr -d '[:space:]')
+  [ -n "$stripped" ] && printf '%s' "$content"
+  return 0
+}
+
+# One section's own content out of a task file, matching the boundary rule
+# `Task::find_section` uses in src/task.rs: a line equal to `heading` (case
+# folded, trailing space trimmed) starts it, and it ends at the next line
+# whose own leading `#`s number 1 through heading's own level — a
+# sub-heading nested deeper stays inside the section instead of ending it.
+# Leading and trailing blank lines are trimmed off what is printed. Prints
+# nothing at all for a missing section, a missing file, or a blank
+# `$SPOOLWAY_TASK_FILE` — the `open` event may carry the empty string there
+# for a task with no file of its own (see `tracking.rs`'s own doc on
+# `open_env`).
+extract_section() {
+  file=$1
+  heading=$2
+  [ -n "$file" ] && [ -f "$file" ] || return 0
+  awk -v heading="$heading" '
+    function hashes(l,    n) {
+      n = 0
+      while (substr(l, n + 1, 1) == "#") n++
+      return n
+    }
+    BEGIN { level = hashes(heading); found = 0; n = 0 }
+    {
+      line = $0
+      sub(/[ \t\r]+$/, "", line)
+      if (!found) {
+        if (tolower(line) == tolower(heading)) found = 1
+        next
+      }
+      lvl = hashes(line)
+      if (lvl > 0 && lvl <= level) exit
+      buf[++n] = line
+    }
+    END {
+      start = 1
+      while (start <= n && buf[start] == "") start++
+      last = n
+      while (last >= start && buf[last] == "") last--
+      for (i = start; i <= last; i++) print buf[i]
+    }
+  ' "$file"
+}
+
+# `heading` and its content from `$SPOOLWAY_TASK_FILE`, blank-line-separated
+# the way a task's own headings are — or nothing when the task has
+# no such section, so the Sub-task body never shows an empty one.
+#
+# `if`/`fi`, not `[ -n "$content" ] && printf ...`: a missing section is
+# the ordinary case, not a failure, but that shape makes an empty match this
+# function's own last, failing command — harmless under plain `sh`, fatal
+# under `set -e` once this runs bare inside a command substitution with
+# nothing wrapping the call in an `if` or an `&&`/`||` of its own.
+ticket_section() {
+  content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
+  if [ -n "$content" ]; then
+    printf '%s\n\n%s\n\n' "$1" "$content"
+  fi
+}
+
+# The same, but tight against its heading — `## Status Log` and `##
+# Handoff` are already bulleted lists in the task, with no blank line
+# under the heading, and a comment reproduces that instead of inventing one.
+# `github.sh`'s own `comment_section` does the same thing, for the same
+# reason — the two comments carry identical content, just rendered through
+# each tracker's own format.
+comment_section() {
+  content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
+  if [ -n "$content" ]; then
+    printf '%s\n%s\n\n' "$1" "$content"
+  fi
+}
+
+# The Markdown-to-ADF converter, as a jq program rather than a shell
+# function: jq is already a hard dependency (see the header), and it is
+# built for walking a tree exactly this shaped — a single-quoted heredoc
+# keeps every `$`-prefixed jq variable below from the shell's own
+# expansion, so this reads as plain jq source. It covers what task files
+# use: `##` headings, paragraphs, `-`/`1.` lists with one nested level
+# (a line indented two or more spaces, under a list that is already open),
+# fenced code, and inline code, bold and links — `scan` tokenises a line
+# left to right on those four inline patterns plus a catch-all, so nothing
+# recognised falls through unmatched, and `` ` ``/`*`/`[` on their own pass
+# through as plain text rather than being dropped. Anything this does not
+# recognise at the block level — a line that does not open a new block —
+# is read as plain prose: it either continues the paragraph or list item
+# already open, or starts a new paragraph, so no line of input is ever
+# lost, only reshaped. `jira.sh`'s own `fetch` arm already walks ADF the
+# other way, into text; this is the one direction it was missing.
+read -r -d '' ADF_FILTER <<'JQ' || true
+# A `**bold**` pair's own content may not start or end on whitespace — the
+# same left/right-flanking rule CommonMark itself uses to decide a `*`/`**`
+# run can open or close emphasis at all. Without it, two unrelated `**`
+# markers far apart in the same block — `assets/**` and `.spoolway/**`,
+# both real glob syntax rather than markup, in one task's own prose — read
+# as one giant bold span over every word between them, swallowing both
+# markers into formatting nobody meant. Requiring non-space on both inner
+# edges rejects exactly that: `**` immediately followed by a space can
+# never open a real bold span, so it is left as the two literal characters
+# it is.
+def inline_nodes:
+  if . == "" then []
+  else
+    [scan("`[^`]*`|\\*\\*(?:[^*\\s][^*]*[^*\\s]|[^*\\s])\\*\\*|\\[[^\\]]*\\]\\([^)]*\\)|[^`*\\[]+|[`*\\[]")]
+    | map(
+        if test("^`.*`$") then {type:"text", text: .[1:-1], marks:[{type:"code"}]}
+        elif test("^\\*\\*.*\\*\\*$") then {type:"text", text: .[2:-2], marks:[{type:"strong"}]}
+        elif test("^\\[.*\\]\\(.*\\)$") then
+          (capture("^\\[(?<t>[^\\]]*)\\]\\((?<u>[^)]*)\\)")) as $m
+          | {type:"text", text: $m.t, marks:[{type:"link", attrs:{href: $m.u}}]}
+        else {type:"text", text: .}
+        end
+      )
+    | map(select(.text != ""))
+  end;
+
+def flatten_list($items; $ordered):
+  {type: (if $ordered then "orderedList" else "bulletList" end),
+   content: ($items | map(
+     {type:"listItem", content:
+       ([{type:"paragraph", content: (.text | inline_nodes)}]
+        + (if .children then [flatten_list(.children.items; .children.ordered)] else [] end))
+     }
+   ))};
+
+def flush_para($s):
+  if ($s.buf|length) > 0 then
+    $s + {blocks: ($s.blocks + [{type:"paragraph", content: ($s.buf | join(" ") | inline_nodes)}]), buf: []}
+  else $s end;
+
+def flush_list($s):
+  if $s.list then
+    $s + {blocks: ($s.blocks + [flatten_list($s.list.items; $s.list.ordered)]), list: null}
+  else $s end;
+
+def append_continuation($s; $text):
+  ($s.list.items | length - 1) as $lastidx
+  | ($s.list.items[$lastidx]) as $lastitem
+  | if $lastitem.children then
+      ($lastitem.children.items | length - 1) as $cidx
+      | ($lastitem.children.items[$cidx].text + " " + $text) as $newtext
+      | $s + {list: ($s.list + {items: ($s.list.items[0:$lastidx] + [($lastitem + {children: ($lastitem.children + {items: ($lastitem.children.items[0:$cidx] + [($lastitem.children.items[$cidx] + {text: $newtext})])})})])})}
+    else
+      ($lastitem.text + " " + $text) as $newtext
+      | $s + {list: ($s.list + {items: ($s.list.items[0:$lastidx] + [($lastitem + {text: $newtext})])})}
+    end;
+
+def md_to_adf:
+  . as $text
+  | ($text | split("\n")) as $lines
+  | reduce $lines[] as $line (
+      {blocks: [], mode: "none", buf: [], code_lines: [], list: null};
+      . as $s
+      | ($line | test("^```")) as $is_fence
+      | if $s.mode == "code" then
+          if $is_fence then
+            $s + {blocks: ($s.blocks + [{type:"codeBlock", content: (if ($s.code_lines|join("\n")) == "" then [] else [{type:"text", text: ($s.code_lines|join("\n"))}] end)}]), mode: "none", code_lines: []}
+          else
+            $s + {code_lines: ($s.code_lines + [$line])}
+          end
+        elif $is_fence then
+          (flush_para($s)) as $s1 | (flush_list($s1)) as $s2
+          | $s2 + {mode: "code", code_lines: []}
+        elif ($line | test("^## +")) then
+          (flush_para($s)) as $s1 | (flush_list($s1)) as $s2
+          | $s2 + {blocks: ($s2.blocks + [{type:"heading", attrs:{level:2}, content: ($line | sub("^## +"; "") | inline_nodes)}])}
+        elif ($line | test("^(-|[0-9]+\\.) +")) then
+          (if $s.list then $s else flush_para($s) end) as $pre
+          | ($line | test("^[0-9]+\\.")) as $ordered
+          | ($line | sub("^(-|[0-9]+\\.) +"; "")) as $item_text
+          | ($pre.list // {ordered: $ordered, items: []}) as $existing
+          | $pre + {list: ($existing + {items: ($existing.items + [{text: $item_text, children: null}])})}
+        elif ($line | test("^  +(-|[0-9]+\\.) +")) and $s.list then
+          ($line | test("^  +[0-9]+\\.")) as $ordered
+          | ($line | sub("^  +(-|[0-9]+\\.) +"; "")) as $item_text
+          | ($s.list.items | length - 1) as $lastidx
+          | ($s.list.items[$lastidx].children // {ordered: $ordered, items: []}) as $existingchild
+          | $s + {list: ($s.list + {items: ($s.list.items[0:$lastidx] + [($s.list.items[$lastidx] + {children: ($existingchild + {items: ($existingchild.items + [{text: $item_text, children: null}])})})])})}
+        elif ($line | test("^ *$")) then
+          (flush_para($s)) as $s1 | flush_list($s1)
+        elif $s.list then
+          append_continuation($s; ($line | sub("^ +"; "")))
+        else
+          $s + {buf: ($s.buf + [$line])}
+        end
+    )
+  | (flush_para(.)) as $f1 | (flush_list($f1)) as $f2
+  | ($f2 + (if $f2.mode == "code" then {blocks: ($f2.blocks + [{type:"codeBlock", content: (if ($f2.code_lines|join("\n")) == "" then [] else [{type:"text", text: ($f2.code_lines|join("\n"))}] end)}])} else {} end)) as $f3
+  | {type:"doc", version:1, content: ($f3.blocks | if length == 0 then [{type:"paragraph", content: []}] else . end)};
+
+$md | md_to_adf
+JQ
+
+# Converts `$1` (Markdown text) to Atlassian Document Format and writes it
+# to `$2`, then checks the result with `jq empty` before anything calls
+# `acli` with it — a converter bug fails loudly here, naming the file this
+# left behind, rather than surfacing as an opaque `acli` rejection.
+to_adf_file() {
+  jq -n --arg md "$1" "$ADF_FILTER" > "$2"
+  jq empty "$2" || {
+    echo "jira.sh: the Markdown body for \"$2\" did not convert to valid ADF" >&2
+    exit 1
+  }
+}
+
 if [ "$SPOOLWAY_EVENT" = fetch ]; then
   fields=$(acli jira workitem view "$SPOOLWAY_REF" --fields "summary,status,labels,description" \
              --json) && [ -n "$fields" ] || {
@@ -247,10 +479,24 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   }
 
   if [ -z "$epic" ]; then
+    # The Story's body is the group description alone, flat, with the
+    # rendered `epic.md` appended only when a project has put something of
+    # its own in it — the shipped template ships empty. `to_adf_file` turns
+    # that Markdown into the ADF Jira Cloud actually draws as rich text.
+    epic_lead=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION")
+    epic_template=$(nonblank_template "$SPOOLWAY_EPIC_BODY")
+    if [ -n "$epic_template" ]; then
+      epic_md=$(printf '%s\n\n%s\n' "$epic_lead" "$epic_template")
+    else
+      epic_md=$epic_lead
+    fi
+    epic_adf="$SPOOLWAY_EPIC_BODY.adf.json"
+    to_adf_file "$epic_md" "$epic_adf"
+
     # A group of one still opens a Story — one shape for every group, not a
     # Story only once a second task shows up.
     epic=$(acli jira workitem create --project "$project" --type "$type_story" \
-             --summary "$SPOOLWAY_GROUP" --description-file "$SPOOLWAY_EPIC_BODY" \
+             --summary "$SPOOLWAY_GROUP" --description-file "$epic_adf" \
              ${SPOOLWAY_LABELS:+--label "$SPOOLWAY_LABELS"} --json | jq -r '.key // empty')
     if [ -z "$epic" ]; then
       echo "jira.sh: acli/jq returned no Story key — is jq installed, and did \`workitem create\` succeed?" >&2
@@ -268,8 +514,26 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   fi
 
   if [ -z "$ticket" ]; then
+    # The task's own words alone: its `## Context` and `## Acceptance
+    # criteria`, never `## Intend` — that section is the plan's framing of
+    # the task, not the task itself. The rendered `ticket.md` is appended
+    # only when a project has put something of its own in it. One command
+    # substitution around all three, not one each concatenated — `$(...)`
+    # strips only its own *trailing* newlines, so capturing `ticket_section`
+    # separately and pasting the results together would weld the end of
+    # Context straight onto the `## Acceptance criteria` heading with
+    # nothing between them.
+    ticket_md=$(
+      ticket_section "## Context"
+      ticket_section "## Acceptance criteria"
+      nonblank_template "$SPOOLWAY_TICKET_BODY"
+    )
+    ticket_adf="$SPOOLWAY_TICKET_BODY.adf.json"
+    to_adf_file "$ticket_md" "$ticket_adf"
+    ticket_title=$(strip_title_prefix "$SPOOLWAY_TITLE")
+
     ticket=$(acli jira workitem create --project "$project" --type "$type_subtask" \
-               --summary "$SPOOLWAY_TITLE" --description-file "$SPOOLWAY_TICKET_BODY" \
+               --summary "$ticket_title" --description-file "$ticket_adf" \
                --parent "$epic" ${SPOOLWAY_LABELS:+--label "$SPOOLWAY_LABELS"} \
                --json | jq -r '.key // empty')
     if [ -z "$ticket" ]; then
@@ -335,10 +599,64 @@ case "$SPOOLWAY_EVENT" in
     fi
     ;;
   blocked | paused)
-    acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body \
-      "spoolway - $SPOOLWAY_TASK is $SPOOLWAY_EVENT at $SPOOLWAY_FROM"
+    # The same content `github.sh`'s own `comment_snapshot` posts, as ADF —
+    # `**bold**` and `` `code` `` both convert, so the heading and the task's
+    # own backticked names draw the same here as they do on GitHub, where
+    # Markdown already renders them. `comment_section` skips a missing
+    # section rather than printing an empty heading, matching `github.sh`.
+    snapshot_md=$(
+      printf '**spoolway** — `%s` is **%s** at `%s`\n\n' \
+        "$SPOOLWAY_TASK" "$SPOOLWAY_EVENT" "$SPOOLWAY_FROM"
+      comment_section "## Status Log"
+      comment_section "## Handoff"
+    )
+    # `mktemp`, not `$SPOOLWAY_TASK_FILE.snapshot.adf.json`: `open` has its
+    # own `$SPOOLWAY_EPIC_BODY`/`$SPOOLWAY_TICKET_BODY` paths under the
+    # tracking directory to write through, but `blocked`/`paused`/`done` get
+    # no scratch path of their own, and `$SPOOLWAY_TASK_FILE` names the live
+    # queue file — a path beside it is a stray `<id>.md.*.adf.json` nothing
+    # ever reads or removes, left behind in the project's queue directory
+    # even once the task archives (review finding, ported). The trap cleans
+    # it up whether `acli` below succeeds or the ERR trap at the top of this
+    # file fires instead.
+    snapshot_adf=$(mktemp "${TMPDIR:-/tmp}/jira-hook-adf.XXXXXX")
+    trap 'rm -f "$snapshot_adf"' EXIT
+    to_adf_file "$snapshot_md" "$snapshot_adf"
+    acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body-file "$snapshot_adf"
     ;;
   done)
+    # The pull request this hand-off names, looked up before anything else
+    # on `done` touches the ticket — a `done` this hook fires for always has
+    # one behind it by then (`spoolway stack` already opened it), so no
+    # result is as much a failure as a nonzero exit is, the same rule
+    # `github.sh`'s own `hand_off_for_review` follows. Every hook here runs
+    # with the repository's own checkout as its working directory, so
+    # `gh pr view` finds the pull request with no `-R` needed to name one —
+    # unlike `github.sh`, which always passes `-R "$repo"` because it holds
+    # no checkout of its own to infer one from.
+    pr=$(gh pr view "$SPOOLWAY_BRANCH" --json url --jq .url)
+    [ -n "$pr" ] || {
+      echo "jira.sh: no pull request found for $SPOOLWAY_BRANCH" >&2
+      exit 1
+    }
+    # `<owner>/<repo>#<n>` as the link text, the pull request's own URL as
+    # its href — the shape the mockup draws, and the one GitHub's own links
+    # already render as everywhere else. `$pr` always ends `/pull/<n>`, so
+    # dropping the scheme and host and swapping that last segment's slash
+    # for `#` is enough; no call here ever parses the host itself, so this
+    # reads the same whether it names github.com or an enterprise host.
+    pr_short=$(printf '%s' "$pr" | sed -E 's#^[a-z]+://[^/]+/##; s#/pull/([0-9]+)$#\#\1#')
+    # `[text](url)` rather than the bare URL: `md_to_adf` only recognises a
+    # Markdown link, never autolinking a bare URL on its own, and the
+    # acceptance bar here is a real ADF link mark, the same blue, underlined
+    # text Jira draws for any other link.
+    review_md=$(printf 'Ready for review in [%s](%s)' "$pr_short" "$pr")
+    # The same `mktemp` scratch path `blocked`/`paused` use above, for the
+    # same reason — see that comment.
+    review_adf=$(mktemp "${TMPDIR:-/tmp}/jira-hook-adf.XXXXXX")
+    trap 'rm -f "$review_adf"' EXIT
+    to_adf_file "$review_md" "$review_adf"
+    acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body-file "$review_adf"
     acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_review" --yes
     if [ "$SPOOLWAY_GROUP_LAST" = 1 ] && [ -n "$SPOOLWAY_EPIC" ]; then
       acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_review" --yes
