@@ -129,13 +129,13 @@ publish() {
   must "the plan branch is on the forge" git push -q -u origin "$branch"
 }
 
-# configure_project <plan-branch> [<worktrees>] [init-flag ...]
+# configure_project <plan-branch> [init-flag ...]
 #
 # What every suite needs before it can queue anything: an initialised project,
 # models whichever agent mode is in force answers to, and a plan branch to be
 # based on.
 #
-# Any argument past the worktree root is passed straight to `spoolway init` —
+# Any argument past the plan branch is passed straight to `spoolway init` —
 # `suites/warmth.sh` is the one caller that passes one, `--take-over`
 # (now a no-op kept for compatibility; see there), since it is also the one
 # suite that reuses the real `~/.spoolway/proj` home run to run rather than
@@ -149,8 +149,8 @@ publish() {
 # is the same behaviour at the harness's own scale. Only a *settled* lane is
 # ever measured against it, so a mock still running is untouched by this.
 configure_project() {
-  local branch=${1:-plan/demo} worktrees=${2:-}
-  shift $(( $# > 2 ? 2 : $# ))
+  local branch=${1:-plan/demo}
+  shift $(( $# > 1 ? 1 : $# ))
   # `--yes` answers the confirmation `init` opens with: there is no
   # terminal here, so without it the question takes its default — no —
   # and nothing is scaffolded at all.
@@ -190,8 +190,6 @@ PROFILE
   # own setting, split apart from the poll rate, and the suites that force
   # the reminder loop need it this short.
   must "the lane patience" "$SPOOLWAY" config set dispatch.lane_quiet 1s
-  [ -n "$worktrees" ] && must "the worktree root" \
-    "$SPOOLWAY" config set dispatch.worktree_root "$worktrees"
   agent_sandbox
   must "the spoolway commit" git add -A
   must "the spoolway commit" git commit -qm "spoolway"

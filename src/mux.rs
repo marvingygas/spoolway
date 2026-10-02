@@ -623,11 +623,9 @@ pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
         crate::config::Backend::Herdr => {
             Box::new(Herdr::new(root, &repo.checkout, &config.dispatch)?)
         }
-        crate::config::Backend::Headless => Box::new(crate::headless::Headless::new(
-            root,
-            &config.dispatch,
-            repo.headless_dir(),
-        )?),
+        crate::config::Backend::Headless => {
+            Box::new(crate::headless::Headless::new(root, repo.headless_dir())?)
+        }
     })
 }
 
@@ -922,7 +920,7 @@ impl Herdr {
             cwd: cwd.to_path_buf(),
             anchor: checkout.to_path_buf(),
             mode: config.herdr_mode,
-            worktree_root: worktree_root(cwd, config)?,
+            worktree_root: worktree_root(cwd)?,
             root_tab: Mutex::new(None),
             project_home: project_home_lenient(cwd).0,
             alias_reservation: Mutex::new(()),
@@ -2506,22 +2504,19 @@ pub(crate) fn project_home_lenient(root: &Path) -> (PathBuf, Option<anyhow::Erro
 /// Outside `~/.herdr/` too, which it did not used to be. That directory is
 /// herdr's, and the checkouts spoolway cuts are ones herdr never hears about
 /// until it is pointed at one — filing them there invited the multiplexer to
-/// make sense of directories it did not make. One root, one setting
-/// (`dispatch.worktree_root`), one answer to where a dispatched checkout
-/// lives — nested under [`project_home`] by default, beside the same
-/// project's queue and archive, so a worktree cut here never registers as a
-/// workspace of its own the way one cut at a repository's root did.
+/// make sense of directories it did not make. One root, no setting to move
+/// it — `dispatch.worktree_root` is retired (see [`DispatchConfig`]) — one
+/// answer to where a dispatched checkout lives: nested under
+/// [`project_home`], beside the same project's queue and archive, so a
+/// worktree cut here never registers as a workspace of its own the way one
+/// cut at a repository's root did.
 ///
 /// The directory *under* the root is the branch slug — see [`branch_slug`] —
 /// for every backend now: one flat entry per task that `git worktree list`
 /// and a person both read by the branch, and the same name whichever
 /// multiplexer cut it. A tracker slug on the branch rides into that directory
 /// name for free.
-pub fn worktree_root(root: &Path, config: &DispatchConfig) -> Result<PathBuf> {
-    let configured = config.worktree_root.trim();
-    if !configured.is_empty() {
-        return Ok(PathBuf::from(shellexpand_home(configured)));
-    }
+pub fn worktree_root(root: &Path) -> Result<PathBuf> {
     Ok(project_home(root)?.join("worktrees"))
 }
 
@@ -2532,15 +2527,6 @@ pub fn worktree_root(root: &Path, config: &DispatchConfig) -> Result<PathBuf> {
 /// that stopped a lane running natively on Windows at all.
 pub fn home() -> PathBuf {
     crate::platform::home_dir().unwrap_or_else(std::env::temp_dir)
-}
-
-/// `~` at the front of a configured path, and nowhere else — a project that
-/// wrote one is naming its own home, not asking for shell expansion.
-fn shellexpand_home(path: &str) -> String {
-    match path.strip_prefix("~/") {
-        Some(rest) => home().join(rest).display().to_string(),
-        None => path.to_string(),
-    }
 }
 
 /// The argv of the `herdr worktree open` call that binds a task's checkout to
@@ -3725,9 +3711,7 @@ mod tests {
     #[test]
     fn every_task_worktree_lands_under_the_projects_own_home() {
         let root = home().join("dev").join("spoolway");
-        let path = worktree_root(&root, &DispatchConfig::default())
-            .unwrap()
-            .join("session-key");
+        let path = worktree_root(&root).unwrap().join("session-key");
         assert!(
             path.ends_with(Path::new("worktrees/session-key")),
             "{path:?}"
@@ -3736,11 +3720,11 @@ mod tests {
         assert!(!path.starts_with(home().join(".herdr")), "{path:?}");
     }
 
-    /// The default worktree root for a home-mode checkout is the
-    /// workspace's own dispatcher folder, not a stamp-keyed home — the same
+    /// The worktree root for a home-mode checkout is the workspace's own
+    /// dispatcher folder, not a stamp-keyed home — the same
     /// `dispatchers/<name>/worktrees/` [`crate::repo::Repo::home`] answers,
-    /// so a dispatch pass cuts a lane's worktree in the right place without
-    /// `dispatch.worktree_root` needing to name it by hand.
+    /// so a dispatch pass cuts a lane's worktree in the right place with
+    /// nothing to configure.
     #[test]
     fn a_home_mode_checkouts_worktree_root_is_its_dispatcher_folder() {
         let scratch_home = crate::scratch::root("mux-home-mode-worktree-root");
@@ -3763,7 +3747,7 @@ mod tests {
         .unwrap();
 
         crate::platform::test_home::with_home(&scratch_home, || {
-            let path = worktree_root(&canon, &DispatchConfig::default()).unwrap();
+            let path = worktree_root(&canon).unwrap();
             assert_eq!(
                 path,
                 workspace.join("dispatchers").join("api").join("worktrees")

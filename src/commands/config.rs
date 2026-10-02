@@ -332,7 +332,7 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(
             state.join("config.toml"),
-            "[dispatch]\nworktree_root = \"from-root\"\n",
+            "[unattended]\nblocked_agent = \"from-root\"\n",
         )
         .unwrap();
         git(&root, &["add", "-A"]);
@@ -352,7 +352,7 @@ mod tests {
         );
         std::fs::write(
             wt.join(crate::config::STATE_DIR).join("config.toml"),
-            "[dispatch]\nworktree_root = \"from-worktree\"\n",
+            "[unattended]\nblocked_agent = \"from-worktree\"\n",
         )
         .unwrap();
 
@@ -374,12 +374,12 @@ mod tests {
     #[test]
     fn config_get_answers_for_the_checkout_not_the_root() {
         let (repo, _root, _base_guard) = worktree_fixture("get");
-        config_get(&repo, "dispatch.worktree_root", false).unwrap();
+        config_get(&repo, "unattended.blocked_agent", false).unwrap();
         // `config_get` prints to stdout, which a unit test cannot capture
         // cheaply — so this also asserts the lower-level read it goes
         // through, which is the part that actually decides the answer.
         let config = Config::load(&repo.checkout).unwrap();
-        assert_eq!(config.dispatch.worktree_root, "from-worktree");
+        assert_eq!(config.unattended.blocked_agent, "from-worktree");
     }
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
         let before_root = std::fs::read_to_string(Config::path_in(&root)).unwrap();
         let before_wt = std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap();
 
-        let err = config_set(&repo, "dispatch.worktree_root", "changed")
+        let err = config_set(&repo, "unattended.blocked_agent", "changed")
             .expect_err("config set must refuse inside a linked worktree");
         let message = format!("{err:#}");
         assert!(
@@ -476,7 +476,7 @@ mod tests {
         // directory as a `Path`, but not the same string.
         assert!(
             message.contains(&format!(
-                "spoolway -C {} config set dispatch.worktree_root changed",
+                "spoolway -C {} config set unattended.blocked_agent changed",
                 repo.root.display()
             )),
             "message did not name the -C invocation: {message}"
@@ -497,9 +497,9 @@ mod tests {
     #[test]
     fn config_set_in_the_main_checkout_writes_exactly_where_it_writes_today() {
         let (repo, _root_guard) = crate::commands::testutil::fixture("config-set-main");
-        config_set(&repo, "dispatch.worktree_root", "changed").unwrap();
+        config_set(&repo, "unattended.blocked_agent", "changed").unwrap();
         let config = Config::load(&repo.root).unwrap();
-        assert_eq!(config.dispatch.worktree_root, "changed");
+        assert_eq!(config.unattended.blocked_agent, "changed");
     }
 
     /// `config list` runs both ways, prints `key = value` rows, and names

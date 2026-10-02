@@ -432,7 +432,6 @@ spoolway config set unattended.blocked_session true
 
 if [ "$HEADLESS" = 1 ]; then
   spoolway config set dispatch.backend headless
-  spoolway config set dispatch.worktree_root "$WORKTREES_HEADLESS"
 fi
 
 # What the plan itself asks for. Every `config: <key> <value>` line in the plan

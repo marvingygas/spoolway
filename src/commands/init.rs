@@ -656,18 +656,10 @@ fn report_row(verb: &str, what: &str) -> String {
 /// `init` create empty; `migrate-legacy-home`'s own move prints it for the
 /// same reason, against the home it just moved.
 ///
-/// Worktrees are counted at `root`'s own configured
-/// `dispatch.worktree_root` when it has one, and at `home`'s own default
-/// location otherwise — reading `root`'s tracked `config.toml` directly
-/// rather than going through `Repo::discover`, which is not safe to call
-/// mid-`init` (before the binding this call is itself establishing exists)
-/// and not yet safe mid-migration either (`crate::repo::migrate_legacy_home`
-/// calls this before the move it is reporting on has finished settling into
-/// `Repo::discover`'s own accessors). A config that fails to load, or a
-/// configured root `crate::mux::worktree_root` cannot resolve, falls back
-/// to the default location rather than erroring out of an inventory line
-/// that only ever reports, never fails a bind.
-pub(crate) fn home_inventory_line(root: &Path, home: &Path) -> String {
+/// Worktrees are always counted at `home`'s own `worktrees` directory —
+/// every dispatched checkout lands there now, with no setting left to move
+/// it elsewhere.
+pub(crate) fn home_inventory_line(home: &Path) -> String {
     let count_docs = |dir: std::path::PathBuf| -> usize {
         std::fs::read_dir(dir)
             .into_iter()
@@ -681,11 +673,7 @@ pub(crate) fn home_inventory_line(root: &Path, home: &Path) -> String {
     let ledger = std::fs::metadata(home.join(crate::usage::LEDGER_FILE))
         .map(|meta| meta.len() > 0)
         .unwrap_or(false);
-    let worktree_dir = Config::load_tracked(root)
-        .ok()
-        .filter(|config| !config.dispatch.worktree_root.trim().is_empty())
-        .and_then(|config| crate::mux::worktree_root(root, &config.dispatch).ok())
-        .unwrap_or_else(|| home.join("worktrees"));
+    let worktree_dir = home.join("worktrees");
     let worktrees = std::fs::read_dir(worktree_dir)
         .into_iter()
         .flatten()
@@ -1008,7 +996,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     if let Some(name) = &args.adopt {
         let home = crate::repo::adopt(root, name)?;
         println!("  bound  {}  ->  {}/", root.display(), home.display());
-        println!("         {}", home_inventory_line(root, &home));
+        println!("         {}", home_inventory_line(&home));
     } else if args.new_id {
         let home = crate::repo::restamp(root)?;
         println!(
@@ -1978,16 +1966,8 @@ mod tests {
         std::fs::write(home.join("queue").join("notes.txt"), "not a task").unwrap();
         std::fs::write(home.join("usage.jsonl"), "{}\n").unwrap();
 
-        // No `.spoolway/config.toml` under this root at all, exactly like a
-        // bare `root` at `--adopt` time before `init` has written one —
-        // `dispatch.worktree_root` reads as unconfigured, so the count
-        // falls back to `home`'s own `worktrees/`.
-        let root = crate::scratch::root("home-inventory-root");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-
         assert_eq!(
-            home_inventory_line(&root, &home),
+            home_inventory_line(&home),
             "queue 2 . archive 1 . ledger . worktrees 2"
         );
 
@@ -1998,46 +1978,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fresh);
         std::fs::create_dir_all(&fresh).unwrap();
         assert_eq!(
-            home_inventory_line(&root, &fresh),
+            home_inventory_line(&fresh),
             "queue 0 . archive 0 . ledger (none) . worktrees 0"
-        );
-    }
-
-    /// A project that points `dispatch.worktree_root` somewhere other than
-    /// its home's own default location must be counted there, not against
-    /// `home`'s own (empty) `worktrees/` — the bug the second review
-    /// caught: the mockup's inventory line could read `worktrees 0` while
-    /// worktrees plainly existed, because the count never looked anywhere
-    /// but the default.
-    #[test]
-    fn home_inventory_line_counts_a_configured_worktree_root() {
-        let root = crate::scratch::root("home-inventory-configured-root");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
-
-        let elsewhere = crate::scratch::root("home-inventory-configured-worktrees");
-        let _ = std::fs::remove_dir_all(&elsewhere);
-        std::fs::create_dir_all(elsewhere.join("task-a")).unwrap();
-        std::fs::write(
-            Config::path_in(&root),
-            format!(
-                "[dispatch]\nworktree_root = {:?}\n",
-                elsewhere.display().to_string()
-            ),
-        )
-        .unwrap();
-
-        let home = crate::scratch::root("home-inventory-configured-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        // The home's own default location is left empty, on purpose: a
-        // count that fell back to it despite the config above would still
-        // read zero.
-        std::fs::create_dir_all(home.join("worktrees")).unwrap();
-
-        assert_eq!(
-            home_inventory_line(&root, &home),
-            "queue 0 . archive 0 . ledger (none) . worktrees 1"
         );
     }
 

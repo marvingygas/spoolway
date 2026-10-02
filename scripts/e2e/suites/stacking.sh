@@ -61,7 +61,7 @@ new_forge "$LIVE/forge"
 install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
-configure_project plan/live "$LIVE/worktrees"
+configure_project plan/live
 publish plan/live
 
 # ------------------------------------------------------- a step the stack runs once
@@ -266,11 +266,11 @@ else
   bad "the branch below it still exists at the moment it is cut from"
 fi
 
-if [ -e "$LIVE/worktrees/task-top/work-base.txt" ]; then
+if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-top/work-base.txt" ]; then
   ok "and its worktree already carries the work that branch holds"
 else
   bad "and its worktree already carries the work that branch holds"
-  ls "$LIVE/worktrees/task-top" 2>/dev/null | sed 's/^/        /'
+  ls "$SPOOLWAY_PROJECT_HOME/worktrees/task-top" 2>/dev/null | sed 's/^/        /'
 fi
 
 # `cut_from` is a fact about the cut, `base:` a fact about where the plan
@@ -408,11 +408,11 @@ else bad "apex is cut once both its parents are in (at \`$(stage_of apex)\`)"; f
 says "and it was cut from the deeper parent" "cut_from: task/top" \
   "$SPOOLWAY" queue show apex
 
-if [ -e "$LIVE/worktrees/task-apex/work-base.txt" ] && [ -e "$LIVE/worktrees/task-apex/work-top.txt" ]; then
+if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-apex/work-base.txt" ] && [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-apex/work-top.txt" ]; then
   ok "its worktree already carries both parents' work"
 else
   bad "its worktree already carries both parents' work"
-  ls "$LIVE/worktrees/task-apex" 2>/dev/null | sed 's/^/        /'
+  ls "$SPOOLWAY_PROJECT_HOME/worktrees/task-apex" 2>/dev/null | sed 's/^/        /'
 fi
 
 if drive apex blocked 150; then ok "apex hands its own change over too"

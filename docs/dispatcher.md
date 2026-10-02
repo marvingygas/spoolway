@@ -432,8 +432,8 @@ Quote the lane name. It holds a space.
 
 ## Where work happens on disk
 
-Each task gets a git worktree at `dispatch.worktree_root`, which is
-`~/.spoolway/<project>/worktrees/task-<id>` by default, or, for a home-mode checkout, its
+Each task gets a git worktree under the project's own home, at
+`~/.spoolway/<project>/worktrees/task-<id>`, or, for a home-mode checkout, its
 workspace's `dispatchers/<dispatcher>/worktrees/task-<id>`. See [Home
 mode](concepts.md#home-mode). If somebody already has the task's branch checked out, the lane
 borrows that checkout and cleanup leaves it alone. See

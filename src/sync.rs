@@ -710,6 +710,36 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                 "migrated: on_fail removed; [issue_tracking] moved under [watch]",
             ));
         }
+        // A blank `worktree_root` was never anybody's decision — the ordinary
+        // "retired setting(s) dropped" line above already covers it, and
+        // there is nothing further to say. A real path is different: it is
+        // where this project's worktrees actually were, and nothing else
+        // tells a person they are still sitting there once the key that
+        // named them is gone.
+        let old_worktree_root = refresh
+            .dropped
+            .iter()
+            .any(|key| key == "dispatch.worktree_root")
+            .then(|| {
+                toml::from_str::<toml::Value>(&text).ok().and_then(|doc| {
+                    doc.get("dispatch")?
+                        .get("worktree_root")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+            })
+            .flatten()
+            .filter(|path| !path.trim().is_empty());
+        if let Some(old) = old_worktree_root {
+            outcomes.push(Outcome::migrated(
+                &shown,
+                format!(
+                    "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                     {old} — yours to remove",
+                ),
+                format!("migrated: worktree_root removed; worktrees were at {old}"),
+            ));
+        }
     }
     if !refresh.renoted.is_empty() {
         outcomes.push(Outcome::wrote(
@@ -2099,6 +2129,66 @@ mod tests {
                     && panel.contains("[issue_tracking] moved under [watch]")
             }),
             "{shown:?}"
+        );
+    }
+
+    /// `dispatch.worktree_root` held a real path: `sync` drops the key, the
+    /// same as any other retired setting, but also names the old directory —
+    /// nothing else tells a project its worktrees are still sitting there
+    /// once the key that named them is gone.
+    #[test]
+    fn a_config_naming_a_real_worktree_root_names_the_old_directory() {
+        let (repo, _root_guard) = fixture("config-retired-worktree-root-real");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nworktree_root = \"/old/worktrees\"\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("worktree_root"), "{after}");
+
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("wrote") && line.contains("dispatch.worktree_root")),
+            "{lines:?}"
+        );
+
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown.iter().any(|(report, panel)| {
+                report.contains("dispatch.worktree_root removed")
+                    && report.contains("/old/worktrees")
+                    && panel.contains("/old/worktrees")
+            }),
+            "{shown:?}"
+        );
+    }
+
+    /// A blank `dispatch.worktree_root` was never anybody's decision — the
+    /// ordinary dropped-key line covers it, and there is nothing further
+    /// worth a dedicated note.
+    #[test]
+    fn a_config_naming_a_blank_worktree_root_gets_no_extra_note() {
+        let (repo, _root_guard) = fixture("config-retired-worktree-root-blank");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nworktree_root = \"\"\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("wrote") && line.contains("dispatch.worktree_root")),
+            "{lines:?}"
+        );
+        assert!(
+            migration_notes(&outcomes).is_empty(),
+            "a blank value must not earn the dedicated directory note"
         );
     }
 

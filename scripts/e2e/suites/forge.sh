@@ -35,7 +35,7 @@ new_forge "$LIVE/forge"
 install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
-configure_project plan/live "$LIVE/worktrees"
+configure_project plan/live
 publish plan/live
 
 BODY="$LIVE/body.md"
@@ -113,7 +113,7 @@ must "a task whose branch will end up empty" "$SPOOLWAY" queue add --from "$LIVE
 if drive_and_hold handed hold 150; then ok "it reaches the step before the hand-off with its own work still on the branch"
 else bad "it reaches the step before the hand-off with its own work still on the branch (at \`$(stage_of handed)\`)"; fi
 must "the branch is wound back to its cut point, leaving nothing to hand over" \
-  git -C "$LIVE/worktrees/task-handed" reset -q --hard plan/live
+  git -C "$SPOOLWAY_PROJECT_HOME/worktrees/task-handed" reset -q --hard plan/live
 : > "$HOLD"
 
 if drive handed blocked 150; then ok "a lane with nothing to hand over blocks for a person instead of guessing"

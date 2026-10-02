@@ -5854,7 +5854,7 @@ mod screen_tests {
     /// up on the folded row, read on the side rather than silently dropped.
     #[test]
     fn a_parent_s_own_skills_and_span_survive_when_only_its_subagent_is_in_window() {
-        let repo = fixture("screen-dirs-window-excludes-parent-ledger-line");
+        let (repo, _root_guard) = fixture("screen-dirs-window-excludes-parent-ledger-line");
         let parent = "0198e2c0-4444-4000-8000-00000000d030";
         let subagent = "agent-aabbccdd";
         bank_dir(
@@ -5956,7 +5956,7 @@ mod screen_tests {
         repo: &Repo,
         n: usize,
         lines_per_session: usize,
-    ) -> std::path::PathBuf {
+    ) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("eval-load-perf-{name}"));
         let project = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
         std::fs::create_dir_all(&project).unwrap();
@@ -6005,7 +6005,7 @@ mod screen_tests {
         const LINES_PER_SESSION: usize = 20;
         const BOUND: f64 = 8.0;
 
-        let repo_small = fixture("eval-load-perf-small");
+        let (repo_small, _small_guard) = fixture("eval-load-perf-small");
         let home_small = many_sessions_home("small", &repo_small, SMALL_N, LINES_PER_SESSION);
         let elapsed_small = crate::platform::test_home::with_home(&home_small, || {
             let start = std::time::Instant::now();
@@ -6014,7 +6014,7 @@ mod screen_tests {
             start.elapsed()
         });
 
-        let repo_large = fixture("eval-load-perf-large");
+        let (repo_large, _large_guard) = fixture("eval-load-perf-large");
         let home_large = many_sessions_home("large", &repo_large, LARGE_N, LINES_PER_SESSION);
         let elapsed_large = crate::platform::test_home::with_home(&home_large, || {
             let start = std::time::Instant::now();
@@ -6056,7 +6056,7 @@ mod screen_tests {
         const N: usize = 120;
         const LINES_PER_SESSION: usize = 40;
 
-        let repo = fixture("eval-load-reuse");
+        let (repo, _root_guard) = fixture("eval-load-reuse");
         let home = many_sessions_home("reuse", &repo, N, LINES_PER_SESSION);
         let project = home.join(".claude/projects/-nonsense-escaping-nobody-should-read");
 

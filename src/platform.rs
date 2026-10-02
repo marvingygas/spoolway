@@ -872,6 +872,19 @@ pub(crate) mod test_home {
         result
     }
 
+    /// Swap the home directory for the rest of this thread, with nothing
+    /// to restore it — for a fixture a whole test body builds on (most of
+    /// `dispatch`'s own), where every later call the test makes, not just
+    /// one, has to land under the scratch home it was handed rather than a
+    /// real developer's own `~`. Safe only because the test harness gives
+    /// every `#[test]` function a thread of its own that nothing else ever
+    /// reuses — see `a_swap_on_one_thread_is_invisible_to_another` below,
+    /// which is what that safety rests on; [`with_home`] stays the right
+    /// call wherever the test can scope the swap to one closure instead.
+    pub(crate) fn pin(home: &Path) {
+        HOME.with(|slot| *slot.borrow_mut() = Some(home.to_path_buf()));
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;

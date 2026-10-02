@@ -564,26 +564,6 @@ pub struct DispatchConfig {
     /// `backend = "herdr"`; headless has no workspaces to lay out.
     pub herdr_mode: MuxMode,
 
-    /// Where a dispatched task's worktree is cut. Empty means
-    /// `~/.spoolway/<project>/worktrees` — see [`crate::mux::worktree_root`].
-    ///
-    /// Every backend and both layout modes cut the same way now: spoolway
-    /// cuts every dispatched checkout itself, with git, and only ever hands
-    /// the multiplexer a path that already exists — see
-    /// [`crate::mux::cut_worktree`]. Nested under the project's own directory
-    /// rather than under the shared dispatch workspace — see
-    /// [`crate::mux::DISPATCH_WORKSPACE_LABEL`] — because a worktree cut
-    /// anywhere inside that shared directory never registers as a workspace
-    /// of its own the way one cut at a repository's root would, and the
-    /// project's own directory holds no checkout of its own either.
-    ///
-    /// Deliberately outside the checkout: a worktree under `.spoolway/` would
-    /// sit beside the prompts every lane already reads, and a lane building
-    /// there could rewrite any other task's checkout by name.
-    /// Deliberately outside `~/.herdr/` too — that is herdr's directory, and a
-    /// checkout spoolway cut is not herdr's to know about.
-    pub worktree_root: String,
-
     /// How long a lane may say nothing before the dispatcher reminds it to
     /// report.
     ///
@@ -704,6 +684,17 @@ pub struct DispatchConfig {
     #[serde(default, skip_serializing)]
     default_pipeline: String,
 
+    /// Retired: where a dispatched task's worktree was cut, when it held a
+    /// path. Every worktree now lands under the project's own home, with no
+    /// way to move it — see [`crate::mux::worktree_root`]. Kept only so an
+    /// existing config still parses; dropped unconditionally on the next
+    /// save. [`crate::sync::config`] names the old directory to a project
+    /// whose value here was a real path, rather than dropping it in silence,
+    /// since worktrees already cut there are not moved for it.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    worktree_root: String,
+
     /// Whether spoolway commits a lane's leftover work when its step settles.
     ///
     /// The one guarantee spoolway makes about git, and the only reason it runs
@@ -768,7 +759,6 @@ impl Default for DispatchConfig {
             // escalates, four of these later.
             lane_quiet: Duration::from_secs(15 * 60),
             lane_child_ceiling: Duration::from_secs(3600),
-            worktree_root: String::new(),
             tmux_mode: MuxMode::default(),
             protected_branches: Vec::new(),
             notify: String::new(),
@@ -777,6 +767,7 @@ impl Default for DispatchConfig {
             max_launches: 0,
             auto_unblock: false,
             default_pipeline: String::new(),
+            worktree_root: String::new(),
             auto_commit: true,
             priority: Priority::default(),
             tear_lanes_on_stop: None,
@@ -3362,7 +3353,7 @@ mod tests {
     fn an_override_merges_by_dotted_key_onto_the_tracked_config() {
         with_override_fixture(
             "dotted-key",
-            "[unattended]\nenabled = false\n[dispatch]\nworktree_root = \"/tracked\"\n",
+            "[unattended]\nenabled = false\nblocked_agent = \"tracked\"\n",
             |root| {
                 let overrides = crate::overrides::dir_for(root).unwrap();
                 std::fs::create_dir_all(&overrides).unwrap();
@@ -3375,7 +3366,7 @@ mod tests {
                 let config = Config::load(root).unwrap();
                 assert!(config.unattended.enabled, "the patched key must win");
                 assert_eq!(
-                    config.dispatch.worktree_root, "/tracked",
+                    config.unattended.blocked_agent, "tracked",
                     "a key the patch never named must still come from the tracked file"
                 );
             },
@@ -3389,14 +3380,13 @@ mod tests {
     fn a_config_key_the_tracked_config_would_refuse_is_skipped_with_the_rest_applied() {
         with_override_fixture(
             "bad-value",
-            "[unattended]\nenabled = false\n[dispatch]\nworktree_root = \"/tracked\"\n",
+            "[unattended]\nenabled = false\nblocked_agent = \"tracked\"\n",
             |root| {
                 let overrides = crate::overrides::dir_for(root).unwrap();
                 std::fs::create_dir_all(&overrides).unwrap();
                 std::fs::write(
                     overrides.join(CONFIG_FILE),
-                    "[unattended]\nenabled = \"not-a-bool\"\n[dispatch]\nworktree_root = \
-                     \"/patched\"\n",
+                    "[unattended]\nenabled = \"not-a-bool\"\nblocked_agent = \"patched\"\n",
                 )
                 .unwrap();
 
@@ -3407,7 +3397,7 @@ mod tests {
                     "the refused key must never have applied — the tracked value stands"
                 );
                 assert_eq!(
-                    config.dispatch.worktree_root, "/patched",
+                    config.unattended.blocked_agent, "patched",
                     "a key in the same patch that the config accepts still applies"
                 );
                 assert_eq!(ignored.len(), 1, "{ignored:?}");
