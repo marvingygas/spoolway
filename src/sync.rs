@@ -74,9 +74,11 @@ pub enum Outcome {
         path: String,
         detail: String,
     },
-    /// A pipeline file rewritten to migrate a retired step shape — see
-    /// `crate::pipeline::migrate_retired_shapes`. Its own variant rather than
-    /// another [`Outcome::Wrote`], because its detail is one of the few this
+    /// A file rewritten to drop a retired setting, with what that drop
+    /// means for the project spelled out — see [`config`]'s own
+    /// `issue_tracking.on_fail` and `dispatch.worktree_root` notes. Its own
+    /// variant rather than another [`Outcome::Wrote`], because its detail is
+    /// one of the few this
     /// report actually prints under the file's own `wrote` line, in both the
     /// long form (`report`) `run`'s own report and `--dry-run` use and the
     /// short one (`panel`) that fits [`run_asking`]'s bounded confirm line —
@@ -1355,9 +1357,9 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 /// wherever it is found and every line around it — the title, the steps, the
 /// notes between them — is copied through unread.
 ///
-/// Three departures from the module doc's promise, specific to a pipeline
+/// Two departures from the module doc's promise, specific to a pipeline
 /// file — [`skills`] departs from the same promise too, in its own way; see
-/// the module doc's own paragraph on it. All three below are deliberate:
+/// the module doc's own paragraph on it. Both below are deliberate:
 ///
 /// - An edit inside the markers is discarded, not refused. This is
 ///   `config.toml`'s bargain, not a skeleton's: there is nothing in here for a
@@ -1367,13 +1369,6 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 ///   a block into a pipeline somebody wrote themselves would be this command
 ///   helping, which is the one thing it must never do. Pasting the two markers
 ///   in is how a pipeline opts in.
-/// - The three retired step shapes — an `on_fail:` naming its own step,
-///   `loop:` as the old per-route map, and `on_loop_max:` — are migrated
-///   ahead of the fence, on any file that has opted in. Unlike the key
-///   reference this does read into a step, but it still never re-serialises
-///   one: [`crate::pipeline::migrate_retired_shapes`] edits the file's own
-///   text, so everything else about a step — its prose, its key order, the
-///   blank lines around it — is copied through unread the same as ever.
 fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
@@ -1459,28 +1454,11 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
             continue;
         }
 
-        // The three retired step shapes migrated ahead of the key
-        // reference: each rewrites this file's own text, never re-parsing
-        // it back out to serde, so re-reading the fence just below still
-        // finds it exactly where it was — see
-        // `crate::pipeline::migrate_retired_shapes`.
         let mut on_disk = on_disk;
         let mut changed = false;
-        if let Some((migrated_text, changes)) = crate::pipeline::migrate_retired_shapes(&on_disk) {
-            on_disk = migrated_text;
-            changed = true;
-            for change in changes {
-                outcomes.push(Outcome::migrated(
-                    &shown,
-                    format!("migrated: {}", change.report),
-                    format!("migrated: {}", change.panel),
-                ));
-            }
-        }
-
         let found = region
             .read(&on_disk)
-            .expect("migrate_retired_shapes never touches the fenced key reference");
+            .expect("the fence was just confirmed above");
         if crate::skeleton::same(found, crate::pipeline::key_block()) {
             outcomes.push(Outcome::Kept);
         } else {
@@ -2576,72 +2554,6 @@ mod tests {
             outcome_lines(&outcomes)
                 .iter()
                 .all(|line| !line.contains("mine.yml")),
-            "{:?}",
-            outcome_lines(&outcomes)
-        );
-    }
-
-    /// `spoolway sync` migrates a pipeline file's three retired step shapes
-    /// in the same pass it refreshes the key reference: the result loads,
-    /// the migration is named as an `Outcome::Migrated` under the file's own
-    /// path, and the key reference is current too.
-    #[test]
-    fn sync_migrates_a_pipelines_retired_shapes_and_refreshes_its_key_reference() {
-        let (repo, _root_guard) = fixture("pipeline-retired-shapes");
-        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bugfix.yml");
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n# a stale key reference this sync also brings forward\n{}\n\nsteps:\n  \
-                 - id: fix\n    agent: pi\n    on_pass: review\n  \
-                 - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: checks\n    \
-                 on_fail: fix\n  \
-                 - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
-                 on_pass: done\n    on_fail: checks\n",
-                crate::assets::PIPELINE_KEYS_BEGIN,
-                crate::assets::PIPELINE_KEYS_END
-            ),
-        )
-        .unwrap();
-
-        let mut outcomes = Vec::new();
-        pipelines(&repo, &args(), &mut outcomes).unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
-
-        assert!(after.contains(crate::pipeline::key_block()), "{after}");
-        assert!(
-            after.contains("    loop: 3\n    on_pass: review"),
-            "{after}"
-        );
-        assert!(!after.contains("on_fail: checks"), "{after}");
-        assert!(!after.contains("checks: 3"), "{after}");
-        crate::pipeline::Pipeline::parse("bugfix", &after).expect("migrated file must load");
-
-        let migrated: Vec<(&str, &str)> = outcomes
-            .iter()
-            .filter_map(|o| match o {
-                Outcome::Migrated { path, report, .. } => Some((path.as_str(), report.as_str())),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            migrated
-                .iter()
-                .any(|(p, r)| p.contains("bugfix.yml") && r.contains("no longer routes a failure")),
-            "{migrated:?}"
-        );
-        assert!(
-            migrated
-                .iter()
-                .any(|(p, r)| p.contains("bugfix.yml") && r.contains("became `loop: 3` on `fix`")),
-            "{migrated:?}"
-        );
-        assert!(
-            outcome_lines(&outcomes)
-                .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("key reference refreshed")),
             "{:?}",
             outcome_lines(&outcomes)
         );

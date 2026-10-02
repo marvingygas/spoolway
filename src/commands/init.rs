@@ -653,8 +653,7 @@ fn report_row(verb: &str, what: &str) -> String {
 /// task counts, whether a usage ledger exists, and how many worktrees are
 /// cut. `--adopt` prints this because it is the one case that can bind a
 /// checkout to a home carrying real state a person did not just watch
-/// `init` create empty; `migrate-legacy-home`'s own move prints it for the
-/// same reason, against the home it just moved.
+/// `init` create empty.
 ///
 /// Worktrees are always counted at `home`'s own `worktrees` directory —
 /// every dispatched checkout lands there now, with no setting left to move

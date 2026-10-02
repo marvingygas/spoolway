@@ -1929,24 +1929,12 @@ fn doctor_sync(repo: &Repo, report: &mut Report) {
 /// The `pipelines load` row's own outcome, once loading has already failed
 /// with `err`.
 ///
-/// When every pipeline file's refusal is a retired shape and nothing worse —
-/// see [`crate::pipeline::Pipelines::retired_shape_file_count`] — this is a
-/// count on the upgrade path: those shapes are all things `sync` migrates,
-/// so a name and a number that point at the update say what actually helps,
-/// rather than [`crate::pipeline::Pipelines::refusals`]'s own per-step prose,
-/// which reads as an instruction to hand-edit the file. That per-step detail
-/// is still what a genuine parse failure gets, across every pipeline file at
-/// once rather than only the one `err` itself stopped at; the original `err`
-/// otherwise, unchanged, for a load failure none of the three retired shapes
-/// explains. Split out from [`doctor`] so it can be tested without driving
-/// the whole command.
+/// [`crate::pipeline::Pipelines::refusals`]'s own per-step prose, naming
+/// every retired shape a pipeline file still carries — across every file at
+/// once rather than only the one `err` itself stopped at — or the original
+/// `err`, unchanged, for a load failure none of them explains. Split out
+/// from [`doctor`] so it can be tested without driving the whole command.
 fn pipelines_load_outcome(root: &Path, err: anyhow::Error) -> Result<Option<String>> {
-    if let Some(count) = crate::pipeline::Pipelines::retired_shape_file_count(root) {
-        return Err(anyhow::anyhow!(
-            "{count} pipeline(s) use shapes this spoolway retired — applying the update \
-             migrates them"
-        ));
-    }
     let refusals = crate::pipeline::Pipelines::refusals(root);
     if refusals.is_empty() {
         Err(err)
@@ -3410,46 +3398,8 @@ mod tests {
         );
     }
 
-    /// When every pipeline file's refusal is a retired shape and nothing
-    /// worse, the `pipelines load` row is a count on the upgrade path — the
-    /// Mockup's own wording, naming no spoolway command — not
-    /// `Pipelines::refusals`' per-step prose, which would read as an
-    /// instruction to hand-edit the file.
-    #[test]
-    fn pipelines_load_outcome_is_a_count_when_every_refusal_is_a_retired_shape() {
-        let root = crate::scratch::root("doctor-pipelines-load-outcome");
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = crate::pipeline::Pipelines::dir_in(&root);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("default.yml"),
-            "steps:\n  \
-             - id: implement\n    agent: pi\n    on_pass: checks\n  \
-             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
-             on_pass: done\n    on_fail: checks\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("bugfix.yml"),
-            "steps:\n  \
-             - id: fix\n    agent: pi\n    on_pass: review\n  \
-             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
-             on_fail: fix\n",
-        )
-        .unwrap();
-
-        let err = pipelines_load_outcome(&root, anyhow::anyhow!("stale error, superseded"))
-            .expect_err("both files still carry a retired shape");
-        assert_eq!(
-            format!("{err:#}"),
-            "2 pipeline(s) use shapes this spoolway retired — applying the update migrates them"
-        );
-    }
-
-    /// A file that will not deserialise at all — nothing an update can
-    /// migrate — keeps `Pipelines::refusals`' own per-file detail rather than
-    /// being folded into the retired-shape count, even beside a file that
-    /// does carry one.
+    /// A file that will not deserialise at all keeps `Pipelines::refusals`'
+    /// own per-file detail, even beside a file that carries a retired shape.
     #[test]
     fn pipelines_load_outcome_falls_back_to_refusals_beside_a_genuine_parse_failure() {
         let root = crate::scratch::root("doctor-pipelines-load-outcome-mixed");

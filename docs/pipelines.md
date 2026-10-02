@@ -135,8 +135,7 @@ pipeline picks the destination.
 
 A step never names its own id in `on_pass` or `on_fail` — a lap goes through another step or
 not at all. `spoolway pipeline check` refuses a file that tries it, naming the step and the
-key. `spoolway sync` removes a self-routing `on_fail:` from a pipeline file that carries the
-markers, and the step waits on `blocked` instead.
+key. Fix it by hand: send the failure to a step that leaves, or delete the step.
 
 ### Loops
 
@@ -152,12 +151,10 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
 - The map form, keyed by the step a failure is sent back from, is refused at parse. The
-  refusal names the step that should carry the limit instead. `spoolway sync` folds a map like
-  this onto the step it named, as a bare `loop:` set to one plus the sum of its entries, and
-  keeps the larger value if that step already carries a bigger bare `loop:`.
-- `on_loop_max:` is refused, naming the pipeline, the step and the key. `spoolway sync` removes
-  the key from a pipeline file that carries the markers. The refusal is what a project meets
-  before its first sync, or in a file that never opted into the markers.
+  refusal names the step that should carry the limit instead: delete the map and give that
+  step a bare `loop:` of its own.
+- `on_loop_max:` is refused, naming the pipeline, the step and the key. A spent loop budget
+  always parks on `blocked`, so the key chooses nothing; delete it.
 - Every cycle needs some step along it carrying a `loop:`. `spoolway pipeline check` refuses
   the file otherwise.
 

@@ -120,9 +120,9 @@ pub(crate) fn sync_popup(repo: &Repo) -> Result<Option<Vec<String>>> {
 ///
 /// Not when the project's pipelines do not load. The screen needs them to
 /// open at all, and a pipeline file carrying a retired step shape is
-/// refused by the load and migrated by `sync` — so the popup could never be
-/// drawn, and bare `spoolway` ends on the refusal. It prints [`LINE`] first
-/// instead, so the refusal is not the only thing it says.
+/// refused by the load — so the popup could never be drawn, and bare
+/// `spoolway` ends on the refusal. It prints [`LINE`] first instead, so the
+/// refusal is not the only thing it says.
 pub(crate) fn asks_as_popup(repo: &Repo) -> bool {
     crate::pipeline::Pipelines::load(&repo.root, &repo.config).is_ok()
 }
@@ -270,12 +270,12 @@ mod tests {
         assert_eq!(stamp(&repo), before);
     }
 
-    /// A pipeline with a retired step shape — the load refuses it, `sync`
-    /// migrates it — sends bare `spoolway` to the printed line, since its
-    /// screen could never open to show the popup; once the file loads, the
-    /// popup shows.
+    /// A pipeline with a retired step shape — the load refuses it — sends
+    /// bare `spoolway` to the printed line, since its screen could never
+    /// open to show the popup; once the file is fixed by hand and loads,
+    /// the popup shows.
     #[test]
-    fn a_pipeline_sync_would_migrate_is_told_printed_not_as_a_popup() {
+    fn a_pipeline_with_a_retired_shape_is_told_printed_not_as_a_popup() {
         let (repo, _root_guard) = fixture("popup-retired-shape");
         let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
@@ -287,8 +287,11 @@ mod tests {
         std::fs::write(dir.join("default.yml"), retired).unwrap();
         assert!(!asks_as_popup(&repo));
 
-        let (migrated, _) = crate::pipeline::migrate_retired_shapes(retired).unwrap();
-        std::fs::write(dir.join("default.yml"), migrated).unwrap();
+        let fixed = "steps:\n  \
+                     - id: a\n    agent: pi\n    on_pass: b\n  \
+                     - id: b\n    agent: pi\n    loop: 2\n    on_pass: z\n    on_fail: a\n  \
+                     - id: z\n    end: true\n";
+        std::fs::write(dir.join("default.yml"), fixed).unwrap();
         assert!(asks_as_popup(&repo));
     }
 }

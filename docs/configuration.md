@@ -510,7 +510,7 @@ These keys still parse in an older `config.toml` and are dropped on the next sav
 
 | Key | Replaced by |
 |---|---|
-| `[update]`, `[calibrate]`, `[retention]`, `[prices]` | `[housekeeping]` |
+| `[update]`, `[calibrate]`, `[retention]`, `[prices]` | Nothing. `[housekeeping]` holds the same settings under new names. |
 | `[pricing]` | `[models]` |
 | `[effort]` | A step's own `model:` and `effort:` |
 | `[stack.summary]` | The task's `title:` and body are the pull request |

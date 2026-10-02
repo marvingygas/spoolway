@@ -158,7 +158,9 @@ cd "$(mktemp -d)" && npm install spoolway@<version> && ./node_modules/.bin/spool
 
 `scripts/e2e/suites/upgrade.sh` runs a project a *past* release actually wrote through the
 new binary, from `scripts/e2e/fixtures/<version>/.spoolway/` — a tree scaffolded by that
-version's own binary, at that version's own tag. It cannot be produced before the tag, so a
+version's own binary, at that version's own tag. 0.6.0 is the oldest fixture it keeps; the
+suite's own `FLOOR` skips every `CHANGELOG.md` version below it, so none of them is asked
+for or scaffolded. At or above the floor, a fixture cannot be produced before the tag, so a
 `CHANGELOG.md` section is asked for its fixture only once `origin` carries its `v<version>`
 tag *and* `Cargo.toml` has moved past it. A release is therefore never blocked by its own
 missing fixture — not while it is being cut, and not when the release workflow runs the suite
@@ -178,7 +180,8 @@ like a regression. The gap is structural — the fixture is impossible to make b
 not demanded until the next bump — so the only place it can be caught is the release that owes
 it.
 
-To scaffold one by hand — an older release that was missed, or a `fixture` step that blocked:
+To scaffold one by hand — a release at or above the 0.6.0 floor that was missed, or a
+`fixture` step that blocked:
 
 ```sh
 npx spoolway@<version> init                        # in a scratch git repo

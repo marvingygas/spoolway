@@ -349,7 +349,7 @@ What `sync` replaces, file by file:
 | File | What is replaced |
 |---|---|
 | `config.toml` | The comments and the settings reference. Your values stay. |
-| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
 | Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder marked by `.installed-by-spoolway`. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |

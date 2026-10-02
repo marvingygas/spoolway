@@ -237,7 +237,8 @@ jobs:
 
       # The class #128 was in: a suite that asks something of every released
       # version and cannot be satisfied for the one being released. It also asks
-      # for a fixture for every *older* version, so this is what catches a
+      # for a fixture for every older version back to its 0.6.0 floor, so this
+      # is what catches a
       # released version whose fixture was never scaffolded — the closing step of
       # docs/releasing.md, which is easy to finish a release without doing.
       - name: the upgrade suite, at the bumped version
