@@ -3,7 +3,6 @@
 # Key                                   Values               Default                                                 Meaning
 # dispatch.backend                      herdr, headless      herdr                                                   Where lanes run: a real pane you can watch. `headless` is spoolway's own test backend, refused unless SPOOLWAY_TEST_BACKEND is set.
 # dispatch.herdr_mode                   grouped, split       split                                                   How a herdr run is laid out: a pane per task in its project's shared tab, or a row of its own per task.
-# dispatch.worktree_root                <path>               (blank)                                                 Where a dispatched task's worktree is cut, whatever the backend; blank means `~/.spoolway/<project>/worktrees`.
 # dispatch.lane_quiet                   <duration>           15m                                                     How long a lane may say nothing before the dispatcher reminds it to report. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets.
 # dispatch.auto_commit                  true, false          true                                                    Whether spoolway commits a lane's leftover work when its step settles.
 # dispatch.priority                     group, any           group                                                   Whether a free slot is filled from every ready task, or from the group already landing first.
@@ -21,7 +20,7 @@
 # housekeeping.retention_days           <days>               30                                                      How long system-prompts/, commands/, tracking/, headless/, scratch/ and archive/ keep an entry before it is deleted; 0 keeps everything forever. queue/, pending/, worktrees/ and plans/ are never swept.
 # housekeeping.price_max_age_days       <days>               30                                                      How old the active shared price table may be before `spoolway doctor` says so; 0 disables the note.
 # watch.dirs                            <path>, ...          (empty)                                                 Directories whose own sessions are counted beside the lanes. The project root is always watched; these are extra. Absolute, or ~-relative.
-# issue_tracking.hook                   <filename>           (blank)                                                 A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook and changes nothing about a task's `queued`, `blocked`, `paused` or `done`.
+# issue_tracking.hook                   <filename>           (blank)                                                 A bare filename, resolved inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`); blank runs no hook and changes nothing about a task's `queued`, `blocked`, `paused` or `done`.
 # issue_tracking.project_key            <string>             (blank)                                                 Opaque to spoolway — `owner/repo` on github, a project key on jira — handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.
 # issue_tracking.key_in_names           true, false          false                                                   Whether a `slug=` the hook answers prefixes the group, branch and worktree name `queue add` generates — `task/<slug>-<id>`. Off changes nothing.
 # agents.<profile>.kind                 <agent kind>         one per shipped profile                                 Which agent binary this profile launches.
@@ -43,7 +42,6 @@
 [dispatch]
 backend = "herdr"
 herdr_mode = "split"
-worktree_root = ""
 lane_quiet = "15m"
 auto_commit = true
 
