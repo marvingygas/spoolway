@@ -29,10 +29,11 @@ The screen holds two tables. The lanes table groups dispatched lanes. The direct
 groups sessions run by hand in a watched directory. `tab` switches between them.
 
 Opening the tab, pressing `[r]`, or applying the filter panel shows a small `Loading…` popup
-while spoolway rereads the ledger and every session's transcript. On first opening the tab, the
-popup sits over an empty frame. On `[r]` or the filter panel, it sits over the table already on
-screen. It closes by itself when the read finishes, and only `[←]`, `[→]` and `[q]` work while
-it shows.
+while spoolway rereads the ledger. It reads a session's transcript again only if the
+transcript's size or modification time changed since the last read. On first opening the tab,
+the popup sits over an empty frame. On `[r]` or the filter panel, it sits over the table
+already on screen. It closes by itself when the read finishes, and only `[←]`, `[→]` and `[q]`
+work while it shows.
 
 | Key | What it does |
 |---|---|
