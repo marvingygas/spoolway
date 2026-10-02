@@ -25,8 +25,9 @@ screen over the same rows.
 
 <img src="screenshots/eval.png" alt="the eval screen">
 
-The screen holds two tables. The lanes table groups dispatched lanes. The directory table
-groups sessions run by hand in a watched directory. `tab` switches between them.
+The screen holds three tables. The lanes table groups dispatched lanes. The directory table
+groups sessions run by hand in a watched directory. The trials table lists every trial. `tab`
+cycles through them, lanes to directories to trials and back.
 
 Opening the tab, pressing `[r]`, or applying the filter panel shows a small `Loading…` popup
 while spoolway rereads the ledger. It reads a session's transcript again only if the
@@ -38,11 +39,32 @@ work while it shows.
 | Key | What it does |
 |---|---|
 | `[↑↓]` | Move the cursor |
-| `[tab]` | Switch to the other table |
+| `[a]` | Open the sort popup, ascending |
+| `[d]` | Open the sort popup, descending |
+| `[tab]` | Cycle to the next table |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the rows on screen to a CSV file |
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
+
+### The sort popup
+
+`[a]` or `[d]` opens a popup listing `default order`, then every column the table draws.
+`[↑↓]` moves, `[enter]` sorts by the chosen column in that direction, `[esc]` closes the popup
+unchanged. The sorted header shows `▲` (ascending) or `▼` (descending) in the space before its
+name, so no column moves.
+
+The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts correctly against
+`54m` and `54.2k` against `9.1M`. Ties keep the table's default order. A blank figure, such as
+`—` or an unpriced `USD`, sorts last in both directions, and the `Total` line always stays
+last.
+
+The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
+own sort. The cursor moves to the first row after a sort. A view that does not draw the sorted
+column falls back to the default order until that column comes back.
+
+A sort carries into every export of the rows it orders: `[e]` writes whatever order the
+screen shows, and `--sort` orders `--csv` and `--json` the same way.
 
 ## The lanes table
 
@@ -78,11 +100,15 @@ With `--all`, a `PROJECT` column appears when the rows span more than one projec
 
 ### The filter panel
 
-`[f]` opens a panel of six rows: `by`, `pipeline`, `step`, `version`, `since` and `until`.
-`[↑↓]` moves between rows, `[←→]` cycles a row's value, `[enter]` on `since` or `until` opens
-a calendar. On a cycled row, `‹` or `›` is drawn only on the side that still changes the
-value, a space in its place otherwise. `by` opens on `pipeline`, its left end, so only `→`
-moves it at first. `[enter]` applies the panel, `[esc]` cancels it.
+`[f]` opens a panel of seven rows: `by`, `pipeline`, `step`, `version`, `trial`, `since` and
+`until`. `[↑↓]` moves between rows, `[←→]` cycles a row's value, `[enter]` on `since` or
+`until` opens a calendar. On a cycled row, `‹` or `›` is drawn only on the side that still
+changes the value, a space in its place otherwise. `by` opens on `pipeline`, its left end, so
+only `→` moves it at first. `[enter]` applies the panel, `[esc]` cancels it.
+
+The `trial` row cycles through the trials inside the `since`/`until` window, newest first,
+each named `<group> · <date>`. `all` clears it. Opening a trial from the trials table sets
+this row for you.
 
 In the calendar, `←`/`→` move a day, `↑`/`↓` a week, `pgup`/`pgdn` a month. `enter` picks the
 day, `x` clears the bound, `esc` goes back.
@@ -116,8 +142,13 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--force` | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | Print the rows as CSV |
 | `--json` | Print the rows as JSON |
+| `--sort <column>[:asc\|:desc]` | Sort the rows by one column, descending when the direction is left off |
 
-A trial forks one group into one arm per task, each under its own pipeline, all under one
+`--sort` takes a column name the way `--csv`'s header spells it, below. An unknown name is
+refused, naming every column `--by`'s current value accepts. It cannot be combined with
+`--discard`.
+
+A trial forks one group into one full copy per pipeline it was ticked under, all under one
 trial id. See [Trials](planning.md#trials).
 
 ```
@@ -133,13 +164,14 @@ cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
 
 The delta line reads each later arm against the first, on pass rate, cost and time. The sign
-says which way it moved, not which arm is better.
+says which way it moved, not which arm is better. A `--sort` can put a later arm on top; the
+delta line still reads against the arm that started first.
 
 ## The directory table
 
-`[tab]` switches to the directory table. It covers every watched root, this project's own
-directory included, even one with no sessions yet. It opens on `by dir`, one row per watched
-directory.
+`[tab]` switches to the directory table. A second `[tab]` opens the trials table, below. The
+directory table covers every watched root, this project's own directory included, even one
+with no sessions yet. It opens on `by dir`, one row per watched directory.
 
 A session run by hand in one of the project's own worktrees counts here too, on the project
 root's own row. A session in a worktree a task owns counts on the lanes table instead. See
@@ -177,6 +209,29 @@ class, `USD` and `TIME` under `by session`.
 Its filter panel has five rows: `by`, `dir`, `skill`, `since` and `until`. The `skill` filter
 keeps whole sessions whose transcript names that skill. There is no command-line flag for the
 directory table; it is read from the screen only.
+
+## The trials table
+
+A second `[tab]` from the directory table opens the trials table, one row per trial that
+banked a lane in the window, newest first. A trial groups the arms a `t` on a group forked, one
+per ticked pipeline, under one trial id. See [Trials](planning.md#trials).
+
+| Column | What it is |
+|---|---|
+| `GROUP` | The group the trial forked. Falls back to the trial id when that is not known. |
+| `WHEN` | The day the trial's earliest arm started |
+| `PIPELINES` | Every pipeline an arm ran under, trimmed with `…` when the list is too wide for the column |
+| `ARMS` | The trial's own tasks, one per ticked pipeline |
+| `STATE` | `running` while a queued task still carries the trial's id, `settled` otherwise |
+
+The table has no `Total` line and no `[e]` export.
+
+`enter` opens the highlighted trial. It sets the lanes table's `trial` filter to it, switches
+`by` to `pipeline`, clears `pipeline` and `version`, and shows the lanes table, so every one of
+the trial's pipelines is a row.
+
+`[a]`/`[d]` sort the table the same way as the other two. Its filter panel has only `since` and
+`until`; there is no command-line flag for it, it is read from the screen only.
 
 ## Exporting
 

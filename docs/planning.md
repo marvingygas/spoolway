@@ -117,15 +117,31 @@ spoolway group list         # every group with open tasks, and which tasks are o
 
 ### Trials
 
-A trial runs one group under several pipelines to compare them. Press `t` on a group.
+A trial runs the same group under several pipelines to compare them. Press `t` on a group.
 
-1. The first screen assigns a pipeline to each task. `←` and `→` cycle through the project's
-   pipelines. `enter` continues.
-2. The second screen lists each task's steps. `space` ticks a step to skip. `esc` goes back.
-   `enter` runs the trial.
+1. The first screen lists every project pipeline with a tick. Pipelines the group's own tasks
+   already name start ticked. `space` ticks or unticks the highlighted pipeline. A line under
+   the list reads `N pipelines × M tasks = K arms`. `enter` continues once at least one pipeline
+   is ticked. With none ticked, `enter` does nothing. The list scrolls when the project has more
+   pipelines than the popup has rows.
+2. The second screen shows one ticked pipeline at a time, its steps one per row. The title row
+   reads `skip steps   ←  <pipeline>  n of N  →   k skipped`. `←`/`→` turn the page to another
+   ticked pipeline, wrapping from the last back to the first. `space` ticks the highlighted step
+   to skip on that pipeline. The list scrolls so the cursor is always visible, with `↑ n more`
+   and `↓ n more` rows where steps are hidden. `esc` goes back to the first screen and keeps
+   every pipeline's skips; unticking a pipeline there drops its own skips. `enter` runs the
+   trial. The popup never grows taller than the terminal.
 
-Each task becomes one arm, queued under its assigned pipeline, with a minted id such as
-`<id>-1`. All arms share one trial id. The source tasks stay in the pending directory.
+Running the trial queues one full copy of the whole group per ticked pipeline. Each copy runs in
+its own group, named `<group>-<pipeline>`, or `<group>-<pipeline>-2` (then `-3`, and so on) when
+that name is already in the queue or the archive. Copies are minted in the order the pipeline
+list ticks them, and each task keeps its own id across copies: a task `alpha` becomes `alpha-1`
+in the first ticked pipeline's copy, `alpha-2` in the second's, and so on. A copy keeps the
+source chain: a task's `depends_on` on another task in the group points at that task's own
+minted id in the same copy. All arms, across every copy, share one trial id. A step ticked to
+skip on the second screen is skipped by every arm of that pipeline's own copy. The source tasks
+stay in the pending directory. Any refusal, such as a group that fails validation, writes
+nothing at all.
 
 An arm never pushes a branch or opens a pull request. Compare the arms with
 `spoolway eval --by task --trial <id>`. When the last arm finishes, every arm's copy is removed.

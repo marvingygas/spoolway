@@ -949,6 +949,7 @@ mod tests {
             patch: None,
             skip: Vec::new(),
             trial: None,
+            trial_group: None,
             replay_of: None,
             worktree_path: None,
             workspace_id: None,

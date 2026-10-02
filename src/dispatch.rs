@@ -2655,6 +2655,7 @@ impl<'a> Dispatcher<'a> {
             outcome,
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
+            trial_group: task.and_then(|t| t.front.trial_group.clone()),
             dir: None,
             hand: false,
             // Never written: the ledger's own location says which project this
@@ -7381,6 +7382,7 @@ mod tests {
             patch: None,
             skip: Vec::new(),
             trial: None,
+            trial_group: None,
             replay_of: None,
             worktree_path: None,
             workspace_id: None,
@@ -7956,6 +7958,33 @@ mod tests {
             "the report points back at the evidence a settled trial keeps, in the same \
              column its kept/removed lines use: {report}"
         );
+    }
+
+    /// An arm runs in its copy's own `<group>-<pipeline>` group, so the
+    /// settle report names the group the trial forked from `trial_group`,
+    /// not the arm's own `group:`.
+    #[test]
+    fn a_settled_trial_names_its_source_group_not_the_copys() {
+        let (repo, _root_guard) = fixture("trial-settle-source-group");
+        let path = add_task(&repo, "beta-1", "implement");
+        let mut task = reload(&path);
+        task.front.trial = Some("t1".into());
+        task.front.trial_group = Some("demo-group".into());
+        task.front.group = Some("demo-group-default".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        let report = report.actions.join("\n");
+        assert!(
+            report.contains("kept      source group demo-group\n"),
+            "{report}"
+        );
+        assert!(!report.contains("demo-group-default"), "{report}");
     }
 
     /// Acceptance criterion: a trial is cleaned up either once every arm
@@ -12256,6 +12285,58 @@ mod tests {
         );
     }
 
+    /// A trial arm's ledger line carries its source group beside its trial
+    /// id, copied off the task the same way `trial` is — the arm's own task
+    /// is deleted once its trial settles, so the line is what still names
+    /// the group the trial compared.
+    #[test]
+    fn a_trial_arms_banked_line_carries_its_source_group_beside_its_trial() {
+        let (mut repo, _root_guard) = fixture("trial-arm-banks-source-group");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "demo-1", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.trial = Some("t1".into());
+            f.trial_group = Some("demo".into());
+            f.group = Some("demo-default".into());
+        }));
+
+        let session = "trial-source-group";
+        let kind = local_kind(&repo);
+        write_entry(&repo, "demo-1", "implement", &kind, "priced-model", session);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo-1 · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "demo-1 · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .rfind(|e| e.session == session)
+            .expect("the freed lane's own bank");
+        assert_eq!(line.trial.as_deref(), Some("t1"), "{banked:?}");
+        assert_eq!(line.trial_group.as_deref(), Some("demo"), "{banked:?}");
+    }
+
     /// A held lane's `wall_s` is a delta against what the hold-time line
     /// already banked, the same way its tokens are (see the test above) —
     /// not the whole time since the lane was launched. A pause with no new
@@ -12302,6 +12383,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                trial_group: None,
                 dir: None,
                 hand: false,
                 project: String::new(),
@@ -13016,6 +13098,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                trial_group: None,
                 dir: None,
                 hand: false,
                 project: String::new(),
@@ -13052,6 +13135,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                trial_group: None,
                 dir: None,
                 hand: false,
                 project: String::new(),
@@ -13129,6 +13213,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                trial_group: None,
                 dir: None,
                 hand: false,
                 project: String::new(),

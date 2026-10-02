@@ -200,6 +200,16 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
 
+    /// The group the trial arm was forked from, banked verbatim from
+    /// `task.front.trial_group` — see
+    /// [`crate::task::Frontmatter::trial_group`]. Set exactly when
+    /// [`Self::trial`] is, and absent on every ordinary line: an arm's own
+    /// task is deleted once its trial settles, and its `group:` was
+    /// `<group>-<pipeline>` anyway, so this is what still names a settled
+    /// trial by the group a person tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_group: Option<String>,
+
     /// The watched root — see [`crate::config::Config::watch_roots`] — a
     /// session's `cwd` sat under, when this line was banked by
     /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
@@ -2274,7 +2284,8 @@ fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest)
 /// enough for that record to be swept next time.
 ///
 /// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
-/// `plan`, `run`, `trial`, `round` and `pipeline_version` are copied onto the
+/// `plan`, `run`, `trial`, `trial_group`, `round` and `pipeline_version` are
+/// copied onto the
 /// new line, so spend recovered by a sweep lands in the same `spoolway eval`
 /// row the lane's own turns did rather than in a pipeline-less one no group
 /// owns — and under the version the lane actually ran, not whatever a
@@ -2323,6 +2334,7 @@ fn bank_lane_at(
         outcome: None,
         run: carry.and_then(|c| c.run.clone()),
         trial: carry.and_then(|c| c.trial.clone()),
+        trial_group: carry.and_then(|c| c.trial_group.clone()),
         dir: None,
         // Copied like the columns above: a catch-up of a hand session's own
         // line stays a hand line, and [`sweep_dirs`] marks the first one by
@@ -3015,6 +3027,7 @@ fn bank_dir_session(
         outcome: None,
         run: None,
         trial: None,
+        trial_group: None,
         dir: Some(dir.to_string()),
         hand: false,
         project: String::new(),
@@ -4415,6 +4428,7 @@ mod tests {
             outcome: Some("pass".into()),
             run: Some("r00001".into()),
             trial: None,
+            trial_group: None,
             dir: None,
             hand: false,
             project: String::new(),
@@ -4432,6 +4446,25 @@ mod tests {
         assert_eq!(back[0].run.as_deref(), Some("r00001"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `trial_group` is a trial arm's alone: an ordinary line never writes
+    /// the key at all, and an arm's line writes it beside `trial`, so a
+    /// ledger reader can tell the two apart by the key's presence.
+    #[test]
+    fn trial_group_is_absent_on_an_ordinary_line_and_beside_trial_on_an_arms() {
+        let ordinary = serde_json::to_string(&minimal_entry("plain")).unwrap();
+        assert!(!ordinary.contains("trial_group"), "{ordinary}");
+        assert!(!ordinary.contains("\"trial\""), "{ordinary}");
+
+        let mut arm = minimal_entry("plain-1");
+        arm.trial = Some("t1".into());
+        arm.trial_group = Some("plain".into());
+        let line = serde_json::to_string(&arm).unwrap();
+        assert!(line.contains("\"trial\":\"t1\""), "{line}");
+        assert!(line.contains("\"trial_group\":\"plain\""), "{line}");
+        let back: Entry = serde_json::from_str(&ordinary).unwrap();
+        assert_eq!(back.trial_group, None);
     }
 
     fn minimal_entry(task: &str) -> Entry {
@@ -4455,6 +4488,7 @@ mod tests {
             outcome: None,
             run: None,
             trial: None,
+            trial_group: None,
             dir: None,
             hand: false,
             project: String::new(),
@@ -5180,6 +5214,7 @@ mod tests {
             outcome: None,
             run: None,
             trial: None,
+            trial_group: None,
             dir: None,
             hand: false,
             project: String::new(),
@@ -5467,8 +5502,8 @@ mod tests {
     }
 
     /// The catch-up line stands in the same `spoolway eval` row the lane's own
-    /// turns did: `task`, `step`, `pipeline`, `agent`, `plan`, `run`, `trial`
-    /// and `round` are copied from the session's most recent lane line. It
+    /// turns did: `task`, `step`, `pipeline`, `agent`, `plan`, `run`, `trial`,
+    /// `trial_group` and `round` are copied from the session's most recent lane line. It
     /// carries no `outcome` — the turns swept up here were never judged.
     #[test]
     fn the_catch_up_line_copies_the_lanes_own_columns_and_carries_no_outcome() {
@@ -5483,6 +5518,7 @@ mod tests {
             round: 4,
             run: Some("r1234".into()),
             trial: Some("t9".into()),
+            trial_group: Some("demo-group".into()),
             outcome: Some("pass".into()),
             session: "s".into(),
             tokens: Tokens {
@@ -5505,6 +5541,7 @@ mod tests {
         assert_eq!(line.round, 4);
         assert_eq!(line.run.as_deref(), Some("r1234"));
         assert_eq!(line.trial.as_deref(), Some("t9"));
+        assert_eq!(line.trial_group.as_deref(), Some("demo-group"));
         assert_eq!(line.outcome, None, "late turns were never judged");
     }
 
