@@ -155,9 +155,22 @@ reading the file whole.
    them.
 
    **A task with no `depends_on` starts a chain, and carries a `base` line** — step 1's `base`,
-   until a note changes it. A task that depends on another shares that chain's base and shows
-   no `base` line of its own. Never propose any other base yourself: not a pending pull
-   request, not the default branch.
+   until a note changes it or the split ballot above recommended a pull request and the person
+   picked the option that shows it. A task that depends on another shares that chain's base
+   and shows no `base` line of its own.
+
+   **Recommend an open, same-repository pull request as a chain's base only when that chain's
+   work needs the pull request's change**, and name the reason in one line under the `base`
+   line. Check it the way the note mechanism below already does: `gh pr view <n> --json
+   headRefName,state,isCrossRepository`, refusing one that is not open, is from a fork
+   (`isCrossRepository` is true), or that the command finds nothing for. Where a chain clears
+   this, draw it on the split ballot above, not a ballot of its own: the recommended option's
+   `base` line reads `#<n> (<headRefName>)`, with the reason beneath it, and one of the other
+   options on that same ballot — its task breakdown otherwise unchanged — keeps that chain's
+   `base` line at step 1's own `<branch>`, so declining costs one pick rather than a note. When
+   the floor leaves only one count on the ballot, add a second option for that same count,
+   differing only in this `base` line. Never recommend a pull request a chain's work does not
+   need, a closed one, or one from a fork.
 
    **A task carries a `labels` line when it proposes any.** Comma-separated plain words, drawn
    from the plan that argued this shape or from the source issue's own labels — `spoolway issue
@@ -227,7 +240,9 @@ reading the file whole.
      — an issue read straight into tasks with no page carries no `plan:` at all, and neither
      does a page with no issue behind it, since `source:` already carries its path there.
    - `base` — on every task, a dependent included: its chain's base from step 2, which is
-     step 1's `base` unless a note changed it. A dependency and its dependent must share one.
+     step 1's `base` unless a note changed it or the person picked the split ballot's
+     recommended pull-request option for that chain. A dependency and its dependent must share
+     one.
    - `depends_on` and `pipeline`.
    - `labels` — the plain words this task proposed on the ballot, carried through unchanged: the
      plan's own words, or the source issue's own labels when this breakdown started at one.
