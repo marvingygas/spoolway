@@ -11,9 +11,13 @@
 //! task is written to, what to name it there, and the two commands that
 //! check it and send it. One call, so a producer never has to be told
 //! anything a person read somewhere else: a model handed this JSON and a
-//! goal has everything it needs to leave a queueable task on disk. Run with
-//! `--from`, it is the exact validation `queue add --from` runs, with
-//! nothing written at the end of it.
+//! goal has everything it needs to leave a queueable task on disk. Under
+//! `routines` it is the routines directory and the routine shape itself —
+//! a folder of finished tasks, `depends_on` between siblings, folder-
+//! versus-single-file queueing and the fresh ids each mints — the other
+//! shape a producer may be asked to write, never a second task contract
+//! with its own placeholders. Run with `--from`, it is the exact validation
+//! `queue add --from` runs, with nothing written at the end of it.
 //!
 //! Both modes are read straight off [`super::queue::RESERVED_KEYS`],
 //! [`super::queue::longest_agent_step`], [`super::queue::gather_tasks`]
@@ -272,6 +276,48 @@ struct ContractKeys {
     passthrough: &'static str,
 }
 
+/// The routine shape, in prose — `spoolway jobs contract` is the format a
+/// scheduled firing reads; this is the same shape read by hand, through
+/// the routines tab's `enter` and `space`, or by `spoolway queue add --from`
+/// pointed straight at a routine file. Kept here rather than only in
+/// `docs/planning.md`, so a producer that writes a routine without ever
+/// reading that page still gets `depends_on` and the id it will be queued
+/// under right.
+const ROUTINES_TEXT: &str = "One folder under this contract's own `dir`, nested however the \
+                              project likes. Every `.md` at or below it is a finished task — one \
+                              whole task per file, in exactly the shape the TASK contract above \
+                              describes, never a skeleton with a placeholder left in it: a \
+                              routine is read and queued whole, not filled in. A routine is never \
+                              a task template: it does not live under, and needs none of, this \
+                              contract's own `templates_dir` — writing a routine's own task into \
+                              a `<pipeline>.md` skeleton there, in place of a plain finished task \
+                              under `dir`, is exactly the confusion this section exists to \
+                              prevent. A \
+                              task may `depends_on` only a sibling in the same folder. Queuing the \
+                              folder — `enter` on the routines tab, or a job whose `routine:` \
+                              names a folder — mints a fresh id for every task under it and \
+                              rewrites every `depends_on` naming a sibling onto the minted ids, so \
+                              the same routine queues again without colliding with its own last \
+                              run; queuing one `.md` file alone instead — `space` on the routines \
+                              tab, or a job whose `routine:` names a file — mints that one task a \
+                              fresh id too, with its `depends_on` emptied, since a lone task \
+                              names no sibling in the batch it is about to join. The routine's own \
+                              files on disk are never written to or consumed by any of this.";
+
+/// The routine half of the contract: this project's own routines directory,
+/// and [`ROUTINES_TEXT`] describing the shape found there.
+#[derive(Debug, serde::Serialize)]
+struct RoutinesContract {
+    dir: String,
+    /// The task templates directory a routine is not — named here, computed
+    /// like `dir`, so [`ROUTINES_TEXT`] can point at it by field. It used to
+    /// spell `.spoolway/templates/tasks/` out in the prose, which named a
+    /// directory that does not exist in home mode (2026-10-02 review), where
+    /// the setup folder is the workspace's `config/`.
+    templates_dir: String,
+    text: &'static str,
+}
+
 /// One sentence on how to size a breakdown — what `spoolway-tasks` used to
 /// work out itself from a pipeline's model windows, before there was
 /// anywhere to print it instead. Judgment, not arithmetic: see this task's
@@ -298,6 +344,7 @@ struct Contract {
     set_rules: Vec<String>,
     fields: std::collections::BTreeMap<&'static str, &'static str>,
     pipelines: std::collections::BTreeMap<String, PipelineContract>,
+    routines: RoutinesContract,
 }
 
 fn build_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> Contract {
@@ -347,6 +394,11 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> 
                        tasks and nothing else",
             queue: "spoolway queue — writing a task does not queue it; a person \
                     selects a group there and sends it",
+        },
+        routines: RoutinesContract {
+            dir: repo.routines_dir().display().to_string(),
+            templates_dir: repo.task_templates_dir().display().to_string(),
+            text: ROUTINES_TEXT,
         },
         keys: ContractKeys {
             required: REQUIRED_KEYS,
@@ -603,6 +655,43 @@ mod tests {
             "`base` should say a dependent is cut from its dependency's branch \
              and must share its `base`: {base}"
         );
+    }
+
+    /// The acceptance criterion this `routines` field exists for: the
+    /// folder path, one finished task per file, folder-versus-single-file
+    /// queueing, `depends_on` between siblings, fresh ids on every queue,
+    /// and that a routine is never a task template.
+    #[test]
+    fn routines_section_names_every_fact_the_acceptance_criteria_list() {
+        let (repo, _root_guard) = fixture("contract-routines-text");
+        let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
+        assert_eq!(
+            contract.routines.dir,
+            repo.routines_dir().display().to_string()
+        );
+        assert_eq!(
+            contract.routines.templates_dir,
+            repo.task_templates_dir().display().to_string()
+        );
+        let text = contract.routines.text;
+        for fact in [
+            "finished task",
+            "one whole task per file",
+            "never a skeleton",
+            "A routine is never a task template",
+            "does not live under",
+            "this contract's own `templates_dir`",
+            "Queuing the folder",
+            "mints a fresh id for every task",
+            "queuing one `.md` file alone",
+            "`depends_on` only a sibling in the same folder",
+            "depends_on` emptied",
+        ] {
+            assert!(
+                text.contains(fact),
+                "routines contract drops `{fact}`: {text}"
+            );
+        }
     }
 
     /// Every public field [`crate::task::Frontmatter`] declares has to show up

@@ -1219,6 +1219,12 @@ pub enum GroupCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum JobsCommand {
+    /// Print the job format: both store paths, every `[jobs.<name>]` key
+    /// with its default, the cron grammar, and the one-name-in-both-stores
+    /// refusal — printed rather than guessed at from `docs/jobs.md`.
+    /// `--json` prints the same facts as one object.
+    Contract,
+
     /// List every job across both stores: name, scope, schedule, pipeline,
     /// when it fires next and when it last fired. `--json` prints the same
     /// rows for a script.

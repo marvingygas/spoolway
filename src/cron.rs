@@ -59,6 +59,22 @@ const DAYS: &[(&str, u32)] = &[
     ("sat", 6),
 ];
 
+/// One grammar field: its name, its inclusive range, and the name table it
+/// also accepts (empty for a field that takes only numbers).
+type Field = (&'static str, u32, u32, &'static [(&'static str, u32)]);
+
+/// The five fields in grammar order — the one table [`Cron::parse`] calls
+/// [`parse_field`] against and [`Cron::grammar`] reads back into prose, so
+/// `spoolway jobs contract`'s text can never claim a range or a name table
+/// the parser does not actually enforce.
+const FIELDS: [Field; 5] = [
+    ("minute", 0, 59, &[]),
+    ("hour", 0, 23, &[]),
+    ("day-of-month", 1, 31, &[]),
+    ("month", 1, 12, MONTHS),
+    ("day-of-week", 0, 6, DAYS),
+];
+
 /// How far ahead [`Cron::next_after`] scans before concluding that an
 /// expression can never fire. The Gregorian calendar — dates and weekdays
 /// both — repeats exactly every 400 years, which is 146097 days and a whole
@@ -118,14 +134,71 @@ impl Cron {
         }
 
         Ok(Cron {
-            minute: parse_field(fields[0], 0, 59, "minute", &[])?,
-            hour: parse_field(fields[1], 0, 23, "hour", &[])?,
-            dom: parse_field(fields[2], 1, 31, "day-of-month", &[])?,
-            month: parse_field(fields[3], 1, 12, "month", MONTHS)?,
-            dow: parse_field(fields[4], 0, 6, "day-of-week", DAYS)?,
+            minute: parse_field(
+                fields[0],
+                FIELDS[0].1,
+                FIELDS[0].2,
+                FIELDS[0].0,
+                FIELDS[0].3,
+            )?,
+            hour: parse_field(
+                fields[1],
+                FIELDS[1].1,
+                FIELDS[1].2,
+                FIELDS[1].0,
+                FIELDS[1].3,
+            )?,
+            dom: parse_field(
+                fields[2],
+                FIELDS[2].1,
+                FIELDS[2].2,
+                FIELDS[2].0,
+                FIELDS[2].3,
+            )?,
+            month: parse_field(
+                fields[3],
+                FIELDS[3].1,
+                FIELDS[3].2,
+                FIELDS[3].0,
+                FIELDS[3].3,
+            )?,
+            dow: parse_field(
+                fields[4],
+                FIELDS[4].1,
+                FIELDS[4].2,
+                FIELDS[4].0,
+                FIELDS[4].3,
+            )?,
             dom_restricted: !fields[2].starts_with('*'),
             dow_restricted: !fields[4].starts_with('*'),
         })
+    }
+
+    /// The grammar in prose, for `spoolway jobs contract` — the field ranges
+    /// and name tables read straight off [`FIELDS`], the same table
+    /// [`Cron::parse`] enforces, so this text can never claim a range the
+    /// parser does not.
+    pub fn grammar() -> String {
+        let mut out = String::new();
+        out.push_str("minute hour day-of-month month day-of-week\n");
+        out.push_str(
+            "Each field is a comma list of terms; each term is `*`, a number, `a-b`, `*/n` \
+             or `a-b/n`.\n",
+        );
+        for (name, lo, hi, names) in FIELDS {
+            let extra = match (names.first(), names.last()) {
+                (Some((first, _)), Some((last, _))) => format!(" (or {first}-{last})"),
+                _ => String::new(),
+            };
+            out.push_str(&format!("  {name:<14} {lo}-{hi}{extra}\n"));
+        }
+        out.push_str("@hourly, @daily, @weekly and @monthly are whole-expression aliases.\n");
+        out.push_str(
+            "When both day fields are restricted (neither begins with `*`), a match on \
+             either fires the job — `0 3 13 * fri` is the thirteenth or any Friday, not \
+             Friday the thirteenth.\n",
+        );
+        out
     }
 
     /// The expression stated back in plain words, for the `spoolway jobs`
@@ -805,6 +878,40 @@ mod tests {
         let cron = Cron::parse("0 0 29 2 *").unwrap();
         let next = cron.next_after(at("2096-02-29 12:00")).unwrap();
         assert_eq!(next, at("2104-02-29 00:00"));
+    }
+
+    /// `grammar`'s ranges and name tables come straight off [`FIELDS`] — the
+    /// same table `parse` enforces — so a boundary value each range names
+    /// must actually parse, and a value one past it must not.
+    #[test]
+    fn grammar_names_the_same_ranges_parse_enforces() {
+        let text = Cron::grammar();
+        for fact in [
+            "minute",
+            "0-59",
+            "hour",
+            "0-23",
+            "day-of-month",
+            "1-31",
+            "month",
+            "1-12",
+            "(or jan-dec)",
+            "day-of-week",
+            "0-6",
+            "(or sun-sat)",
+            "@hourly, @daily, @weekly and @monthly",
+            "the thirteenth or any Friday",
+        ] {
+            assert!(text.contains(fact), "grammar drops `{fact}`: {text}");
+        }
+        assert!(
+            Cron::parse("59 23 31 12 6").is_ok(),
+            "every field's own high bound"
+        );
+        assert!(
+            Cron::parse("60 23 31 12 6").is_err(),
+            "one past minute's bound"
+        );
     }
 
     #[test]

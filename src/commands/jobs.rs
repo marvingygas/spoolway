@@ -1,4 +1,5 @@
-//! `spoolway jobs`: `jobs list` and `jobs run` for scripts, and bare
+//! `spoolway jobs`: `jobs list` and `jobs run` for scripts, `jobs contract`
+//! for a producer that has never seen the two store files, and bare
 //! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
 //! are the only thing that write a job — the jobs tab walks the routine, the
 //! cron expression and the pipeline, then saves through
@@ -93,6 +94,134 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// A sample `[jobs.<name>]` table, valid on its own — `sample_table_parses`
+/// below is what keeps this text and the parser it describes from drifting
+/// apart.
+const SAMPLE_TABLE: &str = "[jobs.nightly-audit]\n\
+                             schedule = \"0 3 * * 1-5\"\n\
+                             pipeline = \"default\"\n\
+                             routine = \"nightly\"\n";
+
+/// One `[jobs.<name>]` key, as `--json` serializes it. `default` and `text`
+/// are owned, not `&'static str`: `default` is read off
+/// [`crate::jobs::enabled_default`] rather than a hand-typed `"true"`, and
+/// `text` has its `{routines_dir}` placeholder filled in with this
+/// project's own path — see [`build_jobs_contract`].
+#[derive(serde::Serialize)]
+struct JobKeyDoc {
+    name: &'static str,
+    default: String,
+    text: String,
+}
+
+/// One store's scope and path, as `--json` serializes it.
+#[derive(serde::Serialize)]
+struct JobsStoreDoc {
+    scope: &'static str,
+    path: String,
+}
+
+/// `spoolway jobs contract`'s whole body, plain or `--json` — the two store
+/// paths, every key, the cron grammar [`crate::cron::Cron::grammar`] builds
+/// from the same table [`crate::cron::Cron::parse`] enforces, the one-name-
+/// in-both-stores refusal, and [`SAMPLE_TABLE`].
+#[derive(serde::Serialize)]
+struct JobsContractOut {
+    stores: [JobsStoreDoc; 2],
+    keys: Vec<JobKeyDoc>,
+    cron_grammar: String,
+    collision: &'static str,
+    sample: &'static str,
+}
+
+fn build_jobs_contract(repo: &Repo) -> JobsContractOut {
+    // `store_label`, the same way the store paths beside it are: in home
+    // mode the setup folder is the workspace's own `config/`
+    // (`crate::config::setup_dir_in`), not `.spoolway/`, so a hardcoded
+    // `.spoolway/routines/` in the `routine` key's sentence would name a
+    // path that project does not even have.
+    let routines_dir = store_label(repo, &repo.routines_dir());
+    JobsContractOut {
+        stores: [
+            JobsStoreDoc {
+                scope: Scope::User.label(),
+                path: store_label(repo, &repo.user_jobs_file()),
+            },
+            JobsStoreDoc {
+                scope: Scope::Project.label(),
+                path: store_label(repo, &repo.jobs_file()),
+            },
+        ],
+        keys: crate::jobs::JOB_KEYS
+            .iter()
+            .map(|key| JobKeyDoc {
+                name: key.name,
+                default: if key.required {
+                    "required".to_string()
+                } else {
+                    // `enabled` is the only optional key today; its default
+                    // is read off `enabled_default` itself so this can
+                    // never print a value the parser does not actually
+                    // default to.
+                    crate::jobs::enabled_default().to_string()
+                },
+                text: key.text.replace("{routines_dir}", &routines_dir),
+            })
+            .collect(),
+        cron_grammar: crate::cron::Cron::grammar(),
+        collision: "A name may be defined in only one store at a time. One found in both is \
+                    refused at load, naming both store paths, rather than one silently \
+                    shadowing the other.",
+        sample: SAMPLE_TABLE,
+    }
+}
+
+/// `spoolway jobs contract` — the job format, printed rather than guessed at
+/// from `docs/jobs.md`. `--json` prints the same facts as one object.
+pub fn jobs_contract(repo: &Repo, json: bool) -> Result<()> {
+    let contract = build_jobs_contract(repo);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&contract)?);
+        return Ok(());
+    }
+    print!("{}", render_jobs_contract(&contract));
+    Ok(())
+}
+
+/// [`jobs_contract`]'s plain-text body, built as a string so a test can
+/// assert on it directly rather than capturing stdout.
+fn render_jobs_contract(contract: &JobsContractOut) -> String {
+    let mut out = String::new();
+    out.push_str("THE JOBS CONTRACT\n");
+    out.push_str("=================\n\n");
+
+    out.push_str(
+        "A job lives in one of two TOML stores, as a `[jobs.<name>]` table — this \
+         project's own two:\n",
+    );
+    for store in &contract.stores {
+        out.push_str(&format!("  {:<8} {}\n", store.scope, store.path));
+    }
+    out.push('\n');
+
+    out.push_str("EVERY KEY\n");
+    for key in &contract.keys {
+        out.push_str(&format!("  {}  (default: {})\n", key.name, key.default));
+        out.push_str(&format!("    {}\n\n", key.text));
+    }
+
+    out.push_str("THE CRON GRAMMAR\n");
+    out.push_str(&contract.cron_grammar);
+    out.push('\n');
+
+    out.push_str(contract.collision);
+    out.push_str("\n\n");
+
+    out.push_str("A SAMPLE TABLE\n");
+    out.push_str(contract.sample);
+    out
 }
 
 /// `spoolway jobs run <name>` — fire one job now, ignoring its schedule.
@@ -1549,6 +1678,100 @@ fn routine_panel(ctx: &Ctx, nav: &RoutineNav) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// The `routine` key's `{routines_dir}` placeholder is filled with this
+    /// project's own routines path, through [`store_label`] — the same
+    /// function the store paths beside it go through, so a home-mode
+    /// project (whose setup folder is not `.spoolway/`) gets a path that
+    /// actually exists rather than a hardcoded `.spoolway/routines/`. The
+    /// `enabled` key's default is read off [`crate::jobs::enabled_default`]
+    /// itself, not a hand-typed `"true"`.
+    #[test]
+    fn the_routine_key_names_this_projects_own_routines_path_and_enabled_reads_its_default() {
+        let (repo, _root_guard) = fixture("jobs-contract-routine-dir");
+        let contract = build_jobs_contract(&repo);
+        let routine_key = contract
+            .keys
+            .iter()
+            .find(|key| key.name == "routine")
+            .unwrap();
+        assert!(
+            !routine_key.text.contains("{routines_dir}"),
+            "the placeholder was never filled in: {}",
+            routine_key.text
+        );
+        assert!(
+            routine_key
+                .text
+                .contains(&store_label(&repo, &repo.routines_dir())),
+            "{}",
+            routine_key.text
+        );
+
+        let enabled_key = contract
+            .keys
+            .iter()
+            .find(|key| key.name == "enabled")
+            .unwrap();
+        assert_eq!(
+            enabled_key.default,
+            crate::jobs::enabled_default().to_string()
+        );
+    }
+
+    /// [`SAMPLE_TABLE`] is not just prose: it is one real `[jobs.<name>]`
+    /// table, and it has to parse the same way a hand-written store would —
+    /// the acceptance criterion behind printing it at all.
+    #[test]
+    fn sample_table_parses_as_one_job() {
+        let (repo, _root_guard) = fixture("jobs-contract-sample");
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(repo.user_jobs_file(), SAMPLE_TABLE).unwrap();
+
+        let jobs = jobs::load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "nightly-audit");
+        assert_eq!(jobs[0].spec.schedule, "0 3 * * 1-5");
+        assert_eq!(jobs[0].spec.pipeline, "default");
+        assert_eq!(jobs[0].spec.routine, "nightly");
+        assert!(jobs[0].spec.enabled);
+    }
+
+    /// The mockup's own promise: both store paths, every key, the cron
+    /// grammar and the one-name-in-both-stores refusal, all in one printed
+    /// body. `--json` carries the same facts as one object.
+    #[test]
+    fn jobs_contract_names_both_stores_every_key_and_the_grammar() {
+        let (repo, _root_guard) = fixture("jobs-contract-text");
+        let text = render_jobs_contract(&build_jobs_contract(&repo));
+        for fact in [
+            "THE JOBS CONTRACT",
+            "schedule",
+            "pipeline",
+            "routine",
+            "enabled",
+            "minute hour day-of-month month day-of-week",
+            "defined in only one store",
+            "[jobs.nightly-audit]",
+        ] {
+            assert!(text.contains(fact), "jobs contract drops `{fact}`: {text}");
+        }
+        assert!(
+            text.contains(&store_label(&repo, &repo.user_jobs_file())),
+            "{text}"
+        );
+        assert!(
+            text.contains(&store_label(&repo, &repo.jobs_file())),
+            "{text}"
+        );
+
+        let json = serde_json::to_value(build_jobs_contract(&repo)).unwrap();
+        assert_eq!(
+            json["keys"].as_array().unwrap().len(),
+            crate::jobs::JOB_KEYS.len()
+        );
+        assert!(json["cron_grammar"].as_str().unwrap().contains("0-59"));
+    }
 
     /// A routine folder with one queueable task, and a job in the user
     /// store pointing at it.

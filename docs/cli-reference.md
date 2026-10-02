@@ -430,6 +430,18 @@ Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writ
 
 See [Jobs](jobs.md).
 
+### `spoolway jobs contract`
+
+Print the job format: both store paths, every `[jobs.<name>]` key with its default, the cron
+grammar, and the one-name-in-both-stores refusal, closed with a sample table to copy.
+
+```
+spoolway jobs contract
+spoolway jobs contract --json
+```
+
+`--json` prints the same facts as one object. See [Jobs](jobs.md).
+
 ### `spoolway jobs list`
 
 Print every job as a table: `NAME`, `SCOPE`, `SCHEDULE`, `PIPELINE`, `NEXT`, `LAST`.
@@ -865,6 +877,11 @@ and exits non-zero on a refusal.
 
 Bare, with no `--from`, the contract also carries a top-level `base`: the branch the checkout
 it ran in has out. A worktree reports its own branch. A detached checkout reports `null`.
+
+Bare, it also carries a `routines` section: the routines directory, the task templates
+directory, and the routine shape itself. That shape is one finished task per file,
+`depends_on` between siblings, folder-versus-single-file queueing, fresh ids on every queue,
+and the fact that a routine is never a task template. See [Routines](planning.md#routines).
 
 ### `spoolway template contract`
 

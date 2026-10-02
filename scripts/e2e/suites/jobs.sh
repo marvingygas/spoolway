@@ -72,6 +72,15 @@ works "jobs list shows the job" \
 says "jobs list --json carries the schedule" '"schedule": "* * * * *"' \
   "$SPOOLWAY" jobs list --json
 
+# `jobs contract` names this project's own two store paths — the project one
+# relative to the checkout, the user one `~`-shortened under home, the same
+# machine home `new_repo` set `SPOOLWAY_PROJECT_HOME` to.
+USER_STORE_DISPLAY="~/.spoolway/$(basename "$SPOOLWAY_PROJECT_HOME")/jobs.toml"
+says "jobs contract names the project store" '.spoolway/jobs.toml' \
+  "$SPOOLWAY" jobs contract
+says "and the user store" "$USER_STORE_DISPLAY" \
+  "$SPOOLWAY" jobs contract
+
 # A dispatcher pass against a matching minute fires the job.
 dispatcher_start
 

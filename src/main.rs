@@ -515,6 +515,7 @@ fn run() -> Result<()> {
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 
+                Command::Jobs(JobsCommand::Contract) => commands::jobs_contract(&repo, cli.json),
                 Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
                 Command::Jobs(JobsCommand::Run(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
