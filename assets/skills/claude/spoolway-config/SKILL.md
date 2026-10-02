@@ -35,6 +35,14 @@ every route below finds its three folders — never build one of these paths
 by hand, since a project laid out differently from a guess would silently
 route to the wrong place.
 
+A task template is a skeleton, not a task: headings, a guidance paragraph per
+heading addressed to whoever writes the task, and `[[bracketed]]`
+placeholders, in the shape of the project's own `default.md` in the task
+templates folder `spoolway template contract` lists. One task's actual
+goal, criteria or findings never go in it — a task written in full belongs in
+the pending directory or under `.spoolway/routines/`. A pipeline whose tasks
+always come from a routine gets no task template and no `task_template:` key.
+
 ## Preferences
 
 - Planning, research and review run on the strongest model available, at
@@ -62,9 +70,11 @@ off an existing one, or a value made permanent:
 
 - Ask what you cannot decide, through AskUserQuestion, 2–3 concrete options
   each. Always worth asking what one pass has to produce.
-- Write the pipeline from the contract's own template, and a prompt for
-  every step the project does not already have one for, into the setup
-  folder `spoolway config path --json` prints.
+- Write the pipeline from the contract's own template, a prompt for every
+  step the project does not already have one for, and a task template
+  skeleton — skip it, and the `task_template:` key, when every task on this
+  pipeline always comes from a routine — into the setup folder
+  `spoolway config path --json` prints.
 - Every pipeline gets a `description:` — the sentence a reader chooses
   between pipelines by. Take it from the human's own words, verbatim except
   for the one narrow rewrite this skill ever makes to a human's prose:
@@ -124,10 +134,12 @@ whole prompt, or any key `spoolway config contract` lists:
   `--workspace new`.
 - Ask "Install the example setup?" and pass `--examples` or `--no-examples`.
 - Without examples, the project has no pipeline yet: write the first one,
-  its prompts and its task template yourself, from `spoolway pipeline
-  contract`, `spoolway prompt contract` and `spoolway template contract` —
-  the same shapes "Edit the setup, for everyone" writes from — into the
-  setup folder `spoolway config path --json` now prints.
+  its prompts, and a task template skeleton (none, and no `task_template:`
+  key, if every task on this pipeline always comes from a routine) yourself,
+  from `spoolway pipeline contract`, `spoolway prompt contract` and
+  `spoolway template contract` — the same shapes "Edit the setup, for
+  everyone" writes from — into the setup folder
+  `spoolway config path --json` now prints.
 
 **Repairing a project** — something is broken, refused or behind:
 
