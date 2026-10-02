@@ -1638,7 +1638,12 @@ fn render(
     jobs_next: &mut Option<crate::jobs::ActiveJobsMemo>,
     drawn: &mut Vec<String>,
 ) -> Result<String> {
-    let (tasks, load_problems) = repo.tasks_and_problems()?;
+    // `cached_queue`, not `repo.tasks_and_problems()`: the board's own
+    // per-file byte cache, so an idle frame over an unchanged queue parses
+    // nothing — see `cached_queue`. `tasks_and_problems` stays the
+    // dispatcher pass's own uncached read (`dispatch.rs`), which must see a
+    // just-written file immediately and runs far less often than a frame.
+    let (tasks, load_problems, _parsed) = cached_queue(&repo.queue_dir())?;
     let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     // Read once and passed down: this is a call out to the multiplexer, and
@@ -2692,6 +2697,160 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
     Ok(Arc::new(crate::task::load_dir(dir)?.0))
 }
 
+/// One queue file [`cached_queue`] has already parsed: the bytes it parsed
+/// from, and what came of them — a [`Task`](crate::task::Task) on success, or
+/// the message a [`LoadProblem`](crate::task::LoadProblem) would carry on
+/// failure. Keeping the outcome rather than just the `Task` means a cache hit
+/// on a file that does not parse still reports the same problem it did the
+/// first time, instead of silently dropping it the second frame.
+struct CachedQueueFile {
+    bytes: String,
+    outcome: Result<crate::task::Task, String>,
+}
+
+/// [`cached_queue`]'s own state between calls: the directory it last read,
+/// and every file in it that is still on disk, keyed by path.
+struct QueueCache {
+    dir: PathBuf,
+    files: HashMap<PathBuf, CachedQueueFile>,
+}
+
+/// [`crate::task::load_dir`] over the queue directory, parsing a file again
+/// only when its bytes differ from the bytes this cached it from last — the
+/// per-file sibling of [`cached_archive`]'s directory-wide one.
+///
+/// A queue file is rewritten in place on nearly every pass that touches
+/// it — a stage move, a round banked, `touched` stamped — so, unlike the
+/// archive, there is no single directory-mtime that tells "nothing in here
+/// changed"; each file has to be compared on its own. The file is still read
+/// in full on every call, same as
+/// [`Repo::tasks_and_problems`](crate::repo::Repo::tasks_and_problems) does —
+/// this only skips the YAML parse once the bytes just read are the ones
+/// already parsed. That parse, not the read, is what scaled with the queue
+/// and ran on every one-second frame.
+///
+/// A poisoned lock falls back to a plain, uncached [`crate::task::load_dir`]
+/// and counts every file as freshly parsed, the same fallback shape
+/// [`cached_archive`] takes — one frame paying full price rather than the
+/// whole board failing to draw.
+///
+/// Returns the parsed tasks, the load problems for files that would not
+/// parse — reported exactly as [`crate::task::load_dir`] reports them — and
+/// how many files were freshly parsed this call, the count the acceptance
+/// test reads rather than timing the call.
+fn cached_queue(
+    dir: &Path,
+) -> Result<(Vec<crate::task::Task>, Vec<crate::task::LoadProblem>, usize)> {
+    static CACHE: OnceLock<Mutex<Option<QueueCache>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+
+    if let Ok(mut guard) = cache.lock() {
+        let needs_reset = !matches!(guard.as_ref(), Some(cached) if cached.dir == dir);
+        if needs_reset {
+            *guard = Some(QueueCache {
+                dir: dir.to_path_buf(),
+                files: HashMap::new(),
+            });
+        }
+        let state = guard.as_mut().expect("just set above");
+        return cached_queue_in(dir, state);
+    }
+    let (tasks, problems) = crate::task::load_dir(dir)?;
+    let parsed = tasks.len() + problems.len();
+    Ok((tasks, problems, parsed))
+}
+
+/// [`cached_queue`]'s own logic, taking its cache state as a plain argument
+/// rather than reaching into the process-wide static itself.
+///
+/// Split out so a test can drive it against a [`QueueCache`] of its own: the
+/// static in `cached_queue` is one slot shared by every caller in the
+/// process, and `Board::frame`'s own tests call `render` — so `cached_queue`
+/// — from several tests that can run in parallel. One landing between two
+/// calls of another resets that shared slot out from under it, which was
+/// read as a reparse the test did not expect (review finding 1, caught by 40
+/// runs of `status::` at `--test-threads=16` failing once).
+fn cached_queue_in(
+    dir: &Path,
+    state: &mut QueueCache,
+) -> Result<(Vec<crate::task::Task>, Vec<crate::task::LoadProblem>, usize)> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // An empty queue is a normal state, not an error — matching
+        // `load_dir`'s own handling of the same case.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            state.files.clear();
+            return Ok((Vec::new(), Vec::new(), 0));
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+
+    let mut seen = HashSet::new();
+    let mut tasks = Vec::new();
+    let mut problems = Vec::new();
+    let mut parsed = 0usize;
+
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        seen.insert(path.clone());
+
+        // Read in full every call, same as `load_dir` — only the parse below
+        // is conditional. A read error is wrapped and reported the same way
+        // `Task::load` reports one, so `LoadProblem.error` reads identically
+        // whichever of the two loaded the file.
+        let bytes = match std::fs::read_to_string(&path)
+            .with_context(|| format!("reading task file {}", path.display()))
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                problems.push(crate::task::LoadProblem {
+                    path,
+                    error: format!("{e:#}"),
+                });
+                continue;
+            }
+        };
+
+        if let Some(cached) = state.files.get(&path)
+            && cached.bytes == bytes
+        {
+            match &cached.outcome {
+                Ok(task) => tasks.push(task.clone()),
+                Err(error) => problems.push(crate::task::LoadProblem {
+                    path: path.clone(),
+                    error: error.clone(),
+                }),
+            }
+            continue;
+        }
+
+        parsed += 1;
+        let outcome = crate::task::Task::parse(path.clone(), &bytes)
+            .with_context(|| format!("parsing task file {}", path.display()))
+            .map_err(|e| format!("{e:#}"));
+        match &outcome {
+            Ok(task) => tasks.push(task.clone()),
+            Err(error) => problems.push(crate::task::LoadProblem {
+                path: path.clone(),
+                error: error.clone(),
+            }),
+        }
+        state.files.insert(path, CachedQueueFile { bytes, outcome });
+    }
+
+    // Files no longer on disk are dropped here rather than left to grow the
+    // cache forever — the same pruning `forget_dead_live_sessions` does for
+    // the session cache beside this one.
+    state.files.retain(|path, _| seen.contains(path));
+
+    tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((tasks, problems, parsed))
+}
+
 /// The other group `task`'s own group stacks on, if any — the bare group its
 /// `depends_on` crosses into, only ever set when `task` is its own group's
 /// first task (no dependency inside its own group). `None` for a task with
@@ -2969,7 +3128,10 @@ fn live_session(
     lane: &str,
     touched: &mut HashSet<String>,
 ) -> Option<Reading> {
-    let (kind, session) = crate::dispatch::lane_session(repo, lane)?;
+    // `lane_session_in`, not `lane_session`: the latter reads the whole
+    // ledger fresh with no cache, which this call already holds as `ledger`
+    // — see `render`'s own comment on why it is read once and shared.
+    let (kind, session) = crate::dispatch::lane_session_in(repo, ledger, lane)?;
     touched.insert(session.clone());
     let cache = LIVE_SESSION_CACHE.get_or_init(Mutex::default);
     let mut cache = cache.lock().ok()?;
@@ -4469,6 +4631,126 @@ mod tests {
             second.len(),
             2,
             "the cache must refresh once the directory's own mtime moves"
+        );
+    }
+
+    /// `board-reads-changed-only`: `render` used to call
+    /// `repo.tasks_and_problems()`, which parsed every queued task file on
+    /// every frame even when none changed — the cost the board's own comment
+    /// already called out for the archive, left unfixed there. A frame over
+    /// unchanged files must parse none of them, and a frame after one file
+    /// is rewritten in place must parse only that one — counted directly,
+    /// not timed, so the assertion does not depend on how fast this machine
+    /// happens to be (unlike `a_second_load_with_nothing_changed_rereads_no_transcript`
+    /// in `src/eval.rs`, which times it). `cached_queue` is the per-file,
+    /// byte-compared cache this task asked for, in the same shape
+    /// `cached_archive` already takes for the directory beside it.
+    ///
+    /// Drives `cached_queue_in` directly, against a `QueueCache` this test
+    /// owns, rather than `cached_queue` and its one process-wide static: that
+    /// static is shared with every other test that calls `render` in this
+    /// module, and one landing between two calls here was free to reset it
+    /// out from under this test and make it parse again when nothing of its
+    /// own had changed (review finding 1).
+    #[test]
+    fn cached_queue_reparses_only_a_file_whose_bytes_changed() {
+        let (repo, _root_guard) = fixture("queue-cache-reparse");
+        let dir = repo.queue_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.md"),
+            "---\nid: a\nstage: implement\ngroup: g\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.md"),
+            "---\nid: b\nstage: implement\ngroup: g\n---\n",
+        )
+        .unwrap();
+
+        let mut state = QueueCache {
+            dir: dir.clone(),
+            files: HashMap::new(),
+        };
+
+        let (_, _, parsed_first) = cached_queue_in(&dir, &mut state).unwrap();
+        assert_eq!(parsed_first, 2, "both files are new, so both are parsed");
+
+        let (tasks_second, _, parsed_second) = cached_queue_in(&dir, &mut state).unwrap();
+        assert_eq!(
+            parsed_second, 0,
+            "nothing on disk changed, so a second reading parses nothing"
+        );
+        assert_eq!(tasks_second.len(), 2);
+
+        // Rewritten in place, same byte length, new content.
+        std::fs::write(
+            dir.join("b.md"),
+            "---\nid: b\nstage: implement\ngroup: h\n---\n",
+        )
+        .unwrap();
+
+        let (tasks_third, _, parsed_third) = cached_queue_in(&dir, &mut state).unwrap();
+        assert_eq!(
+            parsed_third, 1,
+            "only the file whose bytes changed is parsed again"
+        );
+        assert_eq!(
+            tasks_third
+                .iter()
+                .find(|t| t.id() == "b")
+                .unwrap()
+                .front
+                .group
+                .as_deref(),
+            Some("h"),
+            "the board must show the rewritten file's new contents"
+        );
+    }
+
+    /// `board-reads-changed-only`: `live_session` already held the ledger
+    /// `render` read once through `usage::read_cached`, as its own `ledger`
+    /// parameter — but it used to resolve a lane's session through
+    /// `crate::dispatch::lane_session`, which ignored that parameter and ran
+    /// its own full, uncached `usage::read` instead. A frame with ten live
+    /// lanes paid for the whole ledger ten times over. It now goes through
+    /// `crate::dispatch::lane_session_in` with the `ledger` it was given.
+    ///
+    /// Proven here without a real transcript: the lane is on the ledger only
+    /// (no `lanes.json` record), with a different session on disk than the
+    /// one the in-memory `ledger` argument carries. `live_session` records
+    /// whichever session it resolved in `touched` before it ever looks for a
+    /// transcript, so which one lands there says which ledger it actually
+    /// used.
+    #[test]
+    fn live_session_uses_the_ledger_render_already_holds() {
+        let (repo, _root_guard) = fixture("live-session-ledger-reuse");
+        let lane = crate::mux::lane_name("implement", "demo");
+
+        crate::usage::append(
+            &repo,
+            &testutil::banked("demo", "implement", "disk-session", None),
+        )
+        .unwrap();
+        let ledger = vec![testutil::banked(
+            "demo",
+            "implement",
+            "memory-session",
+            None,
+        )];
+
+        let mut touched = HashSet::new();
+        live_session(&repo, &ledger, &lane, &mut touched);
+
+        assert!(
+            touched.contains("memory-session"),
+            "live_session must resolve the lane from the ledger it was \
+             already given: {touched:?}"
+        );
+        assert!(
+            !touched.contains("disk-session"),
+            "it must not fall back to its own fresh read of the ledger on \
+             disk: {touched:?}"
         );
     }
 

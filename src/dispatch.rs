@@ -6053,15 +6053,21 @@ fn write_system_prompt(repo: &Repo, lane: &str, body: &str) -> Result<PathBuf> {
 /// bookkeeping — and the usage ledger as the fallback for a lane whose record
 /// a later pass has already retired.
 ///
-/// One-shot callers (the board, `spoolway lane`) read the ledger here;
-/// [`prepare_boot`], inside a pass, passes the pass's one snapshot to
+/// One-shot callers (`spoolway lane`, `spoolway attach`) read the ledger
+/// here; [`prepare_boot`], inside a pass, passes the pass's one snapshot to
 /// [`lane_session_in`] so the ledger is not parsed again per resume (review
-/// finding 33).
+/// finding 33). The board is a third shape again: a long-lived process that
+/// already holds a cached ledger per frame, so `status::live_session` calls
+/// [`lane_session_in`] directly with that instead of coming through here.
 pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
     lane_session_in(repo, &crate::usage::read(repo).unwrap_or_default(), lane)
 }
 
-fn lane_session_in(
+/// `pub(crate)`, not private: `status::live_session` calls this directly with
+/// the ledger `render` already read through `usage::read_cached`, rather than
+/// through `lane_session` above, which would read the whole ledger again,
+/// uncached, for every live lane on every frame.
+pub(crate) fn lane_session_in(
     repo: &Repo,
     ledger: &[crate::usage::Entry],
     lane: &str,
