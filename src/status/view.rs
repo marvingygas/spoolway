@@ -181,6 +181,7 @@ impl State {
 /// finished line — so the width, the coalescing and the colour are all
 /// decided in [`ticker`], against the pane and the rest of the block, and not
 /// at the moment the move was first seen.
+#[derive(Clone)]
 pub(crate) enum RecentEvent {
     /// A task's move, read backwards off the step that reported it rather
     /// than forwards off the step it arrived at — see [`arrival_event`].

@@ -41,6 +41,7 @@
 use std::cell::Cell;
 use std::io::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -636,20 +637,50 @@ fn dispatch_tab(
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Result<Leave> {
+    // The first frame each time the tab is entered waits for a reading of
+    // its own, so the tab never opens on one left over from before it was
+    // last left. Every frame after it, for a key or an idle tick, is drawn
+    // from the board's last reading and only asks the reader for another —
+    // see `status::Reader`.
+    let mut entered = true;
     loop {
         tab.reap(repo);
-        draw_board(
-            repo,
-            pipelines,
-            board,
-            tab,
-            crate::screen::pane_size(),
-            writer,
-            out,
-        );
-        let Some(key) = wait_key(input, || {
-            tab.reap(repo);
+        if entered {
+            entered = false;
             draw_board(
+                repo,
+                pipelines,
+                board,
+                tab,
+                crate::screen::pane_size(),
+                writer,
+                out,
+            );
+        } else {
+            board.wake_reader();
+            draw_board_from_memory(
+                repo,
+                pipelines,
+                board,
+                tab,
+                crate::screen::pane_size(),
+                writer,
+                out,
+            );
+        }
+        let mut ticked = Instant::now();
+        let Some(key) = wait_key_every(input, READING_LANDED_POLL, || {
+            if ticked.elapsed() >= crate::status::POLL {
+                // The idle tick, once a [`crate::status::POLL`] as it always
+                // was: notice a dispatcher child that ended, ask for a
+                // reading, and redraw, so a resize alone still repaints.
+                ticked = Instant::now();
+                tab.reap(repo);
+                board.wake_reader();
+            } else if !board.reading_landed() {
+                return;
+            }
+            draw_board_from_memory(
                 repo,
                 pipelines,
                 board,
@@ -697,12 +728,29 @@ fn dispatch_tab(
 /// `ctrl-c`. A tab blocked in one would swallow the first press, and the
 /// second would kill the process with the terminal still raw — the default
 /// action the handler hands back after one catch.
-pub(crate) fn wait_key(input: &mut impl PollableRead, mut idle: impl FnMut()) -> Option<Key> {
+pub(crate) fn wait_key(input: &mut impl PollableRead, idle: impl FnMut()) -> Option<Key> {
+    wait_key_every(input, crate::status::POLL, idle)
+}
+
+/// How often the dispatch tab looks between keys for a reading that has
+/// just landed, so a reading a key asked for is drawn when it lands rather
+/// than up to a whole [`crate::status::POLL`] later. Checking costs one
+/// uncontended lock and a pointer compare; a frame is painted only when a
+/// new reading is actually there.
+const READING_LANDED_POLL: Duration = Duration::from_millis(50);
+
+/// [`wait_key`], calling `idle` on every `slice` with nothing typed rather
+/// than on every [`crate::status::POLL`].
+fn wait_key_every(
+    input: &mut impl PollableRead,
+    slice: Duration,
+    mut idle: impl FnMut(),
+) -> Option<Key> {
     loop {
         if crate::platform::stop::asked() {
             return None;
         }
-        if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
+        if !cfg!(unix) || input.byte_pending(slice) {
             return read_key(input);
         }
         idle();
@@ -750,6 +798,26 @@ fn board_frame_rows(
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));
     Some(rows)
+}
+
+/// [`draw_board`], drawn from the board's last reading instead of waiting
+/// for a new one — see [`crate::status::Board::hosted_frame_from_memory`].
+/// What every key and idle tick on the dispatch tab draws, so none of them
+/// starts a process or reads a task file on this thread.
+fn draw_board_from_memory(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    board: &mut crate::status::Board,
+    tab: &DispatchTab,
+    pane_size: (usize, usize),
+    writer: &mut crate::screen::frame_writer::FrameWriter,
+    out: &mut impl Write,
+) {
+    let popup = tab.popup.as_ref().map(Popup::panel);
+    let frame = board.hosted_frame_from_memory(repo, pipelines, tab.dispatching(), popup);
+    let mut rows = strip();
+    rows.extend(frame.lines().map(str::to_string));
+    writer.write_frame(&rows, pane_size, out);
 }
 
 /// A tab that has nothing to draw but a message — a ledger eval could not
@@ -1632,5 +1700,190 @@ mod tests {
             assert_eq!(strip[2], "");
         }
         assert_eq!(hosted(), None);
+    }
+
+    /// `board-reader-thread`'s "how to see it": a cursor move on the
+    /// dispatch tab — `↓`, which never opens a panel — should draw the next
+    /// frame from what `status::Reader` already has in memory, starting no
+    /// process and reading no task file on the key's own thread to get it.
+    ///
+    /// Counted through [`crate::repo::runs_here_under`] and
+    /// [`crate::status::queue_reads_here_under`], scoped to this test's own
+    /// `repo` and to this test's own thread. The key still wakes the reader,
+    /// whose reading may land at any moment during the test; that work is
+    /// the reader thread's, which the key never waits for, so it is not
+    /// counted against the key.
+    #[test]
+    fn a_cursor_key_on_the_dispatch_tab_draws_without_starting_a_process() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-cursor-key-no-process");
+        crate::status::testutil::add(&repo, "demo", &[], None);
+        let pipelines = Pipelines::builtin();
+
+        let mut board = crate::status::Board::for_test();
+        let tab = DispatchTab::default();
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        let mut out = Vec::new();
+
+        draw_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &tab,
+            crate::screen::pane_size(),
+            &mut writer,
+            &mut out,
+        );
+        let runs_after_first = crate::repo::runs_here_under(&repo.root);
+        let reads_after_first = crate::status::queue_reads_here_under(&repo.queue_dir());
+        assert!(
+            runs_after_first >= 1,
+            "the first frame should have started the backend at least once: {runs_after_first}"
+        );
+        assert!(
+            reads_after_first >= 1,
+            "the first frame should have read the queue at least once: {reads_after_first}"
+        );
+
+        board.on_key(&repo, &pipelines, Key::Down).unwrap();
+        board.wake_reader();
+        draw_board_from_memory(
+            &repo,
+            &pipelines,
+            &mut board,
+            &tab,
+            crate::screen::pane_size(),
+            &mut writer,
+            &mut out,
+        );
+
+        assert_eq!(
+            crate::repo::runs_here_under(&repo.root),
+            runs_after_first,
+            "a cursor key should draw the board from memory, but a process \
+             was started for it"
+        );
+        assert_eq!(
+            crate::status::queue_reads_here_under(&repo.queue_dir()),
+            reads_after_first,
+            "a cursor key should draw the board from memory, but a task \
+             file was read for it"
+        );
+    }
+
+    /// The same bug as
+    /// [`a_cursor_key_on_the_dispatch_tab_draws_without_starting_a_process`],
+    /// for a key read while one of the tab's own popups is open and reading
+    /// keys — the dispatch tab's `Popup::Stop`, here, answered with a key
+    /// ([`Key::Char('z')`]) that `DispatchTab::answer` does not recognise
+    /// and so leaves the popup open exactly as it was.
+    #[test]
+    fn a_key_typed_inside_an_open_popup_draws_without_starting_a_process() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-popup-key-no-process");
+        crate::status::testutil::add(&repo, "demo", &[], None);
+        let pipelines = Pipelines::builtin();
+
+        let mut board = crate::status::Board::for_test();
+        let mut tab = DispatchTab {
+            popup: Some(Popup::Stop(crate::screen::dispatcher::stop_panel())),
+            ..Default::default()
+        };
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        let mut out = Vec::new();
+
+        draw_board(
+            &repo,
+            &pipelines,
+            &mut board,
+            &tab,
+            crate::screen::pane_size(),
+            &mut writer,
+            &mut out,
+        );
+        let runs_after_first = crate::repo::runs_here_under(&repo.root);
+        let reads_after_first = crate::status::queue_reads_here_under(&repo.queue_dir());
+        assert!(
+            runs_after_first >= 1,
+            "the first frame should have started the backend at least once: {runs_after_first}"
+        );
+        assert!(
+            reads_after_first >= 1,
+            "the first frame should have read the queue at least once: {reads_after_first}"
+        );
+        assert!(
+            tab.popup.is_some(),
+            "the popup should still be open going into the key"
+        );
+
+        tab.answer(&repo, &pipelines, &repo.root, Key::Char('z'));
+        assert!(
+            tab.popup.is_some(),
+            "`z` answers nothing on the stop popup and should leave it open"
+        );
+        board.wake_reader();
+        draw_board_from_memory(
+            &repo,
+            &pipelines,
+            &mut board,
+            &tab,
+            crate::screen::pane_size(),
+            &mut writer,
+            &mut out,
+        );
+
+        assert_eq!(
+            crate::repo::runs_here_under(&repo.root),
+            runs_after_first,
+            "a key answered inside an open popup should draw the board from \
+             memory, but a process was started for it"
+        );
+        assert_eq!(
+            crate::status::queue_reads_here_under(&repo.queue_dir()),
+            reads_after_first,
+            "a key answered inside an open popup should draw the board from \
+             memory, but a task file was read for it"
+        );
+    }
+
+    /// Every key on the dispatch tab still asks for a fresh reading, as it
+    /// did when it read on its own thread: three `↓` typed into the tab's
+    /// own loop must leave the reader thread reading. Only the first frame
+    /// reads on this thread.
+    #[test]
+    fn keys_on_the_dispatch_tab_wake_the_reader() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-keys-wake-the-reader");
+        crate::status::testutil::add(&repo, "demo", &[], None);
+        let pipelines = Pipelines::builtin();
+
+        let mut board = crate::status::Board::for_test();
+        let mut tab = DispatchTab::default();
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        // Three `↓` and then nothing, which ends the tab the way input
+        // running out always does.
+        let mut input = std::io::Cursor::new(b"\x1b[B\x1b[B\x1b[B".to_vec());
+        let mut out = Vec::new();
+
+        let leave = dispatch_tab(
+            &repo,
+            &pipelines,
+            &repo.root,
+            &mut board,
+            &mut tab,
+            &mut writer,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert!(matches!(leave, Leave::Quit));
+        let here = crate::repo::runs_here_under(&repo.root);
+
+        // The reader runs at its own pace; give it time to land.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::repo::runs_under(&repo.root) == here && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            crate::repo::runs_under(&repo.root) > here,
+            "the keys should have woken the reader into another reading"
+        );
     }
 }

@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
@@ -322,23 +322,6 @@ impl Row {
 /// [`Board::hosted`] of its own and reads the lock only to name who is
 /// dispatching.
 pub struct Board {
-    /// Task id → the stage it was on at the last frame.
-    stages: BTreeMap<String, String>,
-    /// Task id → when its row's stage was last seen to change, alongside
-    /// `stages` above. `build_rows`' state arm reads this back to tell a task
-    /// that just handed off to a new step, with no lane up for it yet, apart
-    /// from one that has genuinely run out of workers to pick it up: the two
-    /// look identical on disk, and only this clock tells them apart.
-    arrived: BTreeMap<String, Instant>,
-    /// Lane name → the TIME a finished step read when this board first saw
-    /// it finish, while no dispatcher is up — see [`finish_settled`]. Empty
-    /// whenever one is.
-    frozen: BTreeMap<String, Option<i64>>,
-    recent: VecDeque<RecentEvent>,
-    /// Whether the queue as it stood at the first frame has been taken as the
-    /// starting point. Without this every task already in flight is announced
-    /// as news the moment the board opens.
-    adopted: bool,
     /// The terminal, taken for as long as the board is up and given back on
     /// `Drop` — the cursor hidden and, on Unix, the tty deaf to whatever gets
     /// typed at it. Held here rather than beside it in the run loop so the
@@ -346,55 +329,72 @@ pub struct Board {
     /// through the same `Board` going out of scope and reach the same
     /// restore.
     _term: crate::platform::TermGuard,
-    /// The task id the cursor sits on. Starts `None` only until [`render`]
-    /// draws its first frame, which lands it on the first row of the first
-    /// group straight away rather than leaving a person's first `↑`/`↓`
-    /// press go to discover that row — see the seeding block inline in
-    /// `render`'s own body. By id rather than a plain row index, so a state
-    /// change that resorts the board — a task passing its step, one landing on
-    /// `paused` above it — never leaves the cursor pointing at a different
-    /// task than the one a person last put it on. The same seeding block
-    /// re-lands it on the first row whenever the id it already holds falls
-    /// out of the frame's own rows entirely, such as a group finishing and
-    /// taking the cursor's row with it — no key pressed. `None` again only
-    /// once the board has nothing left to show at all.
+    /// The task id the cursor sits on. Starts `None` only until the first
+    /// reading lands, which lands it on the first row of the first group
+    /// straight away rather than leaving a person's first `↑`/`↓` press go
+    /// to discover that row — see [`Board::apply`]. By id rather than a
+    /// plain row index, so a state change that resorts the board — a task
+    /// passing its step, one landing on `paused` above it — never leaves the
+    /// cursor pointing at a different task than the one a person last put it
+    /// on. The same seeding re-lands it on the first row whenever the id it
+    /// already holds falls out of a later reading's own rows entirely, such
+    /// as a group finishing and taking the cursor's row with it — no key
+    /// pressed. `None` again only once the board has nothing left to show at
+    /// all.
     cursor: Option<String>,
     /// What a `p` or `R` keypress is waiting on, if anything — see
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves and `r`, which never open a panel at all.
     mode: BoardMode,
-    /// A one-minute memo for the job ledger's own rows, so the per-second
-    /// redraw does not re-scan the calendar for every enabled cron job — see
-    /// [`crate::jobs::active_jobs_cached`].
-    jobs_next: Option<crate::jobs::ActiveJobsMemo>,
-    /// The id of every row the last frame drew, in the order it drew them —
-    /// the live queue and the archived rows beside it, exactly as [`render`]
-    /// composed them. This is what `↑`/`↓` walk, so a cursor move is a step
-    /// through a list already in memory rather than a fresh read of every
-    /// task file: the board reads keys while a pass is rewriting and
-    /// archiving those very files, and a read caught mid-write used to lose
-    /// the keypress outright. The cost is that the marker can sit for one
-    /// frame on a row the queue has already moved — the next draw puts it
-    /// right, the same way [`render`] already re-seeds a cursor whose row has
-    /// left the board.
+    /// The id of every row the last reading drew, in the order it drew them
+    /// — the live queue and the archived rows beside it, exactly as
+    /// [`paint`] composed them. This is what `↑`/`↓` walk, so a cursor move
+    /// is a step through a list already in memory rather than a fresh read
+    /// of every task file: the board reads keys while a pass is rewriting
+    /// and archiving those very files, and a read caught mid-write used to
+    /// lose the keypress outright. The cost is that the marker can sit for a
+    /// reading or two on a row the queue has already moved — the next one
+    /// to land puts it right, the same way [`Board::apply`] already re-seeds
+    /// a cursor whose row has left the board.
     ///
-    /// Empty until the first frame.
+    /// Empty until the first reading.
     drawn: Vec<String>,
+    /// The RECENT ticker's own lines as of the last reading this board has
+    /// folded in — what [`paint`] draws under the table. Copied off each new
+    /// [`Snapshot`] by [`Board::apply`], so it moves once per reading, the
+    /// same as it once moved once per frame.
+    recent: VecDeque<RecentEvent>,
+    /// The last reading this board has folded into its own memory — compared
+    /// by pointer against whatever [`Reader::latest`] or a synchronous
+    /// [`build`] hands back, so [`Board::cursor`] and [`Board::drawn`] move
+    /// forward exactly once per new reading, never once per frame — see
+    /// [`Board::apply`]. `None` until the first.
+    current: Option<Arc<Snapshot>>,
+    /// The one reading a hosted frame no longer makes on the key thread
+    /// itself — see [`Reader`]. `None` until the first hosted frame, which
+    /// starts it — see [`Board::reader`]; a board whose own tests only ever call
+    /// [`Board::frame`] never needs one at all, and never pays a thread for
+    /// it.
+    reader: Option<Reader>,
+    /// [`Reader`]'s own memory, kept here instead for a board whose tests
+    /// call [`Board::frame`] directly: one synchronous [`build`] per call,
+    /// with nothing asynchronous to own a thread of its own.
+    #[cfg(test)]
+    memory: Memory,
 }
 
 impl Board {
     fn with_term(term: crate::platform::TermGuard) -> Board {
         Board {
-            stages: BTreeMap::new(),
-            arrived: BTreeMap::new(),
-            frozen: BTreeMap::new(),
-            recent: VecDeque::new(),
-            adopted: false,
             _term: term,
             cursor: None,
             mode: BoardMode::Browsing,
-            jobs_next: None,
             drawn: Vec::new(),
+            recent: VecDeque::new(),
+            current: None,
+            reader: None,
+            #[cfg(test)]
+            memory: Memory::new(),
         }
     }
 
@@ -428,12 +428,21 @@ impl Board {
     /// this must never name a live pid it did not see.
     ///
     /// Drawn inside a box titled `dispatch` with the key line under it — see
-    /// `render` — so the tab reads like the three beside it.
+    /// `paint` — so the tab reads like the three beside it.
     ///
     /// `popup` is the tab's own — a start gate, or why its dispatcher ended
     /// — drawn over the table the same way the board's confirm panels are.
     /// The board's own panel wins while one is open: the tab opens no popup
     /// of its own until the board is at rest.
+    ///
+    /// Waits for a reading that started after this call before it draws,
+    /// the same full read every frame paid for before [`Reader`] existed.
+    /// The dispatch tab asks for this only on the first frame each time it
+    /// is entered, so the screen never opens on a reading left over from
+    /// before the tab was last left. A reading that fails — the queue
+    /// directory unreadable for an instant — is an error here, so the
+    /// caller leaves the last frame on screen exactly as it always has.
+    /// Every other frame comes from [`Board::hosted_frame_from_memory`].
     pub(crate) fn hosted_frame(
         &mut self,
         repo: &Repo,
@@ -441,19 +450,98 @@ impl Board {
         dispatching: bool,
         popup: Option<&[String]>,
     ) -> Result<String> {
-        let holder = crate::lock::Lock::holder(&repo.lock_file()).unwrap_or(None);
-        let phase = Phase::Watching {
-            holder,
-            dispatching,
+        // A reader started by this very call has just read on this thread —
+        // see [`Reader::start`] — so a second reading straight after it
+        // would only read the same files again.
+        let started_here = self.reader.is_none();
+        let reader = self.reader(repo, pipelines);
+        let snapshot = if started_here {
+            reader.last_reading()?
+        } else {
+            reader.wake_and_wait()?
         };
-        self.frame_with(repo, pipelines, phase, popup)
+        Ok(self.paint_from(repo, pipelines, dispatching, popup, &snapshot))
+    }
+
+    /// [`Board::hosted_frame`], drawn from whatever reading [`Reader`] last
+    /// landed instead of waiting for a new one, so it starts no process and
+    /// reads no file. What a key and the dispatch tab's idle tick draw. It
+    /// asks for no reading of its own — the caller wakes the reader through
+    /// [`Board::wake_reader`] wherever it wants one, which a redraw for a
+    /// reading that has just landed must not.
+    pub(crate) fn hosted_frame_from_memory(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        dispatching: bool,
+        popup: Option<&[String]>,
+    ) -> String {
+        let snapshot = self.reader(repo, pipelines).latest();
+        self.paint_from(repo, pipelines, dispatching, popup, &snapshot)
+    }
+
+    /// Ask the reader for one more reading, without waiting for it. Every
+    /// key on the dispatch tab asks, and so does its idle tick once a
+    /// second; asks that arrive while a reading is running collapse into
+    /// one more reading after it — see [`Reader::wake`]. Does nothing
+    /// before the board's first hosted frame has started the reader.
+    pub(crate) fn wake_reader(&self) {
+        if let Some(reader) = &self.reader {
+            reader.wake();
+        }
+    }
+
+    /// Whether the reader has landed a reading this board has not drawn
+    /// yet. The dispatch tab checks this between keys, so a reading a key
+    /// asked for is drawn as soon as it lands rather than at the next tick.
+    pub(crate) fn reading_landed(&self) -> bool {
+        match (&self.reader, &self.current) {
+            (Some(reader), Some(current)) => !Arc::ptr_eq(&reader.latest(), current),
+            _ => false,
+        }
+    }
+
+    /// The board's [`Reader`], started on its first hosted frame rather than
+    /// in a constructor, so a board whose own tests never host anything
+    /// never pays for a thread. Starting it reads once on this thread — see
+    /// [`Reader::start`] — so the very first frame is never drawn from an
+    /// empty reading.
+    fn reader(&mut self, repo: &Repo, pipelines: &Pipelines) -> &Reader {
+        self.reader
+            .get_or_insert_with(|| Reader::start(repo.clone(), pipelines.clone()))
+    }
+
+    /// One hosted frame painted from `snapshot`, after folding it into the
+    /// board's memory if it is new — see [`Board::apply`].
+    fn paint_from(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        dispatching: bool,
+        popup: Option<&[String]>,
+        snapshot: &Arc<Snapshot>,
+    ) -> String {
+        self.apply(snapshot);
+        let frame = paint(
+            repo,
+            pipelines,
+            dispatching,
+            snapshot,
+            self.cursor.as_deref(),
+            &self.recent,
+        );
+        self.with_popup(frame, popup)
     }
 
     /// One frame, built whole before anything is written so a slow read never
     /// leaves a half-drawn board on screen.
     ///
     /// Only the tests below call this directly any more — production code
-    /// always reaches [`Phase::Watching`] through [`Board::hosted_frame`].
+    /// always reaches [`Phase::Watching`] through [`Board::hosted_frame`] or
+    /// [`Board::hosted_frame_from_memory`].
+    /// Builds synchronously every call, against `phase`'s own `holder`
+    /// rather than a real lock file, so a test can drive the "who is
+    /// dispatching" display without needing one.
     #[cfg(test)]
     fn frame(&mut self, repo: &Repo, pipelines: &Pipelines, phase: Phase) -> Result<String> {
         self.frame_with(repo, pipelines, phase, None)
@@ -461,6 +549,7 @@ impl Board {
 
     /// [`Board::frame`], with `popup` drawn over it wherever the board has
     /// no panel of its own open — see [`Board::hosted_frame`].
+    #[cfg(test)]
     fn frame_with(
         &mut self,
         repo: &Repo,
@@ -468,91 +557,120 @@ impl Board {
         phase: Phase,
         popup: Option<&[String]>,
     ) -> Result<String> {
-        // `render` seeds `self.cursor` itself, from the very rows it composes
-        // to draw the table — see the seeding block inline in its own body
-        // for why — rather than this reading the queue a second time first.
-        let frame = render(
+        let Phase::Watching {
+            holder,
+            dispatching,
+        } = phase;
+        let snapshot = Arc::new(build(repo, pipelines, holder, &mut self.memory)?);
+        self.apply(&snapshot);
+        let frame = paint(
             repo,
             pipelines,
-            phase,
-            &mut self.stages,
-            &mut self.arrived,
-            &mut self.frozen,
-            &mut self.recent,
-            &mut self.cursor,
-            &mut self.jobs_next,
-            &mut self.drawn,
-        )?;
-        if !self.adopted {
-            self.recent.clear();
-            self.adopted = true;
+            dispatching,
+            &snapshot,
+            self.cursor.as_deref(),
+            &self.recent,
+        );
+        Ok(self.with_popup(frame, popup))
+    }
+
+    /// Folds a new reading into the board's own memory — the cursor and
+    /// [`Board::drawn`] — exactly once per reading, never once per frame: a
+    /// second call with the very same [`Snapshot`] a key just redrew from is
+    /// a no-op, compared by pointer rather than by content, since two
+    /// readings over an unchanged queue are allowed to agree down to the
+    /// byte without this treating them as the same one.
+    fn apply(&mut self, snapshot: &Arc<Snapshot>) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, snapshot))
+        {
+            return;
         }
-        // A confirm panel sits on top of the table it interrupted, the same
-        // way `spoolway queue`'s own pickers do — see `crate::screen::overlay`.
-        // Built from a `String` rather than the `Vec<String>` `overlay` wants,
-        // because every other reader of `render`'s output — `draw`, the tests
-        // below — wants one whole frame too, and a second return shape here
-        // would be for this one caller alone.
-        Ok(
-            match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
-                Some(panel) => {
-                    // `overlay` reads its target width off line zero and writes
-                    // each panel row by walking a target row's own characters —
-                    // right for `spoolway queue`'s own frame, whose every row is
-                    // one fixed-width pane with no colour under where a picker
-                    // lands. This board's rows carry colour throughout — the
-                    // state dot, the dimmed footer, the key hint — and `overlay`
-                    // counts an escape byte as a column exactly like a visible
-                    // one, so it writes at the wrong column and can slice a
-                    // `DIM`/`RESET` pair in two, printing what is left of the
-                    // code as stray text. A panel carries no colour of its own,
-                    // so the frame under one loses its for the frame this draws
-                    // — [`strip_ansi`] — and gets it back the moment the panel
-                    // closes and the next frame is read fresh.
-                    //
-                    // Also opens on a blank spacer line, and has other blank
-                    // rows through the ticker and the rule below it — a row
-                    // `overlay` cannot write into at all, since it only ever
-                    // replaces characters a row already has. Padding every row
-                    // out to the widest one first, never shorter than
-                    // `pane_width()`, gives every row the same floor to write
-                    // onto and never truncates anything that already reached it.
-                    let mut stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
-                    // Hosted, the last row is the key line under the board's
-                    // box — see `render` — and a panel lands on the box, never
-                    // on the key line: padded to one width with the box, a key
-                    // line wider than the terminal would widen every row of
-                    // the box past the terminal's last column along with it.
-                    let keys = match crate::screen::shell::hosted() {
-                        Some(_) => stripped.pop(),
-                        None => None,
-                    };
-                    let width = stripped
-                        .iter()
-                        .map(|line| line.chars().count())
-                        .max()
-                        .unwrap_or(0)
-                        .max(pane_width());
-                    let mut lines: Vec<String> = stripped
-                        .iter()
-                        .map(|line| crate::screen::pad_to(line, width))
-                        .collect();
-                    // `overlay` only writes into rows the frame already has,
-                    // so a panel taller than the frame under it — the
-                    // dispatch tab's warnings over an empty queue — would
-                    // lose its bottom rows, key line and all. Blank rows
-                    // under the frame give it somewhere to land, with one
-                    // row above and below it to spare.
-                    while lines.len() < panel.len() + 2 {
-                        lines.push(" ".repeat(width));
-                    }
-                    crate::screen::overlay(&mut lines, &panel);
-                    lines.extend(keys);
-                    lines.join("\n")
+        // Lands the cursor on the first row of the first group before the
+        // very first reading this board ever draws is shown, rather than
+        // leaving a person's first `↑`/`↓` press go to discover it — see
+        // [`Board::cursor`]'s own doc comment. Re-seeded, not just seeded
+        // once, because a group finishing can carry the row the cursor
+        // named off the table between two readings with no key pressed —
+        // the same "gone id" case `shift_cursor` already treats as no
+        // cursor at all.
+        let cursor_still_shown = self
+            .cursor
+            .as_deref()
+            .is_some_and(|id| snapshot.rows.iter().any(|row| row.id == id));
+        if !cursor_still_shown {
+            self.cursor = snapshot.rows.first().map(|row| row.id.clone());
+        }
+        // What `↑`/`↓` will walk until the next reading replaces it — see
+        // [`Board::drawn`].
+        self.drawn = snapshot.rows.iter().map(|row| row.id.clone()).collect();
+        self.recent = snapshot.recent.clone();
+        self.current = Some(Arc::clone(snapshot));
+    }
+
+    /// `frame`, with `popup` drawn over it wherever the board has no panel
+    /// of its own open — see [`Board::hosted_frame`].
+    fn with_popup(&self, frame: String, popup: Option<&[String]>) -> String {
+        match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
+            Some(panel) => {
+                // `overlay` reads its target width off line zero and writes
+                // each panel row by walking a target row's own characters —
+                // right for `spoolway queue`'s own frame, whose every row is
+                // one fixed-width pane with no colour under where a picker
+                // lands. This board's rows carry colour throughout — the
+                // state dot, the dimmed footer, the key hint — and `overlay`
+                // counts an escape byte as a column exactly like a visible
+                // one, so it writes at the wrong column and can slice a
+                // `DIM`/`RESET` pair in two, printing what is left of the
+                // code as stray text. A panel carries no colour of its own,
+                // so the frame under one loses its for the frame this draws
+                // — [`strip_ansi`] — and gets it back the moment the panel
+                // closes and the next frame is read fresh.
+                //
+                // Also opens on a blank spacer line, and has other blank
+                // rows through the ticker and the rule below it — a row
+                // `overlay` cannot write into at all, since it only ever
+                // replaces characters a row already has. Padding every row
+                // out to the widest one first, never shorter than
+                // `pane_width()`, gives every row the same floor to write
+                // onto and never truncates anything that already reached it.
+                let mut stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
+                // Hosted, the last row is the key line under the board's
+                // box — see `paint` — and a panel lands on the box, never
+                // on the key line: padded to one width with the box, a key
+                // line wider than the terminal would widen every row of
+                // the box past the terminal's last column along with it.
+                let keys = match crate::screen::shell::hosted() {
+                    Some(_) => stripped.pop(),
+                    None => None,
+                };
+                let width = stripped
+                    .iter()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(pane_width());
+                let mut lines: Vec<String> = stripped
+                    .iter()
+                    .map(|line| crate::screen::pad_to(line, width))
+                    .collect();
+                // `overlay` only writes into rows the frame already has,
+                // so a panel taller than the frame under it — the
+                // dispatch tab's warnings over an empty queue — would
+                // lose its bottom rows, key line and all. Blank rows
+                // under the frame give it somewhere to land, with one
+                // row above and below it to spare.
+                while lines.len() < panel.len() + 2 {
+                    lines.push(" ".repeat(width));
                 }
-                None => frame,
-            },
-        )
+                crate::screen::overlay(&mut lines, &panel);
+                lines.extend(keys);
+                lines.join("\n")
+            }
+            None => frame,
+        }
     }
 
     /// Apply one key read while the board is up.
@@ -634,7 +752,7 @@ impl Board {
     /// multiplexer opens — a no-op with no cursor or a cursor on a row the
     /// board no longer draws. `repo.task` reads both the queue and the
     /// archive, so this reaches a done row's task exactly as it does a
-    /// live one — [`render`]'s own composed row list, which [`Board::drawn`]
+    /// live one — [`build`]'s own composed row list, which [`Board::drawn`]
     /// is taken from, is what lets the cursor land on that row in the first
     /// place. Never blocks: the pane runs the editor on its
     /// own, and the board keeps redrawing and the pass loop keeps running
@@ -1621,33 +1739,96 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     build_rows(repo, &tasks, pipelines, &graph, &lanes, &ledger, None)
 }
 
-// Every argument is a distinct piece of the board's own state that `frame`
-// holds and this builds one frame from; bundling them into a struct just to
-// pass one reference would hide that. The same call the codebase's other
-// frame builders make.
-#[allow(clippy::too_many_arguments)]
-fn render(
+/// Everything [`build`] read and computed once, for [`paint`] to draw from
+/// as many times as a key or an idle tick asks for a frame with no new
+/// reading behind it — see the `board-reader-thread` decision this split
+/// exists for. Carries the ticker's own RECENT lines forward too, since a
+/// frame draws them from here rather than from a second place of its own.
+struct Snapshot {
+    holder: Option<u32>,
+    rows: Vec<Row>,
+    load_problems: Vec<crate::task::LoadProblem>,
+    totals: BTreeMap<String, view::GroupTotal>,
+    finishing: Option<usize>,
+    used: BTreeMap<String, usize>,
+    model_used: BTreeMap<String, usize>,
+    agent_model: BTreeMap<String, Vec<String>>,
+    active_jobs: Vec<crate::jobs::ActiveJob>,
+    recent: VecDeque<RecentEvent>,
+}
+
+impl Snapshot {
+    /// What a board draws before its first real reading has ever landed, or
+    /// in place of one a failed reading could not replace — the same
+    /// tolerance a failed frame gets today.
+    fn empty() -> Snapshot {
+        Snapshot {
+            holder: None,
+            rows: Vec::new(),
+            load_problems: Vec::new(),
+            totals: BTreeMap::new(),
+            finishing: None,
+            used: BTreeMap::new(),
+            model_used: BTreeMap::new(),
+            agent_model: BTreeMap::new(),
+            active_jobs: Vec::new(),
+            recent: VecDeque::new(),
+        }
+    }
+}
+
+/// What [`build`] carries forward from one reading to the next — the
+/// board's own memory, same as it always was, just no longer living on
+/// `Board` itself. Owned by the [`Reader`] thread for a hosted board, so it
+/// moves once per reading there rather than once per frame; owned by
+/// `Board` itself for a board whose own tests call [`Board::frame`]
+/// directly, with nothing asynchronous about it.
+struct Memory {
+    stages: BTreeMap<String, String>,
+    arrived: BTreeMap<String, Instant>,
+    frozen: BTreeMap<String, Option<i64>>,
+    recent: VecDeque<RecentEvent>,
+    /// Whether the queue as it stood at the first reading has been taken as
+    /// the starting point. Without this every task already in flight is
+    /// announced as news the moment the board opens.
+    adopted: bool,
+    jobs_next: Option<crate::jobs::ActiveJobsMemo>,
+}
+
+impl Memory {
+    fn new() -> Memory {
+        Memory {
+            stages: BTreeMap::new(),
+            arrived: BTreeMap::new(),
+            frozen: BTreeMap::new(),
+            recent: VecDeque::new(),
+            adopted: false,
+            jobs_next: None,
+        }
+    }
+}
+
+/// One reading: the task files, the lane list, the lock, the ledger, the
+/// archive and the command runs — every one of them a dispatch-tab frame
+/// used to pay for again on every key before this, now read once here and
+/// drawn from by [`paint`] as many times as asked. `holder` is taken as a
+/// plain argument rather than read in here with the rest, because a test
+/// drives this against a `Phase` of its own choosing rather than a lock file
+/// it would have to fake — see [`Board::frame`].
+fn build(
     repo: &Repo,
     pipelines: &Pipelines,
-    phase: Phase,
-    stages: &mut BTreeMap<String, String>,
-    arrived: &mut BTreeMap<String, Instant>,
-    frozen: &mut BTreeMap<String, Option<i64>>,
-    recent: &mut VecDeque<RecentEvent>,
-    cursor: &mut Option<String>,
-    jobs_next: &mut Option<crate::jobs::ActiveJobsMemo>,
-    drawn: &mut Vec<String>,
-) -> Result<String> {
+    holder: Option<u32>,
+    memory: &mut Memory,
+) -> Result<Snapshot> {
     // `cached_queue`, not `repo.tasks_and_problems()`: the board's own
-    // per-file byte cache, so an idle frame over an unchanged queue parses
+    // per-file byte cache, so a reading over an unchanged queue parses
     // nothing — see `cached_queue`. `tasks_and_problems` stays the
     // dispatcher pass's own uncached read (`dispatch.rs`), which must see a
-    // just-written file immediately and runs far less often than a frame.
+    // just-written file immediately and runs far less often than a reading.
     let (tasks, load_problems, _parsed) = cached_queue(&repo.queue_dir())?;
     let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
-    // Read once and passed down: this is a call out to the multiplexer, and
-    // `render` is already the one place `draw` makes it from.
     let lanes = mux.list_lanes().unwrap_or_default();
 
     // The ticker sees the queue move: a stage that changed. A task entering
@@ -1665,28 +1846,30 @@ fn render(
         // that actually reported — see `arrival_event`. Clipped by `ticker`
         // itself, the same as every other recent line, so a long id or step
         // name ends in `…` rather than wrapping.
-        if let Some(was) = stages.get(id)
+        if let Some(was) = memory.stages.get(id)
             && was != stage
         {
             push_recent(
-                recent,
+                &mut memory.recent,
                 arrival_event(&now, id, was, stage, &tasks, pipelines),
             );
             // Starts this row's grace clock: `build_rows`' state arm reads it
             // back to tell a task that just handed off, with no lane up for
             // it yet, apart from one genuinely out of workers.
-            arrived.insert(id.clone(), Instant::now());
+            memory.arrived.insert(id.clone(), Instant::now());
         }
     }
-    *stages = current;
+    memory.stages = current;
     // Dropped alongside `stages` above rather than left to grow forever: a
     // task done or archived never clears its own entry, and the dispatcher
     // stays up for weeks (the same kind of leak `forget_dead_live_sessions`,
     // below, prunes for the session cache).
-    arrived.retain(|id, _| stages.contains_key(id));
+    let stages = &memory.stages;
+    memory.arrived.retain(|id, _| stages.contains_key(id));
 
-    // Read once and shared: the rows want it for the OUT column and the footer
-    // wants it for the spend, and it is the largest file the board opens.
+    // Read once and shared: the rows want it for the OUT column and the
+    // footer wants it for the spend, and it is the largest file the board
+    // opens.
     let ledger = crate::usage::read_cached(repo);
     let mut active_rows = build_rows(
         repo,
@@ -1695,62 +1878,308 @@ fn render(
         &graph,
         &lanes,
         &ledger,
-        Some(&*arrived),
+        Some(&memory.arrived),
     )?;
     // How many steps are still working with no dispatcher up to move them on
     // — `None` while one holds the lock, whose rows read exactly as they
     // always have. See `finish_settled`.
-    let finishing = match phase {
-        Phase::Watching { holder: None, .. } => {
-            Some(finish_settled(repo, &mut active_rows, &lanes, frozen))
-        }
-        Phase::Watching {
-            holder: Some(_), ..
-        } => {
-            frozen.clear();
-            None
-        }
+    let finishing = if holder.is_none() {
+        Some(finish_settled(
+            repo,
+            &mut active_rows,
+            &lanes,
+            &mut memory.frozen,
+        ))
+    } else {
+        memory.frozen.clear();
+        None
     };
 
     // Archived tasks stay on the board, dimmed, only as long as their group
-    // still has something in the queue — so the groups worth pulling from the
-    // archive are exactly the ones already among the active rows.
+    // still has something in the queue — so the groups worth pulling from
+    // the archive are exactly the ones already among the active rows.
     let active_groups: BTreeSet<String> =
         active_rows.iter().filter_map(|r| r.group.clone()).collect();
     let mut rows = active_rows;
     rows.extend(done_rows(repo, pipelines, &active_groups)?);
     rows.sort_by(|a, b| a.key().cmp(&b.key()));
 
-    // Lands the cursor on the first row of the first group before the very
-    // first frame this board draws is ever shown, rather than leaving a
-    // person's first `↑`/`↓` press go to discover it — see `Board::cursor`'s
-    // own doc comment. Seeded from `rows`, the same composed list `table`
-    // draws below, rather than a second read of the same task files, graph
-    // and lane list this function already just did. Re-seeded, not just
-    // seeded once, because a group finishing can carry the row the cursor
-    // named off the table between two frames with no key pressed — the same
-    // "gone id" case `shift_cursor` already treats as no cursor at all.
-    let cursor_still_shown = cursor
-        .as_deref()
-        .is_some_and(|id| rows.iter().any(|row| row.id == id));
-    if !cursor_still_shown {
-        *cursor = rows.first().map(|row| row.id.clone());
-    }
-    // What `↑`/`↓` will walk until the next frame replaces it — see
-    // [`Board::drawn`]. Taken here, after the sort and from the same composed
-    // list `table` draws below, so the order on screen and the order a cursor
-    // move steps through are the same list by construction.
-    *drawn = rows.iter().map(|row| row.id.clone()).collect();
     let totals = group_totals(&ledger, &rows);
 
     // Slots: how many live lanes each profile is paying for, against its cap
     // — or, where the model a profile's lanes are running has `slots` of its
     // own, how many that model is paying for against its own cap instead.
+    // Owned as `String`s rather than the borrowed `&str`s `slots_used`
+    // itself hands back, so a `Snapshot` can outlive the `tasks` and
+    // `pipelines` those borrows are tied to.
     let SlotsUsed {
-        agents: used,
-        models: model_used,
+        agents,
+        models,
         agent_model,
     } = slots_used(repo, &tasks, pipelines, &lanes);
+    let used = agents
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    let model_used = models
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    let agent_model = agent_model
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.into_iter().map(str::to_string).collect()))
+        .collect();
+
+    // The job ledger's own rows — every enabled job, ordered by next firing
+    // — memoised, so a reading over an unchanged calendar does not re-scan
+    // it for every enabled job.
+    let active_jobs = crate::jobs::active_jobs_cached(repo, &mut memory.jobs_next);
+
+    // Taken before the clear below, which must not erase the very news this
+    // reading is handing back — see `Memory::adopted`.
+    let recent = memory.recent.clone();
+    if !memory.adopted {
+        memory.recent.clear();
+        memory.adopted = true;
+    }
+
+    Ok(Snapshot {
+        holder,
+        rows,
+        load_problems,
+        totals,
+        finishing,
+        used,
+        model_used,
+        agent_model,
+        active_jobs,
+        recent,
+    })
+}
+
+/// The reading [`build`] does, kept off the key thread by a thread of its
+/// own — see the `board-reader-thread` decision. Before this, every key on
+/// the dispatch tab waited for a full read of the project, two `git` and one
+/// `herdr` process included, before its frame was drawn, and keys typed
+/// behind a slow read queued up behind it. Started lazily on a board's first
+/// hosted frame, which reads once before anything draws. From then on every
+/// key and the dispatch tab's idle tick ask for one more reading, and a
+/// frame draws from [`Reader::latest`] without waiting for it. A failed or
+/// slow reading leaves [`Reader::latest`] holding whatever the last one
+/// landed.
+struct Reader {
+    /// `None` once the board has dropped this and the thread has gone with
+    /// it — see [`Reader`]'s own `Drop`. Sending on a dropped receiver is
+    /// also how the thread notices it is time to stop.
+    wake: Option<mpsc::Sender<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    snapshot: Arc<Mutex<Arc<Snapshot>>>,
+    /// How many readings have started and finished, and whether the last
+    /// one to finish succeeded — see [`Readings`].
+    readings: Arc<(Mutex<Readings>, std::sync::Condvar)>,
+}
+
+/// The reader thread's own count of its readings, kept so
+/// [`Reader::wake_and_wait`] can wait for one that started after it was
+/// called. Counting finished readings alone is not enough: a reading
+/// already running when the call came in finishes next, and it may have
+/// read the queue before whatever the caller is waiting to see was written.
+struct Readings {
+    started: u64,
+    finished: u64,
+    /// Whether the last reading to finish built a snapshot. A failed one
+    /// leaves the snapshot before it standing.
+    last_ok: bool,
+}
+
+impl Reader {
+    /// Reads once, here, on the caller's own thread — so the very first
+    /// hosted frame is never drawn from an empty reading, the same
+    /// guarantee the inline call this replaces always gave, and with the
+    /// same timing: a plain call, not a thread's first reading raced
+    /// against whatever else on the machine is doing its own.
+    fn start(repo: Repo, pipelines: Pipelines) -> Reader {
+        let mut memory = Memory::new();
+        // Nothing stands in for an empty one on the very first reading —
+        // there is no earlier one to keep instead.
+        let initial = build_now(&repo, &pipelines, &mut memory);
+        let last_ok = initial.is_some();
+        let snapshot = Arc::new(Mutex::new(Arc::new(
+            initial.unwrap_or_else(Snapshot::empty),
+        )));
+        let (wake_tx, wake_rx) = mpsc::channel::<()>();
+        let readings = Arc::new((
+            Mutex::new(Readings {
+                started: 0,
+                finished: 0,
+                last_ok,
+            }),
+            std::sync::Condvar::new(),
+        ));
+
+        let thread_snapshot = Arc::clone(&snapshot);
+        let thread_readings = Arc::clone(&readings);
+        let handle = std::thread::spawn(move || {
+            let (state, landed) = &*thread_readings;
+            loop {
+                if wake_rx.recv().is_err() {
+                    // The board dropped its sender: nothing will ever ask
+                    // for another reading, so there is nothing left to wait
+                    // for.
+                    return;
+                }
+                // Keys typed while a reading was running collapse into the
+                // one reading that follows it, never one per key.
+                while wake_rx.try_recv().is_ok() {}
+                if let Ok(mut state) = state.lock() {
+                    state.started += 1;
+                }
+                // A failed reading — the queue directory unreadable for an
+                // instant — leaves the last one standing, the same
+                // tolerance a failed frame always had.
+                let fresh = build_now(&repo, &pipelines, &mut memory);
+                let ok = fresh.is_some();
+                if let Some(fresh) = fresh
+                    && let Ok(mut guard) = thread_snapshot.lock()
+                {
+                    *guard = Arc::new(fresh);
+                }
+                if let Ok(mut state) = state.lock() {
+                    state.finished += 1;
+                    state.last_ok = ok;
+                }
+                landed.notify_all();
+            }
+        });
+
+        Reader {
+            wake: Some(wake_tx),
+            handle: Some(handle),
+            snapshot,
+            readings,
+        }
+    }
+
+    /// Ask for one more reading. Never blocks, and a wake with a reading
+    /// already running is free: the thread drains every wake still waiting
+    /// once that reading is done, rather than running one per wake.
+    fn wake(&self) {
+        if let Some(tx) = &self.wake {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Whatever the last reading landed, cloned out from under the thread's
+    /// own lock — cheap, since cloning an `Arc` is a refcount, not the rows
+    /// behind it.
+    fn latest(&self) -> Arc<Snapshot> {
+        self.snapshot
+            .lock()
+            .map(|guard| Arc::clone(&guard))
+            .unwrap_or_else(|_| Arc::new(Snapshot::empty()))
+    }
+
+    /// Ask for one more reading and wait for a reading that started after
+    /// this call to finish, rather than drawing from whatever is already
+    /// there — [`Board::hosted_frame`]'s guarantee. An error when that
+    /// reading failed, so the caller can leave its last frame on screen.
+    fn wake_and_wait(&self) -> Result<Arc<Snapshot>> {
+        let (state, landed) = &*self.readings;
+        let poisoned = || anyhow::anyhow!("the board's reader thread panicked mid-reading");
+        let guard = state.lock().map_err(|_| poisoned())?;
+        // Every reading numbered above `started` begins after this line,
+        // and they finish in order, so the first of them is done once
+        // `finished` passes `started`.
+        let wanted = guard.started + 1;
+        drop(guard);
+        self.wake();
+        let guard = state.lock().map_err(|_| poisoned())?;
+        drop(
+            landed
+                .wait_while(guard, |state| state.finished < wanted)
+                .map_err(|_| poisoned())?,
+        );
+        self.last_reading()
+    }
+
+    /// [`Reader::latest`], or an error when the last reading to finish
+    /// failed and left an older one standing — so [`Board::hosted_frame`]
+    /// can leave its last frame on screen, as a failed frame always did.
+    fn last_reading(&self) -> Result<Arc<Snapshot>> {
+        let (state, _) = &*self.readings;
+        let ok = state.lock().map(|state| state.last_ok).unwrap_or(false);
+        if !ok {
+            anyhow::bail!(
+                "the board could not read the queue just now; the last frame stays on screen"
+            );
+        }
+        Ok(self.latest())
+    }
+}
+
+impl Drop for Reader {
+    /// Drops the sending half first, so the thread's blocking `recv` wakes
+    /// with an error and returns on its own — then waits for it to, so the
+    /// thread never outlives the board whose repo it was reading. Bounded by
+    /// at most one reading already in flight: the thread checks for the drop
+    /// only between readings, never partway through one.
+    fn drop(&mut self) {
+        self.wake.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// [`build`], reading the real lock file itself rather than taking `holder`
+/// as an argument — the one caller that always wants it, both on
+/// [`Reader::start`]'s first, synchronous reading and on every one its
+/// thread does after. `None` on failure — the queue directory unreadable
+/// for an instant — so a caller can leave the last good reading standing
+/// rather than take the whole board down with an empty one, the same
+/// tolerance a failed frame gets today.
+fn build_now(repo: &Repo, pipelines: &Pipelines, memory: &mut Memory) -> Option<Snapshot> {
+    let holder = crate::lock::Lock::holder(&repo.lock_file()).unwrap_or(None);
+    build(repo, pipelines, holder, memory).ok()
+}
+
+/// Everything [`build`] already read and computed, painted as text — no
+/// reading of its own, so a key or an idle tick can call this as many times
+/// as it likes over the same [`Snapshot`], paying only for the string work.
+/// `cursor` is live rather than carried in the snapshot, since moving it is
+/// the one thing a key does that never needs a fresh reading behind it —
+/// see [`Board::apply`]. `recent` is the board's own ticker, copied off the
+/// snapshot once when the board folded it in.
+fn paint(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    dispatching: bool,
+    snapshot: &Snapshot,
+    cursor: Option<&str>,
+    recent: &VecDeque<RecentEvent>,
+) -> String {
+    let phase = Phase::Watching {
+        holder: snapshot.holder,
+        dispatching,
+    };
+    // Borrowed back out to `&str` keys for `footer`, which wants the same
+    // shape `slots_used` once handed this function directly — see `build`'s
+    // own note on why the snapshot itself owns `String`s instead.
+    let used: BTreeMap<&str, usize> = snapshot
+        .used
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    let model_used: BTreeMap<&str, usize> = snapshot
+        .model_used
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    let agent_model: BTreeMap<&str, Vec<&str>> = snapshot
+        .agent_model
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.iter().map(String::as_str).collect()))
+        .collect();
 
     // ---- the frame ----
     let mut frame = String::new();
@@ -1763,7 +2192,7 @@ fn render(
     // board holds still, and a still board over a still queue is the truth
     // rather than something to animate over.
     let version = version_label(crate::release::installed_newer().as_deref());
-    let header = header_cells(phase, finishing, version);
+    let header = header_cells(phase, snapshot.finishing, version);
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. `masthead`
@@ -1785,37 +2214,31 @@ fn render(
     //
     // With no dispatcher up it turns on the steps still working instead, the
     // same count the header gives, so it stops once the last of them does.
-    let running = match finishing {
+    let running = match snapshot.finishing {
         Some(n) => n > 0,
-        None => logo_turns(&rows),
+        None => logo_turns(&snapshot.rows),
     };
     frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
     frame.push('\n');
 
-    // The job ledger's own rows — every enabled job, ordered by next firing —
-    // read once and shared between the empty-queue copy below and the
-    // footer's own ledger block. Memoised: this redraws every second and the
-    // calendar scan behind it is not cheap per enabled job.
-    let active_jobs = crate::jobs::active_jobs_cached(repo, jobs_next);
-
-    if rows.is_empty() {
+    if snapshot.rows.is_empty() {
         // `nothing queued` either way, enabled job or not — the job ledger
         // in the footer below already names every enabled job and its next
         // firing, so there is nothing left for this line to explain.
         frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
     } else {
         frame.push_str(&table(
-            &rows,
+            &snapshot.rows,
             Style::board(pane),
-            &totals,
-            cursor.as_deref(),
+            &snapshot.totals,
+            cursor,
         ));
     }
 
     // A queue file that would not parse is skipped rather than freezing the
     // board — see [`crate::task::load_dir`] — and named here so the fix is
     // visible on the frame itself, not only in the log.
-    for problem in &load_problems {
+    for problem in &snapshot.load_problems {
         let name = problem
             .path
             .file_name()
@@ -1839,7 +2262,7 @@ fn render(
         &used,
         &model_used,
         &agent_model,
-        &active_jobs,
+        &snapshot.active_jobs,
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
@@ -1900,11 +2323,11 @@ fn render(
     // line stays inside, as the box's last row.
     if crate::screen::shell::hosted().is_some() {
         frame.push('\n');
-        return Ok(boxed(&frame, &keys, pane, height));
+        return boxed(&frame, &keys, pane, height);
     }
     frame.push_str(&format!("\n{keys}\n"));
 
-    Ok(clamp_rows(&frame, height))
+    clamp_rows(&frame, height)
 }
 
 /// How many live lanes each agent profile is paying for, keyed by profile name.
@@ -2215,7 +2638,7 @@ fn ledger_stage(task: &crate::task::Task) -> &str {
 /// and keep the plain `Queued` reading — there is no such memory to read.
 ///
 /// Every argument is a distinct piece of state already read once per frame
-/// — the same reasoning `render`'s own `too_many_arguments` allow gives.
+/// — bundling them into a struct only to pass one reference would hide that.
 #[allow(clippy::too_many_arguments)]
 fn build_rows(
     repo: &Repo,
@@ -2238,7 +2661,7 @@ fn build_rows(
     // one transcript reading per session process-wide, and nothing ever
     // dropped an entry once the lane behind it was gone — a dispatcher up for
     // weeks held thousands of dead ones (review finding 54). The set collected
-    // here prunes the cache at the end of the render.
+    // here prunes the cache at the end of the reading.
     let mut live_sessions: HashSet<String> = HashSet::new();
     // Every task a live dispatcher is booting a lane for this frame, and the
     // step it is booting — empty with no dispatcher behind the lock, so a
@@ -2545,7 +2968,7 @@ fn lane_busy(lanes: &[crate::mux::Lane], step_ids: &[&str], task_id: &str) -> bo
     })
 }
 
-/// The masthead's header cells, joined with ` · ` by [`render`]: who is
+/// The masthead's header cells, joined with ` · ` by [`paint`]: who is
 /// dispatching and which build this is. `finishing` is [`finish_settled`]'s
 /// count, `Some` exactly while no dispatcher holds the lock.
 fn header_cells(phase: Phase, finishing: Option<usize>, version: String) -> Vec<String> {
@@ -2715,6 +3138,30 @@ struct QueueCache {
     files: HashMap<PathBuf, CachedQueueFile>,
 }
 
+/// Every queue file [`cached_queue_in`] has read the bytes of so far in this
+/// process, with the thread that read it — test-only, the same shape as
+/// [`crate::repo::runs_under`] and for the same reasons: scoped by path so
+/// a test counts only its own queue, and by thread so it can tell its own
+/// reads from the board's reader thread's.
+#[cfg(test)]
+static QUEUE_READS: Mutex<Vec<(PathBuf, std::thread::ThreadId)>> = Mutex::new(Vec::new());
+
+/// How many files under `dir` [`cached_queue_in`] has read so far on the
+/// calling thread — see [`QUEUE_READS`].
+#[cfg(test)]
+pub(crate) fn queue_reads_here_under(dir: &Path) -> usize {
+    let here = std::thread::current().id();
+    QUEUE_READS
+        .lock()
+        .map(|reads| {
+            reads
+                .iter()
+                .filter(|(path, thread)| *thread == here && path.starts_with(dir))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// [`crate::task::load_dir`] over the queue directory, parsing a file again
 /// only when its bytes differ from the bytes this cached it from last — the
 /// per-file sibling of [`cached_archive`]'s directory-wide one.
@@ -2765,7 +3212,7 @@ fn cached_queue(
 ///
 /// Split out so a test can drive it against a [`QueueCache`] of its own: the
 /// static in `cached_queue` is one slot shared by every caller in the
-/// process, and `Board::frame`'s own tests call `render` — so `cached_queue`
+/// process, and `Board::frame`'s own tests call `build` — so `cached_queue`
 /// — from several tests that can run in parallel. One landing between two
 /// calls of another resets that shared slot out from under it, which was
 /// read as a reparse the test did not expect (review finding 1, caught by 40
@@ -2800,7 +3247,13 @@ fn cached_queue_in(
         // Read in full every call, same as `load_dir` — only the parse below
         // is conditional. A read error is wrapped and reported the same way
         // `Task::load` reports one, so `LoadProblem.error` reads identically
-        // whichever of the two loaded the file.
+        // whichever of the two loaded the file. Counted here rather than
+        // after the cache check below, since this is the one line that
+        // actually touches the disk — see [`QUEUE_READS`].
+        #[cfg(test)]
+        if let Ok(mut reads) = QUEUE_READS.lock() {
+            reads.push((path.clone(), std::thread::current().id()));
+        }
         let bytes = match std::fs::read_to_string(&path)
             .with_context(|| format!("reading task file {}", path.display()))
         {
@@ -3130,7 +3583,7 @@ fn live_session(
 ) -> Option<Reading> {
     // `lane_session_in`, not `lane_session`: the latter reads the whole
     // ledger fresh with no cache, which this call already holds as `ledger`
-    // — see `render`'s own comment on why it is read once and shared.
+    // — see `build`'s own comment on why it is read once and shared.
     let (kind, session) = crate::dispatch::lane_session_in(repo, ledger, lane)?;
     touched.insert(session.clone());
     let cache = LIVE_SESSION_CACHE.get_or_init(Mutex::default);
@@ -3172,7 +3625,7 @@ fn live_session(
 }
 
 /// Drop every [`live_session`] cache entry whose session no longer backs a
-/// live lane, called once at the end of each render. Entries are small, but
+/// live lane, called once at the end of each reading. Entries are small, but
 /// nothing else ever removed one, so a dispatcher left up for weeks
 /// accumulated one per lane it had ever drawn (review finding 54).
 fn forget_dead_live_sessions(live: &HashSet<String>) {
@@ -3332,6 +3785,109 @@ mod tests {
     use super::*;
     use crate::status::testutil::*;
     use crate::status::view::{GUTTER, OSC8, RecentEvent, ST, Verdict, ticker};
+
+    // ---- Reader: coalescing and shutdown ----
+
+    /// A burst of wakes sent faster than any one reading could possibly
+    /// finish must collapse into the one reading that follows, never one
+    /// per wake — see [`Reader::wake`].
+    #[test]
+    fn a_burst_of_wakes_collapses_into_one_more_reading() {
+        let (repo, _root_guard) = fixture("reader-coalesces-a-burst");
+        let pipelines = Pipelines::builtin();
+        let reader = Reader::start(repo.clone(), pipelines.clone());
+        let before = crate::repo::runs_under(&repo.root);
+
+        for _ in 0..50 {
+            reader.wake();
+        }
+        // Waits for one more reading to land — whichever of the fifty wakes
+        // above it answers, since every one of them that found a reading
+        // already under way asked only to be covered by whatever follows
+        // it, not to start a reading of its own.
+        reader.wake_and_wait().unwrap();
+
+        let after = crate::repo::runs_under(&repo.root);
+        assert!(
+            after > before,
+            "the burst should have landed at least one more reading: \
+             {before} -> {after}"
+        );
+        assert!(
+            after - before < 50,
+            "fifty wakes sent at once must not run fifty readings: \
+             {before} -> {after}"
+        );
+    }
+
+    /// A reading a key asked for is noticed once it lands and folded into
+    /// the board by the next frame drawn from memory — and only once, so a
+    /// second frame over the same reading has nothing new to draw. This is
+    /// what lets the dispatch tab draw a reading when it lands.
+    #[test]
+    fn a_landed_reading_is_noticed_once_and_drawn_from_memory() {
+        let (repo, _root_guard) = fixture("reader-landed-reading-is-noticed");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], None);
+
+        let mut board = Board::for_test();
+        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        assert!(!board.reading_landed(), "nothing new before any wake");
+
+        board.wake_reader();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !board.reading_landed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(board.reading_landed(), "the woken reading should land");
+
+        board.hosted_frame_from_memory(&repo, &pipelines, false, None);
+        assert!(
+            !board.reading_landed(),
+            "a frame drawn from memory takes the landed reading in"
+        );
+    }
+
+    /// [`Board::hosted_frame`] waits for a reading that started after it was
+    /// called, so a task written just before it is always on the frame —
+    /// even with keys having woken the reader into readings of their own.
+    #[test]
+    fn hosted_frame_shows_a_task_written_just_before_it() {
+        let (repo, _root_guard) = fixture("reader-hosted-frame-is-fresh");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], None);
+
+        let mut board = Board::for_test();
+        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        // Chained, since a group is one chain.
+        let mut previous = "login".to_string();
+        for round in 0..20 {
+            let id = format!("late-{round}");
+            board.wake_reader();
+            add(&repo, &id, &[previous.as_str()], None);
+            previous = id.clone();
+            let frame = board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+            assert!(frame.contains(&id), "{id} missing from:\n{frame}");
+        }
+    }
+
+    /// The reader's thread stops, and `Drop` waits for it to, rather than
+    /// leaving it running past the board that started it — see [`Reader`]'s
+    /// own `Drop`. A thread left running would make this loop leak one more
+    /// each time round; fifty of them finishing at all is the proof.
+    #[test]
+    fn dropping_the_reader_stops_its_thread() {
+        let (repo, _root_guard) = fixture("reader-drop-stops-its-thread");
+        let pipelines = Pipelines::builtin();
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            drop(Reader::start(repo.clone(), pipelines.clone()));
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "dropping a reader should stop its thread promptly, not leak it"
+        );
+    }
 
     /// An archived task that named a pipeline no longer defined prints that
     /// name verbatim rather than failing the row, and one that predates
@@ -4648,7 +5204,7 @@ mod tests {
     ///
     /// Drives `cached_queue_in` directly, against a `QueueCache` this test
     /// owns, rather than `cached_queue` and its one process-wide static: that
-    /// static is shared with every other test that calls `render` in this
+    /// static is shared with every other test that calls `build` in this
     /// module, and one landing between two calls here was free to reset it
     /// out from under this test and make it parse again when nothing of its
     /// own had changed (review finding 1).
@@ -4709,7 +5265,7 @@ mod tests {
     }
 
     /// `board-reads-changed-only`: `live_session` already held the ledger
-    /// `render` read once through `usage::read_cached`, as its own `ledger`
+    /// `build` reads once through `usage::read_cached`, as its own `ledger`
     /// parameter — but it used to resolve a lane's session through
     /// `crate::dispatch::lane_session`, which ignored that parameter and ran
     /// its own full, uncached `usage::read` instead. A frame with ten live
@@ -6223,6 +6779,38 @@ mod tests {
         let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
         assert_eq!(before, after);
         assert_eq!(repo.task("login").unwrap().stage(), "implement");
+    }
+
+    /// `board-reader-thread`'s own acceptance test: `p` must open the pause
+    /// panel for a lane that started after the board's last reading, not
+    /// park the task silently as if nothing were live on it —
+    /// `begin_pause_cursor` reads the lane list itself, fresh, every time,
+    /// rather than trusting whatever `status::Reader` already had on hand.
+    #[test]
+    fn p_opens_the_pause_panel_for_a_lane_that_started_after_the_last_reading() {
+        let (mut repo, _root_guard) = fixture("pause-panel-after-stale-reading");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+
+        let mut board = Board::for_test();
+        // Drawn through `hosted_frame`, not `Board::frame`: this is the one
+        // path with a `status::Reader` of its own to go stale, and the
+        // snapshot it reads here carries nothing live — no lane exists yet.
+        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+
+        // Only now does a lane start for it — after the reading above, with
+        // nothing telling the board to read again before the key below.
+        let (_mux, _name) = live_headless_lane(&repo);
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        assert!(
+            matches!(board.mode, BoardMode::ConfirmPause { .. }),
+            "`p` against a stale reading must still open the pause panel \
+             for a lane that has since gone live, not park it silently"
+        );
     }
 
     /// `s` on `p`'s own panel leaves the live turn running and writes
