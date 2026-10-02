@@ -524,6 +524,15 @@ must "spoolway sync runs against the 0.5.0 project" "$SPOOLWAY" sync
 has "the housekeeping value already in place survives the sync" \
   "retention_days = 45" .spoolway/config.toml
 
+# Every release through 0.6.0 had `init` write `key_in_names = false`, its
+# default then. The default is `true` now, but a project that spelled `false`
+# keeps it until its owner flips it: `sync` refreshes the reference header
+# and leaves the value itself alone.
+has "the 0.5.0 fixture's own key_in_names = false survives the default flip" \
+  "key_in_names = false" .spoolway/config.toml
+lacks "and sync did not flip it on behind the project's back" \
+  "key_in_names = true" .spoolway/config.toml
+
 # `default.yml`: `checks`'s self-route and its self-targeting map both go,
 # and `review`'s map on `implement` becomes `loop: 3` — one plus the sum of
 # the one entry naming it, same as at every earlier version.

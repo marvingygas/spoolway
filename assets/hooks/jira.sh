@@ -7,6 +7,12 @@
 # spoolway-requires: bash >= 3.2
 # spoolway-requires: acli >= 1.3.39
 # spoolway-requires: jq >= 1.6
+# spoolway-requires: gh >= 2.97.0
+#
+# The `gh` floor is `done`'s own: it looks up the pull request to comment
+# with through `gh pr view`, the same tool and the same floor `github.sh`
+# already declares. Nothing else in this file touches `gh` at all — Jira's
+# own tool is `acli` throughout.
 #
 # 3.2 is stock macOS's own bash, not a round number picked for looks: the
 # trap below needs nothing newer — `FUNCNAME`, `BASH_SUBSHELL` and the ERR
@@ -247,6 +253,19 @@ ticket_section() {
   content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
   if [ -n "$content" ]; then
     printf '%s\n\n%s\n\n' "$1" "$content"
+  fi
+}
+
+# The same, but tight against its heading — `## Status Log` and `##
+# Handoff` are already bulleted lists in the task, with no blank line
+# under the heading, and a comment reproduces that instead of inventing one.
+# `github.sh`'s own `comment_section` does the same thing, for the same
+# reason — the two comments carry identical content, just rendered through
+# each tracker's own format.
+comment_section() {
+  content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
+  if [ -n "$content" ]; then
+    printf '%s\n%s\n\n' "$1" "$content"
   fi
 }
 
@@ -580,10 +599,64 @@ case "$SPOOLWAY_EVENT" in
     fi
     ;;
   blocked | paused)
-    acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body \
-      "spoolway - $SPOOLWAY_TASK is $SPOOLWAY_EVENT at $SPOOLWAY_FROM"
+    # The same content `github.sh`'s own `comment_snapshot` posts, as ADF —
+    # `**bold**` and `` `code` `` both convert, so the heading and the task's
+    # own backticked names draw the same here as they do on GitHub, where
+    # Markdown already renders them. `comment_section` skips a missing
+    # section rather than printing an empty heading, matching `github.sh`.
+    snapshot_md=$(
+      printf '**spoolway** — `%s` is **%s** at `%s`\n\n' \
+        "$SPOOLWAY_TASK" "$SPOOLWAY_EVENT" "$SPOOLWAY_FROM"
+      comment_section "## Status Log"
+      comment_section "## Handoff"
+    )
+    # `mktemp`, not `$SPOOLWAY_TASK_FILE.snapshot.adf.json`: `open` has its
+    # own `$SPOOLWAY_EPIC_BODY`/`$SPOOLWAY_TICKET_BODY` paths under the
+    # tracking directory to write through, but `blocked`/`paused`/`done` get
+    # no scratch path of their own, and `$SPOOLWAY_TASK_FILE` names the live
+    # queue file — a path beside it is a stray `<id>.md.*.adf.json` nothing
+    # ever reads or removes, left behind in the project's queue directory
+    # even once the task archives (review finding, ported). The trap cleans
+    # it up whether `acli` below succeeds or the ERR trap at the top of this
+    # file fires instead.
+    snapshot_adf=$(mktemp "${TMPDIR:-/tmp}/jira-hook-adf.XXXXXX")
+    trap 'rm -f "$snapshot_adf"' EXIT
+    to_adf_file "$snapshot_md" "$snapshot_adf"
+    acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body-file "$snapshot_adf"
     ;;
   done)
+    # The pull request this hand-off names, looked up before anything else
+    # on `done` touches the ticket — a `done` this hook fires for always has
+    # one behind it by then (`spoolway stack` already opened it), so no
+    # result is as much a failure as a nonzero exit is, the same rule
+    # `github.sh`'s own `hand_off_for_review` follows. Every hook here runs
+    # with the repository's own checkout as its working directory, so
+    # `gh pr view` finds the pull request with no `-R` needed to name one —
+    # unlike `github.sh`, which always passes `-R "$repo"` because it holds
+    # no checkout of its own to infer one from.
+    pr=$(gh pr view "$SPOOLWAY_BRANCH" --json url --jq .url)
+    [ -n "$pr" ] || {
+      echo "jira.sh: no pull request found for $SPOOLWAY_BRANCH" >&2
+      exit 1
+    }
+    # `<owner>/<repo>#<n>` as the link text, the pull request's own URL as
+    # its href — the shape the mockup draws, and the one GitHub's own links
+    # already render as everywhere else. `$pr` always ends `/pull/<n>`, so
+    # dropping the scheme and host and swapping that last segment's slash
+    # for `#` is enough; no call here ever parses the host itself, so this
+    # reads the same whether it names github.com or an enterprise host.
+    pr_short=$(printf '%s' "$pr" | sed -E 's#^[a-z]+://[^/]+/##; s#/pull/([0-9]+)$#\#\1#')
+    # `[text](url)` rather than the bare URL: `md_to_adf` only recognises a
+    # Markdown link, never autolinking a bare URL on its own, and the
+    # acceptance bar here is a real ADF link mark, the same blue, underlined
+    # text Jira draws for any other link.
+    review_md=$(printf 'Ready for review in [%s](%s)' "$pr_short" "$pr")
+    # The same `mktemp` scratch path `blocked`/`paused` use above, for the
+    # same reason — see that comment.
+    review_adf=$(mktemp "${TMPDIR:-/tmp}/jira-hook-adf.XXXXXX")
+    trap 'rm -f "$review_adf"' EXIT
+    to_adf_file "$review_md" "$review_adf"
+    acli jira workitem comment create --key "$SPOOLWAY_TICKET" --body-file "$review_adf"
     acli jira workitem transition --key "$SPOOLWAY_TICKET" --status "$status_review" --yes
     if [ "$SPOOLWAY_GROUP_LAST" = 1 ] && [ -n "$SPOOLWAY_EPIC" ]; then
       acli jira workitem transition --key "$SPOOLWAY_EPIC" --status "$status_review" --yes

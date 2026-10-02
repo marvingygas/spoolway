@@ -310,7 +310,7 @@ price_max_age_days = 30      # how old the price table may be before `spoolway d
 [issue_tracking]
 hook = ""                    # a script in .spoolway/hooks/, e.g. "github.sh"; blank runs none
 project_key = ""             # handed to the hook verbatim, e.g. owner/repo
-key_in_names = false         # prefix branch and worktree names with the tracker's slug
+key_in_names = true          # prefix branch and worktree names with the tracker's slug
 
 [agents.claude]
 kind = "claude"

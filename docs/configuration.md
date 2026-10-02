@@ -232,7 +232,7 @@ every other list-valued key. `spoolway sync` keeps whatever a project has put th
 [issue_tracking]
 hook = ""
 project_key = ""
-key_in_names = false
+key_in_names = true
 ```
 
 One script in `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`) connects
@@ -242,7 +242,11 @@ spoolway to an issue tracker. No pipeline file names a tracker.
 |---|---|---|
 | `hook` | blank | A bare file name inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`), such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
-| `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
+| `key_in_names` | `true` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. With no hook configured, or a blank `hook`, there is no slug to prefix with, so this changes nothing either way. |
+
+A project whose `config.toml` already spells out `key_in_names = false` keeps that value; the
+new default only applies where the key is absent. Delete the line, or set it to `true`, to pick
+up the default.
 
 The script is called once per task per event. A non-zero exit on `queued`, `started` or `done`
 pauses the task with the reason `issue_tracking hook exited N`. The task file gains a
@@ -372,40 +376,36 @@ called it. That log is what a paused task's `## Hook error` reads its tail from.
 
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` | `bash` >= 3.2, `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name; its body is `group_description:` as one flat paragraph, followed by the rendered epic template when it is not blank. The ticket is titled with `SPOOLWAY_TITLE` minus a leading commit prefix (a lowercase word, an optional `(scope)` and an optional `!`, such as `fix(hooks)!: `); a title with no such prefix is unchanged. The ticket's body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`, followed by the rendered ticket template when it is not blank. A section the task does not have is left out, heading and all. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
-| `jira.sh` | `bash` >= 3.2, `acli` >= 1.3.39 and `jq` >= 1.6 | Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. The Story is titled with the group's name; its body is `group_description:` as one flat paragraph, followed by the rendered epic template when it is not blank. The Sub-task is titled with `SPOOLWAY_TITLE` minus the same leading commit prefix `github.sh` strips. Its body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`, followed by the rendered ticket template when it is not blank; a section the task does not have is left out, heading and all. Both bodies are converted from Markdown to Atlassian Document Format by a `jq` filter built into the script, and checked with `jq empty`, before `acli` sends them, so headings, lists, code, bold text and links show as rich text on Jira Cloud instead of one plain paragraph. Returns the lowercased Story key as the slug. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Comments name the task without attaching the file. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
+| `github.sh` | `bash` >= 3.2, `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name; its body is `group_description:` as one flat paragraph, followed by the rendered epic template when it is not blank. The ticket is titled with `SPOOLWAY_TITLE` minus a leading commit prefix (a lowercase word, an optional `(scope)` and an optional `!`, such as `fix(hooks)!: `); a title with no such prefix is unchanged. The ticket's body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`, followed by the rendered ticket template when it is not blank. A section the task does not have is left out, heading and all. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it swaps the `spoolway:in-progress` label for `spoolway:review` and comments "Ready for review in `<PR URL>`" on the ticket. It posts nothing on the pull request and closes nothing itself. |
+| `jira.sh` | `bash` >= 3.2, `acli` >= 1.3.39, `gh` >= 2.97.0 and `jq` >= 1.6 | Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. The Story is titled with the group's name; its body is `group_description:` as one flat paragraph, followed by the rendered epic template when it is not blank. The Sub-task is titled with `SPOOLWAY_TITLE` minus the same leading commit prefix `github.sh` strips. Its body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`, followed by the rendered ticket template when it is not blank; a section the task does not have is left out, heading and all. Both bodies are converted from Markdown to Atlassian Document Format by a `jq` filter built into the script, and checked with `jq empty`, before `acli` sends them, so headings, lists, code, bold text and links show as rich text on Jira Cloud instead of one plain paragraph. Returns the lowercased Story key as the slug. Comments the task's own `## Status Log` and `## Handoff`, as ADF, on `blocked` and `paused`, the same content `github.sh` posts; a missing section is skipped. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. On `done` it also comments "Ready for review in `<owner>/<repo>#<n>`" on the Sub-task, the pull request's own URL behind that link, and fails naming the branch when `gh pr view` finds no pull request. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
 
 ### How the sample GitHub workflow works
 
 At a high level, the sample connects four things: a source issue, a group issue, one child
 issue per task, and the pull request that delivers each task. The `open` event creates the
-group and task issues. Later events add progress comments. The `done` event marks a task issue
-ready for review and leaves a marker on its pull request. The sample GitHub Actions workflow
-uses that marker after a merge to close the task issue, then closes the group issue once all
-of its children are closed.
+group and task issues. Later events add progress comments. The `done` event swaps the
+`spoolway:in-progress` label for `spoolway:review` and comments the pull request's URL on the
+task issue. Closing the issue waits for the pull request to merge.
 
 The shipped hook never closes an issue itself. It expects the task's branch to have a pull
 request by the time the task reaches `done`, however that pull request was created. Nobody has
 necessarily merged or reviewed anything at that point, so closing there would mark work as
 delivered before it was. A custom hook can give `done` any behavior that suits its pipeline.
 
-Instead the `done` branch leaves a comment on the pull request carrying a
-`<!-- spoolway-issue: URL -->` marker, and on the issue it swaps the `spoolway:in-progress`
-label for `spoolway:review`. Closing the issue waits for the pull request to merge.
-
-spoolway's own repository keeps this workflow at `.github/workflows/spoolway-issues.yml`.
-Neither `init` nor `sync` writes or checks it in a project; copy the file in by hand for the
-same close-on-merge automation. It triggers on `pull_request: closed` and runs only when
-`github.event.pull_request.merged` is true. It reads the pull request's comments for a marker
-left by a trusted author — one whose association is OWNER, MEMBER or COLLABORATOR — checks
-that the marked issue carries the `spoolway:task` label, then closes that issue and removes
-its `spoolway:in-progress` and `spoolway:review` labels.
+spoolway's own repository keeps a sample closing workflow at `.github/workflows/spoolway-issues.yml`.
+Neither `init` nor `sync` writes or checks it in a project. It triggers on `pull_request:
+closed` and runs only when `github.event.pull_request.merged` is true. It reads the pull
+request's comments for a `<!-- spoolway-issue: URL -->` marker left by a trusted author — one
+whose association is OWNER, MEMBER or COLLABORATOR — checks that the marked issue carries the
+`spoolway:task` label, then closes that issue and removes its `spoolway:in-progress` and
+`spoolway:review` labels. No shipped hook posts that marker on the pull request; `github.sh`
+comments the pull request's URL on the ticket instead, so this sample closes nothing unless
+something else posts the marker it reads.
 
 ```mermaid
 flowchart LR
-  Task[task issue] -->|done: hook comments a marker on the PR| PR[pull request]
-  PR -->|merges| Workflow[spoolway-issues.yml: pull_request closed, merged]
-  Workflow -->|reads the marker, closes the issue| Closed[issue closed]
+  PR[pull request] -->|merges| Workflow[spoolway-issues.yml: pull_request closed, merged]
+  Workflow -->|reads a marker comment on the PR, closes the issue| Closed[issue closed]
   Closed -->|every child in the group closed| Epic[group epic closed]
 ```
 
@@ -420,14 +420,16 @@ See [Closing tickets on merge](#closing-tickets-on-merge).
 ### Closing tickets on merge
 
 Neither shipped hook closes anything on `done`. `github.sh` leaves an issue labelled
-`spoolway:review`. `jira.sh` leaves a Sub-task, and its Story on the group's last task, in
-Review. Spoolway's own part ends there.
+`spoolway:review`, with the pull request's URL commented on it. `jira.sh` leaves a Sub-task,
+and its Story on the group's last task, in Review, with the same comment on the Sub-task.
+Spoolway's own part ends there.
 
 Every tracker names its own closing status: Resolved on Jira, Closed on GitHub. Setting it is
 left to the user's own merge automation, not a shipped hook. Three ordinary ways to wire it:
 
 - The tracker's own GitHub app, with an automation rule keyed on the pull request title.
-- A pull request workflow the project already runs.
+- A pull request workflow the project already runs, reading the pull request link off the
+  ticket's own "Ready for review" comment.
 - A `spoolway jobs` routine polled on a schedule. See [Jobs](jobs.md).
 
 A custom hook should keep the same split: move a ticket toward review on `done`, and leave the

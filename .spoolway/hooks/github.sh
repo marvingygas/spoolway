@@ -242,9 +242,16 @@ mark_in_progress() {
     --add-label spoolway:in-progress
 }
 
-# `done` means spoolway handed the task to a pull request, not that the change
-# merged. Leave closure to GitHub's merge event: mark the issue for review and
-# put a machine-readable issue marker on the PR for the repository workflow.
+# `done` means spoolway handed the task to a pull request, not that the
+# change merged. Nothing is posted on the pull request itself — nobody wants
+# a comment there — the link runs the other way instead: the ticket names
+# the pull request, so a project's own merge automation can read it off the
+# ticket to tell a group's siblings apart and check whether each one's own
+# pull request has merged. Closing is entirely that automation's job, never
+# this hook's — it only relabels the ticket for review. This repository's own
+# merge workflow, `.github/workflows/spoolway-issues.yml`, is not this file
+# and not spoolway's own binary; it is this project's to keep in step with
+# whatever this comment says.
 hand_off_for_review() {
   pr=$(gh pr view "$SPOOLWAY_BRANCH" -R "$repo" --json url --jq .url)
   [ -n "$pr" ] || {
@@ -252,22 +259,12 @@ hand_off_for_review() {
     exit 1
   }
 
-  # Write the merge marker first: a later cosmetic update failing here now
-  # pauses the task — every non-zero exit on `done` does, there is no
-  # non-blocking `on_fail` any more — but the marker is already posted, so
-  # GitHub can still close the issue once the pull request merges while this
-  # task waits on `spoolway resume` to run the rest again.
-  gh pr comment "$pr" -R "$repo" --body \
-    "**spoolway:** tracks $SPOOLWAY_TICKET
-
-<!-- spoolway-issue: $SPOOLWAY_TICKET -->"
-
   gh issue edit "$SPOOLWAY_TICKET" -R "$repo" \
     --remove-label spoolway:in-progress \
     --add-label spoolway:review
 
   gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body \
-    "**spoolway** — \`$SPOOLWAY_TASK\` is ready for review in $pr. GitHub will close this issue after the pull request merges."
+    "Ready for review in $pr"
 }
 
 # A `blocked` or `paused` comment carries only what just changed — the log

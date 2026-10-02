@@ -363,11 +363,13 @@ impl Default for Config {
 /// steps a pipeline may declare — so a project that wants a ticket touched on
 /// one of them has nowhere else to say so.
 ///
-/// The defaults are "no issue tracking": `hook` and `project_key` blank,
-/// `key_in_names` false. A blank `hook` runs nothing and changes nothing
-/// about a task's four events or about `queue add`'s generated names,
-/// whatever the other two keys hold.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The defaults are "no issue tracking configured, but ready once it is":
+/// `hook` and `project_key` blank, `key_in_names` true. A blank `hook` runs
+/// nothing and changes nothing about a task's four events or about `queue
+/// add`'s generated names, whatever `key_in_names` holds — so the default
+/// being on costs a project with no tracker nothing; it only matters once a
+/// hook actually answers a `slug=` line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IssueTrackingConfig {
     /// A bare filename, resolved inside `.spoolway/hooks/` in the checkout —
@@ -384,16 +386,26 @@ pub struct IssueTrackingConfig {
     pub project_key: String,
 
     /// Whether the issue's key rides into every name `queue add` generates.
-    /// Off by default: nothing changes, and every group, branch and worktree
-    /// directory is named exactly as it is today.
-    ///
-    /// On, and with the tracker hook answering a `slug=` line, `queue add`
-    /// prefixes the `group:`, the `branch:` (`task/<slug>-<id>`) and the
+    /// On by default: with the tracker hook answering a `slug=` line, `queue
+    /// add` prefixes the `group:`, the `branch:` (`task/<slug>-<id>`) and the
     /// worktree directory with that slug, so `git branch` shows which issue a
-    /// branch belongs to. spoolway still parses no tracker identifier of its
-    /// own — the slug comes from the hook, the one thing that knows the
-    /// tracker, and is only checked against [`check_id`]'s alphabet.
+    /// branch belongs to, and a merge workflow can read the group key straight
+    /// back off the branch name. spoolway still parses no tracker identifier
+    /// of its own — the slug comes from the hook, the one thing that knows
+    /// the tracker, and is only checked against [`check_id`]'s alphabet. With
+    /// no hook configured, or a blank `hook`, this changes nothing: there is
+    /// no `slug=` line to prefix names with either way.
     pub key_in_names: bool,
+}
+
+impl Default for IssueTrackingConfig {
+    fn default() -> Self {
+        Self {
+            hook: String::new(),
+            project_key: String::new(),
+            key_in_names: true,
+        }
+    }
 }
 
 /// An old `[pipeline_gen]` table: what `spoolway pipeline gen` opened, and

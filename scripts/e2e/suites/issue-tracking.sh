@@ -968,6 +968,41 @@ lacks "but never the Intend section the task file does hold" \
   "INTEND-MARKER" "$GH_STUB_ISSUES/$PREFIX_NUM.body"
 lacks "nor its heading" "## Intend" "$GH_STUB_ISSUES/$PREFIX_NUM.body"
 
+# --------------------------------------------- done: no pull request comment
+# This task's own acceptance criterion: `hand_off_for_review` comments the
+# ticket, never the pull request — it used to leave a
+# `<!-- spoolway-issue: … -->` marker there. Placed straight at `done`, the
+# same hand-built shape `hook-blocked`/`hook-paused`/`hook-done` above use,
+# with a fresh ticket and pull request of its own rather than reusing
+# `github-open-check`'s: a `done` comment sharing one ticket with the
+# `blocked` comment already checked above would leave only the later
+# overwrite for this assertion to read.
+DONE_TICKET=$(gh issue create -R acme/app -t "review hand-off check" -F "$BODY")
+DONE_NUM=${DONE_TICKET##*/}
+DONE_BRANCH=task/github-done-check
+DONE_PR=$(gh pr create --base plan/live --head "$DONE_BRANCH" --title "review hand-off check" \
+  --body-file "$BODY")
+DONE_PR_NUM=${DONE_PR##*/}
+
+{
+  echo "---"; echo "id: github-done-check"; echo "title: github-done-check, done"
+  echo "stage: done"; echo "group: github-done"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "ticket: $DONE_TICKET"; echo "branch: $DONE_BRANCH"
+  echo "---"; cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/github-done-check.md"
+
+dispatcher_start
+for _ in $(seq 1 150); do
+  [ -s "$GH_STUB_ISSUES/$DONE_NUM.comment" ] && break
+  sleep 0.2
+done
+has "the ticket's comment reads Ready for review, naming the pull request" \
+  "Ready for review in $DONE_PR" "$GH_STUB_ISSUES/$DONE_NUM.comment"
+has "the review label landed on the ticket" "spoolway:review" "$GH_STUB_ISSUES/$DONE_NUM.labels"
+works "no comment was ever posted on the pull request itself" \
+  test ! -e "$GH_STUB_PRS/$DONE_PR_NUM.comment"
+
 # ------------------------------------------------------- jira.sh, real, open
 # The shipped script itself, not a hand-written stand-in, run through its
 # real `open` branch — `scripts/e2e/acli-stub.sh`'s own header explains why
@@ -1072,5 +1107,41 @@ else
   bad "the Sub-task's description is real ADF — headings, lists, code, bold and a link, never Intend"
   sed 's/^/        /' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.description.json"
 fi
+
+# --------------------------------------------- jira.sh, real, done: no PR comment
+# This task's own acceptance criterion, for jira.sh too: `done` comments the
+# ticket, never the pull request. Run directly against the real, shipped
+# script rather than through the dispatcher — `blocked`/`started`/`done`
+# lean on this project's own status and link names meaning something real,
+# which only a live Jira site proves (this task's own live proof against
+# KAN is that half) — but whether a call lands on the ticket or on the pull
+# request is a shape `acli-stub.sh` and `gh-stub.sh` can check together,
+# against `jira-open-check`'s own Sub-task, already open above.
+JIRA_DONE_BRANCH=task/jira-done-check
+JIRA_DONE_PR=$(gh pr create --base plan/live --head "$JIRA_DONE_BRANCH" \
+  --title "jira review hand-off check" --body-file "$BODY")
+JIRA_DONE_PR_NUM=${JIRA_DONE_PR##*/}
+
+must "jira.sh's real done branch runs against the stubs" env \
+  SPOOLWAY_EVENT=done SPOOLWAY_TASK=jira-done-check SPOOLWAY_TICKET="$JIRA_TICKET_KEY" \
+  SPOOLWAY_BRANCH="$JIRA_DONE_BRANCH" SPOOLWAY_PROJECT_KEY=KAN SPOOLWAY_EPIC="$JIRA_EPIC_KEY" \
+  SPOOLWAY_GROUP_LAST=0 SPOOLWAY_TASK_FILE="$LIVE/jira-open-check.md" \
+  bash .spoolway/hooks/jira.sh
+
+if jq -e --arg href "$JIRA_DONE_PR" --arg num "$JIRA_DONE_PR_NUM" '
+     [.. | objects | select(.marks[]?.type == "link")] as $links
+     | ($links | length) == 1
+     and ($links[0].marks[0].attrs.href == $href)
+     and ($links[0].text | endswith("#" + $num))
+   ' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.comment.json" >/dev/null 2>&1
+then
+  ok "the ticket's comment is a real ADF link to the pull request, text ending #<n>"
+else
+  bad "the ticket's comment is a real ADF link to the pull request, text ending #<n>"
+  sed 's/^/        /' "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.comment.json" 2>/dev/null
+fi
+has "the Sub-task transitioned to Review" "Review" "$ACLI_STUB_DIR/$JIRA_TICKET_KEY.status"
+works "no comment was ever posted on the pull request itself" \
+  test ! -e "$GH_STUB_PRS/$JIRA_DONE_PR_NUM.comment"
 
 finish
