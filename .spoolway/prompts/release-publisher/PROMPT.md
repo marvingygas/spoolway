@@ -10,12 +10,13 @@ and why, then read `docs/releasing.md` in full and the readiness through candida
 steps authorize exactly the recorded source commit, version and notes — nothing newer, and nothing
 you may retag.
 
-You never tag or push `refs/tags/v<version>` yourself, and there is no route back to `publish` for
-you to send the task to. You have three outcomes. Pass to `released` once the tag is out on the
-correct commit and the public record is complete, since `released` only re-reads it. Fail to
-`version` once nothing here can be finished and the untagged release commit is reverted off `main`,
-so the next cycle starts clean. Block when only a person can take the next step, and name that step
-on the board.
+You never tag or push `refs/tags/v<version>` yourself: a pass sends the task back to `publish`,
+whose script does it. The script is idempotent — with the tag already on `origin` it only re-checks
+the tag's own workflow run and hands on to `released`; without it, it rehearses, tags and pushes. You
+have three outcomes. Pass once what stopped the script is cleared, so its next run can finish. Fail
+to `version` once nothing here can be finished and the untagged release commit is reverted off
+`main`, so the next cycle starts clean. Block when only a person can take the next step, and name
+that step on the board.
 
 ## How to do it here
 
@@ -24,7 +25,12 @@ on the board.
    `refs/tags/v<version>` pushed), main moved before the tag, the tag's own workflow run failed after
    the push, or the post-publication verifier found a package, asset or release body missing or wrong
    on an otherwise tagged release.
-2. **A rehearsal or tag-push failure with nothing tagged on `origin` yet.** By now `await-release` has
+2. **A tag push that failed for a reason outside the commit** — credentials, the network, a hosted
+   outage — with the rehearsal green and `origin/main` still at the release commit. Clear the cause
+   and pass; `publish` reuses the local tag and pushes it. Everything below in this rule is for a
+   red rehearsal, where the commit itself cannot ship.
+
+   **A red rehearsal with nothing tagged on `origin` yet.** By now `await-release` has
    already seen the release commit merged, so `main` carries an untagged `chore(release): v<version>`
    commit with the bumped version files and `CHANGELOG.md` section. There is no in-place repair: that
    commit has a fixed parent, and only `scripts/release-publish.sh` can rehearse and tag, which runs
@@ -47,8 +53,8 @@ on the board.
    tag sits on the abandoned commit. On the board, say that a person moves `v<version>` from the
    abandoned commit to the corrected one (`docs/releasing.md` has the manual tagging steps), name both
    SHAs and the reason, and that `recover` confirms the rest once they resume it. Once the tag is on the
-   right commit and the registry and release page are complete and correct, pass this step back to
-   `released` to have it re-read and confirm the public state.
+   right commit and the registry and release page are complete and correct, pass: `publish` re-checks
+   the tag's run and `released` re-reads the public state.
 4. **Main moved before the tag.** `scripts/release-publish.sh` refuses to tag an older commit once
    `origin/main` has moved past the recorded release commit. Do not fold the new commits into it,
    force-push, or rewrite `main`. Open one revert pull request that removes only the release
@@ -64,7 +70,7 @@ on the board.
    published body, or a registry read that is merely flaky is not the same as a partial publish; retry
    the bounded transient failure once, and if the gap is real, treat it as a partial publish under rule 3.
 6. Report which script failed, the exact cause, every command you ran and its result, any pull request
-   you opened and its merge, and whether you pass to `released`, fail to `version` or block, and why.
+   you opened and its merge, and whether you pass, fail to `version` or block, and why.
 
 ## Never
 
@@ -75,8 +81,8 @@ on the board.
 - Never republish or replace a package version already on the registry, or hand-edit a published
   release body or its assets.
 - Never fold new `main` commits into an abandoned release commit, force-push `main`, or rewrite history.
-- Never pass this step back to `released` for a release that is not yet tagged on `origin`; there is
-  nothing for `released` to find.
+- Never pass while the release commit cannot be tagged — `main` moved past it, or its rehearsal is
+  red. `publish` would only refuse it again.
 - Never treat an unavailable credential or GitHub outage as permission to bypass protection or skip
   verification. Retry a bounded transient failure once; block on the exact external condition when it
   remains real.

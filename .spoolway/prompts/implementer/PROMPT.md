@@ -31,10 +31,14 @@ rule out stays unbuilt however good an idea it is.
    failure it prevents, in a comment. This project's reviews fail a change that drops that
    habit, because the next reader cannot tell an unexplained branch from an accident.
    The same duty runs backwards over prose your change made false. List every name, command,
-   flag, default and behaviour you changed, then grep `src/` for each one and fix every
-   comment that now describes the old thing. This is the single most common reason a review
-   here sends a task back, and item 4 does not excuse it: a comment your own diff falsified
-   is your change, not a refactor you were not asked for.
+   flag, default and behaviour you changed, then grep `src/`, `scripts/`, `assets/`, `tests/`
+   and `.github/` for each one and fix every comment that now describes the old thing. This is
+   the single most common reason a review here sends a task back, and item 4 does not excuse
+   it: a comment your own diff falsified is your change, not a refactor you were not asked for.
+   Then read back every comment you wrote or rewrote against the code beneath it, on a pass
+   that answers a review as much as on the first: as many findings here are new prose that was
+   never true as old prose left behind. Shipped prose never cites the task, its plan or its
+   mockup — they are deleted at handover, and the reference is left pointing at nothing.
 8. **Test the behaviour you changed and the callers it affects.** Add or update coverage at
    the level this project already uses, then run the relevant tests by name, module or test
    target with `cargo test --locked <filter>` or `cargo test --locked --test <target>`.
@@ -50,7 +54,8 @@ rule out stays unbuilt however good an idea it is.
    Record the exact commands, results and coverage limits in your findings; distinguish your
    focused checks from the full gate that has yet to run.
 9. **Know what "done" means before you call it done.** Re-read the acceptance criteria against
-   what you built, one at a time. A criterion you cannot point at a line for is not met.
+   what you built, one at a time. A criterion you cannot point at a line for is not met. On a
+   bug fix, a passing repro is one criterion among them, not the finish line.
 
 ## Traps
 
@@ -77,6 +82,10 @@ rule out stays unbuilt however good an idea it is.
   the `command_step` cases have all done it here: a 20-second run is contention, a 2-second one
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
+
+- **`target/debug` is shared by every lane, so a test binary can be another worktree's.** A
+  test name, path or output that does not match this worktree's source is a stale build, not a
+  failure. Rebuild with `CARGO_TARGET_DIR` set under your scratch space before believing it.
 
 ## When you get stuck
 

@@ -10,6 +10,10 @@ same both times, and the diff tells you which visit this is.
    `a_task_based_on_a_protected_branch_is_refused_by_itself` is the shape, `test_bug_2` is not.
    A shell script belongs under `scripts/e2e/`, and only when the bug needs the built binary end
    to end. Write it if it is not there; leave it exactly as it is if it is.
+
+   It outlives the fix, so its doc comment states the behaviour it proves and still reads true
+   once the bug is gone — never "this is the bug" or "does not exist yet". Assert on the
+   outcome, never on a wall-clock ratio, a sleep, or a process-wide counter another test moves.
 2. **Run it by name** — `cargo test --locked <name>` — and read the failure. A repro that fails
    for an unrelated reason has not reproduced the bug.
 3. **Read your change to see which visit this is**, then judge:
@@ -38,6 +42,9 @@ exactly what you tried and where it diverged from the task's account.
   `std::env::set_var` is process-global, so a case that sets a step variable makes every
   concurrent test a candidate to lose. Re-run it on its own; if it fails alone, it is real.
   Re-run before you believe a failure that has nothing to do with the bug.
+- **`target/debug` is shared by every lane, so a test binary can be another worktree's.** A
+  repro that is missing, or prints paths from another worktree, is a stale build. Rebuild with
+  `CARGO_TARGET_DIR` set under your scratch space before you judge the visit.
 
 ## Never
 
