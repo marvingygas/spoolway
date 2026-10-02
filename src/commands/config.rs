@@ -99,55 +99,182 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// `spoolway config path`: the three places a project's setup can live —
-/// the setup folder (`.spoolway/` in repo mode, a workspace's `config/` in
-/// home mode), the private layer's `local/` (repo mode only — home mode has
-/// none, since the whole setup is already private) and the override
-/// layer's `overrides/`.
+/// `spoolway config path`: every place this project's own setup lives — the
+/// setup folder (`.spoolway/` in repo mode, a workspace's `config/` in home
+/// mode), the private layer's `local/` (repo mode only — home mode has none,
+/// since the whole setup is already private), the override layer's
+/// `overrides/`, the routines folder and both cron-job stores — plus this
+/// checkout's own workspace and every workspace on the machine, so the
+/// skill can propose `spoolway init --workspace <name>` without building a
+/// path by hand.
 ///
 /// This is what `spoolway-config`'s "never reach past" rule names, and the
-/// skill reads these three paths from here instead of building them itself,
-/// so a project laid out differently from the skill's own assumptions still
-/// routes correctly.
+/// skill reads every path from here instead of building them itself, so a
+/// project laid out differently from the skill's own assumptions still
+/// routes correctly. See [`config_path_anywhere`] for the checkout-no-one-
+/// claims case, which this never sees — it is handed an already-discovered
+/// `Repo`.
 pub fn config_path(repo: &Repo, json: bool) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
-    let paths = SetupPaths::for_repo(repo);
+    print_config_paths(&ConfigPaths::for_repo(repo), json)
+}
 
+/// [`config_path`]'s own entry point from `main`, for a checkout
+/// `Repo::discover` may or may not recognise as a project at all —
+/// `config path` is the one command the skill needs to still answer in a
+/// checkout nothing claims yet, with `mode: null` and the workspace list,
+/// since that is exactly the information `spoolway init --workspace <name>`
+/// needs next. [`Repo::is_unclaimed`] covers both shapes that refusal takes
+/// — nothing anywhere names this checkout, or a broken workspace file
+/// elsewhere leaves that undecided — and in the second shape the broken
+/// file still turns up in the workspace list, with its own `error` field,
+/// rather than taking down the whole command. Every other refusal
+/// `Repo::discover` can give — a `.spoolway/` left on another branch, a
+/// workspace listing a clone whose folder is gone, two workspaces both
+/// claiming this root — still names an actual owner with an actual problem,
+/// so those propagate exactly as `Repo::discover` reported them.
+pub fn config_path_anywhere(cwd: &Path, json: bool) -> Result<()> {
+    match Repo::discover(cwd) {
+        Ok(repo) => config_path(&repo, json),
+        Err(err) if Repo::is_unclaimed(&err) => print_config_paths(&ConfigPaths::unclaimed(), json),
+        Err(err) => Err(err),
+    }
+}
+
+/// [`ConfigPaths`]'s text form — one row per field, the same order `--json`
+/// lists them in, and the same wording whether or not a project was found.
+fn print_config_paths(paths: &ConfigPaths, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&paths)?);
+        println!("{}", serde_json::to_string_pretty(paths)?);
         return Ok(());
     }
 
-    println!("setup:     {}", paths.setup.display());
+    println!("mode:      {}", paths.mode.unwrap_or("-"));
+    println!("setup:     {}", display_opt(paths.setup.as_deref()));
     if let Some(local) = &paths.local {
         println!("local:     {}", local.display());
     }
-    println!("overrides: {}", paths.overrides.display());
+    println!("overrides: {}", display_opt(paths.overrides.as_deref()));
+    println!("routines:  {}", display_opt(paths.routines.as_deref()));
+    match &paths.jobs {
+        Some(jobs) => {
+            println!("jobs.user:    {}", jobs.user.display());
+            println!("jobs.project: {}", jobs.project.display());
+        }
+        None => println!("jobs:      -"),
+    }
+    println!("workspace: {}", paths.workspace.as_deref().unwrap_or("-"));
+    if paths.workspaces.is_empty() {
+        println!("workspaces: -");
+    } else {
+        for place in &paths.workspaces {
+            match &place.error {
+                Some(error) => println!("workspaces: {} — {error}", place.name),
+                None => println!(
+                    "workspaces: {} {} (clones: {})",
+                    place.name,
+                    place.config.display(),
+                    place.clones
+                ),
+            }
+        }
+    }
     Ok(())
 }
 
-/// The three folders [`config_path`] prints and `spoolway-config`'s "never
-/// reach past" rule names — a plain struct so a test can build one and
-/// assert its fields directly, the same way [`render_config_contract`] lets
-/// a test assert a string without capturing stdout.
-#[derive(Debug, PartialEq, Serialize)]
-struct SetupPaths {
-    setup: PathBuf,
-    /// `None` in home mode: the whole setup is already private there, so
-    /// there is no second private layer to report — see
-    /// [`crate::local::is_repo_mode`].
-    local: Option<PathBuf>,
-    overrides: PathBuf,
+/// `-` for a path `config path`'s text form has nothing to show — a checkout
+/// no project claims, where [`ConfigPaths::unclaimed`] leaves every project
+/// path `None`.
+fn display_opt(path: Option<&Path>) -> String {
+    path.map(|p| p.display().to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
-impl SetupPaths {
+/// Both job stores [`config_path`] prints: the user-scoped one in this
+/// machine's project home, and the one tracked in the checkout — see
+/// [`Repo::user_jobs_file`] and [`Repo::jobs_file`].
+#[derive(Debug, PartialEq, Serialize)]
+struct JobPaths {
+    user: PathBuf,
+    project: PathBuf,
+}
+
+/// Everything [`config_path`] and [`config_path_anywhere`] print — a plain
+/// struct so a test can build one and assert its fields directly, the same
+/// way [`render_config_contract`] lets a test assert a string without
+/// capturing stdout.
+///
+/// Every field but `mode` and `workspaces` is `None`/empty only in
+/// [`ConfigPaths::unclaimed`]: an ordinary project, repo mode or home mode,
+/// fills in all of them, so the three keys `config path` printed before this
+/// task keep their old values for a project that already has one — only an
+/// unclaimed checkout sees the new `null`s.
+#[derive(Debug, PartialEq, Serialize)]
+struct ConfigPaths {
+    mode: Option<&'static str>,
+    setup: Option<PathBuf>,
+    /// `None` in home mode or when unclaimed: home mode's whole setup is
+    /// already private, so there is no second private layer to report — see
+    /// [`crate::local::is_repo_mode`].
+    local: Option<PathBuf>,
+    overrides: Option<PathBuf>,
+    routines: Option<PathBuf>,
+    jobs: Option<JobPaths>,
+    /// This checkout's own workspace name, home mode only.
+    workspace: Option<String>,
+    /// Every workspace on the machine, whatever this checkout's own mode —
+    /// the skill reads it to propose `spoolway init --workspace <name>`.
+    workspaces: Vec<crate::repo::WorkspacePlace>,
+}
+
+impl ConfigPaths {
     fn for_repo(repo: &Repo) -> Self {
-        SetupPaths {
-            setup: repo.setup_dir(),
+        // A tracked `.spoolway/` always wins — the same precedence
+        // `crate::local::is_repo_mode` gives it — so a project that has one
+        // is unambiguously repo mode without ever consulting the workspace
+        // registry, which a stray `project.toml` elsewhere on the machine
+        // naming this same root by mistake could otherwise contradict.
+        let home_clone = (!crate::config::tracked_setup_dir_in(&repo.checkout).is_dir())
+            .then(|| crate::repo::workspace_clone(&repo.checkout))
+            .flatten();
+        let mode = Some(if home_clone.is_some() { "home" } else { "repo" });
+        let workspace = home_clone.and_then(|clone| {
+            clone
+                .workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
+        ConfigPaths {
+            mode,
+            setup: Some(repo.setup_dir()),
             local: crate::local::is_repo_mode(&repo.checkout).then(|| repo.local_dir()),
-            overrides: repo.overrides_dir(),
+            overrides: Some(repo.overrides_dir()),
+            routines: Some(repo.routines_dir()),
+            jobs: Some(JobPaths {
+                user: repo.user_jobs_file(),
+                project: repo.jobs_file(),
+            }),
+            workspace,
+            workspaces: crate::repo::workspace_places(),
+        }
+    }
+
+    /// What `config path` answers when `Repo::discover` found nothing
+    /// claiming this checkout — every project path `None`, but still the
+    /// workspace list, since that is what the skill needs before offering
+    /// `spoolway init --workspace <name>`.
+    fn unclaimed() -> Self {
+        ConfigPaths {
+            mode: None,
+            setup: None,
+            local: None,
+            overrides: None,
+            routines: None,
+            jobs: None,
+            workspace: None,
+            workspaces: crate::repo::workspace_places(),
         }
     }
 }
@@ -179,7 +306,7 @@ fn render_config_contract() -> String {
         ("spoolway config show", "the whole file"),
         (
             "spoolway config path",
-            "where the setup, local/ and overrides folders live",
+            "every place the setup lives, and every workspace",
         ),
         (
             "spoolway config edit",
@@ -397,24 +524,47 @@ mod tests {
         let (repo, _root_guard) = crate::commands::testutil::fixture("config-path-json");
         // `config_path` itself only prints — exercised here too, so a panic
         // in its own printing path still fails this test — but the
-        // assertions below are against [`SetupPaths`], the payload it
+        // assertions below are against [`ConfigPaths`], the payload it
         // serialises, since that is what a caller of `--json` actually reads.
         config_path(&repo, false).unwrap();
         config_path(&repo, true).unwrap();
 
         assert!(crate::local::is_repo_mode(&repo.checkout));
-        let paths = SetupPaths::for_repo(&repo);
-        assert_eq!(paths.setup, repo.checkout.join(".spoolway"));
-        assert_eq!(paths.overrides, repo.home.join("overrides"));
+        let paths = ConfigPaths::for_repo(&repo);
+        assert_eq!(paths.mode, Some("repo"));
+        assert_eq!(paths.setup, Some(repo.checkout.join(".spoolway")));
+        assert_eq!(paths.overrides, Some(repo.home.join("overrides")));
         assert_eq!(paths.local, Some(repo.home.join("local")));
+        assert_eq!(paths.routines, Some(repo.routines_dir()));
+        assert_eq!(
+            paths.jobs.as_ref().map(|j| &j.user),
+            Some(&repo.user_jobs_file())
+        );
+        assert_eq!(
+            paths.jobs.as_ref().map(|j| &j.project),
+            Some(&repo.jobs_file())
+        );
+        assert_eq!(paths.workspace, None);
 
         let json = serde_json::to_value(&paths).unwrap();
+        assert_eq!(json["mode"], "repo");
         assert_eq!(json["setup"], repo.setup_dir().display().to_string());
         assert_eq!(
             json["overrides"],
             repo.overrides_dir().display().to_string()
         );
         assert_eq!(json["local"], repo.local_dir().display().to_string());
+        assert_eq!(json["routines"], repo.routines_dir().display().to_string());
+        assert_eq!(
+            json["jobs"]["user"],
+            repo.user_jobs_file().display().to_string()
+        );
+        assert_eq!(
+            json["jobs"]["project"],
+            repo.jobs_file().display().to_string()
+        );
+        assert!(json["workspace"].is_null());
+        assert!(json["workspaces"].is_array());
     }
 
     /// Home mode's whole setup is already private, so there is no second
@@ -445,12 +595,19 @@ mod tests {
 
             assert!(!crate::local::is_repo_mode(&repo.checkout));
             config_path(&repo, true).unwrap();
-            let paths = SetupPaths::for_repo(&repo);
-            assert_eq!(paths.setup, clone.config_dir());
+            let paths = ConfigPaths::for_repo(&repo);
+            assert_eq!(paths.mode, Some("home"));
+            assert_eq!(paths.setup, Some(clone.config_dir()));
             assert_eq!(paths.local, None);
+            assert_eq!(
+                paths.workspace.as_deref(),
+                clone.workspace.file_name().and_then(|n| n.to_str())
+            );
 
             let json = serde_json::to_value(&paths).unwrap();
+            assert_eq!(json["mode"], "home");
             assert!(json["local"].is_null());
+            assert_eq!(json["workspace"], paths.workspace.clone().unwrap());
         });
 
         std::fs::remove_dir_all(&root).ok();
@@ -572,5 +729,178 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted, "`config list` is not in key order:\n{text}");
+    }
+
+    /// Helper for a bare checkout — git-initialised, no `.spoolway/` ever
+    /// written into it — the shape of the `config-path-places` acceptance
+    /// criterion "a checkout no project claims".
+    fn bare_checkout(name: &str) -> crate::scratch::ScratchRoot {
+        let root = crate::scratch::root(name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        crate::repo::run(
+            &root,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "seed"],
+        )
+        .unwrap();
+        root
+    }
+
+    /// `Repo::discover` refuses a checkout nothing claims — the one refusal
+    /// `config_path_anywhere` treats as an answer rather than a hard
+    /// failure, so this is the case the acceptance criterion means by "a
+    /// checkout no project claims".
+    #[test]
+    fn config_path_anywhere_exits_ok_for_a_checkout_no_project_claims() {
+        let root = bare_checkout("config-path-anywhere-unclaimed");
+        let fake_home = root.parent().unwrap().join(format!(
+            "{}-realhome",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&fake_home);
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            let err = Repo::discover(&root).unwrap_err();
+            assert!(
+                Repo::is_unclaimed(&err),
+                "the fixture is only useful if the checkout is genuinely unclaimed: {err:#}"
+            );
+
+            // A workspace elsewhere on the machine, unrelated to this
+            // checkout — still part of the answer, since the skill needs
+            // the whole list before proposing `spoolway init --workspace
+            // <name>`.
+            let other = bare_checkout("config-path-anywhere-other");
+            crate::repo::create_workspace(&other).unwrap();
+
+            config_path_anywhere(&root, false).unwrap();
+            config_path_anywhere(&root, true).unwrap();
+
+            let places = crate::repo::workspace_places();
+            assert_eq!(places.len(), 1, "{places:?}");
+            assert!(places[0].error.is_none());
+            assert_eq!(places[0].clones, 1);
+        });
+
+        std::fs::remove_dir_all(&fake_home).ok();
+    }
+
+    /// Review finding on round 1: an unclaimed checkout sitting beside a
+    /// workspace whose `project.toml` cannot even be parsed used to make
+    /// `Repo::root` bail with "this checkout is in no workspace spoolway can
+    /// read, and … does not parse" — a different message from the "no
+    /// spoolway project found" [`Repo::is_unclaimed`] originally matched, so
+    /// `config_path_anywhere` propagated it as a hard failure instead of
+    /// answering `mode: null` with the broken workspace listed. This
+    /// reproduces exactly that shape: nothing claims `root`, and the only
+    /// thing standing between it and the ordinary "nothing found" refusal is
+    /// one broken `project.toml` elsewhere on the machine.
+    #[test]
+    fn config_path_anywhere_exits_ok_beside_a_broken_workspace_elsewhere() {
+        let root = bare_checkout("config-path-anywhere-unclaimed-broken-elsewhere");
+        let fake_home = root.parent().unwrap().join(format!(
+            "{}-realhome",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&fake_home);
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            let state = crate::mux::state_root();
+            let broken = state.join("broken-ws");
+            std::fs::create_dir_all(broken.join("config")).unwrap();
+            std::fs::write(broken.join(crate::repo::BINDING_FILE), "clones = [\n").unwrap();
+
+            // The exact refusal this used to be, and the one
+            // `Repo::is_unclaimed` now has to recognise too.
+            let err = Repo::discover(&root).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("does not parse"),
+                "the fixture is only useful if the broken file is what `Repo::root` trips on: \
+                 {err:#}"
+            );
+            assert!(
+                Repo::is_unclaimed(&err),
+                "a broken workspace file elsewhere must not turn an unclaimed checkout into a \
+                 hard failure: {err:#}"
+            );
+
+            config_path_anywhere(&root, false).unwrap();
+            config_path_anywhere(&root, true).unwrap();
+
+            let places = crate::repo::workspace_places();
+            assert_eq!(places.len(), 1, "{places:?}");
+            assert_eq!(places[0].name, "broken-ws");
+            assert!(places[0].error.is_some());
+        });
+
+        std::fs::remove_dir_all(&fake_home).ok();
+    }
+
+    /// Everything [`ConfigPaths::unclaimed`] is for: `mode: null`, no
+    /// project path, but still the workspace list.
+    #[test]
+    fn config_paths_unclaimed_has_null_mode_and_no_project_paths() {
+        let paths = ConfigPaths::unclaimed();
+        assert_eq!(paths.mode, None);
+        assert_eq!(paths.setup, None);
+        assert_eq!(paths.local, None);
+        assert_eq!(paths.overrides, None);
+        assert_eq!(paths.routines, None);
+        assert!(paths.jobs.is_none());
+        assert_eq!(paths.workspace, None);
+
+        let json = serde_json::to_value(&paths).unwrap();
+        assert!(json["mode"].is_null());
+        assert!(json["setup"].is_null());
+        assert!(json["overrides"].is_null());
+        assert!(json["routines"].is_null());
+        assert!(json["jobs"].is_null());
+        assert!(json["workspace"].is_null());
+        assert!(json["workspaces"].is_array());
+    }
+
+    /// Acceptance criterion: an unreadable `project.toml` gives its own
+    /// `workspaces` entry an `error` field, and the rest of the list still
+    /// prints rather than the whole command failing.
+    #[test]
+    fn workspace_places_reports_an_error_for_an_unreadable_project_toml() {
+        let fake_home = crate::scratch::root("config-path-workspace-places-broken");
+        let _ = std::fs::remove_dir_all(&fake_home);
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            let good = bare_checkout("config-path-workspace-places-good");
+            crate::repo::create_workspace(&good).unwrap();
+
+            let state = crate::mux::state_root();
+            let broken = state.join("broken-ws");
+            std::fs::create_dir_all(broken.join("config")).unwrap();
+            // Not valid TOML at all, so it fails to parse as a
+            // `WorkspaceToml` — the unreadable case this entry's `error`
+            // field exists for.
+            std::fs::write(broken.join(crate::repo::BINDING_FILE), "clones = [\n").unwrap();
+
+            let places = crate::repo::workspace_places();
+            assert_eq!(places.len(), 2, "{places:?}");
+            // `create_workspace` names the folder after `good`'s own
+            // basename plus a fresh id, never `good`'s path verbatim — so
+            // the readable one is told apart from `broken-ws` by having no
+            // `error`, not by its exact name.
+            assert!(
+                places
+                    .iter()
+                    .any(|p| p.name != "broken-ws" && p.error.is_none()),
+                "the readable workspace is still listed: {places:?}"
+            );
+            let broken_entry = places
+                .iter()
+                .find(|p| p.name == "broken-ws")
+                .unwrap_or_else(|| panic!("the broken workspace is still listed: {places:?}"));
+            assert!(broken_entry.error.is_some());
+        });
+
+        std::fs::remove_dir_all(&fake_home).ok();
     }
 }

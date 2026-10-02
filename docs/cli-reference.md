@@ -926,10 +926,15 @@ spoolway config edit
 |---|---|
 | `show` | Print the whole file |
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
-| `path` | Print the setup folder, the private `local/` folder (repo mode only) and the overrides folder. `--json` prints them as `{"setup","local","overrides"}`, with `local` `null` in home mode |
+| `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree |
 | `edit` | Open the file in `$EDITOR` and validate it on save |
+
+`path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
+and the workspace list. That list is what `spoolway init --workspace <name>` needs next. Each
+`workspaces` entry carries a name, a `config/` path and a clone count. An unreadable
+`project.toml` gives that entry an `error` field instead, and the rest of the list still prints.
 
 See [Configuration](configuration.md).
 
