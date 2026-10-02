@@ -294,8 +294,9 @@ has "and closes on the model-and-effort line" \
 works "the examples are written" \
   test -f "$INITDIR/github/.spoolway/pipelines/default.yml" -a \
        -f "$INITDIR/github/.spoolway/prompts/implementer/PROMPT.md" -a \
-       -f "$INITDIR/github/.spoolway/templates/tasks/default.md" -a \
-       -f "$INITDIR/github/.spoolway/templates/tracking/ticket.md"
+       -f "$INITDIR/github/.spoolway/templates/tasks/default.md"
+works "the tracking templates are gone — the open hook builds the issue body itself" \
+  test ! -e "$INITDIR/github/.spoolway/templates/tracking/ticket.md"
 has "the hook it names" 'hook = "github.sh"' "$INITDIR/github/.spoolway/config.toml"
 has "and the project it files into" 'project_key = "acme/app"' \
   "$INITDIR/github/.spoolway/config.toml"

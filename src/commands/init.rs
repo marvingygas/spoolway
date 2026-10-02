@@ -858,16 +858,6 @@ fn place_examples(
         let rel = shown(root, &path);
         wrote |= placer.file(path, &rel, skeleton.as_bytes(), false)?;
     }
-    // The two ticket-body templates — seeded once, like a task skeleton,
-    // and never looked at again by `sync`. Nothing reads either any more:
-    // the `open` hook builds the whole issue body itself, from the task
-    // file and the group description.
-    for (name, body) in assets::TRACKING_TEMPLATES {
-        let path = crate::config::under_setup(state, crate::config::TRACKING_TEMPLATES_DIR)
-            .join(format!("{name}.md"));
-        let rel = shown(root, &path);
-        wrote |= placer.file(path, &rel, body.as_bytes(), false)?;
-    }
     Ok(wrote)
 }
 

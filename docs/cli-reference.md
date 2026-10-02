@@ -1071,7 +1071,7 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--setup <repo\|home>` | `repo` | Answer `Where should this project's setup live?` without asking |
 | `--workspace <NAME\|new>` | | Answer the workspace menu without asking. Implies `--setup home`. A name joins an unlisted checkout to that workspace, or moves a listed one there; `new` starts a new workspace, or moves a listed checkout into one |
 | `--provider <claude\|codex\|pi>` | the project's own provider, or `claude` on a fresh one | The coding agent whose skills are installed and which becomes the project's agent profile |
-| `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts, task templates and ticket templates. Also the answer with nobody to ask |
+| `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts and task templates. Also the answer with nobody to ask |
 | `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |

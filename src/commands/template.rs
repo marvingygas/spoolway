@@ -37,10 +37,8 @@ fn render_template_contract(repo: &Repo) -> String {
          Nothing\n  in the body is ever parsed; the three headings a running task grows — Status \
          Log,\n  Handoff, Blocker — are appended by `spoolway report` if the skeleton does\n  not \
          already have them, so a skeleton may be a single `## Goal` and still \
-         work.\n  `.spoolway/templates/tracking/epic.md` and `ticket.md` are seeded into \
-         every\n  project by `spoolway init`; nothing reads either once they are there — the \
-         `open`\n  event's own hook builds the whole issue body itself, from the task and the \
-         group's\n  own description — see `spoolway hook contract`.\n\n",
+         work.\n  The `open` event's own hook builds the whole issue body itself, from the task \
+         and the\n  group's own description — see `spoolway hook contract`.\n\n",
         crate::task_template::FALLBACK
     ));
 

@@ -1,6 +1,6 @@
 ---
 domain: configuration
-covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/tracking/**", "assets/hooks/**", ".github/workflows/spoolway-issues.yml", ".github/scripts/close-jira.sh"]
+covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/hooks/**", ".github/workflows/spoolway-issues.yml", ".github/scripts/close-jira.sh"]
 ---
 
 # Configuration

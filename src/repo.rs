@@ -493,13 +493,6 @@ impl Repo {
         self.under_setup(crate::config::JOBS_FILE)
     }
 
-    /// Where `epic.md` and `ticket.md` are seeded into a project by `init`
-    /// — unread by anything now that the `open` hook builds the whole issue
-    /// body itself. See [`crate::assets::TRACKING_TEMPLATES`].
-    pub fn tracking_templates_dir(&self) -> PathBuf {
-        self.under_setup(crate::config::TRACKING_TEMPLATES_DIR)
-    }
-
     /// Every task's lane state, across every dispatcher this machine has run
     /// for this project.
     pub fn lanes_file(&self) -> PathBuf {
@@ -3346,7 +3339,6 @@ mod tests {
             "STATE_DIR",
             "PROMPTS_DIR",
             "TASK_TEMPLATES_DIR",
-            "TRACKING_TEMPLATES_DIR",
             "ROUTINES_DIR",
             "JOBS_FILE",
         ];

@@ -1111,14 +1111,6 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
         return crate::assets::task_template(stem).map(str::to_string);
     }
 
-    // The two ticket-body templates `init` seeds into
-    // `.spoolway/templates/tracking/` — never touched by an ordinary sync,
-    // exactly like a prompt or a task skeleton, but reachable by name here
-    // the same way both of those already are.
-    if path.starts_with(repo.tracking_templates_dir()) {
-        return crate::assets::tracking_template(stem).map(str::to_string);
-    }
-
     // The hook scripts `init` seeds into `.spoolway/hooks/` — same rule:
     // never touched by an ordinary sync, `--replace` only.
     if path.starts_with(crate::tracking::hooks_dir_in(&repo.checkout)) {
@@ -2947,15 +2939,6 @@ mod tests {
             assert!(shipped.contains(expected), "{}", path.display());
         }
 
-        // `ticket.md` ships empty now — a project's own body is the task's
-        // `## Context` and `## Acceptance criteria`, not a template — but
-        // `--replace` still has to recognise and reach it rather than
-        // reading a template this blank as "nothing shipped for this path".
-        assert_eq!(
-            shipped_for(&repo, &repo.tracking_templates_dir().join("ticket.md")),
-            Some(String::new())
-        );
-
         // And nothing else: replacing a file spoolway does not write would be
         // this command inventing content for somebody's own work. The project's
         // `.gitignore` is exactly that file — spoolway only ever removes its
@@ -3501,10 +3484,13 @@ mod tests {
         assert_eq!(outcome_lines(&outcomes).len(), 1);
     }
 
-    /// All three dead templates go, each with its own reason, and a project's
+    /// All five dead templates go, each with its own reason, and a project's
     /// own file under `.spoolway/templates/` — named by neither
     /// [`crate::install::RETIRED_TEMPLATES`] nor a shape `init` still
-    /// places — is left exactly where it was.
+    /// places — is left exactly where it was. `epic.md` and `ticket.md` are
+    /// removed whatever they hold — one left empty, the other still carrying
+    /// a project's own words — since sync never inspects a retired
+    /// template's contents before deleting it.
     #[test]
     fn sync_removes_every_retired_template_and_leaves_a_projects_own_file() {
         let (repo, _root_guard) = fixture("retired-templates");
@@ -3512,9 +3498,15 @@ mod tests {
         let task_log = dir.join("task-log.md");
         let pull_request = dir.join("pull-request.md");
         let lane_prompts = dir.join("lane-prompts.md");
+        let tracking = dir.join("tracking");
+        std::fs::create_dir_all(&tracking).unwrap();
+        let epic = tracking.join("epic.md");
+        let ticket = tracking.join("ticket.md");
         std::fs::write(&task_log, "stale\n").unwrap();
         std::fs::write(&pull_request, "stale\n").unwrap();
         std::fs::write(&lane_prompts, "stale\n").unwrap();
+        std::fs::write(&epic, "").unwrap();
+        std::fs::write(&ticket, "a project's own words\n").unwrap();
         let untouched = dir.join("a-projects-own-notes.md");
         std::fs::write(&untouched, "mine\n").unwrap();
 
@@ -3524,6 +3516,8 @@ mod tests {
         assert!(!task_log.exists(), "task-log.md must be removed");
         assert!(!pull_request.exists(), "pull-request.md must be removed");
         assert!(!lane_prompts.exists(), "lane-prompts.md must be removed");
+        assert!(!epic.exists(), "epic.md must be removed even when empty");
+        assert!(!ticket.exists(), "ticket.md must be removed even with text");
         assert!(
             untouched.is_file(),
             "a file not on the retired list must never be touched"
@@ -3551,6 +3545,22 @@ mod tests {
                 l.starts_with("removed")
                     && l.contains("lane-prompts.md")
                     && l.contains("the lane messages are spoolway's own")
+            }),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| {
+                l.starts_with("removed")
+                    && l.contains("tracking/epic.md")
+                    && l.contains("the issue body is the hook's own")
+            }),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| {
+                l.starts_with("removed")
+                    && l.contains("tracking/ticket.md")
+                    && l.contains("the issue body is the hook's own")
             }),
             "{lines:?}"
         );

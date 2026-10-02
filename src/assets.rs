@@ -124,33 +124,6 @@ pub fn task_template(name: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
-/// The two ticket-body templates a project's `.spoolway/templates/tracking/`
-/// starts from, by name — seeded by `spoolway init` the way a task
-/// skeleton's own shipped default is seeded into `.spoolway/templates/tasks/`.
-/// `spoolway sync` never touches either, once `init` has written them: the
-/// same rule a task skeleton or a prompt already follows.
-///
-/// Nothing reads either at runtime any more — the `open` hook builds the
-/// whole issue body itself, from the task file and the group description —
-/// so this pair is seeded into every new project by `init` and then read by
-/// nothing. Neither carries the word "spoolway": whatever a project once put
-/// in one was its own words, not spoolway's — see this module's own test.
-pub const TRACKING_TEMPLATES: &[(&str, &str)] = &[
-    ("epic", include_str!("../assets/tracking/epic.md")),
-    ("ticket", include_str!("../assets/tracking/ticket.md")),
-];
-
-/// Read one of [`TRACKING_TEMPLATES`] by name — what `crate::update`'s own
-/// `shipped_for` hands `--replace` for a tracking template, the same way it
-/// already does for a task skeleton and a prompt; `init` itself still places
-/// the pair by iterating the slice above directly.
-pub fn tracking_template(name: &str) -> Option<&'static str> {
-    TRACKING_TEMPLATES
-        .iter()
-        .find(|(known, _)| *known == name)
-        .map(|(_, text)| *text)
-}
-
 /// The two hook scripts `spoolway init` writes into `.spoolway/hooks/`, one
 /// per tracker, each calling the tracker's own command-line tool (`gh` or
 /// `acli`) rather than any tracker's HTTP API directly. Both are written
@@ -854,36 +827,6 @@ esac
                 prompt.name
             );
             assert!(!prompt.body.trim().is_empty(), "{} is empty", prompt.name);
-        }
-    }
-
-    /// The rendered body of an epic or a ticket is the project's own, opened
-    /// on its own tracker — not a spoolway one. Neither shipped template may
-    /// say the brand's name in its own prose, so a hand-off between
-    /// projects never reads as spoolway's ticket rather than theirs.
-    ///
-    /// The `${SPOOLWAY_*}` placeholders themselves are stripped first: those
-    /// name the variables the hook's own environment already carries, the
-    /// mechanism rather than the brand, and every one of them necessarily
-    /// spells the word.
-    #[test]
-    fn no_shipped_tracking_template_names_the_brand() {
-        for (name, body) in TRACKING_TEMPLATES {
-            let mut prose = String::new();
-            let mut rest = *body;
-            while let Some(start) = rest.find("${") {
-                prose.push_str(&rest[..start]);
-                rest = match rest[start + 2..].find('}') {
-                    Some(end) => &rest[start + 2 + end + 1..],
-                    None => "",
-                };
-            }
-            prose.push_str(rest);
-
-            assert!(
-                !prose.to_lowercase().contains("spoolway"),
-                "{name}.md names spoolway outside its `${{SPOOLWAY_*}}` placeholders"
-            );
         }
     }
 

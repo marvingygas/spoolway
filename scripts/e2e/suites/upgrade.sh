@@ -300,6 +300,16 @@ has "the 0.6.0 fixture's own key_in_names = false survives the default flip" \
   "key_in_names = false" .spoolway/config.toml
 lacks "and sync did not flip it on behind the project's back" \
   "key_in_names = true" .spoolway/config.toml
+# 0.6.0's own `init` seeded `templates/tracking/epic.md` and `ticket.md`, and
+# this fixture's copies hold that release's own text. Nothing reads either
+# file now — the `open` hook builds the issue body itself — so `sync` deletes
+# both whatever they hold, and this is the one place a pair a real past
+# release wrote, rather than one a unit test made up, is put to that.
+works "sync removed the 0.6.0 fixture's tracking epic template" \
+  test ! -e .spoolway/templates/tracking/epic.md
+works "and its tracking ticket template, text and all" \
+  test ! -e .spoolway/templates/tracking/ticket.md
+
 byte_for_byte_outside_block \
   "the prose around the key block came back byte for byte — nothing in it changed" \
   "$WORK/0.6.0/before-default.yml" "$PIPELINE"
