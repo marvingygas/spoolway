@@ -1441,19 +1441,6 @@ fn live_pane_in(dir: &Path, mux: &dyn Mux) -> Result<Option<String>> {
     })
 }
 
-/// Where a project's own pipeline files actually sit — the workspace's
-/// `config/pipelines/<name>.yml` in home mode, `.spoolway/pipelines/<name>.yml`
-/// in repo mode — for the hints below that point a person at "give this step
-/// a model" rather than at a file that does not exist under this checkout.
-fn pipelines_hint(repo: &Repo) -> String {
-    let dir = if crate::repo::workspace_clone(&repo.checkout).is_some() {
-        "config/pipelines"
-    } else {
-        ".spoolway/pipelines"
-    };
-    format!("{dir}/<name>.yml")
-}
-
 /// Per agent profile a pipeline actually references: whether its binary is on
 /// PATH, whether every step that runs on it names a model, and whether its
 /// permission mode is one spoolway recognises. Three checks per agent rather
@@ -1461,7 +1448,6 @@ fn pipelines_hint(repo: &Repo) -> String {
 /// have to guess which of three things "agent `x` is broken" means.
 fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let pipelines_hint = pipelines_hint(repo);
     for (agent, steps) in pipelines.referenced_agents() {
         let outcome = config.agent(agent).and_then(|profile| {
             let found = which(&profile.kind);
@@ -1482,19 +1468,48 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
         // a person and launches no agent. Config checks enforce its model once
         // unattended mode actually staffs it; do not misdirect an attended
         // project to pipeline YAML for this config-derived blank.
-        let missing: Vec<&str> = steps
-            .iter()
-            .copied()
-            .filter(|step| config.unattended.enabled || *step != crate::pipeline::BLOCKED)
-            .filter(|step| !pipelines.step_has_model(step))
-            .collect();
-        let model = if missing.is_empty() {
-            Ok(Some(format!("set per step in {pipelines_hint}")))
+        //
+        // Grouped by pipeline, and checked against that pipeline's own steps
+        // directly, rather than flattened into one `{missing:?}` debug list of
+        // bare step ids the way this used to read: a step id can repeat across
+        // pipelines that have nothing else to do with each other, and the fix
+        // for a missing model always lives in one specific pipeline's own
+        // file — so the message names that pipeline and points at that file's
+        // real absolute path, not a `<name>.yml` placeholder that may not even
+        // be the one dir this checkout uses.
+        let mut problems = Vec::new();
+        for (name, pipeline) in &pipelines.pipelines {
+            let missing: Vec<&str> = pipeline
+                .steps
+                .iter()
+                .filter(|step| step.agent.as_deref() == Some(agent))
+                .filter(|step| step.run.is_none())
+                .filter(|step| config.unattended.enabled || step.id != crate::pipeline::BLOCKED)
+                .filter(|step| !step.model.as_deref().is_some_and(|m| !m.trim().is_empty()))
+                .map(|step| step.id.as_str())
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            let path = pipeline
+                .private_file
+                .clone()
+                .unwrap_or_else(|| Pipelines::file_in(&repo.checkout, name));
+            let (noun, verb, pronoun) = match missing.len() {
+                1 => ("step", "names", "it"),
+                _ => ("steps", "name", "them"),
+            };
+            problems.push(format!(
+                "pipeline `{name}` {noun} {} {verb} no model, running on `{agent}` — give \
+                 {pronoun} one in {}",
+                missing.join(", "),
+                path.display()
+            ));
+        }
+        let model = if problems.is_empty() {
+            Ok(Some("every step names a model".into()))
         } else {
-            Err(anyhow::anyhow!(
-                "{missing:?} names no model, running on `{agent}` — give it one in \
-                 {pipelines_hint}"
-            ))
+            Err(anyhow::anyhow!(problems.join("; ")))
         };
         findings.push(Finding::Check(
             format!("agent `{agent}` has a model"),
@@ -2280,32 +2295,53 @@ mod tests {
         );
     }
 
-    /// `doctor`'s model messages name `.spoolway/pipelines/<name>.yml`, where a
-    /// step's `model:` actually lives — not the retired single `pipeline.yml`
-    /// that `Pipelines::load` now refuses (finding 25).
+    /// `doctor`'s model messages name the real absolute path of the one
+    /// pipeline file a missing model actually lives in — `.spoolway/pipelines/
+    /// <name>.yml` under this checkout, not the retired single `pipeline.yml`
+    /// that `Pipelines::load` now refuses (finding 25), and not a bare Rust
+    /// debug list of step ids with no file at all.
     #[test]
     fn the_model_check_points_at_the_pipelines_directory() {
         let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-model-check-points");
-        let pipelines = crate::pipeline::Pipelines::builtin();
-        let config = Config::default();
+        let mut pipelines = crate::pipeline::Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline
+                .steps
+                .iter_mut()
+                .find(|step| step.id == crate::pipeline::BLOCKED)
+                .unwrap()
+                .model = None;
+        }
+        let mut config = Config::default();
+        config.unattended.enabled = true;
+        config.unattended.blocked_model.clear();
         let findings = agent_checks(&repo, &pipelines, &config);
 
         let notes: Vec<String> = findings
             .iter()
             .filter_map(|f| match f {
-                Finding::Check(label, outcome) if label.ends_with("has a model") => match outcome {
-                    Ok(Some(note)) => Some(note.clone()),
-                    Err(err) => Some(format!("{err:#}")),
-                    Ok(None) => None,
-                },
+                Finding::Check(label, Err(err)) if label.ends_with("has a model") => {
+                    Some(format!("{err:#}"))
+                }
                 _ => None,
             })
             .collect();
 
         assert!(!notes.is_empty(), "a model check was produced");
         for note in notes {
-            assert!(note.contains(".spoolway/pipelines/"), "{note}");
+            assert!(
+                note.contains(
+                    &repo
+                        .checkout
+                        .join(".spoolway/pipelines")
+                        .display()
+                        .to_string()
+                ),
+                "{note}"
+            );
+            assert!(note.ends_with(".yml"), "{note}");
             assert!(!note.contains(" in pipeline.yml"), "{note}");
+            assert!(!note.contains('['), "{note} reads like a debug list");
         }
     }
 
@@ -2371,6 +2407,41 @@ mod tests {
             .expect("the model check fails");
         assert!(failure.contains(crate::pipeline::BLOCKED), "{failure}");
         assert!(!failure.contains("some step running on"), "{failure}");
+    }
+
+    /// A command step names no model on purpose, so the shipped `handover`
+    /// (a `run:` step in `default`) must never turn up in a `has a model`
+    /// failure — this is what moved here once the check started reading
+    /// each pipeline's own steps directly instead of a step id shared
+    /// across pipelines.
+    // covers: step.run — a command step runs no agent, so it carries no model to be missing
+    #[test]
+    fn a_command_step_is_never_reported_as_missing_a_model() {
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("doctor-command-step-no-model");
+        let pipelines = crate::pipeline::Pipelines::builtin();
+
+        let command_steps: Vec<&str> = pipelines
+            .pipelines
+            .values()
+            .flat_map(|pipeline| &pipeline.steps)
+            .filter(|step| step.run.is_some())
+            .map(|step| step.id.as_str())
+            .collect();
+        assert!(
+            command_steps.contains(&"handover"),
+            "the shipped set should still have a command `handover`: {command_steps:?}"
+        );
+
+        let config = Config::default();
+        let findings = agent_checks(&repo, &pipelines, &config);
+        assert!(findings.iter().all(|finding| match finding {
+            Finding::Check(label, Err(err)) if label.ends_with("has a model") => {
+                let msg = format!("{err:#}");
+                !msg.contains("handover")
+            }
+            _ => true,
+        }));
     }
 
     /// One note per `[models]` entry that sets `slots` or `exclusive` without
@@ -3637,10 +3708,10 @@ mod tests {
         );
     }
 
-    /// A home-mode checkout has no `.spoolway/` of its own — the model hint
-    /// and the `config parses` note must name the workspace's shared
-    /// `config/`, not a path under this checkout that does not exist, and
-    /// never call it "this checkout's own copy".
+    /// A home-mode checkout has no `.spoolway/` of its own — the model
+    /// check's own pipeline path and the `config parses` note must name the
+    /// workspace's shared `config/`, not a path under this checkout that
+    /// does not exist, and never call it "this checkout's own copy".
     #[test]
     fn home_mode_pipeline_and_config_messages_name_the_workspace_not_the_checkout() {
         let root = crate::scratch::root("doctor-home-mode-messages");
@@ -3666,8 +3737,13 @@ mod tests {
         };
 
         crate::platform::test_home::with_home(&home, || {
-            let hint = pipelines_hint(&repo);
-            assert_eq!(hint, "config/pipelines/<name>.yml", "{hint}");
+            let path = Pipelines::file_in(&repo.checkout, "default");
+            assert_eq!(
+                path,
+                workspace.join("config/pipelines/default.yml"),
+                "{}",
+                path.display()
+            );
 
             let owner = config_owner_label(&repo);
             assert_eq!(owner, "the workspace's shared config", "{owner}");

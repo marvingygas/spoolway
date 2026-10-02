@@ -1536,12 +1536,17 @@ pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> 
         let dest_dir = dest
             .parent()
             .with_context(|| format!("resolving the folder holding {}", dest.display()))?;
-        copy_dir_all(source_dir, dest_dir)?;
-    } else {
-        let body = std::fs::read_to_string(&source)
-            .with_context(|| format!("reading {}", source.display()))?;
-        write_atomic(&dest, &body)?;
+        let mut written = copy_dir_all(source_dir, dest_dir)?;
+        written.sort();
+        return print_wrote(
+            json,
+            &written.iter().map(PathBuf::as_path).collect::<Vec<_>>(),
+        );
     }
+
+    let body = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+    write_atomic(&dest, &body)?;
 
     print_wrote(json, &[&dest])
 }
@@ -1573,8 +1578,12 @@ fn copy_file(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// A plain recursive copy, every file under `from` landing at the same
-/// relative path under `to`.
-fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
+/// relative path under `to`, handing back every plain file it wrote —
+/// `to`'s own path for each one, `assets/` included — so a caller like
+/// [`prompt_copy`] can report every file it copies rather than only the
+/// top-level folder.
+fn copy_dir_all(from: &Path, to: &Path) -> Result<Vec<PathBuf>> {
+    let mut written = Vec::new();
     std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
     for entry in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
         let entry = entry.with_context(|| format!("reading {}", from.display()))?;
@@ -1584,14 +1593,15 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
             .with_context(|| format!("reading {}", entry.path().display()))?
             .is_dir()
         {
-            copy_dir_all(&entry.path(), &dest)?;
+            written.extend(copy_dir_all(&entry.path(), &dest)?);
         } else {
             std::fs::copy(entry.path(), &dest).with_context(|| {
                 format!("copying {} to {}", entry.path().display(), dest.display())
             })?;
+            written.push(dest);
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 /// Whether `dir`, or anything nested under it, holds a symlink that points
@@ -1637,9 +1647,14 @@ fn dir_contains_symlinked_directory(dir: &Path) -> Result<bool> {
 }
 
 /// Copy a [`Moved`] plan item forward, directory or plain file alike.
+///
+/// `pipeline_promote` moves whole prompt and pipeline files as one step in
+/// its own plan and reports that step, not each file beneath it, so the
+/// per-file list [`copy_dir_all`] hands back is dropped here.
 fn copy_item(item: &Moved) -> Result<()> {
     if item.dir {
-        copy_dir_all(&item.from, &item.to)
+        copy_dir_all(&item.from, &item.to)?;
+        Ok(())
     } else {
         copy_file(&item.from, &item.to)
     }
@@ -2378,6 +2393,50 @@ mod tests {
                 .is_file(),
             "prompt copy must bring every file under the prompt's assets/"
         );
+    }
+
+    /// `prompt copy`'s own report comes from `copy_dir_all`'s return value,
+    /// not from the one top-level folder path it used to report alone — a
+    /// folder copied but never listed reads as though only `PROMPT.md` was
+    /// written. Every file `copy_dir_all` actually wrote must come back,
+    /// `assets/` included.
+    #[test]
+    fn copy_dir_all_reports_every_file_it_writes_assets_included() {
+        let (repo, _root_guard) = repo_for("copy-dir-all-lists-files");
+        let source_dir = crate::prompt::path_for_tracked(&repo, "archivist")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let dest_dir = repo.checkout.join("copy-dest");
+
+        let mut written = copy_dir_all(&source_dir, &dest_dir).expect("copy");
+        written.sort();
+
+        assert!(
+            written.contains(&dest_dir.join(crate::assets::PROMPT_FILE)),
+            "{written:?}"
+        );
+        assert!(
+            written.contains(
+                &dest_dir
+                    .join(crate::assets::PROMPT_ASSETS)
+                    .join("document.md")
+            ),
+            "{written:?}"
+        );
+        assert!(
+            written.contains(
+                &dest_dir
+                    .join(crate::assets::PROMPT_ASSETS)
+                    .join("landing-page.md")
+            ),
+            "{written:?}"
+        );
+        // Every path reported is a file this call actually wrote — no
+        // directory entries standing in for the files beneath them.
+        for path in &written {
+            assert!(path.is_file(), "{}", path.display());
+        }
     }
 
     /// `prompt copy` must refuse a source folder holding a symlinked

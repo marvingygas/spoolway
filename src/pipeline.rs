@@ -2444,29 +2444,6 @@ impl Pipelines {
         map
     }
 
-    /// Whether every step with this id names its own model.
-    ///
-    /// A name no step defines answers false rather than vacuously true:
-    /// nothing there can be carrying a model, so it counts as having none.
-    /// Blank counts the same as absent — spoolway ships no model of its own,
-    /// so an empty `model:` is exactly as unrunnable as a missing one.
-    ///
-    /// Command steps are skipped, because a step id is shared across
-    /// pipelines and a `run:` step names no model by design. `handover` is
-    /// the live case: `default` runs it as `spoolway stack` with no model at
-    /// all, while `local` still hands it to one, and without this the
-    /// command step would report the model step's agent as unrunnable.
-    pub fn step_has_model(&self, step_id: &str) -> bool {
-        let mut steps = self
-            .pipelines
-            .values()
-            .filter_map(|pipeline| pipeline.step(step_id))
-            .filter(|step| step.run.is_none())
-            .peekable();
-        steps.peek().is_some()
-            && steps.all(|step| step.model.as_deref().is_some_and(|m| !m.trim().is_empty()))
-    }
-
     pub fn validate(&self) -> Result<()> {
         self.validate_impl(true)
     }
@@ -2758,37 +2735,6 @@ mod tests {
             a_with.destination(Outcome::Block),
             a_without.destination(Outcome::Block)
         );
-    }
-
-    /// A command step names no model on purpose, so it does not make a
-    /// configured agent step sharing an id read as model-less.
-    // covers: step.run — a command step runs no agent, so it carries no model to be missing
-    #[test]
-    fn a_command_step_does_not_count_as_a_step_missing_its_model() {
-        let pipelines = Pipelines::builtin();
-
-        let command_steps: Vec<&str> = pipelines
-            .pipelines
-            .values()
-            .flat_map(|pipeline| &pipeline.steps)
-            .filter(|step| step.run.is_some())
-            .map(|step| step.id.as_str())
-            .collect();
-        assert!(
-            command_steps.contains(&"handover"),
-            "the shipped set should still have a command `handover`: {command_steps:?}"
-        );
-
-        // `Pipelines::builtin` hydrates the scaffold for dispatcher tests;
-        // command steps sharing ids do not erase those fixture models.
-        for (agent, steps) in pipelines.referenced_agents() {
-            for step in steps {
-                assert!(
-                    pipelines.step_has_model(step),
-                    "step `{step}` on agent `{agent}` reads as having no model"
-                );
-            }
-        }
     }
 
     /// A pull request is its own checkpoint — somebody reads it and merges it —

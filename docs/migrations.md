@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.6.x to 0.7.x | `dispatch.worktree_root` is gone; every worktree lands under the project home. | Delete the key, or let `spoolway sync` drop it and name the old directory when it held a path. |
+| 0.6.x to 0.7.x | `dispatch.worktree_root` and `issue_tracking.on_fail` are gone; `dispatch --plain` and `init --adopt`/`--new-id`/`--take-over`/`workspace move` are removed in favour of `spoolway init`; `sync` migrates only from 0.6.0 onward; the four spoolway skills stay current by name. | Delete the retired keys, drop the removed flags from scripts, and set up an older-than-0.6 project again with `spoolway init --force`. |
 | 0.5.x to 0.6.x | Retired pipeline shapes are migrated on update; `loop:` counts arrivals; installed skills are always rewritten; `/spoolway-doctor` and `spoolway spend` are gone; `spoolway eval` flags change. | Open spoolway, apply the update, read what it migrated, and update scripts that call `spend` or the removed `eval` flags. |
 | 0.4.x to 0.5.x | `sync` takes over from `update`; `dispatch.interval`, `dispatch.default_pipeline` and the tmux backend are gone; tasks name their own `pipeline:` and `base:`. | Delete the retired keys, set `pipeline:` and `base:` on every task, and apply the update. |
 | 0.3.x to 0.4.x | Retired config, template and pipeline-generation features are removed. | Remove the retired entries described below. |
@@ -41,11 +41,29 @@ wsl npm install -g spoolway
 
 ## 0.6.x to 0.7.x
 
+- `sync` now only knows how to bring a project forward from 0.6.0. A project that was never
+  brought to 0.6 — one whose pipeline files still carry a shape 0.6 retired, such as a
+  self-routing `on_fail:` or the old map form of `loop:` — is no longer migrated
+  automatically. A plain `spoolway init` keeps every file that already exists, so it does not
+  replace an old-shaped pipeline. Set the project up again with `spoolway init --force`, or
+  remove the old `.spoolway/` setup and run `spoolway init`. Otherwise hand-edit each file to
+  the current shape before applying this update.
 - `dispatch.worktree_root` is retired: every dispatched worktree now lands under the project
   home, with no setting to move it. Delete any `dispatch.worktree_root = ...` line from
   `.spoolway/config.toml`; a config that still sets it loads, with a note naming `spoolway
   sync`, and `spoolway sync` drops the key on the next save. The report names the old
   directory, and, when a queued task still has a worktree there, names that task too.
+- `issue_tracking.on_fail` is retired the same way: a failing `queued`, `started` or `done`
+  hook always pauses its task now, with nothing left to configure. Delete any
+  `issue_tracking.on_fail = ...` line; a config that still sets it loads with a note, and
+  `spoolway sync` drops the key on the next save.
+- `dispatch --plain` is removed. Drop the flag from any script that calls `spoolway dispatch`.
+- `init --adopt`, `init --new-id`, `init --take-over` and `spoolway workspace move` are
+  removed. `spoolway init` covers every case on its own now — run it and answer its questions
+  instead of passing one of the removed flags.
+- The four spoolway skills (`spoolway-plan`, `spoolway-tasks`, `spoolway-config` and
+  `spoolway-calibrate`) are kept current by name, with no `.installed-by-spoolway` marker
+  file needed to tell a shipped skill from a hand-written one.
 
 ## 0.5.x to 0.6.x
 

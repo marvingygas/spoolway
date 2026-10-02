@@ -90,13 +90,19 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 | Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | Where should this project's setup live? | `--setup repo\|home` | `repo` |
 | Which workspace should this checkout use? (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
-| The coding agent you plan in | `--provider claude\|codex` | `claude` |
+| The coding agent you plan in | `--provider claude\|codex\|pi` | `claude` |
 | Install the example setup? (skipped when joining a workspace) | `--examples`/`--no-examples` | yes |
 | The issue tracker (skipped when joining a workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
 and effort are left blank on every step, and you fill them in before dispatching.
+
+An established project keeps its own provider: a repeat `init` run with `--provider` left off
+takes the project's already-chosen provider rather than falling back to `claude`, whether run
+without a terminal or answered at the menu, whose own default is pre-selected to it. Naming
+a different `--provider` on an established project adds that provider's skills. The project's
+own profile and pipelines stay as they are until `spoolway init --force` rewrites them.
 
 Answering yes to the example setup writes the shipped pipelines, prompts, task templates and
 ticket templates. Answering no writes `config.toml` and empty `pipelines/`, `prompts/`

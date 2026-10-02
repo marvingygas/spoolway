@@ -153,10 +153,24 @@ const KEPT: &str =
 /// above it are what a sync *would* take, and nothing was touched.
 const DRY_RUN: &str = "Dry run: nothing was written. Run without --dry-run to take it.";
 
-/// What a non-dry sync says when the scan wrote or removed nothing: `KEPT`
-/// talks about files being overwritten, which is false when there were none
-/// to overwrite and reads as the tool lying about having touched the tree.
+/// What a sync says when the scan wrote or removed nothing, dry run or not:
+/// `KEPT` talks about files being overwritten and `DRY_RUN` about what a
+/// write *would* do, both of which are false when there was nothing to do
+/// at all and would otherwise read as the tool telling a project to re-run
+/// a command that would do the exact same nothing.
 const NOOP: &str = "Nothing updating.";
+
+/// Which of the three closing lines above a run prints, kept as its own
+/// pure function so a test can hold it to its text without capturing
+/// stdout: `nothing_to_do` always wins, dry run or not, since neither
+/// `DRY_RUN` nor `KEPT` is true of a run that touched nothing.
+fn closing_line(dry_run: bool, nothing_to_do: bool) -> &'static str {
+    match (dry_run, nothing_to_do) {
+        (_, true) => NOOP,
+        (true, false) => DRY_RUN,
+        (false, false) => KEPT,
+    }
+}
 
 pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     if !args.replace.is_empty() {
@@ -198,11 +212,10 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     }
 
     println!();
-    match (args.dry_run, wrote.is_empty() && removed.is_empty()) {
-        (true, _) => println!("{DRY_RUN}"),
-        (false, true) => println!("{NOOP}"),
-        (false, false) => println!("{KEPT}"),
-    }
+    println!(
+        "{}",
+        closing_line(args.dry_run, wrote.is_empty() && removed.is_empty())
+    );
 
     // Only once the write has actually happened: the stamp records what a
     // checkout was last brought to, and a dry run brings it to nothing.
@@ -1960,6 +1973,18 @@ mod tests {
         );
         assert!(KEPT.contains("config values"), "{KEPT}");
         assert!(KEPT.contains("prompts"), "{KEPT}");
+    }
+
+    /// A dry run with nothing to do used to say `DRY_RUN` anyway — "Run
+    /// without --dry-run to take it" over an empty scan, which took nothing
+    /// and had nothing to take. `nothing_to_do` must win over `dry_run`.
+    #[test]
+    fn a_dry_run_with_nothing_to_do_says_so_instead_of_offering_to_run_it() {
+        assert_eq!(closing_line(true, true), NOOP);
+        assert_eq!(closing_line(false, true), NOOP);
+        assert_eq!(closing_line(true, false), DRY_RUN);
+        assert_eq!(closing_line(false, false), KEPT);
+        assert!(!NOOP.contains("--dry-run"), "{NOOP}");
     }
 
     /// The sync nothing used to perform: a config written before a setting
