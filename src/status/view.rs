@@ -166,9 +166,10 @@ impl State {
             // more, and the board's green means something is.
             State::Finished => format!("{DIM}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
-            // A live lane, not a stop, so it takes `Running`'s own colour —
-            // the task has not left its step, only paused for a keystroke.
-            State::Prompt => format!("{GREEN}{word}{RESET}"),
+            // Amber, and bold, like `Paused`: a prompt is a pane holding a
+            // permission question, and nothing moves until a person answers
+            // it there — the same stop that `Paused` is.
+            State::Prompt => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
             State::Waiting => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
@@ -1762,11 +1763,13 @@ mod tests {
     /// `Blocked` reads apart from every other stop: orange, its own colour
     /// — a block is a task waiting on a person, the same kind of stop
     /// `Paused` is, and no state on this board is red at all now that the
-    /// dead-end state is gone.
+    /// dead-end state is gone. `Prompt` takes `Paused`'s own bold amber,
+    /// because a prompt is the same kind of stop too.
     #[test]
-    fn blocked_is_orange_and_no_other_state_changed_colour() {
+    fn blocked_is_orange_prompt_is_amber_and_no_other_state_changed_colour() {
         assert_eq!(State::Blocked.dot(), format!("{ORANGE}● blocked{RESET}"));
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
+        assert_eq!(State::Prompt.dot(), format!("{AMBER}{BOLD}● prompt{RESET}"));
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
         assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
         assert_eq!(State::Starting.dot(), format!("{GREEN}◌ starting{RESET}"));
