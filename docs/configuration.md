@@ -1,6 +1,6 @@
 ---
 domain: configuration
-covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/tracking/**", "assets/hooks/**"]
+covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/tracking/**", "assets/hooks/**", ".github/workflows/spoolway-issues.yml", ".github/scripts/close-jira.sh"]
 ---
 
 # Configuration
@@ -392,26 +392,32 @@ request by the time the task reaches `done`, however that pull request was creat
 necessarily merged or reviewed anything at that point, so closing there would mark work as
 delivered before it was. A custom hook can give `done` any behavior that suits its pipeline.
 
-spoolway's own repository keeps a sample closing workflow at `.github/workflows/spoolway-issues.yml`.
+spoolway's own repository keeps a closing workflow at `.github/workflows/spoolway-issues.yml`.
 Neither `init` nor `sync` writes or checks it in a project. It triggers on `pull_request:
-closed` and runs only when `github.event.pull_request.merged` is true. It reads the pull
-request's comments for a `<!-- spoolway-issue: URL -->` marker left by a trusted author — one
-whose association is OWNER, MEMBER or COLLABORATOR — checks that the marked issue carries the
-`spoolway:task` label, then closes that issue and removes its `spoolway:in-progress` and
-`spoolway:review` labels. No shipped hook posts that marker on the pull request; `github.sh`
-comments the pull request's URL on the ticket instead, so this sample closes nothing unless
-something else posts the marker it reads.
+closed` and runs only when `github.event.pull_request.merged` is true, in a single
+`spoolway-issues` concurrency group. GitHub keeps at most one pending run per group and
+replaces an older pending run with a newer one, so in a stack of several pull requests some
+runs may never execute; that is harmless, because every run sweeps the whole group and the run
+that replaces them sees every sibling merged.
+
+The merged pull request's own head branch names the group: `task/gh-123-…` is group issue
+#123. A branch with no such prefix, including this repository's Jira-style `task/kan-40-…`
+branches, names no group, and the run stops. For every open child (sub-issue) of that group
+issue, the workflow reads the most recent trusted comment — one whose author association is
+OWNER, MEMBER or COLLABORATOR — matching "Ready for review in `<PR URL>`", the comment
+`github.sh` posts on `done`. A child with no such comment, or whose named pull request has not
+merged, is left open. A merged child is commented "**spoolway:** merged in #`<n>`." and closed,
+and its `spoolway:in-progress` and `spoolway:review` labels are removed.
 
 ```mermaid
 flowchart LR
   PR[pull request] -->|merges| Workflow[spoolway-issues.yml: pull_request closed, merged]
-  Workflow -->|reads a marker comment on the PR, closes the issue| Closed[issue closed]
+  Workflow -->|reads the group from the branch, each child's own comment| Closed[merged children closed]
   Closed -->|every child in the group closed| Epic[group epic closed]
 ```
 
-The workflow also closes the group's epic. After closing a task's issue it looks up that
-issue's parent. If the parent carries the `spoolway:group` label and every one of its
-sub-issues has closed, the workflow comments on the epic and closes it too.
+Once every child of the group has closed, the workflow closes the group issue too, commented
+with the triggering pull request's number.
 
 The shipped Jira hook has no pull request lifecycle to wait on. `jira.sh` moves a Sub-task to
 Review on `done`, and moves its Story to Review too once the group's last task reaches `done`.
@@ -424,8 +430,8 @@ Neither shipped hook closes anything on `done`. `github.sh` leaves an issue labe
 and its Story on the group's last task, in Review, with the same comment on the Sub-task.
 Spoolway's own part ends there.
 
-Every tracker names its own closing status: Resolved on Jira, Closed on GitHub. Setting it is
-left to the user's own merge automation, not a shipped hook. Three ordinary ways to wire it:
+Every tracker names its own closing status. Setting it is left to the user's own merge
+automation, not a shipped hook. Three ordinary ways to wire it:
 
 - The tracker's own GitHub app, with an automation rule keyed on the pull request title.
 - A pull request workflow the project already runs, reading the pull request link off the
@@ -434,6 +440,28 @@ left to the user's own merge automation, not a shipped hook. Three ordinary ways
 
 A custom hook should keep the same split: move a ticket toward review on `done`, and leave the
 close for whatever watches the merge.
+
+spoolway's own repository wires the GitHub side this way, through
+`.github/workflows/spoolway-issues.yml` above. It wires the Jira side with
+`.github/scripts/close-jira.sh`, run by hand after a merge:
+`.github/scripts/close-jira.sh <pull request number>`. This project holds no Jira API token,
+so the script only ever runs against a local `acli` login, never from a GitHub Actions runner.
+
+The pull request's own head branch names the Story the same way `jira.sh` reads it:
+`task/kan-40-…` is Story KAN-40. A branch with no such prefix names no Story, and the run
+stops. For every Sub-task of that Story not already in its done status — `Resolved` in this
+project, named once at the script's head, since this Jira site has no status named `Done` —
+the script reads the most recent "Ready for review in `<owner>/<repo>#<n>`" comment on it and
+asks `gh` whether that pull request merged. A Sub-task with no such comment is left open. A
+merged Sub-task is assigned to its reporter, commented "Merged `<PR URL>`", with the full URL
+as the link text, and moved to the done status. Once no Sub-task is left open, the Story gets
+the same three steps, commented with the triggering pull request's URL. Running the script
+again changes nothing already done.
+
+Both scripts sweep the whole group on any merge in it, the same way: a stack merge fires one
+`pull_request closed` event per pull request at nearly the same time, so whichever run goes
+last still finds every sibling merged and closes the group once. Neither ships in the binary
+or in `spoolway init`; they belong to this repository only.
 
 ## `[agents.*]` — who runs a step
 

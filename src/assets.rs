@@ -177,17 +177,17 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// apart, checking whether the pull request each one names has merged
 /// before closing it — and, once every child of a group has closed, the
 /// group's own epic. `init` no longer ships one. A project without one
-/// closes the ticket by hand after the merge; this repository's own
-/// `.github/workflows/spoolway-issues.yml` still reads the older marker
-/// comment this hook no longer posts, and wants updating to match, which is
-/// a separate task's own work. `open` was run against a real repository: the
-/// issues it creates, the parent link and the labels all landed, four times
-/// over, on a real group and the tasks inside it. `done`'s own "Ready for
+/// closes the ticket by hand after the merge. This repository's own
+/// `.github/workflows/spoolway-issues.yml` reads the group issue from the
+/// merged branch and each child's "Ready for review in" comment, and
+/// `.github/scripts/close-jira.sh` is its Jira counterpart, run by hand.
+/// `open` was run against a real repository: the issues it creates, the
+/// parent link and the labels all landed, four times over, on a real group
+/// and the tasks inside it. `done`'s own "Ready for
 /// review" comment and label swap are proven by `tracking::tests` against a
 /// stubbed `gh` and by the e2e suite's own real run of this shipped
 /// script — this change did not repeat the live run above against a real
-/// pull request, since nothing closes a real ticket from it until the
-/// workflow above is rewritten.
+/// pull request.
 ///
 /// `jira.sh` opens one Story per group, a group of one included, and one
 /// Sub-task per task under it — `Blocks` links a Sub-task to the task its
