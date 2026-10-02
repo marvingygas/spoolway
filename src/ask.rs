@@ -39,8 +39,12 @@ pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Resul
         return Ok(default);
     }
 
+    // Only rows with a note line their notes up, so a long entry with none —
+    // the workspace menu's closing "Create a new workspace" — does not push
+    // every note on the menu out to its own width.
     let width = options
         .iter()
+        .filter(|(_, note)| !note.is_empty())
         .map(|(value, _)| value.len())
         .max()
         .unwrap_or(0);

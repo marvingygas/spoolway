@@ -206,15 +206,34 @@ impl Repo {
         // that *is* listed, just in a `project.toml` nobody could read. That
         // deserves its own error naming the file, not the same "run
         // `spoolway init`" that would convert this very clone to repo mode.
-        workspace_clone_checked(start)?;
+        //
+        // A match here, rather than an error, means the opposite kind of
+        // gap: `start` is listed, its workspace's `project.toml` reads
+        // fine, but `setup_dir_in` above still found no directory — the
+        // workspace's own `config/` is missing. Naming that folder here,
+        // rather than falling through, is what stops `spoolway init` from
+        // reading this the same as a checkout nobody has ever set up and
+        // writing a fresh default config into a workspace other clones
+        // still share.
+        if let Some(clone) = workspace_clone_checked(start)? {
+            bail!(
+                "{} is listed as a clone of {}, but {} does not exist\n  restore it by hand, or \
+                 remove this checkout's entry from {} by hand to leave the workspace",
+                start.display(),
+                clone.workspace.display(),
+                clone.config_dir().display(),
+                clone.workspace.join(BINDING_FILE).display(),
+            );
+        }
 
         // Nothing here names *this* checkout — but a workspace elsewhere on
         // this machine may still be naming one that moved or was deleted
-        // without being re-attached. Each such entry gets its own
-        // `--adopt` line, the exact command that rewrites it; see the
-        // `home-mode-discovery` task's non-goal on not going further than
-        // reporting one.
-        let stale = stale_workspace_clones();
+        // without being re-attached. Each workspace `start` would actually
+        // take such an entry's queue over in — see `stale_workspace_clones`
+        // for the exact rule — gets its own `init --workspace` line; see
+        // the `home-mode-discovery` task's non-goal on not going further
+        // than reporting one.
+        let stale = stale_workspace_clones(start);
         if stale.is_empty() {
             bail!(
                 "no spoolway project found at or above {} (run `spoolway init` there first)",
@@ -814,6 +833,7 @@ fn recorded_or_parent(common: &Path) -> Option<PathBuf> {
 fn listed_checkout_of(common: &Path) -> Option<PathBuf> {
     all_workspaces()
         .unwrap_or_default()
+        .0
         .into_iter()
         .flat_map(|(_, toml)| toml.clones)
         .map(|clone| clone.root)
@@ -928,10 +948,10 @@ fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
 /// not the repository's actual root: `git clone --depth 1` of this very
 /// checkout reports a different value here than this checkout itself does,
 /// even though it is the same repository. Recording that boundary would
-/// poison the entry for every later `--adopt`; comparing against it (see
+/// poison the entry for every later takeover; comparing against it (see
 /// [`commit_exists`]) would refuse the very re-clone that made it. Checked
 /// first, before `rev-list` ever runs, so neither ever happens.
-fn root_commit(dir: &Path) -> Option<String> {
+pub(crate) fn root_commit(dir: &Path) -> Option<String> {
     if run(dir, "git", &["rev-parse", "--is-shallow-repository"])
         .is_ok_and(|out| out.trim() == "true")
     {
@@ -950,55 +970,17 @@ fn origin_url(dir: &Path) -> Option<String> {
     (!url.is_empty()).then(|| url.to_string())
 }
 
-/// The repository `dir` belongs to, for telling two clones of the same
-/// project apart from two unrelated ones — what `init`'s workspace menu
-/// (acceptance criterion: workspaces of this checkout's own repository
-/// listed first and marked) and its non-interactive note compare.
-///
-/// Two signals rather than one, because neither answers for every pair of
-/// clones on its own. `origin`'s URL agrees for two clones of the same
-/// remote even before either has a commit, but not for a `git clone` of a
-/// local checkout (whose `origin` is that checkout's path, while the
-/// checkout itself has none) or for one clone over SSH and one over HTTPS.
-/// [`root_commit`] agrees for all of those, but not before the first commit.
-/// [`RepoIdentity::same_as`] takes either.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RepoIdentity {
-    origin: Option<String>,
-    root: Option<String>,
-}
-
-impl RepoIdentity {
-    /// Whether `self` and `other` are the same repository: the same `origin`
-    /// URL, or the same root commit. Two identities that know neither never
-    /// match.
-    pub(crate) fn same_as(&self, other: &RepoIdentity) -> bool {
-        let agree = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
-        agree(&self.origin, &other.origin) || agree(&self.root, &other.root)
-    }
-}
-
-/// `dir`'s [`RepoIdentity`] — `None` when neither signal answers: no
-/// `origin` remote, and no commits yet, or `git` could not be asked.
-pub(crate) fn repo_identity(dir: &Path) -> Option<RepoIdentity> {
-    let identity = RepoIdentity {
-        origin: origin_url(dir),
-        root: root_commit(dir),
-    };
-    (identity.origin.is_some() || identity.root.is_some()).then_some(identity)
-}
-
 /// Whether `dir`'s repository actually holds `commit` — what
-/// [`adopt_workspace_clone`]'s different-repository refusal checks a
-/// re-attached checkout against, rather than comparing two [`root_commit`]
-/// values for equality.
+/// [`join_workspace`]'s different-repository refusal checks a checkout
+/// taking a gone entry's dispatcher over against, rather than comparing
+/// two [`root_commit`] values for equality.
 ///
 /// Equality would be wrong on its own: a repository with more than one root
 /// commit (history merged in from elsewhere) can print a different first
 /// line from `rev-list` depending on which branch `HEAD` happens to be on,
 /// so the *same* checkout can disagree with its own earlier fingerprint.
 /// Asking whether the recorded commit is simply present answers the
-/// question `--adopt` actually needs — is this really the repository the
+/// question a takeover actually needs — is this really the repository the
 /// entry was set up for — without caring which commit `rev-list` would
 /// have picked first.
 fn commit_exists(dir: &Path, commit: &str) -> bool {
@@ -1146,8 +1128,7 @@ pub(crate) const BINDING_FILE: &str = "project.toml";
 /// What a home's `project.toml` says: the id its checkout was stamped with,
 /// and the checkout itself. The two files that must agree — the checkout's
 /// own `.git/spoolway-id` and this — are read and reconciled together only
-/// by [`bind`]; nothing else ever writes this file except `spoolway init
-/// --adopt`/`--new-id`, by a person's own request.
+/// by [`bind`], and nothing else ever writes this file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Binding {
     id: String,
@@ -1193,8 +1174,7 @@ pub(crate) fn binding_at(home: &Path) -> Option<(String, PathBuf)> {
 /// Write `binding` to `home`'s `project.toml`, whole — the atomic write
 /// `spoolway init`'s old pointer file already used, reused here since this
 /// replaces it. The one place either a fresh binding or a moved one
-/// (acceptance criteria 2 and 7) is written outside a person's own
-/// `--adopt`/`--new-id`.
+/// (acceptance criteria 2 and 7) is written.
 fn write_binding(home: &Path, binding: &Binding) -> Result<()> {
     std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
     let body = format!(
@@ -1202,8 +1182,7 @@ fn write_binding(home: &Path, binding: &Binding) -> Result<()> {
          # `.git` is stamped with. Checked against each other on every\n\
          # command — see the `binding-record` task. Updated on its own only\n\
          # to record a checkout that moved (the one it named is gone, or no\n\
-         # longer carries this id); replaced outright only by a person\n\
-         # running `spoolway init --adopt`/`--new-id` by hand.\n{}",
+         # longer carries this id).\n{}",
         toml::to_string_pretty(binding).context("serialising project.toml")?
     );
     crate::task::write_atomic(&home.join(BINDING_FILE), body)
@@ -1244,9 +1223,8 @@ fn read_stamp(root: &Path) -> Result<Stamp> {
 
 /// Check `root`'s own stamp against its home's record of it, settling
 /// whatever can be settled on its own and refusing what cannot — the seven
-/// states the `binding-record` task defines, and the one place a home's
-/// `project.toml` is written short of a person asking for it by name with
-/// `spoolway init --adopt`/`--new-id`. Called from [`Repo::discover`] on
+/// states the `binding-record` task defines, and the one place a repo-mode
+/// home's `project.toml` is ever written. Called from [`Repo::discover`] on
 /// every command, not only `init`.
 ///
 /// `root` is already canonicalized, as every caller's is.
@@ -1260,15 +1238,36 @@ fn read_stamp(root: &Path) -> Result<Stamp> {
 /// on the same checkout the stamp-based flow below has no way to arbitrate,
 /// so this settles it before that flow ever starts.
 ///
-/// The fallible [`workspace_clone_checked`], not the lenient
-/// [`workspace_clone`] every other accessor uses: this is the one check
-/// [`Repo::discover`] runs for every ordinary command, so it is also the one
-/// place that must not quietly read "nothing lists this checkout" for a
-/// workspace file that could not be read or parsed, or for `root` itself
-/// being listed more than once — both would otherwise resolve to whichever
-/// entry `read_dir` happened to return first, with nobody told.
+/// [`workspace_clone_lenient`], not [`workspace_clone_checked`]: this is
+/// the one check [`Repo::discover`] runs for *every* ordinary command, so a
+/// workspace file broken by a typo on the other side of the machine must
+/// never stop it — [`Repo::root`]'s own last-resort scan already refused on
+/// `root`'s behalf if that broken file was the one explanation left for not
+/// finding it. What this still must not do is resolve `root` itself being
+/// listed more than once to whichever entry `read_dir` happened to return
+/// first, with nobody told — [`workspace_clone_lenient`] keeps that bail.
+/// Every broken file it reports back is noted, once, before this falls
+/// through to treating `root` as unlisted.
 pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
-    if let Some(clone) = workspace_clone_checked(root)? {
+    let (clone, broken) = workspace_clone_lenient(root)?;
+    for record_path in &broken {
+        // `bind` runs twice on an ordinary command — once through
+        // `gate::notify`'s own lenient discovery, once through the command's
+        // own strict one — so printing unconditionally here would say the
+        // same broken file twice. `first_time_this_process` is the same
+        // process-wide dedup `overrides::print_ignored_notices` already
+        // uses for the identical reason. Stderr, not stdout: this is a
+        // notice about the machine, not part of a command's own output —
+        // `--json` output must still be the one thing on stdout.
+        let line = format!(
+            "  note  {} does not read as a workspace; skipped",
+            record_path.display(),
+        );
+        if crate::overrides::first_time_this_process(&line) {
+            eprintln!("{line}");
+        }
+    }
+    if let Some(clone) = clone {
         let tracked = crate::config::tracked_setup_dir_in(root);
         if tracked.is_dir() {
             bail!(
@@ -1301,25 +1300,52 @@ pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
             // `crate::mux::project_home` already falls back to whenever
             // nothing else settles it, built from `root`'s own basename,
             // never from the untrusted `raw` id.
-            let record_line = match home_recording(root) {
-                Some(home) => home.join(BINDING_FILE).display().to_string(),
+            // Whether deleting the stamp alone is enough to let a plain
+            // `spoolway init` mint a fresh one: it is, only when nothing
+            // under `~/.spoolway/` records this exact path already. When
+            // something does, `bind_unstamped`'s own criterion 6 would
+            // refuse that rerun — "has no id, but {record} already records
+            // this checkout" — rather than mint, since a bare stamp delete
+            // leaves that record pointing at an id nothing on disk carries
+            // any more. The remedy has to delete that record too, named
+            // here so it does not take a second refusal to learn that.
+            let (record_line, second_file) = match home_recording(root) {
+                Some(home) => {
+                    let record_path = home.join(BINDING_FILE);
+                    (
+                        record_path.display().to_string(),
+                        Some(record_path.display().to_string()),
+                    )
+                }
                 None => {
                     let fallback = crate::mux::state_root()
                         .join(crate::mux::project_label(root))
                         .join(BINDING_FILE);
-                    format!(
-                        "{} (does not exist — nothing records this checkout)",
-                        fallback.display()
+                    (
+                        format!(
+                            "{} (does not exist — nothing records this checkout)",
+                            fallback.display()
+                        ),
+                        None,
                     )
                 }
             };
+            let remedy = match &second_file {
+                Some(record_path) => format!(
+                    "delete {} and {record_path}, then run `spoolway init` again to mint a \
+                     fresh one",
+                    stamp_path.display(),
+                ),
+                None => format!(
+                    "delete {} and run `spoolway init` again to mint a fresh one",
+                    stamp_path.display(),
+                ),
+            };
             bail!(
                 "{} does not hold a usable id: {raw:?} is not six lowercase letters and \
-                 digits\n  {}\n  fix it by hand, or run `spoolway init --new-id` in {} to \
-                 mint a fresh one",
+                 digits\n  {}\n  fix it by hand, or {remedy}",
                 stamp_path.display(),
                 record_line,
-                root.display(),
             );
         }
         Stamp::Valid(id) => bind_stamped(root, &id),
@@ -1383,19 +1409,17 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
 
             // Criterion 4: a valid stamp, but no home records it at all —
             // either the directory itself is gone, or it exists but nobody
-            // has ever bound a checkout to it. `--adopt {id}` is not
-            // offered here: nothing under `~/.spoolway/` carries this id by
-            // definition, so naming it back would send a person straight
-            // into the same refusal a second time.
+            // has ever bound a checkout to it.
             bail!(
                 "no home holds the id {id}\n  {}  {id}\n  nothing under {} records it\n  \
                  if a home under {} already holds this project's state under a different \
-                 name, run `spoolway init --adopt <name>` naming it\n  \
-                 `spoolway init --new-id` mints this checkout a fresh id and a fresh home \
-                 instead",
+                 name, edit that home's own project.toml by hand to name this root\n  \
+                 otherwise delete {} and run `spoolway init` again to mint a fresh id and a \
+                 fresh home",
                 stamp_path.display(),
                 record_path.display(),
                 crate::mux::state_root().display(),
+                stamp_path.display(),
             );
         }
         Err(err) => {
@@ -1457,12 +1481,21 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
         // was written, or vice versa. Neither file is more likely right
         // than the other, so this refuses rather than silently trusting
         // one over the other.
+        //
+        // Deleting the stamp alone and rerunning is not the fix: `home` was
+        // computed from `id`, this record's own `root` is already `root`,
+        // so `bind_unstamped`'s own `home_recording` scan would find this
+        // very `record_path` again and refuse with criterion 6 instead of
+        // minting — the remedy has to delete both files.
         bail!(
             "{} and {} disagree about this checkout's id: the stamp says {id}, the record \
-             says {}\n  `spoolway init --new-id` mints a fresh id both files will agree on",
+             says {}\n  fix one by hand to match the other, or delete both {} and {} and run \
+             `spoolway init` again to mint a fresh id both files will agree on",
             stamp_path.display(),
             record_path.display(),
             binding.id,
+            stamp_path.display(),
+            record_path.display(),
         );
     }
 
@@ -1484,10 +1517,12 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
     match other_stamp {
         Some(Ok(Stamp::Valid(other))) if other == id => bail!(
             "two checkouts carry the id {id}\n  {}  recorded in {}, and still carries it\n  \
-             {}  this one, stamped at {}\n  re-stamp this one with `spoolway init --new-id`",
+             {}  this one, stamped at {}\n  delete {} and run `spoolway init` again to \
+             re-stamp this one with a fresh id",
             binding.root.display(),
             record_path.display(),
             root.display(),
+            stamp_path.display(),
             stamp_path.display(),
         ),
         Some(Err(err)) => {
@@ -1496,10 +1531,11 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
                     "could not tell whether {} still carries the id {id} recorded in {} — \
                      refusing rather than guessing which checkout this binding belongs to. \
                      Fix whatever stopped that checkout's own stamp from being read (often a \
-                     permissions problem) and run this again, or run `spoolway init --new-id` \
-                     in {} to stop depending on the answer at all.",
+                     permissions problem) and run this again, or delete {} and run `spoolway \
+                     init` again in {} to stop depending on the answer at all.",
                     binding.root.display(),
                     record_path.display(),
+                    stamp_path.display(),
                     root.display(),
                 )
             });
@@ -1552,10 +1588,10 @@ fn home_recording(root: &Path) -> Option<PathBuf> {
 /// `home-mode-discovery` task and the plan's `#d-path-binding` drawing.
 /// Written by a home-mode `spoolway init`, which creates one with
 /// [`create_workspace`] or adds a clone to one with [`join_workspace`], and
-/// rewritten in place by [`adopt_workspace_clone`], which changes only a
-/// clone entry's own `root`, on a person's explicit
-/// `spoolway init --adopt <workspace>/<dispatcher>`. Nothing ever removes a
-/// clone entry.
+/// rewritten in place by a join that takes over a gone checkout's entry,
+/// which changes only that clone entry's own `root`. A move ([`move_clone`],
+/// reached from `spoolway init`'s own menu through [`move_checkout`]) is the
+/// one thing that takes an entry out, and puts it into another workspace.
 ///
 /// Its `clones` field is what tells this shape apart from an ordinary
 /// [`Binding`], which this same [`BINDING_FILE`] name holds for a repo-mode
@@ -1565,7 +1601,7 @@ fn home_recording(root: &Path) -> Option<PathBuf> {
 /// being misread as the other. `id` is carried along on both reads and
 /// writes even though nothing here ever consults it — the workspace's own
 /// id, recorded for a person reading the file by eye (see `#d-path-binding`)
-/// — so [`adopt_workspace_clone`]'s rewrite never silently drops it.
+/// — so a takeover's own rewrite never silently drops it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct WorkspaceToml {
     id: String,
@@ -1583,10 +1619,10 @@ struct CloneEntry {
     /// written — `None` for an entry a version before this field existed
     /// wrote, for a `root` with no commits yet, or for a shallow clone (see
     /// [`root_commit`]'s own doc comment). The one piece of this entry
-    /// [`adopt_workspace_clone`] checks a re-attach against through
+    /// [`join_workspace`]'s takeover checks a gone entry against through
     /// [`commit_exists`] rather than only rewrites: `root` itself can be
     /// compared for existence and liveness, but once it is gone there is
-    /// nothing left on disk to tell an unrelated repository re-adopted onto
+    /// nothing left on disk to tell an unrelated repository taking over
     /// this dispatcher by mistake apart from the real clone moved — this is
     /// that fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1623,8 +1659,12 @@ impl WorkspaceClone {
     }
 }
 
+/// [`all_workspaces`]'s own return shape, named only so clippy's
+/// `type_complexity` lint stops flagging the function signature.
+type Workspaces = (Vec<(PathBuf, WorkspaceToml)>, Vec<PathBuf>);
+
 /// Every workspace's own `project.toml` under `~/.spoolway/`, read once and
-/// shared by [`workspace_clone_checked`] and [`stale_workspace_clones`]
+/// shared by [`workspace_clone_lenient`] and [`stale_workspace_clones`]
 /// rather than each scanning the directory on its own.
 ///
 /// `~/.spoolway/` holds more than workspaces: a 0.6.0 repo-mode home (an
@@ -1637,18 +1677,29 @@ impl WorkspaceClone {
 /// and [`join_workspace`] always write alongside one. Anything else is
 /// skipped silently, exactly as before.
 ///
-/// A folder that *does* look like a workspace errors, naming the file, in
-/// two cases: its `project.toml` cannot be read or parsed, or one of its
-/// clones has a `dispatcher` that is not one plain name. The first is the `workspace-scan-strict` task's whole point: a broken workspace file
-/// used to vanish the same way a stray `logs/` folder did, so every command
-/// that reached the end of its scan fell through to "no spoolway project
-/// found … run `spoolway init`", which converts the clone to repo mode
-/// instead of saying what is actually wrong.
-fn all_workspaces() -> Result<Vec<(PathBuf, WorkspaceToml)>> {
+/// A folder that *does* look like a workspace, but whose `project.toml`
+/// cannot be read or parsed, is reported back as `broken` rather than
+/// stopping the scan — the `broken-workspace-skipped` task's whole point:
+/// this used to `bail!` outright on the first such file, and [`bind`] asks
+/// this before it even checks whether the checkout in hand is listed
+/// anywhere, so one typo in one workspace's `project.toml` stopped every
+/// command on the machine, repo-mode projects included, with an error
+/// naming a file that had nothing to do with them. A caller that finds no
+/// match for the checkout it cares about decides for itself whether a
+/// broken file nearby is reason enough to refuse; one that finds its match
+/// anyway, or was never looking for one in the first place, is never
+/// stopped by it.
+///
+/// A `dispatcher` field that is not one plain name is a different kind of
+/// problem — the file read and parsed fine, it just holds a value nothing
+/// should ever trust (see the bail below) — so that still refuses outright
+/// rather than joining `broken`.
+fn all_workspaces() -> Result<Workspaces> {
     let Ok(entries) = std::fs::read_dir(crate::mux::state_root()) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let mut found = Vec::new();
+    let mut broken = Vec::new();
     for path in entries
         .flatten()
         .map(|entry| entry.path())
@@ -1659,13 +1710,10 @@ fn all_workspaces() -> Result<Vec<(PathBuf, WorkspaceToml)>> {
             path.join("config").is_dir() || path.join("dispatchers").is_dir();
         let raw = match std::fs::read_to_string(&record_path) {
             Ok(raw) => raw,
-            Err(_) if looks_like_workspace => bail!(
-                "{} cannot be read\n  this workspace folder has a `config/` or `dispatchers/` \
-                 beside it but no readable project.toml, so every command that scans \
-                 workspaces would otherwise stop finding it at all — fix its permissions, or \
-                 restore the file, by hand",
-                record_path.display(),
-            ),
+            Err(_) if looks_like_workspace => {
+                broken.push(record_path);
+                continue;
+            }
             Err(_) => continue,
         };
         let has_clones_key = raw
@@ -1677,7 +1725,7 @@ fn all_workspaces() -> Result<Vec<(PathBuf, WorkspaceToml)>> {
             Ok(workspace) => {
                 // A `dispatcher` field is joined straight onto the
                 // workspace folder by `WorkspaceClone::home_dir` — never
-                // checked when `spoolway init`/`--adopt` write it, because
+                // checked when `spoolway init` writes it, because
                 // every writer already mints or validates it, but nothing
                 // has ever stopped a hand edit from putting a path
                 // separator or a `..` there instead. Checked here, once,
@@ -1699,36 +1747,40 @@ fn all_workspaces() -> Result<Vec<(PathBuf, WorkspaceToml)>> {
                 }
                 found.push((path, workspace));
             }
-            Err(err) if looks_like_workspace || has_clones_key => bail!(
-                "{} does not read as a workspace's project.toml: {err}\n  fix it by hand before \
-                 running any other spoolway command here — `spoolway init` from one of its \
-                 clones would otherwise fall through to setting that clone up in repo mode \
-                 instead",
-                record_path.display(),
-            ),
+            Err(_) if looks_like_workspace || has_clones_key => broken.push(record_path),
             Err(_) => continue,
         }
     }
-    Ok(found)
+    Ok((found, broken))
 }
 
-/// [`WorkspaceClone`] for `root`, if some workspace's `project.toml` lists
-/// it, and `Err` when either of two things stands in the way of answering
-/// honestly: a workspace file [`all_workspaces`] could not read or parse, or
-/// `root` itself is listed more than once — in one workspace's `clones`, or
-/// across several. The second case is collected across every match rather
-/// than stopping at the first, exactly because the bug this guards against
-/// is picking one of several entries at random: `read_dir`'s order is
-/// unspecified, so a silent `find_map` would bind to whichever the
-/// filesystem happened to return first, differently from one run to the
-/// next. The fallible form — used where falling silently back to repo mode,
-/// or to one of two disagreeing entries, is exactly the bug being fixed:
-/// [`bind`], which every ordinary command reaches through
-/// [`Repo::discover`], [`Repo::root`]'s own last-resort scan, and `init`'s
-/// own `Placement::choose`.
-pub(crate) fn workspace_clone_checked(root: &Path) -> Result<Option<WorkspaceClone>> {
+/// [`WorkspaceClone`] for `root`, if some *readable* workspace's
+/// `project.toml` lists it, paired with the record path of every workspace
+/// file [`all_workspaces`] could not read or parse — never a hard failure
+/// on its own, since a checkout settled some other way (its own tracked
+/// `.spoolway/`, or a match found here regardless) has no reason to care
+/// that an unrelated workspace file is broken. Still a hard failure when
+/// `root` itself is listed more than once among the readable workspaces —
+/// in one workspace's `clones`, or across several. That case is collected
+/// across every match rather than stopping at the first, exactly because
+/// the bug it guards against is picking one of several entries at random:
+/// `read_dir`'s order is unspecified, so a silent `find_map` would bind to
+/// whichever the filesystem happened to return first, differently from one
+/// run to the next.
+///
+/// [`bind`] and `doctor`'s own `registration_check` are the two callers
+/// that need exactly this: a match if there is one, the broken list to note
+/// and move past, and still a hard refusal on a genuine duplicate. Neither
+/// is answering the one question [`workspace_clone_checked`] exists for —
+/// whether `root` itself might be the checkout a broken file would have
+/// named — because both already know better by the time they ask:
+/// [`Repo::root`] settled that question before either of them runs.
+pub(crate) fn workspace_clone_lenient(
+    root: &Path,
+) -> Result<(Option<WorkspaceClone>, Vec<PathBuf>)> {
+    let (workspaces, broken) = all_workspaces()?;
     let mut matches: Vec<(PathBuf, WorkspaceClone)> = Vec::new();
-    for (workspace, toml) in all_workspaces()? {
+    for (workspace, toml) in &workspaces {
         for clone in &toml.clones {
             if clone.root == root {
                 matches.push((
@@ -1757,7 +1809,29 @@ pub(crate) fn workspace_clone_checked(root: &Path) -> Result<Option<WorkspaceClo
                 .join("\n"),
         );
     }
-    Ok(matches.into_iter().next().map(|(_, clone)| clone))
+    Ok((matches.into_iter().next().map(|(_, clone)| clone), broken))
+}
+
+/// [`workspace_clone_lenient`], refusing outright when `root` matches no
+/// readable workspace *and* some workspace file nearby could not be read —
+/// `root` might be exactly the checkout that file would have named, so
+/// answering "not listed" here would be a guess, not a fact. Used where
+/// that guess is exactly the bug being fixed: [`Repo::root`]'s own
+/// last-resort scan, before it falls through to "no spoolway project found
+/// … run `spoolway init`", and `init`'s own `Placement::choose`, before it
+/// falls through to converting the clone it could not read about to repo
+/// mode instead.
+pub(crate) fn workspace_clone_checked(root: &Path) -> Result<Option<WorkspaceClone>> {
+    let (found, broken) = workspace_clone_lenient(root)?;
+    if found.is_none()
+        && let Some(first) = broken.first()
+    {
+        bail!(
+            "this checkout is in no workspace spoolway can read, and {} does not parse.",
+            first.display(),
+        );
+    }
+    Ok(found)
 }
 
 /// [`workspace_clone_checked`], with a broken or duplicate workspace entry
@@ -1766,10 +1840,11 @@ pub(crate) fn workspace_clone_checked(root: &Path) -> Result<Option<WorkspaceClo
 /// mode at all: [`crate::config::setup_dir_in`] for the tracked setup, and
 /// [`crate::mux::project_home`] for the dispatcher folder, both of which run
 /// on every command and have no way to surface an error about a workspace
-/// that is not even the one in play — [`bind`], which both of those are
-/// read far more often through than on their own (see `project_home`'s own
-/// doc comment), is the one place that does, and runs ahead of either on
-/// every ordinary command through [`Repo::discover`].
+/// that is not even the one in play. Neither has to: [`Repo::root`]'s own
+/// last-resort scan, ahead of either on every ordinary command through
+/// [`Repo::discover`], already refused on `root`'s behalf if a broken file
+/// was the one explanation left for not finding it — by the time this runs,
+/// a broken file nearby is never a reason to doubt the answer.
 pub(crate) fn workspace_clone(root: &Path) -> Option<WorkspaceClone> {
     workspace_clone_checked(root).unwrap_or(None)
 }
@@ -1795,41 +1870,67 @@ pub(crate) fn sibling_clones(workspace: &Path, except: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// A `spoolway init --adopt <workspace>/<dispatcher>` line for every clone
-/// entry, across every workspace, whose folder no longer exists — the hint
-/// [`Repo::root`]'s own "no spoolway project found" appends when it has one,
-/// for a checkout that moved or was deleted without being re-attached. This
-/// is the only place any such entry is reported; nothing here removes one.
+/// A `spoolway init --workspace <name>` line for every workspace that
+/// [`start`] would actually take a gone entry's queue over in — the hint
+/// [`Repo::root`]'s own "no spoolway project found" appends when it has
+/// one, for a checkout that moved or was deleted without being re-attached.
+/// Mirrors [`join_workspace`]'s own takeover rule exactly, rather than
+/// listing every gone entry on the machine regardless of whether running
+/// the line would actually take it over: a workspace prints a line only
+/// when exactly one of its entries is both gone and a match for `start`'s
+/// own root commit, through [`commit_exists`] — the same test
+/// [`join_workspace`] runs. A workspace with a gone entry from an unrelated
+/// repository, with two or more gone entries of this one, or whose entry
+/// recorded no root commit at all, prints nothing: naming the command
+/// there would promise a takeover `join_workspace` would not actually make,
+/// joining `start` as a new clone instead with its old queue left behind.
+/// This is the only place any such entry is reported; nothing here removes
+/// one.
 ///
-/// The `<workspace>/<dispatcher>` argument is shell-quoted — a workspace
-/// folder a person named by hand can carry a space or another character a
-/// shell would otherwise split on — and each line names the entry's own old
+/// `start` carrying no root commit of its own — no commits yet, or a
+/// shallow clone — can never match anything, the same rule
+/// [`join_workspace`] applies, so this returns no lines at all rather than
+/// asking `all_workspaces` for nothing.
+///
+/// The `<name>` argument is shell-quoted — a workspace folder a person
+/// named by hand can carry a space or another character a shell would
+/// otherwise split on — and each line names the matched entry's own old
 /// `root`, so a person staring at several stale lines at once can tell
-/// which checkout each one is actually offering to re-attach.
+/// which checkout each one is actually offering to take over.
 ///
 /// Best-effort like [`workspace_clone`]: by the time this runs,
 /// [`Repo::root`] has already let a broken workspace file's own error
 /// through if there was one to report, so a failure here is some other
 /// workspace's, worth degrading to "no hint" rather than replacing the
 /// not-found error this only ever appends to.
-fn stale_workspace_clones() -> Vec<String> {
+fn stale_workspace_clones(start: &Path) -> Vec<String> {
+    let Some(mine) = root_commit(start) else {
+        return Vec::new();
+    };
     all_workspaces()
         .unwrap_or_default()
+        .0
         .into_iter()
-        .flat_map(|(workspace, toml)| {
+        .filter_map(|(workspace, toml)| {
             let name = workspace
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| workspace.display().to_string());
-            toml.clones.into_iter().filter_map(move |clone| {
-                (!clone.root.exists()).then(|| {
-                    format!(
-                        "spoolway init --adopt {} — was {}",
-                        crate::platform::quote(&format!("{name}/{}", clone.dispatcher)),
-                        clone.root.display(),
-                    )
-                })
-            })
+            let mut matching = toml.clones.into_iter().filter(|clone| {
+                !clone.root.exists()
+                    && clone
+                        .root_commit
+                        .as_deref()
+                        .is_some_and(|commit| commit == mine || commit_exists(start, commit))
+            });
+            match (matching.next(), matching.next()) {
+                (Some(entry), None) => Some(format!(
+                    "spoolway init --workspace {} — was {}",
+                    crate::platform::quote(&name),
+                    entry.root.display(),
+                )),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -1854,16 +1955,10 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
         // deleted or never made it into this clone. Refused rather than
         // silently re-stamped: writing a fresh id here would leave that
         // home's record pointing at an id nothing on disk carries any more.
-        // `home` is already known by name, so `--adopt` is offered naming
-        // exactly it, not a placeholder — the one refusal that can.
-        let home_name = home
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| home.display().to_string());
         bail!(
             "{} has no id, but {} already records this checkout\n  \
-             restore the stamp from the id in that file, or run \
-             `spoolway init --adopt {home_name}` to re-stamp this checkout with it",
+             restore the stamp from the id in that file by hand, or delete the project.toml \
+             entry and run `spoolway init` again to mint this checkout a fresh id",
             common_git_dir(root)?
                 .map(|dir| dir.join(ID_FILE).display().to_string())
                 .unwrap_or_else(|| root.display().to_string()),
@@ -1892,29 +1987,22 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
             // old path), or a wholly different checkout that once lived
             // here simply shares this basename with the one now asking.
             // Either way there is a real, on-disk claim on this name that
-            // this checkout does not itself hold — refused, naming
-            // `--adopt` for the first case and `--new-id` for the second,
-            // rather than silently minting a second, unrelated home right
-            // beside it.
+            // this checkout does not itself hold — refused, rather than
+            // silently minting a second, unrelated home right beside it.
             //
             // This is *not* the `migrate-legacy-home` non-goal's renamed-
             // checkout case — a checkout whose *basename* changed along
             // with its path leaves no legacy home at this location to find
             // at all, and nothing on disk links the two: see
-            // `legacy_home_for`'s own doc for why that one is left to
-            // `spoolway init --adopt`, run by a person who still remembers
-            // the old name, rather than anything guessed here.
+            // `legacy_home_for`'s own doc for why that one is left to a
+            // person who still remembers the old name, to settle by hand.
             Some(pointer_root) => {
-                let legacy_name = legacy
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| legacy.display().to_string());
                 bail!(
                     "{} already holds a 0.2 home for a different checkout, recorded at {}\n  \
-                     if that home is actually this checkout's own, moved since, run \
-                     `spoolway init --adopt {legacy_name}` to claim it by hand\n  \
-                     otherwise `spoolway init --new-id` mints this checkout a fresh home of \
-                     its own",
+                     if that home is actually this checkout's own, moved since, edit its \
+                     project.toml by hand to name this root\n  \
+                     otherwise rename or remove that legacy home, then run `spoolway init` \
+                     again to mint this checkout a fresh home of its own",
                     legacy.join(BINDING_FILE).display(),
                     pointer_root.display(),
                 );
@@ -1967,8 +2055,19 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
 /// `~/.spoolway/` for one whose recorded root no longer exists would answer
 /// with every abandoned or already-migrated 0.2 project on the machine, not
 /// this one, which is exactly the guess the task's non-goal says not to
-/// make. `spoolway init --adopt <name>` is the answer, run by a person who
-/// still remembers the old name themselves.
+/// make.
+///
+/// The answer is a person who still remembers the old name recovering it
+/// by hand, and it takes both halves: this function keys on the
+/// checkout's *current* basename, so editing the legacy home's own
+/// `project.toml` alone leaves it exactly as unreachable as before — it
+/// has to be renamed to the checkout's new basename too, so this lookup
+/// finds it at all, with its `project.toml` edited to name the new path.
+/// Done before anything else has bound this checkout fresh, that is the
+/// whole of it. Done after — the ordinary case, since every command but
+/// this recovery itself mints one the moment it runs — the fresh stamp
+/// and the fresh home it minted need removing first, or [`legacy_conflict`]
+/// refuses both homes outright once there are two.
 ///
 /// A checkout moved to a *different parent* without its own basename
 /// changing is not this case: `legacy_home_for` still finds the same
@@ -2047,7 +2146,7 @@ fn reread_record(home: &Path, root: &Path) -> Reread {
 /// settled as this checkout's own — only when it is real: not a candidate
 /// still waiting for its first migration (that case never reaches this; it
 /// is [`migrate_legacy_home`]'s to move, not refuse over), but one sitting
-/// alongside a home already bound a different way, through `--adopt` or a
+/// alongside a home already bound a different way — by hand, or by a
 /// migration this checkout never got the chance to run because something
 /// else recorded it first. `migrate-legacy-home` acceptance criterion 4:
 /// refuse and name both rather than merge or pick.
@@ -2301,22 +2400,16 @@ fn rename_onto_home(legacy: &Path, home: &Path) -> Result<bool> {
 }
 
 /// Overwrite `root`'s own stamp with `id`, whatever it already held —
-/// [`read_or_mint`]'s idempotent read is exactly what [`adopt`] and
-/// [`restamp`] must not get, since both exist to force a disagreement
-/// straight rather than read back whatever was already there.
+/// [`read_or_mint`]'s idempotent read is exactly what this must not get,
+/// bypassing it to set up the two-checkouts-sharing-an-id fixtures
+/// [`bind`]'s own tests need, which no ordinary path ever writes on
+/// purpose any more.
 ///
-/// `label`, unlike `id`, is `None` for [`restamp`]: a fresh id does not
-/// mean a fresh name, so the checkout's own label is left alone once it
-/// exists (frozen at a checkout's first stamp by design, see
-/// [`stamped_id`]), and only written at all for one stamped for the very
-/// first time, which needs one for [`crate::mux::project_home`] to key
-/// off. [`adopt`] passes `Some`, forcing the label to match — the home
-/// being adopted may carry a different one than this checkout's own
-/// basename, and [`crate::mux::project_home`] has to key off *that* label
-/// afterwards or a checkout adopting `api-8w4r2c` while its own current
-/// basename is `fresh` would resolve straight back to `fresh-8w4r2c`, a
-/// home nothing wrote, the moment anything asks again.
-fn stamp_over(root: &Path, id: &str, label: Option<&str>) -> Result<()> {
+/// A label is minted the same way [`stamped_id`] would for a checkout
+/// stamped for the very first time, when `root` does not already carry
+/// one — needed for [`crate::mux::project_home`] to key off afterwards.
+#[cfg(test)]
+fn stamp_over(root: &Path, id: &str) -> Result<()> {
     let common = common_git_dir(root)?.with_context(|| {
         format!(
             "{} has no git repository behind it — spoolway keys a project's home off an id \
@@ -2325,414 +2418,13 @@ fn stamp_over(root: &Path, id: &str, label: Option<&str>) -> Result<()> {
         )
     })?;
     crate::task::write_atomic(&common.join(ID_FILE), id)?;
-    match label {
-        Some(label) => {
-            crate::task::write_atomic(&common.join(LABEL_FILE), label)?;
-        }
-        None if peek(&common.join(LABEL_FILE), is_valid_label)?.is_none() => {
-            crate::task::write_atomic(
-                &common.join(LABEL_FILE),
-                sanitize_label(&crate::mux::project_label(root)),
-            )?;
-        }
-        None => {}
+    if peek(&common.join(LABEL_FILE), is_valid_label)?.is_none() {
+        crate::task::write_atomic(
+            &common.join(LABEL_FILE),
+            sanitize_label(&crate::mux::project_label(root)),
+        )?;
     }
     Ok(())
-}
-
-/// `spoolway init --adopt <name>`: bind `root` to the home already at
-/// `~/.spoolway/<name>/`, overwriting the checkout's own stamp and that
-/// home's own record to match — the one way two disagreeing files are made
-/// to agree on a person's own say-so rather than [`bind`]'s own judgement,
-/// which never does more than record a move or refuse (see the
-/// `binding-record` task's non-goals). `name` is the home's own directory
-/// name, `<label>-<id>` — the mockup's own `spoolway init --adopt
-/// api-8w4r2c`, not the bare id alone: a bare id can be handed straight to
-/// [`is_valid_id`] and joined without a lookup, but a home a person is
-/// pointing at by name may have been renamed by hand, or may be a home
-/// this checkout has never carried a matching id for at all — the very
-/// case `--adopt` exists for.
-///
-/// A 0.2 home is the one exception to that `<label>-<id>` shape, and it
-/// is taken too: named by the plain basename it was filed under before an
-/// id keyed anything, it is carried onto this checkout's own id through
-/// [`migrate_legacy_home`], with the same liveness refusals, the same
-/// `git worktree repair` pass and the same never-delete guarantee the
-/// automatic route has. This is the answer the `migrate-legacy-home`
-/// non-goal names for a checkout renamed under 0.2, whose old home
-/// nothing on disk still links to its new path — so it is deliberately
-/// the one route that does *not* require the recorded root to match
-/// `root`, since naming a path that no longer exists is exactly the case
-/// it exists for.
-///
-/// `name` is validated as an ordinary, single path component before
-/// anything is built from it: a separator, a `..`, or a character outside
-/// what a directory name can hold must never reach a path joined onto
-/// `state_root()`.
-///
-/// `name` in the `<workspace>/<dispatcher>` shape — the one form that *does*
-/// carry a separator — is home mode's own re-attach instead, delegated
-/// whole to [`adopt_workspace_clone`] before any of the repo-mode checks
-/// below, which all assume a single path component and would otherwise
-/// refuse it outright as one.
-pub(crate) fn adopt(root: &Path, name: &str) -> Result<PathBuf> {
-    if let Some((workspace_name, dispatcher)) = name.split_once('/') {
-        return adopt_workspace_clone(root, workspace_name, dispatcher);
-    }
-    // `root` already belongs to a workspace clone — stamping a repo-mode id
-    // into its `.git` here would claim it a second way, and on a checkout
-    // some *other* project's home already records by that id, would break
-    // that project outright (`two checkouts carry the id`, further down).
-    // Checked before anything below reads or writes `root` at all, so a
-    // refused `--adopt <repo-home>` leaves `.git` exactly as it was.
-    if let Some(clone) = workspace_clone(root) {
-        bail!(
-            "{} is already set up in home mode, in workspace {}, dispatcher {}\n  `--adopt \
-             {name}` would stamp a repo-mode id into its `.git`, on top of that — run `spoolway \
-             init --adopt {}/{}` instead to re-attach it by workspace and dispatcher, or \
-             `spoolway init` with no flags to repeat its existing home-mode setup",
-            root.display(),
-            clone.workspace.display(),
-            clone.dispatcher,
-            clone
-                .workspace
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| clone.workspace.display().to_string()),
-            clone.dispatcher,
-        );
-    }
-    if !crate::tracking::is_bare_filename(name) {
-        bail!(
-            "`{name}` is not a plain directory name, so it cannot name a home under {} — a \
-             `..` can never appear in one. Run `spoolway init --adopt <name>` again with the \
-             home's own directory name, exactly as `ls {}` lists it, or `spoolway init --adopt \
-             <workspace>/<dispatcher>` to re-attach a home-mode clone instead.",
-            crate::mux::state_root().display(),
-            crate::mux::state_root().display(),
-        );
-    }
-    let home = crate::mux::state_root().join(name);
-    if !home.is_dir() {
-        bail!(
-            "no home named {name} exists under {} — check `ls {}` for the name actually there, \
-             or run `spoolway init --new-id` to bind this checkout to a fresh home instead of \
-             adopting an existing one.",
-            crate::mux::state_root().display(),
-            crate::mux::state_root().display(),
-        );
-    }
-    // `name` with no `/` reaches here whether it names a repo-mode home or a
-    // home-mode workspace, since both sit as plain directories straight
-    // under `state_root()` and nothing before this point tells them apart.
-    // A workspace's own `project.toml` has no `root` field at all — the
-    // `<label>-<id>` split and the `Binding` parse below are both written
-    // for a repo-mode home's shape — so naming a workspace here used to run
-    // straight into a raw TOML parse error from deep inside this function,
-    // instead of the one fix that actually works: naming the dispatcher
-    // too.
-    if let Ok(raw) = std::fs::read_to_string(home.join(BINDING_FILE))
-        && let Ok(workspace) = toml::from_str::<WorkspaceToml>(&raw)
-    {
-        let dispatchers: Vec<&str> = workspace
-            .clones
-            .iter()
-            .map(|clone| clone.dispatcher.as_str())
-            .collect();
-        bail!(
-            "{name} is a workspace, not a home — name the dispatcher too: `spoolway init \
-             --adopt {name}/<dispatcher>`\n  this workspace has: {}",
-            dispatchers.join(", "),
-        );
-    }
-    // A 0.2 home, named the way every home was before an id keyed one:
-    // the plain basename the checkout had back then, and a `project.toml`
-    // carrying a `root` and no `id` at all. This is the one route a person
-    // has to a legacy home `bind` itself can no longer find — the
-    // `migrate-legacy-home` non-goal's renamed-under-0.2 checkout, whose
-    // old home sits under a basename nothing on disk still links to the
-    // new one — and it is the route every refusal in this area names, so
-    // it has to actually work on the shape it is pointed at. Handled here,
-    // before the `<label>-<id>` split below, because a legacy name answers
-    // that split wrongly twice over: it has no `-<id>` suffix to find, and
-    // one that merely contains a `-` (`my-project`) would split into a
-    // label and an "id" that were never either.
-    //
-    // Delegated whole to `migrate_legacy_home` rather than reimplemented:
-    // adopting a legacy home *is* the migration, just asked for by hand
-    // instead of found automatically, and it must carry the same liveness
-    // refusals, the same `git worktree repair` pass and the same
-    // never-delete guarantee with it. The destination follows this
-    // checkout's own current label, not `name` — a checkout renamed from
-    // `api` to `billing` adopts `~/.spoolway/api/` onto
-    // `~/.spoolway/billing-<id>/`, which is the whole point of adopting it.
-    //
-    // The recorded root is deliberately not required to match `root`: it
-    // naming a path that no longer exists is exactly the case this exists
-    // for, and `--adopt` is already the explicit, typed-by-a-person
-    // override for a link spoolway cannot make on its own.
-    if read_legacy_pointer(&home).is_some() {
-        return migrate_legacy_home(root, &home);
-    }
-
-    // `name` is `<label>-<id>` by construction — every home this project
-    // ever wrote is named that way — so splitting on the last `-` recovers
-    // both halves regardless of which one ends up actually used below.
-    let (name_label, name_id) = match name.rsplit_once('-') {
-        Some((label, id)) => (label, Some(id)),
-        None => (name, None),
-    };
-    // `name` passing `is_bare_filename` only proves the whole string is one
-    // plain path component — splitting it on its last `-` can still strand
-    // a label half that is not, such as the empty label `-abc123` splits
-    // into. `stamp_over` writes `name_label` into `spoolway-label`
-    // unchecked, and `project_home` joins it straight onto `state_root()`,
-    // so an unusable label here would only surface the next time this
-    // checkout is resolved — refuse it now, before anything is written.
-    if !is_valid_label(name_label) {
-        bail!(
-            "{name} is not a usable home name — splitting it on its last `-` leaves the label \
-             {name_label:?}, which is not a plain directory name, so re-running `spoolway init \
-             --adopt {name}` cannot succeed. Rename {} to a `<label>-<id>` name with a real \
-             label before adopting it, or run `spoolway init --new-id` in this checkout \
-             instead to bind a fresh home rather than adopting this one.",
-            home.display(),
-        );
-    }
-    // The id this home is keyed on: read back from its own record when it
-    // has one — the only place a home's id is written down apart from its
-    // own directory name — and otherwise trust the name's own suffix, for
-    // a home that has a directory but no `project.toml` of its own yet.
-    // Either way, validated before it is stamped anywhere: a hand-edited
-    // record is exactly what must not silently mint a checkout an
-    // unusable or disagreeing id.
-    let record_path = home.join(BINDING_FILE);
-    let id = match read_binding(&home)? {
-        Some(binding) => {
-            if !is_valid_id(&binding.id) {
-                bail!(
-                    "{} carries an id that is not six lowercase letters and digits: {:?} — \
-                     fix it by hand, or run `spoolway init --new-id` in {} to mint this \
-                     checkout a fresh id and a fresh home instead of adopting this one.",
-                    record_path.display(),
-                    binding.id,
-                    root.display(),
-                );
-            }
-            if let Some(name_id) = name_id
-                && name_id != binding.id
-            {
-                bail!(
-                    "{} is named for the id {name_id}, but {} records the id {} — fix one to \
-                     match the other by hand before adopting it, or run `spoolway init \
-                     --new-id` in {} to sidestep both.",
-                    home.display(),
-                    record_path.display(),
-                    binding.id,
-                    root.display(),
-                );
-            }
-            binding.id
-        }
-        None => {
-            let Some(name_id) = name_id else {
-                bail!(
-                    "{} carries no {} of its own, and its name has no `-<id>` suffix either, \
-                     so there is no id to stamp this checkout with — run `spoolway init \
-                     --new-id` in {} instead to mint one from scratch.",
-                    home.display(),
-                    record_path.display(),
-                    root.display(),
-                );
-            };
-            if !is_valid_id(name_id) {
-                bail!(
-                    "{} carries no {} of its own, and its name's own id, {name_id:?}, is not \
-                     six lowercase letters and digits — fix the name by hand, write a valid \
-                     {} yourself, or run `spoolway init --new-id` in {} instead.",
-                    home.display(),
-                    record_path.display(),
-                    record_path.display(),
-                    root.display(),
-                );
-            }
-            name_id.to_string()
-        }
-    };
-    stamp_over(root, &id, Some(name_label))?;
-    write_binding(
-        &home,
-        &Binding {
-            id,
-            root: root.to_path_buf(),
-        },
-    )?;
-    Ok(home)
-}
-
-/// `spoolway init --adopt <workspace>/<dispatcher>`: rewrite that clone
-/// entry's own `root` in the workspace's `project.toml` to `root` — the
-/// checkout asking to be adopted — keeping `dispatcher` unchanged, and so
-/// keeping the whole `dispatchers/<dispatcher>/` folder it already names:
-/// the queue, archive and worktrees a clone that moved or was re-cloned at
-/// a new path had before. Home mode's whole binding lives in that one
-/// file, so this is the one write `--adopt` ever makes for a workspace
-/// clone — nothing is ever written to `root`'s own `.git`, the same rule
-/// [`bind`] holds for every checkout a workspace already lists. The
-/// refusals below do read `root` and the entry's current one, to check
-/// each is a live checkout, already listed, carries a tracked
-/// `.spoolway/`, or is the same repository — but only read, never stamp.
-///
-/// `workspace_name` and `dispatcher` are each validated as an ordinary,
-/// single path component first, exactly as [`adopt`]'s own `name` is for
-/// the repo-mode form — a `<workspace>/<dispatcher>` argument with more
-/// than one `/` leaves the extra segments in `dispatcher`'s own half, which
-/// `is_bare_filename` then refuses.
-fn adopt_workspace_clone(root: &Path, workspace_name: &str, dispatcher: &str) -> Result<PathBuf> {
-    require_utf8_root(root)?;
-    require_git_repository(root)?;
-    if !crate::tracking::is_bare_filename(workspace_name)
-        || !crate::tracking::is_bare_filename(dispatcher)
-    {
-        bail!(
-            "`{workspace_name}/{dispatcher}` is not a plain `<workspace>/<dispatcher>` name — \
-             neither half can carry a path separator or a `..`. Run `spoolway init --adopt \
-             <workspace>/<dispatcher>` again exactly as the \"no spoolway project found\" \
-             error printed it."
-        );
-    }
-    let workspace = crate::mux::state_root().join(workspace_name);
-    let record_path = workspace.join(BINDING_FILE);
-    // Checked before locking — see `join_workspace`'s own comment on why:
-    // a mistyped `--adopt <workspace>/<dispatcher>` must not `mkdir` the
-    // workspace folder just to find out it never existed.
-    if !record_path.is_file() {
-        bail!(
-            "no workspace named {workspace_name} exists under {} — check `ls {}` for the name \
-             actually there",
-            crate::mux::state_root().display(),
-            crate::mux::state_root().display(),
-        );
-    }
-    // Same read-modify-write race `join_workspace` closes, and the same
-    // lock — an `--adopt` racing a join on this workspace must not read the
-    // clone list the other is about to overwrite.
-    let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(&workspace))?;
-    let raw = std::fs::read_to_string(&record_path).with_context(|| {
-        format!(
-            "no workspace named {workspace_name} exists under {} — check `ls {}` for the name \
-             actually there",
-            crate::mux::state_root().display(),
-            crate::mux::state_root().display(),
-        )
-    })?;
-    let mut parsed: WorkspaceToml = toml::from_str(&raw).with_context(|| {
-        format!(
-            "{} does not read as a workspace's project.toml",
-            record_path.display()
-        )
-    })?;
-    // Built before the lookup below to answer the refusal too — `home_dir`
-    // is the one place `dispatchers/<dispatcher>` is ever joined, the same
-    // accessor [`workspace_clone`]'s own callers use.
-    let dispatcher_home = (WorkspaceClone {
-        workspace: workspace.clone(),
-        dispatcher: dispatcher.to_string(),
-    })
-    .home_dir();
-    let Some(entry) = parsed
-        .clones
-        .iter_mut()
-        .find(|clone| clone.dispatcher == dispatcher)
-    else {
-        bail!(
-            "{} names no clone with dispatcher {dispatcher:?} — check `ls {}` for the \
-             dispatcher folders actually there.",
-            record_path.display(),
-            dispatcher_home.parent().unwrap_or(&workspace).display(),
-        );
-    };
-
-    // The legitimate case `--adopt` exists for is the entry's own `root`
-    // having moved or been deleted — but a `root` still sitting there as a
-    // live git checkout is still in use by whoever cloned it. Rewriting the
-    // entry out from under it would cut that clone off from its own queue
-    // and worktrees with no hint at all, and hand both to `root` instead.
-    if entry.root != root && common_git_dir(&entry.root)?.is_some() {
-        bail!(
-            "{} still exists as a live git checkout, and dispatcher {dispatcher} still uses it\n  \
-             adopting from {} would cut it off from its own queue and worktrees with no hint, \
-             and hand them to {} instead\n  if {} really is gone, delete it first, then run \
-             `spoolway init --adopt {workspace_name}/{dispatcher}` again from {}",
-            entry.root.display(),
-            entry.root.display(),
-            root.display(),
-            entry.root.display(),
-            root.display(),
-        );
-    }
-
-    // `root` already belongs somewhere — this same dispatcher (a harmless
-    // repeat) is fine, but any other entry, in this workspace or another,
-    // means `root` would end up listed twice. A checkout listed twice is
-    // refused by every later command's strict scan, so this rewrite would
-    // appear to succeed and then leave the checkout unusable until one
-    // listing is removed by hand.
-    if let Some(listed) = workspace_clone(root)
-        && (listed.workspace != workspace || listed.dispatcher != dispatcher)
-    {
-        bail!(
-            "{} is already listed in workspace {}, dispatcher {}\n  a checkout can use only one \
-             dispatcher at a time — run `spoolway init --adopt {workspace_name}/{dispatcher}` \
-             from the checkout that should actually take over {dispatcher}, not from one already \
-             bound to {}",
-            root.display(),
-            listed.workspace.display(),
-            listed.dispatcher,
-            listed.dispatcher,
-        );
-    }
-
-    // A checkout with its own tracked `.spoolway/` is a repo-mode project —
-    // adopting it into a workspace clone would leave it claimed by both at
-    // once, with nothing here ever reading or writing that `.spoolway/`.
-    if crate::config::tracked_setup_dir_in(root).is_dir() {
-        bail!(
-            "{} already has a tracked `.spoolway/` — it is a repo-mode project, not a home-mode \
-             clone\n  move or remove that `.spoolway/` first if {} should really become \
-             dispatcher {dispatcher}'s clone",
-            root.display(),
-            root.display(),
-        );
-    }
-
-    // `entry.root` being gone proves nothing about whether `root` is the
-    // same repository that moved there — an unrelated checkout pointed at
-    // the wrong dispatcher by mistake passes every check above just as
-    // cleanly. Asked of `root` directly, through `commit_exists`, rather
-    // than by comparing two `root_commit` values for equality — see that
-    // function's own doc comment for why equality is the wrong question.
-    // Skipped when `root` itself has no fingerprint to check with (no
-    // commits yet, or a shallow clone — `root_commit` returns `None` for
-    // both) or when the entry predates this field: refusing on nothing to
-    // compare would be a guess, not a finding.
-    let new_commit = root_commit(root);
-    if let Some(expected) = &entry.root_commit
-        && new_commit.is_some()
-        && !commit_exists(root, expected)
-    {
-        bail!(
-            "{} is a different repository from the one dispatcher {dispatcher} was set up for\n  \
-             it does not hold the commit {expected} was recorded at — adopt the clone that \
-             actually moved, not one that merely happens to sit where it used to be",
-            root.display(),
-        );
-    }
-
-    entry.root = root.to_path_buf();
-    entry.root_commit = new_commit;
-    write_workspace(&workspace, &parsed)?;
-    Ok(dispatcher_home)
 }
 
 /// The advisory lock [`crate::lock::WorkspaceLock`] takes over `workspace`'s
@@ -2747,43 +2439,71 @@ fn workspace_lock_path(workspace: &Path) -> PathBuf {
 /// Write `workspace`'s `project.toml` whole, in the same explained-header
 /// style [`write_binding`] uses for a repo-mode home's own record. The one
 /// place a workspace's own file is ever written by this binary: by `init`,
-/// through [`create_workspace`] and [`join_workspace`], and by
-/// [`adopt_workspace_clone`] on a person's own
-/// `spoolway init --adopt <workspace>/<dispatcher>`. None of them removes a
-/// clone entry, including a stale one nothing has re-attached (the
-/// `home-mode-discovery` task's own non-goal on not going further than
-/// reporting one).
+/// through [`create_workspace`], [`join_workspace`] and [`move_checkout`],
+/// and by [`move_clone`]. Only a move takes an entry out; a stale one
+/// nothing has taken over stays.
 fn write_workspace(workspace: &Path, toml_value: &WorkspaceToml) -> Result<()> {
     let body = format!(
         "# The clones that read this workspace's config/, each found by its path.\n\
          # Nothing is stamped into any clone. `spoolway init` adds a clone here,\n\
-         # and `spoolway init --adopt <workspace>/<dispatcher>` re-attaches one\n\
-         # that moved. root_commit is that clone's first commit, checked against\n\
-         # a re-attached checkout so --adopt refuses an unrelated repository —\n\
-         # delete the line to skip that check for one entry.\n{}",
+         # and takes a gone clone's entry over when its root commit matches.\n\
+         # root_commit is that clone's first commit, checked against a\n\
+         # checkout taking a gone entry over so it refuses an unrelated\n\
+         # repository — delete the line to skip that check for one entry.\n{}",
         toml::to_string_pretty(toml_value).context("serialising project.toml")?
     );
     let path = workspace.join(BINDING_FILE);
     crate::task::write_atomic(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
-/// One workspace as `init`'s "Which workspace should this checkout use?"
-/// menu lists it: its folder name under `~/.spoolway/`, and the repository
-/// its clones belong to.
+/// One workspace as `init`'s workspace menu lists it: its folder name under
+/// `~/.spoolway/`, the repository its clones belong to, and every root commit
+/// its clone entries record.
 pub(crate) struct WorkspaceSummary {
     pub(crate) name: String,
     /// The repository this workspace's clones belong to, as the menu row
-    /// shows it: the first still-listed clone's `origin` URL, shortened
-    /// under `$HOME` when it has none, as its own path instead. `None` when
-    /// the workspace lists no clones at all — once only ever true for a
-    /// `project.toml` nobody had joined yet, but now also reachable through
-    /// [`move_clone`], which can move a workspace's last clone out of it
-    /// and leave it standing, real but empty.
+    /// shows it for a workspace of another repository: the first listed
+    /// clone's `origin` URL, or its path shortened under `$HOME` when it has
+    /// none. `None` when the workspace lists no clones at all.
     pub(crate) repo_display: Option<String>,
-    /// The same clone's own [`repo_identity`] — never shown, only compared,
-    /// to tell whether this workspace already holds the checkout `init` is
-    /// running from.
-    pub(crate) repo_identity: Option<RepoIdentity>,
+    /// Every distinct root commit across the workspace's clone entries:
+    /// each entry's recorded `root_commit`, or, for an entry written before
+    /// that field existed, the commit read off its folder while it still
+    /// exists. Every clone counts, not only the first: the first entry is
+    /// often a checkout long since deleted, and a workspace whose first
+    /// entry recorded nothing used to read as another repository even with
+    /// a clone of this one listed right after it.
+    root_commits: Vec<String>,
+}
+
+impl WorkspaceSummary {
+    /// Whether this workspace holds a clone of the repository `root` is
+    /// a checkout of, `mine` being `root`'s own [`root_commit`]. Same
+    /// repository means the same root commit, nothing weaker: an `origin`
+    /// URL is spelled differently over SSH and HTTPS and is missing on a
+    /// local clone, so it was dropped as a signal. A recorded commit is also
+    /// accepted when `root` merely holds it, through [`commit_exists`],
+    /// because a repository with several root commits names whichever one
+    /// its current branch reaches first. A checkout with no root commit — no
+    /// commits yet, or a shallow clone — matches nothing.
+    pub(crate) fn holds_repository_of(&self, root: &Path, mine: Option<&str>) -> bool {
+        let Some(mine) = mine else { return false };
+        self.root_commits
+            .iter()
+            .any(|commit| commit == mine || commit_exists(root, commit))
+    }
+
+    /// Whether `root` may move into this workspace: one holding its own
+    /// repository, never another's. A checkout with no root commit has
+    /// nothing to compare, so it may move only into a workspace that has no
+    /// root commit recorded either — anything else could be an unrelated
+    /// repository, and a move carries the checkout's queue with it.
+    pub(crate) fn may_move_into(&self, root: &Path, mine: Option<&str>) -> bool {
+        match mine {
+            Some(_) => self.holds_repository_of(root, mine),
+            None => self.root_commits.is_empty(),
+        }
+    }
 }
 
 /// Every workspace under `~/.spoolway/`, sorted by name so the menu reads
@@ -2798,19 +2518,36 @@ pub(crate) struct WorkspaceSummary {
 pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
     let mut found: Vec<WorkspaceSummary> = all_workspaces()
         .unwrap_or_default()
+        .0
         .into_iter()
         .filter_map(|(path, toml)| {
             let name = path.file_name()?.to_string_lossy().into_owned();
-            let main = toml.clones.first().map(|clone| clone.root.clone());
-            let repo_identity = main.as_deref().and_then(repo_identity);
-            let repo_display = main.as_deref().map(|root| match origin_url(root) {
-                Some(url) => url,
-                None => shorten_home(root),
-            });
+            let repo_display = toml
+                .clones
+                .first()
+                .map(|clone| match origin_url(&clone.root) {
+                    Some(url) => url,
+                    None => shorten_home(&clone.root),
+                });
+            let mut root_commits: Vec<String> = Vec::new();
+            for clone in &toml.clones {
+                let commit = clone.root_commit.clone().or_else(|| {
+                    clone
+                        .root
+                        .exists()
+                        .then(|| root_commit(&clone.root))
+                        .flatten()
+                });
+                if let Some(commit) = commit
+                    && !root_commits.contains(&commit)
+                {
+                    root_commits.push(commit);
+                }
+            }
             Some(WorkspaceSummary {
                 name,
                 repo_display,
-                repo_identity,
+                root_commits,
             })
         })
         .collect();
@@ -2830,6 +2567,34 @@ pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
 pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
     require_utf8_root(root)?;
     require_git_repository(root)?;
+    let (workspace, id, label) = new_workspace_folder(root)?;
+    let clone = WorkspaceClone {
+        workspace: workspace.clone(),
+        dispatcher: label,
+    };
+    let home = clone.home_dir();
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    // Written last, so a workspace is only ever found — by `all_workspaces`,
+    // which reads nothing but this file — once its folders are all there.
+    write_workspace(
+        &workspace,
+        &WorkspaceToml {
+            id,
+            clones: vec![CloneEntry {
+                root: root.to_path_buf(),
+                dispatcher: clone.dispatcher.clone(),
+                root_commit: root_commit(root),
+            }],
+        },
+    )?;
+    Ok(clone)
+}
+
+/// A fresh `~/.spoolway/<label>-<id>/` with an empty `config/` and
+/// `dispatchers/`, and no `project.toml` yet — the part of
+/// [`create_workspace`] that [`move_checkout`] shares when a checkout moves
+/// into a new workspace. Answers the folder, its id and `root`'s label.
+fn new_workspace_folder(root: &Path) -> Result<(PathBuf, String, String)> {
     let state = crate::mux::state_root();
     std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
     let label = sanitize_label(&crate::mux::project_label(root));
@@ -2848,27 +2613,10 @@ pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
             }
         }
     };
-    let clone = WorkspaceClone {
-        workspace: workspace.clone(),
-        dispatcher: label,
-    };
-    for dir in [clone.config_dir(), clone.home_dir()] {
+    for dir in [workspace.join("config"), workspace.join("dispatchers")] {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    // Written last, so a workspace is only ever found — by `all_workspaces`,
-    // which reads nothing but this file — once its folders are all there.
-    write_workspace(
-        &workspace,
-        &WorkspaceToml {
-            id,
-            clones: vec![CloneEntry {
-                root: root.to_path_buf(),
-                dispatcher: clone.dispatcher.clone(),
-                root_commit: root_commit(root),
-            }],
-        },
-    )?;
-    Ok(clone)
+    Ok((workspace, id, label))
 }
 
 /// Add `root` to the workspace named `name` under `~/.spoolway/`, with a
@@ -2880,6 +2628,11 @@ pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
 /// already under `dispatchers/` that a clone entry no longer names, whose
 /// queue and worktrees must not be picked up by a clone they never belonged
 /// to. A checkout the workspace already lists keeps its own entry.
+///
+/// One case takes over an entry instead of adding one: exactly one entry of
+/// this repository, by root commit, whose folder no longer exists. Its
+/// `root` is rewritten to this checkout, and this checkout carries on with
+/// its queue, archive and worktrees — see the comment where it happens.
 pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> {
     require_utf8_root(root)?;
     require_git_repository(root)?;
@@ -2933,6 +2686,35 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
             config.display()
         );
     }
+    // A checkout of this repository whose folder is gone left its queue
+    // behind under its own dispatcher folder. Exactly one such entry is
+    // taken over without asking: this checkout is that clone moved or
+    // re-cloned, and its tasks carry on. None means an ordinary join, and
+    // two or more means there is no telling which one this checkout
+    // replaces, so it joins as new rather than guessing. The root commit is
+    // what makes it the same repository; a checkout with none — no commits
+    // yet, or a shallow clone — never takes over, and neither does an entry
+    // that recorded none.
+    let mine = root_commit(root);
+    if let Some(mine) = &mine {
+        let mut gone = parsed.clones.iter_mut().filter(|clone| {
+            !clone.root.exists()
+                && clone
+                    .root_commit
+                    .as_deref()
+                    .is_some_and(|commit| commit == mine || commit_exists(root, commit))
+        });
+        if let (Some(entry), None) = (gone.next(), gone.next()) {
+            entry.root = root.to_path_buf();
+            entry.root_commit = Some(mine.clone());
+            let clone = WorkspaceClone {
+                workspace: workspace.clone(),
+                dispatcher: entry.dispatcher.clone(),
+            };
+            write_workspace(&workspace, &parsed)?;
+            return Ok(clone);
+        }
+    }
     let base = sanitize_label(&crate::mux::project_label(root));
     let taken = |candidate: &str| {
         parsed
@@ -2959,7 +2741,7 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
     parsed.clones.push(CloneEntry {
         root: root.to_path_buf(),
         dispatcher,
-        root_commit: root_commit(root),
+        root_commit: mine,
     });
     // A failure here has already created `home` above — remove it rather
     // than leave a dispatcher folder no entry in `project.toml` ever claims,
@@ -2971,17 +2753,222 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
     Ok(clone)
 }
 
-/// `spoolway workspace move <to>`: move `root`'s home-mode registration from
-/// the workspace it is listed in now to `to`, carrying its dispatcher folder
-/// — queue, archive and worktrees — along rather than leaving it behind.
+/// The ids of every task queued in `clone`'s dispatcher folder that holds a
+/// worktree, sorted — what refuses a move through `spoolway init`.
+///
+/// A task holding a worktree records its path in `worktree_path`, and that
+/// path sits under the dispatcher folder a move renames. Left as it is, the
+/// task would run as borrowed from a path that no longer exists, and its
+/// worktree and branch would be left behind; rewritten, it would still point
+/// git at a worktree the dispatcher did not cut there. So the move waits
+/// until the task is finished or unqueued instead. A queue file that does not
+/// parse counts when its text carries a `worktree_path:` line, since a
+/// refusal is cheaper than a stranded worktree.
+pub(crate) fn tasks_holding_worktrees(clone: &WorkspaceClone) -> Result<Vec<String>> {
+    let (tasks, problems) =
+        crate::task::load_dir(&clone.home_dir().join(crate::config::QUEUE_DIR))?;
+    let mut held: Vec<String> = tasks
+        .iter()
+        .filter(|task| task.front.worktree_path.is_some())
+        .map(|task| task.id().to_string())
+        .collect();
+    for problem in problems {
+        let raw = std::fs::read_to_string(&problem.path).unwrap_or_default();
+        if raw.lines().any(|line| line.starts_with("worktree_path:"))
+            && let Some(stem) = problem.path.file_stem()
+        {
+            held.push(stem.to_string_lossy().into_owned());
+        }
+    }
+    held.sort();
+    Ok(held)
+}
+
+/// What [`move_checkout`] did: where the checkout is listed now, and the
+/// folder name of the workspace the move emptied and removed, if it did.
+pub(crate) struct Moved {
+    pub(crate) clone: WorkspaceClone,
+    pub(crate) removed: Option<String>,
+}
+
+/// Move `root` from the workspace that lists it into the workspace named
+/// `to`, or into a new workspace when `to` is `None` — what picking another
+/// workspace in `spoolway init`'s menu does.
+///
+/// Refused, with nothing written, in three cases. A task in this checkout's
+/// queue holds a worktree (see [`tasks_holding_worktrees`]), and the refusal
+/// names each one. `to` holds another repository (see
+/// [`WorkspaceSummary::may_move_into`]), and nothing forces that. `to` has
+/// lost its `config/`, which a moved checkout would then read no setup from.
+///
+/// The dispatcher folder keeps its name at `to` when it is free there, and
+/// otherwise takes the first free `-2`, `-3` and so on: with no task holding
+/// a worktree, nothing records the folder's path, so renaming it is safe.
+/// The live-work checks and the folder rename are [`move_clone`]'s.
+///
+/// The workspace the move leaves with no clone listed is removed, with its
+/// `config/` and its entry in the usage registry's `projects.json`: nothing
+/// can reach that setup any more, and it would otherwise sit in every later
+/// workspace menu as a workspace with no checkouts.
+pub(crate) fn move_checkout(root: &Path, to: Option<&str>) -> Result<Moved> {
+    let from = check_move(root, to)?;
+    let (to_name, fresh) = match to {
+        Some(to) => (to.to_string(), None),
+        None => {
+            let (workspace, id, _label) = new_workspace_folder(root)?;
+            write_workspace(
+                &workspace,
+                &WorkspaceToml {
+                    id,
+                    clones: Vec::new(),
+                },
+            )?;
+            let name = workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (name, Some(workspace))
+        }
+    };
+
+    let to_workspace = crate::mux::state_root().join(&to_name);
+    let listed: Vec<String> = std::fs::read_to_string(to_workspace.join(BINDING_FILE))
+        .ok()
+        .and_then(|raw| toml::from_str::<WorkspaceToml>(&raw).ok())
+        .map(|toml| {
+            toml.clones
+                .into_iter()
+                .map(|clone| clone.dispatcher)
+                .collect()
+        })
+        .unwrap_or_default();
+    let free = |candidate: &str| {
+        !listed.iter().any(|name| name == candidate)
+            && !to_workspace.join("dispatchers").join(candidate).exists()
+    };
+    let base = from.dispatcher.clone();
+    let dispatcher = std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}-{n}")))
+        .find(|candidate| free(candidate))
+        .expect("an unbounded run of names always has a free one");
+
+    let clone = match move_clone(root, &to_name, Some(&dispatcher)) {
+        Ok(clone) => clone,
+        Err(err) => {
+            // A new workspace made only to receive this checkout is taken
+            // back out, so a refused move leaves no empty workspace behind.
+            if let Some(workspace) = fresh {
+                let _ = std::fs::remove_dir_all(workspace);
+            }
+            return Err(err);
+        }
+    };
+    let removed = remove_if_empty(&from.workspace)?;
+    Ok(Moved { clone, removed })
+}
+
+/// Every refusal [`move_checkout`] makes before it writes anything, and the
+/// workspace `root` moves out of. `spoolway init` calls this right after its
+/// menu, before asking anything else, so a refused move costs nothing; the
+/// move calls it again, since time has passed in between.
+pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone> {
+    require_utf8_root(root)?;
+    let from = workspace_clone_checked(root)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is not in any workspace, so there is nothing to move",
+            root.display()
+        )
+    })?;
+    let held = tasks_holding_worktrees(&from)?;
+    if !held.is_empty() {
+        let (verb, noun, them) = if held.len() == 1 {
+            ("holds", "a worktree", "it")
+        } else {
+            ("hold", "worktrees", "them")
+        };
+        bail!(
+            "{} {verb} {noun} in this checkout.\n  Finish or unqueue {them}, then run `spoolway \
+             init` again.",
+            and_list(&held),
+        );
+    }
+    let Some(to) = to else { return Ok(from) };
+    let Some(target) = workspaces().into_iter().find(|w| w.name == to) else {
+        bail!(
+            "no workspace named {to} exists under {}.\n  Run `spoolway init` and pick one from \
+             the menu.",
+            shorten_home(&crate::mux::state_root())
+        );
+    };
+    if !target.may_move_into(root, root_commit(root).as_deref()) {
+        bail!(
+            "workspace {to} holds another repository, so this checkout cannot move there.\n  \
+             Run `spoolway init` and pick a workspace of this repository, or create a new one."
+        );
+    }
+    let config = crate::mux::state_root().join(to).join("config");
+    if !config.is_dir() {
+        bail!(
+            "workspace {to} has no setup: {} is missing.\n  Restore it, or run `spoolway init` \
+             and pick another workspace.",
+            config.display()
+        );
+    }
+    Ok(from)
+}
+
+/// `items` as a sentence names them: `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Remove `workspace` when its `project.toml` lists no clone, together with
+/// every usage-registry entry whose home sits inside it, and answer its
+/// folder name. The clone list is read under the workspace's own lock, so a
+/// join that landed first keeps the workspace. The lock is let go before the
+/// folder goes, because it lives inside it and Windows refuses to delete an
+/// open file.
+fn remove_if_empty(workspace: &Path) -> Result<Option<String>> {
+    let empty = {
+        let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(workspace))?;
+        let record = workspace.join(BINDING_FILE);
+        let raw = std::fs::read_to_string(&record)
+            .with_context(|| format!("reading {}", record.display()))?;
+        let parsed: WorkspaceToml = toml::from_str(&raw).with_context(|| {
+            format!(
+                "{} does not read as a workspace's project.toml",
+                record.display()
+            )
+        })?;
+        parsed.clones.is_empty()
+    };
+    if !empty {
+        return Ok(None);
+    }
+    std::fs::remove_dir_all(workspace)
+        .with_context(|| format!("removing {}", workspace.display()))?;
+    crate::usage::registry::forget_under(workspace);
+    Ok(workspace
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned()))
+}
+
+/// Move `root`'s home-mode registration from the workspace it is listed in
+/// now to `to`, carrying its dispatcher folder — queue, archive and
+/// worktrees — along rather than leaving it behind. Reached from
+/// `spoolway init`'s own menu, through [`move_checkout`].
 ///
 /// The folder keeps its current name at `to` unless that name is already
 /// taken there, in which case this refuses rather than silently drawing
 /// `-2` the way [`join_workspace`] does for a fresh clone: a move carries
 /// live work across workspaces, and renaming its folder out from under it
-/// without being asked is exactly the kind of silent choice this command
-/// exists to avoid making for somebody. `dispatcher` names the folder
-/// explicitly instead, and is required once the plain name collides.
+/// without being asked is exactly the kind of silent choice this exists to
+/// avoid making for somebody. `dispatcher` names the folder explicitly
+/// instead, and is required once the plain name collides.
 ///
 /// Refuses, leaving both workspaces untouched, while
 /// [`crate::lock::Lock::holder`] reports a live dispatcher over the clone's
@@ -3232,44 +3219,6 @@ pub(crate) fn move_clone(
     })
 }
 
-/// `spoolway init --new-id`: mint `root` a fresh id it has never carried
-/// before, and bind it to the fresh home that id keys — the other of the
-/// two ways a person forces a disagreement straight, for the checkout that
-/// would rather stop sharing an id than fight over who it belongs to.
-pub(crate) fn restamp(root: &Path) -> Result<PathBuf> {
-    // Same refusal `adopt` makes for `--adopt <repo-home>`, and for the
-    // same reason: `root` already belongs to a workspace clone, so minting
-    // it a repo-mode id here would claim it a second way, checked before
-    // anything below writes to `root`'s own `.git` at all.
-    if let Some(clone) = workspace_clone(root) {
-        bail!(
-            "{} is already set up in home mode, in workspace {}, dispatcher {}\n  `--new-id` \
-             would stamp a fresh repo-mode id into its `.git`, on top of that — run `spoolway \
-             init --adopt {}/{}` instead to re-attach it by workspace and dispatcher",
-            root.display(),
-            clone.workspace.display(),
-            clone.dispatcher,
-            clone
-                .workspace
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| clone.workspace.display().to_string()),
-            clone.dispatcher,
-        );
-    }
-    let id = generate_id();
-    stamp_over(root, &id, None)?;
-    let home = crate::mux::project_home(root)?;
-    write_binding(
-        &home,
-        &Binding {
-            id,
-            root: root.to_path_buf(),
-        },
-    )?;
-    Ok(home)
-}
-
 /// Read the value at `path` if it is there and valid — never minting,
 /// unlike [`read_or_mint`]. `Ok(None)` for "nothing usable there", whether
 /// that is because the file is missing or because its content fails
@@ -3286,15 +3235,14 @@ fn peek(path: &Path, valid: impl Fn(&str) -> bool) -> Result<Option<String>> {
 }
 
 /// Whether `candidate` is a usable id: exactly [`ID_LEN`] lowercase
-/// letters-and-digits. `pub(crate)` for [`adopt`], which parses one back
-/// out of a home directory's own `<label>-<id>` suffix rather than trust
-/// it blind — the id-shaped alphabet this checks against is itself what
-/// keeps a parsed suffix from ever being able to escape `~/.spoolway/`
-/// (the acceptance criterion this alphabet exists to satisfy); `adopt`'s
-/// own escape guard on the *name* it is actually handed is
-/// [`crate::tracking::is_bare_filename`], a separate, wider check, since a
-/// home's directory name is not required to end in a valid id at all.
-pub(crate) fn is_valid_id(candidate: &str) -> bool {
+/// letters-and-digits — what every read of a checkout's own
+/// `.git/spoolway-id` checks it against ([`stamped_id`]'s own mint-or-read,
+/// [`project_identity`]'s lenient peek, and [`read_stamp`]'s own three-way
+/// read), to tell a stamp some other id-minting run actually wrote apart
+/// from one hand-edited or truncated into something
+/// [`crate::mux::project_home`] could never safely build a path out of.
+/// Not `pub(crate)`: every caller is inside this module.
+fn is_valid_id(candidate: &str) -> bool {
     candidate.len() == ID_LEN
         && candidate
             .bytes()
@@ -3309,9 +3257,9 @@ pub(crate) fn is_valid_id(candidate: &str) -> bool {
 /// differs from the real one at the very byte that made it invalid, so
 /// [`workspace_clone`]'s exact-match lookup can never find that checkout
 /// again. Called once by every writer of a `clones` entry —
-/// [`create_workspace`], [`join_workspace`], and `adopt_workspace_clone`'s
-/// rewrite of `root` — rather than relying on `toml`'s own serialization
-/// failure to catch it, which would name the error, not the path.
+/// [`create_workspace`], [`join_workspace`] and the checkout's own move —
+/// rather than relying on `toml`'s own serialization failure to catch it,
+/// which would name the error, not the path.
 fn require_utf8_root(root: &Path) -> Result<()> {
     if root.to_str().is_none() {
         bail!(
@@ -3333,14 +3281,14 @@ fn require_utf8_root(root: &Path) -> Result<()> {
 /// found" from any subdirectory walked past the folder itself, exactly the
 /// unbounded walk that check exists to prevent. Called by every write that
 /// lists a checkout in a workspace: [`create_workspace`], [`join_workspace`]
-/// and [`adopt_workspace_clone`] — the three places `--setup home` and
-/// `--adopt <workspace>/<dispatcher>` reach.
+/// and the checkout's own move — the places `spoolway init`'s own
+/// home-mode menu reaches.
 fn require_git_repository(root: &Path) -> Result<()> {
     if common_git_dir(root)?.is_none() {
         bail!(
-            "{} has no git repository behind it — spoolway finds a home-mode checkout again \
-             through its git toplevel, so there is nowhere to bound that search without one. \
-             Run `git init` here first.",
+            "{} is not a git repository. A home-mode workspace lists a checkout by its git \
+             repository, so it needs one.\n  Run `git init` here first, then `spoolway init` \
+             again.",
             root.display()
         );
     }
@@ -4609,24 +4557,35 @@ mod tests {
         );
     }
 
-    /// Two clones of one repository are the same repository however each
-    /// was made. A `git clone` of a local checkout has that checkout's path
-    /// as its `origin` while the checkout has no `origin` at all, and one
-    /// clone over SSH and one over HTTPS name two different URLs: the root
-    /// commit is what agrees there. Before any commit, the shared `origin`
-    /// is. An unrelated repository agrees on neither.
+    /// A workspace holds this checkout's repository when any of its clone
+    /// entries shares this checkout's root commit — not only the first. A
+    /// `git clone` of a local checkout agrees on the root commit even though
+    /// its `origin` is that checkout's path. An unrelated repository agrees
+    /// on nothing, and a checkout with no commits matches no workspace and
+    /// may move only into one that records no root commit either.
     #[test]
-    fn repo_identity_matches_clones_of_one_repository_however_each_was_made() {
-        let parent = crate::scratch::root("repo-identity");
+    fn a_workspace_holds_this_repository_when_any_clone_shares_its_root_commit() {
+        let (home, _home_guard) = scratch_home("holds-repository");
+        let parent = crate::scratch::root("holds-repository");
+        let commit = |dir: &Path, message: &str| {
+            run(
+                dir,
+                "git",
+                &["commit", "--allow-empty", "-q", "-m", message],
+            )
+            .unwrap();
+        };
         let first = parent.join("api");
-        std::fs::create_dir_all(&first).unwrap();
-        crate::scratch::git_init(&first, &["-b", "main"]);
-        run(
-            &first,
-            "git",
-            &["commit", "--allow-empty", "-q", "-m", "root"],
-        )
-        .unwrap();
+        let unrelated = parent.join("other");
+        let third = parent.join("third");
+        let empty = parent.join("empty");
+        for dir in [&first, &unrelated, &third, &empty] {
+            std::fs::create_dir_all(dir).unwrap();
+            crate::scratch::git_init(dir, &["-b", "main"]);
+        }
+        commit(&first, "root");
+        commit(&unrelated, "another root");
+        commit(&third, "a third root");
         let local = parent.join("api-review");
         run(
             &parent,
@@ -4639,68 +4598,48 @@ mod tests {
             ],
         )
         .unwrap();
-        let identity = |dir: &Path| repo_identity(dir).unwrap();
-        assert!(
-            identity(&local).same_as(&identity(&first)),
-            "a local clone's origin is the first checkout's path, but the root commit agrees"
-        );
 
-        let ssh = parent.join("api-ssh");
-        run(
-            &parent,
-            "git",
-            &[
-                "clone",
-                "-q",
-                first.to_str().unwrap(),
-                ssh.to_str().unwrap(),
-            ],
-        )
-        .unwrap();
-        run(
-            &ssh,
-            "git",
-            &["remote", "set-url", "origin", "git@example.com:api.git"],
-        )
-        .unwrap();
-        run(
-            &local,
-            "git",
-            &["remote", "set-url", "origin", "https://example.com/api.git"],
-        )
-        .unwrap();
-        assert!(
-            identity(&ssh).same_as(&identity(&local)),
-            "SSH and HTTPS clones of one remote"
-        );
+        crate::platform::test_home::with_home(&home, || {
+            // The unrelated repository is the workspace's first entry, and
+            // the clone of `first` only its second.
+            let created = create_workspace(&unrelated).unwrap();
+            let name = created
+                .workspace
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            join_workspace(&local, &name).unwrap();
+            let summary = workspaces()
+                .into_iter()
+                .find(|workspace| workspace.name == name)
+                .unwrap();
 
-        let unrelated = parent.join("other");
-        std::fs::create_dir_all(&unrelated).unwrap();
-        crate::scratch::git_init(&unrelated, &["-b", "main"]);
-        run(
-            &unrelated,
-            "git",
-            &["commit", "--allow-empty", "-q", "-m", "another root"],
-        )
-        .unwrap();
-        assert!(!identity(&unrelated).same_as(&identity(&first)));
+            let mine = root_commit(&first);
+            assert!(
+                summary.holds_repository_of(&first, mine.as_deref()),
+                "the second entry's root commit counts"
+            );
+            assert!(summary.may_move_into(&first, mine.as_deref()));
 
-        let empty_a = parent.join("empty-a");
-        let empty_b = parent.join("empty-b");
-        for dir in [&empty_a, &empty_b] {
-            std::fs::create_dir_all(dir).unwrap();
-            crate::scratch::git_init(dir, &["-b", "main"]);
-            run(
-                dir,
-                "git",
-                &["remote", "add", "origin", "https://example.com/new.git"],
-            )
-            .unwrap();
-        }
-        assert!(
-            identity(&empty_a).same_as(&identity(&empty_b)),
-            "before any commit, the shared origin is what agrees"
-        );
+            create_workspace(&third).unwrap();
+            let only_unrelated = workspaces()
+                .into_iter()
+                .find(|workspace| workspace.name != name)
+                .unwrap();
+            assert!(
+                !only_unrelated.holds_repository_of(&first, mine.as_deref()),
+                "a workspace of another repository is not this one"
+            );
+            assert!(!only_unrelated.may_move_into(&first, mine.as_deref()));
+
+            assert_eq!(root_commit(&empty), None);
+            assert!(!summary.holds_repository_of(&empty, None));
+            assert!(
+                !summary.may_move_into(&empty, None),
+                "a checkout with no root commit cannot move into a workspace that records one"
+            );
+        });
         let _ = std::fs::remove_dir_all(&parent);
     }
 
@@ -4919,7 +4858,7 @@ mod tests {
             said.contains("project.toml"),
             "names the record file: {said}"
         );
-        assert!(said.contains("--new-id"), "{said}");
+        assert!(said.contains("delete"), "{said}");
     }
 
     /// Criterion 2: a home recording a checkout that is gone updates the
@@ -4951,10 +4890,10 @@ mod tests {
 
     /// Criterion 2, the other of its two causes: a home recording a
     /// checkout that still physically exists, but whose own stamp has
-    /// since changed to something else — re-stamped by hand, or by
-    /// `--new-id` — moves to this one exactly as a gone checkout does. Not
-    /// reachable through `rename` the way the first cause is, so this
-    /// writes the disagreeing files directly.
+    /// since changed to something else — re-stamped by hand — moves to
+    /// this one exactly as a gone checkout does. Not reachable through
+    /// `rename` the way the first cause is, so this writes the disagreeing
+    /// files directly.
     #[test]
     fn bind_criterion_2_the_other_cause_a_checkout_that_no_longer_carries_the_id_moves_to_this_one()
     {
@@ -4975,8 +4914,8 @@ mod tests {
         crate::scratch::git_init(&new_checkout, &["-b", "plan/demo"]);
 
         crate::platform::test_home::with_home(&home, || {
-            stamp_over(&old_checkout, "aaaaaa", None).unwrap();
-            stamp_over(&new_checkout, "bbbbbb", None).unwrap();
+            stamp_over(&old_checkout, "aaaaaa").unwrap();
+            stamp_over(&new_checkout, "bbbbbb").unwrap();
             let home_dir = crate::mux::project_home(&new_checkout).unwrap();
             write_binding(
                 &home_dir,
@@ -5021,7 +4960,7 @@ mod tests {
         .expect_err("two real checkouts must not both bind to the one home");
         let said = format!("{err:#}");
         assert!(said.contains("two checkouts carry the id"), "{said}");
-        assert!(said.contains("--new-id"), "{said}");
+        assert!(said.contains("delete"), "{said}");
     }
 
     /// A real failure reading the recorded checkout's own stamp — a
@@ -5078,7 +5017,7 @@ mod tests {
 
     /// Criterion 4: a valid stamp, but no home recording it at all — the
     /// home was deleted, or nothing ever bound this checkout to it — must
-    /// refuse, naming both files and the two commands that resolve it.
+    /// refuse, naming both files and how to resolve it by hand.
     #[test]
     fn bind_criterion_4_a_valid_stamp_with_no_home_refuses() {
         let work = bind_fixture("criterion-4");
@@ -5097,10 +5036,8 @@ mod tests {
             said.contains("project.toml"),
             "names the record file: {said}"
         );
-        assert!(
-            said.contains("--adopt") && said.contains("--new-id"),
-            "{said}"
-        );
+        assert!(said.contains("edit that home's own project.toml"), "{said}");
+        assert!(said.contains("delete"), "{said}");
     }
 
     /// Criterion 5: a stamp that is not six lowercase base36 characters
@@ -5119,7 +5056,7 @@ mod tests {
             said.contains("not six lowercase letters and digits"),
             "{said}"
         );
-        assert!(said.contains("--new-id"), "{said}");
+        assert!(said.contains("delete"), "{said}");
     }
 
     /// Criterion 6: no stamp, but some home already records this exact
@@ -5142,7 +5079,7 @@ mod tests {
             said.contains("project.toml"),
             "names the record file: {said}"
         );
-        assert!(said.contains("--adopt"), "{said}");
+        assert!(said.contains("restore the stamp"), "{said}");
     }
 
     /// Criterion 7: no stamp, and nothing records this checkout anywhere —
@@ -5158,6 +5095,95 @@ mod tests {
             .expect("nothing recorded anywhere binds itself and proceeds");
         assert!(bound.join(BINDING_FILE).is_file());
         assert!(work.join(".git").join("spoolway-id").is_file());
+    }
+
+    /// `all_workspaces` bails outright on the first workspace `project.toml`
+    /// it cannot parse, and `bind` asks it before checking whether `root` is
+    /// even listed anywhere — so one unrelated workspace file broken by a
+    /// typo stops every checkout on the machine from binding, this one
+    /// included, though nothing about it names the broken workspace at all.
+    /// Wanted instead: a checkout nothing points to binds itself exactly as
+    /// criterion 7 does, and the broken file becomes one note elsewhere, not
+    /// a hard stop here.
+    #[test]
+    fn bind_skips_an_unreadable_workspace_file_for_a_checkout_it_does_not_list() {
+        let work = bind_fixture("skips-unreadable");
+        let (home, _home_guard) = scratch_home("skips-unreadable");
+        let broken = home.join(".spoolway").join("a-1x");
+        std::fs::create_dir_all(broken.join("config")).unwrap();
+        std::fs::write(broken.join(BINDING_FILE), "clones = [\n").unwrap();
+
+        let bound = crate::platform::test_home::with_home(&home, || bind(&work));
+        assert!(
+            bound.is_ok(),
+            "a checkout listed nowhere must not be stopped by an unrelated \
+             workspace's unreadable project.toml: {:?}",
+            bound.err()
+        );
+    }
+
+    /// The other half of the same fix: a checkout that really is in no
+    /// *readable* workspace must still refuse while any workspace file is
+    /// unreadable, rather than quietly binding itself the way criterion 7
+    /// does — the broken file might be exactly the one that would have
+    /// named it, so answering "nothing lists this" here would be a guess.
+    /// `Repo::root`'s own last-resort scan is what must say so, never the
+    /// generic "no spoolway project found … run `spoolway init`", which
+    /// would convert a checkout that might be a listed clone to repo mode.
+    #[test]
+    fn root_refuses_a_checkout_found_in_no_readable_workspace_while_one_is_unreadable() {
+        let work = bind_fixture("root-refuses-unreadable");
+        let (home, _home_guard) = scratch_home("root-refuses-unreadable");
+        let broken = home.join(".spoolway").join("a-1x");
+        std::fs::create_dir_all(broken.join("config")).unwrap();
+        std::fs::write(broken.join(BINDING_FILE), "clones = [\n").unwrap();
+
+        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&work))
+            .expect_err("a checkout that might be listed in the broken file must refuse");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains(&broken.join(BINDING_FILE).display().to_string()),
+            "names the unreadable file: {err}"
+        );
+        assert!(
+            !err.contains("no spoolway project found"),
+            "must not fall through to the generic not-found message, which tells the person to \
+             run `spoolway init` and so converts this checkout to repo mode: {err}",
+        );
+    }
+
+    /// A clone a readable workspace still lists, but whose shared `config/`
+    /// has been lost, must refuse naming the missing folder — not the
+    /// generic "no spoolway project found", which `spoolway init --yes`
+    /// would answer by writing a fresh default config into the very folder
+    /// every other clone of that workspace already shares.
+    #[test]
+    fn root_refuses_a_listed_clone_whose_workspace_has_no_config() {
+        let work = bind_fixture("listed-no-config");
+        let canon = work.canonical().unwrap();
+        let (home, _home_guard) = workspace_fixture("listed-no-config", &canon, "api");
+        std::fs::remove_dir_all(
+            home.join(".spoolway")
+                .join("listed-no-config-ws")
+                .join("config"),
+        )
+        .unwrap();
+
+        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&work))
+            .expect_err("a listed clone with no shared config/ must refuse");
+        let err = format!("{err:#}");
+        let missing = home
+            .join(".spoolway")
+            .join("listed-no-config-ws")
+            .join("config");
+        assert!(
+            err.contains(&missing.display().to_string()),
+            "names the missing config/ folder: {err}"
+        );
+        assert!(
+            !err.contains("no spoolway project found"),
+            "must not read as an unconfigured checkout: {err}",
+        );
     }
 
     /// A 0.2 home for `work`: `~/.spoolway/<basename>/project.toml`
@@ -5457,8 +5483,7 @@ mod tests {
             said.contains("already holds a 0.2 home for a different checkout"),
             "{said}"
         );
-        assert!(said.contains("--adopt"), "{said}");
-        assert!(said.contains("--new-id"), "{said}");
+        assert!(said.contains("edit its project.toml by hand"), "{said}");
         assert!(
             !work.join(".git").join("spoolway-id").is_file(),
             "refused rather than silently minting a fresh home instead"
@@ -5471,8 +5496,10 @@ mod tests {
     /// unreachable from the new one — nothing on disk still links the two
     /// — so `bind` binds the checkout fresh, exactly as it would if no
     /// legacy home existed anywhere, and the old one is left for a person
-    /// to `spoolway init --adopt` themselves. See `legacy_home_for`'s own
-    /// doc for why this is undetectable rather than merely unhandled.
+    /// to settle by hand afterwards. See `legacy_home_for`'s own doc for
+    /// why this is undetectable rather than merely unhandled, and for the
+    /// full recovery recipe — this fresh bind is exactly the complication
+    /// that recipe has to undo first.
     ///
     /// Binding fresh here is the decided behaviour, not a gap. This is
     /// the same `bind_unstamped` Criterion 7 fallback every genuinely new
@@ -5483,17 +5510,6 @@ mod tests {
     /// machine that still has an orphaned 0.2 home lying around anywhere
     /// (which breaks `binding-record`'s own accepted Criterion 7, and the
     /// fresh-`init` output `tests/init_output.rs` pins line for line).
-    ///
-    /// What the non-goal actually requires is that `spoolway init --adopt`
-    /// be the answer, and it now genuinely is one: `adopt` carries a
-    /// legacy home onto a renamed checkout by hand — see
-    /// `adopt_carries_a_legacy_home_onto_a_checkout_renamed_since_0_2`,
-    /// which walks this exact rename through to recovery. Before that it
-    /// did not work at all on a 0.2 home, which is what made this look
-    /// like an unresolvable contradiction rather than a missing feature:
-    /// every refusal in this area named a remedy that failed with a raw
-    /// TOML "missing field `id`". `docs/installation.md`'s upgrade note
-    /// tells a person coming from 0.2 to run it.
     #[test]
     fn bind_mints_a_fresh_home_when_this_checkouts_own_basename_has_changed_since_0_2() {
         let base = crate::scratch::root("bind-legacy-renamed-basename");
@@ -5527,551 +5543,6 @@ mod tests {
             legacy_before.is_dir(),
             "the old, now-unreachable legacy home is untouched, not deleted"
         );
-    }
-
-    /// `spoolway init --adopt <name>` is the answer the
-    /// `migrate-legacy-home` non-goal names for a checkout renamed under
-    /// 0.2, and every refusal in this area names it too — so it has to
-    /// work on the shape it is pointed at. It did not: a 0.2
-    /// `project.toml` carries a `root` and no `id`, and `read_binding`
-    /// treats a missing `id` as a hard parse error, so `--adopt` on a
-    /// legacy home failed with a raw TOML "missing field `id`" instead of
-    /// adopting anything.
-    ///
-    /// The full non-goal route, end to end: a 0.2 checkout at `api` is
-    /// renamed to `billing`, `bind` can no longer find its old home (the
-    /// test above proves that, and proves it binds fresh), and the person
-    /// who still remembers the old name recovers it by hand with the
-    /// command the refusals told them to run.
-    #[test]
-    fn adopt_carries_a_legacy_home_onto_a_checkout_renamed_since_0_2() {
-        let base = crate::scratch::root("adopt-legacy-renamed");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let before = base.join("api");
-        std::fs::create_dir_all(&before).unwrap();
-        crate::scratch::git_init(&before, &["-b", "plan/demo"]);
-        let (home, _home_guard) = scratch_home("adopt-legacy-renamed");
-
-        let legacy = crate::platform::test_home::with_home(&home, || {
-            let legacy = legacy_home_fixture(&before);
-            std::fs::create_dir_all(legacy.join("queue")).unwrap();
-            std::fs::write(legacy.join("queue").join("t-1.md"), "task\n").unwrap();
-            legacy
-        });
-        let name = legacy.file_name().unwrap().to_string_lossy().into_owned();
-
-        // The rename `bind` can never see through.
-        let after = base.join("billing");
-        std::fs::rename(&before, &after).unwrap();
-
-        let adopted = crate::platform::test_home::with_home(&home, || adopt(&after, &name))
-            .expect("a person naming the old home by hand is the documented way back to it");
-
-        assert!(
-            adopted
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("billing-"),
-            "the adopted home follows the checkout's current name, not the old one: {adopted:?}"
-        );
-        assert!(
-            adopted.join("queue").join("t-1.md").is_file(),
-            "the 0.2 queue this whole feature exists to rescue came across"
-        );
-        assert!(!legacy.exists(), "nothing is left behind at the old path");
-        assert!(after.join(".git").join("spoolway-id").is_file());
-
-        // And the very next ordinary command lands back on it by itself,
-        // with no second adoption — the stamp `migrate_legacy_home` wrote
-        // is what makes the recovery stick.
-        let bound = crate::platform::test_home::with_home(&home, || bind(&after))
-            .expect("the adopted home resolves on the next ordinary command");
-        assert_eq!(bound, adopted);
-    }
-
-    /// Adopting a legacy home is the migration, asked for by hand — so it
-    /// carries the migration's own refusals with it rather than becoming a
-    /// way around them. A live dispatcher over the legacy home blocks
-    /// `--adopt` exactly as it blocks the automatic route, and leaves the
-    /// old home untouched to retry against.
-    #[test]
-    fn adopt_refuses_a_legacy_home_a_dispatcher_is_still_running_over() {
-        let work = bind_fixture("adopt-legacy-live");
-        let (home, _home_guard) = scratch_home("adopt-legacy-live");
-        let legacy = crate::platform::test_home::with_home(&home, || legacy_home_fixture(&work));
-        let name = legacy.file_name().unwrap().to_string_lossy().into_owned();
-
-        let lock = crate::lock::Lock::acquire(&legacy.join(crate::lock::LOCK_FILE), false, None)
-            .expect("a dispatcher's own lock over the legacy home");
-
-        let err = crate::platform::test_home::with_home(&home, || adopt(&work, &name))
-            .expect_err("adopting must not pull a home out from under a live dispatcher");
-        let said = format!("{err:#}");
-        assert!(said.contains("cannot move while work is live"), "{said}");
-        assert!(
-            said.contains(&legacy.display().to_string()),
-            "names the old path in full: {said}"
-        );
-        assert!(legacy.join(BINDING_FILE).is_file(), "untouched");
-
-        drop(lock);
-        let adopted = crate::platform::test_home::with_home(&home, || adopt(&work, &name))
-            .expect("the same command succeeds once the dispatch has finished");
-        assert!(!legacy.exists());
-        assert!(adopted.join(BINDING_FILE).is_file());
-    }
-
-    /// `spoolway init --adopt <workspace>/<dispatcher>`: a clone whose
-    /// folder moved is re-attached by rewriting its entry's `root` in the
-    /// workspace's own `project.toml` — the dispatcher folder, and
-    /// everything under it, stays exactly as it was.
-    #[test]
-    fn adopt_workspace_clone_rewrites_the_entrys_root_and_keeps_its_dispatcher() {
-        let old = bind_fixture("adopt-ws-old");
-        let old_canon = old.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("adopt-ws-basic", &old_canon, "api");
-        let workspace = home.join(".spoolway").join("adopt-ws-basic-ws");
-        // A worktree already cut under the dispatcher folder — proof
-        // nothing here is deleted or recreated, only the clone entry.
-        let marker = workspace
-            .join("dispatchers")
-            .join("api")
-            .join("worktrees")
-            .join("task-x");
-        std::fs::create_dir_all(&marker).unwrap();
-
-        // The clone itself moved to a new path.
-        let new = crate::scratch::root("adopt-ws-new");
-        let _ = std::fs::remove_dir_all(&new);
-        std::fs::rename(&old, &new).unwrap();
-        let new_canon = new.canonical().unwrap();
-
-        let adopted = crate::platform::test_home::with_home(&home, || {
-            adopt(&new_canon, "adopt-ws-basic-ws/api")
-        })
-        .expect("re-attaching a moved clone by workspace/dispatcher");
-        assert_eq!(adopted, workspace.join("dispatchers").join("api"));
-        assert!(
-            marker.is_dir(),
-            "the dispatcher folder was kept, not rebuilt"
-        );
-
-        let raw = std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap();
-        let rewritten: WorkspaceToml = toml::from_str(&raw).unwrap();
-        assert_eq!(rewritten.clones[0].root, new_canon);
-        assert_eq!(rewritten.clones[0].dispatcher, "api");
-        assert_eq!(
-            rewritten.id, "adopt-ws-basic",
-            "the workspace's own id survives the rewrite"
-        );
-
-        assert!(
-            std::fs::read_to_string(new_canon.join(".git").join("spoolway-id")).is_err(),
-            "adopting a workspace clone must write nothing into .git"
-        );
-    }
-
-    /// A dispatcher name the workspace does not carry is refused, naming
-    /// the workspace's own `project.toml` and where its dispatcher folders
-    /// actually live — nothing is written.
-    #[test]
-    fn adopt_workspace_clone_refuses_a_dispatcher_the_workspace_does_not_name() {
-        let clone = bind_fixture("adopt-ws-unknown-dispatcher");
-        let canon = clone.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("adopt-ws-unknown", &canon, "api");
-        let before = std::fs::read_to_string(
-            home.join(".spoolway")
-                .join("adopt-ws-unknown-ws")
-                .join(BINDING_FILE),
-        )
-        .unwrap();
-
-        let err = crate::platform::test_home::with_home(&home, || {
-            adopt(&canon, "adopt-ws-unknown-ws/gone")
-        })
-        .expect_err("a dispatcher the workspace never named cannot be adopted");
-        let said = format!("{err:#}");
-        assert!(said.contains("names no clone with dispatcher"), "{said}");
-        assert!(said.contains("\"gone\""), "{said}");
-        assert_eq!(
-            std::fs::read_to_string(
-                home.join(".spoolway")
-                    .join("adopt-ws-unknown-ws")
-                    .join(BINDING_FILE)
-            )
-            .unwrap(),
-            before,
-            "a refused adopt must not touch the file"
-        );
-    }
-
-    /// A workspace name nothing under `~/.spoolway/` carries is refused by
-    /// name, naming the state root a person can `ls` to find the real one.
-    #[test]
-    fn adopt_workspace_clone_refuses_a_workspace_that_does_not_exist() {
-        let clone = bind_fixture("adopt-ws-no-such-workspace");
-        let canon = clone.canonical().unwrap();
-        let (home, _home_guard) = scratch_home("adopt-ws-no-such-workspace");
-
-        let err = crate::platform::test_home::with_home(&home, || adopt(&canon, "nope/api"))
-            .expect_err("a workspace name that does not exist cannot be adopted");
-        assert!(
-            format!("{err:#}").contains("no workspace named nope exists"),
-            "{err:#}"
-        );
-    }
-
-    /// `--adopt <workspace>` with no `/<dispatcher>` used to fall through to
-    /// the repo-mode routes below — `name` passes `is_bare_filename`, so it
-    /// read as an ordinary home name, and failed deep inside the
-    /// `<label>-<id>` split or the `Binding` TOML parse with an error about
-    /// neither a workspace nor a dispatcher. Named by name instead: the
-    /// workspace exists, and the fix is the dispatcher half, not a
-    /// different home.
-    #[test]
-    fn adopt_names_the_dispatcher_form_when_given_a_bare_workspace_name() {
-        // `canon` is deliberately not the workspace's own clone — adopting
-        // it onto itself would hit the earlier "already set up in home
-        // mode" refusal first, which is a different bug than this one.
-        let other = crate::scratch::root("adopt-bare-workspace-other");
-        let _ = std::fs::remove_dir_all(&other);
-        let clone = bind_fixture("adopt-bare-workspace");
-        let canon = clone.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("adopt-bare-workspace", &other, "api");
-
-        let err = crate::platform::test_home::with_home(&home, || {
-            adopt(&canon, "adopt-bare-workspace-ws")
-        })
-        .expect_err("a bare workspace name with no dispatcher cannot be adopted");
-        let said = format!("{err:#}");
-        assert!(said.contains("name the dispatcher too"), "{said}");
-        assert!(
-            said.contains("--adopt adopt-bare-workspace-ws/<dispatcher>"),
-            "{said}"
-        );
-        assert!(said.contains("api"), "{said}");
-        assert!(!said.contains("TOML"), "{said}");
-    }
-
-    /// Bug: `--adopt <workspace>/<dispatcher>` rewrites the entry's `root`
-    /// with no check that the clone it currently names is still there.
-    /// Clone `A` (`old`) is the live checkout using dispatcher `api`; clone
-    /// `B` (`new`) is a second, unrelated checkout still sitting on disk.
-    /// Adopting from `B` must be refused — `A` is still a working git
-    /// checkout, so pulling the dispatcher out from under it would cut `A`
-    /// off from its own queue and worktrees with no hint, and hand them to
-    /// `B` instead. The legitimate case — `old`'s folder actually gone — is
-    /// already covered by
-    /// `adopt_workspace_clone_rewrites_the_entrys_root_and_keeps_its_dispatcher`
-    /// and must keep working.
-    #[test]
-    fn adopt_workspace_clone_refuses_while_the_old_root_still_exists() {
-        let old = bind_fixture("adopt-ws-live-old");
-        let old_canon = old.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("adopt-ws-live", &old_canon, "api");
-        let workspace = home.join(".spoolway").join("adopt-ws-live-ws");
-        let before = std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap();
-
-        // A second, unrelated clone — still on disk, not `old` moved.
-        let new = bind_fixture("adopt-ws-live-new");
-        let new_canon = new.canonical().unwrap();
-
-        let err = crate::platform::test_home::with_home(&home, || {
-            adopt(&new_canon, "adopt-ws-live-ws/api")
-        })
-        .expect_err("adopting must not pull a dispatcher out from under a clone still there");
-        let said = format!("{err:#}");
-        assert!(
-            said.contains(&old_canon.display().to_string()),
-            "names the still-live old root: {said}"
-        );
-        assert!(old.exists(), "the old clone itself is untouched");
-        assert_eq!(
-            std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap(),
-            before,
-            "a refused adopt must not touch the workspace's project.toml"
-        );
-    }
-
-    /// Bug: a checkout already listed as `api-2` adopts `api-4` too, leaving
-    /// its root in `project.toml` twice. The rewrite would look like it
-    /// succeeded, and then every later command in that checkout would refuse
-    /// the duplicate listing until one is removed by hand.
-    #[test]
-    fn adopt_workspace_clone_refuses_a_checkout_already_listed_elsewhere() {
-        let listed = bind_fixture("adopt-ws-double-listed");
-        let listed_canon = listed.canonical().unwrap();
-        let (home, _home_guard) = scratch_home("adopt-ws-double");
-        let workspace = home.join(".spoolway").join("adopt-ws-double-ws");
-        std::fs::create_dir_all(workspace.join("config")).unwrap();
-        std::fs::write(workspace.join("config").join("config.toml"), "").unwrap();
-        // Two dispatchers in one workspace: `listed` already uses `api-2`.
-        // `api-4`'s own root is already gone — the legitimate `--adopt`
-        // target — but `listed` is not the checkout that moved there; it
-        // already has a dispatcher of its own.
-        let gone = crate::scratch::root("adopt-ws-double-gone");
-        let _ = std::fs::remove_dir_all(&gone);
-        std::fs::write(
-            workspace.join(BINDING_FILE),
-            format!(
-                "id = \"adopt-ws-double\"\nclones = [\
-                 {{ root = {:?}, dispatcher = \"api-2\" }}, \
-                 {{ root = {:?}, dispatcher = \"api-4\" }}]\n",
-                listed_canon.display(),
-                gone.display(),
-            ),
-        )
-        .unwrap();
-        let before = std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap();
-
-        let err = crate::platform::test_home::with_home(&home, || {
-            adopt(&listed_canon, "adopt-ws-double-ws/api-4")
-        })
-        .expect_err("a checkout already listed under another dispatcher cannot be adopted again");
-        let said = format!("{err:#}");
-        assert!(said.contains("already listed"), "{said}");
-        assert!(
-            said.contains("api-2"),
-            "names the dispatcher it already uses: {said}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap(),
-            before,
-            "a refused adopt must not touch the workspace's project.toml"
-        );
-    }
-
-    /// Bug: `--adopt <workspace>/<dispatcher>` onto a checkout with a
-    /// tracked `.spoolway/` succeeds, leaving it claimed by both a
-    /// repo-mode setup and a workspace clone at once — every later command
-    /// then refuses, finding both.
-    #[test]
-    fn adopt_workspace_clone_refuses_a_checkout_with_a_tracked_dot_spoolway() {
-        let old = bind_fixture("adopt-ws-tracked-old");
-        let old_canon = old.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("adopt-ws-tracked", &old_canon, "api");
-        let workspace = home.join(".spoolway").join("adopt-ws-tracked-ws");
-        // The entry's own root is gone — otherwise the liveness refusal
-        // above would fire first and this check would never be reached.
-        std::fs::remove_dir_all(&old).unwrap();
-        let before = std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap();
-
-        let tracked = bind_fixture("adopt-ws-tracked-new");
-        let tracked_canon = tracked.canonical().unwrap();
-        std::fs::create_dir_all(tracked_canon.join(".spoolway")).unwrap();
-
-        let err = crate::platform::test_home::with_home(&home, || {
-            adopt(&tracked_canon, "adopt-ws-tracked-ws/api")
-        })
-        .expect_err("a checkout with a tracked .spoolway/ cannot be adopted into a workspace");
-        let said = format!("{err:#}");
-        assert!(said.contains("tracked"), "{said}");
-        assert!(
-            said.contains(&tracked_canon.display().to_string()),
-            "{said}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.join(BINDING_FILE)).unwrap(),
-            before,
-            "a refused adopt must not touch the workspace's project.toml"
-        );
-    }
-
-    /// Acceptance criterion 3: the entry's own root being gone is the case
-    /// `--adopt` exists for, but gone on its own is not proof `root` is the
-    /// clone that actually moved there — an unrelated repository pointed at
-    /// the wrong dispatcher by mistake passes the liveness, listed-elsewhere
-    /// and tracked-`.spoolway/` checks just as cleanly. The entry's own
-    /// recorded root commit is the one thing left to tell them apart.
-    #[test]
-    fn adopt_workspace_clone_refuses_a_different_repository_once_the_old_root_is_gone() {
-        let old = bind_fixture("adopt-ws-diffrepo-old");
-        let old_canon = old.canonical().unwrap();
-        git(
-            &old_canon,
-            &["commit", "--allow-empty", "-q", "-m", "old root"],
-        );
-        let (home_dir, _home_guard) = scratch_home("adopt-ws-diffrepo");
-        // `create_workspace`, not `workspace_fixture`: only a real write
-        // through `create_workspace`/`join_workspace` records a root
-        // commit, which is the one thing this test needs the entry to
-        // carry.
-        let clone = crate::platform::test_home::with_home(&home_dir, || {
-            create_workspace(&old_canon).unwrap()
-        });
-        let before = std::fs::read_to_string(clone.workspace.join(BINDING_FILE)).unwrap();
-        std::fs::remove_dir_all(&old).unwrap();
-
-        // A wholly unrelated repository, with its own unrelated history.
-        let other = bind_fixture("adopt-ws-diffrepo-other");
-        let other_canon = other.canonical().unwrap();
-        git(
-            &other_canon,
-            &["commit", "--allow-empty", "-q", "-m", "other root"],
-        );
-        let name = format!(
-            "{}/{}",
-            clone.workspace.file_name().unwrap().to_string_lossy(),
-            clone.dispatcher,
-        );
-
-        let err = crate::platform::test_home::with_home(&home_dir, || adopt(&other_canon, &name))
-            .expect_err(
-                "an unrelated repository must not be adopted onto a gone clone's dispatcher",
-            );
-        let said = format!("{err:#}");
-        assert!(said.contains("different repository"), "{said}");
-        assert_eq!(
-            std::fs::read_to_string(clone.workspace.join(BINDING_FILE)).unwrap(),
-            before,
-            "a refused adopt must not touch the workspace's project.toml"
-        );
-    }
-
-    /// Review finding: a shallow re-clone (`git clone --depth 1`) of the
-    /// very same repository reports its own fetch boundary as `root_commit`
-    /// rather than the real root commit the entry was recorded with, so
-    /// comparing those for equality would refuse the legitimate re-clone
-    /// this task's own non-goal says must keep working.
-    /// `root_commit` returns `None` for a shallow clone instead, so the
-    /// different-repository check is skipped, not failed.
-    #[test]
-    fn adopt_workspace_clone_accepts_a_shallow_reclone_once_the_old_root_is_gone() {
-        let old = bind_fixture("adopt-ws-shallow-old");
-        let old_canon = old.canonical().unwrap();
-        git(&old_canon, &["commit", "--allow-empty", "-q", "-m", "root"]);
-        let (home_dir, _home_guard) = scratch_home("adopt-ws-shallow");
-        let clone = crate::platform::test_home::with_home(&home_dir, || {
-            create_workspace(&old_canon).unwrap()
-        });
-        let name = format!(
-            "{}/{}",
-            clone.workspace.file_name().unwrap().to_string_lossy(),
-            clone.dispatcher,
-        );
-
-        // A shallow re-clone of the exact same repository — same content,
-        // but its own commit history is truncated at the clone boundary.
-        let shallow = crate::scratch::root("adopt-ws-shallow-new");
-        let _ = std::fs::remove_dir_all(&shallow);
-        // `--no-local`: a plain local clone of a path ignores `--depth`
-        // outright (it hardlinks the whole object store instead), so a real
-        // shallow clone has to be forced past that shortcut.
-        run(
-            &old_canon,
-            "git",
-            &[
-                "clone",
-                "-q",
-                "--no-local",
-                "--depth",
-                "1",
-                ".",
-                &shallow.display().to_string(),
-            ],
-        )
-        .unwrap();
-        let shallow_canon = shallow.canonical().unwrap();
-        assert!(
-            root_commit(&shallow_canon).is_none(),
-            "a shallow clone must carry no fingerprint to compare"
-        );
-        std::fs::remove_dir_all(&old).unwrap();
-
-        let adopted =
-            crate::platform::test_home::with_home(&home_dir, || adopt(&shallow_canon, &name))
-                .expect("a shallow re-clone of the same repository must still be adoptable");
-        assert_eq!(
-            adopted,
-            clone.workspace.join("dispatchers").join(&clone.dispatcher)
-        );
-    }
-
-    /// Acceptance criterion 4: `--new-id` on a checkout a workspace already
-    /// lists must not stamp a repo-mode id into its `.git` — that would
-    /// claim the checkout a second way, and on a checkout some other
-    /// project's home already records by that id, would break that project
-    /// (`two checkouts carry the id`).
-    #[test]
-    fn restamp_refuses_a_checkout_a_workspace_already_lists() {
-        let work = bind_fixture("restamp-listed");
-        let canon = work.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("restamp-listed", &canon, "api");
-
-        let err = crate::platform::test_home::with_home(&home, || restamp(&canon))
-            .expect_err("--new-id must refuse a checkout a workspace already lists");
-        assert!(
-            format!("{err:#}").contains("already set up in home mode"),
-            "{err:#}"
-        );
-        assert!(
-            std::fs::read_to_string(canon.join(".git").join("spoolway-id")).is_err(),
-            "--new-id must write nothing into .git once refused"
-        );
-    }
-
-    /// Acceptance criterion 4's other flag: `--adopt <repo-home>` on a
-    /// checkout a workspace already lists is refused the same way, before
-    /// the plain-name home lookup even runs.
-    #[test]
-    fn adopt_refuses_a_repo_home_name_on_a_checkout_a_workspace_already_lists() {
-        let work = bind_fixture("adopt-repo-home-listed");
-        let canon = work.canonical().unwrap();
-        let (home, _home_guard) = workspace_fixture("adopt-repo-home-listed", &canon, "api");
-
-        let err =
-            crate::platform::test_home::with_home(&home, || adopt(&canon, "some-home-8w4r2c"))
-                .expect_err("--adopt <repo-home> must refuse a checkout a workspace already lists");
-        assert!(
-            format!("{err:#}").contains("already set up in home mode"),
-            "{err:#}"
-        );
-        assert!(
-            std::fs::read_to_string(canon.join(".git").join("spoolway-id")).is_err(),
-            "a refused --adopt must write nothing into .git"
-        );
-    }
-
-    /// Acceptance criterion 4: `--new-id` behaves exactly as before this
-    /// task on a repo-mode checkout no workspace lists.
-    #[test]
-    fn restamp_is_unchanged_for_a_checkout_no_workspace_lists() {
-        let work = bind_fixture("restamp-unlisted");
-        let canon = work.canonical().unwrap();
-        let (home, _home_guard) = scratch_home("restamp-unlisted");
-
-        let bound = crate::platform::test_home::with_home(&home, || restamp(&canon))
-            .expect("--new-id on an unlisted checkout still works");
-        assert!(bound.join(BINDING_FILE).is_file());
-        assert!(canon.join(".git").join("spoolway-id").is_file());
-    }
-
-    /// Acceptance criterion 4: `--adopt <repo-home>` behaves exactly as
-    /// before this task on a repo-mode checkout no workspace lists —
-    /// including adopting a home whose own old checkout is gone, the case
-    /// [`adopt`]'s own `<label>-<id>` route exists for and this task's own
-    /// non-goal says not to change.
-    #[test]
-    fn repo_home_adopt_is_unchanged_for_a_checkout_no_workspace_lists() {
-        let work = bind_fixture("adopt-repo-home-unlisted");
-        let canon = work.canonical().unwrap();
-        let (home, _home_guard) = scratch_home("adopt-repo-home-unlisted");
-        let bound = crate::platform::test_home::with_home(&home, || restamp(&canon))
-            .expect("minting a fresh home to adopt back onto");
-        let name = bound.file_name().unwrap().to_string_lossy().into_owned();
-
-        // The old checkout is gone — the case `--adopt <repo-home>` exists
-        // for. A different checkout adopts the home in its place.
-        std::fs::remove_dir_all(&work).unwrap();
-        let moved = bind_fixture("adopt-repo-home-unlisted-moved");
-        let moved_canon = moved.canonical().unwrap();
-
-        let adopted = crate::platform::test_home::with_home(&home, || adopt(&moved_canon, &name))
-            .expect("--adopt <repo-home> whose old checkout is gone still works");
-        assert_eq!(adopted, bound);
-        assert!(moved_canon.join(".git").join("spoolway-id").is_file());
     }
 
     /// Acceptance criterion 4: a clone that already has a home settled
@@ -6746,9 +6217,9 @@ mod tests {
 
     /// Acceptance criterion 6, repo-mode case: the same mixed `~/.spoolway/`
     /// must not trip up a checkout that is itself in repo mode either —
-    /// `bind` now runs the strict scan ([`workspace_clone_checked`]) for
-    /// every ordinary command, home mode or not, so a repo-mode project is
-    /// exactly as exposed to a stray 0.6.0 sibling as a home-mode one.
+    /// `bind` scans every workspace under `~/.spoolway/` for every ordinary
+    /// command, home mode or not, so a repo-mode project is exactly as
+    /// exposed to a stray 0.6.0 sibling as a home-mode one.
     #[test]
     fn a_mixed_home_from_older_installs_does_not_affect_a_repo_mode_project() {
         let (_origin, work, _base_guard) = fixture("repo-mode-mixed");
@@ -6890,10 +6361,10 @@ mod tests {
     }
 
     /// Acceptance criterion 4, the UTF-8 half: `create_workspace`,
-    /// `join_workspace` and `adopt_workspace_clone` all refuse a `root` with
-    /// bytes that are not valid UTF-8 rather than let it reach
-    /// `write_workspace`, where it could only be recorded lossily (or fail
-    /// with `toml`'s own, less specific, serialization error).
+    /// `join_workspace` and `move_clone` all refuse a `root` with bytes that
+    /// are not valid UTF-8 rather than let it reach `write_workspace`, where
+    /// it could only be recorded lossily (or fail with `toml`'s own, less
+    /// specific, serialization error).
     #[cfg(unix)]
     #[test]
     fn a_clone_path_that_is_not_valid_utf8_is_refused_rather_than_stored_lossily() {
@@ -6912,7 +6383,7 @@ mod tests {
                 join_workspace(&root, "whatever")
                     .err()
                     .map(|e| e.to_string()),
-                adopt_workspace_clone(&root, "whatever", "whatever")
+                move_clone(&root, "whatever", None)
                     .err()
                     .map(|e| e.to_string()),
             ];
@@ -7018,25 +6489,94 @@ mod tests {
     }
 
     /// Nothing here names the checkout being asked about, but a workspace
-    /// elsewhere lists a clone whose folder is gone — the "no spoolway
-    /// project found" error names it, with the exact, shell-quoted `--adopt`
-    /// line that re-attaches it, and the old path that clone used to be at.
+    /// elsewhere lists a clone whose folder is gone, and the checkout being
+    /// asked about shares that clone's root commit — exactly the case
+    /// [`join_workspace`] would take its queue over for. The "no spoolway
+    /// project found" error names that workspace, with the exact,
+    /// shell-quoted `init --workspace` line that takes it over, and the old
+    /// path that clone used to be at.
     #[test]
-    fn no_project_found_lists_a_stale_clone_with_its_adopt_line() {
+    fn no_project_found_lists_a_stale_clone_with_its_workspace_line() {
         let missing = crate::scratch::root("home-mode-stale-gone");
-        let (home, _home_guard) = workspace_fixture("home-mode-stale", &missing, "api");
+        std::fs::create_dir_all(&missing).unwrap();
+        crate::scratch::git_init(&missing, &["-b", "main"]);
+        run(
+            &missing,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "root"],
+        )
+        .unwrap();
+        let commit = root_commit(&missing).expect("a real commit has a root commit");
+
+        // A clone of the same repository, taken before `missing` is removed
+        // — the checkout that replaces it, sharing its root commit.
         let elsewhere = crate::scratch::root("home-mode-stale-elsewhere");
         let _ = std::fs::remove_dir_all(&elsewhere);
-        std::fs::create_dir_all(&elsewhere).unwrap();
+        run(
+            missing.parent().unwrap(),
+            "git",
+            &[
+                "clone",
+                "-q",
+                missing.to_str().unwrap(),
+                elsewhere.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        std::fs::remove_dir_all(&missing).unwrap();
+
+        let (home, _home_guard) = scratch_home("home-mode-stale");
+        let workspace = home.join(".spoolway").join("home-mode-stale-ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(workspace.join("config").join("config.toml"), "").unwrap();
+        std::fs::write(
+            workspace.join(BINDING_FILE),
+            format!(
+                "id = \"home-mode-stale\"\nclones = [{{ root = {:?}, dispatcher = \"api\", \
+                 root_commit = {commit:?} }}]\n",
+                missing.display(),
+            ),
+        )
+        .unwrap();
 
         let err = crate::platform::test_home::with_home(&home, || Repo::discover(&elsewhere))
-            .expect_err("an unrelated directory is still not a project");
+            .expect_err("the clone of the same repository is still not a project itself");
         let said = format!("{err:#}");
         assert!(
-            said.contains("spoolway init --adopt 'home-mode-stale-ws/api'"),
+            said.contains("spoolway init --workspace 'home-mode-stale-ws'"),
             "{said}"
         );
         assert!(said.contains(&missing.display().to_string()), "{said}");
+    }
+
+    /// The same hint, withheld: a workspace's gone entry recorded no root
+    /// commit at all (an entry a version before that field existed wrote,
+    /// or one for a `root` that never had any commits), so nothing proves
+    /// the checkout asking is the clone that moved — `join_workspace` would
+    /// never take this over either, so the hint must not promise it would.
+    #[test]
+    fn no_project_found_omits_a_stale_clone_with_no_root_commit_to_match() {
+        let missing = crate::scratch::root("home-mode-stale-no-commit-gone");
+        let (home, _home_guard) = workspace_fixture("home-mode-stale-no-commit", &missing, "api");
+        let elsewhere = crate::scratch::root("home-mode-stale-no-commit-elsewhere");
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        crate::scratch::git_init(&elsewhere, &["-b", "main"]);
+        run(
+            &elsewhere,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "root"],
+        )
+        .unwrap();
+
+        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&elsewhere))
+            .expect_err("an unlisted checkout is still not a project");
+        let said = format!("{err:#}");
+        assert!(
+            !said.contains("--workspace"),
+            "no entry here can be taken over, so no line should offer to: {said}"
+        );
     }
 
     /// Six clones joining one workspace at once must all end up listed:
@@ -7116,10 +6656,10 @@ mod tests {
     }
 
     /// `WorkspaceLock::acquire` no longer `mkdir -p`s its lock file's
-    /// parent, and both `join_workspace` and `adopt_workspace_clone` check
-    /// a workspace exists before ever reaching it — so naming a workspace
-    /// that was never created leaves nothing under `~/.spoolway/`, not even
-    /// the folder the lock file would have sat in.
+    /// parent, and both `join_workspace` and `move_clone` check a workspace
+    /// exists before ever reaching it — so naming a workspace that was
+    /// never created leaves nothing under `~/.spoolway/`, not even the
+    /// folder the lock file would have sat in.
     #[test]
     fn joining_a_workspace_that_does_not_exist_creates_no_folder() {
         let (home, _home_guard) = scratch_home("join-missing-workspace");
@@ -7237,9 +6777,9 @@ mod tests {
         (root, base)
     }
 
-    /// `spoolway workspace move`'s whole point: a clone moves to another
-    /// workspace, its dispatcher folder — and whatever is in it — moving
-    /// with it, and the workspace it came from no longer listing it.
+    /// `move_clone`'s whole point: a clone moves to another workspace, its
+    /// dispatcher folder — and whatever is in it — moving with it, and the
+    /// workspace it came from no longer listing it.
     #[test]
     fn move_clone_moves_the_clone_and_its_dispatcher_folder() {
         let (home, _home_guard) = scratch_home("move-basic");

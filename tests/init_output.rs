@@ -750,9 +750,9 @@ fn a_moved_checkout_prints_exactly_one_line_when_the_old_one_is_gone() {
 }
 
 /// The same criterion's other cause: a home's recorded checkout still
-/// exists, but its own stamp has since moved on (`--new-id`, or a hand
-/// edit) — a stale copy taken before that still carries the old id prints
-/// the same one line, not two.
+/// exists, but its own stamp has since moved on (a hand edit, or a hand
+/// edit racing a crashed migration) — a stale copy taken before that still
+/// carries the old id prints the same one line, not two.
 #[test]
 fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
     let project = Project::new("moved-restamped");
@@ -763,21 +763,31 @@ fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
         .expect("read the original stamp")
         .trim()
         .to_string();
+    let label = std::fs::read_to_string(root.join(".git/spoolway-label"))
+        .expect("read the original label")
+        .trim()
+        .to_string();
 
-    // The original checkout mints itself a fresh id — the home keyed on
+    // The original checkout's stamp moves on by hand — the home keyed on
     // `old_id` is now stale, though the checkout on record for it still
-    // exists right where it was.
-    let restamp = Command::new(env!("CARGO_BIN_EXE_spoolway"))
-        .args(["init", "--yes", "--new-id"])
-        .current_dir(&root)
-        .env("HOME", &home)
-        .output()
-        .expect("run spoolway");
-    assert!(
-        restamp.status.success(),
-        "spoolway failed: {}",
-        String::from_utf8_lossy(&restamp.stderr)
-    );
+    // exists right where it was. A fresh home, keyed on the new id, is
+    // written right alongside it: this is exactly what `spoolway init`
+    // itself wrote the one time this checkout's id was first minted, just
+    // done again by hand rather than by a command.
+    let new_id = if old_id == "zzzzzz" {
+        "yyyyyy"
+    } else {
+        "zzzzzz"
+    };
+    let new_home = home.join(".spoolway").join(format!("{label}-{new_id}"));
+    std::fs::create_dir_all(&new_home).expect("create the fresh home");
+    std::fs::write(
+        new_home.join("project.toml"),
+        format!("id = {new_id:?}\nroot = {root:?}\n"),
+    )
+    .expect("write the fresh home's binding");
+    std::fs::write(root.join(".git/spoolway-id"), format!("{new_id}\n"))
+        .expect("re-stamp the checkout by hand");
 
     // A second checkout — a full copy of the first, taken before the
     // restamp — still carries `old_id`.
@@ -1234,4 +1244,73 @@ fn init_with_no_terminal_and_no_yes_says_nothing_was_written() {
             && (line.contains("nothing") || line.contains("wrote nothing"))),
         "expected a line saying nothing was written and naming --yes, got:\n{out}"
     );
+}
+
+/// A workspace `project.toml` elsewhere on the machine, broken by a typo —
+/// a `config/` folder beside it (so `all_workspaces` treats it as a real
+/// workspace rather than skipping it silently) and unparseable TOML inside
+/// it. Written directly under `project`'s own `HOME`, same as every other
+/// workspace fixture in this file, so it sits beside — never inside — the
+/// repo-mode project the test itself runs commands against.
+fn write_broken_workspace_file(project: &Project) -> PathBuf {
+    let broken = project.as_ref().join("home").join(".spoolway").join("a-1x");
+    std::fs::create_dir_all(broken.join("config")).unwrap();
+    std::fs::write(broken.join("project.toml"), "garbage = [\n").unwrap();
+    broken.join("project.toml")
+}
+
+/// Acceptance criterion 2: an unrelated project — repo mode here, listed in
+/// no workspace at all — prints exactly one note naming a broken workspace
+/// file elsewhere on the machine, then carries on to its own normal output.
+/// `bind` runs twice on an ordinary command (`main.rs`'s own update-check
+/// notice resolves the project leniently before the command arm resolves it
+/// again), so this is also the regression test for the note printing twice
+/// in one run.
+#[test]
+fn queue_list_in_an_unrelated_project_notes_a_broken_workspace_file_once() {
+    let project = Project::new("queue-list-broken-workspace");
+    project.init("claude");
+    let broken_file = write_broken_workspace_file(&project);
+
+    let result = project.run(&["queue", "list"]);
+    let out = stdout(&result);
+    let err = stderr(&result);
+
+    let note = format!("{} does not read as a workspace", broken_file.display());
+    assert_eq!(
+        err.matches(&note).count(),
+        1,
+        "expected exactly one note naming the broken file on stderr, got:\n{err}"
+    );
+    assert!(
+        !out.contains("does not read as a workspace"),
+        "the note belongs on stderr, not mixed into the command's own stdout:\n{out}"
+    );
+    assert!(
+        out.contains("No tasks queued."),
+        "the command's own normal output still follows the note:\n{out}"
+    );
+}
+
+/// The same broken-file note, with `--json`: the note still goes to stderr,
+/// once, and stdout is left as nothing but the parseable JSON `queue list
+/// --json` always prints — a machine reader of stdout alone never sees it.
+#[test]
+fn queue_list_json_in_an_unrelated_project_keeps_the_note_off_stdout() {
+    let project = Project::new("queue-list-broken-workspace-json");
+    project.init("claude");
+    let broken_file = write_broken_workspace_file(&project);
+
+    let result = project.run(&["queue", "list", "--json"]);
+    let out = stdout(&result);
+    let err = stderr(&result);
+
+    let note = format!("{} does not read as a workspace", broken_file.display());
+    assert_eq!(
+        err.matches(&note).count(),
+        1,
+        "expected exactly one note naming the broken file on stderr, got:\n{err}"
+    );
+    serde_json::from_str::<serde_json::Value>(&out)
+        .unwrap_or_else(|err| panic!("--json stdout must parse as JSON, got {err}:\n{out}"));
 }

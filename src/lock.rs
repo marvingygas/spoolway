@@ -343,25 +343,26 @@ impl Drop for LedgerLock {
 /// A short-lived advisory lock over one workspace's `project.toml`
 /// read-modify-write.
 ///
-/// [`crate::repo::join_workspace`] and `adopt_workspace_clone` both read the
-/// file, add or rewrite one clone entry in memory, and write the whole thing
-/// back. With nothing between them, two joins racing the same workspace both
-/// read the same list, each adds its own entry on top of it, and whichever
-/// write lands second throws the other's entry away — no error, just a
-/// clone missing from `project.toml` forever. This serialises the three.
+/// [`crate::repo::join_workspace`] and [`crate::repo::move_clone`] both read
+/// the file, add or rewrite one clone entry in memory, and write the whole
+/// thing back. With nothing between them, two joins racing the same
+/// workspace both read the same list, each adds its own entry on top of it,
+/// and whichever write lands second throws the other's entry away — no
+/// error, just a clone missing from `project.toml` forever. This
+/// serialises them all.
 ///
 /// The lock file sits inside the workspace's own directory, right beside
 /// `project.toml`, rather than in a folder of its own under `~/.spoolway/`.
 /// `acquire` never creates that parent itself — every caller checks the
 /// workspace is really there (its `project.toml` exists) before taking this
-/// lock, so a mistyped `--workspace` or `--adopt` name fails with nothing
+/// lock, so a mistyped `--workspace` name fails with nothing
 /// left behind, rather than an empty folder under `~/.spoolway/` for
 /// `all_workspaces` or any other walk of it to trip over.
 ///
 /// Same `link_into_place` + [`Lock::holder`] machinery as [`TaskLock`] and
 /// [`LedgerLock`], and a crashed holder's file is reaped the same way.
 /// Unlike those two, a live holder still in it past
-/// [`WorkspaceLock::WAIT`] fails the whole join or adopt rather than
+/// [`WorkspaceLock::WAIT`] fails the whole join or move rather than
 /// proceeding unlocked: the point of this lock is that no entry is ever
 /// lost to a race, and writing `project.toml` without it would reopen
 /// exactly that.

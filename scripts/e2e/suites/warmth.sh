@@ -123,15 +123,11 @@ ln -sf "$SPOOLWAY" "$LIVE/bin/spoolway"
 # `~/.spoolway` — every other suite gets a scratch `$HOME` from `new_repo` —
 # and the fixture it registers is a mktemp tree that is gone by the next run,
 # with the previous run's own home still sitting behind wherever it landed.
-# `--take-over` is passed on for compatibility only: it is accepted and does
-# nothing now (see `src/commands/init.rs`, near `--take-over`) — the
-# basename collision it used to resolve cannot happen once a home is keyed
-# by id instead of by name, per the `binding-record` task.
 new_repo "$LIVE/proj"
-# What actually keeps this run clean is the sweep below, not `--take-over`.
-# Every task this suite mints is named below (`warm`, `thaw`, `chill`,
-# `stuck`), so a stale `proj-*` home is this suite's own leavings and
-# nothing else's: remove it before init writes the fresh one.
+# What actually keeps this run clean is the sweep below. Every task this
+# suite mints is named below (`warm`, `thaw`, `chill`, `stuck`), so a stale
+# `proj-*` home is this suite's own leavings and nothing else's: remove it
+# before init writes the fresh one.
 #
 # A home is `<label>-<id>` now, and every run's `$LIVE` is a fresh `mktemp`
 # checkout, so it mints a fresh id every time — there is no one path left to
@@ -139,7 +135,7 @@ new_repo "$LIVE/proj"
 # `SPOOLWAY_PROJECT_HOME` (still the pre-init, id-less guess at this point)
 # is no help either; glob the real family instead.
 rm -rf "$HOME"/.spoolway/proj-*
-configure_project plan/live --take-over
+configure_project plan/live
 publish plan/live
 
 # A real lane, so it needs to be able to run its tools without a person to

@@ -51,11 +51,6 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 | The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. |
 | Anything else | The command refuses, naming both files by absolute path. |
 
-Two commands write a binding over one that already exists, and nothing else does. `spoolway init
---adopt <name>` binds this checkout to the home already at `~/.spoolway/<name>/` and stamps it
-with that home's id. `spoolway init --new-id` mints a fresh id and binds the checkout to the
-fresh home that id keys.
-
 The shared dispatch workspace sits at `~/.spoolway/.dispatcher/`. A project home always ends in
 `-<id>`, so the two can never collide. See [One home for every run, in every
 project](dispatcher.md#one-home-for-every-run-in-every-project).
@@ -75,7 +70,8 @@ repo mode. See [Private pipelines](pipelines.md#private-pipelines).
 
 Delete `~/.spoolway/<label>-<id>/` to forget every task, plan and lane. The checkout is
 untouched. The next command in that checkout refuses, because the checkout still carries a stamp
-no home holds. Run `spoolway init --new-id` to start clean.
+no home holds. Delete `.git/spoolway-id` too and run `spoolway init` again to mint a fresh id
+and a fresh home.
 
 ## The overrides layer
 

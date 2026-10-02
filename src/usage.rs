@@ -2061,6 +2061,22 @@ pub mod registry {
         write_at(&path, &known);
     }
 
+    /// Drop every entry whose home sits inside `dir` — a workspace a move
+    /// emptied and removed, whose dispatcher folders are gone with it.
+    /// Best-effort like [`register`].
+    pub fn forget_under(dir: &Path) {
+        let Some(path) = path() else { return };
+        let known = list_at(&path);
+        let kept: Vec<Entry> = known
+            .iter()
+            .filter(|entry| !entry.home.starts_with(dir))
+            .cloned()
+            .collect();
+        if kept.len() != known.len() {
+            write_at(&path, &kept);
+        }
+    }
+
     /// Known project roots that still look like projects, oldest
     /// registration order aside — a root [`crate::config::setup_dir_in`]
     /// can no longer find a tracked setup for was moved or deleted, and
