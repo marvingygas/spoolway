@@ -582,6 +582,18 @@ fn ignores(
 /// thing that ever added a missing key was `config set` re-rendering the whole
 /// file: the right rewrite, performed at the wrong moment, while somebody was
 /// changing an interval. See [`crate::confdoc`].
+///
+/// The private `overrides/config.toml` layer is never part of what gets
+/// rewritten here: `current` below is loaded with
+/// [`crate::config::Config::load_dropping_retired_keys`], which merges no
+/// patch onto it, precisely so a value set through `spoolway config
+/// override` can never leak into the tracked file through a sync — a
+/// project's private layer is not this project's to commit. What this *does*
+/// touch is the layer itself: a key the override still names that the
+/// tracked config has since stopped recognising is dropped straight out of
+/// `overrides/config.toml` too, the same way a retired key vanishes from the
+/// tracked file, so it stops reprinting "override ignored" forever with no
+/// way to clear on its own.
 fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     let path = crate::config::Config::path_in(&repo.checkout);
     let shown = crate::platform::relative(&repo.checkout, &path);
@@ -625,23 +637,59 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
     // `checkout` can hold two different files. `current` is always the
     // checkout's own, so a rewrite is sourced from the file it replaces.
     //
-    // `load_dropping_retired_keys` rather than `Config::load`: `dispatch.
-    // interval` and `issue_tracking.on_fail` are each retired hard enough
-    // that an ordinary load refuses a file still naming either, and this is
-    // the one place that has to bring such a file forward instead of
-    // rejecting it.
+    // `load_dropping_retired_keys` rather than `Config::load`: both strip
+    // `dispatch.interval` and `issue_tracking.on_fail` the same way now, but
+    // `Config::load` also merges the private override layer onto the
+    // result, and that merged value must never be what gets rendered and
+    // written back here — see this function's own doc.
     // A config this binary cannot even parse, same as the read failure
     // above: this fails loudly rather than recording a quiet
     // `Outcome::Blocked` a plain `sync` or `sync --dry-run` never prints.
-    // Named here rather than left to `load_dropping_retired_keys`'s own
-    // error: the retired-key strip it runs first (`crate::confdoc::remove`)
-    // parses the raw text itself, ahead of the `toml::from_str` that would
-    // otherwise have named the file, so its failure says only "this file is
-    // not valid TOML" with no path at all — and `spoolway config edit` is
-    // named here too, since it reads this same file leniently for exactly
+    // `load_dropping_retired_keys`'s own error already names the path —
+    // `strip_hard_retired_keys` only touches the raw text through
+    // `crate::confdoc::remove` when a lenient, untyped parse finds the key
+    // actually there, so invalid TOML reaches the named `toml::from_str`
+    // unchanged and its error names the file same as any other parse
+    // failure here. `spoolway config edit` is still worth naming in the
+    // context below, since it reads this same file leniently for exactly
     // this reason (see `Command::Config(ConfigCommand::Edit)` in `main.rs`).
     let current = crate::config::Config::load_dropping_retired_keys(&repo.checkout)
         .with_context(|| format!("{} — fix it with `spoolway config edit`", path.display()))?;
+
+    // Dropped against the layer's own directory, not the loaded `repo.home`:
+    // `dir_for` is what `Config::load` itself resolves the layer through,
+    // and a linked worktree's `repo.home` may not even point at the same
+    // project's state — see `crate::overrides::dir_for`'s own doc.
+    //
+    // Computed here regardless of `args.dry_run` — a dry run has to say what
+    // it would drop, the same as every other outcome this function reports —
+    // but written to disk only when `!args.dry_run`, the same guard the
+    // tracked file's own write gets below. Unconditional before this fix,
+    // `spoolway sync --dry-run` rewrote the private layer and then printed
+    // "Dry run: nothing was written" over it.
+    if let Ok(overrides_dir) = crate::overrides::dir_for(&repo.checkout) {
+        let dropped = crate::overrides::retired_config_patch_keys(&overrides_dir, &current)?;
+        if !dropped.is_empty() {
+            if !args.dry_run {
+                crate::overrides::write_dropped_config_patch_keys(&overrides_dir, &dropped)?;
+            }
+            let shown_override = crate::platform::relative(
+                &repo.checkout,
+                &crate::overrides::config_patch_path(&overrides_dir),
+            );
+            outcomes.push(Outcome::migrated(
+                &shown_override,
+                format!(
+                    "migrated: retired override key(s) dropped from the private layer: {}",
+                    dropped.join(", ")
+                ),
+                format!(
+                    "migrated: retired override key(s) dropped: {}",
+                    dropped.join(", ")
+                ),
+            ));
+        }
+    }
 
     let rewritten = current.render()?;
 
@@ -733,14 +781,46 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             .flatten()
             .filter(|path| !path.trim().is_empty());
         if let Some(old) = old_worktree_root {
-            outcomes.push(Outcome::migrated(
-                &shown,
-                format!(
-                    "migrated: dispatch.worktree_root removed; its worktrees were cut at \
-                     {old} — yours to remove",
-                ),
-                format!("migrated: worktree_root removed; worktrees were at {old}"),
-            ));
+            // A queued task can still have its own worktree sitting under
+            // the old path — this never moves one already cut, only new
+            // ones land under the project home — so the old directory is
+            // never called safe to remove outright: a task still using it
+            // is named instead, the same way `doctor`'s own
+            // `worktree_root_note` does (see `commands::doctor`).
+            let tasks = repo.tasks().unwrap_or_default();
+            let mut still_there: Vec<&str> = tasks
+                .iter()
+                .filter(|t| {
+                    t.front
+                        .worktree_path
+                        .as_deref()
+                        .is_some_and(|wt| wt.starts_with(&old))
+                })
+                .map(crate::task::Task::id)
+                .collect();
+            still_there.sort_unstable();
+            let (report_detail, panel_detail) = if still_there.is_empty() {
+                (
+                    format!(
+                        "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                         {old} — no queued task has a worktree there any more",
+                    ),
+                    format!("migrated: worktree_root removed; worktrees were at {old}"),
+                )
+            } else {
+                (
+                    format!(
+                        "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                         {old} — still in use by: {}",
+                        still_there.join(", "),
+                    ),
+                    format!(
+                        "migrated: worktree_root removed; {old} still used by {}",
+                        still_there.join(", "),
+                    ),
+                )
+            };
+            outcomes.push(Outcome::migrated(&shown, report_detail, panel_detail));
         }
     }
     if !refresh.renoted.is_empty() {
@@ -1993,14 +2073,15 @@ mod tests {
         assert!(said.contains("spoolway config edit"), "{said}");
     }
 
-    /// `dispatch.interval` is retired hard enough that an ordinary load
-    /// refuses a file still naming it — the same refusal `spoolway config
-    /// get` or `dispatch` would hit on this file today. `sync` is the one
-    /// path that has to bring it forward instead: it drops the key, rewrites
-    /// the reference header around its removal, and leaves the rest of the
-    /// file exactly as it read it.
+    /// `dispatch.interval` is retired hard enough that `DispatchConfig`'s own
+    /// `deny_unknown_fields` would refuse it outright if nothing stripped it
+    /// first — but `Config::load` now does exactly that, the same strip
+    /// `sync` has always used, with a note naming `spoolway sync`. `sync` is
+    /// still the one path that writes the key away for good: it drops it,
+    /// rewrites the reference header around its removal, and leaves the rest
+    /// of the file exactly as it read it.
     #[test]
-    fn a_config_still_naming_dispatch_interval_is_refused_before_sync_and_accepted_after() {
+    fn a_config_still_naming_dispatch_interval_loads_past_it_and_sync_drops_it_for_good() {
         let (repo, _root_guard) = fixture("config-retired-interval");
         let path = crate::config::Config::path_in(&repo.root);
         std::fs::write(
@@ -2010,8 +2091,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            crate::config::Config::load(&repo.root).is_err(),
-            "an ordinary load must still refuse the retired key"
+            crate::config::Config::load(&repo.root).is_ok(),
+            "an ordinary load must still load past the retired key"
         );
 
         let mut outcomes = Vec::new();
@@ -2033,9 +2114,10 @@ mod tests {
         );
     }
 
-    /// `issue_tracking.on_fail` is the other key retired hard enough that an
-    /// ordinary load refuses a file still naming it. Unlike `dispatch.
-    /// interval` this retirement also moves the table it lived in — from
+    /// `issue_tracking.on_fail` is the other key retired hard enough that it
+    /// would otherwise fail `deny_unknown_fields` outright — `Config::load`
+    /// strips it first now, the same as `dispatch.interval` above. Unlike
+    /// that one this retirement also moves the table it lived in — from
     /// after every `[agents.*]`/`[models.*]` table to directly under
     /// `[watch]`, following `Config`'s own field order (see
     /// `crate::config::Config::render`) — and `sync`'s summary names both
@@ -2054,8 +2136,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            crate::config::Config::load(&repo.root).is_err(),
-            "an ordinary load must still refuse the retired key"
+            crate::config::Config::load(&repo.root).is_ok(),
+            "an ordinary load must still load past the retired key"
         );
 
         let mut outcomes = Vec::new();
@@ -2140,6 +2222,43 @@ mod tests {
                 report.contains("dispatch.worktree_root removed")
                     && report.contains("/old/worktrees")
                     && panel.contains("/old/worktrees")
+                    && !report.contains("yours to remove")
+                    && !report.contains("safe to remove")
+            }),
+            "a folder with no queued task left in it must never be called removable \
+             unconditionally — it must still never claim either: {shown:?}"
+        );
+    }
+
+    /// A queued task still has its own worktree cut under the old path —
+    /// `sync` must name that task rather than call the old directory
+    /// anybody's to remove, the same promise `doctor`'s own
+    /// `worktree_root_note` keeps.
+    #[test]
+    fn a_config_naming_a_real_worktree_root_names_a_queued_task_still_using_it() {
+        let (repo, _root_guard) = fixture("config-retired-worktree-root-queued");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nworktree_root = \"/old/worktrees\"\n").unwrap();
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("still-queued.md"),
+            "---\nid: still-queued\nstage: queued\nworktree_path: /old/worktrees/still-queued\n\
+             ---\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown.iter().any(|(report, panel)| {
+                report.contains("still-queued")
+                    && panel.contains("still-queued")
+                    && !report.contains("yours to remove")
+                    && !report.contains("safe to remove")
             }),
             "{shown:?}"
         );
@@ -2168,6 +2287,164 @@ mod tests {
             migration_notes(&outcomes).is_empty(),
             "a blank value must not earn the dedicated directory note"
         );
+    }
+
+    /// `spoolway config override` setting a live key must never reach the
+    /// tracked file through a sync, and a retired key sitting in the same
+    /// override must be dropped from the layer itself rather than left to
+    /// print "override ignored" forever.
+    #[test]
+    fn a_config_override_never_leaks_into_the_tracked_file_and_a_retired_key_drops_from_it() {
+        let (repo, _root_guard) = fixture("config-override-no-leak");
+        let home = crate::scratch::root("sync-config-override-no-leak-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nlane_quiet = \"15m\"\n").unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                crate::overrides::config_patch_path(&overrides),
+                "[dispatch]\nlane_quiet = \"20m\"\nworktree_root = \"/old/worktrees\"\n",
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                after.contains("lane_quiet = \"15m\""),
+                "the tracked value must survive a sync untouched: {after}"
+            );
+            assert!(
+                !after.contains("20m"),
+                "the private override's value must never reach the tracked file: {after}"
+            );
+
+            let override_after =
+                std::fs::read_to_string(crate::overrides::config_patch_path(&overrides)).unwrap();
+            assert!(
+                override_after.contains("lane_quiet = \"20m\""),
+                "a live override key must stay in the layer: {override_after}"
+            );
+            assert!(
+                !override_after.contains("worktree_root"),
+                "a retired key must be dropped from the layer too: {override_after}"
+            );
+
+            let lines = outcome_lines(&outcomes);
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("retired override key")
+                        && line.contains("dispatch.worktree_root")),
+                "{lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `sync --dry-run` must report a retired override key as dropped
+    /// without actually writing the layer — the same promise it keeps for
+    /// the tracked file. Before this fix the override write ran
+    /// unconditionally, so a dry run rewrote `overrides/config.toml` and
+    /// then printed "Dry run: nothing was written" over it.
+    #[test]
+    fn a_dry_run_reports_a_retired_override_key_without_dropping_it() {
+        let (repo, _root_guard) = fixture("config-override-dry-run");
+        let home = crate::scratch::root("sync-config-override-dry-run-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nlane_quiet = \"15m\"\n").unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            let override_path = crate::overrides::config_patch_path(&overrides);
+            let before = "[dispatch]\nworktree_root = \"/old/worktrees\"\n";
+            std::fs::write(&override_path, before).unwrap();
+
+            let mut outcomes = Vec::new();
+            config(
+                &repo,
+                &SyncArgs {
+                    dry_run: true,
+                    ..args()
+                },
+                &mut outcomes,
+            )
+            .unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(&override_path).unwrap(),
+                before,
+                "a dry run must never write the private layer"
+            );
+
+            let lines = outcome_lines(&outcomes);
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("retired override key")
+                        && line.contains("dispatch.worktree_root")),
+                "a dry run must still say what it would drop: {lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A mistake in a private override — a typo, not a key this binary
+    /// retired — must never be deleted on the project's behalf: it is left
+    /// in the layer, printing "override ignored" until the person who wrote
+    /// it fixes the spelling themselves.
+    #[test]
+    fn a_typo_in_the_override_is_left_in_the_layer_not_deleted() {
+        let (repo, _root_guard) = fixture("config-override-typo");
+        let home = crate::scratch::root("sync-config-override-typo-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nlane_quiet = \"15m\"\n").unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            let override_path = crate::overrides::config_patch_path(&overrides);
+            // `lane_quiett` earns a "did you mean"; `lane_quite` earns none,
+            // and was the one sync deleted before the drop took only keys on
+            // `config::RETIRED_KEYS`.
+            std::fs::write(
+                &override_path,
+                "[dispatch]\nlane_quiett = \"20m\"\nlane_quite = \"1m\"\n",
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+
+            let override_after = std::fs::read_to_string(&override_path).unwrap();
+            assert!(
+                override_after.contains("lane_quiett") && override_after.contains("lane_quite "),
+                "a typo must survive a sync untouched, not be deleted as though retired: \
+                 {override_after}"
+            );
+
+            let lines = outcome_lines(&outcomes);
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.contains("retired override key")),
+                "a typo must never be reported as a dropped retired key: {lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// Run from a linked worktree, `sync` writes the checkout it was run

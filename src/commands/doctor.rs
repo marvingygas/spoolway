@@ -258,7 +258,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     let mut report = Report::default();
     report.record_all(config_checks(repo, None, config));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
-    report.record_all(retired_key_notes(&repo.checkout));
+    report.record_all(retired_key_notes(&repo.checkout, &tasks));
     warmth_notes(repo, pipelines, config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, config, &graph));
     report.record_all(cheap_branch_checks(repo, &tasks));
@@ -409,6 +409,12 @@ pub fn doctor(
 
     let mut report = Report::default();
 
+    // Read ahead of the pipeline match below so `worktree_root_note` — one
+    // of `retired_key_notes`'s own findings — can name a queued task with a
+    // worktree in the old folder in both branches, not only the one with a
+    // loaded pipeline set.
+    let tasks = repo.tasks().unwrap_or_default();
+
     // A pipeline file that will not parse must not stop the command you run
     // to find out which one it is. Report the load failure as a failed row
     // and run the checks that read no pipeline — config, issue tracking,
@@ -423,7 +429,7 @@ pub fn doctor(
             );
             report.record_all(config_checks(repo, config_error, &config));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
-            report.record_all(retired_key_notes(&repo.checkout));
+            report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
             report.record(mux_finding(&mux));
             doctor_sync(repo, &mut report);
@@ -438,12 +444,11 @@ pub fn doctor(
 
     // A task file can be hand-edited into a graph nothing can get through, and
     // the only symptom is tasks that quietly never start.
-    let tasks = repo.tasks().unwrap_or_default();
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
     report.record_all(config_checks(repo, config_error, &config));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
-    report.record_all(retired_key_notes(&repo.checkout));
+    report.record_all(retired_key_notes(&repo.checkout, &tasks));
     report.record_all(override_layer_note(repo));
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
@@ -559,7 +564,12 @@ fn home_unavailable_findings(
         }
         Err(err) => findings.push(Finding::Check("config parses".into(), Err(err))),
     }
-    findings.extend(retired_key_notes(&repo.checkout));
+    // No `tasks` here: `repo.tasks()` reads under `repo.home`, the very
+    // thing that failed to resolve — see the early return above this
+    // function's own caller. `worktree_root_note` still names the path with
+    // no task list to check it against, the same as it would for a project
+    // with no queue at all.
+    findings.extend(retired_key_notes(&repo.checkout, &[]));
     findings
 }
 
@@ -1082,7 +1092,7 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
 /// constant now (`dispatch::MAX_LAUNCHES`), never a number anybody tuned in
 /// practice. Both spellings still parse and both are dropped on the next
 /// save; the only way a project finds out is here.
-fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
+fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
     let mut findings = Vec::new();
     if names_key(checkout, "max_attempts") || names_key(checkout, "max_launches") {
         findings.push(Finding::Note(
@@ -1091,7 +1101,7 @@ fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
                 .into(),
         ));
     }
-    findings.extend(worktree_root_note(checkout));
+    findings.extend(worktree_root_note(checkout, tasks));
     findings
 }
 
@@ -1103,7 +1113,13 @@ fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
 /// Read off the raw file rather than the loaded [`Config`]: the struct keeps
 /// the retired field only so an existing file still parses, not as something
 /// any other part of this command should read.
-fn worktree_root_note(checkout: &Path) -> Vec<Finding> {
+///
+/// A queued task can still have its own worktree sitting under the old
+/// path — `dispatch` never moves a lane already cut, only new ones — so
+/// this never calls the old directory safe to remove on its own: it checks
+/// `tasks` for one whose `worktree_path` sits under the configured path and,
+/// when it finds any, names them instead. Only once none do does it say so.
+fn worktree_root_note(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
     let configured = std::fs::read_to_string(Config::path_in(checkout))
         .ok()
         .and_then(|raw| raw.parse::<toml::Value>().ok())
@@ -1114,15 +1130,43 @@ fn worktree_root_note(checkout: &Path) -> Vec<Finding> {
                 .map(str::to_string)
         })
         .filter(|path| !path.trim().is_empty());
-    match configured {
-        Some(path) => vec![Finding::Note(format!(
+    let Some(path) = configured else {
+        return Vec::new();
+    };
+    let mut still_there: Vec<&str> = tasks
+        .iter()
+        .filter(|t| {
+            t.front
+                .worktree_path
+                .as_deref()
+                .is_some_and(|wt| wt.starts_with(&path))
+        })
+        .map(Task::id)
+        .collect();
+    still_there.sort_unstable();
+    let note = if still_there.is_empty() {
+        format!(
             "dispatch.worktree_root in this checkout's config names {path} — the setting is \
-             retired, every worktree now lands under the project home, and the next \
-             `spoolway sync` drops the key; worktrees already cut at the old path are yours \
-             to remove"
-        ))],
-        None => Vec::new(),
-    }
+             retired, every worktree now lands under the project home, and the next `spoolway \
+             sync` drops the key; no queued task has a worktree under the old path"
+        )
+    } else if still_there.len() == 1 {
+        format!(
+            "dispatch.worktree_root in this checkout's config names {path} — the setting is \
+             retired, every worktree now lands under the project home, and the next `spoolway \
+             sync` drops the key; queued task {} still has a worktree there",
+            still_there[0],
+        )
+    } else {
+        format!(
+            "dispatch.worktree_root in this checkout's config names {path} — the setting is \
+             retired, every worktree now lands under the project home, and the next `spoolway \
+             sync` drops the key; {} queued tasks still have a worktree there: {}",
+            still_there.len(),
+            still_there.join(", "),
+        )
+    };
+    vec![Finding::Note(note)]
 }
 
 /// `pipelines are valid` and `task dependency graph` bracket one note about
@@ -2484,11 +2528,11 @@ mod tests {
         );
     }
 
-    /// A real path left in `dispatch.worktree_root` is worth a note — it is
-    /// where worktrees already cut under the old setting still are, and
-    /// nothing else tells a project they are there to clean up.
+    /// No queued task has a worktree under the old path — the note still
+    /// names the path, but, since nothing of a project's own depends on it
+    /// any more, it says so rather than naming any task.
     #[test]
-    fn worktree_root_note_names_a_real_path() {
+    fn worktree_root_note_names_a_real_path_with_no_tasks_there() {
         let root = crate::scratch::root("doctor-worktree-root-note-path");
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         std::fs::write(
@@ -2497,13 +2541,54 @@ mod tests {
         )
         .unwrap();
 
-        let notes = worktree_root_note(&root);
+        let notes = worktree_root_note(&root, &[]);
         assert_eq!(notes.len(), 1, "{notes:#?}");
         let Finding::Note(text) = &notes[0] else {
             panic!("{notes:#?}")
         };
         assert!(text.contains("/old/worktrees"), "{text}");
         assert!(text.contains("retired"), "{text}");
+        assert!(
+            !text.contains("safe to remove") && !text.contains("yours to remove"),
+            "a folder must never be called safe to remove outright: {text}"
+        );
+    }
+
+    /// A queued task still has a worktree cut under the old path — the note
+    /// must name that task rather than call the old directory anybody's to
+    /// remove.
+    #[test]
+    fn worktree_root_note_names_a_queued_task_still_using_the_old_path() {
+        let root = crate::scratch::root("doctor-worktree-root-note-task");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&root),
+            "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+        )
+        .unwrap();
+        let still_queued = Task::parse(
+            PathBuf::from("still-queued.md"),
+            "---\nid: still-queued\nstage: queued\nworktree_path: /old/worktrees/still-queued\n\
+             ---\n",
+        )
+        .unwrap();
+        let elsewhere = Task::parse(
+            PathBuf::from("elsewhere.md"),
+            "---\nid: elsewhere\nstage: queued\nworktree_path: /new/worktrees/elsewhere\n---\n",
+        )
+        .unwrap();
+
+        let notes = worktree_root_note(&root, &[still_queued, elsewhere]);
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        let Finding::Note(text) = &notes[0] else {
+            panic!("{notes:#?}")
+        };
+        assert!(text.contains("still-queued"), "{text}");
+        assert!(!text.contains("elsewhere"), "{text}");
+        assert!(
+            !text.contains("safe to remove") && !text.contains("yours to remove"),
+            "a folder with a task still in it must never be called removable: {text}"
+        );
     }
 
     /// A blank value was never anybody's decision — nothing to clean up, so
@@ -2515,7 +2600,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         std::fs::write(Config::path_in(&root), "[dispatch]\nworktree_root = \"\"\n").unwrap();
 
-        assert!(worktree_root_note(&root).is_empty());
+        assert!(worktree_root_note(&root, &[]).is_empty());
     }
 
     /// No key at all — the ordinary case for a project that never set it —
@@ -2526,7 +2611,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         std::fs::write(Config::path_in(&root), "[dispatch]\n").unwrap();
 
-        assert!(worktree_root_note(&root).is_empty());
+        assert!(worktree_root_note(&root, &[]).is_empty());
     }
 
     fn single_step_pipelines(step_yaml: &str) -> Pipelines {

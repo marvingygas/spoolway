@@ -43,9 +43,9 @@ wsl npm install -g spoolway
 
 - `dispatch.worktree_root` is retired: every dispatched worktree now lands under the project
   home, with no setting to move it. Delete any `dispatch.worktree_root = ...` line from
-  `.spoolway/config.toml`; a config that still sets it loads, and `spoolway sync` drops the
-  key on the next save, naming the old directory when it held a real path. Worktrees already
-  cut there are yours to remove.
+  `.spoolway/config.toml`; a config that still sets it loads, with a note naming `spoolway
+  sync`, and `spoolway sync` drops the key on the next save. The report names the old
+  directory, and, when a queued task still has a worktree there, names that task too.
 
 ## 0.5.x to 0.6.x
 

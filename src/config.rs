@@ -519,9 +519,11 @@ pub struct DispatchConfig {
     /// path. Every worktree now lands under the project's own home, with no
     /// way to move it — see [`crate::mux::worktree_root`]. Kept only so an
     /// existing config still parses; dropped unconditionally on the next
-    /// save. [`crate::sync::config`] names the old directory to a project
-    /// whose value here was a real path, rather than dropping it in silence,
-    /// since worktrees already cut there are not moved for it.
+    /// save. A non-blank value earns a note on every ordinary
+    /// [`Config::load`] (see `load_with_notices`), and `spoolway sync` and
+    /// `spoolway doctor` both go further and name a queued task whose
+    /// worktree still sits at the old path, rather than dropping the key in
+    /// silence or calling a worktree cut there safe to remove.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     worktree_root: String,
@@ -1335,6 +1337,96 @@ fn leftover_placeholder(rendered: &str) -> Option<String> {
     None
 }
 
+/// Every key this binary has retired that a config it still upgrades from
+/// could hold, as `(table, key)`. `*` stands for any `[agents.<name>]`
+/// profile. These are the `skip_serializing` fields kept above only so an
+/// old file still parses (each under every spelling serde accepts for it),
+/// plus the two [`strip_hard_retired_keys`] removes before the parse.
+///
+/// [`crate::overrides::retired_config_patch_keys`] drops only keys on this
+/// list from a private override. It used to treat every key the config did
+/// not know as retired, and `spoolway sync` deleted a plain typo
+/// (`dispatch.lane_quite`, 2026-10-02) as though it were one. A mistake is
+/// for whoever wrote it to fix, so a key not named here stays in the layer.
+/// A field retired later belongs here as well as under `skip_serializing`.
+const RETIRED_KEYS: &[(&str, &str)] = &[
+    ("dispatch", "interval"),
+    ("dispatch", "tmux_mode"),
+    ("dispatch", "protected_branches"),
+    ("dispatch", "notify"),
+    ("dispatch", "open_on_escalation"),
+    ("dispatch", "open"),
+    ("dispatch", "max_launches"),
+    ("dispatch", "max_attempts"),
+    ("dispatch", "auto_unblock"),
+    ("dispatch", "default_pipeline"),
+    ("dispatch", "worktree_root"),
+    ("dispatch", "tear_lanes_on_stop"),
+    ("dispatch", "cleanup_on_stop"),
+    ("unattended", "skip_blocked_lane"),
+    ("issue_tracking", "on_fail"),
+    ("agents.*", "args"),
+    ("agents.*", "model"),
+    ("agents.*", "sandbox"),
+    ("agents.*", "sandbox_extension"),
+    ("agents.*", "context_window"),
+    ("agents.*", "quota_ceiling"),
+    ("agents.*", "session_reuse_uncached"),
+    ("agents.*", "env"),
+];
+
+/// Whether `dotted` (`dispatch.worktree_root`, `agents.claude.env.FOO`)
+/// names a key on [`RETIRED_KEYS`], or a leaf inside one such as an entry of
+/// a retired `env` table.
+pub(crate) fn is_retired_key(dotted: &str) -> bool {
+    let parts: Vec<&str> = dotted.split('.').collect();
+    RETIRED_KEYS.iter().any(|(table, key)| {
+        let pattern: Vec<&str> = table.split('.').chain(std::iter::once(*key)).collect();
+        parts.len() >= pattern.len()
+            && pattern
+                .iter()
+                .zip(&parts)
+                .all(|(want, got)| *want == "*" || want == got)
+    })
+}
+
+/// `dispatch.interval` and `issue_tracking.on_fail`, each stripped from
+/// `raw` when present, along with one note per key naming `spoolway sync`.
+///
+/// Both are retired hard enough that `DispatchConfig` and
+/// [`IssueTrackingConfig`]'s own `deny_unknown_fields` refuses a file that
+/// still names either, rather than quietly dropping it the way every other
+/// retired key does — on purpose, so a project only discovers a key is gone
+/// the moment something tries to read it. That used to mean a project
+/// upgraded from 0.6.0 with either key still set could not run anything but
+/// `spoolway sync`: every other command loaded the same file through
+/// [`Config::load`] or [`Config::load_tracked`], both of which go straight
+/// to `toml::from_str` with no strip at all. This is what both now call
+/// before that parse, so the file loads everywhere, with a note saying so —
+/// `spoolway sync` is still the one command that writes the key away for
+/// good, the same way [`Config::save_key`] edits a document in place, so the
+/// note sends a person there. Stripping a key the file never had is a no-op.
+fn strip_hard_retired_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
+    const RETIRED: [(&str, &str); 2] = [("dispatch", "interval"), ("issue_tracking", "on_fail")];
+    let mut stripped = raw.to_string();
+    let mut notices = Vec::new();
+    for (table, key) in RETIRED {
+        let present = toml::from_str::<toml::Value>(&stripped)
+            .ok()
+            .and_then(|v| v.get(table)?.get(key).cloned())
+            .is_some();
+        if present {
+            notices.push(format!(
+                "note: {table}.{key} in {} is retired — loaded past it; run `spoolway sync` to \
+                 drop the key for good.",
+                path.display(),
+            ));
+            stripped = crate::confdoc::remove(&stripped, &[table, key])?;
+        }
+    }
+    Ok((stripped, notices))
+}
+
 impl Config {
     /// `.spoolway/config.toml` under `root`.
     ///
@@ -1365,41 +1457,55 @@ impl Config {
     }
 
     fn load_impl(root: &Path, overrides: Option<&Path>) -> Result<Config> {
-        let (config, notices, ignored) = Config::load_with_notices(root, overrides)?;
-        for notice in notices {
-            eprintln!("{notice}");
-        }
-        crate::overrides::print_ignored_notices(&ignored);
-        Ok(config)
+        Config::load_and_print(root, overrides).map(|(config, _)| config)
     }
 
-    /// [`Config::load`], tolerating a file that still names a key retired
-    /// hard enough that an ordinary load refuses it outright: `dispatch.
-    /// interval`, or `issue_tracking.on_fail` (see [`crate::tracking`]'s own
-    /// doc for what replaced it — every failing hook pauses its task now,
-    /// so there is nothing left for this to choose between).
+    /// [`Config::load_impl`], also handing back the notices it actually
+    /// printed, so a test can see the dedupe below at work.
+    fn load_and_print(root: &Path, overrides: Option<&Path>) -> Result<(Config, Vec<String>)> {
+        let (config, notices, ignored) = Config::load_with_notices(root, overrides)?;
+        // One plain command loads its config more than once on the way to
+        // answering — `main.rs` builds a `Pipelines` ahead of its own
+        // dispatch match, and most commands read their own copy again right
+        // after — and every one of those loads runs the same notices. Without
+        // this, `queue list` over a config still naming `issue_tracking.
+        // on_fail` prints the same note twice, and `doctor` three times.
+        // `first_time_this_process` is the exact dedup `print_ignored_notices`
+        // already leans on for the override layer's own notices, keyed by
+        // the rendered line rather than by which notice it was, so it works
+        // here unchanged.
+        let mut printed = Vec::new();
+        for notice in notices {
+            if crate::overrides::first_time_this_process(&notice) {
+                eprintln!("{notice}");
+                printed.push(notice);
+            }
+        }
+        crate::overrides::print_ignored_notices(&ignored);
+        Ok((config, printed))
+    }
+
+    /// [`Config::load_tracked`] with every notice silenced — no "retired"
+    /// note, no tmux-backend note, nothing from an `[agents.*]` table — and
+    /// `config.migrate()` run directly, with no call through
+    /// [`Config::load_with_notices`] at all.
     ///
-    /// Every other caller keeps refusing a file naming either key:
-    /// `DispatchConfig` and [`IssueTrackingConfig`]'s own `deny_unknown_fields`
-    /// is what makes each a hard parse error rather than a quietly-dropped
-    /// one, on purpose, so a project only discovers a key is gone the moment
-    /// something tries to read it. `spoolway sync` is the one caller that
-    /// exists to bring a file like that forward rather than reject it, so
-    /// this strips both keys from the raw text before parsing — the same
-    /// way [`Config::save_key`] edits a document in place — and parses what
-    /// is left. Stripping a key this file never had is a no-op.
+    /// [`Config::load_tracked`] already reads the same file through the same
+    /// patch-free path, so the two agree on every value; this exists only
+    /// because `spoolway sync`'s own config step builds its own report of
+    /// what changed (`refresh.dropped`, the `Migrated` notes) from the raw
+    /// text itself, and would otherwise print the exact same things twice —
+    /// once from here, once from its own summary. Nothing else should reach
+    /// for this over [`Config::load_tracked`]: a caller that wants the
+    /// ordinary notices gets them from that one for free.
     pub fn load_dropping_retired_keys(root: &Path) -> Result<Config> {
         let path = Config::path_in(root);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let stripped = crate::confdoc::remove(&raw, &["dispatch", "interval"])?;
-        let stripped = crate::confdoc::remove(&stripped, &["issue_tracking", "on_fail"])?;
+        let (stripped, _notices) = strip_hard_retired_keys(&raw, &path)?;
         let mut config: Config =
             toml::from_str(&stripped).with_context(|| format!("parsing {}", path.display()))?;
         config.migrate();
-        if let Ok(overrides) = crate::overrides::dir_for(root) {
-            config = crate::overrides::apply_config_patch(config, &overrides)?.0;
-        }
         Ok(config)
     }
 
@@ -1413,9 +1519,15 @@ impl Config {
         let path = Config::path_in(root);
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
-                let mut config: Config =
-                    toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-                let mut notices = Vec::new();
+                // `dispatch.interval` and `issue_tracking.on_fail` fail every
+                // caller outright otherwise — see `strip_hard_retired_keys`'s
+                // own doc — so this strips them before the struct ever sees
+                // the file, and the notices it returns say so, naming
+                // `spoolway sync` as the one command that writes the key
+                // away for good.
+                let (stripped, mut notices) = strip_hard_retired_keys(&raw, &path)?;
+                let mut config: Config = toml::from_str(&stripped)
+                    .with_context(|| format!("parsing {}", path.display()))?;
                 // The alias on `Backend::Herdr` already turned a `tmux` value
                 // into `Herdr` by the time `config` exists — this is only
                 // what tells a person it happened, since the typed value
@@ -1438,6 +1550,26 @@ impl Config {
                         "note: dispatch.backend = \"tmux\" in {} — the tmux backend is gone, \
                          so this now loads as \"herdr\". The key is rewritten on the next save.",
                         path.display(),
+                    ));
+                }
+                // `dispatch.worktree_root` still parses — the field stays on
+                // `DispatchConfig` for exactly this — but nothing reads it
+                // any more, so a project that set it to a real path deserves
+                // the same kind of note the two hard-retired keys above earn,
+                // not silence until `doctor` or `sync` happens to mention it.
+                // A blank value was never a real decision — nothing to say
+                // until it names a path. `spoolway sync`'s own note on the
+                // same key (`crate::sync::config`) and `doctor`'s
+                // `worktree_root_note` both go further, naming a queued task
+                // whose worktree still sits there; this one only says the
+                // key is gone, since a plain load has no task list to check.
+                if !config.dispatch.worktree_root.trim().is_empty() {
+                    notices.push(format!(
+                        "note: dispatch.worktree_root in {} names {} — the setting is retired, \
+                         every worktree now lands under the project home; run `spoolway sync` \
+                         to drop the key.",
+                        path.display(),
+                        config.dispatch.worktree_root,
                     ));
                 }
                 // Said here for the same reason: a person who set it wanted
@@ -2543,6 +2675,110 @@ mod tests {
         assert!(!rendered.contains("template"));
         assert!(!rendered.contains("store ="));
         assert!(!rendered.contains("format ="));
+    }
+
+    /// `dispatch.interval` and `issue_tracking.on_fail` are retired hard
+    /// enough that `DispatchConfig` and `IssueTrackingConfig`'s own
+    /// `deny_unknown_fields` refuses a file still naming either — this used
+    /// to be stripped only by `spoolway sync`'s own loader,
+    /// [`Config::load_dropping_retired_keys`], leaving every other command
+    /// — `queue list`, `config get`, `resume`, `doctor` — refusing to load a
+    /// project upgraded from 0.6.0 at all. [`strip_hard_retired_keys`] is
+    /// now shared by [`Config::load`] and [`Config::load_tracked`] too, so
+    /// this loads past the retired key with a note naming `spoolway sync`,
+    /// the one command that still writes it away for good.
+    #[test]
+    fn a_retired_key_that_only_sync_strips_still_loads_everywhere_else() {
+        let dir = crate::scratch::root("config-retired-key-outside-sync");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&dir), "[issue_tracking]\non_fail = \"\"\n").unwrap();
+
+        Config::load(&dir).expect(
+            "a config holding a key only `load_dropping_retired_keys` strips must still load \
+             outside `sync`, with a note naming `spoolway sync`",
+        );
+
+        // One note for the one key the file names, naming `spoolway sync` —
+        // not zero, which is the whole fix. That one load never printed it
+        // twice is `the_same_retired_key_note_prints_once_however_often_a_command_loads`'s
+        // to show.
+        let notices = Config::load_with_notices(&dir, None).unwrap().1;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("issue_tracking.on_fail"), "{notices:?}");
+        assert!(notices[0].contains("spoolway sync"), "{notices:?}");
+    }
+
+    /// One command runs `Config::load` several times — `main.rs` builds a
+    /// `Pipelines` first, then most commands read their own copy — and
+    /// before `load_impl` deduped its notices, `queue list` over a 0.6.0
+    /// config printed the `issue_tracking.on_fail` note twice and `doctor`
+    /// three times (seen 2026-10-02). The second load here must print
+    /// nothing.
+    #[test]
+    fn the_same_retired_key_note_prints_once_however_often_a_command_loads() {
+        let dir = crate::scratch::root("config-retired-key-note-once");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&dir), "[issue_tracking]\non_fail = \"\"\n").unwrap();
+
+        let first = Config::load_and_print(&dir, None).unwrap().1;
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(first[0].contains("issue_tracking.on_fail"), "{first:?}");
+
+        let second = Config::load_and_print(&dir, None).unwrap().1;
+        assert!(second.is_empty(), "a second load printed again: {second:?}");
+    }
+
+    /// Only a key this binary actually retired counts as one: a typo with no
+    /// near live key (`lane_quite`) is not on the list, while a retired key,
+    /// a retired spelling (`max_attempts`) and a leaf under a retired agent
+    /// table all are.
+    #[test]
+    fn only_a_key_on_the_retired_list_counts_as_retired() {
+        assert!(is_retired_key("dispatch.worktree_root"));
+        assert!(is_retired_key("dispatch.max_attempts"));
+        assert!(is_retired_key("issue_tracking.on_fail"));
+        assert!(is_retired_key("agents.claude.env.FOO"));
+        assert!(!is_retired_key("dispatch.lane_quite"));
+        assert!(!is_retired_key("dispatch.lane_quiet"));
+        assert!(!is_retired_key("agents.claude"));
+        assert!(!is_retired_key("models.opus.context_window"));
+    }
+
+    /// `dispatch.worktree_root` is only soft-retired — the field still
+    /// parses on its own, with no `deny_unknown_fields` to trip — so it
+    /// never needed `strip_hard_retired_keys` to load. The plan's own
+    /// `d-upgrade-floor` still asks for a note naming `spoolway sync` on
+    /// every ordinary load, the same as the two hard-retired keys, so an
+    /// otherwise silent command (`queue list`, before this fix) still says
+    /// something.
+    #[test]
+    fn a_real_worktree_root_earns_a_load_note_naming_sync() {
+        let dir = crate::scratch::root("config-worktree-root-load-note");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+        )
+        .unwrap();
+
+        let notices = Config::load_with_notices(&dir, None).unwrap().1;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("dispatch.worktree_root"), "{notices:?}");
+        assert!(notices[0].contains("/old/worktrees"), "{notices:?}");
+        assert!(notices[0].contains("spoolway sync"), "{notices:?}");
+    }
+
+    /// A blank `dispatch.worktree_root` was never a real decision — the
+    /// mockup's own 0.6.0 fixture carries one and shows no note for it, the
+    /// same as `doctor`'s and `sync`'s own notes on the same key.
+    #[test]
+    fn a_blank_worktree_root_earns_no_load_note() {
+        let dir = crate::scratch::root("config-worktree-root-load-note-blank");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&dir), "[dispatch]\nworktree_root = \"\"\n").unwrap();
+
+        let notices = Config::load_with_notices(&dir, None).unwrap().1;
+        assert!(notices.is_empty(), "{notices:?}");
     }
 
     /// A whole `[pipeline_gen]` table, all six keys it ever carried — the

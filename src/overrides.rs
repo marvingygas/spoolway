@@ -403,6 +403,57 @@ pub(crate) fn apply_config_patch(
     Ok((config, ignored))
 }
 
+/// Every leaf key `overrides/config.toml` holds that this binary has retired
+/// — on [`crate::config::is_retired_key`]'s own list, not merely mistyped —
+/// sorted. Nothing on disk is touched; see
+/// [`write_dropped_config_patch_keys`] for the half that is.
+///
+/// `spoolway sync`'s own config step calls this right after it rebuilds the
+/// tracked file from `tracked` alone (never from a patched copy — see
+/// `crate::sync::config`'s own doc for why): a key the struct has already
+/// dropped would otherwise sit in the layer forever, since nothing else ever
+/// edits it, printing "override ignored" at every load with no way to clear
+/// itself the way a retired key in the *tracked* file does on its own next
+/// save.
+///
+/// Only a key on that explicit list counts. A typo (`dispatch.lane_quite`),
+/// or a live key holding a value [`crate::confkv::set`] refuses, is a
+/// mistake worth leaving in front of whoever wrote it, not something sync
+/// should delete on their behalf. Telling the two apart by the wording of
+/// [`apply_config_patch`]'s complaint did not work: a typo only earns a "did
+/// you mean" when `confkv`'s hint happens to find a near key, and one that
+/// did not was deleted as retired.
+pub(crate) fn retired_config_patch_keys(overrides: &Path, tracked: &Config) -> Result<Vec<String>> {
+    let (_, ignored) = apply_config_patch(tracked.clone(), overrides)?;
+    let mut retired: Vec<String> = ignored
+        .into_iter()
+        .filter(|entry| entry.target == crate::config::CONFIG_FILE)
+        .filter(|entry| crate::config::is_retired_key(&entry.fields))
+        .map(|entry| entry.fields)
+        .collect();
+    retired.sort();
+    Ok(retired)
+}
+
+/// Remove each of `keys` (as [`retired_config_patch_keys`] found them) from
+/// `overrides/config.toml`, in place, leaving every other key in the layer
+/// untouched. A no-op on an empty `keys`, so a caller never has to guard the
+/// call itself.
+pub(crate) fn write_dropped_config_patch_keys(overrides: &Path, keys: &[String]) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let path = config_patch_path(overrides);
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut doc = raw;
+    for key in keys {
+        let parts: Vec<&str> = key.split('.').collect();
+        doc = crate::confdoc::remove(&doc, &parts)?;
+    }
+    crate::task::write_atomic(&path, &doc).with_context(|| format!("writing {}", path.display()))
+}
+
 fn apply_config_table(
     mut config: Config,
     table: &toml::value::Table,

@@ -107,7 +107,10 @@ applied. A prompt override for a prompt the checkout no longer has is left out t
 patch or a prompt override written for a private target is also left out of the merge — a
 patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
-itself is never changed.
+itself is left alone, except for one case: `spoolway sync` deletes a key on the [Retired
+keys](#retired-keys) list from `overrides/config.toml`, the same way it drops that key from
+the tracked file. A config patch key merely unknown to the tracked config, such as a typo,
+stays in the override file for you to fix yourself.
 
 Outside a lane, each command that loads prints one stderr line per entry it leaves out:
 
@@ -506,7 +509,11 @@ with no `slots`, and a row no pipeline step uses.
 
 ## Retired keys
 
-These keys still parse in an older `config.toml` and are dropped on the next save.
+These keys still parse in an older `config.toml`, and a file naming one loads normally in every
+command. Each key is dropped from the tracked file on the next save. `dispatch.interval`,
+`issue_tracking.on_fail` and a non-blank `dispatch.worktree_root` each print one note per run,
+naming `spoolway sync` as the command that drops the key for good. `spoolway sync` also drops a
+retired key it finds in the [overrides layer](#the-overrides-layer).
 
 | Key | Replaced by |
 |---|---|
