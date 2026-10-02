@@ -90,13 +90,19 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 | Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | Where should this project's setup live? | `--setup repo\|home` | `repo` |
 | The workspace menu (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
-| The coding agent you plan in | `--provider claude\|codex` | `claude` |
+| The coding agent you plan in | `--provider claude\|codex\|pi` | `claude` |
 | Install the example setup? (skipped when joining or moving into an existing workspace) | `--examples`/`--no-examples` | yes |
 | The issue tracker (skipped when joining or moving into an existing workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
 and effort are left blank on every step, and you fill them in before dispatching.
+
+An established project keeps its own provider: a repeat `init` run with `--provider` left off
+takes the project's already-chosen provider rather than falling back to `claude`, whether run
+without a terminal or answered at the menu, whose own default is pre-selected to it. Naming
+a different `--provider` on an established project adds that provider's skills. The project's
+own profile and pipelines stay as they are until `spoolway init --force` rewrites them.
 
 Answering yes to the example setup writes the shipped pipelines, prompts, task templates and
 ticket templates. Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
@@ -129,7 +135,8 @@ flowchart LR
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
-Existing files are kept. `--force` overwrites them.
+Existing files are kept. `--force` overwrites them. A skill file is the exception: `init`
+and `install` rewrite it whenever it differs from the shipped copy, `--force` or not.
 
 Running `init` again in a set-up project installs skills, restores any example file that went
 missing, and otherwise changes nothing. To change settings later, use `spoolway config set`.
@@ -268,10 +275,10 @@ folder sits inside a checkout that home mode promises to leave untouched.
 | `pi` | `~/.pi/agent/skills/`. pi also reads `~/.agents/skills/`, so installing both codex and pi at user level shows pi each skill twice. |
 
 pi's trust note is not printed for a user-level install, since a user folder loads without
-being asked. `spoolway sync` refreshes a user folder only when `spoolway install <provider>
---user` or a home-mode `init` wrote it, marked by a `.installed-by-spoolway` file inside it.
-Deleting that file makes `sync` leave the folder alone. `sync` never removes a retired skill
-name from a user folder.
+being asked. `spoolway sync` keeps current any user folder holding one of the four shipped
+skills: `spoolway-plan`, `spoolway-tasks`, `spoolway-config`, `spoolway-calibrate`. Those
+names belong to spoolway, so a hand-made folder sharing one of them is overwritten too.
+`sync` never removes a retired skill name from a user folder.
 
 ### Checking the setup
 
@@ -359,9 +366,9 @@ What `sync` replaces, file by file:
 | File | What is replaced |
 |---|---|
 | `config.toml` | The comments and the settings reference. Your values stay. |
-| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
-| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder marked by `.installed-by-spoolway`. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
+| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |

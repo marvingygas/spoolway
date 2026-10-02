@@ -2440,8 +2440,8 @@ pub fn project_label(root: &Path) -> String {
 /// repository behind it at all (a bare fixture directory, most of the unit
 /// tests below [`crate::overrides::dir_for`] and
 /// [`crate::pipeline::Pipelines::load`]), or it does but nothing has stamped
-/// it yet, which is every project that predates this stamp and has not been
-/// migrated onto one (`migrate-legacy-home`, not this task) — or a checkout
+/// it yet — every project `spoolway init` or an ordinary command has not
+/// yet stamped — or a checkout
 /// `crate::repo::bind` has not been asked about yet either, straight after
 /// a fresh `git clone` and before any spoolway command has run in it at
 /// all. `project_home` itself never stamps anything — the same call
@@ -2682,10 +2682,9 @@ pub(crate) fn resolve_cut_base(repo: &Path, base: &str) -> String {
 /// to run.
 ///
 /// The shared directory sits beside `worktrees_dir`, never inside it:
-/// `home_inventory_line` (`src/commands/init.rs`) and `migrate_legacy_home`
-/// (`src/repo.rs`) both read every directory directly under the worktree
-/// root as a worktree of its own, and a `.cargo-target` there would be
-/// misread as one — `git worktree repair` genuinely fails on a path that
+/// `move_clone` (`src/repo.rs`) reads every directory directly under the
+/// worktree root as a worktree of its own, and a `.cargo-target` there
+/// would be misread as one — `git worktree repair` genuinely fails on a path that
 /// is not a worktree.
 ///
 /// Best-effort and never fatal: a `target/debug` this worktree already has —

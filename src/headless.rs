@@ -566,19 +566,18 @@ pub fn alive(pid: u32) -> bool {
 /// same run already wrote an exit code for, but a process [`alive`] still
 /// finds running. Built standalone, off `lane_dir` alone, rather than a
 /// whole [`Headless`] — its `root` and `worktree_root` play no part in this
-/// answer, and the one caller outside this module,
-/// [`crate::repo::migrate_legacy_home`], is asking about a 0.2 home nothing
-/// has bound a fresh [`Repo`](crate::repo::Repo) to yet.
+/// answer, and the one caller outside this module, `crate::repo`'s own
+/// `any_worktree_in_use`, is asking on behalf of `spoolway init`'s workspace
+/// menu, about a clone's own folder it is about to move elsewhere.
 ///
-/// A legacy home's own worktrees are never live enough to block a move
-/// merely by existing — `git worktree repair` is what carries the merely
-/// idle ones across (`migrate-legacy-home` acceptance criterion 3) — only
-/// one a lane is actually still working in blocks it at all (acceptance
-/// criterion 2), independently of whether the dispatcher that started that
-/// lane is itself still running: a headless lane survives its own
-/// dispatcher's death by design (see `disaster.sh`'s own kill cases), so
-/// asking only [`crate::lock::Lock::holder`] would miss exactly the lane
-/// this exists to catch.
+/// A worktree is never live enough to block a move merely by existing —
+/// `git worktree repair` is what carries the merely idle ones across —
+/// only one a lane is actually still working in blocks it at all,
+/// independently of whether the dispatcher that started that lane is
+/// itself still running: a headless lane survives its own dispatcher's
+/// death by design (see `disaster.sh`'s own kill cases), so asking only
+/// [`crate::lock::Lock::holder`] would miss exactly the lane this exists to
+/// catch.
 pub(crate) fn lane_working_under(lane_dir: &Path, home: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(lane_dir) else {
         return false;
@@ -950,7 +949,7 @@ mod tests {
         .unwrap();
     }
 
-    /// The property `crate::repo::migrate_legacy_home` leans on: a lane
+    /// The property `crate::repo::any_worktree_in_use` leans on: a lane
     /// still working — a live pid, no exit file yet — inside a worktree
     /// under `home` is found, and one that has since finished is not.
     #[test]

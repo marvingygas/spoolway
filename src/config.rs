@@ -206,49 +206,9 @@ pub struct Config {
     /// every other `[dispatch]` key applies whether or not a person is
     /// watching and these do not.
     pub unattended: UnattendedConfig,
-    /// Where an old `[paths]` table lands so an existing config still parses.
-    /// See [`LegacyPaths`]; the directories it named are constants now.
-    /// Dropped unconditionally on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    paths: LegacyPaths,
-    /// Where an old `[pipeline_gen]` table lands so an existing config still
-    /// parses. See [`LegacyPipelineGen`]; `spoolway pipeline gen` is gone, and
-    /// nothing replaces the session it used to open. Dropped unconditionally
-    /// on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    pipeline_gen: LegacyPipelineGen,
     /// Everything spoolway does for its own upkeep, with no bearing on how a
     /// task runs. See [`HousekeepingConfig`].
     pub housekeeping: HousekeepingConfig,
-    /// Where an old `[update]` table lands so an existing config still
-    /// parses. See [`LegacyUpdate`]; the one key it held moved to
-    /// `housekeeping.update_check`. Dropped unconditionally on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    update: LegacyUpdate,
-    /// Where an old `[calibrate]` table lands so an existing config still
-    /// parses. See [`LegacyCalibrate`]; the one key it held moved to
-    /// `housekeeping.calibrate_window`. Dropped unconditionally on the next
-    /// save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    calibrate: LegacyCalibrate,
-    /// Where an old `[retention]` table lands so an existing config still
-    /// parses. See [`LegacyRetention`]; the one key it held moved to
-    /// `housekeeping.retention_days`. Dropped unconditionally on the next
-    /// save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    retention: LegacyRetention,
-    /// Where an old `[prices]` table lands so an existing config still
-    /// parses. See [`LegacyPrices`]; the one key it held moved to
-    /// `housekeeping.price_max_age_days`. Dropped unconditionally on the next
-    /// save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    prices: LegacyPrices,
     /// Extra directories whose own agent sessions count beside this
     /// project's lanes. See [`WatchConfig`] and [`Config::watch_roots`].
     pub watch: WatchConfig,
@@ -264,41 +224,8 @@ pub struct Config {
     /// field order is `config.toml`'s section order (see [`Config::render`]),
     /// so this is declared here rather than after every open-ended table.
     pub issue_tracking: IssueTrackingConfig,
-    /// Where an old `[plans]` table lands so an existing config still
-    /// parses. See [`LegacyPlans`]; the binary keeps no notion of a plan
-    /// store any more — spoolway-plan writes its page wherever it is told
-    /// to. Dropped unconditionally on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    plans: LegacyPlans,
-    /// Where an old `[docs]` table lands so an existing config still parses.
-    /// See [`LegacyDocs`]; spoolway keeps no notion of documentation any
-    /// more — where documents live, and what each covers, is
-    /// `assets/prompts/archivist/PROMPT.md`'s to say. Dropped
-    /// unconditionally on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    docs: LegacyDocs,
     /// Agent profiles, referenced by name from a pipeline step's `agent:`.
     pub agents: BTreeMap<String, AgentProfile>,
-    /// Where an old `[effort]` table lands so an existing config still
-    /// parses. See [`LegacyEffort`]; a step's `effort:` needs no machine
-    /// setting to mean anything now. Dropped unconditionally on the next
-    /// save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    effort: LegacyEffort,
-    /// Where an old `[sandbox]` table lands so an existing config still
-    /// parses. See [`LegacySandbox`]; the layer it configured is gone, and
-    /// nothing inside spoolway replaces the one goal it carried — see
-    /// `blocked_on_write` above. Dropped unconditionally on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    sandbox: LegacySandbox,
-    /// Where an old `[criteria]` table lands so an existing config still
-    /// parses. See [`LegacyCriteria`]; standards live in the prompt now.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub criteria: LegacyCriteria,
     /// What a model costs, and how big its context window is, keyed by a glob
     /// over the model name. Consulted by `spoolway eval`.
     ///
@@ -331,21 +258,10 @@ impl Default for Config {
         Self {
             dispatch: DispatchConfig::default(),
             unattended: UnattendedConfig::default(),
-            paths: LegacyPaths::default(),
-            pipeline_gen: LegacyPipelineGen::default(),
             housekeeping: HousekeepingConfig::default(),
-            update: LegacyUpdate::default(),
-            calibrate: LegacyCalibrate::default(),
-            retention: LegacyRetention::default(),
-            prices: LegacyPrices::default(),
             watch: WatchConfig::default(),
             issue_tracking: IssueTrackingConfig::default(),
-            plans: LegacyPlans::default(),
-            docs: LegacyDocs::default(),
             agents: AgentProfile::defaults(),
-            effort: LegacyEffort::default(),
-            sandbox: LegacySandbox::default(),
-            criteria: LegacyCriteria::new(),
             // Empty for the same reason no model name ships in `[agents]`:
             // spoolway does not know what you run, and a guessed price is worse
             // than an admitted blank. Every model a shipped pipeline names is
@@ -396,26 +312,8 @@ pub struct IssueTrackingConfig {
     pub key_in_names: bool,
 }
 
-/// An old `[pipeline_gen]` table: what `spoolway pipeline gen` opened, and
-/// what it handed the generation procedure.
-///
-/// The command is gone — it wrote nothing itself, only opened a pane and
-/// prompted the `spoolway-config` skill, which now sends someone straight to
-/// that skill instead. Deserialised as a free map for the same reason
-/// [`LegacySandbox`] is: an existing config still opens, all six keys
-/// included; nothing here is read, and the table is dropped on the next save.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(transparent)]
-struct LegacyPipelineGen(#[allow(dead_code)] BTreeMap<String, toml::Value>);
-
 /// `[housekeeping]`: everything spoolway does for its own upkeep, with no
 /// bearing on how any task runs.
-///
-/// Folded from four one-key tables — `[update]`, `[calibrate]`,
-/// `[retention]` and `[prices]` — that each existed only to carry the single
-/// setting below it. Their old spellings still parse, and a value one of them
-/// held is carried across in [`Config::migrate`] — see [`LegacyUpdate`] and
-/// its three siblings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HousekeepingConfig {
@@ -467,73 +365,6 @@ impl Default for HousekeepingConfig {
             retention_days: 30,
             price_max_age_days: 30,
         }
-    }
-}
-
-/// An old `[update]` table: whether spoolway said a newer release was out.
-///
-/// The one key it held moved to `housekeeping.update_check` — see
-/// [`Config::migrate`], which carries a value across only when this differs
-/// from its own default, the same default `update_check` itself now carries.
-/// Kept only so an existing config still parses; never read directly, and
-/// dropped on the next save.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
-struct LegacyUpdate {
-    check: bool,
-}
-
-impl Default for LegacyUpdate {
-    fn default() -> Self {
-        Self { check: true }
-    }
-}
-
-/// An old `[calibrate]` table: how far back `spoolway-calibrate` read. See
-/// [`LegacyUpdate`] for the pattern; the one key here moved to
-/// `housekeeping.calibrate_window`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
-struct LegacyCalibrate {
-    #[serde(with = "human_duration")]
-    window: Duration,
-}
-
-impl Default for LegacyCalibrate {
-    fn default() -> Self {
-        Self {
-            window: Duration::from_secs(14 * 86_400),
-        }
-    }
-}
-
-/// An old `[retention]` table: how long a byproduct directory kept what it
-/// held. See [`LegacyUpdate`] for the pattern; the one key here moved to
-/// `housekeeping.retention_days`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
-struct LegacyRetention {
-    days: u64,
-}
-
-impl Default for LegacyRetention {
-    fn default() -> Self {
-        Self { days: 30 }
-    }
-}
-
-/// An old `[prices]` table: how stale the shared price table could get before
-/// it was mentioned. See [`LegacyUpdate`] for the pattern; the one key here
-/// moved to `housekeeping.price_max_age_days`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
-struct LegacyPrices {
-    max_age_days: u64,
-}
-
-impl Default for LegacyPrices {
-    fn default() -> Self {
-        Self { max_age_days: 30 }
     }
 }
 
@@ -688,9 +519,11 @@ pub struct DispatchConfig {
     /// path. Every worktree now lands under the project's own home, with no
     /// way to move it — see [`crate::mux::worktree_root`]. Kept only so an
     /// existing config still parses; dropped unconditionally on the next
-    /// save. [`crate::sync::config`] names the old directory to a project
-    /// whose value here was a real path, rather than dropping it in silence,
-    /// since worktrees already cut there are not moved for it.
+    /// save. A non-blank value earns a note on every ordinary
+    /// [`Config::load`] (see `load_with_notices`), and `spoolway sync` and
+    /// `spoolway doctor` both go further and name a queued task whose
+    /// worktree still sits at the old path, rather than dropping the key in
+    /// silence or calling a worktree cut there safe to remove.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     worktree_root: String,
@@ -1079,7 +912,7 @@ pub struct AgentProfile {
 
     /// Retired: whether this profile's lanes were confined by the kernel, and
     /// whether they loaded their kind's own network-egress extension. Both
-    /// belonged to the sandbox, which is gone — see [`LegacySandbox`]. Kept
+    /// belonged to the sandbox, which is gone. Kept
     /// only so an existing config still parses; dropped unconditionally on the
     /// next save.
     #[allow(dead_code)]
@@ -1504,106 +1337,95 @@ fn leftover_placeholder(rendered: &str) -> Option<String> {
     None
 }
 
-/// An old `[effort]` table: `tier_models` picked a model per named tier, and
-/// `sensitive_paths` decided what a step's `effort: auto` meant.
+/// Every key this binary has retired that a config it still upgrades from
+/// could hold, as `(table, key)`. `*` stands for any `[agents.<name>]`
+/// profile. These are the `skip_serializing` fields kept above only so an
+/// old file still parses (each under every spelling serde accepts for it),
+/// plus the two [`strip_hard_retired_keys`] removes before the parse.
 ///
-/// Both are gone. A step's `effort:` is a free string now, handed straight
-/// through to the flag its agent kind carries one on — no tier, no model
-/// swap, and so no machine-level setting for either to consult. This exists
-/// only so a config written before that still parses; it is never read, and
-/// dropped on the next save.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct LegacyEffort {
-    tier_models: BTreeMap<String, String>,
-    sensitive_paths: Vec<String>,
+/// [`crate::overrides::retired_config_patch_keys`] drops only keys on this
+/// list from a private override. It used to treat every key the config did
+/// not know as retired, and `spoolway sync` deleted a plain typo
+/// (`dispatch.lane_quite`, 2026-10-02) as though it were one. A mistake is
+/// for whoever wrote it to fix, so a key not named here stays in the layer.
+/// A field retired later belongs here as well as under `skip_serializing`.
+const RETIRED_KEYS: &[(&str, &str)] = &[
+    ("dispatch", "interval"),
+    ("dispatch", "tmux_mode"),
+    ("dispatch", "protected_branches"),
+    ("dispatch", "notify"),
+    ("dispatch", "open_on_escalation"),
+    ("dispatch", "open"),
+    ("dispatch", "max_launches"),
+    ("dispatch", "max_attempts"),
+    ("dispatch", "auto_unblock"),
+    ("dispatch", "default_pipeline"),
+    ("dispatch", "worktree_root"),
+    ("dispatch", "tear_lanes_on_stop"),
+    ("dispatch", "cleanup_on_stop"),
+    ("unattended", "skip_blocked_lane"),
+    ("issue_tracking", "on_fail"),
+    ("agents.*", "args"),
+    ("agents.*", "model"),
+    ("agents.*", "sandbox"),
+    ("agents.*", "sandbox_extension"),
+    ("agents.*", "context_window"),
+    ("agents.*", "quota_ceiling"),
+    ("agents.*", "session_reuse_uncached"),
+    ("agents.*", "env"),
+];
+
+/// Whether `dotted` (`dispatch.worktree_root`, `agents.claude.env.FOO`)
+/// names a key on [`RETIRED_KEYS`], or a leaf inside one such as an entry of
+/// a retired `env` table.
+pub(crate) fn is_retired_key(dotted: &str) -> bool {
+    let parts: Vec<&str> = dotted.split('.').collect();
+    RETIRED_KEYS.iter().any(|(table, key)| {
+        let pattern: Vec<&str> = table.split('.').chain(std::iter::once(*key)).collect();
+        parts.len() >= pattern.len()
+            && pattern
+                .iter()
+                .zip(&parts)
+                .all(|(want, got)| *want == "*" || want == got)
+    })
 }
 
-/// An old `[sandbox]` table: the kernel confinement every local lane ran
-/// under, and the paths, ports and domains that widened it.
+/// `dispatch.interval` and `issue_tracking.on_fail`, each stripped from
+/// `raw` when present, along with one note per key naming `spoolway sync`.
 ///
-/// The whole layer is gone — Landlock, the shims, the guardrails artifacts and
-/// this table with them — so there is nothing left for any of these keys to
-/// configure, and nothing inside spoolway replaces it: confinement is the
-/// person's own agent settings now, outside this repository. Deserialised as
-/// a free map because the point is only that an existing config still opens:
-/// it is never read, and dropped on the next save.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(transparent)]
-struct LegacySandbox(#[allow(dead_code)] BTreeMap<String, toml::Value>);
-
-/// An old `[paths]` table. Every directory it named is a constant now —
-/// `QUEUE_DIR` and friends, beside [`STATE_DIR`] — because a project never
-/// chooses where its own state lives, and every caller already goes through
-/// the accessors on [`crate::repo::Repo`]. `docs` used to be the exception,
-/// carried across onto a `[docs]` table this binary also no longer keeps —
-/// see [`LegacyDocs`] — so nothing here is read again either way. Dropped on
-/// the next save.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(transparent)]
-struct LegacyPaths(#[allow(dead_code)] BTreeMap<String, toml::Value>);
-
-/// An old `[plans]` table: where a plan page was written, and how.
-///
-/// The binary kept an opinion about that once — a store to write into, a
-/// shared skeleton, a stylesheet and two lockups every page pointed at by
-/// relative path. None of it is spoolway's business any more: spoolway-plan
-/// writes one self-contained page wherever it is told to, and reads no
-/// config to decide it. Deserialised as a free map for the same reason
-/// [`LegacySandbox`] is — an existing config still opens, `store`, `format`
-/// and `template` all included; nothing here is read, and the table is
-/// dropped on the next save.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(transparent)]
-struct LegacyPlans(#[allow(dead_code)] BTreeMap<String, toml::Value>);
-
-/// An old `[docs]` table: what the archivist wrote a domain document as, and
-/// where.
-///
-/// Retired the way `[plans]` was: `src/docs.rs` is gone, and spoolway keeps no
-/// notion of documentation any more — where documents live, and what each
-/// covers, is `assets/prompts/archivist/PROMPT.md`'s to say, and a project
-/// whose layout was never the default gets a note rather than a migration —
-/// see [`Config::load`]. Named fields rather than an opaque map, unlike most
-/// of its retired siblings, because [`Config::load`]'s note only fires when a
-/// value here was ever set away from the default: an untouched `[docs]`
-/// table, which every config written before this carries, says nothing worth
-/// printing.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
-struct LegacyDocs {
-    path: PathBuf,
-    format: LegacyDocFormat,
-}
-
-impl Default for LegacyDocs {
-    fn default() -> Self {
-        Self {
-            path: PathBuf::from("docs"),
-            format: LegacyDocFormat::default(),
+/// Both are retired hard enough that `DispatchConfig` and
+/// [`IssueTrackingConfig`]'s own `deny_unknown_fields` refuses a file that
+/// still names either, rather than quietly dropping it the way every other
+/// retired key does — on purpose, so a project only discovers a key is gone
+/// the moment something tries to read it. That used to mean a project
+/// upgraded from 0.6.0 with either key still set could not run anything but
+/// `spoolway sync`: every other command loaded the same file through
+/// [`Config::load`] or [`Config::load_tracked`], both of which go straight
+/// to `toml::from_str` with no strip at all. This is what both now call
+/// before that parse, so the file loads everywhere, with a note saying so —
+/// `spoolway sync` is still the one command that writes the key away for
+/// good, the same way [`Config::save_key`] edits a document in place, so the
+/// note sends a person there. Stripping a key the file never had is a no-op.
+fn strip_hard_retired_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
+    const RETIRED: [(&str, &str); 2] = [("dispatch", "interval"), ("issue_tracking", "on_fail")];
+    let mut stripped = raw.to_string();
+    let mut notices = Vec::new();
+    for (table, key) in RETIRED {
+        let present = toml::from_str::<toml::Value>(&stripped)
+            .ok()
+            .and_then(|v| v.get(table)?.get(key).cloned())
+            .is_some();
+        if present {
+            notices.push(format!(
+                "note: {table}.{key} in {} is retired — loaded past it; run `spoolway sync` to \
+                 drop the key for good.",
+                path.display(),
+            ));
+            stripped = crate::confdoc::remove(&stripped, &[table, key])?;
         }
     }
+    Ok((stripped, notices))
 }
-
-/// The shape an old `[docs]` table's `format` held. Never read for anything
-/// but the comparison [`LegacyDocs`]'s doc explains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum LegacyDocFormat {
-    #[default]
-    Markdown,
-    Custom,
-}
-
-/// A `[criteria]` table left over from before review standards moved into the
-/// reviewer prompt.
-///
-/// Kept only because [`Config`] denies unknown fields: without somewhere for it
-/// to land, an existing project's config would stop parsing on the next command
-/// rather than telling anyone what changed. It is never written back — the
-/// `skip_serializing_if` on the field is what makes the next `spoolway config
-/// set` drop it — and [`Config::load`] says so once when it finds one.
-pub type LegacyCriteria = BTreeMap<String, Vec<String>>;
 
 impl Config {
     /// `.spoolway/config.toml` under `root`.
@@ -1635,41 +1457,55 @@ impl Config {
     }
 
     fn load_impl(root: &Path, overrides: Option<&Path>) -> Result<Config> {
-        let (config, notices, ignored) = Config::load_with_notices(root, overrides)?;
-        for notice in notices {
-            eprintln!("{notice}");
-        }
-        crate::overrides::print_ignored_notices(&ignored);
-        Ok(config)
+        Config::load_and_print(root, overrides).map(|(config, _)| config)
     }
 
-    /// [`Config::load`], tolerating a file that still names a key retired
-    /// hard enough that an ordinary load refuses it outright: `dispatch.
-    /// interval`, or `issue_tracking.on_fail` (see [`crate::tracking`]'s own
-    /// doc for what replaced it — every failing hook pauses its task now,
-    /// so there is nothing left for this to choose between).
+    /// [`Config::load_impl`], also handing back the notices it actually
+    /// printed, so a test can see the dedupe below at work.
+    fn load_and_print(root: &Path, overrides: Option<&Path>) -> Result<(Config, Vec<String>)> {
+        let (config, notices, ignored) = Config::load_with_notices(root, overrides)?;
+        // One plain command loads its config more than once on the way to
+        // answering — `main.rs` builds a `Pipelines` ahead of its own
+        // dispatch match, and most commands read their own copy again right
+        // after — and every one of those loads runs the same notices. Without
+        // this, `queue list` over a config still naming `issue_tracking.
+        // on_fail` prints the same note twice, and `doctor` three times.
+        // `first_time_this_process` is the exact dedup `print_ignored_notices`
+        // already leans on for the override layer's own notices, keyed by
+        // the rendered line rather than by which notice it was, so it works
+        // here unchanged.
+        let mut printed = Vec::new();
+        for notice in notices {
+            if crate::overrides::first_time_this_process(&notice) {
+                eprintln!("{notice}");
+                printed.push(notice);
+            }
+        }
+        crate::overrides::print_ignored_notices(&ignored);
+        Ok((config, printed))
+    }
+
+    /// [`Config::load_tracked`] with every notice silenced — no "retired"
+    /// note, no tmux-backend note, nothing from an `[agents.*]` table — and
+    /// `config.migrate()` run directly, with no call through
+    /// [`Config::load_with_notices`] at all.
     ///
-    /// Every other caller keeps refusing a file naming either key:
-    /// `DispatchConfig` and [`IssueTrackingConfig`]'s own `deny_unknown_fields`
-    /// is what makes each a hard parse error rather than a quietly-dropped
-    /// one, on purpose, so a project only discovers a key is gone the moment
-    /// something tries to read it. `spoolway sync` is the one caller that
-    /// exists to bring a file like that forward rather than reject it, so
-    /// this strips both keys from the raw text before parsing — the same
-    /// way [`Config::save_key`] edits a document in place — and parses what
-    /// is left. Stripping a key this file never had is a no-op.
+    /// [`Config::load_tracked`] already reads the same file through the same
+    /// patch-free path, so the two agree on every value; this exists only
+    /// because `spoolway sync`'s own config step builds its own report of
+    /// what changed (`refresh.dropped`, the `Migrated` notes) from the raw
+    /// text itself, and would otherwise print the exact same things twice —
+    /// once from here, once from its own summary. Nothing else should reach
+    /// for this over [`Config::load_tracked`]: a caller that wants the
+    /// ordinary notices gets them from that one for free.
     pub fn load_dropping_retired_keys(root: &Path) -> Result<Config> {
         let path = Config::path_in(root);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let stripped = crate::confdoc::remove(&raw, &["dispatch", "interval"])?;
-        let stripped = crate::confdoc::remove(&stripped, &["issue_tracking", "on_fail"])?;
+        let (stripped, _notices) = strip_hard_retired_keys(&raw, &path)?;
         let mut config: Config =
             toml::from_str(&stripped).with_context(|| format!("parsing {}", path.display()))?;
         config.migrate();
-        if let Ok(overrides) = crate::overrides::dir_for(root) {
-            config = crate::overrides::apply_config_patch(config, &overrides)?.0;
-        }
         Ok(config)
     }
 
@@ -1683,21 +1519,15 @@ impl Config {
         let path = Config::path_in(root);
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
-                let mut config: Config =
-                    toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-                let mut notices = Vec::new();
-                // Said here rather than in `doctor`, because the standards stop
-                // reaching the reviewer the moment this file is the only place
-                // they are written down, and nothing else would ever mention it.
-                if !config.criteria.is_empty() {
-                    notices.push(format!(
-                        "note: [criteria] in {} is no longer read — a project's review standards \
-                         live at the bottom of {PROMPTS_DIR}/reviewer/{}, where they can be \
-                         edited as prose. Move them across and delete the table.",
-                        path.display(),
-                        crate::assets::PROMPT_FILE,
-                    ));
-                }
+                // `dispatch.interval` and `issue_tracking.on_fail` fail every
+                // caller outright otherwise — see `strip_hard_retired_keys`'s
+                // own doc — so this strips them before the struct ever sees
+                // the file, and the notices it returns say so, naming
+                // `spoolway sync` as the one command that writes the key
+                // away for good.
+                let (stripped, mut notices) = strip_hard_retired_keys(&raw, &path)?;
+                let mut config: Config = toml::from_str(&stripped)
+                    .with_context(|| format!("parsing {}", path.display()))?;
                 // The alias on `Backend::Herdr` already turned a `tmux` value
                 // into `Herdr` by the time `config` exists — this is only
                 // what tells a person it happened, since the typed value
@@ -1722,6 +1552,26 @@ impl Config {
                         path.display(),
                     ));
                 }
+                // `dispatch.worktree_root` still parses — the field stays on
+                // `DispatchConfig` for exactly this — but nothing reads it
+                // any more, so a project that set it to a real path deserves
+                // the same kind of note the two hard-retired keys above earn,
+                // not silence until `doctor` or `sync` happens to mention it.
+                // A blank value was never a real decision — nothing to say
+                // until it names a path. `spoolway sync`'s own note on the
+                // same key (`crate::sync::config`) and `doctor`'s
+                // `worktree_root_note` both go further, naming a queued task
+                // whose worktree still sits there; this one only says the
+                // key is gone, since a plain load has no task list to check.
+                if !config.dispatch.worktree_root.trim().is_empty() {
+                    notices.push(format!(
+                        "note: dispatch.worktree_root in {} names {} — the setting is retired, \
+                         every worktree now lands under the project home; run `spoolway sync` \
+                         to drop the key.",
+                        path.display(),
+                        config.dispatch.worktree_root,
+                    ));
+                }
                 // Said here for the same reason: a person who set it wanted
                 // their worktrees kept across a stop, and that is now what
                 // every stop does.
@@ -1734,18 +1584,6 @@ impl Config {
                          stood. The key is dropped on the next save.",
                         path.display(),
                     );
-                }
-                // Only where a value was somebody's decision: an untouched
-                // `[docs]` table — every config written before this carries
-                // one — says nothing worth a note.
-                if config.docs != LegacyDocs::default() {
-                    notices.push(format!(
-                        "note: [docs] in {} is no longer read — spoolway keeps no notion of \
-                         documentation. Where documents live, and what each covers, is the \
-                         archivist's: {PROMPTS_DIR}/archivist/PROMPT.md. The table is dropped \
-                         on the next save.",
-                        path.display(),
-                    ));
                 }
                 for (name, profile) in &config.agents {
                     if !profile.env.is_empty() {
@@ -1833,28 +1671,6 @@ impl Config {
                 None => profile.permission_mode.clear(),
                 Some(_) => {}
             }
-        }
-
-        // Four retired one-key tables, each folded into `[housekeeping]`. A
-        // legacy table absent from the file parses to the same default its
-        // own struct carries, and that default already equals
-        // `HousekeepingConfig`'s own default for the field it fed — so
-        // comparing against the legacy default is what tells apart a value
-        // somebody actually set under the old name from one that was never
-        // there, and this never clobbers a `[housekeeping]` value the file
-        // set directly with no `[update]`/`[calibrate]`/`[retention]`/
-        // `[prices]` table anywhere in it.
-        if self.update != LegacyUpdate::default() {
-            self.housekeeping.update_check = self.update.check;
-        }
-        if self.calibrate != LegacyCalibrate::default() {
-            self.housekeeping.calibrate_window = self.calibrate.window;
-        }
-        if self.retention != LegacyRetention::default() {
-            self.housekeeping.retention_days = self.retention.days;
-        }
-        if self.prices != LegacyPrices::default() {
-            self.housekeeping.price_max_age_days = self.prices.max_age_days;
         }
     }
 
@@ -2352,26 +2168,6 @@ mod tests {
 
         let parsed: Config = toml::from_str(&rendered).unwrap();
         assert_eq!(parsed.housekeeping.price_max_age_days, 7);
-    }
-
-    /// The acceptance test: a config file written before this change, naming
-    /// the old `[update]` table, still reports the value it held after a
-    /// load-and-save round trip — `Config::migrate` carries it into
-    /// `housekeeping.update_check` rather than losing it the way an uncaught
-    /// table would (see [`Config::extra`]).
-    #[test]
-    fn an_old_update_table_survives_a_load_and_save_round_trip() {
-        let mut config: Config = toml::from_str("[update]\ncheck = false\n").unwrap();
-        config.migrate();
-        assert!(!config.housekeeping.update_check);
-
-        let saved = config.render().unwrap();
-        let mut reloaded: Config = toml::from_str(&saved).unwrap();
-        reloaded.migrate();
-        assert!(!reloaded.housekeeping.update_check);
-        // The old table itself is gone from the rewritten file — it is not
-        // simply carried forward alongside the new key.
-        assert!(!saved.contains("[update]"));
     }
 
     #[test]
@@ -2881,6 +2677,110 @@ mod tests {
         assert!(!rendered.contains("format ="));
     }
 
+    /// `dispatch.interval` and `issue_tracking.on_fail` are retired hard
+    /// enough that `DispatchConfig` and `IssueTrackingConfig`'s own
+    /// `deny_unknown_fields` refuses a file still naming either — this used
+    /// to be stripped only by `spoolway sync`'s own loader,
+    /// [`Config::load_dropping_retired_keys`], leaving every other command
+    /// — `queue list`, `config get`, `resume`, `doctor` — refusing to load a
+    /// project upgraded from 0.6.0 at all. [`strip_hard_retired_keys`] is
+    /// now shared by [`Config::load`] and [`Config::load_tracked`] too, so
+    /// this loads past the retired key with a note naming `spoolway sync`,
+    /// the one command that still writes it away for good.
+    #[test]
+    fn a_retired_key_that_only_sync_strips_still_loads_everywhere_else() {
+        let dir = crate::scratch::root("config-retired-key-outside-sync");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&dir), "[issue_tracking]\non_fail = \"\"\n").unwrap();
+
+        Config::load(&dir).expect(
+            "a config holding a key only `load_dropping_retired_keys` strips must still load \
+             outside `sync`, with a note naming `spoolway sync`",
+        );
+
+        // One note for the one key the file names, naming `spoolway sync` —
+        // not zero, which is the whole fix. That one load never printed it
+        // twice is `the_same_retired_key_note_prints_once_however_often_a_command_loads`'s
+        // to show.
+        let notices = Config::load_with_notices(&dir, None).unwrap().1;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("issue_tracking.on_fail"), "{notices:?}");
+        assert!(notices[0].contains("spoolway sync"), "{notices:?}");
+    }
+
+    /// One command runs `Config::load` several times — `main.rs` builds a
+    /// `Pipelines` first, then most commands read their own copy — and
+    /// before `load_impl` deduped its notices, `queue list` over a 0.6.0
+    /// config printed the `issue_tracking.on_fail` note twice and `doctor`
+    /// three times (seen 2026-10-02). The second load here must print
+    /// nothing.
+    #[test]
+    fn the_same_retired_key_note_prints_once_however_often_a_command_loads() {
+        let dir = crate::scratch::root("config-retired-key-note-once");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&dir), "[issue_tracking]\non_fail = \"\"\n").unwrap();
+
+        let first = Config::load_and_print(&dir, None).unwrap().1;
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(first[0].contains("issue_tracking.on_fail"), "{first:?}");
+
+        let second = Config::load_and_print(&dir, None).unwrap().1;
+        assert!(second.is_empty(), "a second load printed again: {second:?}");
+    }
+
+    /// Only a key this binary actually retired counts as one: a typo with no
+    /// near live key (`lane_quite`) is not on the list, while a retired key,
+    /// a retired spelling (`max_attempts`) and a leaf under a retired agent
+    /// table all are.
+    #[test]
+    fn only_a_key_on_the_retired_list_counts_as_retired() {
+        assert!(is_retired_key("dispatch.worktree_root"));
+        assert!(is_retired_key("dispatch.max_attempts"));
+        assert!(is_retired_key("issue_tracking.on_fail"));
+        assert!(is_retired_key("agents.claude.env.FOO"));
+        assert!(!is_retired_key("dispatch.lane_quite"));
+        assert!(!is_retired_key("dispatch.lane_quiet"));
+        assert!(!is_retired_key("agents.claude"));
+        assert!(!is_retired_key("models.opus.context_window"));
+    }
+
+    /// `dispatch.worktree_root` is only soft-retired — the field still
+    /// parses on its own, with no `deny_unknown_fields` to trip — so it
+    /// never needed `strip_hard_retired_keys` to load. The plan's own
+    /// `d-upgrade-floor` still asks for a note naming `spoolway sync` on
+    /// every ordinary load, the same as the two hard-retired keys, so an
+    /// otherwise silent command (`queue list`, before this fix) still says
+    /// something.
+    #[test]
+    fn a_real_worktree_root_earns_a_load_note_naming_sync() {
+        let dir = crate::scratch::root("config-worktree-root-load-note");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+        )
+        .unwrap();
+
+        let notices = Config::load_with_notices(&dir, None).unwrap().1;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("dispatch.worktree_root"), "{notices:?}");
+        assert!(notices[0].contains("/old/worktrees"), "{notices:?}");
+        assert!(notices[0].contains("spoolway sync"), "{notices:?}");
+    }
+
+    /// A blank `dispatch.worktree_root` was never a real decision — the
+    /// mockup's own 0.6.0 fixture carries one and shows no note for it, the
+    /// same as `doctor`'s and `sync`'s own notes on the same key.
+    #[test]
+    fn a_blank_worktree_root_earns_no_load_note() {
+        let dir = crate::scratch::root("config-worktree-root-load-note-blank");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&dir), "[dispatch]\nworktree_root = \"\"\n").unwrap();
+
+        let notices = Config::load_with_notices(&dir, None).unwrap().1;
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+
     /// A whole `[pipeline_gen]` table, all six keys it ever carried — the
     /// three live ones `spoolway pipeline gen` read plus the three already
     /// retired inside it — must still parse now that the command and the
@@ -3289,43 +3189,15 @@ mod tests {
     /// `[docs]` and a non-empty `agents.<profile>.env` both retire the way
     /// `[plans]` did — parsed, never read, and dropped on the next save.
     #[test]
-    fn an_old_docs_table_and_a_non_empty_env_table_parse_and_drop() {
-        let raw = "[docs]\n\
-                    path = \"website/docs\"\n\
-                    format = \"custom\"\n\
-                    [agents.claude]\n\
+    fn a_non_empty_agent_env_table_parses_and_drops() {
+        let raw = "[agents.claude]\n\
                     kind = \"claude\"\n\
                     [agents.claude.env]\n\
                     ANTHROPIC_BASE_URL = \"https://example.test\"\n";
-        let config: Config = toml::from_str(raw).expect("a retired [docs]/env pair must parse");
+        let config: Config = toml::from_str(raw).expect("a retired env table must parse");
 
         let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("[docs"));
-        assert!(!rendered.contains("website/docs"));
         assert!(!rendered.contains("ANTHROPIC_BASE_URL"));
-    }
-
-    /// The note `Config::load` prints for `[docs]` fires only where a value
-    /// was somebody's decision — an untouched table, the shape every config
-    /// written before this carries, says nothing. This is the predicate that
-    /// decides it.
-    #[test]
-    fn the_docs_note_fires_only_when_the_table_was_not_already_the_default() {
-        let default = "[docs]\npath = \"docs\"\nformat = \"markdown\"\n";
-        let parsed: Config = toml::from_str(default).unwrap();
-        assert_eq!(
-            parsed.docs,
-            LegacyDocs::default(),
-            "the shipped default must compare equal to itself"
-        );
-
-        let customised = "[docs]\npath = \"website/docs\"\nformat = \"markdown\"\n";
-        let parsed: Config = toml::from_str(customised).unwrap();
-        assert_ne!(parsed.docs, LegacyDocs::default());
-
-        // And a file that never wrote `[docs]` at all — `Config::default()`'s
-        // own starting point — is the same as the default table written out.
-        assert_eq!(Config::default().docs, LegacyDocs::default());
     }
 
     /// A scratch project with a tracked `config.toml`, and a scratch `$HOME`
@@ -3432,9 +3304,7 @@ mod tests {
     /// last, after the notices and after `migrate()`.
     #[test]
     fn a_patch_on_disk_does_not_silence_the_retired_table_notices() {
-        let tracked = "[docs]\npath = \"handbook\"\n\
-                       [criteria]\ncorrectness = [\"holds\"]\n\
-                       [agents.leftover]\nkind = \"nosuchkind\"\n\
+        let tracked = "[agents.leftover]\nkind = \"nosuchkind\"\n\
                        [agents.pi]\nkind = \"pi\"\n\
                        [agents.pi.env]\nFOO = \"bar\"\n\
                        [unattended]\nenabled = false\n";
@@ -3442,8 +3312,8 @@ mod tests {
             let bare = Config::load_with_notices(root, None).unwrap().1;
             assert_eq!(
                 bare.len(),
-                4,
-                "the tracked file alone earns all four notices: {bare:?}"
+                2,
+                "the tracked file alone earns both notices: {bare:?}"
             );
 
             let overrides = crate::overrides::dir_for(root).unwrap();
@@ -3461,12 +3331,7 @@ mod tests {
                 patched, bare,
                 "a patch on an unrelated key must not change which notices print"
             );
-            for table in [
-                "[docs]",
-                "[criteria]",
-                "[agents.pi.env]",
-                "[agents.leftover]",
-            ] {
+            for table in ["[agents.pi.env]", "[agents.leftover]"] {
                 assert!(
                     patched.iter().any(|n| n.contains(table)),
                     "{table} notice missing with a patch on disk: {patched:?}"

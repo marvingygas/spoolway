@@ -51,6 +51,20 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 | The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. |
 | Anything else | The command refuses, naming both files by absolute path. |
 
+A third file, `.git/spoolway-root`, sits beside the id stamp in the same common git directory.
+It records the checkout's own absolute path. Unlike the id, which is minted once, it is
+rewritten each time the checkout is stamped: by `spoolway init`, and by the first command that
+binds an unstamped checkout. It exists for one case that neither the id stamp nor an ordinary
+`git rev-parse` answers: a `--separate-git-dir` clone or a submodule. There the common git
+directory need not sit inside the checkout, so its parent is not a reliable way back to it.
+
+Nothing checks `spoolway-root` against anything else. It is a locator, not part of the binding
+above. A linked worktree finds its checkout from the common directory's parent when that parent
+checks out, then from this record, then from the workspace's clone listing. When none of the
+three answers, as in a fresh `--separate-git-dir` clone or submodule with no record, `spoolway
+init` refuses that linked worktree and tells you to run `spoolway init` in the main checkout
+first. Run `spoolway init` there before working from a linked worktree of such a clone.
+
 The shared dispatch workspace sits at `~/.spoolway/.dispatcher/`. A project home always ends in
 `-<id>`, so the two can never collide. See [One home for every run, in every
 project](dispatcher.md#one-home-for-every-run-in-every-project).
@@ -103,7 +117,10 @@ applied. A prompt override for a prompt the checkout no longer has is left out t
 patch or a prompt override written for a private target is also left out of the merge — a
 patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
 promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
-itself is never changed.
+itself is left alone, except for one case: `spoolway sync` deletes a key on the [Retired
+keys](#retired-keys) list from `overrides/config.toml`, the same way it drops that key from
+the tracked file. A config patch key merely unknown to the tracked config, such as a typo,
+stays in the override file for you to fix yourself.
 
 Outside a lane, each command that loads prints one stderr line per entry it leaves out:
 
@@ -502,11 +519,21 @@ with no `slots`, and a row no pipeline step uses.
 
 ## Retired keys
 
-These keys still parse in an older `config.toml` and are dropped on the next save.
+A file naming a retired key always loads. None of them refuses to parse any more, even
+`dispatch.interval` and `issue_tracking.on_fail`, which used to fail every command except
+`spoolway sync`. Each key is dropped from the tracked file on the next save. These keys load
+with a note: `dispatch.interval`, `issue_tracking.on_fail`, a non-blank
+`dispatch.worktree_root`, `dispatch.backend` set to `tmux` (which loads as `herdr` instead),
+`dispatch.tear_lanes_on_stop`, an `[agents.<profile>.env]` table, and an `[agents.<profile>]`
+naming a kind spoolway no longer knows how to launch. Only the notes for `dispatch.interval`,
+`issue_tracking.on_fail` and `dispatch.worktree_root` name `spoolway sync` as the command that
+drops the key for good. The others say the key is rewritten or dropped on the next save. The
+rest of the table below are dropped with nothing printed.
+`spoolway sync` also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
 
 | Key | Replaced by |
 |---|---|
-| `[update]`, `[calibrate]`, `[retention]`, `[prices]` | `[housekeeping]` |
+| `[update]`, `[calibrate]`, `[retention]`, `[prices]` | Nothing. `[housekeeping]` holds the same settings under new names. |
 | `[pricing]` | `[models]` |
 | `[effort]` | A step's own `model:` and `effort:` |
 | `[stack.summary]` | The task's `title:` and body are the pull request |

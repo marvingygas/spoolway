@@ -376,14 +376,16 @@ refuses "so --replace has nothing left to hand back" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" sync --replace .spoolway/templates/lane-prompts.md
 
 # ------------------------------------------------------- dispatch.interval
-# `dispatch.interval` is retired hard: `DispatchConfig` denies unknown
-# fields, so a config that still names it is a parse error rather than a
-# quietly-dropped setting, everywhere except `sync`, which is the one place
-# meant to bring such a file forward.
+# `dispatch.interval` is retired, and a config that still names it loads past
+# the key with a note rather than refusing — `DispatchConfig` still denies
+# unknown fields, but the key is stripped before the parse sees it. `sync` is
+# the one place that drops it from the file for good.
 CONFIG="$INITDIR/unasked/.spoolway/config.toml"
 sed -i '/^\[dispatch\]$/a interval = "10s"' "$CONFIG"
-refuses "a config still naming dispatch.interval is refused" \
-  "unknown field" \
+works "a config still naming dispatch.interval loads" \
+  env -C "$INITDIR/unasked" "$SPOOLWAY" config get dispatch.lane_quiet
+says "and says the key is retired, pointing at sync" \
+  "dispatch.interval in" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" config get dispatch.lane_quiet
 must "sync runs over the project anyway" env -C "$INITDIR/unasked" "$SPOOLWAY" sync
 lacks "dispatch.interval is gone from the rewritten config" "interval" "$CONFIG"

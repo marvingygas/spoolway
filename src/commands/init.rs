@@ -724,43 +724,6 @@ fn report_row(verb: &str, what: &str) -> String {
     format!("  {verb:<9}{what}")
 }
 
-/// The mockup's second `bound` row: how much was already sitting under a
-/// home a checkout just took over — the queue and archive task counts,
-/// whether a usage ledger exists, and how many worktrees are cut.
-/// `migrate-legacy-home`'s own move prints this against the home it just
-/// moved, the one case that can bind a checkout to a home carrying real
-/// state a person did not just watch `init` create empty.
-///
-/// Worktrees are always counted at `home`'s own `worktrees` directory —
-/// every dispatched checkout lands there now, with no setting left to move
-/// it elsewhere.
-pub(crate) fn home_inventory_line(home: &Path) -> String {
-    let count_docs = |dir: std::path::PathBuf| -> usize {
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
-            .count()
-    };
-    let queue = count_docs(home.join(crate::config::QUEUE_DIR));
-    let archive = count_docs(home.join(crate::config::ARCHIVE_DIR));
-    let ledger = std::fs::metadata(home.join(crate::usage::LEDGER_FILE))
-        .map(|meta| meta.len() > 0)
-        .unwrap_or(false);
-    let worktree_dir = home.join("worktrees");
-    let worktrees = std::fs::read_dir(worktree_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .count();
-    format!(
-        "queue {queue} . archive {archive} . ledger{} . worktrees {worktrees}",
-        if ledger { "" } else { " (none)" }
-    )
-}
-
 /// Writes what `init` places and keeps the report rows for it.
 ///
 /// Every file or folder considered gets one row, in call order, rather than
@@ -1918,43 +1881,6 @@ mod tests {
             crate::assets::PROMPTS.len(),
             "listed {:?}",
             listed.iter().map(|e| &e.name).collect::<Vec<_>>()
-        );
-    }
-
-    /// The mockup's own second `bound` line, with real state under the
-    /// home to count — an empty home (the common case, an ordinary `init`)
-    /// is not enough on its own to prove the counters, only that they
-    /// don't crash on nothing.
-    #[test]
-    fn home_inventory_line_counts_what_is_actually_there() {
-        let home = crate::scratch::root("home-inventory");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join("queue")).unwrap();
-        std::fs::create_dir_all(home.join("archive")).unwrap();
-        std::fs::create_dir_all(home.join("worktrees").join("task-a")).unwrap();
-        std::fs::create_dir_all(home.join("worktrees").join("task-b")).unwrap();
-        for name in ["one.md", "two.md"] {
-            std::fs::write(home.join("queue").join(name), "---\n---\n").unwrap();
-        }
-        std::fs::write(home.join("archive").join("done.md"), "---\n---\n").unwrap();
-        // A stray non-task file must not be counted as a queued task.
-        std::fs::write(home.join("queue").join("notes.txt"), "not a task").unwrap();
-        std::fs::write(home.join("usage.jsonl"), "{}\n").unwrap();
-
-        assert_eq!(
-            home_inventory_line(&home),
-            "queue 2 . archive 1 . ledger . worktrees 2"
-        );
-
-        // Empty, as an ordinary fresh `init` leaves it: every counter reads
-        // zero, and the ledger is reported absent rather than crashing on
-        // directories that do not exist yet.
-        let fresh = crate::scratch::root("home-inventory-empty");
-        let _ = std::fs::remove_dir_all(&fresh);
-        std::fs::create_dir_all(&fresh).unwrap();
-        assert_eq!(
-            home_inventory_line(&fresh),
-            "queue 0 . archive 0 . ledger (none) . worktrees 0"
         );
     }
 

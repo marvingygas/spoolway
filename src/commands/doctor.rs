@@ -258,7 +258,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
     let mut report = Report::default();
     report.record_all(config_checks(repo, None, config));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
-    report.record_all(retired_key_notes(&repo.checkout));
+    report.record_all(retired_key_notes(&repo.checkout, &tasks));
     warmth_notes(repo, pipelines, config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, config, &graph));
     report.record_all(cheap_branch_checks(repo, &tasks));
@@ -409,6 +409,12 @@ pub fn doctor(
 
     let mut report = Report::default();
 
+    // Read ahead of the pipeline match below so `worktree_root_note` — one
+    // of `retired_key_notes`'s own findings — can name a queued task with a
+    // worktree in the old folder in both branches, not only the one with a
+    // loaded pipeline set.
+    let tasks = repo.tasks().unwrap_or_default();
+
     // A pipeline file that will not parse must not stop the command you run
     // to find out which one it is. Report the load failure as a failed row
     // and run the checks that read no pipeline — config, issue tracking,
@@ -423,7 +429,7 @@ pub fn doctor(
             );
             report.record_all(config_checks(repo, config_error, &config));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
-            report.record_all(retired_key_notes(&repo.checkout));
+            report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
             report.record(mux_finding(&mux));
             doctor_sync(repo, &mut report);
@@ -438,12 +444,11 @@ pub fn doctor(
 
     // A task file can be hand-edited into a graph nothing can get through, and
     // the only symptom is tasks that quietly never start.
-    let tasks = repo.tasks().unwrap_or_default();
     let graph = Graph::build(&tasks, &repo.archive_dir());
 
     report.record_all(config_checks(repo, config_error, &config));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
-    report.record_all(retired_key_notes(&repo.checkout));
+    report.record_all(retired_key_notes(&repo.checkout, &tasks));
     report.record_all(override_layer_note(repo));
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
@@ -559,7 +564,12 @@ fn home_unavailable_findings(
         }
         Err(err) => findings.push(Finding::Check("config parses".into(), Err(err))),
     }
-    findings.extend(retired_key_notes(&repo.checkout));
+    // No `tasks` here: `repo.tasks()` reads under `repo.home`, the very
+    // thing that failed to resolve — see the early return above this
+    // function's own caller. `worktree_root_note` still names the path with
+    // no task list to check it against, the same as it would for a project
+    // with no queue at all.
+    findings.extend(retired_key_notes(&repo.checkout, &[]));
     findings
 }
 
@@ -1087,7 +1097,7 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
 /// constant now (`dispatch::MAX_LAUNCHES`), never a number anybody tuned in
 /// practice. Both spellings still parse and both are dropped on the next
 /// save; the only way a project finds out is here.
-fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
+fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
     let mut findings = Vec::new();
     if names_key(checkout, "max_attempts") || names_key(checkout, "max_launches") {
         findings.push(Finding::Note(
@@ -1096,7 +1106,7 @@ fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
                 .into(),
         ));
     }
-    findings.extend(worktree_root_note(checkout));
+    findings.extend(worktree_root_note(checkout, tasks));
     findings
 }
 
@@ -1108,7 +1118,13 @@ fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
 /// Read off the raw file rather than the loaded [`Config`]: the struct keeps
 /// the retired field only so an existing file still parses, not as something
 /// any other part of this command should read.
-fn worktree_root_note(checkout: &Path) -> Vec<Finding> {
+///
+/// A queued task can still have its own worktree sitting under the old
+/// path — `dispatch` never moves a lane already cut, only new ones — so
+/// this never calls the old directory safe to remove on its own: it checks
+/// `tasks` for one whose `worktree_path` sits under the configured path and,
+/// when it finds any, names them instead. Only once none do does it say so.
+fn worktree_root_note(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
     let configured = std::fs::read_to_string(Config::path_in(checkout))
         .ok()
         .and_then(|raw| raw.parse::<toml::Value>().ok())
@@ -1119,15 +1135,43 @@ fn worktree_root_note(checkout: &Path) -> Vec<Finding> {
                 .map(str::to_string)
         })
         .filter(|path| !path.trim().is_empty());
-    match configured {
-        Some(path) => vec![Finding::Note(format!(
+    let Some(path) = configured else {
+        return Vec::new();
+    };
+    let mut still_there: Vec<&str> = tasks
+        .iter()
+        .filter(|t| {
+            t.front
+                .worktree_path
+                .as_deref()
+                .is_some_and(|wt| wt.starts_with(&path))
+        })
+        .map(Task::id)
+        .collect();
+    still_there.sort_unstable();
+    let note = if still_there.is_empty() {
+        format!(
             "dispatch.worktree_root in this checkout's config names {path} — the setting is \
-             retired, every worktree now lands under the project home, and the next \
-             `spoolway sync` drops the key; worktrees already cut at the old path are yours \
-             to remove"
-        ))],
-        None => Vec::new(),
-    }
+             retired, every worktree now lands under the project home, and the next `spoolway \
+             sync` drops the key; no queued task has a worktree under the old path"
+        )
+    } else if still_there.len() == 1 {
+        format!(
+            "dispatch.worktree_root in this checkout's config names {path} — the setting is \
+             retired, every worktree now lands under the project home, and the next `spoolway \
+             sync` drops the key; queued task {} still has a worktree there",
+            still_there[0],
+        )
+    } else {
+        format!(
+            "dispatch.worktree_root in this checkout's config names {path} — the setting is \
+             retired, every worktree now lands under the project home, and the next `spoolway \
+             sync` drops the key; {} queued tasks still have a worktree there: {}",
+            still_there.len(),
+            still_there.join(", "),
+        )
+    };
+    vec![Finding::Note(note)]
 }
 
 /// `pipelines are valid` and `task dependency graph` bracket one note about
@@ -1402,19 +1446,6 @@ fn live_pane_in(dir: &Path, mux: &dyn Mux) -> Result<Option<String>> {
     })
 }
 
-/// Where a project's own pipeline files actually sit — the workspace's
-/// `config/pipelines/<name>.yml` in home mode, `.spoolway/pipelines/<name>.yml`
-/// in repo mode — for the hints below that point a person at "give this step
-/// a model" rather than at a file that does not exist under this checkout.
-fn pipelines_hint(repo: &Repo) -> String {
-    let dir = if crate::repo::workspace_clone(&repo.checkout).is_some() {
-        "config/pipelines"
-    } else {
-        ".spoolway/pipelines"
-    };
-    format!("{dir}/<name>.yml")
-}
-
 /// Per agent profile a pipeline actually references: whether its binary is on
 /// PATH, whether every step that runs on it names a model, and whether its
 /// permission mode is one spoolway recognises. Three checks per agent rather
@@ -1422,7 +1453,6 @@ fn pipelines_hint(repo: &Repo) -> String {
 /// have to guess which of three things "agent `x` is broken" means.
 fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let pipelines_hint = pipelines_hint(repo);
     for (agent, steps) in pipelines.referenced_agents() {
         let outcome = config.agent(agent).and_then(|profile| {
             let found = which(&profile.kind);
@@ -1443,19 +1473,48 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
         // a person and launches no agent. Config checks enforce its model once
         // unattended mode actually staffs it; do not misdirect an attended
         // project to pipeline YAML for this config-derived blank.
-        let missing: Vec<&str> = steps
-            .iter()
-            .copied()
-            .filter(|step| config.unattended.enabled || *step != crate::pipeline::BLOCKED)
-            .filter(|step| !pipelines.step_has_model(step))
-            .collect();
-        let model = if missing.is_empty() {
-            Ok(Some(format!("set per step in {pipelines_hint}")))
+        //
+        // Grouped by pipeline, and checked against that pipeline's own steps
+        // directly, rather than flattened into one `{missing:?}` debug list of
+        // bare step ids the way this used to read: a step id can repeat across
+        // pipelines that have nothing else to do with each other, and the fix
+        // for a missing model always lives in one specific pipeline's own
+        // file — so the message names that pipeline and points at that file's
+        // real absolute path, not a `<name>.yml` placeholder that may not even
+        // be the one dir this checkout uses.
+        let mut problems = Vec::new();
+        for (name, pipeline) in &pipelines.pipelines {
+            let missing: Vec<&str> = pipeline
+                .steps
+                .iter()
+                .filter(|step| step.agent.as_deref() == Some(agent))
+                .filter(|step| step.run.is_none())
+                .filter(|step| config.unattended.enabled || step.id != crate::pipeline::BLOCKED)
+                .filter(|step| !step.model.as_deref().is_some_and(|m| !m.trim().is_empty()))
+                .map(|step| step.id.as_str())
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            let path = pipeline
+                .private_file
+                .clone()
+                .unwrap_or_else(|| Pipelines::file_in(&repo.checkout, name));
+            let (noun, verb, pronoun) = match missing.len() {
+                1 => ("step", "names", "it"),
+                _ => ("steps", "name", "them"),
+            };
+            problems.push(format!(
+                "pipeline `{name}` {noun} {} {verb} no model, running on `{agent}` — give \
+                 {pronoun} one in {}",
+                missing.join(", "),
+                path.display()
+            ));
+        }
+        let model = if problems.is_empty() {
+            Ok(Some("every step names a model".into()))
         } else {
-            Err(anyhow::anyhow!(
-                "{missing:?} names no model, running on `{agent}` — give it one in \
-                 {pipelines_hint}"
-            ))
+            Err(anyhow::anyhow!(problems.join("; ")))
         };
         findings.push(Finding::Check(
             format!("agent `{agent}` has a model"),
@@ -1934,24 +1993,12 @@ fn doctor_sync(repo: &Repo, report: &mut Report) {
 /// The `pipelines load` row's own outcome, once loading has already failed
 /// with `err`.
 ///
-/// When every pipeline file's refusal is a retired shape and nothing worse —
-/// see [`crate::pipeline::Pipelines::retired_shape_file_count`] — this is a
-/// count on the upgrade path: those shapes are all things `sync` migrates,
-/// so a name and a number that point at the update say what actually helps,
-/// rather than [`crate::pipeline::Pipelines::refusals`]'s own per-step prose,
-/// which reads as an instruction to hand-edit the file. That per-step detail
-/// is still what a genuine parse failure gets, across every pipeline file at
-/// once rather than only the one `err` itself stopped at; the original `err`
-/// otherwise, unchanged, for a load failure none of the three retired shapes
-/// explains. Split out from [`doctor`] so it can be tested without driving
-/// the whole command.
+/// [`crate::pipeline::Pipelines::refusals`]'s own per-step prose, naming
+/// every retired shape a pipeline file still carries — across every file at
+/// once rather than only the one `err` itself stopped at — or the original
+/// `err`, unchanged, for a load failure none of them explains. Split out
+/// from [`doctor`] so it can be tested without driving the whole command.
 fn pipelines_load_outcome(root: &Path, err: anyhow::Error) -> Result<Option<String>> {
-    if let Some(count) = crate::pipeline::Pipelines::retired_shape_file_count(root) {
-        return Err(anyhow::anyhow!(
-            "{count} pipeline(s) use shapes this spoolway retired — applying the update \
-             migrates them"
-        ));
-    }
     let refusals = crate::pipeline::Pipelines::refusals(root);
     if refusals.is_empty() {
         Err(err)
@@ -2253,32 +2300,53 @@ mod tests {
         );
     }
 
-    /// `doctor`'s model messages name `.spoolway/pipelines/<name>.yml`, where a
-    /// step's `model:` actually lives — not the retired single `pipeline.yml`
-    /// that `Pipelines::load` now refuses (finding 25).
+    /// `doctor`'s model messages name the real absolute path of the one
+    /// pipeline file a missing model actually lives in — `.spoolway/pipelines/
+    /// <name>.yml` under this checkout, not the retired single `pipeline.yml`
+    /// that `Pipelines::load` now refuses (finding 25), and not a bare Rust
+    /// debug list of step ids with no file at all.
     #[test]
     fn the_model_check_points_at_the_pipelines_directory() {
         let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-model-check-points");
-        let pipelines = crate::pipeline::Pipelines::builtin();
-        let config = Config::default();
+        let mut pipelines = crate::pipeline::Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline
+                .steps
+                .iter_mut()
+                .find(|step| step.id == crate::pipeline::BLOCKED)
+                .unwrap()
+                .model = None;
+        }
+        let mut config = Config::default();
+        config.unattended.enabled = true;
+        config.unattended.blocked_model.clear();
         let findings = agent_checks(&repo, &pipelines, &config);
 
         let notes: Vec<String> = findings
             .iter()
             .filter_map(|f| match f {
-                Finding::Check(label, outcome) if label.ends_with("has a model") => match outcome {
-                    Ok(Some(note)) => Some(note.clone()),
-                    Err(err) => Some(format!("{err:#}")),
-                    Ok(None) => None,
-                },
+                Finding::Check(label, Err(err)) if label.ends_with("has a model") => {
+                    Some(format!("{err:#}"))
+                }
                 _ => None,
             })
             .collect();
 
         assert!(!notes.is_empty(), "a model check was produced");
         for note in notes {
-            assert!(note.contains(".spoolway/pipelines/"), "{note}");
+            assert!(
+                note.contains(
+                    &repo
+                        .checkout
+                        .join(".spoolway/pipelines")
+                        .display()
+                        .to_string()
+                ),
+                "{note}"
+            );
+            assert!(note.ends_with(".yml"), "{note}");
             assert!(!note.contains(" in pipeline.yml"), "{note}");
+            assert!(!note.contains('['), "{note} reads like a debug list");
         }
     }
 
@@ -2344,6 +2412,41 @@ mod tests {
             .expect("the model check fails");
         assert!(failure.contains(crate::pipeline::BLOCKED), "{failure}");
         assert!(!failure.contains("some step running on"), "{failure}");
+    }
+
+    /// A command step names no model on purpose, so the shipped `handover`
+    /// (a `run:` step in `default`) must never turn up in a `has a model`
+    /// failure — this is what moved here once the check started reading
+    /// each pipeline's own steps directly instead of a step id shared
+    /// across pipelines.
+    // covers: step.run — a command step runs no agent, so it carries no model to be missing
+    #[test]
+    fn a_command_step_is_never_reported_as_missing_a_model() {
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("doctor-command-step-no-model");
+        let pipelines = crate::pipeline::Pipelines::builtin();
+
+        let command_steps: Vec<&str> = pipelines
+            .pipelines
+            .values()
+            .flat_map(|pipeline| &pipeline.steps)
+            .filter(|step| step.run.is_some())
+            .map(|step| step.id.as_str())
+            .collect();
+        assert!(
+            command_steps.contains(&"handover"),
+            "the shipped set should still have a command `handover`: {command_steps:?}"
+        );
+
+        let config = Config::default();
+        let findings = agent_checks(&repo, &pipelines, &config);
+        assert!(findings.iter().all(|finding| match finding {
+            Finding::Check(label, Err(err)) if label.ends_with("has a model") => {
+                let msg = format!("{err:#}");
+                !msg.contains("handover")
+            }
+            _ => true,
+        }));
     }
 
     /// One note per `[models]` entry that sets `slots` or `exclusive` without
@@ -2501,11 +2604,11 @@ mod tests {
         );
     }
 
-    /// A real path left in `dispatch.worktree_root` is worth a note — it is
-    /// where worktrees already cut under the old setting still are, and
-    /// nothing else tells a project they are there to clean up.
+    /// No queued task has a worktree under the old path — the note still
+    /// names the path, but, since nothing of a project's own depends on it
+    /// any more, it says so rather than naming any task.
     #[test]
-    fn worktree_root_note_names_a_real_path() {
+    fn worktree_root_note_names_a_real_path_with_no_tasks_there() {
         let root = crate::scratch::root("doctor-worktree-root-note-path");
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         std::fs::write(
@@ -2514,13 +2617,54 @@ mod tests {
         )
         .unwrap();
 
-        let notes = worktree_root_note(&root);
+        let notes = worktree_root_note(&root, &[]);
         assert_eq!(notes.len(), 1, "{notes:#?}");
         let Finding::Note(text) = &notes[0] else {
             panic!("{notes:#?}")
         };
         assert!(text.contains("/old/worktrees"), "{text}");
         assert!(text.contains("retired"), "{text}");
+        assert!(
+            !text.contains("safe to remove") && !text.contains("yours to remove"),
+            "a folder must never be called safe to remove outright: {text}"
+        );
+    }
+
+    /// A queued task still has a worktree cut under the old path — the note
+    /// must name that task rather than call the old directory anybody's to
+    /// remove.
+    #[test]
+    fn worktree_root_note_names_a_queued_task_still_using_the_old_path() {
+        let root = crate::scratch::root("doctor-worktree-root-note-task");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&root),
+            "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+        )
+        .unwrap();
+        let still_queued = Task::parse(
+            PathBuf::from("still-queued.md"),
+            "---\nid: still-queued\nstage: queued\nworktree_path: /old/worktrees/still-queued\n\
+             ---\n",
+        )
+        .unwrap();
+        let elsewhere = Task::parse(
+            PathBuf::from("elsewhere.md"),
+            "---\nid: elsewhere\nstage: queued\nworktree_path: /new/worktrees/elsewhere\n---\n",
+        )
+        .unwrap();
+
+        let notes = worktree_root_note(&root, &[still_queued, elsewhere]);
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        let Finding::Note(text) = &notes[0] else {
+            panic!("{notes:#?}")
+        };
+        assert!(text.contains("still-queued"), "{text}");
+        assert!(!text.contains("elsewhere"), "{text}");
+        assert!(
+            !text.contains("safe to remove") && !text.contains("yours to remove"),
+            "a folder with a task still in it must never be called removable: {text}"
+        );
     }
 
     /// A blank value was never anybody's decision — nothing to clean up, so
@@ -2532,7 +2676,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         std::fs::write(Config::path_in(&root), "[dispatch]\nworktree_root = \"\"\n").unwrap();
 
-        assert!(worktree_root_note(&root).is_empty());
+        assert!(worktree_root_note(&root, &[]).is_empty());
     }
 
     /// No key at all — the ordinary case for a project that never set it —
@@ -2543,7 +2687,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         std::fs::write(Config::path_in(&root), "[dispatch]\n").unwrap();
 
-        assert!(worktree_root_note(&root).is_empty());
+        assert!(worktree_root_note(&root, &[]).is_empty());
     }
 
     fn single_step_pipelines(step_yaml: &str) -> Pipelines {
@@ -3415,46 +3559,8 @@ mod tests {
         );
     }
 
-    /// When every pipeline file's refusal is a retired shape and nothing
-    /// worse, the `pipelines load` row is a count on the upgrade path — the
-    /// Mockup's own wording, naming no spoolway command — not
-    /// `Pipelines::refusals`' per-step prose, which would read as an
-    /// instruction to hand-edit the file.
-    #[test]
-    fn pipelines_load_outcome_is_a_count_when_every_refusal_is_a_retired_shape() {
-        let root = crate::scratch::root("doctor-pipelines-load-outcome");
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = crate::pipeline::Pipelines::dir_in(&root);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("default.yml"),
-            "steps:\n  \
-             - id: implement\n    agent: pi\n    on_pass: checks\n  \
-             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
-             on_pass: done\n    on_fail: checks\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("bugfix.yml"),
-            "steps:\n  \
-             - id: fix\n    agent: pi\n    on_pass: review\n  \
-             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
-             on_fail: fix\n",
-        )
-        .unwrap();
-
-        let err = pipelines_load_outcome(&root, anyhow::anyhow!("stale error, superseded"))
-            .expect_err("both files still carry a retired shape");
-        assert_eq!(
-            format!("{err:#}"),
-            "2 pipeline(s) use shapes this spoolway retired — applying the update migrates them"
-        );
-    }
-
-    /// A file that will not deserialise at all — nothing an update can
-    /// migrate — keeps `Pipelines::refusals`' own per-file detail rather than
-    /// being folded into the retired-shape count, even beside a file that
-    /// does carry one.
+    /// A file that will not deserialise at all keeps `Pipelines::refusals`'
+    /// own per-file detail, even beside a file that carries a retired shape.
     #[test]
     fn pipelines_load_outcome_falls_back_to_refusals_beside_a_genuine_parse_failure() {
         let root = crate::scratch::root("doctor-pipelines-load-outcome-mixed");
@@ -3647,10 +3753,10 @@ mod tests {
         assert!(note.contains("repo mode"), "{note}");
     }
 
-    /// A home-mode checkout has no `.spoolway/` of its own — the model hint
-    /// and the `config parses` note must name the workspace's shared
-    /// `config/`, not a path under this checkout that does not exist, and
-    /// never call it "this checkout's own copy".
+    /// A home-mode checkout has no `.spoolway/` of its own — the model
+    /// check's own pipeline path and the `config parses` note must name the
+    /// workspace's shared `config/`, not a path under this checkout that
+    /// does not exist, and never call it "this checkout's own copy".
     #[test]
     fn home_mode_pipeline_and_config_messages_name_the_workspace_not_the_checkout() {
         let root = crate::scratch::root("doctor-home-mode-messages");
@@ -3676,8 +3782,13 @@ mod tests {
         };
 
         crate::platform::test_home::with_home(&home, || {
-            let hint = pipelines_hint(&repo);
-            assert_eq!(hint, "config/pipelines/<name>.yml", "{hint}");
+            let path = Pipelines::file_in(&repo.checkout, "default");
+            assert_eq!(
+                path,
+                workspace.join("config/pipelines/default.yml"),
+                "{}",
+                path.display()
+            );
 
             let owner = config_owner_label(&repo);
             assert_eq!(owner, "the workspace's shared config", "{owner}");

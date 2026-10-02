@@ -347,9 +347,10 @@ pub struct Outcome {
     pub(crate) wrote: bool,
 }
 
-/// Write the provider's skill files, skipping any that already exist unless
-/// `force`. Rendering is left to [`report`], so a caller embedding the install
-/// does not inherit a nested file-by-file transcript.
+/// Write the provider's skill files, rewriting any that differ from the
+/// shipped copy and leaving the rest alone unless `force`. Rendering is left
+/// to [`report`], so a caller embedding the install does not inherit a
+/// nested file-by-file transcript.
 ///
 /// Skill files belong to spoolway outright: `spoolway sync` rewrites every
 /// installed one that differs from the shipped copy on every run (see
@@ -359,15 +360,6 @@ pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> 
     let dest = crate::fmt::relative(root, &provider.skills_dir(root));
     write_planned(&provider.plan(root), provider.caveat(), force, dest)
 }
-
-/// The one proof `sync` trusts that a provider's user-level folder is
-/// spoolway's to manage — written by [`install_user`] alongside the skill
-/// files themselves, directly under [`Provider::user_skills_dir`]. No
-/// release before #576 wrote anything at user level, so a folder there with
-/// no marker is a person's own, whatever it is named: a planned file
-/// existing, or a directory sharing a retired skill's name, proves nothing
-/// on its own. Only its presence is read; the contents carry no meaning.
-pub const USER_INSTALL_MARKER: &str = ".installed-by-spoolway";
 
 /// [`install`], into the provider's user-level folder rather than a
 /// project's — a home-mode `init`, and `spoolway install --user`. Refused
@@ -387,15 +379,6 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     // project's skills, and a user folder is loaded without asking.
     let dest = crate::repo::shorten_home(&provider.user_skills_dir(&home));
     let outcome = write_planned(&provider.plan_user(&home), None, force, dest)?;
-    // Written every time, force or not: the marker is not a skill file a
-    // person could have edited, just proof this command ran here, and a
-    // `--user` install that never writes it would look, to `sync`, exactly
-    // like a folder it never touched.
-    write_atomic(
-        &provider.user_skills_dir(&home).join(USER_INSTALL_MARKER),
-        "this folder is kept current by `spoolway sync`; delete this file to make spoolway \
-         leave it alone\n",
-    )?;
     Ok(outcome)
 }
 
@@ -417,8 +400,15 @@ pub(crate) fn user_home() -> Option<PathBuf> {
     crate::platform::test_home::current()
 }
 
-/// Write each planned file, skipping any that already exist unless `force`,
-/// and carry `caveat` and `dest` on to [`report`].
+/// Write each planned file, and carry `caveat` and `dest` on to [`report`].
+///
+/// A file matching the shipped copy is left alone unless `force`, the same
+/// "nothing to do" `sync` would itself report. But a skill file belongs to
+/// spoolway outright — see [`install`]'s own comment — so a stale one left
+/// by an older release is rewritten here too, `force` or not: a repeat
+/// `init` that found only stale copies must say it wrote them, never "Skills
+/// already installed" beside content that still differs from what this
+/// binary ships.
 fn write_planned(
     planned: &[Planned],
     caveat: Option<&'static str>,
@@ -427,7 +417,11 @@ fn write_planned(
 ) -> Result<Outcome> {
     let mut wrote = false;
     for file in planned {
-        if file.path.exists() && !force {
+        if file.path.exists()
+            && !force
+            && let Ok(on_disk) = std::fs::read_to_string(&file.path)
+            && on_disk == file.contents
+        {
             continue;
         }
         write_atomic(&file.path, file.contents)?;
@@ -548,11 +542,7 @@ mod tests {
     }
 
     /// `install --user` writes the same files a project install would, under
-    /// the user folder of the home it runs in, and nothing anywhere else —
-    /// plus the marker `sync::user_skills` reads back to know this folder is
-    /// spoolway's to manage. A build that stopped writing that marker would
-    /// pass every other test here while `sync` silently stopped refreshing
-    /// every user-level install.
+    /// the user folder of the home it runs in, and nothing anywhere else.
     #[test]
     fn install_user_writes_every_skill_under_the_user_folder() {
         let home = crate::scratch::root("install-user");
@@ -564,14 +554,38 @@ mod tests {
         for planned in Provider::Codex.plan_user(&home) {
             assert!(planned.path.is_file(), "{} missing", planned.path.display());
         }
-        assert!(
-            Provider::Codex
-                .user_skills_dir(&home)
-                .join(USER_INSTALL_MARKER)
-                .is_file(),
-            "install_user must leave sync's own marker behind"
-        );
         assert!(!home.join(".claude").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A repeat `install --user` must rewrite a stale skill file left by an
+    /// older release and say so — not skip it the way a scaffold file's own
+    /// `--force` gate would, and not report "already installed" beside
+    /// content that still differs from what this binary ships.
+    #[test]
+    fn install_user_rewrites_a_stale_skill_and_reports_it_wrote() {
+        let home = crate::scratch::root("install-user-stale");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            install_user(Provider::Claude, false).unwrap();
+        });
+        let stale = Provider::Claude
+            .user_skills_dir(&home)
+            .join("spoolway-config")
+            .join("SKILL.md");
+        std::fs::write(&stale, "stale, from an older release\n").unwrap();
+
+        let outcome = crate::platform::test_home::with_home(&home, || {
+            install_user(Provider::Claude, false).unwrap()
+        });
+
+        assert!(outcome.wrote, "a stale skill file must count as written");
+        assert_ne!(
+            std::fs::read_to_string(&stale).unwrap(),
+            "stale, from an older release\n",
+            "the stale copy must be rewritten to the shipped one"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
