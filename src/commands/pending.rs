@@ -112,7 +112,13 @@ pub(crate) enum GroupState {
 /// A group is what a person selects and submits, whole. Its tasks are a
 /// chain — cut together, ordered by `depends_on` — and half a chain in the
 /// queue is a task waiting on a dependency nobody queued.
-#[derive(Debug, PartialEq)]
+///
+/// `Clone`: the queue tab's reader thread (`commands::queue`'s own
+/// `QueueReader`) hands a freshly read `Vec<Group>` back across threads
+/// inside an `Arc`, and the key thread clones it out into its own owned
+/// list so the rest of the screen can keep mutating that list in place —
+/// `finish_submit`'s `groups.retain` the one place that still does.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Group {
     /// The `group:` value, verbatim. Never path-parsed and never split: two
     /// tasks group together only when they name exactly the same string,
@@ -248,6 +254,30 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
     list_groups_in(repo, &mut guard, &mut parsed)
 }
 
+/// Every file [`list_groups_in`] has read the bytes of so far in this
+/// process, with the thread that read it — test-only, the same shape as
+/// [`crate::status::QUEUE_READS`] and [`crate::repo::PROCESS_RUNS`]: scoped
+/// by path so a test counts only its own fixture, and by thread so it can
+/// tell a key's own thread's reads from a reader thread's.
+#[cfg(test)]
+static PENDING_READS: Mutex<Vec<(PathBuf, std::thread::ThreadId)>> = Mutex::new(Vec::new());
+
+/// How many files under `dir` [`list_groups_in`] has read so far on the
+/// calling thread — see [`PENDING_READS`].
+#[cfg(test)]
+pub(crate) fn pending_reads_here_under(dir: &Path) -> usize {
+    let here = std::thread::current().id();
+    PENDING_READS
+        .lock()
+        .map(|reads| {
+            reads
+                .iter()
+                .filter(|(path, thread)| *thread == here && path.starts_with(dir))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// [`list_groups`]'s own logic, taking its [`list_front`] cache and a
 /// freshly-parsed-file counter as plain arguments instead of reaching into
 /// a process-wide static for either — the same split
@@ -288,6 +318,13 @@ pub(crate) fn list_groups_in(
         // propagated: one bad task must not fail the whole listing. The
         // same file is found again and named by [`unreadable`], which is
         // what the opening message reports it through.
+        //
+        // Counted here, the one line that actually touches the disk — see
+        // [`PENDING_READS`].
+        #[cfg(test)]
+        if let Ok(mut reads) = PENDING_READS.lock() {
+            reads.push((path.clone(), std::thread::current().id()));
+        }
         let Ok(doc) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -362,6 +399,12 @@ pub(crate) fn list_groups_in(
         }
         let id = id.to_string();
 
+        // Counted here, the one line that actually touches the disk — see
+        // [`PENDING_READS`].
+        #[cfg(test)]
+        if let Ok(mut reads) = PENDING_READS.lock() {
+            reads.push((path.clone(), std::thread::current().id()));
+        }
         let Ok(doc) = std::fs::read_to_string(&path) else {
             continue;
         };

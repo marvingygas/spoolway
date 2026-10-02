@@ -375,7 +375,7 @@ pub struct Board {
     /// starts it — see [`Board::reader`]; a board whose own tests only ever call
     /// [`Board::frame`] never needs one at all, and never pays a thread for
     /// it.
-    reader: Option<Reader>,
+    reader: Option<Reader<Snapshot>>,
     /// [`Reader`]'s own memory, kept here instead for a board whose tests
     /// call [`Board::frame`] directly: one synchronous [`build`] per call,
     /// with nothing asynchronous to own a thread of its own.
@@ -506,9 +506,9 @@ impl Board {
     /// never pays for a thread. Starting it reads once on this thread — see
     /// [`Reader::start`] — so the very first frame is never drawn from an
     /// empty reading.
-    fn reader(&mut self, repo: &Repo, pipelines: &Pipelines) -> &Reader {
+    fn reader(&mut self, repo: &Repo, pipelines: &Pipelines) -> &Reader<Snapshot> {
         self.reader
-            .get_or_insert_with(|| Reader::start(repo.clone(), pipelines.clone()))
+            .get_or_insert_with(|| Reader::for_board(repo.clone(), pipelines.clone()))
     }
 
     /// One hosted frame painted from `snapshot`, after folding it into the
@@ -1777,6 +1777,17 @@ impl Snapshot {
     }
 }
 
+/// [`Reader<Snapshot>`] needs this to fall back on when its lock is
+/// poisoned, or when a reading fails before the very first one has ever
+/// landed — see [`Reader::start`]. Identical to [`Snapshot::empty`], kept
+/// as a trait impl only because the generic reader is written against it
+/// rather than a `Snapshot`-specific method.
+impl Default for Snapshot {
+    fn default() -> Snapshot {
+        Snapshot::empty()
+    }
+}
+
 /// What [`build`] carries forward from one reading to the next — the
 /// board's own memory, same as it always was, just no longer living on
 /// `Board` itself. Owned by the [`Reader`] thread for a hosted board, so it
@@ -1967,13 +1978,29 @@ fn build(
 /// frame draws from [`Reader::latest`] without waiting for it. A failed or
 /// slow reading leaves [`Reader::latest`] holding whatever the last one
 /// landed.
-struct Reader {
-    /// `None` once the board has dropped this and the thread has gone with
+///
+/// Generic over what a reading actually builds — the queue and routines
+/// tabs read their own groups and branch the same way, through
+/// `commands::queue`'s own `Reader<commands::queue::QueueSnapshot>`, rather
+/// than a second copy of this thread. `T` only has to be `Default`, for the
+/// empty value a poisoned lock or a reading that fails before the very
+/// first one ever lands falls back to; everything else is read off
+/// `build`, the one thing that differs between a board's own [`Snapshot`]
+/// and the queue tab's.
+pub(crate) struct Reader<T> {
+    /// `None` once the owner has dropped this and the thread has gone with
     /// it — see [`Reader`]'s own `Drop`. Sending on a dropped receiver is
     /// also how the thread notices it is time to stop.
     wake: Option<mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
-    snapshot: Arc<Mutex<Arc<Snapshot>>>,
+    /// The last reading to land, paired with `generation` — the count of
+    /// readings started so far as of the one that built it — so a caller
+    /// that mutates its own copy of `T` directly between readings (the
+    /// queue tab's own `finish_submit`, which edits `groups` the moment a
+    /// submission lands) can tell a reading already in flight at that
+    /// moment from one that actually started after it — see
+    /// [`Reader::latest_with_generation`] and [`Reader::started_count`].
+    snapshot: Arc<Mutex<(Arc<T>, u64)>>,
     /// How many readings have started and finished, and whether the last
     /// one to finish succeeded — see [`Readings`].
     readings: Arc<(Mutex<Readings>, std::sync::Condvar)>,
@@ -1992,21 +2019,22 @@ struct Readings {
     last_ok: bool,
 }
 
-impl Reader {
+impl<T: Send + Sync + Default + 'static> Reader<T> {
     /// Reads once, here, on the caller's own thread — so the very first
     /// hosted frame is never drawn from an empty reading, the same
     /// guarantee the inline call this replaces always gave, and with the
     /// same timing: a plain call, not a thread's first reading raced
-    /// against whatever else on the machine is doing its own.
-    fn start(repo: Repo, pipelines: Pipelines) -> Reader {
-        let mut memory = Memory::new();
+    /// against whatever else on the machine is doing its own. `build` is
+    /// called once right here for that reading, then moved onto the thread
+    /// for every one after it — so whatever state it closes over (a board's
+    /// own [`Memory`], say) carries over between readings exactly as a
+    /// loop's own local would.
+    pub(crate) fn start(mut build: impl FnMut() -> Option<T> + Send + 'static) -> Reader<T> {
         // Nothing stands in for an empty one on the very first reading —
         // there is no earlier one to keep instead.
-        let initial = build_now(&repo, &pipelines, &mut memory);
+        let initial = build();
         let last_ok = initial.is_some();
-        let snapshot = Arc::new(Mutex::new(Arc::new(
-            initial.unwrap_or_else(Snapshot::empty),
-        )));
+        let snapshot = Arc::new(Mutex::new((Arc::new(initial.unwrap_or_default()), 0)));
         let (wake_tx, wake_rx) = mpsc::channel::<()>();
         let readings = Arc::new((
             Mutex::new(Readings {
@@ -2023,7 +2051,7 @@ impl Reader {
             let (state, landed) = &*thread_readings;
             loop {
                 if wake_rx.recv().is_err() {
-                    // The board dropped its sender: nothing will ever ask
+                    // The owner dropped its sender: nothing will ever ask
                     // for another reading, so there is nothing left to wait
                     // for.
                     return;
@@ -2031,18 +2059,21 @@ impl Reader {
                 // Keys typed while a reading was running collapse into the
                 // one reading that follows it, never one per key.
                 while wake_rx.try_recv().is_ok() {}
-                if let Ok(mut state) = state.lock() {
+                let generation = if let Ok(mut state) = state.lock() {
                     state.started += 1;
-                }
+                    state.started
+                } else {
+                    0
+                };
                 // A failed reading — the queue directory unreadable for an
                 // instant — leaves the last one standing, the same
                 // tolerance a failed frame always had.
-                let fresh = build_now(&repo, &pipelines, &mut memory);
+                let fresh = build();
                 let ok = fresh.is_some();
                 if let Some(fresh) = fresh
                     && let Ok(mut guard) = thread_snapshot.lock()
                 {
-                    *guard = Arc::new(fresh);
+                    *guard = (Arc::new(fresh), generation);
                 }
                 if let Ok(mut state) = state.lock() {
                     state.finished += 1;
@@ -2063,7 +2094,7 @@ impl Reader {
     /// Ask for one more reading. Never blocks, and a wake with a reading
     /// already running is free: the thread drains every wake still waiting
     /// once that reading is done, rather than running one per wake.
-    fn wake(&self) {
+    pub(crate) fn wake(&self) {
         if let Some(tx) = &self.wake {
             let _ = tx.send(());
         }
@@ -2072,20 +2103,38 @@ impl Reader {
     /// Whatever the last reading landed, cloned out from under the thread's
     /// own lock — cheap, since cloning an `Arc` is a refcount, not the rows
     /// behind it.
-    fn latest(&self) -> Arc<Snapshot> {
+    pub(crate) fn latest(&self) -> Arc<T> {
+        self.latest_with_generation().0
+    }
+
+    /// [`Reader::latest`], paired with the generation it landed on — see
+    /// [`Reader`]'s own doc comment for what a caller needs that for.
+    pub(crate) fn latest_with_generation(&self) -> (Arc<T>, u64) {
         self.snapshot
             .lock()
-            .map(|guard| Arc::clone(&guard))
-            .unwrap_or_else(|_| Arc::new(Snapshot::empty()))
+            .map(|guard| (Arc::clone(&guard.0), guard.1))
+            .unwrap_or_else(|_| (Arc::new(T::default()), 0))
+    }
+
+    /// How many readings the thread has started so far, including one
+    /// still running — what a caller compares a landed reading's own
+    /// generation against to tell one that started before some edit of its
+    /// own from one that actually started after it.
+    pub(crate) fn started_count(&self) -> u64 {
+        self.readings
+            .0
+            .lock()
+            .map(|state| state.started)
+            .unwrap_or(0)
     }
 
     /// Ask for one more reading and wait for a reading that started after
     /// this call to finish, rather than drawing from whatever is already
     /// there — [`Board::hosted_frame`]'s guarantee. An error when that
     /// reading failed, so the caller can leave its last frame on screen.
-    fn wake_and_wait(&self) -> Result<Arc<Snapshot>> {
+    pub(crate) fn wake_and_wait(&self) -> Result<Arc<T>> {
         let (state, landed) = &*self.readings;
-        let poisoned = || anyhow::anyhow!("the board's reader thread panicked mid-reading");
+        let poisoned = || anyhow::anyhow!("the reader thread panicked mid-reading");
         let guard = state.lock().map_err(|_| poisoned())?;
         // Every reading numbered above `started` begins after this line,
         // and they finish in order, so the first of them is done once
@@ -2105,22 +2154,32 @@ impl Reader {
     /// [`Reader::latest`], or an error when the last reading to finish
     /// failed and left an older one standing — so [`Board::hosted_frame`]
     /// can leave its last frame on screen, as a failed frame always did.
-    fn last_reading(&self) -> Result<Arc<Snapshot>> {
+    pub(crate) fn last_reading(&self) -> Result<Arc<T>> {
         let (state, _) = &*self.readings;
         let ok = state.lock().map(|state| state.last_ok).unwrap_or(false);
         if !ok {
-            anyhow::bail!(
-                "the board could not read the queue just now; the last frame stays on screen"
-            );
+            anyhow::bail!("the reader could not read just now; the last frame stays on screen");
         }
         Ok(self.latest())
     }
 }
 
-impl Drop for Reader {
+impl Reader<Snapshot> {
+    /// [`Reader::start`], seeded the way the dispatch tab's board always
+    /// has: a fresh [`Memory`], closed over so it carries its caches
+    /// forward between readings the same way a loop's own local would, and
+    /// [`build_now`] run against `repo` and `pipelines` for as long as this
+    /// reader lives.
+    fn for_board(repo: Repo, pipelines: Pipelines) -> Reader<Snapshot> {
+        let mut memory = Memory::new();
+        Reader::start(move || build_now(&repo, &pipelines, &mut memory))
+    }
+}
+
+impl<T> Drop for Reader<T> {
     /// Drops the sending half first, so the thread's blocking `recv` wakes
     /// with an error and returns on its own — then waits for it to, so the
-    /// thread never outlives the board whose repo it was reading. Bounded by
+    /// thread never outlives the owner whose repo it was reading. Bounded by
     /// at most one reading already in flight: the thread checks for the drop
     /// only between readings, never partway through one.
     fn drop(&mut self) {
@@ -3795,7 +3854,7 @@ mod tests {
     fn a_burst_of_wakes_collapses_into_one_more_reading() {
         let (repo, _root_guard) = fixture("reader-coalesces-a-burst");
         let pipelines = Pipelines::builtin();
-        let reader = Reader::start(repo.clone(), pipelines.clone());
+        let reader = Reader::for_board(repo.clone(), pipelines.clone());
         let before = crate::repo::runs_under(&repo.root);
 
         for _ in 0..50 {
@@ -3881,7 +3940,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let start = std::time::Instant::now();
         for _ in 0..50 {
-            drop(Reader::start(repo.clone(), pipelines.clone()));
+            drop(Reader::for_board(repo.clone(), pipelines.clone()));
         }
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
