@@ -105,12 +105,10 @@ the page that buys nothing.
 - `.tagline` — what is being built, in five words.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
   question for the person.
-- Intend's paragraph, `.standfirst` — the one sentence a person can approve or reject, naming
+- Context's lead, `.standfirst` — the one sentence a person can approve or reject, naming
   the outcome this plan means to produce. It is the page's lead and there is no second one:
-  nothing stands above Intend but the name, the tagline and the path.
+  nothing stands above Context but the name, the tagline and the path.
 - Context's paragraph — two or three sentences: what is true today, and the pressure on it.
-- Context's figure — the one view of the system as it is, inline SVG with an `aria-label`
-  summarising it; delete the whole `<figure>` only when the context genuinely has no shape.
 - `.refs` lists (context and each decision) — a `<code>path</code>` and what it already explains;
   delete the list where there is nothing to point at.
 - Each decision's `<h3>` — the decision stated as a decision, not a component.
@@ -118,10 +116,12 @@ the page that buys nothing.
 - The decision's figure — drawn or mocked, per "The record's figure" below.
 - The paragraph after the figure — what it does not show: the name, the default, the thing a
   reader would otherwise get wrong.
-- `.risks` — each risk this decision carries and how it is mitigated, one sentence per pair.
-  Never empty; a record with no risk to name was not a decision.
+- The `.risks` table — a `<tr>` per risk this decision carries, its risk `<td>` beside its
+  mitigation `<td>`. At least one row; a record with no risk to name was not a decision. A row
+  with an empty Mitigation cell is unfinished.
 - `.change` — the record's last line, painted highlighted: one plain sentence stating the
-  change that will now happen.
+  change that will now happen. The slot takes the sentence alone; a CSS `::before` rule paints
+  "After implementation: " ahead of it — never type the prefix yourself.
 - Each mockup step's `<h3>` — two or three words naming the moment — and its figure. Nothing
   else: no caption, no note under a panel.
 
@@ -186,10 +186,11 @@ a browser — `spoolway-tasks` reads it by name and learns nothing about the mar
 **Fill it last, in one pass once the rest of the page is done** — never mirrored slot by slot as
 each section above it is written; the block is prose written once, not markup kept in step with
 markup. It carries every heading, every paragraph, every mock panel and every decision's
-`forces`, `risks` and `change` line, from Intend through Mockup, in the page's own order; a
-figure that has no Markdown form of its own appears as `[figure] ` followed by that figure's
-`aria-label`. A revision rewrites the whole block, the same pass it rewrites the prose and
-figures it followed.
+`forces`, risks and `change` line, from Context through Mockup, in the page's own order. The
+risks are written as a Markdown table, and the change line starts with "After implementation: "
+written out in full. A figure that has no Markdown form of its own appears as `[figure] `
+followed by that figure's `aria-label`. A revision rewrites the whole block, the same pass it
+rewrites the prose and figures it followed.
 
 ## The proof block
 
@@ -197,14 +198,16 @@ Run before you say a word, after every fill and every revision:
 
 ```
 grep -c '\[\[' <path>                          # must be 0
+grep -c 'class="change">After implementation' <path>   # must be 0
 diff <(grep -o 'iVBORw0KGgo[A-Za-z0-9+/=]*' <path>) \
      <(grep -o 'iVBORw0KGgo[A-Za-z0-9+/=]*' <skeleton>)   # must print nothing
 ```
 
 `<skeleton>` is `assets/template.html` beside this file — the same one the `cp` came from. A slot
-left behind reaches the reader as gibberish; a non-empty diff means a lockup did not survive the
-copy and the rail will paint the word "spoolway" where the logo goes. Fix whichever of these
-fires and re-run until the block is clean — never mention the loop to the human.
+left behind reaches the reader as gibberish; a non-zero second count means the prefix was typed
+by hand, so it now paints twice; a non-empty diff means a lockup did not survive the copy and the
+rail will paint the word "spoolway" where the logo goes. Fix whichever of these fires and re-run
+until the block is clean — never mention the loop to the human.
 
 ## Revising a plan
 
