@@ -168,7 +168,19 @@ PROFILE
     sed -i '/^[[:space:]]*agent: claude[[:space:]]*$/{N;/prompt: \(implementer\|reproducer\|archivist\)[[:space:]]*$/s/agent: claude/agent: pi/;P;D;}' "$file"
   done
   agent_models
-  own_prompts
+  # `SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS=1` is the one opt-out: `flow.sh` sets
+  # it so its pipeline keeps running the actual shipped prompts rather than
+  # `own_prompts`'s stand-ins, because that suite's job is proving the
+  # shipped pipeline runs end to end on them. Every other suite leaves this
+  # unset and gets `own_prompts`, same as always — the stand-in agents below
+  # decide what to do from `$SPOOLWAY_STEP` alone, never from a prompt's
+  # wording, so which prompt set is installed changes nothing else here. The
+  # one exception is the handover role in `agents/pi`, which does match a
+  # prompt's own opening line (`^You own git\.`) — but no shipped prompt
+  # opens with that line, and the shipped `handover` step is `run: spoolway
+  # stack`, never an agent step, so that match never fires on either prompt
+  # set this function chooses between.
+  [ -n "${SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS:-}" ] || own_prompts
   # `spoolway dispatch` refuses `backend = headless` outright unless this is
   # set — the backend draws nowhere a person can see, so only this harness
   # (no multiplexer in CI) may run it. Exported here, beside the config edit
@@ -209,7 +221,10 @@ PROFILE
 # The shipped set is not left untested by this. `src/prompt.rs`'s own unit
 # tests are about exactly that set — every shipped prompt names only real
 # commands, knows nothing of the pipeline graph, and never names spoolway
-# itself — and no suite names one any more.
+# itself. `flow.sh` is the one suite that still names one, with
+# `SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS=1` to skip this function: its job is
+# proving the shipped pipeline runs end to end on the prompts the product
+# actually ships.
 #
 # The prompts are short on purpose. A stand-in never reads them; what they are
 # for is `spoolway pipeline check`, which reads a prompt against the step that
@@ -262,7 +277,8 @@ $opening
 
 Written by the end-to-end harness, for a pipeline the harness wrote. Nothing
 here is the product's: the shipped prompts are \`src/prompt.rs\`'s own unit
-tests' subject, and no suite names one.
+tests' subject, and only \`flow.sh\` — proving the shipped pipeline runs on
+them — names one; every other suite gets this one instead.
 
 ## Never
 

@@ -311,9 +311,10 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
         println!("   | {line}");
     }
     println!();
-    println!("   Headings and bullets a small local model can skim. One default per choice,");
-    println!("   never a menu. Write only what the model does not already know: the traps,");
-    println!("   the conventions, the mistake it is about to make.");
+    println!("   Bullets, not paragraphs. Facts, not narration. No jargon.");
+    println!("   No procedure any capable model follows unasked.");
+    println!("   Named by role: `reviewer`, never `<pipeline>-reviewer`.");
+    println!("   Knowledge two prompts share: a skill, through the step's skills:.");
     println!();
     println!("   NEVER IN A PROMPT. spoolway writes each of these itself, at launch:");
     println!("     the report commands and their flags              section 6");
@@ -342,9 +343,13 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
 const PROMPT_SKELETON: &str = "\
 # <role>
 
-## What you are looking at
-## How to do it here
-## Never";
+<the job and when it is done, 1\u{2013}3 lines>
+
+## Domain knowledge
+- <a fact the model cannot know: a path, a convention, a trap>
+
+## Never
+- <a guardrail; none is fine>";
 
 /// Which step this contract is for, and a task to render its prompt against.
 fn subject<'a>(
@@ -1314,6 +1319,59 @@ mod tests {
                 messages(&findings)
             );
         }
+    }
+
+    /// The `##` headings of a prompt, in order.
+    fn headings(body: &str) -> Vec<&str> {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("## "))
+            .collect()
+    }
+
+    /// The shipped prompts are the first thing a new project runs, so they
+    /// follow the shape section 7 prints: a `# <role>` title, one to three
+    /// lines of job, then `## Domain knowledge` and `## Never`, each holding
+    /// only bullets, in at most 25 lines.
+    #[test]
+    fn every_shipped_prompt_follows_the_shape_section_seven_prints() {
+        for prompt in crate::assets::PROMPTS {
+            let name = prompt.name;
+            let lines: Vec<&str> = prompt.body.lines().collect();
+            assert!(lines.len() <= 25, "{name}: {} lines", lines.len());
+            assert!(
+                lines[0].starts_with("# ") && lines[0].len() > 2,
+                "{name}: opens with {:?}, not `# <role>`",
+                lines[0]
+            );
+            assert_eq!(
+                headings(prompt.body),
+                ["Domain knowledge", "Never"],
+                "{name}"
+            );
+            let first_section = lines
+                .iter()
+                .position(|line| line.starts_with("## "))
+                .unwrap();
+            let job = lines[1..first_section]
+                .iter()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            assert!((1..=3).contains(&job), "{name}: {job} job lines");
+            for line in &lines[first_section..] {
+                assert!(
+                    line.trim().is_empty() || line.starts_with("## ") || line.starts_with("- "),
+                    "{name}: {line:?} is neither a heading nor a bullet"
+                );
+            }
+        }
+    }
+
+    /// The skeleton section 7 prints and the shipped prompts written to it
+    /// name the same sections, so neither can move without the other.
+    #[test]
+    fn the_printed_skeleton_names_the_shipped_prompts_sections() {
+        assert!(PROMPT_SKELETON.starts_with("# <role>\n"));
+        assert_eq!(headings(PROMPT_SKELETON), ["Domain knowledge", "Never"]);
     }
 
     /// A placeholder is not a subcommand and an argument is not one either — a
