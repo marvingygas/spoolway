@@ -280,9 +280,13 @@ stage() {
 # Review finding 1: `stage`'s own `spoolway init` runs a second time over a
 # tree that release's own `init` already scaffolded in full, so every file
 # it considers is already there — this asserts the transcript `stage`
-# captured reads `kept` for it rather than `wrote`, and that `nothing to
-# install.` is what it closes with. Every fixture under `scripts/e2e/
-# fixtures/` ships with `issue_tracking.hook` blank, so there is no
+# captured reads `kept` for it rather than `wrote`. A fixture carries only
+# its `.spoolway/`, never the skills a release's `init` installed beside it,
+# so this run installs them for the first time — and since the
+# `home-mode-messages` task, a run that wrote skills closes on the install
+# report alone, never also on `nothing to install.` beside it. Every
+# fixture under `scripts/e2e/fixtures/` ships with `issue_tracking.hook`
+# blank, so there is no
 # `.spoolway/hooks/` row to expect here either — that
 # half of acceptance criterion 3 (a `wrote` row for something a fixture
 # actually lacks) is `tests/init_output.rs`'s own job, against a project
@@ -293,7 +297,10 @@ assert_init_reused_everything() {
   lacks "the $version fixture's second init wrote anything at all" "  wrote" "$out"
   has "and reported every file it considered kept instead" \
     "  kept     .spoolway/config.toml" "$out"
-  has "closing with nothing to install" "nothing to install." "$out"
+  has "and installed the skills the fixture never carried" \
+    "Skills installed successfully, into .claude/skills." "$out"
+  lacks "without also claiming there was nothing to install" \
+    "nothing to install." "$out"
 }
 
 # ----------------------------------------------------------------- 0.1.0: fold
