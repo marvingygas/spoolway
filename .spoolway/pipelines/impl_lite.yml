@@ -74,7 +74,7 @@ steps:
     description: Write the code to satisfy the task's acceptance criteria.
     agent: claude
     prompt: implementer
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: medium
     session: true
     loop: 2
@@ -109,7 +109,7 @@ steps:
     description: Bring the domain documents in line with what this task changed.
     agent: claude
     prompt: archivist
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: high
     on_pass: handover
 

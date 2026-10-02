@@ -865,8 +865,8 @@ mod tests {
     #[test]
     fn the_anthropic_models_this_project_runs_are_in_the_builtin_table() {
         for model in [
-            "claude-opus-5",
-            "claude-sonnet-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
             "claude-haiku-4-5-20251001",
         ] {
             assert!(

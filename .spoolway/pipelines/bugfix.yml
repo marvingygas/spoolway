@@ -73,7 +73,7 @@ steps:
       a failure to loop on.
     agent: claude
     prompt: reproducer
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: medium
     session: true
     on_pass: fix
@@ -82,7 +82,7 @@ steps:
     description: Make the repro pass without breaking anything else.
     agent: claude
     prompt: implementer
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: medium
     session: true
     loop: 2
@@ -106,7 +106,7 @@ steps:
       Pass when it passes: the bug is gone. Fail when it still reproduces.
     agent: claude
     prompt: reproducer
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: medium
     session: true
     loop: 2
@@ -132,7 +132,7 @@ steps:
     description: Bring the domain documents in line with what this fix changed.
     agent: claude
     prompt: archivist
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: high
     on_pass: handover
 
