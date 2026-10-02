@@ -94,7 +94,7 @@ reading the file whole.
 
    Each task: **independently completable**, one model, one worktree, no
    coordination; **whole enough that one lane holds the change at once**, split by *subject*
-   not size; **small in criteria too**, five bullets or split; **ordered**, chained with
+   first, then by size; **small in criteria too**, five bullets or split; **ordered**, chained with
    `depends_on` (a **join** — one task depending on two — rebases onto only one parent,
    shipping silently missing the other's work). Whether two tasks may run side by side is
    judged from what each one actually changes, never from a shared file — a shared file
@@ -110,10 +110,14 @@ reading the file whole.
    **Size for the lane that implements it, never for a person.** A lane is an agent in a
    fresh worktree, not a developer with an afternoon — so "a session" and "a day's work" are
    the wrong units and do not belong in this judgement at all. Judge instead by what one lane
-   must hold: the files it reads to understand the change, the files it changes, and whether
-   the whole thing is one subject. No arithmetic: step 1's own `sizing` field says it plainly
-   — cut a reasonable number of tasks for the shape at hand, judged by subject, with each
-   task's criteria kept under five bullets or split again.
+   must hold: the files it reads to understand the change, the files it changes, and how many
+   separate pieces it builds. A subject that builds several pieces that each work on their own
+   is more than one lane holds: cut it along those pieces, in the same chain, and route each
+   piece on its own. Keep a group's tasks roughly even in size: cut again where one is far
+   larger than its siblings, and fold a piece into its neighbour where it is far smaller. No
+   arithmetic: step 1's own `sizing` field says it plainly — cut a reasonable number of tasks
+   for the shape at hand, judged by subject first and size second, with each task's criteria
+   kept under five bullets or split again.
 
    **Offer this group's shape, with one AskUserQuestion.** Settle on a recommended count
    first, then put **that count and the three below it** on the ballot, floored at 1 — a

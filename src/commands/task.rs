@@ -277,8 +277,10 @@ struct ContractKeys {
 /// anywhere to print it instead. Judgment, not arithmetic: see this task's
 /// own non-goals for why no per-pipeline figure replaces it.
 const SIZING: &str = "Cut a reasonable number of tasks for the shape at hand, each routed to \
-                      one of the pipelines below. No arithmetic: judge the split by subject, \
-                      and keep each task's criteria under five bullets.";
+                      one of the pipelines below. No arithmetic: split by subject first, then \
+                      cut any subject that builds several standalone pieces along them, so a \
+                      group's tasks come out roughly even in size. Keep each task's criteria \
+                      under five bullets.";
 
 /// The whole task contract, printed as JSON by bare `spoolway task
 /// contract`.
@@ -719,7 +721,8 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .contains_key("window"),
-            "no per-pipeline `window` — a caller judges sizing by subject, not arithmetic: {value}"
+            "no per-pipeline `window` — a caller judges sizing by subject first and size \
+             second, not arithmetic: {value}"
         );
     }
 
