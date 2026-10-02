@@ -93,7 +93,7 @@ steps:
     description: Write and validate the changelog section that ships everywhere, and the migration guide's section for this upgrade.
     agent: claude
     prompt: release-notes
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: high
     session: true
     on_pass: candidate
