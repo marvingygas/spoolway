@@ -7256,7 +7256,42 @@ mod tests {
         path
     }
 
-    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+    /// A [`fixture`] root that stops every command run still going under its
+    /// `commands/` directory before the directory itself disappears.
+    ///
+    /// A test built on [`run_until`] leaves a wrapper shell polling for a
+    /// `release` file somewhere under this root, started detached under
+    /// `setsid` by `command_step::spawn_wrapper`, so it outlives the test
+    /// process on its own. Writing `release` only asks that shell to notice
+    /// on its next 0.05s poll; it does not wait for it. A bare
+    /// `ScratchRoot` drops straight to `remove_dir_all`, so `release`
+    /// disappears along with everything else before the shell's next `[ -e
+    /// release ]` can see it ever existed — the loop reads false forever and
+    /// the shell never ends. Stopping every run recorded under
+    /// `commands_dir` here, in this wrapper's own `Drop`, kills it outright
+    /// instead: Rust always runs a struct's own `Drop::drop` before dropping
+    /// its fields, so this runs before the inner `ScratchRoot` field's own
+    /// `Drop` deletes the folder.
+    struct FixtureRoot {
+        commands_dir: PathBuf,
+        // Never read: it is kept only for its own `Drop`, which runs after
+        // ours and deletes the directory — see the struct's own doc comment.
+        #[allow(dead_code)]
+        root: crate::scratch::ScratchRoot,
+    }
+
+    impl Drop for FixtureRoot {
+        fn drop(&mut self) {
+            let runs = crate::command_step::Runs::new(&self.commands_dir);
+            for keys in runs.keys_by_task().into_values() {
+                for key in keys {
+                    runs.stop(&key);
+                }
+            }
+        }
+    }
+
+    fn fixture(name: &str) -> (Repo, FixtureRoot) {
         let root = crate::scratch::root(&format!("dispatch-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".spoolway/prompts")).unwrap();
@@ -7313,15 +7348,14 @@ mod tests {
         // this line goes away.
         crate::platform::test_home::pin(&sibling(&root, "home"));
 
-        (
-            Repo {
-                checkout: root.to_path_buf(),
-                root: root.to_path_buf(),
-                config,
-                home,
-            },
-            root,
-        )
+        let repo = Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config,
+            home,
+        };
+        let commands_dir = repo.commands_dir();
+        (repo, FixtureRoot { commands_dir, root })
     }
 
     /// A path beside `root`, named for what it holds — `<root>-worktrees` for
@@ -10746,7 +10780,7 @@ mod tests {
     /// Set on the config rather than through a lock, because a fixture has no
     /// dispatcher holding one — and `Repo::unattended` falls back to exactly
     /// this when there is no run to ask about.
-    fn unattended_fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+    fn unattended_fixture(name: &str) -> (Repo, FixtureRoot) {
         let (mut repo, root_guard) = fixture(name);
         repo.config.unattended.enabled = true;
         (repo, root_guard)
@@ -17340,6 +17374,50 @@ mod tests {
             );
         }
         std::fs::write(&release, "").unwrap();
+    }
+
+    /// A test built on [`run_until`] must not leave its shell running once it
+    /// ends: writing `release` only tells the shell to stop, it does not wait
+    /// for it. What this checks is that [`FixtureRoot`] stops the run
+    /// outright before its folder goes, rather than leaving the shell to
+    /// notice `release` on its own — a notice it would never get, since
+    /// `release` disappears along with the rest of the folder.
+    #[test]
+    fn a_command_step_test_leaves_no_shell_running_once_it_ends() {
+        let release;
+        let pids;
+        {
+            let (repo, _root_guard) = fixture("command-no-leak");
+            add_task_with_worktree(&repo, "a-login", "implement");
+            add_task_with_worktree(&repo, "b-export", "implement");
+            release = repo.root.join("release");
+            let pipelines = pipelines_running(&run_until(&release), false);
+            let mux = FakeMux::new(vec![]);
+
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+
+            let runs = crate::command_step::Runs::new(&repo.commands_dir());
+            pids = ["a-login", "b-export"]
+                .iter()
+                .map(|task| {
+                    runs.read_pid(&crate::command_step::Runs::key("implement", task))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+
+            std::fs::write(&release, "").unwrap();
+        } // `_root_guard` drops here: it stops the runs, then deletes the scratch root.
+
+        std::thread::sleep(Duration::from_millis(500));
+        for pid in pids {
+            assert!(
+                !crate::headless::alive(pid),
+                "a command shell under `{}` outlived its test",
+                release.display()
+            );
+        }
     }
 
     /// The step that hands the change over, and what the pipeline says about it.

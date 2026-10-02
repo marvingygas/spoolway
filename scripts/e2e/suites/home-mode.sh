@@ -238,6 +238,7 @@ lacks "the workspace it left no longer lists it" "root = \"$(pwd -P)\"" "$WS2/pr
 if [ -d "$WS2" ]; then ok "a workspace still holding a checkout is kept"
 else bad "a workspace still holding a checkout is kept"; fi
 
+mkdir -p "$WS3/dispatchers/api/queue"
 task_doc "$WS3/dispatchers/api/queue/c1.md" c1 "$BODY" "stage: implement" \
   "worktree_path: $WS3/dispatchers/api/worktrees/task-c1"
 ws3_before=$(cat "$WS3/project.toml")
