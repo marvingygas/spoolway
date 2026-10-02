@@ -61,16 +61,20 @@ The binary checks nothing about a document's shape. A document without a readabl
 
 The body of a task file comes from `.spoolway/templates/tasks/`. There is one skeleton per
 pipeline, selected by filename: a task on the `bugfix` pipeline is written from `bugfix.md`,
-or from `default.md` when there is no `bugfix.md`. A pipeline can name another skeleton with
-its `task_template:` key.
+or from `default.md` when there is no `bugfix.md`. A pipeline can name a different skeleton
+file with its `task_template:` key, and the filename above follows that name instead.
 
-A private pipeline's skeleton can live at `local/templates/tasks/<pipeline>.md`, the same
-private layer [Private pipelines](pipelines.md#private-pipelines) uses for pipelines and
-prompts, read only in repo mode. For a private pipeline with no `<pipeline>.md` of its own,
-it answers before the tracked `default.md` does. A *tracked* pipeline with no skeleton of its
-own never reads this file: it falls through to the tracked `default.md` instead, even when a
-private file happens to share its name. `local/templates/tasks/default.md` is the last private
-fallback, read after the tracked `default.md` and before the built-in skeleton.
+A private pipeline's skeleton can live at `local/templates/tasks/<name>.md`, the same private
+layer [Private pipelines](pipelines.md#private-pipelines) uses for pipelines and prompts, read
+only in repo mode, where `<name>` is the skeleton name `task_template:` (or the pipeline's own
+name) picked. For a private pipeline with no tracked skeleton of that name, the private file
+answers before the tracked `default.md` does.
+
+A tracked pipeline never reads the private layer for its skeleton, even when its
+`task_template:` names a file that exists only privately, and even when a private file happens
+to share that name. It falls through past the private layer to the tracked `default.md`
+instead. `local/templates/tasks/default.md` is the last fallback, read after the tracked
+`default.md` and before the built-in skeleton, and only for a pipeline that is itself private.
 
 spoolway never reads a task's body. No heading in it is required.
 

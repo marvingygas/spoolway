@@ -340,6 +340,86 @@ impl Drop for LedgerLock {
     }
 }
 
+/// A short-lived advisory lock over one workspace's `project.toml`
+/// read-modify-write.
+///
+/// [`crate::repo::join_workspace`] and `adopt_workspace_clone` both read the
+/// file, add or rewrite one clone entry in memory, and write the whole thing
+/// back. With nothing between them, two joins racing the same workspace both
+/// read the same list, each adds its own entry on top of it, and whichever
+/// write lands second throws the other's entry away — no error, just a
+/// clone missing from `project.toml` forever. This serialises the three.
+///
+/// The lock file sits inside the workspace's own directory, right beside
+/// `project.toml`, rather than in a folder of its own under `~/.spoolway/`.
+/// `acquire` never creates that parent itself — every caller checks the
+/// workspace is really there (its `project.toml` exists) before taking this
+/// lock, so a mistyped `--workspace` or `--adopt` name fails with nothing
+/// left behind, rather than an empty folder under `~/.spoolway/` for
+/// `all_workspaces` or any other walk of it to trip over.
+///
+/// Same `link_into_place` + [`Lock::holder`] machinery as [`TaskLock`] and
+/// [`LedgerLock`], and a crashed holder's file is reaped the same way.
+/// Unlike those two, a live holder still in it past
+/// [`WorkspaceLock::WAIT`] fails the whole join or adopt rather than
+/// proceeding unlocked: the point of this lock is that no entry is ever
+/// lost to a race, and writing `project.toml` without it would reopen
+/// exactly that.
+pub struct WorkspaceLock {
+    path: PathBuf,
+}
+
+impl WorkspaceLock {
+    /// A read-modify-write here is a read, a few in-memory checks and one
+    /// `write_atomic`, so a holder still in it this long has stalled.
+    const WAIT: Duration = Duration::from_secs(3);
+
+    pub fn acquire(path: &Path) -> Result<WorkspaceLock> {
+        // No `create_dir_all` on `path`'s parent, unlike `TaskLock` and
+        // `LedgerLock` — see the type doc. The caller has already checked
+        // the workspace directory is there.
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + Self::WAIT;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(WorkspaceLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder(path)? {
+                    Some(pid) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "workspace lock at {} is still held by pid {pid} after {:?}",
+                                path.display(),
+                                Self::WAIT
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for WorkspaceLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Puts `contents` at `path`, but only if nothing is there yet — `true` on
 /// success, `false` if `path` was already taken.
 ///
@@ -440,11 +520,12 @@ mod tests {
 
     /// The lock file's own path, in a scratch directory of its own — standing
     /// in for [`crate::repo::Repo::lock_file`], which every real caller uses.
-    fn scratch(name: &str) -> PathBuf {
+    fn scratch(name: &str) -> (PathBuf, crate::scratch::ScratchRoot) {
         let dir = crate::scratch::root(&format!("lock-test-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join(LOCK_FILE)
+        let path = dir.join(LOCK_FILE);
+        (path, dir)
     }
 
     /// The property every other test here rests on: this very process, which
@@ -463,7 +544,7 @@ mod tests {
     /// time that is not this process's — which is what a reused pid looks like.
     #[test]
     fn a_pid_reused_by_another_process_is_not_a_holder() {
-        let path = scratch("reused");
+        let (path, _guard) = scratch("reused");
 
         std::fs::write(&path, format!("{}\nnot-this-process\n", std::process::id())).unwrap();
         assert_eq!(Lock::holder(&path).unwrap(), None);
@@ -476,7 +557,7 @@ mod tests {
     /// no way to ask for a start time. The pid alone still has to be honoured.
     #[test]
     fn a_lock_file_with_no_start_time_still_names_its_holder() {
-        let path = scratch("pid-only");
+        let (path, _guard) = scratch("pid-only");
 
         std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
         assert_eq!(Lock::holder(&path).unwrap(), Some(std::process::id()));
@@ -497,14 +578,14 @@ mod tests {
 
     #[test]
     fn a_second_acquire_is_refused_while_the_first_is_held() {
-        let path = scratch("held");
+        let (path, _guard) = scratch("held");
         let _first = Lock::acquire(&path, false, None).unwrap();
         assert!(Lock::acquire(&path, false, None).is_err());
     }
 
     #[test]
     fn the_lock_is_released_on_drop() {
-        let path = scratch("drop");
+        let (path, _guard) = scratch("drop");
         {
             let _lock = Lock::acquire(&path, false, None).unwrap();
             assert!(Lock::holder(&path).unwrap().is_some());
@@ -518,7 +599,7 @@ mod tests {
     /// the file — and has to stop being an answer the moment the run is over.
     #[test]
     fn the_lock_carries_the_runs_mode_and_only_while_the_run_is_live() {
-        let path = scratch("mode");
+        let (path, _guard) = scratch("mode");
         {
             let _lock = Lock::acquire(&path, true, None).unwrap();
             assert_eq!(Lock::unattended(&path), Some(true));
@@ -535,7 +616,7 @@ mod tests {
     /// simply has nothing to say about the mode.
     #[test]
     fn a_lock_file_with_no_mode_line_is_still_a_holder() {
-        let path = scratch("pid-and-time-only");
+        let (path, _guard) = scratch("pid-and-time-only");
 
         let pid = std::process::id();
         std::fs::write(
@@ -556,11 +637,11 @@ mod tests {
         let pid = std::process::id();
         let started = started_at(pid).unwrap_or_default();
 
-        let three_lines = scratch("pane-three-lines");
+        let (three_lines, _guard) = scratch("pane-three-lines");
         std::fs::write(&three_lines, format!("{pid}\n{started}\nattended\n")).unwrap();
         assert_eq!(Lock::holder(&three_lines).unwrap(), Some(pid));
 
-        let four_lines_blank = scratch("pane-four-lines-blank");
+        let (four_lines_blank, _guard2) = scratch("pane-four-lines-blank");
         std::fs::write(&four_lines_blank, format!("{pid}\n{started}\nattended\n\n")).unwrap();
         assert_eq!(Lock::holder(&four_lines_blank).unwrap(), Some(pid));
     }
@@ -574,7 +655,7 @@ mod tests {
     /// is a faithful stand-in for two dispatchers starting at once.
     #[test]
     fn two_contenders_for_one_lock_leave_exactly_one_holder() {
-        let path = scratch("contend");
+        let (path, _guard) = scratch("contend");
         let contenders = 8;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(contenders));
         let handles: Vec<_> = (0..contenders)
@@ -597,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_lock_file_from_a_dead_process_is_stale() {
-        let path = scratch("stale");
+        let (path, _guard) = scratch("stale");
         // Pid 0 is never a live user process, so this stands in for the file a
         // crashed dispatcher leaves behind.
         std::fs::write(&path, "0\n").unwrap();
@@ -611,7 +692,8 @@ mod tests {
     /// task.
     #[test]
     fn a_task_lock_is_taken_then_released_on_drop() {
-        let path = scratch("task-lock").with_file_name("demo.lock");
+        let (path, _guard) = scratch("task-lock");
+        let path = path.with_file_name("demo.lock");
         {
             let _held = TaskLock::acquire(&path).unwrap();
             assert!(Lock::holder(&path).unwrap().is_some());
@@ -626,7 +708,8 @@ mod tests {
     /// rather than waiting the whole [`TaskLock::WAIT`] out.
     #[test]
     fn a_stale_task_lock_is_reaped_at_once() {
-        let path = scratch("task-lock-stale").with_file_name("demo.lock");
+        let (path, _guard) = scratch("task-lock-stale");
+        let path = path.with_file_name("demo.lock");
         std::fs::write(&path, "0\n").unwrap();
         let started = std::time::Instant::now();
         let _lock = TaskLock::acquire(&path).unwrap();

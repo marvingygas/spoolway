@@ -103,7 +103,38 @@ pub fn setup_dir_in(checkout: &Path) -> PathBuf {
 /// that a workspace was in the running at all — `bind` has to see the
 /// tracked directory's existence directly to refuse on it instead.
 pub(crate) fn tracked_setup_dir_in(checkout: &Path) -> PathBuf {
-    checkout.join(STATE_DIR)
+    let candidate = checkout.join(STATE_DIR);
+    // `checkout` is `$HOME` itself exactly when this join lands on
+    // `crate::mux::state_root()` — spoolway's own state directory, not a
+    // project's tracked setup, but a real directory all the same, so every
+    // caller's plain `is_dir()`/`exists()` would otherwise read it as one.
+    // A path holding a NUL can never name a real file on any platform this
+    // runs on, so every such *check* answers `false` without this
+    // function's callers needing to special-case the one checkout none of
+    // them should ever treat as a project — but nothing here stops a
+    // caller from *using* this path to write with, which is why
+    // `commands::init::Placement::choose` refuses repo mode in this one
+    // checkout, by name, before `init` ever reaches a writer at all (home
+    // mode never writes into the checkout, so it is let through). See
+    // [`is_state_root_checkout`], the same identity check this and that
+    // refusal both go through.
+    if is_state_root_checkout(checkout) {
+        return candidate.join("\0not-a-project");
+    }
+    candidate
+}
+
+/// Whether `checkout` is `$HOME` itself — the one directory a project's
+/// tracked `.spoolway/` can never be, because `crate::mux::state_root()`
+/// joins `.spoolway` onto exactly this path and nowhere else, making it
+/// spoolway's own state directory rather than any project's. Compared
+/// against `crate::platform::home_dir()` directly rather than joining
+/// `STATE_DIR` a second time here: that join is a setup-path constant, and
+/// `nothing_joins_state_dir_except_the_one_accessor` keeps every one of its
+/// joins inside the handful of accessors already named for it —
+/// [`tracked_setup_dir_in`] is that one join for this identity check too.
+pub(crate) fn is_state_root_checkout(checkout: &Path) -> bool {
+    crate::platform::home_dir().as_deref() == Some(checkout)
 }
 
 /// `full` — one of the constants above ([`PROMPTS_DIR`], [`TASK_TEMPLATES_DIR`],
@@ -1226,8 +1257,9 @@ impl Default for AgentProfile {
 
 impl AgentProfile {
     /// The built-in profile definitions. Fresh-project init retains only the
-    /// selected Claude or Codex row; defaults kept in memory still include Pi
-    /// for older projects and test/runtime assembly.
+    /// selected provider's row, whichever of Claude, Codex or Pi it is; the
+    /// defaults kept in memory still carry all three for test and runtime
+    /// assembly.
     ///
     /// None carries a `concurrency`: a fresh project does not know the
     /// account or model capacity it would need to assert one. See the field's
@@ -2212,6 +2244,37 @@ mod tests {
         assert!(check_id("task id", "slug-subcommand2").is_ok());
     }
 
+    /// `~/.spoolway` is spoolway's own state directory, not a project's
+    /// tracked setup — a command run directly in `$HOME` must never read it
+    /// as one, the same way `Repo::root`'s ancestor walk already refuses to
+    /// find a project there. `tracked_setup_dir_in` is the one place every
+    /// other check in this area (`Placement::choose`, `bind`,
+    /// `adopt_workspace_clone`, `local::is_repo_mode`) goes through, so
+    /// fixing it here is what keeps `init --setup home --yes` from reading
+    /// "already has a tracked `.spoolway/`" when run in `$HOME` itself.
+    #[test]
+    fn home_itself_never_carries_a_tracked_setup() {
+        let home = crate::scratch::root("config-test-home-not-a-project");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            // The directory really is there on disk — spoolway's own state
+            // root, created the way any real use of this machine would.
+            std::fs::create_dir_all(crate::mux::state_root()).unwrap();
+
+            assert!(
+                !tracked_setup_dir_in(&home).is_dir(),
+                "{} must not read as a tracked project setup",
+                home.display()
+            );
+            assert_ne!(
+                setup_dir_in(&home),
+                crate::mux::state_root(),
+                "the general setup-dir accessor must agree"
+            );
+        });
+    }
+
     #[test]
     fn durations_round_trip() {
         for text in ["30s", "10m", "1h", "1h30m", "2d"] {
@@ -2395,10 +2458,15 @@ mod tests {
 
         let roots = crate::platform::test_home::with_home(&home, || config.watch_roots(&root));
 
-        let expected: Vec<_> = [&root, &home.join("notes"), &root.join("logs"), &absolute]
-            .into_iter()
-            .map(|p| p.canonical().unwrap())
-            .collect();
+        let expected: Vec<_> = [
+            root.to_path_buf(),
+            home.join("notes"),
+            root.join("logs"),
+            absolute.to_path_buf(),
+        ]
+        .into_iter()
+        .map(|p| p.canonical().unwrap())
+        .collect();
         assert_eq!(roots.len(), expected.len(), "{roots:?}");
         for path in &expected {
             assert!(roots.contains(path), "{path:?} missing from {roots:?}");

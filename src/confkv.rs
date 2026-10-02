@@ -188,9 +188,9 @@ pub const REFERENCE: &[Reference] = &[
         key: "issue_tracking.hook",
         values: "<filename>",
         default: "(blank)",
-        sentence: "A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook \
-                    and changes nothing about a task's `queued`, `blocked`, `paused` or \
-                    `done`.",
+        sentence: "A bare filename, resolved inside `.spoolway/hooks/` (a home-mode \
+                    workspace's own `config/hooks/`); blank runs no hook and changes nothing \
+                    about a task's `queued`, `blocked`, `paused` or `done`.",
     },
     Reference {
         key: "issue_tracking.project_key",

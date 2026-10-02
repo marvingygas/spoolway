@@ -333,6 +333,18 @@ impl Provider {
 /// The facts a command may report after the skill files are safely in place.
 pub struct Outcome {
     caveat: Option<&'static str>,
+    /// Where the files landed, shown the way a person would type it back —
+    /// relative to the project for [`install`], `~`-shortened for
+    /// [`install_user`] — so [`report`] can say where it installed rather
+    /// than only that it did.
+    dest: String,
+    /// Whether any file was actually written, as opposed to every planned
+    /// one already sitting there unchanged. `init` folds this into its own
+    /// "did this run write anything at all" tally, so a repeat run that
+    /// skipped every scaffold file but picked up a provider's skills for
+    /// the first time does not also claim there was "nothing to install" —
+    /// see the `home-mode-messages` task.
+    pub(crate) wrote: bool,
 }
 
 /// Write the provider's skill files, skipping any that already exist unless
@@ -344,8 +356,18 @@ pub struct Outcome {
 /// [`crate::sync::skills`]), so there is nothing here for a per-file record
 /// to protect any more.
 pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
-    write_planned(&provider.plan(root), provider.caveat(), force)
+    let dest = crate::fmt::relative(root, &provider.skills_dir(root));
+    write_planned(&provider.plan(root), provider.caveat(), force, dest)
 }
+
+/// The one proof `sync` trusts that a provider's user-level folder is
+/// spoolway's to manage — written by [`install_user`] alongside the skill
+/// files themselves, directly under [`Provider::user_skills_dir`]. No
+/// release before #576 wrote anything at user level, so a folder there with
+/// no marker is a person's own, whatever it is named: a planned file
+/// existing, or a directory sharing a retired skill's name, proves nothing
+/// on its own. Only its presence is read; the contents carry no meaning.
+pub const USER_INSTALL_MARKER: &str = ".installed-by-spoolway";
 
 /// [`install`], into the provider's user-level folder rather than a
 /// project's — a home-mode `init`, and `spoolway install --user`. Refused
@@ -363,7 +385,18 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     };
     // No caveat: pi's is about trusting a project before it loads that
     // project's skills, and a user folder is loaded without asking.
-    write_planned(&provider.plan_user(&home), None, force)
+    let dest = crate::repo::shorten_home(&provider.user_skills_dir(&home));
+    let outcome = write_planned(&provider.plan_user(&home), None, force, dest)?;
+    // Written every time, force or not: the marker is not a skill file a
+    // person could have edited, just proof this command ran here, and a
+    // `--user` install that never writes it would look, to `sync`, exactly
+    // like a folder it never touched.
+    write_atomic(
+        &provider.user_skills_dir(&home).join(USER_INSTALL_MARKER),
+        "this folder is kept current by `spoolway sync`; delete this file to make spoolway \
+         leave it alone\n",
+    )?;
+    Ok(outcome)
 }
 
 /// The home directory user-level skills are installed under and synced in.
@@ -385,30 +418,47 @@ pub(crate) fn user_home() -> Option<PathBuf> {
 }
 
 /// Write each planned file, skipping any that already exist unless `force`,
-/// and carry `caveat` on to [`report`].
+/// and carry `caveat` and `dest` on to [`report`].
 fn write_planned(
     planned: &[Planned],
     caveat: Option<&'static str>,
     force: bool,
+    dest: String,
 ) -> Result<Outcome> {
+    let mut wrote = false;
     for file in planned {
         if file.path.exists() && !force {
             continue;
         }
         write_atomic(&file.path, file.contents)?;
+        wrote = true;
     }
 
-    Ok(Outcome { caveat })
+    Ok(Outcome {
+        caveat,
+        dest,
+        wrote,
+    })
 }
 
 /// Print the deliberately small successful-install report.
+///
+/// Says "already" rather than "successfully" when nothing was actually
+/// written — every planned file already sat there, unforced — so a plain
+/// repeat `init` does not claim to have just installed these skills right
+/// next to its own "nothing to install" line for the very same run; see the
+/// `home-mode-messages` task's review finding 1.
 pub fn report(outcome: Outcome) {
     // Reported whether or not anything was written: a project that installed
     // these last week and has never seen them load wants this warning too.
     if let Some(caveat) = outcome.caveat {
         println!("  note  {caveat}");
     }
-    println!("Skills installed successfully.");
+    if outcome.wrote {
+        println!("Skills installed successfully, into {}.", outcome.dest);
+    } else {
+        println!("Skills already installed, in {}.", outcome.dest);
+    }
 }
 
 #[cfg(test)]
@@ -498,7 +548,11 @@ mod tests {
     }
 
     /// `install --user` writes the same files a project install would, under
-    /// the user folder of the home it runs in, and nothing anywhere else.
+    /// the user folder of the home it runs in, and nothing anywhere else —
+    /// plus the marker `sync::user_skills` reads back to know this folder is
+    /// spoolway's to manage. A build that stopped writing that marker would
+    /// pass every other test here while `sync` silently stopped refreshing
+    /// every user-level install.
     #[test]
     fn install_user_writes_every_skill_under_the_user_folder() {
         let home = crate::scratch::root("install-user");
@@ -510,6 +564,13 @@ mod tests {
         for planned in Provider::Codex.plan_user(&home) {
             assert!(planned.path.is_file(), "{} missing", planned.path.display());
         }
+        assert!(
+            Provider::Codex
+                .user_skills_dir(&home)
+                .join(USER_INSTALL_MARKER)
+                .is_file(),
+            "install_user must leave sync's own marker behind"
+        );
         assert!(!home.join(".claude").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -817,8 +878,8 @@ mod tests {
         // skill files' own outcomes are asserted on.
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let repo = crate::repo::Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: crate::config::Config::default(),
             home,
         };

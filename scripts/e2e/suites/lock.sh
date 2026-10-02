@@ -116,6 +116,68 @@ else
   printf '        second run took %sms, wanted at least %sms\n' "$elapsed" "$WANT"
 fi
 
+# ------------------------------------------------------------ a third run waits its turn too
+#
+# Two runs cannot tell a correct flock-and-unlink apart from a racy one.
+# The race needs a third run that opens `$LOCK` only after the first has
+# exited and unlinked it, while the second still holds the lock on the
+# first's old inode. Unlocked before it was unlinked, the first lets the
+# second wake and keep that orphaned inode, so the third creates a fresh
+# one, locks it at once, and runs beside the second. Unlinked under the
+# lock, the second's acquire loop sees its inode gone from the path and
+# retries, and the third waits for it. A third that arrived while the
+# first still held the lock would open the same inode as the second and
+# block either way, which is why this one waits for the first to exit.
+THREE_HOLD=3
+third_lock="$LIVE/three.lock"
+first3_log="$LIVE/first3.log"
+(
+  SPOOLWAY_E2E_PR_LOCK="$third_lock" E2E_LOCK_HOLD="$THREE_HOLD" SPOOLWAY="$SPOOLWAY" \
+    bash "$RUN" --tier pr --suite ghost >"$first3_log" 2>&1
+) &
+first3_pid=$!
+sleep "$SETTLE"
+
+second3_log="$LIVE/second3.log"
+(
+  SPOOLWAY_E2E_PR_LOCK="$third_lock" E2E_LOCK_HOLD="$THREE_HOLD" SPOOLWAY="$SPOOLWAY" \
+    bash "$RUN" --tier pr --suite ghost >"$second3_log" 2>&1
+) &
+second3_pid=$!
+
+wait "$first3_pid"
+first3_status=$?
+
+start3=$(now_ms)
+SPOOLWAY_E2E_PR_LOCK="$third_lock" SPOOLWAY="$SPOOLWAY" \
+  bash "$RUN" --tier pr --suite ghost >"$LIVE/third.log" 2>&1
+third_status=$?
+elapsed3=$(( $(now_ms) - start3 ))
+
+wait "$second3_pid"
+second3_status=$?
+
+if [ "$first3_status" -eq 0 ] && [ "$second3_status" -eq 0 ] && [ "$third_status" -eq 0 ]; then
+  ok "three overlapping \`--tier pr\` runs all still exit 0"
+else
+  bad "three overlapping \`--tier pr\` runs all still exit 0"
+  printf '        exits: first %s, second %s, third %s\n' \
+    "$first3_status" "$second3_status" "$third_status"
+  sed 's/^/        /' "$first3_log" "$second3_log" "$LIVE/third.log"
+fi
+
+# The third arrives just as the second takes the lock, so it has to wait
+# out about the second's whole hold. One that slipped through on a fresh
+# inode returns in about the baseline. Half the hold is the bar, for the
+# same loaded-machine margin as the two-run case above.
+WANT3=$(( BASELINE_MS + THREE_HOLD * 1000 / 2 ))
+if [ "$elapsed3" -ge "$WANT3" ]; then
+  ok "a run arriving after the first has unlinked the lock still waits for the second"
+else
+  bad "a run arriving after the first has unlinked the lock still waits for the second"
+  printf '        third run took %sms, wanted at least %sms\n' "$elapsed3" "$WANT3"
+fi
+
 # ------------------------------------------------------------ a lower tier is unaffected
 # The same two-at-once shape, `--tier smoke` this time: nothing here should
 # wait on anything, because the lock is `pr`-tier's alone.

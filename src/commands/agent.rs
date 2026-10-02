@@ -1160,8 +1160,8 @@ mod tests {
 
         {
             let _scratch = ScratchTree {
-                dir: dir.clone(),
-                home: Some(home.clone()),
+                dir: dir.to_path_buf(),
+                home: Some(home.to_path_buf()),
             };
             assert!(dir.exists(), "the guard must not delete it early");
         }

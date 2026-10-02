@@ -145,16 +145,16 @@ mod tests {
     fn a_renamed_checkout_keeps_the_same_log_file() {
         let home = crate::scratch::root("problem-log-home-k7f2q9");
         let before = Repo {
-            root: crate::scratch::root("problem-log-before"),
-            checkout: crate::scratch::root("problem-log-before"),
+            root: crate::scratch::root("problem-log-before").to_path_buf(),
+            checkout: crate::scratch::root("problem-log-before").to_path_buf(),
             config: Config::default(),
-            home: home.clone(),
+            home: home.to_path_buf(),
         };
         let after = Repo {
-            root: crate::scratch::root("problem-log-after-renamed"),
-            checkout: crate::scratch::root("problem-log-after-renamed"),
+            root: crate::scratch::root("problem-log-after-renamed").to_path_buf(),
+            checkout: crate::scratch::root("problem-log-after-renamed").to_path_buf(),
             config: Config::default(),
-            home,
+            home: home.to_path_buf(),
         };
 
         assert_eq!(
@@ -211,8 +211,8 @@ mod tests {
     fn a_fixtures_problem_log_stays_under_the_fixtures_own_scratch_home() {
         let fixture_root = crate::scratch::root("problem-log-leak-home");
         let repo = Repo {
-            root: fixture_root.clone(),
-            checkout: fixture_root.clone(),
+            root: fixture_root.to_path_buf(),
+            checkout: fixture_root.to_path_buf(),
             config: Config::default(),
             home: fixture_root.join("leak-id"),
         };

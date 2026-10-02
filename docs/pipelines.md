@@ -523,25 +523,48 @@ field it would use for a tracked pipeline. The file name is the pipeline name, a
 in `.yml` or `.yaml`. This works in repo mode only; home mode has no private layer of its own,
 because a home-mode project's whole setup is already private to the machine it runs on.
 
-- `spoolway pipeline copy <from> <to>` writes a new private pipeline and its task skeleton.
-  `spoolway prompt copy <from> <to>` writes a new private prompt. Both refuse a `<to>` that
-  already exists, tracked or private. In home mode they write into the workspace's own
-  `config/` instead, since there is no private layer to add there. `spoolway pipeline promote
-  <name>` moves a private pipeline, the private prompts it names and its private skeleton into
-  `.spoolway/`, then deletes the private files. It refuses inside a linked worktree, refuses any
-  clash with a tracked file, and is refused outright in home mode. See [`pipeline
-  copy`](cli-reference.md#spoolway-pipeline-copy-from-to), [`prompt
-  copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
+- `spoolway pipeline copy <from> <to>` writes a new private pipeline and, when `from` names no
+  `task_template:` of its own, a task skeleton to go with it; when `from` does name one, the
+  copy shares that same skeleton instead of writing a new one. `spoolway prompt copy <from>
+  <to>` writes a new private prompt, copying the whole prompt folder `from` names, `assets/`
+  included; a source folder holding a symlinked directory is refused outright, naming it. Both
+  require `<from>` and `<to>` to be one plain name each: not empty, not absolute, and holding
+  none of `/`, `\` or `..`. Both also refuse a `<to>` that already exists, tracked or private;
+  `pipeline copy` also refuses a `<to>` whose skeleton already exists on its own. Run from a
+  linked worktree, those checks also cover the main checkout's tracked files, naming the
+  clashing file, since the main checkout and the dispatcher load those files even when the
+  worktree's own checkout has never picked up the commit that added them. In home mode they
+  write into the workspace's own `config/` instead, since there is no private layer to add
+  there. `spoolway pipeline promote <name>` moves a private pipeline, the private prompts it
+  names and the skeleton its `task_template:` names (the pipeline's own name when it sets
+  none) into `.spoolway/`, then
+  deletes the private files. It refuses inside a linked worktree, refuses any clash with a
+  tracked file, refuses a step's prompt name or the pipeline's `task_template:` that is not one
+  plain name, refuses when another private pipeline names the same skeleton, and is refused
+  outright in home mode. See [`pipeline copy`](cli-reference.md#spoolway-pipeline-copy-from-to),
+  [`prompt copy`](cli-reference.md#spoolway-prompt-copy-from-to) and [`pipeline
   promote`](cli-reference.md#spoolway-pipeline-promote-name).
-- A private pipeline whose name matches a tracked one is refused, naming both files.
+- A private pipeline whose name matches a tracked one is refused, naming both files. Two
+  private files of the same name but different extensions — `foo.yml` beside `foo.yaml` — are
+  refused the same way, naming both private files; this is never reported as a clash with a
+  tracked file.
 - A private pipeline may name a tracked prompt or a private one. A tracked pipeline whose step
   names a prompt that exists only privately is refused, because that pipeline would break the
-  moment it ran on a machine with no copy of the private prompt.
+  moment it ran on a machine with no copy of the private prompt. A prompt name holding `/` is
+  never resolved in the private layer, so a step naming one is treated as missing even when a
+  file sits where the name would otherwise point.
 - `spoolway pipeline list` and `spoolway pipeline show` print `private · <file>` after a private
   pipeline's name, naming the file it came from. A tracked pipeline prints nothing extra. See
   [`spoolway pipeline list`](cli-reference.md#spoolway-pipeline-list).
 - `spoolway pipeline check` validates a private pipeline the same way it validates a tracked
-  one.
+  one. A private pipeline that fails validation is named by its own file, not only by its name.
+- `spoolway pipeline override` and `spoolway prompt override` find a private pipeline or prompt
+  the same way `list` and `show` do, and write a patch or fork for it. That patch or fork only
+  starts applying once `spoolway pipeline promote` makes the target tracked; until then it sits
+  in the overrides layer, named as waiting on the promote rather than reported as a missing
+  name. `spoolway pipeline promote <name>` itself names any override file — for the pipeline or
+  for a prompt it carries — that starts applying because of the move. See [The overrides
+  layer](configuration.md#the-overrides-layer).
 - A lane running in a worktree reads the same `local/` the main checkout does.
 
 ## Adding a step

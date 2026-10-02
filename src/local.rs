@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 /// Directory under a project's home holding the private layer.
 pub const LOCAL_DIR: &str = "local";
@@ -61,4 +61,78 @@ pub(crate) fn prompts_dir(local: &Path) -> PathBuf {
 /// shape as the tracked `.spoolway/templates/tasks/`.
 pub(crate) fn task_templates_dir(local: &Path) -> PathBuf {
     local.join("templates").join("tasks")
+}
+
+/// Whether `name` is one plain path component — not empty, not absolute, and
+/// carrying none of `/`, `\` or `..`. `pipeline copy` and `prompt copy` join
+/// a `<from>`/`<to>` straight onto a private directory with nothing else
+/// standing between the string and the filesystem, so this is the one shape
+/// that join can ever be trusted with; anything else walks the write
+/// outside the private folder — in repo mode as far as a tracked
+/// `.spoolway/` the traversal happens to reach, and in home mode out of the
+/// workspace's own `config/`, the private layer's stand-in there. `\` is
+/// checked as a literal character rather than through
+/// [`std::path::Component`], which treats it as ordinary on this platform
+/// and would wave a Windows-style traversal straight through. Also the shape
+/// [`prompt::local_names_in`](crate::prompt::local_names_in) enumerates —
+/// direct children only — so a nested name like `nest/inner` is never
+/// resolved privately either, closing the gap
+/// [`prompt::path_for`](crate::prompt::path_for) otherwise has by joining it
+/// straight on.
+pub(crate) fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !Path::new(name).is_absolute()
+}
+
+/// Refuse `name` as a `<from>`/`<to>` unless [`is_plain_name`] — the one
+/// check `pipeline copy` and `prompt copy` run on both arguments before
+/// touching the filesystem at all, so a bad name is caught before anything
+/// is read or written rather than after. `label` names what kind of thing
+/// `name` is meant to be (`"pipeline"`, `"prompt"`), for the message.
+pub(crate) fn refuse_unless_plain_name(label: &str, name: &str) -> Result<()> {
+    if is_plain_name(name) {
+        return Ok(());
+    }
+    bail!(
+        "`{name}` is not a valid {label} name — one plain name, no `/`, `\\` or `..`, and not \
+         empty or absolute"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A plain, ordinary name is the only shape `pipeline copy` and `prompt
+    /// copy` may ever write — everything a name could do to escape the
+    /// private directory it is joined onto, refused.
+    #[test]
+    fn a_name_that_is_empty_absolute_or_holds_a_separator_or_dotdot_is_not_plain() {
+        for bad in [
+            "",
+            "/etc/passwd",
+            "a/b",
+            "..",
+            "../../../../escaped",
+            "a\\b",
+            "\\\\x",
+        ] {
+            assert!(!is_plain_name(bad), "`{bad}` should not be plain");
+            assert!(
+                refuse_unless_plain_name("pipeline", bad).is_err(),
+                "`{bad}` should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_name_is_plain() {
+        for good in ["default", "default-strict", "implementer_v2"] {
+            assert!(is_plain_name(good), "`{good}` should be plain");
+            assert!(refuse_unless_plain_name("pipeline", good).is_ok());
+        }
+    }
 }

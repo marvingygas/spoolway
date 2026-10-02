@@ -304,7 +304,7 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> 
         .iter()
         .map(|(name, pipeline)| {
             let longest = super::queue::longest_agent_step(pipeline);
-            let body = crate::task_template::resolve(repo, pipeline.task_template_name());
+            let body = crate::task_template::resolve_for(repo, pipeline);
             let last_of_chain = pipeline
                 .steps
                 .iter()
@@ -560,7 +560,7 @@ mod tests {
     /// detached checkout reports none at all.
     #[test]
     fn contract_base_is_the_branch_the_checkout_has_out() {
-        let repo = fixture("contract-base");
+        let (repo, _root_guard) = fixture("contract-base");
         let json = |cwd: &std::path::Path| {
             serde_json::to_value(build_contract(&repo, &Pipelines::builtin(), cwd)).unwrap()
         };
@@ -588,7 +588,7 @@ mod tests {
     /// take the field as naming where a dependent's worktree came from.
     #[test]
     fn base_field_explains_the_dependent_case() {
-        let repo = fixture("contract-base-field-text");
+        let (repo, _root_guard) = fixture("contract-base-field-text");
         let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let base = contract.fields["base"];
         assert!(
@@ -610,7 +610,7 @@ mod tests {
     /// missing from the contract.
     #[test]
     fn every_frontmatter_field_is_in_some_contract_group() {
-        let repo = fixture("contract-groups");
+        let (repo, _root_guard) = fixture("contract-groups");
         let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let mut known = std::collections::BTreeSet::new();
         known.extend(contract.keys.required.iter().copied());
@@ -642,7 +642,7 @@ mod tests {
     /// `Frontmatter` field does above.
     #[test]
     fn every_settable_key_has_a_fields_entry() {
-        let repo = fixture("contract-fields");
+        let (repo, _root_guard) = fixture("contract-fields");
         let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let mut settable = std::collections::BTreeSet::new();
         settable.extend(contract.keys.required.iter().copied());
@@ -682,7 +682,7 @@ mod tests {
     /// JSON on stdout with nothing else beside it.
     #[test]
     fn bare_contract_prints_only_the_contract_as_json() {
-        let repo = fixture("contract-bare");
+        let (repo, _root_guard) = fixture("contract-bare");
         let value: serde_json::Value = serde_json::from_str(
             &serde_json::to_string(&build_contract(&repo, &Pipelines::builtin(), &repo.root))
                 .unwrap(),
@@ -729,7 +729,7 @@ mod tests {
     /// able to read them from instead.
     #[test]
     fn title_field_names_all_nine_commit_types() {
-        let repo = fixture("contract-title-types");
+        let (repo, _root_guard) = fixture("contract-title-types");
         let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
         let title = contract.fields["title"];
         for kind in [
@@ -754,7 +754,7 @@ mod tests {
         let last_step_id = with_last.steps.first().unwrap().id.clone();
         with_last.steps.first_mut().unwrap().last = true;
 
-        let repo = fixture("contract-last-of-chain");
+        let (repo, _root_guard) = fixture("contract-last-of-chain");
         let contract = build_contract(&repo, &pipelines, &repo.root);
 
         let default_out = &contract.pipelines["default"];
@@ -783,7 +783,7 @@ mod tests {
         with_both.steps.first_mut().unwrap().first = true;
         with_both.steps.last_mut().unwrap().last = true;
 
-        let repo = fixture("contract-first-of-chain");
+        let (repo, _root_guard) = fixture("contract-first-of-chain");
         let contract = build_contract(&repo, &pipelines, &repo.root);
 
         let default_out = &contract.pipelines["default"];
@@ -808,7 +808,7 @@ mod tests {
     /// path pattern for it to expand on its own.
     #[test]
     fn the_contract_names_the_directory_tasks_are_written_to() {
-        let repo = fixture("contract-output");
+        let (repo, _root_guard) = fixture("contract-output");
         let contract = build_contract(&repo, &Pipelines::builtin(), &repo.root);
 
         assert_eq!(
@@ -826,7 +826,7 @@ mod tests {
     /// problems, and nothing is written — the whole point of the command.
     #[test]
     fn from_accepts_a_good_task_and_writes_nothing() {
-        let repo = fixture("check-good");
+        let (repo, _root_guard) = fixture("check-good");
         let text = task_text(
             "checked",
             "group: demo\ntouches: [notes/checked.md]\n",
@@ -856,7 +856,7 @@ mod tests {
     /// checkout's branch instead.
     #[test]
     fn from_refuses_a_task_with_no_base_and_no_flag() {
-        let repo = fixture("check-no-base");
+        let (repo, _root_guard) = fixture("check-no-base");
         let text = task_text("checked", "group: demo\n", BODY);
         let path = write_doc(&repo, "checked.md", &text);
 
@@ -897,7 +897,7 @@ mod tests {
         // very same path, and the two error strings can be compared for
         // real — a second fixture would only ever differ by its own temp
         // path.
-        let repo = fixture("check-reserved");
+        let (repo, _root_guard) = fixture("check-reserved");
         let text = task_text("bad", "group: demo\nrun: r00001\n", BODY);
         let path = write_doc(&repo, "bad.md", &text);
 
@@ -930,7 +930,7 @@ mod tests {
     /// untouched.
     #[test]
     fn task_edit_rewrites_a_paused_tasks_named_section() {
-        let repo = fixture("edit-paused");
+        let (repo, _root_guard) = fixture("edit-paused");
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
         task.front.paused_at = Some("implement".into());
@@ -967,7 +967,7 @@ mod tests {
     /// a lane speaking for one) editing the task out from under it.
     #[test]
     fn task_edit_refuses_a_task_that_is_neither_paused_nor_blocked() {
-        let repo = fixture("edit-not-stopped");
+        let (repo, _root_guard) = fixture("edit-not-stopped");
         add(&repo, "ship", &[]);
 
         let from = write_doc(&repo, "mockup.txt", "new goal\n");
@@ -993,7 +993,7 @@ mod tests {
     /// A `blocked` task is stopped exactly the same as a `paused` one.
     #[test]
     fn task_edit_accepts_a_blocked_task_too() {
-        let repo = fixture("edit-blocked");
+        let (repo, _root_guard) = fixture("edit-blocked");
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
         task.set_stage(crate::pipeline::BLOCKED, None);
@@ -1018,7 +1018,7 @@ mod tests {
     /// edit names a section the task's own template already put there.
     #[test]
     fn task_edit_refuses_a_heading_the_body_does_not_have() {
-        let repo = fixture("edit-no-such-section");
+        let (repo, _root_guard) = fixture("edit-no-such-section");
         add(&repo, "ship", &[]);
         let mut task = queued(&repo, "ship");
         task.set_stage(crate::pipeline::PAUSED, None);

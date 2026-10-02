@@ -68,7 +68,7 @@ use anyhow::Result;
 use cli::{
     AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HerdrCommand, HookCommand,
     IssueCommand, JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand,
-    QueueCommand, TaskCommand, TemplateCommand,
+    QueueCommand, TaskCommand, TemplateCommand, WorkspaceCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -173,6 +173,15 @@ fn run() -> Result<()> {
             // failure is handed in as a finding, the same way `config_error`
             // is, rather than aborting the command on it.
             let pipelines = Pipelines::load(&repo.checkout, &repo.config);
+            // `clap` already refuses `--no-live` together with `--live` (see
+            // `DoctorArgs`), so exactly one of these can be true here.
+            let live = if args.no_live {
+                commands::LiveCheckMode::Skip
+            } else if args.live {
+                commands::LiveCheckMode::Forced
+            } else {
+                commands::LiveCheckMode::Default
+            };
             // `config_error` is about `repo.root`'s file — the one
             // `discover_lenient` reads. `doctor` loads `repo.checkout`'s own
             // copy again for everything it checks, and folds this one in as
@@ -184,7 +193,7 @@ fn run() -> Result<()> {
                 home_error,
                 args.verbose,
                 cli.json,
-                args.no_live,
+                live,
             )
         }
 
@@ -258,14 +267,19 @@ fn run() -> Result<()> {
             commands::config_override(&repo, home_error.as_ref())
         }
         command => {
-            // `sync` is the one command below that has to survive a
-            // `config.toml` that no longer parses, for the same reason
-            // `doctor` and `config edit`/`config override` read leniently
-            // above: it is the command that brings a config like that
-            // forward — most sharply, one still carrying a key this binary
-            // retired hard enough that `Config::load` now refuses it
-            // outright (see `crate::sync::config`). Every other command
-            // reaching this arm still dies on a config it cannot read.
+            // `sync` is the one command below that has to survive long
+            // enough to reach its own read of `config.toml`, for the same
+            // reason `doctor` and `config edit`/`config override` read
+            // leniently above: `Repo::discover` would otherwise refuse a
+            // file still naming a key this binary retired hard enough that
+            // `Config::load` rejects it outright, before `sync` ever got
+            // the chance to be the one command that brings a file like that
+            // forward (see `crate::sync::config`). A file this lenient
+            // `Repo` still cannot even parse as TOML is a different case:
+            // `sync::config` fails loudly on that one itself, naming the
+            // file, rather than leaving it to look like nothing was wrong.
+            // Every other command reaching this arm still dies on a config
+            // it cannot read.
             let repo = if matches!(command, Command::Sync(_)) {
                 let (repo, _, _) = Repo::discover_lenient(&cwd)?;
                 repo
@@ -444,7 +458,10 @@ fn run() -> Result<()> {
                     commands::pipeline_list(&repo, &read, cli.json)
                 }
                 Command::Pipeline(PipelineCommand::Contract) => {
-                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
+                    // Not plain `load`: this command prints the pipeline
+                    // file format, which needs no pipeline of this
+                    // project's own to exist — see `Pipelines::load_or_empty`.
+                    let read = Pipelines::load_or_empty(&repo.checkout, &repo.config)?;
                     commands::pipeline_contract(&repo, &read)
                 }
                 Command::Pipeline(PipelineCommand::Override(args)) => {
@@ -463,7 +480,11 @@ fn run() -> Result<()> {
                 // yet, and `prompt contract` exists to preview exactly that
                 // edit before it does.
                 Command::Prompt(PromptCommand::Contract(args)) => {
-                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
+                    // Not plain `load`: a project with no pipelines yet
+                    // gets a pointer to `pipeline contract` instead of a
+                    // load failure — see `Pipelines::load_or_empty` and
+                    // `prompt::contract`.
+                    let read = Pipelines::load_or_empty(&repo.checkout, &repo.config)?;
                     prompt::contract(&repo, &read, args)
                 }
                 Command::Prompt(PromptCommand::List) => {
@@ -490,9 +511,13 @@ fn run() -> Result<()> {
                 }
 
                 Command::Template(TemplateCommand::Contract) => commands::template_contract(&repo),
-                Command::Hook(HookCommand::Contract) => commands::hook_contract(),
+                Command::Hook(HookCommand::Contract) => commands::hook_contract(&repo),
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
+
+                Command::Workspace(WorkspaceCommand::Move(args)) => {
+                    commands::workspace_move(&repo.root, args)
+                }
 
                 Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
                 Command::Jobs(JobsCommand::Run(args)) => {
@@ -599,11 +624,185 @@ fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Where `spoolway init` should place `.spoolway/`: the git toplevel if there is
-/// one, otherwise here.
+/// Where `spoolway init` should place `.spoolway/`: the main checkout if
+/// `cwd` is a linked worktree of one, the git toplevel if there is one,
+/// otherwise here.
+///
+/// `repo::main_checkout` first, ahead of `toplevel_raw`: a linked
+/// worktree's own `git rev-parse --show-toplevel` answers with the
+/// worktree itself, which is never where `init` should write — it would
+/// set up a second, ignored project there and still stamp the shared
+/// `.git`. `main_checkout` answers `Some` of the checkout itself for every
+/// ordinary repository too, not only a linked worktree's, so `toplevel_raw`
+/// is reached only for a non-git folder or a checkout `main_checkout`
+/// cannot yet resolve — a fresh `--separate-git-dir` clone or submodule
+/// nothing has stamped or listed in a workspace.
+///
+/// From the main checkout of such a clone, `toplevel_raw` answers the
+/// checkout itself, which is right. From a linked worktree of one it
+/// answers the worktree, and git has no way to name the main checkout
+/// either (`git worktree list` gives the git directory in its place), so
+/// that case is refused: setting up the worktree would register a path the
+/// main checkout and every other worktree never find again.
 fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
-    match repo::run(cwd, "git", &["rev-parse", "--show-toplevel"]) {
-        Ok(out) => Ok(PathBuf::from(out.trim())),
+    if let Some(main) = repo::main_checkout(cwd) {
+        return Ok(main);
+    }
+    if repo::is_linked_worktree(cwd) {
+        anyhow::bail!(
+            "{} is a linked worktree, and spoolway cannot tell which checkout it was cut from, \
+             because its git directory sits outside that checkout\n  run `spoolway init` in \
+             the main checkout first, or pass `-C <main checkout>` — every worktree finds the \
+             project from there afterwards",
+            cwd.display()
+        );
+    }
+    match repo::toplevel_raw(cwd) {
+        Ok(top) => Ok(top),
         Err(_) => Ok(cwd.to_path_buf()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::PathExt;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?}: {e}"));
+        assert!(status.success(), "git {args:?} in {dir:?} failed");
+    }
+
+    /// `init_root` picks the folder `spoolway init` writes into. A linked
+    /// worktree's own `git rev-parse --show-toplevel` answers with the
+    /// worktree itself, not the main checkout it was cut from — so running
+    /// `init` from inside one must still resolve to the main checkout,
+    /// never the worktree, or it sets up a second, ignored project there.
+    #[test]
+    fn init_root_from_a_linked_worktree_resolves_to_the_main_checkout() {
+        let base = crate::scratch::root("init-root-worktree");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+
+        let wt = base.join("task-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let root = init_root(&wt).unwrap();
+        assert_eq!(
+            root.canonical().unwrap(),
+            work.canonical().unwrap(),
+            "`spoolway init` run from a linked worktree must act on the \
+             main checkout {work:?}, not the worktree {wt:?} it was \
+             resolved from — got {root:?}"
+        );
+    }
+
+    /// `repo::main_checkout` answers `None`, not a wrong guess, for a fresh
+    /// `--separate-git-dir` clone nothing has stamped yet — see that
+    /// function's own doc. `init_root` has to fall through to `toplevel_raw`
+    /// for that case, which answers the checkout itself correctly, or the
+    /// very first `spoolway init` in such a clone would write into — and
+    /// stamp — the wrong folder entirely, with no way to ever reach the
+    /// real one afterwards.
+    #[test]
+    fn init_root_falls_through_to_toplevel_for_an_unstamped_separate_git_dir_clone() {
+        let base = crate::scratch::root("init-root-separate-git-dir");
+        let _ = std::fs::remove_dir_all(&base);
+        let git_dir = base.join("elsewhere").join("git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+
+        let root = init_root(&work).unwrap();
+        assert_eq!(
+            root.canonical().unwrap(),
+            work.canonical().unwrap(),
+            "the very first `spoolway init` in a fresh --separate-git-dir \
+             clone must still target the checkout itself, not the git \
+             directory's own parent — got {root:?}"
+        );
+    }
+
+    /// From a linked worktree of a `--separate-git-dir` clone that nothing
+    /// has stamped or listed, neither `main_checkout` nor git can name the
+    /// main checkout, and `toplevel_raw` answers the worktree itself.
+    /// `init_root` must refuse rather than hand that worktree to `init`,
+    /// which registered it as a project no other checkout could find.
+    #[test]
+    fn init_root_refuses_a_linked_worktree_whose_main_checkout_cannot_be_found() {
+        let base = crate::scratch::root("init-root-separate-git-dir-worktree");
+        let _ = std::fs::remove_dir_all(&base);
+        let git_dir = base.join("repos").join("foo.git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+        let wt = base.join("task-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let err = crate::platform::test_home::with_home(&base.join("home"), || init_root(&wt))
+            .expect_err("the worktree must not be taken for the project");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("linked worktree") && said.contains("main checkout"),
+            "the refusal says to run init in the main checkout: {said}"
+        );
     }
 }

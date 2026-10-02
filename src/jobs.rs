@@ -789,13 +789,13 @@ mod tests {
 
     #[test]
     fn no_store_is_an_empty_list() {
-        let repo = fixture("jobs-none");
+        let (repo, _root_guard) = fixture("jobs-none");
         assert!(load(&repo).unwrap().is_empty());
     }
 
     #[test]
     fn a_store_is_read_with_its_scope() {
-        let repo = fixture("jobs-one");
+        let (repo, _root_guard) = fixture("jobs-one");
         write_user_store(
             &repo,
             "[jobs.nightly-audit]\nschedule = \"0 3 * * 1-5\"\npipeline = \"impl\"\nroutine = \"nightly\"\n",
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn the_two_stores_merge() {
-        let repo = fixture("jobs-merge");
+        let (repo, _root_guard) = fixture("jobs-merge");
         write_user_store(
             &repo,
             "[jobs.a]\nschedule = \"@daily\"\npipeline = \"impl\"\nroutine = \"nightly\"\n",
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn one_name_in_both_stores_is_refused_naming_both_paths() {
-        let repo = fixture("jobs-collide");
+        let (repo, _root_guard) = fixture("jobs-collide");
         let spec = "schedule = \"@daily\"\npipeline = \"impl\"\nroutine = \"nightly\"\n";
         write_user_store(&repo, &format!("[jobs.dup]\n{spec}"));
         write_project_store(&repo, &format!("[jobs.dup]\n{spec}"));
@@ -838,14 +838,14 @@ mod tests {
 
     #[test]
     fn a_malformed_store_is_an_error() {
-        let repo = fixture("jobs-malformed");
+        let (repo, _root_guard) = fixture("jobs-malformed");
         write_user_store(&repo, "[jobs.x]\nschedule = \"@daily\"\n"); // no pipeline/routine
         assert!(load(&repo).is_err());
     }
 
     #[test]
     fn a_routine_target_that_escapes_the_routines_directory_is_refused() {
-        let repo = fixture("jobs-escape");
+        let (repo, _root_guard) = fixture("jobs-escape");
         for bad in ["../../etc/passwd", "/etc/passwd", "nightly/../../secret"] {
             write_user_store(
                 &repo,
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn a_routine_target_inside_the_routines_directory_resolves() {
-        let repo = fixture("jobs-inside");
+        let (repo, _root_guard) = fixture("jobs-inside");
         write_user_store(
             &repo,
             "[jobs.x]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"nightly/audit.md\"\n",
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn a_written_job_reads_back_through_load() {
-        let repo = fixture("jobs-write");
+        let (repo, _root_guard) = fixture("jobs-write");
         write(&repo, Scope::User, "nightly-audit", &spec("0 3 * * 1-5")).unwrap();
 
         let jobs = load(&repo).unwrap();
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn writing_a_job_leaves_a_sibling_and_a_comment_where_they_were() {
-        let repo = fixture("jobs-write-preserve");
+        let (repo, _root_guard) = fixture("jobs-write-preserve");
         write_user_store(
             &repo,
             "# hand-written note\n[jobs.weekly-deps]\nschedule = \"0 3 * * sun\"\n\
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn editing_a_job_keeps_its_own_comment_and_any_key_this_reader_does_not_know() {
-        let repo = fixture("jobs-write-inplace");
+        let (repo, _root_guard) = fixture("jobs-write-inplace");
         write_user_store(
             &repo,
             "# nightly deps audit\n[jobs.nightly]\nschedule = \"0 3 * * *\"\n\
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn write_and_delete_surface_a_store_that_will_not_read_rather_than_treat_it_as_absent() {
-        let repo = fixture("jobs-store-unreadable");
+        let (repo, _root_guard) = fixture("jobs-store-unreadable");
         // A directory where the store file should be: `read_to_string` fails
         // with something other than NotFound, and neither call may pretend
         // the store is empty.
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn a_paused_job_writes_enabled_false_and_resuming_drops_the_key() {
-        let repo = fixture("jobs-write-paused");
+        let (repo, _root_guard) = fixture("jobs-write-paused");
         let mut paused = spec("@daily");
         paused.enabled = false;
         write(&repo, Scope::User, "lint-sweep", &paused).unwrap();
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn delete_removes_a_job_from_the_store_that_holds_it_and_is_quiet_otherwise() {
-        let repo = fixture("jobs-delete");
+        let (repo, _root_guard) = fixture("jobs-delete");
         write(&repo, Scope::Project, "a", &spec("@daily")).unwrap();
         write(&repo, Scope::Project, "b", &spec("@weekly")).unwrap();
 
@@ -1001,7 +1001,7 @@ mod tests {
     /// firing, and a paused one left off entirely.
     #[test]
     fn active_jobs_orders_by_next_firing_and_omits_a_paused_one() {
-        let repo = fixture("jobs-active");
+        let (repo, _root_guard) = fixture("jobs-active");
         write_user_store(
             &repo,
             "[jobs.weekly]\nschedule = \"0 3 * * sun\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
@@ -1019,7 +1019,7 @@ mod tests {
     /// the ledger, `next: None`, sorted after every job that will fire.
     #[test]
     fn active_jobs_keeps_a_job_whose_schedule_never_fires_at_the_end() {
-        let repo = fixture("jobs-active-impossible");
+        let (repo, _root_guard) = fixture("jobs-active-impossible");
         write_user_store(
             &repo,
             "[jobs.impossible]\nschedule = \"0 0 30 2 *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
@@ -1228,7 +1228,7 @@ mod tests {
 
     #[test]
     fn a_due_job_fires_onto_its_own_pipeline_and_records_the_minute() {
-        let repo = fixture("jobs-fire");
+        let (repo, _root_guard) = fixture("jobs-fire");
         // `bugfix`, not the default: the job names its own pipeline and every
         // queued task has to land on it.
         every_minute_job(&repo, "nightly", "bugfix");
@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn a_window_that_fell_between_two_passes_still_fires() {
         use chrono::Timelike;
-        let repo = fixture("jobs-missed-window");
+        let (repo, _root_guard) = fixture("jobs-missed-window");
         let now = Local::now().naive_local();
         let due = now - Duration::minutes(30);
         scheduled_job(
@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn a_second_pass_in_the_same_minute_does_not_fire_again() {
-        let repo = fixture("jobs-dedup");
+        let (repo, _root_guard) = fixture("jobs-dedup");
         every_minute_job(&repo, "nightly", "default");
 
         fire(&repo);
@@ -1331,7 +1331,7 @@ mod tests {
 
     #[test]
     fn a_job_whose_last_run_is_still_in_the_queue_skips_and_says_so() {
-        let repo = fixture("jobs-overlap");
+        let (repo, _root_guard) = fixture("jobs-overlap");
         every_minute_job(&repo, "nightly", "default");
         crate::commands::testutil::add(&repo, "leftover", &[]);
 
@@ -1363,7 +1363,7 @@ mod tests {
 
     #[test]
     fn a_paused_job_never_fires() {
-        let repo = fixture("jobs-paused");
+        let (repo, _root_guard) = fixture("jobs-paused");
         let dir = repo.routines_dir().join("nightly");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(

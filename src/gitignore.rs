@@ -84,7 +84,7 @@ fn bounds(lines: &[String]) -> Option<Result<(usize, usize), ()>> {
 mod tests {
     use super::*;
 
-    fn root(name: &str) -> PathBuf {
+    fn root(name: &str) -> crate::scratch::ScratchRoot {
         let dir = crate::scratch::root(&format!("gitignore-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

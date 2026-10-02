@@ -103,8 +103,11 @@ merged, for example a step that already runs a command and gets `agent:` added o
 stale entry is left out of the merge. The step stays exactly as the tracked file wrote it, and
 every other entry, in this file and in every other, still applies. A config patch key the
 tracked config would refuse is left out the same way, with every other key in the patch still
-applied. A prompt override for a prompt the checkout no longer has is left out too. The
-override file itself is never changed.
+applied. A prompt override for a prompt the checkout no longer has is left out too. A pipeline
+patch or a prompt override written for a private target is also left out of the merge — a
+patch only ever applies to a tracked file — but is named as waiting on `spoolway pipeline
+promote`, not as missing, since the name is not wrong, only not tracked yet. The override file
+itself is never changed.
 
 Outside a lane, each command that loads prints one stderr line per entry it leaves out:
 
@@ -175,7 +178,7 @@ These keys apply only when nobody is watching. See [Unattended runs](pipelines.m
 | `enabled` | `false` | `true` staffs `blocked` with the unblocker lane instead of parking the task for a person. `gate:` still pauses the task for a person. `spoolway dispatch --unattended` or `--attended` overrides this for one run. |
 | `max_output_tokens` | `0` | Output tokens one unattended run may spend before the dispatcher stops starting lanes. `0` is no limit. Live lanes finish. |
 | `max_cost_usd` | `0.0` | Dollars one unattended run may spend before the dispatcher stops starting lanes. `0.0` is no limit. Whichever limit is hit first stops the run. See [Cost accounting](cost.md). |
-| `blocked_agent` | `claude` | The `[agents.*]` profile that runs the `blocked` step. A pipeline may override these five keys in its own `blocked` step. |
+| `blocked_agent` | `claude` | The `[agents.*]` profile that runs the `blocked` step. A pipeline may override these five keys in its own `blocked` step. `spoolway init`, run again with no `--provider`, reads this key as the project's own provider; pointing it at a profile `init` did not create falls back to the menu's default, `claude`. |
 | `blocked_model` | `claude-opus-5` | The model for the `blocked` step. Blank refuses an unattended run. `spoolway init` writes it blank, so set it before the first unattended run. |
 | `blocked_effort` | blank | The effort for the `blocked` step. |
 | `blocked_session` | `true` | Whether the `blocked` lane carries its earlier session forward. |
@@ -234,12 +237,12 @@ project_key = ""
 key_in_names = false
 ```
 
-One script in `.spoolway/hooks/` connects spoolway to an issue tracker. No pipeline file
-names a tracker.
+One script in `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`) connects
+spoolway to an issue tracker. No pipeline file names a tracker.
 
 | Key | Default | What it controls |
 |---|---|---|
-| `hook` | blank | A bare file name inside `.spoolway/hooks/`, such as `github.sh`. Blank runs no hook. A path is refused. |
+| `hook` | blank | A bare file name inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`), such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
 | `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
 
@@ -342,11 +345,12 @@ failing `queued` hook does. `spoolway resume` runs the hook again. A trial arm n
 
 ### The shipped hook scripts
 
-`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`, but only
-when a tracker is chosen; answering `none` leaves that folder unwritten. They are project-owned
-starting points, not required integrations: edit either script, replace it with any executable
-that follows `spoolway hook contract`, or leave `hook` blank. `spoolway sync` never changes
-them. Switch trackers with `spoolway config set issue_tracking.hook <file>`.
+`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/` (a
+home-mode workspace's own `config/hooks/`), but only when a tracker is chosen; answering `none`
+leaves that folder unwritten. They are project-owned starting points, not required
+integrations: edit either script, replace it with any executable that follows `spoolway hook
+contract`, or leave `hook` blank. `spoolway sync` never changes them. Switch trackers with
+`spoolway config set issue_tracking.hook <file>`.
 
 A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
 comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's

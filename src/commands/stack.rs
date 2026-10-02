@@ -1103,7 +1103,7 @@ mod tests {
     #[test]
     fn a_trial_arm_s_stack_step_never_pushes_or_opens_a_pull_request() {
         let _guard = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let repo = crate::commands::testutil::fixture("stack-trial-noop");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-trial-noop");
         crate::commands::testutil::add(&repo, "demo", &[]);
         let mut task = repo.task("demo").unwrap();
         task.front.trial = Some("t1".into());
@@ -1142,7 +1142,7 @@ mod tests {
     /// instead of falling through to `base`.
     #[test]
     fn a_cut_from_deleted_everywhere_resolves_to_nothing_rather_than_its_own_name() {
-        let repo = crate::commands::testutil::fixture("stack-resolved-ref");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-resolved-ref");
         std::fs::write(repo.root.join("file.txt"), "one\n").unwrap();
         crate::repo::run(&repo.root, "git", &["add", "-A"]).unwrap();
         crate::repo::run(&repo.root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
@@ -1277,7 +1277,7 @@ mod tests {
     /// this one is simply never cut.
     #[test]
     fn a_queued_task_with_no_branch_yet_is_not_a_predicted_conflict() {
-        let repo = crate::commands::testutil::fixture("group-conflicts-no-ref");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("group-conflicts-no-ref");
         std::fs::write(repo.root.join("file.txt"), "one\n").unwrap();
         crate::repo::run(&repo.root, "git", &["add", "-A"]).unwrap();
         crate::repo::run(&repo.root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
@@ -1318,7 +1318,7 @@ mod tests {
     /// group is never pulled in.
     #[test]
     fn stack_groups_walks_the_after_edge_both_ways_and_leaves_unrelated_groups_out() {
-        let repo = crate::commands::testutil::fixture("stack-groups-walk");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-groups-walk");
         let parse = |yaml: &str| Task::parse(PathBuf::from("t.md"), yaml).unwrap();
 
         let auth_login = parse(

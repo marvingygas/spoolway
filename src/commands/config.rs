@@ -315,7 +315,7 @@ mod tests {
     /// Both `.spoolway/config.toml` files are written with a value the other
     /// one does not have, so a test reading the wrong file is caught by a
     /// wrong answer rather than by both files agreeing.
-    fn worktree_fixture(name: &str) -> (Repo, PathBuf) {
+    fn worktree_fixture(name: &str) -> (Repo, PathBuf, crate::scratch::ScratchRoot) {
         // A base directory unique to this call, holding both the project and
         // its worktree — mirroring `repo::tests::fixture` — so two `cargo
         // test` processes running this test at once never share a directory.
@@ -368,12 +368,12 @@ mod tests {
             repo.checkout, repo.root,
             "the fixture is only useful if it actually lands in a linked worktree"
         );
-        (repo, root)
+        (repo, root, base)
     }
 
     #[test]
     fn config_get_answers_for_the_checkout_not_the_root() {
-        let (repo, _root) = worktree_fixture("get");
+        let (repo, _root, _base_guard) = worktree_fixture("get");
         config_get(&repo, "dispatch.worktree_root", false).unwrap();
         // `config_get` prints to stdout, which a unit test cannot capture
         // cheaply — so this also asserts the lower-level read it goes
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn config_path_names_the_worktrees_own_setup_folder() {
-        let (repo, _root) = worktree_fixture("path");
+        let (repo, _root, _base_guard) = worktree_fixture("path");
         assert_eq!(repo.setup_dir(), repo.checkout.join(".spoolway"));
     }
 
@@ -394,7 +394,7 @@ mod tests {
     /// `local` has to be present in the ordinary repo-mode case.
     #[test]
     fn config_path_reports_setup_local_and_overrides_in_repo_mode() {
-        let repo = crate::commands::testutil::fixture("config-path-json");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("config-path-json");
         // `config_path` itself only prints — exercised here too, so a panic
         // in its own printing path still fails this test — but the
         // assertions below are against [`SetupPaths`], the payload it
@@ -425,6 +425,7 @@ mod tests {
         let root = crate::scratch::root("config-path-home-mode");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
         let fake_home = root.parent().unwrap().join(format!(
             "{}-realhome",
             root.file_name().unwrap().to_string_lossy()
@@ -436,8 +437,8 @@ mod tests {
             std::fs::create_dir_all(clone.config_dir()).unwrap();
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
-                checkout: root.clone(),
-                root: root.clone(),
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config: Config::default(),
                 home,
             };
@@ -458,7 +459,7 @@ mod tests {
 
     #[test]
     fn config_set_refuses_inside_a_linked_worktree_and_writes_nothing() {
-        let (repo, root) = worktree_fixture("set");
+        let (repo, root, _base_guard) = worktree_fixture("set");
         let before_root = std::fs::read_to_string(Config::path_in(&root)).unwrap();
         let before_wt = std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap();
 
@@ -495,7 +496,7 @@ mod tests {
 
     #[test]
     fn config_set_in_the_main_checkout_writes_exactly_where_it_writes_today() {
-        let repo = crate::commands::testutil::fixture("config-set-main");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("config-set-main");
         config_set(&repo, "dispatch.worktree_root", "changed").unwrap();
         let config = Config::load(&repo.root).unwrap();
         assert_eq!(config.dispatch.worktree_root, "changed");
@@ -509,7 +510,7 @@ mod tests {
     /// it in key order.
     #[test]
     fn config_list_prints_every_settable_key_as_key_equals_value() {
-        let repo = crate::commands::testutil::fixture("config-list");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("config-list");
         config_list(&repo, false).unwrap();
         config_list(&repo, true).unwrap();
 

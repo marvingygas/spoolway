@@ -102,7 +102,9 @@ Answering yes to the example setup writes the shipped pipelines, prompts, task t
 ticket templates. Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
 and `templates/` folders instead, for the `spoolway-config` skill to fill. An established
 project is not asked again: it keeps whatever its own files already show, and a repeat run
-restores any of its example files that went missing.
+restores any of its example files that went missing. An example pipeline whose name a private
+pipeline already uses is skipped instead: `init` prints a line naming the private file, and
+renaming that private pipeline lets the example come back on the next run.
 
 ```mermaid
 flowchart LR
@@ -119,7 +121,7 @@ flowchart LR
 |---|---|
 | `.spoolway/config.toml` | Every setting, with defaults and comments. |
 | `.spoolway/pipelines/` | The two sample pipelines, with the example setup. Edit or replace them. |
-| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts, with the example setup. Updates never touch them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The five sample prompts, with the example setup. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders, with the example setup. |
@@ -151,31 +153,51 @@ checkout still carries a stamp no home holds. Run `spoolway init --new-id` to st
 [Runtime state](configuration.md#runtime-state).
 
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
-version wrote there.
+version wrote there, outside home mode. A home-mode checkout keeps its `.gitignore`
+untouched, matching home mode's own promise to write nothing into the checkout.
 
 ### Home mode
 
 `--setup home` puts the setup in a workspace under `~/.spoolway/` instead of the checkout, and
 `init` writes nothing into the checkout or its `.git`. With no workspace yet, or with
-`--workspace new`, it creates `~/.spoolway/<label>-<id>/` holding an empty `config/`, a
-`dispatchers/<name>/` for this clone, and a `project.toml` listing it. `<label>` and `<id>`
-take the same shape a repo-mode home's own folder does.
+`--workspace new`, it creates `~/.spoolway/<label>-<id>/`: a `dispatchers/<name>/` for this
+clone, a `project.toml` listing it, and a `config/` scaffolded the same way the table above
+scaffolds a repo-mode checkout's `.spoolway/`. `<label>` and `<id>` take the same shape a
+repo-mode home's own folder does.
 
-With workspaces already there, `init` also asks which one this checkout uses, listing each with
-the clones that already use it, plus `new`. Joining one keeps its `config/` exactly as it is,
-skips the example and tracker questions, and adds this clone to its `project.toml` with a
-dispatcher folder of its own — the clone's directory name, with `-2` added when that name is
-taken. With nobody to ask and no `--workspace`, `init` starts a new workspace rather than
-joining one unasked.
+With workspaces already there, `init` also asks which one this checkout uses. Each row names the
+repository its clones belong to — the first clone's `origin` URL, or its path shortened under
+`~` when it has none — plus `new`. A workspace already holding a clone of this same repository
+sorts to the top of the list, marked as the repository this checkout belongs to. `new` is always
+the default, so pressing Enter without reading the menu starts a fresh workspace rather than
+joining one.
+
+Joining a workspace keeps its `config/` exactly as it is, skips the example and tracker
+questions, and adds this clone to its `project.toml` with a dispatcher folder of its own — the
+clone's directory name, with `-2` added when that name is taken.
+
+With nobody to ask and no `--workspace`, `init` starts a new workspace, the same default the
+menu above takes. When a workspace already holds a clone of this repository, it prints that
+workspace's name and the command that joins it, then still starts the new workspace.
 
 Skills install into the coding agent's user folder instead of the project's own, since a
 project skill folder sits inside a checkout that home mode promises to leave untouched. See [The
 pipeline skills](#the-pipeline-skills).
 
 Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`,
+`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own, and
 `--workspace <name>` naming a workspace other than the one a checkout already uses. Each
 refusal names the command to run instead. See [Home mode](concepts.md#home-mode).
+
+Joining a workspace whose `config/` has gone missing is refused too, naming the missing path.
+
+To actually move a clone already listed in one workspace to another, run `spoolway workspace
+move <to>`. It carries the clone's dispatcher folder — queue, archive and worktrees — along with
+it, under its current name unless `--dispatcher <name>` picks a different one. It refuses while a
+dispatcher is running over that folder, while a live process is working in one of its worktrees,
+or when the destination already has a dispatcher folder by that name. See [CLI
+reference](cli-reference.md#spoolway-workspace-move-to).
 
 ```
 $ spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes
@@ -184,7 +206,7 @@ $ spoolway init --setup home --workspace new --provider claude --examples --trac
   wrote  ~/.spoolway/api-k7f2q9/config/pipelines/default.yml
   ...
   bound  /home/you/work/api  ->  ~/.spoolway/api-k7f2q9/dispatchers/api/
-Skills installed successfully.
+Skills installed successfully, into ~/.claude/skills.
 Project initialized successfully.
 ```
 
@@ -195,7 +217,7 @@ $ spoolway init --setup home --workspace api-k7f2q9 --provider claude --yes
 ...
   kept   ~/.spoolway/api-k7f2q9/config/
   bound  /home/you/work/api-review  ->  ~/.spoolway/api-k7f2q9/dispatchers/api-review/
-Skills installed successfully.
+Skills already installed, in ~/.claude/skills.
 Project initialized successfully.
 ```
 
@@ -236,8 +258,10 @@ folder sits inside a checkout that home mode promises to leave untouched.
 | `pi` | `~/.pi/agent/skills/`. pi also reads `~/.agents/skills/`, so installing both codex and pi at user level shows pi each skill twice. |
 
 pi's trust note is not printed for a user-level install, since a user folder loads without
-being asked. `spoolway sync` keeps user-level copies current the same way it keeps a project's
-own current.
+being asked. `spoolway sync` refreshes a user folder only when `spoolway install <provider>
+--user` or a home-mode `init` wrote it, marked by a `.installed-by-spoolway` file inside it.
+Deleting that file makes `sync` leave the folder alone. `sync` never removes a retired skill
+name from a user folder.
 
 ### Checking the setup
 
@@ -326,12 +350,19 @@ What `sync` replaces, file by file:
 |---|---|
 | `config.toml` | The comments and the settings reference. Your values stay. |
 | Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
-| `.gitignore` | Only the old marked block, removed once. |
-| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any agent's user folder installed there. |
+| `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
+| Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder marked by `.installed-by-spoolway`. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |
 | A retired template | Removed, with the reason it is gone. |
+
+In home mode, this leaves the checkout untouched: nothing under it is read, written or
+removed. See [Home mode](concepts.md#home-mode).
+
+A `config.toml` that `sync` cannot read fails the whole command, naming the file and pointing
+at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
+edit` instead.
 
 `sync` never merges. A marked block you edited by hand stops the sync on that file, and it is
 reported, not overwritten. A skill file has no such block: sync always rewrites it to match the

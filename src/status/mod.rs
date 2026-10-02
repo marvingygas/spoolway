@@ -3198,7 +3198,7 @@ mod tests {
     /// in flight reporting `cloud slots 3/5`.
     #[test]
     fn only_lanes_in_our_own_checkouts_take_a_slot() {
-        let repo = fixture("slots-ownership");
+        let (repo, _root_guard) = fixture("slots-ownership");
         let pipelines = Pipelines::builtin();
         let worktree = repo.root.join("wt").join("page-and-skills");
         add(&repo, "page-and-skills", &[], Some("review"));
@@ -3237,7 +3237,7 @@ mod tests {
     /// onto it is the whole of the setup.
     #[test]
     fn agent_model_names_a_queued_pipelines_model_with_no_live_lane() {
-        let mut repo = fixture("queued-agent-model");
+        let (mut repo, _root_guard) = fixture("queued-agent-model");
         add(&repo, "login", &[], Some("implement"));
         let pipelines = Pipelines::builtin();
         let tasks = repo.tasks().unwrap();
@@ -3266,7 +3266,7 @@ mod tests {
     /// line from.
     #[test]
     fn agent_model_widens_with_every_pooled_model_a_profiles_steps_name() {
-        let repo = fixture("queued-agent-model-two-pools");
+        let (repo, _root_guard) = fixture("queued-agent-model-two-pools");
         let pipeline = crate::pipeline::Pipeline::parse(
             "impl_ui",
             "steps:\n\
@@ -3306,7 +3306,7 @@ mod tests {
     /// work can start while the dispatcher happily starts some.
     #[test]
     fn a_parked_lane_gives_its_slot_back() {
-        let repo = fixture("slots-parked");
+        let (repo, _root_guard) = fixture("slots-parked");
         let pipelines = Pipelines::builtin();
         for (id, stage) in [
             ("blocked-one", crate::pipeline::BLOCKED),
@@ -3338,7 +3338,7 @@ mod tests {
     /// pipelines now do.
     #[test]
     fn a_staffed_blocked_lane_keeps_its_slot() {
-        let mut repo = fixture("slots-staffed-blocked");
+        let (mut repo, _root_guard) = fixture("slots-staffed-blocked");
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         add(&repo, "blocked-one", &[], Some(crate::pipeline::BLOCKED));
@@ -3363,7 +3363,7 @@ mod tests {
     /// starts another lane in its place.
     #[test]
     fn a_finished_lane_not_yet_closed_gives_its_slot_back() {
-        let repo = fixture("slots-finished-not-closed");
+        let (repo, _root_guard) = fixture("slots-finished-not-closed");
         let pipelines = Pipelines::builtin();
         add(&repo, "moved-on", &[], Some("review"));
 
@@ -3385,7 +3385,7 @@ mod tests {
     /// above, so it needs its own case.
     #[test]
     fn a_lane_still_mid_turn_counts_even_once_its_task_has_moved_on() {
-        let repo = fixture("slots-busy-not-current");
+        let (repo, _root_guard) = fixture("slots-busy-not-current");
         let pipelines = Pipelines::builtin();
         add(&repo, "moved-on", &[], Some("review"));
 
@@ -3407,7 +3407,7 @@ mod tests {
     /// STEP column now, so it is read off `Row::arrivals`, not off `next`.
     #[test]
     fn the_next_column_names_a_step_for_a_moving_task_and_a_reason_for_a_stuck_one() {
-        let repo = fixture("next-column");
+        let (repo, _root_guard) = fixture("next-column");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         add(&repo, "sessions", &["login"], None);
@@ -3468,7 +3468,7 @@ mod tests {
     /// the arrow at all.
     #[test]
     fn a_paused_rows_next_names_what_it_caught_when_it_was_not_a_pass() {
-        let repo = fixture("paused-next-caught");
+        let (repo, _root_guard) = fixture("paused-next-caught");
         let pipelines = Pipelines::builtin();
 
         add_to(&repo, "pause-reach", &[], None, Some("pause-reach"));
@@ -3531,7 +3531,7 @@ mod tests {
     /// same step.
     #[test]
     fn a_task_paused_for_going_quiet_names_the_step_its_resume_carries_it_back_to() {
-        let repo = fixture("parked-from-next");
+        let (repo, _root_guard) = fixture("parked-from-next");
         let pipelines = Pipelines::builtin();
         add(&repo, "release-publishing", &[], None);
         let mut task = repo.task("release-publishing").unwrap();
@@ -3557,7 +3557,7 @@ mod tests {
     /// queue list` both draw from.
     #[test]
     fn a_gate_ranked_row_waits_for_a_worker_slot_like_any_other() {
-        let repo = fixture("gate-note");
+        let (repo, _root_guard) = fixture("gate-note");
         let pipelines = Pipelines::builtin();
         add_to(
             &repo,
@@ -3585,7 +3585,7 @@ mod tests {
     /// route.
     #[test]
     fn arrivals_read_the_step_s_own_entry_regardless_of_any_loop_bound() {
-        let repo = fixture("arrival-counter");
+        let (repo, _root_guard) = fixture("arrival-counter");
         let pipelines = Pipelines::builtin();
 
         // A route the shipped pipeline does bound: the arrival count is
@@ -3615,7 +3615,7 @@ mod tests {
     /// version now takes.
     #[test]
     fn a_frame_carries_the_run_and_its_version_but_no_clock() {
-        let repo = fixture("frame-header");
+        let (repo, _root_guard) = fixture("frame-header");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -3679,7 +3679,7 @@ mod tests {
     /// enabled job and its next firing, so this line does not repeat it.
     #[test]
     fn an_empty_queue_with_a_job_enabled_says_nothing_queued() {
-        let repo = fixture("board-jobs-resident");
+        let (repo, _root_guard) = fixture("board-jobs-resident");
         let pipelines = Pipelines::builtin();
         std::fs::create_dir_all(repo.home()).unwrap();
         std::fs::write(
@@ -3721,7 +3721,7 @@ mod tests {
     /// the plain heading a group search matches.
     #[test]
     fn a_saved_task_url_becomes_the_group_bands_hyperlink_in_the_frame() {
-        let repo = fixture("band-url-frame");
+        let (repo, _root_guard) = fixture("band-url-frame");
         let pipelines = Pipelines::builtin();
         add_to(
             &repo,
@@ -3766,7 +3766,7 @@ mod tests {
     /// the hint is never conditional.
     #[test]
     fn the_key_hint_is_drawn_on_every_frame() {
-        let repo = fixture("key-hint");
+        let (repo, _root_guard) = fixture("key-hint");
         let pipelines = Pipelines::builtin();
 
         let mut board = Board::for_test();
@@ -3818,7 +3818,7 @@ mod tests {
     /// task's own stage move the state off `Running`.
     #[test]
     fn a_settled_lane_with_no_report_still_reads_as_running() {
-        let repo = fixture("waiting-but-working");
+        let (repo, _root_guard) = fixture("waiting-but-working");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -3847,7 +3847,7 @@ mod tests {
     /// remembered from the last one.
     #[test]
     fn a_blocked_lane_reads_as_prompt_live_and_never_sticky() {
-        let repo = fixture("blocked-lane-reads-prompt");
+        let (repo, _root_guard) = fixture("blocked-lane-reads-prompt");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -3876,7 +3876,7 @@ mod tests {
     /// `Done` or `Idle`, reads `✓ finished` with what moves it on.
     #[test]
     fn a_stopped_board_counts_working_lanes_and_finishes_settled_ones() {
-        let repo = fixture("stopped-board-lanes");
+        let (repo, _root_guard) = fixture("stopped-board-lanes");
         let pipelines = Pipelines::builtin();
         let statuses = [
             ("working", crate::mux::LaneStatus::Working),
@@ -3915,7 +3915,7 @@ mod tests {
     /// live again the moment the lane goes back to work.
     #[test]
     fn a_finished_steps_clock_stops_where_the_board_first_saw_it_settle() {
-        let repo = fixture("stopped-board-clock");
+        let (repo, _root_guard) = fixture("stopped-board-clock");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
@@ -3964,7 +3964,7 @@ mod tests {
     /// draws `queued`, since nothing running backs it any more.
     #[test]
     fn a_stopped_board_counts_a_running_command_and_finishes_an_exited_one() {
-        let repo = fixture("stopped-board-command");
+        let (repo, _root_guard) = fixture("stopped-board-command");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("handover"));
 
@@ -4034,7 +4034,7 @@ mod tests {
     /// this holds that line against the id that first broke it.
     #[test]
     fn a_dependency_named_for_a_lifecycle_is_not_a_dependency_cycle() {
-        let repo = fixture("cycle-in-the-name");
+        let (repo, _root_guard) = fixture("cycle-in-the-name");
         let pipelines = Pipelines::builtin();
         add(&repo, "park-lifecycle", &[], Some(crate::pipeline::QUEUED));
         add(
@@ -4072,7 +4072,7 @@ mod tests {
     /// diagnosing it as stranded.
     #[test]
     fn a_dependency_that_can_never_arrive_still_reads_queued() {
-        let repo = fixture("dead-dependency");
+        let (repo, _root_guard) = fixture("dead-dependency");
         let pipelines = Pipelines::builtin();
         add(&repo, "search-typo", &[], Some(crate::pipeline::BLOCKED));
         add(
@@ -4100,7 +4100,7 @@ mod tests {
     /// file still says `queued` — and the logo turns for it.
     #[test]
     fn a_claimed_task_reads_starting_on_its_claimed_step() {
-        let repo = fixture("claimed-starting");
+        let (repo, _root_guard) = fixture("claimed-starting");
         let pipelines = Pipelines::builtin();
         add_to(
             &repo,
@@ -4148,7 +4148,7 @@ mod tests {
     /// dispatcher left: the row reads `queued`, never `starting`.
     #[test]
     fn a_boot_mark_with_no_live_dispatcher_is_ignored() {
-        let repo = fixture("claimed-stale");
+        let (repo, _root_guard) = fixture("claimed-stale");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
         let mut claims = crate::claim::Claims::new(&repo);
@@ -4167,7 +4167,7 @@ mod tests {
     /// ledger has banked for a step still in flight.
     #[test]
     fn lane_time_reads_now_minus_launched_at_for_a_live_lane() {
-        let repo = fixture("lane-time-live");
+        let (repo, _root_guard) = fixture("lane-time-live");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
@@ -4191,7 +4191,7 @@ mod tests {
     /// queued rows that never move says the dispatcher has stopped.
     #[test]
     fn a_command_step_reads_as_running_while_its_own_run_is_in_flight() {
-        let repo = fixture("command-step-running");
+        let (repo, _root_guard) = fixture("command-step-running");
         let pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
         add(&repo, "login", &[], Some("handover"));
@@ -4232,7 +4232,7 @@ mod tests {
     /// moment that run is no longer going.
     #[test]
     fn a_task_held_on_a_serial_step_reads_as_waiting_on_the_run_ahead() {
-        let repo = fixture("command-step-serial");
+        let (repo, _root_guard) = fixture("command-step-serial");
         let mut pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
         let default = pipelines.pipelines.get_mut("default").unwrap();
@@ -4289,7 +4289,7 @@ mod tests {
     /// rather than sleeping through it for real.
     #[test]
     fn a_stage_that_just_changed_reads_running_until_the_grace_window_passes() {
-        let repo = fixture("mid-handoff-grace");
+        let (repo, _root_guard) = fixture("mid-handoff-grace");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -4321,7 +4321,7 @@ mod tests {
     /// once did, made the board read a dash from the second frame onward.
     #[test]
     fn lane_time_survives_launch_landed() {
-        let repo = fixture("lane-time-survives-launch-landed");
+        let (repo, _root_guard) = fixture("lane-time-survives-launch-landed");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
@@ -4370,7 +4370,7 @@ mod tests {
     /// on every pass" for the wrong reason. See gh-378 / issue #380.
     #[test]
     fn a_paused_rows_time_reads_the_step_it_actually_paused_from() {
-        let repo = fixture("paused-row-reads-its-own-step");
+        let (repo, _root_guard) = fixture("paused-row-reads-its-own-step");
         let pipelines = Pipelines::builtin();
         add(&repo, "cart-totals", &[], Some("implement"));
         let mut task = repo.task("cart-totals").unwrap();
@@ -4410,7 +4410,7 @@ mod tests {
     /// `● done` rows.
     #[test]
     fn done_rows_only_appear_for_a_group_still_in_the_queue() {
-        let repo = fixture("done-rows");
+        let (repo, _root_guard) = fixture("done-rows");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
 
@@ -4442,7 +4442,7 @@ mod tests {
     /// reparsing every file on every one-second frame.
     #[test]
     fn cached_archive_refreshes_once_the_directorys_mtime_moves() {
-        let repo = fixture("archive-cache-refresh");
+        let (repo, _root_guard) = fixture("archive-cache-refresh");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("first.md"),
@@ -4479,7 +4479,7 @@ mod tests {
     /// rather than failing the whole board.
     #[test]
     fn every_row_names_the_pipeline_its_task_resolves_to() {
-        let repo = fixture("pipeline-column-name");
+        let (repo, _root_guard) = fixture("pipeline-column-name");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
         // Its own group: `login` and `hotfix` have no dependency between
@@ -4521,7 +4521,7 @@ mod tests {
     /// depends on `zeta`, so `zeta` runs first and belongs above it.
     #[test]
     fn a_dependency_sorts_above_its_dependent_despite_fewer_steps_left_and_an_earlier_id() {
-        let repo = fixture("run-order-depth");
+        let (repo, _root_guard) = fixture("run-order-depth");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "zeta", &[], None, Some("pair"));
         add_to(&repo, "alpha", &["zeta"], None, Some("pair"));
@@ -4548,7 +4548,7 @@ mod tests {
     /// later.
     #[test]
     fn a_groups_row_order_survives_a_dependency_moving_from_queued_to_running() {
-        let repo = fixture("run-order-stable");
+        let (repo, _root_guard) = fixture("run-order-stable");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-ranks", &[], None, Some("gate"));
         add_to(
@@ -4623,7 +4623,7 @@ mod tests {
     /// has already been banked for comes off just the same.
     #[test]
     fn a_reported_cost_is_taken_at_its_word_less_whatever_is_banked() {
-        let repo = fixture("live-cost-reported");
+        let (repo, _root_guard) = fixture("live-cost-reported");
         let ledger = [banked("login", "implement", "s1", Some(1.5))];
         let harvest = |cost: f64| crate::usage::Harvest {
             model: "claude-sonnet-5".into(),
@@ -4647,7 +4647,7 @@ mod tests {
     /// step's bill on this one's row.
     #[test]
     fn a_reused_session_is_priced_from_what_it_has_spent_since_it_was_banked() {
-        let mut repo = fixture("live-cost-reuse");
+        let (mut repo, _root_guard) = fixture("live-cost-reuse");
         repo.config.models = std::collections::BTreeMap::from([(
             "claude-*".to_string(),
             crate::usage::ModelPrice {
@@ -4702,7 +4702,7 @@ mod tests {
     /// what gives the columns room, and it is three.
     #[test]
     fn the_state_column_is_only_as_wide_as_the_states_on_the_board() {
-        let repo = fixture("state-column");
+        let (repo, _root_guard) = fixture("state-column");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -4741,7 +4741,7 @@ mod tests {
     /// the command rather than a description of the state.
     #[test]
     fn a_paused_row_names_the_resume_that_frees_it() {
-        let repo = fixture("paused-row");
+        let (repo, _root_guard) = fixture("paused-row");
         let pipelines = Pipelines::builtin();
         add(&repo, "ship", &[], Some("handover"));
         let mut task = repo.task("ship").unwrap();
@@ -4859,7 +4859,7 @@ mod tests {
     /// it, so this is not just the ticker going silent altogether.
     #[test]
     fn a_task_entering_the_queue_or_archiving_pushes_no_ticker_entry() {
-        let repo = fixture("queue-and-archive-silent");
+        let (repo, _root_guard) = fixture("queue-and-archive-silent");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "steady", &[], Some("implement"), Some("steady"));
 
@@ -4985,7 +4985,7 @@ mod tests {
     /// first frame, rather than only after a first `↓` discovers it.
     #[test]
     fn a_fresh_board_starts_with_the_cursor_on_the_first_row() {
-        let repo = fixture("cursor-starts-on-first-row");
+        let (repo, _root_guard) = fixture("cursor-starts-on-first-row");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -5012,7 +5012,7 @@ mod tests {
     /// on screen.
     #[test]
     fn an_arrow_walks_the_last_frame_even_with_the_queue_gone_from_disk() {
-        let repo = fixture("cursor-walks-the-drawn-frame");
+        let (repo, _root_guard) = fixture("cursor-walks-the-drawn-frame");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("login"));
         add_to(&repo, "signup", &[], Some("implement"), Some("signup"));
@@ -5050,7 +5050,7 @@ mod tests {
     /// first row still on the board.
     #[test]
     fn the_cursor_falls_back_to_the_first_row_when_its_group_finishes() {
-        let repo = fixture("cursor-group-finishes");
+        let (repo, _root_guard) = fixture("cursor-group-finishes");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
         add(&repo, "other", &[], None);
@@ -5097,7 +5097,7 @@ mod tests {
     /// the queue no longer holds the file.
     #[test]
     fn the_cursor_reaches_a_done_row_and_o_opens_its_task() {
-        let mut repo = fixture("cursor-reaches-done-row");
+        let (mut repo, _root_guard) = fixture("cursor-reaches-done-row");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("auth"));
@@ -5148,7 +5148,7 @@ mod tests {
     /// task already past `queued` must still pass it.
     #[test]
     fn a_paused_row_is_not_resumable_while_its_own_dependency_is_unfinished() {
-        let repo = fixture("resume-deps");
+        let (repo, _root_guard) = fixture("resume-deps");
         let pipelines = Pipelines::builtin();
         add(&repo, "blocker", &[], Some("implement"));
         add(&repo, "gate-board", &["blocker"], None);
@@ -5172,7 +5172,7 @@ mod tests {
     /// still running in it. Settled again, the same row is resumable.
     #[test]
     fn a_paused_row_is_not_resumable_while_its_lane_is_busy() {
-        let repo = fixture("resume-busy");
+        let (repo, _root_guard) = fixture("resume-busy");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
@@ -5209,7 +5209,7 @@ mod tests {
     /// same way a paused row does: key first, then the command.
     #[test]
     fn a_parked_blocked_row_is_resumable_by_the_same_rule_as_a_paused_one() {
-        let repo = fixture("resume-blocked");
+        let (repo, _root_guard) = fixture("resume-blocked");
         let pipelines = Pipelines::builtin();
         add(&repo, "wall", &[], None);
         let mut task = repo.task("wall").unwrap();
@@ -5234,7 +5234,7 @@ mod tests {
     /// `past_the_gate` resumes it by.
     #[test]
     fn a_cleared_block_row_names_the_step_it_blocked_on_not_past_it() {
-        let repo = fixture("paused-cleared-block");
+        let (repo, _root_guard) = fixture("paused-cleared-block");
         let pipelines = Pipelines::builtin();
         add(&repo, "wall", &[], None);
         let mut task = repo.task("wall").unwrap();
@@ -5259,7 +5259,7 @@ mod tests {
     /// destination, with `paused_at` cleared.
     #[test]
     fn r_on_a_resumable_paused_row_releases_it() {
-        let repo = fixture("resume-key-release");
+        let (repo, _root_guard) = fixture("resume-key-release");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
@@ -5298,7 +5298,7 @@ mod tests {
     /// `blocked_from` cleared.
     #[test]
     fn r_on_a_resumable_blocked_row_unblocks_it() {
-        let repo = fixture("resume-key-unblock");
+        let (repo, _root_guard) = fixture("resume-key-unblock");
         let pipelines = Pipelines::builtin();
         add(&repo, "wall", &[], None);
         let mut task = repo.task("wall").unwrap();
@@ -5339,7 +5339,7 @@ mod tests {
     /// so this case is never mistaken for "nothing to resume".
     #[test]
     fn r_on_a_task_parked_before_it_started_puts_it_back_on_queued() {
-        let repo = fixture("resume-key-queued-park");
+        let (repo, _root_guard) = fixture("resume-key-queued-park");
         let pipelines = Pipelines::builtin();
         add(&repo, "never-run", &[], None);
         let mut task = repo.task("never-run").unwrap();
@@ -5381,7 +5381,7 @@ mod tests {
     /// which is about a row with a real step to check.
     #[test]
     fn a_row_parked_off_queued_is_resumable_however_its_dependency_stands() {
-        let repo = fixture("resume-queued-park-deps");
+        let (repo, _root_guard) = fixture("resume-queued-park-deps");
         let pipelines = Pipelines::builtin();
         add(&repo, "blocker", &[], Some("implement"));
         add(&repo, "never-run", &["blocker"], None);
@@ -5404,7 +5404,7 @@ mod tests {
     /// to `queued`, where that dependency is checked the ordinary way.
     #[test]
     fn shift_r_sends_every_queued_park_back_to_queued_whatever_its_dependency() {
-        let repo = fixture("resume-all-queued-parks");
+        let (repo, _root_guard) = fixture("resume-all-queued-parks");
         let pipelines = Pipelines::builtin();
         add(&repo, "blocker", &[], Some("implement"));
         add(&repo, "never-run", &["blocker"], None);
@@ -5427,7 +5427,7 @@ mod tests {
     /// nothing: the task stays exactly where it was.
     #[test]
     fn r_on_a_row_that_is_not_resumable_does_nothing() {
-        let repo = fixture("resume-key-refused");
+        let (repo, _root_guard) = fixture("resume-key-refused");
         let pipelines = Pipelines::builtin();
         add(&repo, "blocker", &[], Some("implement"));
         add(&repo, "gate-board", &["blocker"], None);
@@ -5465,7 +5465,7 @@ mod tests {
     /// belongs to `r`, and quitting to `ctrl-c` alone.
     #[test]
     fn enter_and_q_are_ignored_while_browsing() {
-        let repo = fixture("enter-and-q-ignored");
+        let (repo, _root_guard) = fixture("enter-and-q-ignored");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
@@ -5519,7 +5519,7 @@ mod tests {
     /// frame grows blank rows for it rather than cutting it off.
     #[test]
     fn a_popup_taller_than_the_frame_still_draws_its_key_line() {
-        let repo = fixture("popup-taller-than-frame");
+        let (repo, _root_guard) = fixture("popup-taller-than-frame");
         let pipelines = Pipelines::builtin();
         let body: Vec<String> = (0..40).map(|i| format!("finding {i}")).collect();
         let panel = crate::screen::panel("before dispatching", &body, "[enter] its own key");
@@ -5538,7 +5538,7 @@ mod tests {
     /// line stays under the bottom border.
     #[test]
     fn a_hosted_board_draws_in_a_box_and_a_popup_lands_inside_it() {
-        let repo = fixture("hosted-board-boxed");
+        let (repo, _root_guard) = fixture("hosted-board-boxed");
         let pipelines = Pipelines::builtin();
         add(&repo, "boxed-row", &[], None);
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
@@ -5585,7 +5585,7 @@ mod tests {
     /// digits and `;` between, panel open or not.
     #[test]
     fn a_confirm_panel_never_slices_a_coloured_rows_escape_sequence() {
-        let repo = fixture("panel-colour-safe");
+        let (repo, _root_guard) = fixture("panel-colour-safe");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut task = repo.task("gate-board").unwrap();
@@ -5645,7 +5645,7 @@ mod tests {
     /// nothing running: an idle task on a step stays exactly where it was.
     #[test]
     fn a_stop_interrupt_kills_a_running_command_step_and_marks_its_park() {
-        let repo = fixture("stop-interrupt-command-step");
+        let (repo, _root_guard) = fixture("stop-interrupt-command-step");
         let pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
         add_to(&repo, "login", &[], Some("handover"), Some("login"));
@@ -5678,7 +5678,7 @@ mod tests {
     /// ever stops this one task's step.
     #[test]
     fn pressing_p_on_the_cursor_with_a_command_step_running_opens_a_panel_scoped_to_it() {
-        let repo = fixture("pause-cursor-command-step");
+        let (repo, _root_guard) = fixture("pause-cursor-command-step");
         let pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
         add_to(&repo, "login", &[], Some("handover"), Some("login"));
@@ -5744,7 +5744,7 @@ mod tests {
     /// back onto its step to continue its session, and spends the mark.
     #[test]
     fn a_stop_interrupt_ends_a_live_agent_turn_and_the_next_start_resumes_it() {
-        let mut repo = fixture("stop-interrupt-live-lane");
+        let (mut repo, _root_guard) = fixture("stop-interrupt-live-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -5777,7 +5777,7 @@ mod tests {
     /// `paused`.
     #[test]
     fn a_start_resumes_only_the_tasks_a_stop_parked() {
-        let repo = fixture("stop-resume-only-marked");
+        let (repo, _root_guard) = fixture("stop-resume-only-marked");
         let pipelines = Pipelines::builtin();
         for id in ["stopped", "by-hand", "escaped"] {
             add_to(&repo, id, &[], Some("implement"), Some(id));
@@ -5807,7 +5807,7 @@ mod tests {
     /// the stop's mark behind for the next start to find.
     #[test]
     fn a_stop_mark_never_outlives_the_stop_that_wrote_it() {
-        let repo = fixture("stop-mark-spent");
+        let (repo, _root_guard) = fixture("stop-mark-spent");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         park_under_lock(&repo, "login", true).unwrap();
@@ -5831,7 +5831,7 @@ mod tests {
     /// the `[r]` offer a person's own park reads.
     #[test]
     fn a_stop_parked_row_says_it_resumes_when_dispatching_starts() {
-        let repo = fixture("stop-parked-next");
+        let (repo, _root_guard) = fixture("stop-parked-next");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("login"));
         add_to(&repo, "by-hand", &[], Some("implement"), Some("by-hand"));
@@ -5859,7 +5859,7 @@ mod tests {
     /// `enter`. Pressed on the board it opens nothing and parks nothing.
     #[test]
     fn shift_p_is_no_longer_a_board_key() {
-        let repo = fixture("shift-p-gone");
+        let (repo, _root_guard) = fixture("shift-p-gone");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
@@ -5879,7 +5879,7 @@ mod tests {
     /// still exactly what it was when the panel opened.
     #[test]
     fn pressing_p_on_a_live_agent_lane_names_the_turn_and_says_it_is_only_interrupted() {
-        let mut repo = fixture("pause-cursor-agent-lane");
+        let (mut repo, _root_guard) = fixture("pause-cursor-agent-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -5949,7 +5949,7 @@ mod tests {
     /// `implement`, and the lane the panel named is still there afterwards.
     #[test]
     fn pressing_s_on_the_pause_panel_schedules_a_gate_and_leaves_the_lane_running() {
-        let mut repo = fixture("schedule-pause-cursor");
+        let (mut repo, _root_guard) = fixture("schedule-pause-cursor");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -5992,7 +5992,7 @@ mod tests {
     /// the mockup's "pressing `s` again... clears it".
     #[test]
     fn pressing_s_again_clears_a_scheduled_pause() {
-        let mut repo = fixture("schedule-pause-toggle");
+        let (mut repo, _root_guard) = fixture("schedule-pause-toggle");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -6038,7 +6038,7 @@ mod tests {
     /// own route once `gate_at` matches the step a running task sits on.
     #[test]
     fn the_next_column_names_a_scheduled_pause() {
-        let repo = fixture("schedule-pause-next-column");
+        let (repo, _root_guard) = fixture("schedule-pause-next-column");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
@@ -6058,7 +6058,7 @@ mod tests {
     /// have opened is left exactly as it was.
     #[test]
     fn pressing_o_with_no_multiplexer_leaves_the_task_file_unchanged() {
-        let mut repo = fixture("open-key-headless");
+        let (mut repo, _root_guard) = fixture("open-key-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -6096,7 +6096,7 @@ mod tests {
     /// counter across it.
     #[test]
     fn pressing_p_then_shift_r_round_trips_a_task_without_banking_a_lap() {
-        let mut repo = fixture("park-round-trip");
+        let (mut repo, _root_guard) = fixture("park-round-trip");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -6170,7 +6170,7 @@ mod tests {
     /// `parked_window`, so there is no such row left to park.
     #[test]
     fn pressing_p_with_nothing_live_parks_at_once_from_every_such_state() {
-        let repo = fixture("pause-nothing-live");
+        let (repo, _root_guard) = fixture("pause-nothing-live");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "queued-task", &[], None, Some("queued-task"));
         add_to(&repo, "gap-task", &[], Some("implement"), Some("gap-task"));
@@ -6194,7 +6194,7 @@ mod tests {
     /// waiting on a person, not a state to park over again.
     #[test]
     fn pressing_p_on_a_paused_row_does_nothing() {
-        let repo = fixture("pause-noop-states");
+        let (repo, _root_guard) = fixture("pause-noop-states");
         let pipelines = Pipelines::builtin();
         add(&repo, "already-paused", &[], None);
         let mut paused = repo.task("already-paused").unwrap();
@@ -6220,7 +6220,7 @@ mod tests {
     /// beside the fresh `parked_from: blocked` it now carries too.
     #[test]
     fn pressing_p_on_a_blocked_row_with_nothing_live_parks_it_at_once() {
-        let repo = fixture("pause-blocked-idle");
+        let (repo, _root_guard) = fixture("pause-blocked-idle");
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
         let mut task = repo.task("stuck").unwrap();
@@ -6251,7 +6251,7 @@ mod tests {
     /// onto `blocked` rather than opening a fresh one.
     #[test]
     fn pressing_p_on_a_blocked_row_with_a_live_unblocker_interrupts_it_and_resumes_onto_blocked() {
-        let mut repo = fixture("pause-blocked-live-lane");
+        let (mut repo, _root_guard) = fixture("pause-blocked-live-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
         add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
@@ -6314,7 +6314,7 @@ mod tests {
     /// frontmatter — accepted unchanged by a fresh `queue add --from`.
     #[test]
     fn pressing_u_on_an_unstarted_task_moves_it_back_to_pending() {
-        let repo = fixture("unqueue-cursor");
+        let (repo, _root_guard) = fixture("unqueue-cursor");
         let pipelines = Pipelines::builtin();
         add(&repo, "chain-refusals", &[], None);
         assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");
@@ -6397,7 +6397,7 @@ mod tests {
     /// `esc` on `u`'s panel leaves the queue exactly as it was.
     #[test]
     fn pressing_esc_on_the_unqueue_panel_moves_nothing() {
-        let repo = fixture("unqueue-esc");
+        let (repo, _root_guard) = fixture("unqueue-esc");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[], None);
 
@@ -6433,7 +6433,7 @@ mod tests {
     /// checkout, which is outside what this key reaches.
     #[test]
     fn pressing_u_on_a_started_task_is_a_no_op() {
-        let repo = fixture("unqueue-started");
+        let (repo, _root_guard) = fixture("unqueue-started");
         let pipelines = Pipelines::builtin();
         add(&repo, "under-way", &[], Some("implement"));
 
@@ -6478,7 +6478,7 @@ mod tests {
     /// carries both back to pending, leaving neither in the queue.
     #[test]
     fn pressing_u_on_a_task_a_queued_dependent_names_carries_both() {
-        let repo = fixture("unqueue-depended-on");
+        let (repo, _root_guard) = fixture("unqueue-depended-on");
         let pipelines = Pipelines::builtin();
         add(&repo, "drop-walk", &[], None);
         add(&repo, "chain-refusals", &["drop-walk"], None);
@@ -6546,7 +6546,7 @@ mod tests {
     /// its immediate dependent.
     #[test]
     fn pressing_u_carries_a_chain_two_hops_deep() {
-        let repo = fixture("unqueue-chain-two-hops");
+        let (repo, _root_guard) = fixture("unqueue-chain-two-hops");
         let pipelines = Pipelines::builtin();
         add(&repo, "alpha", &[], None);
         add(&repo, "beta", &["alpha"], None);
@@ -6607,7 +6607,7 @@ mod tests {
     /// task the board no longer shows.
     #[test]
     fn pressing_u_moves_the_cursor_to_the_row_underneath() {
-        let repo = fixture("unqueue-cursor-advances");
+        let (repo, _root_guard) = fixture("unqueue-cursor-advances");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "chain-refusals", &[], None, Some("chain-refusals"));
         add_to(&repo, "month-instant", &[], None, Some("month-instant"));
@@ -6643,7 +6643,7 @@ mod tests {
     /// has to catch itself.
     #[test]
     fn pressing_u_on_the_last_row_clears_the_cursor() {
-        let repo = fixture("unqueue-cursor-clears");
+        let (repo, _root_guard) = fixture("unqueue-cursor-clears");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[], None);
 
@@ -6680,7 +6680,7 @@ mod tests {
     /// that set, and never moves.
     #[test]
     fn pressing_shift_u_moves_every_unstarted_task_to_pending() {
-        let repo = fixture("unqueue-all");
+        let (repo, _root_guard) = fixture("unqueue-all");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "chain-refusals", &[], None, Some("chain-refusals"));
         add_to(&repo, "month-instant", &[], None, Some("month-instant"));
@@ -6730,7 +6730,7 @@ mod tests {
     /// stale queued copy on top of the newer draft. See review finding 49.
     #[test]
     fn unqueue_does_not_overwrite_a_newer_pending_draft() {
-        let repo = fixture("unqueue-keeps-newer-draft");
+        let (repo, _root_guard) = fixture("unqueue-keeps-newer-draft");
         add(&repo, "solo", &[], None);
 
         let draft = repo.pending_dir().join("solo.md");
@@ -6761,7 +6761,7 @@ mod tests {
     /// `R` up on its own.
     #[test]
     fn pressing_shift_r_gates_on_a_paused_at_but_resumes_a_plain_park_freely() {
-        let repo = fixture("resume-all");
+        let (repo, _root_guard) = fixture("resume-all");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut gated = repo.task("gate-board").unwrap();
@@ -6817,7 +6817,7 @@ mod tests {
     /// resumes it on the spot.
     #[test]
     fn pressing_shift_r_with_no_gate_among_them_resumes_at_once() {
-        let repo = fixture("resume-all-no-gate");
+        let (repo, _root_guard) = fixture("resume-all-no-gate");
         let pipelines = Pipelines::builtin();
         add(&repo, "quiet-pane", &[], None);
         let mut parked = repo.task("quiet-pane").unwrap();
@@ -6839,7 +6839,7 @@ mod tests {
     /// tests above this one.
     #[test]
     fn the_old_confirming_letter_no_longer_answers_any_panel() {
-        let repo = fixture("panels-ignore-their-own-letter");
+        let (repo, _root_guard) = fixture("panels-ignore-their-own-letter");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "gate-board", &[], None, Some("gate-board"));
         let mut gated = repo.task("gate-board").unwrap();

@@ -4642,8 +4642,8 @@ mod screen_tests {
 
     /// A fixture with one ordinary `implement` run banked — the smallest
     /// ledger that draws a real table.
-    fn fixture_with_one_run(name: &str) -> Repo {
-        let repo = fixture(name);
+    fn fixture_with_one_run(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (repo, root_guard) = fixture(name);
         bank(
             &repo,
             "2026-08-01T09:00:00+00:00",
@@ -4654,7 +4654,7 @@ mod screen_tests {
             1.0,
             Some("pass"),
         );
-        repo
+        (repo, root_guard)
     }
 
     /// `load` retains only `Entry::is_lane` over the real ledger — pinned
@@ -4663,7 +4663,7 @@ mod screen_tests {
     /// than an out-of-band replay of the same predicate.
     #[test]
     fn load_never_returns_an_interactive_line() {
-        let repo = fixture_with_one_run("load-excludes-interactive");
+        let (repo, _root_guard) = fixture_with_one_run("load-excludes-interactive");
         crate::usage::append(
             &repo,
             &Entry {
@@ -4751,7 +4751,7 @@ mod screen_tests {
     #[test]
     fn hosted_an_unreadable_window_is_held_on_the_tab_until_a_shell_key() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture_with_one_run("screen-hosted-load-error");
+        let (repo, _root_guard) = fixture_with_one_run("screen-hosted-load-error");
         let _hosting = Hosting::open(Tab::Eval);
         let args = EvalArgs {
             since: Some("not-a-date".into()),
@@ -4772,7 +4772,7 @@ mod screen_tests {
     #[test]
     fn hosted_browsing_leaves_on_the_arrows_but_the_filters_keep_them() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture_with_one_run("screen-hosted-leave");
+        let (repo, _root_guard) = fixture_with_one_run("screen-hosted-leave");
         let _hosting = Hosting::open(Tab::Eval);
         let run = |input: &str| {
             let mut input = keys(input);
@@ -4831,7 +4831,7 @@ mod screen_tests {
     #[test]
     fn the_first_frame_is_drawn_under_the_loading_popup_before_the_load_lands() {
         use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let repo = fixture_with_one_run("screen-loading-first");
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-first");
         let _hosting = Hosting::open(Tab::Eval);
         let senders = Senders::default();
         let mut input = keys("f\t\x1b[C");
@@ -4905,7 +4905,7 @@ mod screen_tests {
     /// is drawn on the idle slice it landed in, with no key pressed.
     #[test]
     fn a_result_landing_while_idle_closes_the_popup_and_draws_the_table() {
-        let repo = fixture_with_one_run("screen-loading-late");
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-late");
         let senders = Senders::default();
         let mut input = LandsWhileIdle {
             keys: keys("q"),
@@ -4938,7 +4938,7 @@ mod screen_tests {
     /// over the table already shown rather than an empty frame.
     #[test]
     fn a_reload_shows_the_popup_over_the_table_already_shown() {
-        let repo = fixture_with_one_run("screen-loading-reload");
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-reload");
         for script in ["r", "f\r"] {
             let senders = Senders::default();
             let mut first = true;
@@ -4976,7 +4976,7 @@ mod screen_tests {
     /// cell for cell, in text, colour and bold.
     #[test]
     fn eval_paints_as_before() {
-        let repo = fixture_with_one_run("eval-paints-as-before");
+        let (repo, _root_guard) = fixture_with_one_run("eval-paints-as-before");
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new(&repo, &no_args());
         let loaded = load(&repo, &no_filters()).unwrap();
@@ -4997,7 +4997,7 @@ mod screen_tests {
     /// same notice it always did, with its key line; the table stays.
     #[test]
     fn a_failed_reload_lands_as_the_eval_notice() {
-        let repo = fixture_with_one_run("screen-loading-reload-error");
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-reload-error");
         let senders = Senders::default();
         let mut state = ScreenState::new(&repo, &no_args());
         let mut loaded = Some(load(&repo, &no_filters()).unwrap());
@@ -5024,7 +5024,7 @@ mod screen_tests {
     /// it was loaded through and — from the filter panel — the cursor home.
     #[test]
     fn only_the_newest_of_two_overlapping_loads_is_kept() {
-        let repo = fixture_with_one_run("screen-loading-overlap");
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-overlap");
         let senders = Senders::default();
         let mut state = ScreenState::new(&repo, &no_args());
         state.cursor = 3;
@@ -5058,7 +5058,7 @@ mod screen_tests {
     /// reads.
     #[test]
     fn load_in_background_lands_what_load_reads() {
-        let repo = fixture_with_one_run("screen-loading-thread");
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-thread");
         let landed = load_in_background(&repo, &no_filters())
             .recv()
             .unwrap()
@@ -5211,7 +5211,7 @@ mod screen_tests {
 
     #[test]
     fn an_empty_ledger_says_so_and_the_screen_ends_when_input_runs_out() {
-        let repo = fixture("screen-empty");
+        let (repo, _root_guard) = fixture("screen-empty");
         let text = screen(&repo, "");
         assert!(text.contains("Nothing to compare"), "{text}");
     }
@@ -5220,7 +5220,7 @@ mod screen_tests {
     /// line and the bracketed key line naming `tab`'s other table.
     #[test]
     fn the_screen_opens_by_pipeline_with_a_total_and_bracketed_keys() {
-        let repo = fixture_with_one_run("screen-opens");
+        let (repo, _root_guard) = fixture_with_one_run("screen-opens");
         let text = screen(&repo, "q");
         let last = last_frame(&text);
         assert!(last.contains("┌─ eval · by pipeline "), "{last}");
@@ -5238,7 +5238,7 @@ mod screen_tests {
     /// `tab` moves between the two tables and back, nothing else.
     #[test]
     fn tab_switches_between_the_lanes_and_the_directories() {
-        let repo = fixture_with_one_run("screen-tab");
+        let (repo, _root_guard) = fixture_with_one_run("screen-tab");
         let text = screen(&repo, "\t");
         let dirs = last_frame(&text);
         assert!(dirs.contains("┌─ eval · by dir "), "{dirs}");
@@ -5262,7 +5262,7 @@ mod screen_tests {
     /// frame, where it would cost the table a body row.
     #[test]
     fn the_screen_prints_the_unpriced_note_under_the_frame_not_inside_it() {
-        let repo = fixture("screen-unpriced-note");
+        let (repo, _root_guard) = fixture("screen-unpriced-note");
         let mut e = tests_entry("a", "implement");
         e.model = "some-local-model".into();
         e.cost_usd = None;
@@ -5283,7 +5283,7 @@ mod screen_tests {
     /// the confirmation names the rows and the file it wrote.
     #[test]
     fn e_exports_the_table_to_a_file_named_after_its_by() {
-        let repo = fixture_with_one_run("screen-export-key");
+        let (repo, _root_guard) = fixture_with_one_run("screen-export-key");
         let text = screen(&repo, "eq");
         let shown = std::path::PathBuf::from(".spoolway")
             .join("evals")
@@ -5305,7 +5305,7 @@ mod screen_tests {
 
     #[test]
     fn e_on_the_directory_table_writes_its_own_header() {
-        let repo = fixture("export-dirs-and-sessions");
+        let (repo, _root_guard) = fixture("export-dirs-and-sessions");
         bank_dir(&repo, "2026-09-01T09:00:00+00:00", "spoolway", "s1", 0.70);
         let mut filters = no_filters();
         let loaded = load(&repo, &filters).unwrap();
@@ -5339,7 +5339,7 @@ mod screen_tests {
     /// `field_text_mut`'s `unreachable!()`.
     #[test]
     fn backspace_on_the_filter_panel_does_nothing_rather_than_panicking() {
-        let repo = fixture("screen-backspace");
+        let (repo, _root_guard) = fixture("screen-backspace");
         screen(&repo, "f\x7fq");
     }
 
@@ -5349,7 +5349,7 @@ mod screen_tests {
     /// frame's last row and the panel loses its own bottom border.
     #[test]
     fn a_short_table_still_fits_the_taller_overlay_panels_whole() {
-        let repo = fixture_with_one_run("screen-short-table");
+        let (repo, _root_guard) = fixture_with_one_run("screen-short-table");
         let last = last_frame(&screen(&repo, "fq")).to_string();
         assert!(last.contains("[enter] apply   [esc] back"), "{last}");
         assert!(last.contains("└───"), "{last}");
@@ -5447,7 +5447,7 @@ mod screen_tests {
     /// and the top border says so.
     #[test]
     fn the_by_row_regroups_the_table_once_applied() {
-        let repo = fixture_with_one_run("screen-by-step");
+        let (repo, _root_guard) = fixture_with_one_run("screen-by-step");
         let text = screen(&repo, &format!("f{RIGHT}\rq"));
         let last = last_frame(&text);
         assert!(last.contains("┌─ eval · by step "), "{last}");
@@ -5460,7 +5460,7 @@ mod screen_tests {
     /// border then names.
     #[test]
     fn the_filter_panel_narrows_the_table_once_applied() {
-        let repo = fixture_with_one_run("screen-filter");
+        let (repo, _root_guard) = fixture_with_one_run("screen-filter");
         bank(
             &repo,
             "2026-08-02T09:00:00+00:00",
@@ -5482,7 +5482,7 @@ mod screen_tests {
     /// opened on, and `x` clears it.
     #[test]
     fn esc_leaves_the_row_untouched_enter_picks_the_day_x_clears_it() {
-        let repo = fixture("screen-calendar-roundtrip");
+        let (repo, _root_guard) = fixture("screen-calendar-roundtrip");
         let today = chrono::Local::now()
             .date_naive()
             .format("%Y-%m-%d")
@@ -5506,7 +5506,7 @@ mod screen_tests {
     /// own bottom border and key line must survive.
     #[test]
     fn a_short_table_still_fits_the_calendars_whole_height_key_line_included() {
-        let repo = fixture_with_one_run("screen-short-table-calendar");
+        let (repo, _root_guard) = fixture_with_one_run("screen-short-table-calendar");
         let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(4)));
         let last = last_frame(&text);
         assert!(last.contains("┌─ since ─"), "{last}");
@@ -5518,7 +5518,7 @@ mod screen_tests {
     /// the calendar.
     #[test]
     fn typing_on_a_date_row_does_nothing_and_enter_still_opens_the_calendar() {
-        let repo = fixture("screen-bad-since");
+        let (repo, _root_guard) = fixture("screen-bad-since");
         let text = screen(&repo, &format!("f{}notadate\rq", DOWN.repeat(4)));
         assert!(last_frame(&text).contains("┌─ since ─"), "{text}");
         assert!(!text.contains("notadate"), "{text}");
@@ -5562,7 +5562,7 @@ mod screen_tests {
 
     /// A `.claude/projects/<escaped>/<session>.jsonl` transcript under a
     /// fresh scratch home, so `skill_markers` has something real to read.
-    fn claude_home_with(name: &str, session: &str, lines: &str) -> std::path::PathBuf {
+    fn claude_home_with(name: &str, session: &str, lines: &str) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("eval-skill-{name}"));
         let dir = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
         std::fs::create_dir_all(&dir).unwrap();
@@ -5587,7 +5587,7 @@ mod screen_tests {
     /// border names it.
     #[test]
     fn by_session_names_each_skill_and_the_skill_row_narrows_to_it() {
-        let repo = fixture("screen-dirs-and-skill");
+        let (repo, _root_guard) = fixture("screen-dirs-and-skill");
         bank_dir(
             &repo,
             "2026-09-01T09:00:00+00:00",
@@ -5628,7 +5628,7 @@ mod screen_tests {
     /// to it.
     #[test]
     fn a_skill_run_through_the_skill_tool_is_kept_by_the_same_filter_a_typed_command_is() {
-        let repo = fixture("screen-dirs-and-skill-tool");
+        let (repo, _root_guard) = fixture("screen-dirs-and-skill-tool");
         bank_dir(
             &repo,
             "2026-09-01T09:00:00+00:00",
@@ -5679,7 +5679,7 @@ mod screen_tests {
     /// really the same one spelled without its slash.
     #[test]
     fn a_skill_named_both_ways_on_one_session_is_one_skill_everywhere() {
-        let repo = fixture("screen-dirs-skill-both-forms");
+        let (repo, _root_guard) = fixture("screen-dirs-skill-both-forms");
         bank_dir(
             &repo,
             "2026-09-01T09:00:00+00:00",
@@ -5738,7 +5738,7 @@ mod screen_tests {
     /// include what the subagent ran.
     #[test]
     fn a_subagents_spend_and_skills_land_on_its_parents_row() {
-        let repo = fixture("screen-dirs-and-subagent");
+        let (repo, _root_guard) = fixture("screen-dirs-and-subagent");
         let parent = "0198e2c0-3333-4000-8000-00000000d020";
         let subagent = "agent-9988aabb";
         bank_dir(

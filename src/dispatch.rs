@@ -5702,10 +5702,12 @@ fn prepare_boot(
     // rather than one role with a branch in it.
     let prompt_path = crate::prompt::path_for(repo, step.prompt_name());
     let prompt = std::fs::read_to_string(&prompt_path).with_context(|| {
-        format!(
-            "step `{}` needs prompt {} — run `spoolway init`",
-            step.id,
-            prompt_path.display()
+        crate::prompt::missing_prompt_message(
+            repo,
+            pipeline.private_file.is_some(),
+            step.prompt_name(),
+            &format!("step `{}`", step.id),
+            "run `spoolway init`",
         )
     })?;
 
@@ -7022,7 +7024,7 @@ mod tests {
     /// first.
     #[test]
     fn this_pass_opens_on_the_report_contract_with_nothing_else_to_say() {
-        let repo = fixture("no-scope-line");
+        let (repo, _root_guard) = fixture("no-scope-line");
         add_task_with(&repo, "earlier", "done", |f| {
             f.branch = Some("task/earlier".into());
         });
@@ -7058,7 +7060,7 @@ mod tests {
     /// nothing ever points at one.
     #[test]
     fn what_you_have_names_the_dependency_and_omits_the_group() {
-        let repo = fixture("reading-list");
+        let (repo, _root_guard) = fixture("reading-list");
         add_task_with(&repo, "earlier-task", "done", |f| {
             f.branch = Some("task/earlier-task".into());
         });
@@ -7091,7 +7093,7 @@ mod tests {
     /// branch chosen quietly went back to being wrong.
     #[test]
     fn what_you_have_reads_the_dependencys_branch_not_the_tasks_own_base() {
-        let repo = fixture("what-you-have");
+        let (repo, _root_guard) = fixture("what-you-have");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.require_step("implement").unwrap();
@@ -7146,7 +7148,7 @@ mod tests {
     /// it is never shown, whatever `group:` was recorded as.
     #[test]
     fn the_group_value_is_never_shown_however_it_was_recorded() {
-        let repo = fixture("group-verbatim");
+        let (repo, _root_guard) = fixture("group-verbatim");
         let path = add_task_with(&repo, "login", "implement", |front| {
             front.group = Some("/abs/path/to/demo.html".into());
         });
@@ -7163,7 +7165,7 @@ mod tests {
     /// binary having an opinion about a file it does not read.
     #[test]
     fn the_opening_prompt_names_no_heading_of_the_task_body() {
-        let repo = fixture("headings");
+        let (repo, _root_guard) = fixture("headings");
         let path = add_task(&repo, "login", "implement");
         let task = Task::load(&path).unwrap();
         let pipelines = Pipelines::builtin();
@@ -7202,7 +7204,7 @@ mod tests {
     // covers: step.prompt — the prompt a step names reaches its lane whole
     #[test]
     fn a_projects_own_prompt_reaches_its_lane_whole() {
-        let repo = fixture("prompt-prompt");
+        let (repo, _root_guard) = fixture("prompt-prompt");
         let task = reload(&add_task(&repo, "demo", "handover"));
         let theirs = "You hand work over. Be brief.";
 
@@ -7247,14 +7249,14 @@ mod tests {
     /// A real (if minimal) git repo, not just a directory: a launch now
     /// resolves `{git_dir}` by asking git from inside the worktree, and a
     /// plain directory answers "not a git repository" instead.
-    fn a_checkout(name: &str) -> PathBuf {
+    fn a_checkout(name: &str) -> crate::scratch::ScratchRoot {
         let path = crate::scratch::root(name);
         std::fs::create_dir_all(&path).unwrap();
         crate::repo::run(&path, "git", &["init", "-q"]).unwrap();
         path
     }
 
-    fn fixture(name: &str) -> Repo {
+    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("dispatch-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".spoolway/prompts")).unwrap();
@@ -7310,12 +7312,15 @@ mod tests {
         // product never uses.
         config.dispatch.worktree_root = sibling(&root, "worktrees").display().to_string();
 
-        Repo {
-            checkout: root.clone(),
+        (
+            Repo {
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config,
+                home,
+            },
             root,
-            config,
-            home,
-        }
+        )
     }
 
     /// A path beside `root`, named for what it holds — `<root>-worktrees` for
@@ -7434,7 +7439,7 @@ mod tests {
 
     #[test]
     fn a_queued_task_gets_a_worktree_and_a_lane() {
-        let repo = fixture("queued");
+        let (repo, _root_guard) = fixture("queued");
         let path = add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]);
 
@@ -7470,7 +7475,7 @@ mod tests {
     /// this dispatcher's own checkout happens to have out.
     #[test]
     fn a_task_with_no_base_is_refused_rather_than_given_one() {
-        let repo = fixture("no-base");
+        let (repo, _root_guard) = fixture("no-base");
         let path = add_task_with(&repo, "demo", "queued", |f| f.base = None);
         let mux = FakeMux::new(vec![]);
 
@@ -7497,7 +7502,7 @@ mod tests {
     /// queue runs exactly as it would have otherwise.
     #[test]
     fn a_cut_tasks_base_edited_by_hand_holds_only_that_task() {
-        let repo = fixture("base-moved-since-cut");
+        let (repo, _root_guard) = fixture("base-moved-since-cut");
         let moved = add_task_with(&repo, "moved", "queued", |f| {
             f.cut_from = Some("work".into());
             f.base = Some("elsewhere".into());
@@ -7536,7 +7541,7 @@ mod tests {
     /// needed the base to exist in the first place.
     #[test]
     fn a_borrowed_tasks_missing_base_holds_nothing() {
-        let repo = fixture("borrowed-base-gone");
+        let (repo, _root_guard) = fixture("borrowed-base-gone");
         crate::repo::run(
             &repo.root,
             "git",
@@ -7567,7 +7572,7 @@ mod tests {
     /// asked of git again.
     #[test]
     fn base_problem_trusts_a_caches_answer_rather_than_asking_origin_again() {
-        let repo = fixture("bases-remote-cache");
+        let (repo, _root_guard) = fixture("bases-remote-cache");
         let task = reload(&add_task_with(
             &repo,
             "demo",
@@ -7593,7 +7598,7 @@ mod tests {
     /// already opened.
     #[test]
     fn every_lane_of_a_project_shares_one_tab_whatever_its_plan() {
-        let repo = fixture("plan-tabs");
+        let (repo, _root_guard) = fixture("plan-tabs");
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
         let wing = project_tab(&repo, &mux, Some(&repo.root)).unwrap().unwrap();
@@ -7623,7 +7628,7 @@ mod tests {
     /// waiting for it, so it still splits one the ordinary way.
     #[test]
     fn a_projects_first_task_starts_in_the_pane_that_opened_its_tab() {
-        let repo = fixture("queued-grouped");
+        let (repo, _root_guard) = fixture("queued-grouped");
         let first = add_task(&repo, "first", "queued");
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
@@ -7664,7 +7669,7 @@ mod tests {
     /// with it.
     #[test]
     fn a_projects_tab_goes_with_the_last_task_of_the_project() {
-        let repo = fixture("plan-tab-last");
+        let (repo, _root_guard) = fixture("plan-tab-last");
         let planned = |front: &mut Frontmatter| {
             front.workspace_id = Some("wD".into());
             front.tab_id = Some("wD:t7".into());
@@ -7704,7 +7709,7 @@ mod tests {
     /// lane is named for `lane_stage` because a pane keeps the name of the
     /// step that got the task here, not of the stage it parked at.
     fn a_stop_spares_the_parked_task(name: &str, stage: &str, lane_stage: &str) {
-        let repo = fixture(name);
+        let (repo, _root_guard) = fixture(name);
         let path = add_task_with(&repo, "demo", stage, |f| {
             f.workspace_id = Some("w1".into());
             f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
@@ -7791,7 +7796,7 @@ mod tests {
     /// failed the moment the next run starts.
     #[test]
     fn an_interrupted_task_is_left_exactly_where_it_stood() {
-        let repo = fixture("stop-inflight");
+        let (repo, _root_guard) = fixture("stop-inflight");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -7842,7 +7847,7 @@ mod tests {
     /// and its local branch is spent litter.
     #[test]
     fn a_finished_task_takes_its_branch_with_it() {
-        let repo = fixture("cleanup-branch");
+        let (repo, _root_guard) = fixture("cleanup-branch");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         mark_pushed(&repo, "task/demo");
         let path = add_task(&repo, "demo", "implement");
@@ -7871,7 +7876,7 @@ mod tests {
     /// once_the_last_one_settles` below fire.
     #[test]
     fn a_trial_arms_archive_is_kept_while_a_sibling_is_still_queued() {
-        let repo = fixture("trial-settle-not-yet");
+        let (repo, _root_guard) = fixture("trial-settle-not-yet");
         add_task_with(&repo, "beta-1", "implement", |f| {
             f.trial = Some("t1".into());
             f.group = Some("demo-group".into());
@@ -7905,7 +7910,7 @@ mod tests {
     /// (the source group, the usage rows) and what was removed.
     #[test]
     fn a_trial_removes_every_arms_archive_once_the_last_one_settles() {
-        let repo = fixture("trial-settle-last");
+        let (repo, _root_guard) = fixture("trial-settle-last");
         // `alpha-1` settled earlier — already in the archive, the way its
         // own `clean_up` would have left it.
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
@@ -7964,7 +7969,7 @@ mod tests {
     /// it however the arms were named.
     #[test]
     fn discarding_a_trial_removes_every_arms_task_wherever_it_sits() {
-        let repo = fixture("trial-discard-everywhere");
+        let (repo, _root_guard) = fixture("trial-discard-everywhere");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("alpha-1.md"),
@@ -8009,7 +8014,7 @@ mod tests {
     /// on the branch. Nothing under `task/beta-1` is pushed here.
     #[test]
     fn discarding_a_trial_removes_an_arms_branch_even_when_unpushed() {
-        let repo = fixture("trial-discard-branch");
+        let (repo, _root_guard) = fixture("trial-discard-branch");
         crate::repo::run(&repo.root, "git", &["branch", "task/beta-1"]).unwrap();
         add_task_with(&repo, "beta-1", "implement", |front| {
             front.trial = Some("t1".into());
@@ -8036,7 +8041,7 @@ mod tests {
     /// discard has just removed.
     #[test]
     fn discarding_a_trial_frees_an_arms_branch_a_sibling_arm_was_holding() {
-        let repo = fixture("trial-discard-held-branch");
+        let (repo, _root_guard) = fixture("trial-discard-held-branch");
         for arm in ["alpha-1", "beta-1"] {
             crate::repo::run(&repo.root, "git", &["branch", &format!("task/{arm}")]).unwrap();
         }
@@ -8069,7 +8074,7 @@ mod tests {
     /// reads exactly like success. Named instead.
     #[test]
     fn discarding_a_trial_that_does_not_exist_is_an_error_rather_than_a_quiet_no_op() {
-        let repo = fixture("trial-discard-unknown");
+        let (repo, _root_guard) = fixture("trial-discard-unknown");
         add_task(&repo, "real-1", "implement");
 
         let mux = FakeMux::new(vec![]);
@@ -8085,7 +8090,7 @@ mod tests {
     /// it — the same trade `spoolway queue pause --force` makes.
     #[test]
     fn a_trial_with_a_live_agent_lane_is_refused_until_force_says_otherwise() {
-        let repo = fixture("trial-discard-live");
+        let (repo, _root_guard) = fixture("trial-discard-live");
         let queued = add_task_with(&repo, "beta-1", "implement", |front| {
             front.trial = Some("t1".into());
             front.group = Some("demo-group".into());
@@ -8112,7 +8117,7 @@ mod tests {
     /// reason is on the run's own problem list.
     #[test]
     fn a_branch_with_unpushed_commits_survives_its_own_tasks_archiving() {
-        let repo = fixture("cleanup-branch-unpushed");
+        let (repo, _root_guard) = fixture("cleanup-branch-unpushed");
         // A remote to have pushed to. The fixture has none, and with none
         // "unpushed" is not a state at all — see the two tests below — so
         // one is named here, never fetched from: nothing under `task/demo`
@@ -8158,7 +8163,7 @@ mod tests {
     /// finding 7).
     #[test]
     fn with_no_remote_a_finished_tasks_branch_goes_with_its_archive() {
-        let repo = fixture("cleanup-branch-no-remote");
+        let (repo, _root_guard) = fixture("cleanup-branch-no-remote");
         assert!(!repo.has_remote(), "the fixture is local-only");
         repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
@@ -8195,7 +8200,7 @@ mod tests {
     /// once nothing names it, without a push ever having been possible.
     #[test]
     fn with_no_remote_the_orphan_sweep_frees_a_retained_branch() {
-        let repo = fixture("branch-freed-no-remote");
+        let (repo, _root_guard) = fixture("branch-freed-no-remote");
         assert!(!repo.has_remote(), "the fixture is local-only");
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
@@ -8249,7 +8254,7 @@ mod tests {
     /// exists to remove.
     #[test]
     fn a_trial_arms_branch_is_removed_even_when_unpushed() {
-        let repo = fixture("cleanup-branch-trial-unpushed");
+        let (repo, _root_guard) = fixture("cleanup-branch-trial-unpushed");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let path = add_task(&repo, "demo", "implement");
         let mut task = reload(&path);
@@ -8278,7 +8283,7 @@ mod tests {
     /// about it — so it is never even asked.
     #[test]
     fn a_borrowed_checkouts_branch_survives_archiving_even_fully_pushed() {
-        let repo = fixture("cleanup-branch-borrowed");
+        let (repo, _root_guard) = fixture("cleanup-branch-borrowed");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         mark_pushed(&repo, "task/demo");
         let path = add_task(&repo, "demo", "implement");
@@ -8308,7 +8313,7 @@ mod tests {
     /// already frees one a queued dependent stopped needing.
     #[test]
     fn an_unpushed_branch_is_freed_once_pushed_by_the_next_cleanups_sweep() {
-        let repo = fixture("cleanup-branch-unpushed-then-pushed");
+        let (repo, _root_guard) = fixture("cleanup-branch-unpushed-then-pushed");
         // A remote to have pushed to, never fetched from — as in
         // `a_branch_with_unpushed_commits_survives_its_own_tasks_archiving`.
         let origin = repo.root.display().to_string();
@@ -8365,7 +8370,7 @@ mod tests {
     /// never calls `tear_down_checkout` at all any more.
     #[test]
     fn a_workspace_that_lost_its_checkout_still_gives_both_back() {
-        let repo = fixture("stop-unbound");
+        let (repo, _root_guard) = fixture("stop-unbound");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         task.front.workspace_id = Some("w1".into());
@@ -8402,7 +8407,7 @@ mod tests {
     /// never calls `tear_down_checkout` at all any more.
     #[test]
     fn a_checkout_with_no_workspace_left_is_still_given_back() {
-        let repo = fixture("stop-no-workspace");
+        let (repo, _root_guard) = fixture("stop-no-workspace");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
@@ -8429,7 +8434,7 @@ mod tests {
     #[test]
     fn a_stop_closes_neither_a_projects_tab_nor_its_shared_workspace() {
         for stage in ["implement", crate::pipeline::BLOCKED] {
-            let repo = fixture(&format!("stop-close-{stage}"));
+            let (repo, _root_guard) = fixture(&format!("stop-close-{stage}"));
             let path = add_task(&repo, "demo", stage);
             let mut task = reload(&path);
             task.front.workspace_id = Some("wD".into());
@@ -8452,7 +8457,7 @@ mod tests {
     /// multiplexer for nothing at all.
     #[test]
     fn stopping_never_opens_a_workspace_to_close_it() {
-        let repo = fixture("stop-no-workspace");
+        let (repo, _root_guard) = fixture("stop-no-workspace");
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
         let mut report = Report::default();
         Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
@@ -8474,7 +8479,7 @@ mod tests {
     /// task that owns its own row never reaches it.
     #[test]
     fn a_task_that_owns_its_workspace_cuts_its_own_worktree() {
-        let repo = fixture("cut-against");
+        let (repo, _root_guard) = fixture("cut-against");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]);
 
@@ -8491,7 +8496,7 @@ mod tests {
     /// `create_workspace` cuts its worktree with git either way.
     #[test]
     fn a_backend_with_no_workspaces_still_cuts_its_own_worktree() {
-        let repo = fixture("cut-against-none");
+        let (repo, _root_guard) = fixture("cut-against-none");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]).without_workspaces();
 
@@ -8511,7 +8516,7 @@ mod tests {
     /// that no longer exists.
     #[test]
     fn a_named_step_in_skip_falls_through_without_a_lane() {
-        let repo = fixture("skip-fallthrough");
+        let (repo, _root_guard) = fixture("skip-fallthrough");
         let path = add_task_with(&repo, "demo", "review", |f| {
             f.skip = vec!["review".into()];
         });
@@ -8543,7 +8548,7 @@ mod tests {
     /// of waiting for the next pass to look again.
     #[test]
     fn a_skipped_tail_reaches_done_in_one_pass() {
-        let repo = fixture("skip-tail");
+        let (repo, _root_guard) = fixture("skip-tail");
         let path = add_task_with(&repo, "demo", "document", |f| {
             f.skip = vec!["document".into(), "handover".into(), "checks".into()];
         });
@@ -8623,7 +8628,7 @@ mod tests {
     /// raw index it replaced.
     #[test]
     fn fewer_steps_left_sorts_before_a_higher_raw_step_index() {
-        let mut repo = fixture("steps-left-order");
+        let (mut repo, _root_guard) = fixture("steps-left-order");
         add_task_with(&repo, "nearly-done", "document", |_| {});
         add_task_with(&repo, "far-along", "checkpoint", |f| {
             f.pipeline = Some("local".into());
@@ -8647,7 +8652,7 @@ mod tests {
     /// nothing from the platform beyond a working `Runs::start`.
     #[test]
     fn only_the_top_of_a_chain_runs_a_last_step() {
-        let repo = fixture("last-chain");
+        let (repo, _root_guard) = fixture("last-chain");
         let pipelines = last_pipelines();
         let mux = FakeMux::new(vec![]);
 
@@ -8689,7 +8694,7 @@ mod tests {
     /// `when: last` got wrong by asking about declared dependents instead.
     #[test]
     fn every_task_of_a_fan_runs_a_last_step() {
-        let repo = fixture("last-fan");
+        let (repo, _root_guard) = fixture("last-fan");
         let pipelines = last_pipelines();
         let mux = FakeMux::new(vec![]);
 
@@ -8717,7 +8722,7 @@ mod tests {
     /// in, and nothing above it will ever cover the work.
     #[test]
     fn a_task_with_no_group_runs_a_last_step() {
-        let repo = fixture("last-lone");
+        let (repo, _root_guard) = fixture("last-lone");
         let pipelines = last_pipelines();
         let mux = FakeMux::new(vec![]);
         add_task(&repo, "alone", "suite");
@@ -8740,7 +8745,7 @@ mod tests {
     /// still open above it, and its group's suite would never run.
     #[test]
     fn a_stacked_on_groups_tail_still_runs_its_own_last_step() {
-        let repo = fixture("last-stacked");
+        let (repo, _root_guard) = fixture("last-stacked");
         let pipelines = last_pipelines();
         let mux = FakeMux::new(vec![]);
 
@@ -8792,7 +8797,7 @@ mod tests {
     /// walks past to `on_pass` without the command being started at all.
     #[test]
     fn only_the_root_of_a_chain_runs_a_first_step() {
-        let repo = fixture("first-chain");
+        let (repo, _root_guard) = fixture("first-chain");
         let pipelines = first_pipelines();
         let mux = FakeMux::new(vec![]);
 
@@ -8829,7 +8834,7 @@ mod tests {
     /// fan, mirrored for the opposite end of the chain.
     #[test]
     fn every_independent_root_of_a_fan_runs_a_first_step() {
-        let repo = fixture("first-fan");
+        let (repo, _root_guard) = fixture("first-fan");
         let pipelines = first_pipelines();
         let mux = FakeMux::new(vec![]);
 
@@ -8857,7 +8862,7 @@ mod tests {
     /// so its own empty `depends_on` makes it first.
     #[test]
     fn a_task_with_no_group_runs_a_first_step() {
-        let repo = fixture("first-lone");
+        let (repo, _root_guard) = fixture("first-lone");
         let pipelines = first_pipelines();
         let mux = FakeMux::new(vec![]);
         add_task(&repo, "alone", "setup");
@@ -8881,7 +8886,7 @@ mod tests {
     /// the graph and its former dependent would wrongly look like a root.
     #[test]
     fn an_archived_dependency_still_keeps_a_task_from_running_a_first_step() {
-        let repo = fixture("first-archived-dep");
+        let (repo, _root_guard) = fixture("first-archived-dep");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("root.md"),
@@ -8925,7 +8930,7 @@ mod tests {
     /// the task's own tab already says so (see the next test).
     #[test]
     fn a_grouped_pane_is_labelled_with_the_lanes_own_name() {
-        let repo = fixture("pane-label");
+        let (repo, _root_guard) = fixture("pane-label");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
@@ -8947,7 +8952,7 @@ mod tests {
     /// the visible pane label drops the task.
     #[test]
     fn a_split_agent_panes_label_is_only_its_step_not_the_task() {
-        let repo = fixture("split-pane-label");
+        let (repo, _root_guard) = fixture("split-pane-label");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]); // default: task_owns_workspace() == true, i.e. split
 
@@ -8974,7 +8979,7 @@ mod tests {
     /// freshly opened tab is a bare number, and this is what replaces it.
     #[test]
     fn a_freshly_cut_split_tasks_tab_is_renamed_to_its_slug() {
-        let repo = fixture("split-tab-fresh");
+        let (repo, _root_guard) = fixture("split-tab-fresh");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]); // default: task_owns_workspace() == true, i.e. split
 
@@ -8998,7 +9003,7 @@ mod tests {
     /// the slug too, per the task's own "resumed split task" mockup.
     #[test]
     fn a_resumed_split_tasks_tab_is_renamed_to_its_slug_too() {
-        let repo = fixture("split-tab-resumed");
+        let (repo, _root_guard) = fixture("split-tab-resumed");
         // Already placed — `workspace_id`/`tab_id`/`pane_id` set as though an
         // earlier dispatcher had cut this task's workspace on a run that has
         // since restarted, rather than freshly cut by this pass.
@@ -9032,7 +9037,7 @@ mod tests {
     /// tabs at all.
     #[test]
     fn a_lane_starts_from_its_recorded_pane_when_the_backend_has_no_tabs() {
-        let repo = fixture("no-tabs");
+        let (repo, _root_guard) = fixture("no-tabs");
         let worktree = repo.root.join("wt-demo");
         std::fs::create_dir_all(&worktree).unwrap();
         add_task_with(&repo, "demo", "implement", |front| {
@@ -9058,12 +9063,13 @@ mod tests {
     /// into the prompt.
     #[test]
     fn a_claude_lane_is_launched_with_its_prompt_as_a_file() {
-        let repo = fixture("claude-lane");
+        let (repo, _root_guard) = fixture("claude-lane");
+        let worktree = a_checkout("dispatch-claude-lane");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-claude-lane"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
         let mux = FakeMux::new(vec![]);
 
@@ -9084,7 +9090,7 @@ mod tests {
     // covers: agents.<profile>.kind — the kind a profile names is what its lanes launch, and an unknown one is refused
     #[test]
     fn a_profile_naming_an_unknown_kind_is_refused_rather_than_launched() {
-        let mut repo = fixture("unknown-kind");
+        let (mut repo, _root_guard) = fixture("unknown-kind");
         repo.config.agents.get_mut("pi").unwrap().kind = "mystery".into();
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]);
@@ -9121,7 +9127,7 @@ mod tests {
     /// apart.
     #[test]
     fn three_claimed_slots_boot_their_lanes_at_once() {
-        let repo = fixture("boot-together");
+        let (repo, _root_guard) = fixture("boot-together");
         for id in ["a", "b", "c"] {
             add_task(&repo, id, crate::pipeline::QUEUED);
         }
@@ -9159,7 +9165,7 @@ mod tests {
     /// mark the board reads as `◌ starting`. See [`crate::claim`].
     #[test]
     fn a_claimed_lane_is_marked_while_it_boots_and_cleared_after() {
-        let repo = fixture("claim-mark-while-booting");
+        let (repo, _root_guard) = fixture("claim-mark-while-booting");
         for id in ["a", "b"] {
             add_task(&repo, id, crate::pipeline::QUEUED);
         }
@@ -9200,7 +9206,7 @@ mod tests {
     /// a mark a killed dispatcher left behind is swept by the next pass.
     #[test]
     fn a_failed_boot_and_a_leftover_mark_both_leave_no_mark() {
-        let repo = fixture("claim-mark-failed-boot");
+        let (repo, _root_guard) = fixture("claim-mark-failed-boot");
         add_task(&repo, "a", crate::pipeline::QUEUED);
         crate::task::write_atomic(&repo.claims_dir().join("gone"), "review").unwrap();
         let mux = FakeMux::new(vec![]).refusing_to_start();
@@ -9221,7 +9227,7 @@ mod tests {
     /// long as any thread it is waiting on is still booting. gh-464.
     #[test]
     fn tick_runs_at_vacate_poll_rate_while_a_lane_boots() {
-        let repo = fixture("boot-together-ticks");
+        let (repo, _root_guard) = fixture("boot-together-ticks");
         add_task(&repo, "a", crate::pipeline::QUEUED);
         let boot_time = Duration::from_millis(650);
         let mux = FakeMux::new(vec![]).with_boot_delay(boot_time);
@@ -9250,7 +9256,7 @@ mod tests {
     /// two still start and are prompted. gh-464.
     #[test]
     fn a_start_lane_failure_in_a_claimed_batch_is_recorded_on_that_lane_alone() {
-        let repo = fixture("boot-together-fails-to-start");
+        let (repo, _root_guard) = fixture("boot-together-fails-to-start");
         for id in ["a", "b", "c"] {
             add_task(&repo, id, crate::pipeline::QUEUED);
         }
@@ -9322,7 +9328,7 @@ mod tests {
     /// once. gh-464.
     #[test]
     fn a_prompt_failure_in_a_claimed_batch_is_recorded_on_that_lane_alone() {
-        let repo = fixture("boot-together-fails-to-prompt");
+        let (repo, _root_guard) = fixture("boot-together-fails-to-prompt");
         for id in ["a", "b", "c"] {
             add_task(&repo, id, crate::pipeline::QUEUED);
         }
@@ -9394,7 +9400,7 @@ mod tests {
     /// number it is exercising.
     #[test]
     fn the_concurrency_cap_is_enforced_across_tasks() {
-        let mut repo = fixture("cap");
+        let (mut repo, _root_guard) = fixture("cap");
         repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
 
         for id in ["a", "b", "c"] {
@@ -9410,7 +9416,7 @@ mod tests {
 
     #[test]
     fn a_running_lane_already_counts_against_the_cap() {
-        let mut repo = fixture("cap-running");
+        let (mut repo, _root_guard) = fixture("cap-running");
         repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
         add_task_with(&repo, "busy", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -9428,7 +9434,7 @@ mod tests {
 
     #[test]
     fn work_nearest_the_end_is_scheduled_first() {
-        let mut repo = fixture("priority");
+        let (mut repo, _root_guard) = fixture("priority");
         add_task(&repo, "fresh", crate::pipeline::QUEUED);
         add_task_with(&repo, "nearly-done", "document", |f| {
             f.workspace_id = Some("w2".into());
@@ -9450,7 +9456,7 @@ mod tests {
     /// less legible.
     #[test]
     fn a_step_with_no_model_configured_refuses_to_start_a_lane() {
-        let repo = fixture("no-model");
+        let (repo, _root_guard) = fixture("no-model");
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         pipeline
             .steps
@@ -9487,7 +9493,7 @@ mod tests {
     /// finding 8.
     #[test]
     fn a_step_naming_an_undefined_agent_profile_is_a_problem_not_a_pass_abort() {
-        let repo = fixture("undefined-agent");
+        let (repo, _root_guard) = fixture("undefined-agent");
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         pipeline
             .steps
@@ -9520,7 +9526,7 @@ mod tests {
     /// matches the fingerprint the pass first read.
     #[test]
     fn persist_task_does_not_overwrite_a_report_that_landed_mid_pass() {
-        let repo = fixture("persist-guards-a-report");
+        let (repo, _root_guard) = fixture("persist-guards-a-report");
         let path = add_task(&repo, "demo", "implement");
 
         // What the pass read: no report yet.
@@ -9561,7 +9567,7 @@ mod tests {
     /// way it already catches a `spoolway report`.
     #[test]
     fn persist_task_does_not_overwrite_a_park_typed_mid_pass() {
-        let repo = fixture("persist-guards-a-park");
+        let (repo, _root_guard) = fixture("persist-guards-a-park");
         let path = add_task(&repo, "demo", "implement");
 
         // What the pass read: still running, nobody has touched it.
@@ -9596,7 +9602,7 @@ mod tests {
     /// rather than once for the whole pass.
     #[test]
     fn pass_ticks_between_each_task() {
-        let repo = fixture("pass-ticks-between-tasks");
+        let (repo, _root_guard) = fixture("pass-ticks-between-tasks");
         add_task(&repo, "alpha", crate::pipeline::PAUSED);
         add_task(&repo, "beta", crate::pipeline::PAUSED);
 
@@ -9619,7 +9625,7 @@ mod tests {
     /// the test exercises both.
     #[test]
     fn owns_cwd_matches_a_worktree_path_the_backend_canonicalised() {
-        let repo = fixture("owns-cwd-symlink");
+        let (repo, _root_guard) = fixture("owns-cwd-symlink");
         let base = repo.root.join("wt");
         let real = base.join("real-worktree");
         std::fs::create_dir_all(&real).unwrap();
@@ -9758,7 +9764,7 @@ mod tests {
     /// split does, must spare the tab it names.
     #[test]
     fn sweep_anchor_tabs_spares_a_tab_holding_a_pane_a_run_actually_recorded() {
-        let repo = fixture("sweep-anchor-tabs");
+        let (repo, _root_guard) = fixture("sweep-anchor-tabs");
         // Not `add_task_with_worktree`: that helper's other callers run a
         // real command process, and this one has no need of that.
         let checkout = repo.root.join("wt-demo");
@@ -9813,7 +9819,7 @@ mod tests {
     /// worktree at all. See the bug this task tracks.
     #[test]
     fn a_workspace_on_the_project_checkout_is_never_swept() {
-        let repo = fixture("sweep-own-tabs");
+        let (repo, _root_guard) = fixture("sweep-own-tabs");
 
         let work = SweepTab {
             workspace_id: "w1".into(),
@@ -9853,7 +9859,7 @@ mod tests {
     /// finding 31.
     #[test]
     fn a_corrupt_lanes_json_is_kept_as_a_bad_copy() {
-        let repo = fixture("corrupt-lanes");
+        let (repo, _root_guard) = fixture("corrupt-lanes");
         add_task(&repo, "demo", "queued");
         let lanes = repo.lanes_file();
         std::fs::create_dir_all(lanes.parent().unwrap()).unwrap();
@@ -9878,7 +9884,7 @@ mod tests {
     // covers: models.<glob>.slots — a model's own cap replaces its profile's concurrency
     #[test]
     fn a_models_slots_cap_lanes_instead_of_the_profiles_concurrency() {
-        let mut repo = fixture("model-slots");
+        let (mut repo, _root_guard) = fixture("model-slots");
         repo.config.models.insert(
             "your-local-model".to_string(),
             crate::usage::ModelPrice {
@@ -9911,7 +9917,7 @@ mod tests {
     /// not mid-turn ten seconds after its pane opened.
     #[test]
     fn a_lane_that_has_not_started_working_yet_still_holds_its_models_slot() {
-        let mut repo = fixture("model-slots-idle");
+        let (mut repo, _root_guard) = fixture("model-slots-idle");
         repo.config.models.insert(
             "*local-model".to_string(),
             crate::usage::ModelPrice {
@@ -9957,7 +9963,7 @@ mod tests {
     /// exists to prevent.
     #[test]
     fn an_idle_lane_is_still_the_resident_exclusive_model() {
-        let mut repo = fixture("exclusive-idle");
+        let (mut repo, _root_guard) = fixture("exclusive-idle");
         for model in ["your-local-model", "other-local-model"] {
             repo.config.models.insert(
                 model.to_string(),
@@ -10005,7 +10011,7 @@ mod tests {
     // covers: step.slot — a step exempted from its profile's slots still answers to its model's
     #[test]
     fn a_step_that_takes_no_profile_slot_still_takes_a_models() {
-        let mut repo = fixture("model-slots-optout");
+        let (mut repo, _root_guard) = fixture("model-slots-optout");
         repo.config.models.insert(
             "your-local-model".to_string(),
             crate::usage::ModelPrice {
@@ -10041,7 +10047,7 @@ mod tests {
     // covers: models.<glob>.exclusive — one set of weights on the card at a time
     #[test]
     fn two_exclusive_models_never_run_in_the_same_pass() {
-        let mut repo = fixture("exclusive");
+        let (mut repo, _root_guard) = fixture("exclusive");
         repo.config.models.insert(
             "model-a".to_string(),
             crate::usage::ModelPrice {
@@ -10093,7 +10099,7 @@ mod tests {
 
     #[test]
     fn a_settled_lane_on_a_superseded_step_is_freed() {
-        let repo = fixture("free");
+        let (repo, _root_guard) = fixture("free");
         // The prompt already reported, so the task moved to `review` while
         // `implement`'s finished session still occupies the pane.
         add_task_with(&repo, "demo", "review", |f| {
@@ -10118,12 +10124,13 @@ mod tests {
     /// before it is allowed to start at all.
     #[test]
     fn a_task_holds_only_one_lane_while_its_old_step_is_still_busy() {
-        let repo = fixture("pane-per-task");
+        let (repo, _root_guard) = fixture("pane-per-task");
+        let worktree = a_checkout("dispatch-pane-per-task");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-pane-per-task"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         // `implement` reported and the task moved to `review`, but its lane
@@ -10155,12 +10162,13 @@ mod tests {
     /// workspace with it, and with the workspace the task's worktree.
     #[test]
     fn a_kind_with_no_way_to_leave_still_gets_a_pane_of_its_own() {
-        let repo = fixture("pane-per-step");
+        let (repo, _root_guard) = fixture("pane-per-step");
+        let worktree = a_checkout("dispatch-pane-per-step");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-pane-per-step"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         // `implement` reported and the task moved on, but its agent is still
@@ -10192,12 +10200,13 @@ mod tests {
     /// one thing about it that does not change from step to step.
     #[test]
     fn a_settled_lane_hands_its_pane_to_the_next_step() {
-        let repo = fixture("pane-handover");
+        let (repo, _root_guard) = fixture("pane-handover");
+        let worktree = a_checkout("dispatch-pane-handover");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-pane-handover"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         // `implement` reported, the task moved on, and its lane has finished
@@ -10238,12 +10247,13 @@ mod tests {
     /// step's pane is split first and the stuck one closed after.
     #[test]
     fn a_session_that_will_not_leave_is_closed_only_after_its_replacement_is_split() {
-        let repo = fixture("pane-stuck");
+        let (repo, _root_guard) = fixture("pane-stuck");
+        let worktree = a_checkout("dispatch-pane-stuck");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-pane-stuck"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         let mux = FakeMux::new(vec![Lane {
@@ -10281,12 +10291,13 @@ mod tests {
     /// splitting its own pane before the stuck lane's is closed.
     #[test]
     fn a_lane_that_never_settles_stops_holding_the_next_step_up() {
-        let repo = fixture("handover-bound");
+        let (repo, _root_guard) = fixture("handover-bound");
+        let worktree = a_checkout("dispatch-handover-bound");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-handover-bound"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         let mux = FakeMux::new(vec![lane_in(
@@ -10332,7 +10343,7 @@ mod tests {
     /// three passes in a row fail the same way.
     #[test]
     fn a_start_that_fails_takes_its_pane_back_with_it() {
-        let repo = fixture("pane-leak");
+        let (repo, _root_guard) = fixture("pane-leak");
         add_task(&repo, "demo", "queued");
 
         let mux = FakeMux::new(vec![]).refusing_to_start();
@@ -10365,7 +10376,7 @@ mod tests {
     /// once per one of the three passes it took to get there.
     #[test]
     fn ceiling_on_launch_failures_parks_an_agent_step() {
-        let repo = fixture("agent-launch-ceiling");
+        let (repo, _root_guard) = fixture("agent-launch-ceiling");
         let path = add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]).refusing_to_start();
         let home = crate::scratch::root("agent-launch-ceiling-home");
@@ -10460,7 +10471,7 @@ mod tests {
     /// `launch_failures` recorded against it at all.
     #[test]
     fn a_momentarily_busy_pane_costs_a_pass_not_a_strike() {
-        let repo = fixture("pane-busy-retry");
+        let (repo, _root_guard) = fixture("pane-busy-retry");
         let path = add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
 
@@ -10535,7 +10546,7 @@ mod tests {
     /// measured from the *first* refusal rather than reset every pass.
     #[test]
     fn ten_minutes_of_nothing_but_a_busy_pane_resolves_like_the_ceiling() {
-        let repo = fixture("pane-busy-timeout");
+        let (repo, _root_guard) = fixture("pane-busy-timeout");
         let path = add_task_with(&repo, "demo", "queued", |front| {
             front
                 .launch_busy_since
@@ -10585,7 +10596,7 @@ mod tests {
     /// back here is what turns that hour into one retry.
     #[test]
     fn a_prompt_that_never_lands_takes_its_lane_back_with_it() {
-        let repo = fixture("prompt-leak");
+        let (repo, _root_guard) = fixture("prompt-leak");
         let path = add_task(&repo, "demo", "queued");
 
         let mux = FakeMux::new(vec![]).refusing_to_prompt();
@@ -10623,7 +10634,7 @@ mod tests {
 
     #[test]
     fn a_busy_lane_is_never_torn_down() {
-        let repo = fixture("busy");
+        let (repo, _root_guard) = fixture("busy");
         add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -10638,7 +10649,7 @@ mod tests {
 
     #[test]
     fn escalating_records_where_the_task_stopped() {
-        let repo = fixture("blocked-from");
+        let (repo, _root_guard) = fixture("blocked-from");
         // A task whose lane has been started as often as the budget allows, and
         // whose session is gone again, goes to a person rather than round again.
         let path = add_task_with(&repo, "demo", "implement", |f| {
@@ -10666,7 +10677,7 @@ mod tests {
     /// call is reached.
     #[test]
     fn an_escalation_from_blocked_itself_lands_on_paused_not_back_on_blocked() {
-        let repo = unattended_fixture("blocked-escalates");
+        let (repo, _root_guard) = unattended_fixture("blocked-escalates");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
@@ -10706,10 +10717,10 @@ mod tests {
     /// Set on the config rather than through a lock, because a fixture has no
     /// dispatcher holding one — and `Repo::unattended` falls back to exactly
     /// this when there is no run to ask about.
-    fn unattended_fixture(name: &str) -> Repo {
-        let mut repo = fixture(name);
+    fn unattended_fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (mut repo, root_guard) = fixture(name);
         repo.config.unattended.enabled = true;
-        repo
+        (repo, root_guard)
     }
 
     /// The same escalation with nobody to escalate to, on a pipeline that
@@ -10730,7 +10741,7 @@ mod tests {
     /// keeps its teeth in both modes.
     #[test]
     fn an_unattended_escalation_pauses_just_like_an_attended_one() {
-        let repo = unattended_fixture("unattended-resume");
+        let (repo, _root_guard) = unattended_fixture("unattended-resume");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -10771,7 +10782,7 @@ mod tests {
     /// happened, since the stage move alone would not say why.
     #[test]
     fn an_unattended_escalation_still_records_what_stopped_the_task() {
-        let repo = unattended_fixture("unattended-blocker-kept");
+        let (repo, _root_guard) = unattended_fixture("unattended-blocker-kept");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -10798,7 +10809,7 @@ mod tests {
     /// pass, which would be the busy loop the ceiling exists to prevent.
     #[test]
     fn an_unattended_dead_launch_waits_instead_of_parking_or_spinning() {
-        let repo = unattended_fixture("unattended-backoff");
+        let (repo, _root_guard) = unattended_fixture("unattended-backoff");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -10829,7 +10840,7 @@ mod tests {
     /// And once the wait is up, it really does try again.
     #[test]
     fn an_unattended_dead_launch_is_retried_once_its_wait_is_up() {
-        let repo = unattended_fixture("unattended-backoff-elapsed");
+        let (repo, _root_guard) = unattended_fixture("unattended-backoff-elapsed");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
@@ -10923,14 +10934,14 @@ mod tests {
     #[test]
     fn report_moved_reflects_a_free_not_a_busy_lane_sitting_where_it_is() {
         // Nothing queued at all: an ordinary idle pass.
-        let repo = fixture("report-moved-idle");
+        let (repo, _root_guard) = fixture("report-moved-idle");
         let idle = run_pass(&repo, &FakeMux::new(vec![]));
         assert!(!idle.moved, "an idle pass reported moved: {idle:?}");
 
         // A lane genuinely still working, on the task's own current step —
         // free_finished_lanes leaves a live one alone, so there is nothing
         // here to call moved.
-        let repo = fixture("report-moved-busy");
+        let (repo, _root_guard) = fixture("report-moved-busy");
         add_task_with(&repo, "demo", "implement", |_| {});
         let busy = run_pass(
             &repo,
@@ -10947,7 +10958,7 @@ mod tests {
         // `implement` pane it left behind and frees it. That free alone is
         // real progress, whether or not `review` itself manages to start in
         // the same pass.
-        let repo = fixture("report-moved-freed");
+        let (repo, _root_guard) = fixture("report-moved-freed");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -10964,14 +10975,15 @@ mod tests {
 
     #[test]
     fn a_closeout_workspace_is_closed_and_never_removed_as_a_worktree() {
-        let repo = fixture("closeout-cleanup");
+        let (repo, _root_guard) = fixture("closeout-cleanup");
+        let worktree = a_checkout("dispatch-closeout-cleanup");
         add_task_with(&repo, "plan-closeout", "done", |f| {
             f.borrowed = true;
             f.workspace_id = Some("w9".into());
             f.tab_id = Some("w9:t2".into());
             f.pane_id = Some("w9:p2".into());
             // What a borrowed workspace points at: the checkout itself.
-            f.worktree_path = Some(a_checkout("dispatch-closeout-cleanup"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         let mux = FakeMux::new(vec![]);
@@ -10992,13 +11004,14 @@ mod tests {
 
     #[test]
     fn a_closeout_that_opened_its_own_workspace_takes_it_with_it() {
-        let repo = fixture("closeout-own-workspace");
+        let (repo, _root_guard) = fixture("closeout-own-workspace");
+        let worktree = a_checkout("dispatch-closeout-own-workspace");
         add_task_with(&repo, "plan-closeout", "done", |f| {
             f.borrowed = true;
             f.workspace_id = Some("w9".into());
             f.tab_id = Some("w9:t1".into());
             f.pane_id = Some("w9:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-closeout-own-workspace"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         // Nobody else had this checkout open, so spoolway made the workspace and
@@ -11019,13 +11032,14 @@ mod tests {
     /// What tells one step from the next is the lane's own name, on its pane.
     #[test]
     fn a_tasks_row_is_never_relabelled_as_it_moves_steps() {
-        let repo = fixture("labels");
+        let (repo, _root_guard) = fixture("labels");
         // A task already past its first step, in the workspace cut for it then.
+        let worktree = a_checkout("dispatch-labels");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-labels"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         let mux = FakeMux::new(vec![]);
@@ -11040,7 +11054,7 @@ mod tests {
 
     #[test]
     fn another_projects_lane_is_not_this_dispatchers_to_touch() {
-        let repo = fixture("someone-elses");
+        let (repo, _root_guard) = fixture("someone-elses");
         add_task(&repo, "demo", "implement");
 
         // Same step, same task id, another checkout: two projects sharing a
@@ -11066,7 +11080,7 @@ mod tests {
     /// the failure this whole branch exists to stop.
     #[test]
     fn a_lane_that_ends_its_turn_keeps_its_pane_and_waits() {
-        let repo = fixture("waiting");
+        let (repo, _root_guard) = fixture("waiting");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11099,7 +11113,7 @@ mod tests {
     /// it as a person's own interrupt.
     #[test]
     fn a_blocked_lane_is_un_parked_in_the_same_pass() {
-        let repo = fixture("blocked-unparks");
+        let (repo, _root_guard) = fixture("blocked-unparks");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11132,7 +11146,7 @@ mod tests {
 
     #[test]
     fn a_lane_waiting_on_a_person_is_left_completely_alone() {
-        let repo = fixture("gate");
+        let (repo, _root_guard) = fixture("gate");
         let path = add_task_with(&repo, "demo", "document", |f| {
             f.pane_id = Some("w1:p1".into());
         });
@@ -11180,7 +11194,7 @@ mod tests {
     /// it is reminded and then paused exactly like one on any other step.
     #[test]
     fn a_gated_lane_that_never_reported_is_clocked_like_any_other() {
-        let repo = fixture("gate-forever");
+        let (repo, _root_guard) = fixture("gate-forever");
         let pipelines = gated_pipeline();
         let path = add_task_with(&repo, "demo", "release", |f| {
             f.workspace_id = Some("w1".into());
@@ -11239,7 +11253,7 @@ mod tests {
     /// nothing here asks the lane to hold it too.
     #[test]
     fn a_gated_step_tells_its_lane_a_person_opens_this_pane_and_parks_its_pass() {
-        let repo = fixture("checkpoint-holds");
+        let (repo, _root_guard) = fixture("checkpoint-holds");
         let pipelines = gated_pipeline();
         let step = pipelines.get("default").unwrap().step("release").unwrap();
         let path = add_task_with(&repo, "demo", "release", |f| {
@@ -11316,7 +11330,7 @@ mod tests {
     // covers: dispatch.lane_quiet — how long a lane may say nothing before it is reminded
     #[test]
     fn a_lane_that_settles_without_reporting_is_reminded_then_paused_once_it_goes_dead() {
-        let repo = fixture("unreported");
+        let (repo, _root_guard) = fixture("unreported");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11403,7 +11417,7 @@ mod tests {
     /// running the whole time. See .spoolway/queue/lane-liveness.md, "Bug".
     #[test]
     fn a_lane_holding_a_process_it_started_is_never_reminded() {
-        let repo = fixture("busy-child");
+        let (repo, _root_guard) = fixture("busy-child");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11433,7 +11447,7 @@ mod tests {
     /// transcript would never reach it.
     #[test]
     fn a_process_held_open_past_the_ceiling_is_escalated_anyway() {
-        let mut repo = fixture("busy-child-ceiling");
+        let (mut repo, _root_guard) = fixture("busy-child-ceiling");
         repo.config.dispatch.lane_child_ceiling = Duration::from_secs(30);
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -11479,7 +11493,7 @@ mod tests {
     /// again, not whatever was left of the first one's.
     #[test]
     fn a_lane_whose_child_goes_and_comes_back_gets_a_fresh_ceiling() {
-        let repo = fixture("busy-child-restart");
+        let (repo, _root_guard) = fixture("busy-child-restart");
         add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11533,7 +11547,7 @@ mod tests {
     /// walks for an ordinary settled lane right above.
     #[test]
     fn a_hand_interrupted_lane_reaches_paused_within_one_pass() {
-        let repo = fixture("hand-interrupt");
+        let (repo, _root_guard) = fixture("hand-interrupt");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11578,7 +11592,7 @@ mod tests {
     /// already covers in full for the eventual escalation.
     #[test]
     fn a_settled_lane_with_no_abort_marker_is_still_reminded_not_parked() {
-        let repo = fixture("hand-interrupt-none");
+        let (repo, _root_guard) = fixture("hand-interrupt-none");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11663,11 +11677,8 @@ mod tests {
 
         // And the behaviour itself: a lane quiet for well over a poll interval,
         // but inside its patience, is left alone rather than prompted.
-        let repo = {
-            let mut repo = fixture("patience-outlasts-a-run");
-            repo.config.dispatch.lane_quiet = shipped.lane_quiet;
-            repo
-        };
+        let (mut repo, _root_guard) = fixture("patience-outlasts-a-run");
+        repo.config.dispatch.lane_quiet = shipped.lane_quiet;
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11694,7 +11705,7 @@ mod tests {
     /// it.
     #[test]
     fn a_settled_lane_that_writes_after_a_reminder_is_reminded_again() {
-        let repo = fixture("unreported-again");
+        let (repo, _root_guard) = fixture("unreported-again");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11745,7 +11756,7 @@ mod tests {
     /// would sit in `lanes.json` forever without the prune this test proves.
     #[test]
     fn a_lane_record_for_a_task_no_longer_queued_is_pruned() {
-        let repo = fixture("stale-lane-record");
+        let (repo, _root_guard) = fixture("stale-lane-record");
         add_task(&repo, "demo", "implement");
 
         let mut records = HashMap::new();
@@ -11779,7 +11790,7 @@ mod tests {
     /// go look at.
     #[test]
     fn a_lane_reminded_three_times_is_escalated_on_the_fourth_due_reminder() {
-        let repo = fixture("reminder-ceiling");
+        let (repo, _root_guard) = fixture("reminder-ceiling");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11850,7 +11861,7 @@ mod tests {
     /// one of its own, exactly as a cross-step handover would.
     #[test]
     fn a_self_routing_step_hands_its_pane_to_its_own_restart() {
-        let repo = unattended_fixture("blocked-self-handover");
+        let (repo, _root_guard) = unattended_fixture("blocked-self-handover");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11923,7 +11934,7 @@ mod tests {
     /// identity check reads the report directly and retires the lane instead.
     #[test]
     fn a_settled_lane_that_reported_on_a_self_routing_step_is_retired_not_reminded() {
-        let repo = unattended_fixture("blocked-self-route");
+        let (repo, _root_guard) = unattended_fixture("blocked-self-route");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -11989,7 +12000,7 @@ mod tests {
     /// reason: ask the backend whether a waiting lane is resident.
     #[test]
     fn a_block_on_a_detached_backend_stops_the_lane_rather_than_holding_it() {
-        let repo = fixture("block-on-detached");
+        let (repo, _root_guard) = fixture("block-on-detached");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12034,7 +12045,7 @@ mod tests {
     /// arguing over one name.
     #[test]
     fn a_pane_held_for_a_person_is_closed_once_the_block_is_cleared() {
-        let repo = fixture("block-holds-its-pane");
+        let (repo, _root_guard) = fixture("block-holds-its-pane");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
@@ -12114,7 +12125,7 @@ mod tests {
     /// what happens *after* the hold, not the hold itself.
     #[test]
     fn a_persons_round_in_a_held_pane_is_committed_when_it_settles() {
-        let repo = fixture("person-turn");
+        let (repo, _root_guard) = fixture("person-turn");
         let path = add_task_with(&repo, "demo", crate::pipeline::PAUSED, |f| {
             f.worktree_path = Some(repo.root.clone());
             f.workspace_id = Some("w1".into());
@@ -12193,7 +12204,7 @@ mod tests {
     /// own delta is appended (review finding 34).
     #[test]
     fn a_held_lane_banks_the_persons_rounds_when_its_pane_is_freed() {
-        let mut repo = fixture("held-lane-banks");
+        let (mut repo, _root_guard) = fixture("held-lane-banks");
         priced(&mut repo, "priced-model");
         let _task = reload(&add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -12255,7 +12266,7 @@ mod tests {
     /// `record_usage` always writes `now_secs() - record.started_at`).
     #[test]
     fn a_held_lanes_second_bank_carries_only_its_own_wall_time() {
-        let mut repo = fixture("held-lane-wall-delta");
+        let (mut repo, _root_guard) = fixture("held-lane-wall-delta");
         priced(&mut repo, "priced-model");
         let _task = reload(&add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -12358,7 +12369,7 @@ mod tests {
     /// permission-prompt time add nothing" (see gh-378 / issue #380).
     #[test]
     fn a_working_pass_adds_its_interval_and_a_permission_prompt_adds_none() {
-        let repo = fixture("accrue-busy-time");
+        let (repo, _root_guard) = fixture("accrue-busy-time");
         add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12416,7 +12427,7 @@ mod tests {
     /// record through `LaneRecord::clear_busy_s` for exactly this.
     #[test]
     fn a_stop_banks_a_running_lanes_busy_time_once_and_saves_none_of_it() {
-        let mut repo = fixture("stop-banks-busy-time-once");
+        let (mut repo, _root_guard) = fixture("stop-banks-busy-time-once");
         priced(&mut repo, "priced-model");
         add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -12475,7 +12486,7 @@ mod tests {
     /// downtime.
     #[test]
     fn a_gap_since_the_last_poll_wider_than_the_ceiling_is_clamped() {
-        let repo = fixture("accrue-busy-time-ceiling");
+        let (repo, _root_guard) = fixture("accrue-busy-time-ceiling");
         add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12519,7 +12530,7 @@ mod tests {
     /// discard the interval outright, with no later call to recover it from.
     #[test]
     fn a_hold_that_banks_nothing_leaves_its_busy_time_for_the_next_bank_to_find() {
-        let repo = fixture("hold-banks-nothing-keeps-busy-time");
+        let (repo, _root_guard) = fixture("hold-banks-nothing-keeps-busy-time");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12612,7 +12623,7 @@ mod tests {
     /// see `only_the_top_of_a_chain_runs_a_last_step`.
     #[test]
     fn two_tasks_hand_over_at_the_same_time() {
-        let repo = fixture("handover-parallel");
+        let (repo, _root_guard) = fixture("handover-parallel");
         for id in ["alpha", "beta"] {
             add_task_with(&repo, id, "handover", |f| {
                 f.branch = Some(format!("task/{id}"));
@@ -12652,7 +12663,7 @@ mod tests {
     /// concurrency = 2`.
     #[test]
     fn a_pane_kept_for_a_person_holds_no_worker_slot() {
-        let repo = fixture("waiting-slot");
+        let (repo, _root_guard) = fixture("waiting-slot");
         add_task_with(&repo, "asking", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12666,7 +12677,7 @@ mod tests {
 
         // And the same with a paused task holding the pane: both queued tasks
         // start, because nothing of this profile's is running.
-        let repo = fixture("waiting-slot-paused");
+        let (repo, _root_guard) = fixture("waiting-slot-paused");
         let pipelines = gated_pipeline();
         add_task_with(&repo, "gated", crate::pipeline::PAUSED, |f| {
             f.workspace_id = Some("w1".into());
@@ -12698,7 +12709,7 @@ mod tests {
     /// silently never bites.
     #[test]
     fn a_lane_start_is_counted_after_the_transition_that_zeroes_the_counter() {
-        let repo = fixture("attempts-order");
+        let (repo, _root_guard) = fixture("attempts-order");
         let path = add_task(&repo, "demo", "queued");
 
         run_pass(&repo, &FakeMux::new(vec![]));
@@ -12716,7 +12727,7 @@ mod tests {
     /// would be re-spawned for as long as the dispatcher runs.
     #[test]
     fn a_task_whose_lane_keeps_being_restarted_is_handed_to_a_person() {
-        let repo = fixture("attempts-budget");
+        let (repo, _root_guard) = fixture("attempts-budget");
         let path = add_task(&repo, "demo", "queued");
 
         // `max_launches = 1` by default: launched once, and never relaunched.
@@ -12746,7 +12757,7 @@ mod tests {
     /// rather than reading the silence as proof of death on the spot.
     #[test]
     fn a_launch_this_dispatcher_never_witnessed_gets_a_grace_before_a_person_is_asked() {
-        let repo = fixture("unwitnessed-dead-launch");
+        let (repo, _root_guard) = fixture("unwitnessed-dead-launch");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12821,7 +12832,7 @@ mod tests {
     /// is the dead-agent case `MAX_LAUNCHES` exists to catch.
     #[test]
     fn a_launch_this_dispatcher_watched_die_escalates_without_waiting() {
-        let repo = fixture("witnessed-dead-launch");
+        let (repo, _root_guard) = fixture("witnessed-dead-launch");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12846,7 +12857,7 @@ mod tests {
     /// budget rather than one that is already spent.
     #[test]
     fn unblocking_a_task_gives_it_its_start_budget_back() {
-        let repo = fixture("attempts-unblock");
+        let (repo, _root_guard) = fixture("attempts-unblock");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.blocked_from = Some("implement".into());
             f.attempts = 7;
@@ -12910,7 +12921,7 @@ mod tests {
     /// cost the difference rather than the entire task a second time.
     #[test]
     fn a_resumed_step_continues_the_session_its_lane_blocked_on() {
-        let repo = fixture("resume-session");
+        let (repo, _root_guard) = fixture("resume-session");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.blocked_from = Some("implement".into());
         });
@@ -12957,7 +12968,7 @@ mod tests {
     /// than start over.
     #[test]
     fn an_ordinary_start_mints_a_session_of_its_own() {
-        let repo = fixture("resume-only-once");
+        let (repo, _root_guard) = fixture("resume-only-once");
         add_task_with(&repo, "demo", "implement", |_| {});
         record_lane(
             &repo,
@@ -13061,7 +13072,7 @@ mod tests {
     // covers: unattended.max_output_tokens — the ceiling counts what lanes spend, and stops the run starting more work
     #[test]
     fn the_output_ceiling_counts_lanes_and_not_the_person_watching() {
-        let mut repo = unattended_fixture("ceiling-interactive");
+        let (mut repo, _root_guard) = unattended_fixture("ceiling-interactive");
         repo.config.unattended.max_output_tokens = 1_000;
         let pipelines = Pipelines::builtin();
         let mux = FakeMux::new(vec![]);
@@ -13092,7 +13103,7 @@ mod tests {
     /// rather than `tokens.output` once set.
     #[test]
     fn the_cost_ceiling_is_off_by_default_and_counts_lanes_once_set() {
-        let mut repo = unattended_fixture("ceiling-cost");
+        let (mut repo, _root_guard) = unattended_fixture("ceiling-cost");
         let pipelines = Pipelines::builtin();
         let mux = FakeMux::new(vec![]);
 
@@ -13154,7 +13165,7 @@ mod tests {
     /// three blocked tasks in the morning.
     #[test]
     fn stopping_a_run_forgives_the_launch_counter_so_the_next_one_resumes() {
-        let repo = fixture("stop-forgives");
+        let (repo, _root_guard) = fixture("stop-forgives");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -13195,7 +13206,7 @@ mod tests {
     /// keeps its count, and if its pane goes too the guard is still there.
     #[test]
     fn a_working_lane_forgives_the_launch_counter_and_a_settled_one_does_not() {
-        let repo = fixture("launch-landed");
+        let (repo, _root_guard) = fixture("launch-landed");
         let working = add_task_with(&repo, "busy", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -13223,7 +13234,7 @@ mod tests {
     /// at all for a task the stop swept.
     #[test]
     fn stopping_a_run_banks_what_the_interrupted_lane_spent() {
-        let repo = fixture("stop-banks");
+        let (repo, _root_guard) = fixture("stop-banks");
         add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -13275,7 +13286,7 @@ mod tests {
     /// the banked-totals fold must still be `None` once the pass is done.
     #[test]
     fn a_pass_that_banks_nothing_never_reads_the_ledger() {
-        let repo = fixture("lazy-usage-banked");
+        let (repo, _root_guard) = fixture("lazy-usage-banked");
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
         let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
@@ -13297,7 +13308,7 @@ mod tests {
     /// `session`, `kind`, `agent` and `model`, recovered by lane name alone.
     #[test]
     fn a_lane_re_adopted_across_a_restart_still_banks_its_tokens() {
-        let repo = fixture("readopted-banks");
+        let (repo, _root_guard) = fixture("readopted-banks");
         let task = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -13361,7 +13372,7 @@ mod tests {
     /// reminder either.
     #[test]
     fn silence_is_measured_from_the_transcript_and_not_from_the_pane() {
-        let repo = fixture("silence-transcript");
+        let (repo, _root_guard) = fixture("silence-transcript");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -13454,7 +13465,7 @@ mod tests {
     /// size check needs, since checking it is now unconditional on every
     /// carried session and so requires an actual transcript rather than a
     /// proxy for one.
-    fn pi_home_with(session: &str, size: u64) -> PathBuf {
+    fn pi_home_with(session: &str, size: u64) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("dispatch-oversize-{session}"));
         let dir = root.join(".pi/agent/sessions/--home-someone-work--");
         std::fs::create_dir_all(&dir).unwrap();
@@ -13475,7 +13486,7 @@ mod tests {
     /// `abort_marker` established for pi — the exact record `usage.rs`'s own
     /// fixture tests use, quoted again here rather than shared, since a test
     /// module's fixtures are not each other's to import.
-    fn pi_home_aborted(session: &str) -> PathBuf {
+    fn pi_home_aborted(session: &str) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("dispatch-abort-{session}"));
         let dir = root.join(".pi/agent/sessions/--home-someone-work--");
         std::fs::create_dir_all(&dir).unwrap();
@@ -13492,7 +13503,7 @@ mod tests {
     /// `elapsed` seconds since it was last touched — the fixture the `Stale`
     /// miss needs, since the horizon is now read off the store's own mtime
     /// rather than a timestamp inside the record.
-    fn claude_home_with(session: &str, elapsed: i64, size: u64) -> PathBuf {
+    fn claude_home_with(session: &str, elapsed: i64, size: u64) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("dispatch-warmth-{session}"));
         let dir = root.join(".claude/projects/-home-someone-work");
         std::fs::create_dir_all(&dir).unwrap();
@@ -13541,7 +13552,7 @@ mod tests {
     /// a `<task> · <step>` lane name rather than silently finding nothing.
     #[test]
     fn a_retired_lanes_session_is_still_found_by_its_ledger_entry() {
-        let repo = fixture("session-retired");
+        let (repo, _root_guard) = fixture("session-retired");
         write_entry(&repo, "demo", "fix", "claude", "test-model", "old-session");
 
         let found = lane_session(&repo, &lane_name("fix", "demo"));
@@ -13557,7 +13568,7 @@ mod tests {
     /// default zero ceiling does not require a model window just to reuse it.
     #[test]
     fn a_zero_reuse_ceiling_resumes_its_prompts_earlier_conversation() {
-        let repo = fixture("session-carry");
+        let (repo, _root_guard) = fixture("session-carry");
         assert_eq!(repo.config.agents["pi"].session_reuse_ctx, 0);
         add_task(&repo, "demo", "fix");
         let kind = local_kind(&repo);
@@ -13593,7 +13604,7 @@ mod tests {
     // covers: models.<glob>.context_window — what one session of this model gets to work in
     #[test]
     fn a_session_key_falls_through_when_the_models_window_is_unset() {
-        let mut repo = fixture("session-window-unset");
+        let (mut repo, _root_guard) = fixture("session-window-unset");
         // An enabled percentage needs a window to measure against. The
         // default zero does not, as the test above demonstrates.
         repo.config.agents.get_mut("pi").unwrap().session_reuse_ctx = 50;
@@ -13644,7 +13655,7 @@ mod tests {
     /// ordinary case for a task's first pass through a `session:` step.
     #[test]
     fn a_session_key_falls_through_when_no_earlier_session_is_found() {
-        let repo = fixture("session-not-found");
+        let (repo, _root_guard) = fixture("session-not-found");
         add_task(&repo, "demo", "fix");
 
         let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
@@ -13667,7 +13678,7 @@ mod tests {
     /// of what criterion 5 asks for.
     #[test]
     fn a_step_with_no_session_key_ignores_an_earlier_prompt_match() {
-        let repo = fixture("session-ordinary");
+        let (repo, _root_guard) = fixture("session-ordinary");
         add_task(&repo, "demo", "implement");
         let kind = local_kind(&repo);
         // `fix` is `implement`'s own prompt match, but `implement` itself
@@ -13690,7 +13701,7 @@ mod tests {
     /// prompt.
     #[test]
     fn the_one_shot_resume_flag_wins_over_a_standing_session() {
-        let repo = fixture("session-one-shot-wins");
+        let (repo, _root_guard) = fixture("session-one-shot-wins");
         let path = add_task_with(&repo, "demo", "fix", |f| {
             f.resume = Some("fix".into());
         });
@@ -13723,7 +13734,7 @@ mod tests {
     /// [`resume_prompt`] never does.
     #[test]
     fn a_carried_session_reads_a_different_prompt_than_an_unblocked_one() {
-        let repo = fixture("session-prompt");
+        let (repo, _root_guard) = fixture("session-prompt");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
@@ -13746,7 +13757,7 @@ mod tests {
     /// can then conclude is that whatever they did must have worked.
     #[test]
     fn an_unattended_resume_is_never_told_that_a_person_fixed_anything() {
-        let repo = fixture("unattended-prompt");
+        let (repo, _root_guard) = fixture("unattended-prompt");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
@@ -13764,7 +13775,7 @@ mod tests {
     /// `system_prompt`, which every resumed lane was also launched with.
     #[test]
     fn resumed_prompts_carry_no_report_form_and_no_stage_warning() {
-        let repo = fixture("resumed-prompts-trimmed");
+        let (repo, _root_guard) = fixture("resumed-prompts-trimmed");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
@@ -13793,7 +13804,7 @@ mod tests {
     /// `resume_prompt`'s unattended half must not reach a park.
     #[test]
     fn a_park_prompt_says_nothing_changed() {
-        let repo = fixture("park-prompt");
+        let (repo, _root_guard) = fixture("park-prompt");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
@@ -13816,7 +13827,7 @@ mod tests {
     /// a `## Status Log` line and a pane tail before this ever ran.
     #[test]
     fn a_park_escalated_prompt_says_what_actually_happened() {
-        let repo = fixture("park-escalated-prompt");
+        let (repo, _root_guard) = fixture("park-escalated-prompt");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
@@ -13841,7 +13852,7 @@ mod tests {
     /// on it.
     #[test]
     fn resuming_a_park_into_an_idle_lane_still_gets_park_prompt() {
-        let repo = fixture("park-resume-idle");
+        let (repo, _root_guard) = fixture("park-resume-idle");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.parked_from = Some("implement".into());
             f.resume = Some("implement".into());
@@ -13873,7 +13884,7 @@ mod tests {
     /// pass `parked_from` and `resume` are.
     #[test]
     fn resuming_an_escalated_park_gets_the_escalated_prompt() {
-        let repo = fixture("park-resume-escalated");
+        let (repo, _root_guard) = fixture("park-resume-escalated");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.parked_from = Some("implement".into());
             f.escalated = true;
@@ -13908,7 +13919,7 @@ mod tests {
     /// happen — but no launch and no prompt are sent.
     #[test]
     fn resuming_a_park_into_a_busy_lane_sends_nothing() {
-        let repo = fixture("park-resume-busy");
+        let (repo, _root_guard) = fixture("park-resume-busy");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.parked_from = Some("implement".into());
             f.resume = Some("implement".into());
@@ -13955,7 +13966,7 @@ mod tests {
     /// worth continuing, not whichever happens to be first in the file.
     #[test]
     fn carried_session_prefers_the_newest_matching_entry() {
-        let mut repo = fixture("session-newest");
+        let (mut repo, _root_guard) = fixture("session-newest");
         priced(&mut repo, "test-model");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
@@ -14006,7 +14017,7 @@ mod tests {
     /// model's `session_reuse_idle`.
     #[test]
     fn carried_session_reports_which_of_the_four_misses_it_was() {
-        let mut repo = fixture("session-misses");
+        let (mut repo, _root_guard) = fixture("session-misses");
         // Priced separately from `test-model`, which the second assertion
         // below relies on staying unpriced.
         repo.config.models.insert(
@@ -14152,7 +14163,7 @@ mod tests {
     // covers: agents.<profile>.session_blocked_ctx — the ceiling on a running lane's size
     #[test]
     fn a_live_lane_past_its_ctx_ceiling_is_stopped_and_escalated() {
-        let mut repo = fixture("ctx-ceiling-live");
+        let (mut repo, _root_guard) = fixture("ctx-ceiling-live");
         repo.config.models.insert(
             "test-model".into(),
             crate::usage::ModelPrice {
@@ -14263,7 +14274,7 @@ mod tests {
         // `parked_for_a_person`. A staffed `blocked` settles like any other
         // step instead, which is the shape `retire` (and so this exclusion)
         // is for.
-        let mut repo = unattended_fixture("ctx-ceiling-reported");
+        let (mut repo, _root_guard) = unattended_fixture("ctx-ceiling-reported");
         // `blocked` is the shipped step that routes back to itself — a
         // `--block` report leaves the stage exactly where it found it — so
         // `Pipelines::builtin()` already carries the shape this test needs.
@@ -14353,7 +14364,7 @@ mod tests {
     // covers: agents.<profile>.session_blocked_ctx — the ceiling needs no unattended special case
     #[test]
     fn an_unattended_run_needs_no_special_case_for_the_ctx_ceiling() {
-        let mut repo = unattended_fixture("ctx-ceiling-unattended");
+        let (mut repo, _root_guard) = unattended_fixture("ctx-ceiling-unattended");
         // `implement` in the shipped pipeline names the placeholder model —
         // priced here under its own name, standing in for the real local
         // model a project would have named instead.
@@ -14451,7 +14462,7 @@ mod tests {
     /// is the general case it was a special use of.
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
-        let repo = fixture("in-place");
+        let (repo, _root_guard) = fixture("in-place");
         // A task may not set its own `branch:` — see
         // `queue::RESERVED_KEYS` — and this fixture never turns on
         // `issue_tracking.key_in_names`, so the branch is the plain
@@ -14508,7 +14519,7 @@ mod tests {
 
     #[test]
     fn a_task_waits_for_its_dependencies_to_finish() {
-        let repo = fixture("deps");
+        let (repo, _root_guard) = fixture("deps");
         add_task(&repo, "first", "implement");
         add_task_with(&repo, "second", "queued", |f| {
             f.depends_on = vec!["first".into()];
@@ -14523,7 +14534,7 @@ mod tests {
 
     #[test]
     fn an_archived_dependency_counts_as_finished() {
-        let repo = fixture("deps-archived");
+        let (repo, _root_guard) = fixture("deps-archived");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("first.md"),
@@ -14542,7 +14553,7 @@ mod tests {
 
     #[test]
     fn the_group_with_least_left_to_do_is_started_first() {
-        let mut repo = fixture("group-order");
+        let (mut repo, _root_guard) = fixture("group-order");
         // `big-a` would win on task id alone. What decides it is that `small`
         // is one task away from reaching main and `big` is three.
         for id in ["big-a", "big-b", "big-c"] {
@@ -14561,7 +14572,7 @@ mod tests {
 
     #[test]
     fn within_one_group_whatever_unblocks_the_most_goes_first() {
-        let mut repo = fixture("dependents-order");
+        let (mut repo, _root_guard) = fixture("dependents-order");
         // Same group and same step, so only the graph can separate them — and
         // `zulu` is the one that has to lose on task id to prove it did.
         add_task_with(&repo, "alpha", "queued", |f| f.group = Some("p".into()));
@@ -14587,7 +14598,7 @@ mod tests {
     /// from the pass, it just sorts last.
     #[test]
     fn a_never_run_group_ranks_behind_an_open_group_that_can_still_move() {
-        let mut repo = fixture("gate-hold");
+        let (mut repo, _root_guard) = fixture("gate-hold");
         add_task_with(&repo, "billing", "implement", |f| {
             f.group = Some("dispatcher-ui".into());
         });
@@ -14615,7 +14626,7 @@ mod tests {
     /// the untouched group's task sorts first and gets the slot.
     #[test]
     fn the_gate_has_nothing_to_rank_against_once_the_open_groups_only_task_is_blocked() {
-        let repo = fixture("gate-release");
+        let (repo, _root_guard) = fixture("gate-release");
         add_task_with(&repo, "billing", crate::pipeline::BLOCKED, |f| {
             f.group = Some("dispatcher-ui".into());
         });
@@ -14636,7 +14647,7 @@ mod tests {
     fn an_ungrouped_task_starts_whether_or_not_the_gate_is_ranking_anything() {
         // The gate is actively ranking `slot-priority` behind `dispatcher-ui`
         // here, and the ungrouped task starts anyway.
-        let holding = fixture("gate-ungrouped-holding");
+        let (holding, _root_guard) = fixture("gate-ungrouped-holding");
         add_task_with(&holding, "billing", "implement", |f| {
             f.group = Some("dispatcher-ui".into());
         });
@@ -14655,7 +14666,7 @@ mod tests {
 
         // The gate has nothing to rank here — `dispatcher-ui`'s only task is
         // blocked — and the ungrouped task still starts exactly the same way.
-        let released = fixture("gate-ungrouped-released");
+        let (released, _root_guard) = fixture("gate-ungrouped-released");
         add_task_with(&released, "billing", crate::pipeline::BLOCKED, |f| {
             f.group = Some("dispatcher-ui".into());
         });
@@ -14679,7 +14690,7 @@ mod tests {
     /// test that fails against that `retain`.
     #[test]
     fn an_open_groups_free_slots_go_to_never_run_groups_rather_than_idling() {
-        let mut repo = fixture("gate-fills-idle-slots");
+        let (mut repo, _root_guard) = fixture("gate-fills-idle-slots");
         // `dispatcher-ui` is open — a live lane of its own, mid-turn — but
         // has no further ready task, so nothing of its own group is left to
         // fill the two slots its one lane does not use.
@@ -14715,7 +14726,7 @@ mod tests {
 
     #[test]
     fn a_dependency_that_can_never_finish_is_left_alone_rather_than_waited_on() {
-        let repo = fixture("stranded");
+        let (repo, _root_guard) = fixture("stranded");
         let root = add_task(&repo, "root", "blocked");
         let leaf = add_task_with(&repo, "leaf", "queued", |f| {
             f.depends_on = vec!["root".into()]
@@ -14742,7 +14753,7 @@ mod tests {
 
     #[test]
     fn a_dependency_cycle_is_reported_rather_than_waited_on_forever() {
-        let repo = fixture("cycle");
+        let (repo, _root_guard) = fixture("cycle");
         add_task_with(&repo, "a", "queued", |f| f.depends_on = vec!["b".into()]);
         add_task_with(&repo, "b", "queued", |f| f.depends_on = vec!["a".into()]);
 
@@ -14764,7 +14775,7 @@ mod tests {
 
     #[test]
     fn cutting_a_workspace_mints_a_run_and_pins_the_base_commit() {
-        let repo = fixture("run-and-base-commit");
+        let (repo, _root_guard) = fixture("run-and-base-commit");
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
@@ -14787,7 +14798,7 @@ mod tests {
     /// against at all (review finding 2).
     #[test]
     fn cutting_from_a_remote_only_base_still_pins_the_base_commit() {
-        let repo = fixture("remote-only-base-commit");
+        let (repo, _root_guard) = fixture("remote-only-base-commit");
         let origin = crate::scratch::root("dispatch-remote-only-base-commit-origin");
         let _ = std::fs::remove_dir_all(&origin);
         std::fs::create_dir_all(&origin).unwrap();
@@ -14823,7 +14834,7 @@ mod tests {
 
     #[test]
     fn a_borrowed_checkout_mints_a_run_but_no_base_commit() {
-        let repo = fixture("run-borrowed");
+        let (repo, _root_guard) = fixture("run-borrowed");
         let worktree = crate::scratch::root("dispatch-run-borrowed-wt");
         let _ = std::fs::remove_dir_all(&worktree);
         // A worktree already has `task/demo` out, which is what makes the
@@ -14861,7 +14872,7 @@ mod tests {
     /// a re-cut.
     #[test]
     fn a_forgotten_workspace_gets_a_fresh_pane_on_the_same_worktree() {
-        let repo = fixture("forgotten-workspace");
+        let (repo, _root_guard) = fixture("forgotten-workspace");
         let worktree = crate::scratch::root("dispatch-forgotten-workspace-wt");
         let _ = std::fs::remove_dir_all(&worktree);
         std::fs::create_dir_all(&worktree).unwrap();
@@ -14870,7 +14881,7 @@ mod tests {
             f.branch = Some("task/demo".into());
             f.base = Some("work".into());
             f.borrowed = false;
-            f.worktree_path = Some(worktree.clone());
+            f.worktree_path = Some(worktree.to_path_buf());
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
             f.tab_id = Some("w1:t1".into());
@@ -14883,7 +14894,7 @@ mod tests {
 
         assert_eq!(
             task.front.worktree_path,
-            Some(worktree.clone()),
+            Some(worktree.to_path_buf()),
             "the worktree itself was never in question"
         );
         assert_eq!(
@@ -14916,7 +14927,7 @@ mod tests {
     /// pane behind a task's back.
     #[test]
     fn a_workspace_the_mux_still_knows_is_left_alone() {
-        let repo = fixture("live-workspace");
+        let (repo, _root_guard) = fixture("live-workspace");
         let worktree = crate::scratch::root("dispatch-live-workspace-wt");
         let _ = std::fs::remove_dir_all(&worktree);
         std::fs::create_dir_all(&worktree).unwrap();
@@ -14924,7 +14935,7 @@ mod tests {
         let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
             f.branch = Some("task/demo".into());
             f.base = Some("work".into());
-            f.worktree_path = Some(worktree.clone());
+            f.worktree_path = Some(worktree.to_path_buf());
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
             f.tab_id = Some("w1:t1".into());
@@ -14985,7 +14996,7 @@ mod tests {
 
     #[test]
     fn cleaning_up_measures_the_patch_against_base_commit_and_it_survives_into_the_archive() {
-        let repo = fixture("patch-on-cleanup");
+        let (repo, _root_guard) = fixture("patch-on-cleanup");
         // Beside the fixture root rather than inside it, so cleaning the
         // worktree up is not the same act as cleaning the repository up — and
         // by its own name, not a sibling of one, or two `cargo test`
@@ -15010,7 +15021,7 @@ mod tests {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/demo".into());
             f.base_commit = Some(base_commit);
-            f.worktree_path = Some(worktree.clone());
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         let mux = FakeMux::new(vec![]);
@@ -15044,7 +15055,7 @@ mod tests {
     /// silence.
     #[test]
     fn no_fixture_cuts_a_worktree_in_the_real_home() {
-        let repo = fixture("home-leak-guard");
+        let (repo, _root_guard) = fixture("home-leak-guard");
         let cut = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).unwrap();
 
         let real_home = crate::mux::home();
@@ -15075,7 +15086,7 @@ mod tests {
     /// left behind.
     #[test]
     fn a_dependent_is_cut_from_its_dependencys_branch_not_base() {
-        let repo = fixture("cut-from-dependency");
+        let (repo, _root_guard) = fixture("cut-from-dependency");
         // Outside `repo.root`, because a checkout git treats as separate does
         // not belong inside the one it was cut from — `fixture` names the
         // sibling this lands in, and
@@ -15144,7 +15155,7 @@ mod tests {
     /// the dependency being the problem.
     #[test]
     fn a_dependency_that_cannot_be_found_fails_by_name_not_at_the_worktree_cut() {
-        let repo = fixture("dep-not-found");
+        let (repo, _root_guard) = fixture("dep-not-found");
         let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)
             .unwrap()
             .join("second");
@@ -15178,7 +15189,7 @@ mod tests {
     /// before this task — `cut_from` and `base` agree.
     #[test]
     fn a_task_with_no_dependency_is_still_cut_from_base() {
-        let repo = fixture("cut-from-base");
+        let (repo, _root_guard) = fixture("cut-from-base");
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
@@ -15194,7 +15205,7 @@ mod tests {
     /// that dependent with nothing to be cut from.
     #[test]
     fn a_finished_tasks_branch_survives_while_a_queued_dependent_still_names_it() {
-        let repo = fixture("branch-survives-dependent");
+        let (repo, _root_guard) = fixture("branch-survives-dependent");
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
@@ -15234,7 +15245,7 @@ mod tests {
     /// task's cleanup.
     #[test]
     fn an_orphaned_branch_is_freed_by_the_next_cleanup_that_finds_it() {
-        let repo = fixture("branch-freed-later");
+        let (repo, _root_guard) = fixture("branch-freed-later");
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
@@ -15288,7 +15299,7 @@ mod tests {
     /// the sweep that runs once nothing queued needs it any more.
     #[test]
     fn a_trial_arms_orphaned_unpushed_branch_is_freed_by_the_next_cleanup_that_finds_it() {
-        let repo = fixture("branch-freed-later-trial");
+        let (repo, _root_guard) = fixture("branch-freed-later-trial");
         repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
@@ -15336,7 +15347,7 @@ mod tests {
     /// prefixed orphan branch is freed exactly as a bare one is.
     #[test]
     fn an_orphaned_prefixed_branch_is_recovered_and_freed() {
-        let repo = fixture("prefixed-branch-freed");
+        let (repo, _root_guard) = fixture("prefixed-branch-freed");
         repo.git(&["checkout", "-q", "-b", "task/proj-12-auth-01"])
             .unwrap();
         repo.git(&["commit", "-q", "--allow-empty", "-m", "auth-01"])
@@ -15383,7 +15394,7 @@ mod tests {
     /// something else — and `old-x` still on the queue must keep its branch.
     #[test]
     fn a_prefixed_branch_is_not_mis_attributed_to_a_task_its_slug_contains() {
-        let repo = fixture("prefixed-branch-ambiguous");
+        let (repo, _root_guard) = fixture("prefixed-branch-ambiguous");
         for branch in ["task/proj-old-x", "task/old-x"] {
             repo.git(&["checkout", "-q", "-b", branch]).unwrap();
             repo.git(&["commit", "-q", "--allow-empty", "-m", branch])
@@ -15433,7 +15444,7 @@ mod tests {
     fn a_cleanup_terminal_holds_a_task_whose_work_cannot_be_committed() {
         use std::os::unix::fs::PermissionsExt;
 
-        let repo = fixture("cleanup-uncommittable");
+        let (repo, _root_guard) = fixture("cleanup-uncommittable");
         let worktree = crate::scratch::root("dispatch-cleanup-uncommittable-wt");
         let _ = std::fs::remove_dir_all(&worktree);
         std::fs::create_dir_all(&worktree).unwrap();
@@ -15451,7 +15462,7 @@ mod tests {
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/demo".into());
-            f.worktree_path = Some(worktree.clone());
+            f.worktree_path = Some(worktree.to_path_buf());
             f.last_report = Some(crate::task::LastReport {
                 step: "implement".into(),
                 outcome: "pass".into(),
@@ -15485,7 +15496,7 @@ mod tests {
     // covers: the reserved `done` stage — reaching it takes the worktree, the branch and the task file
     #[test]
     fn reaching_the_done_stage_tears_down_and_archives() {
-        let repo = fixture("cleanup");
+        let (repo, _root_guard) = fixture("cleanup");
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/demo".into());
@@ -15504,7 +15515,7 @@ mod tests {
     /// hook (review finding 64). Another task's files are left untouched.
     #[test]
     fn cleanup_reclaims_a_tasks_tracking_and_command_run_files() {
-        let repo = fixture("cleanup-reclaim");
+        let (repo, _root_guard) = fixture("cleanup-reclaim");
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/demo".into());
@@ -15571,7 +15582,7 @@ mod tests {
     /// runs after the archive rename, past every early return.
     #[test]
     fn a_cleanup_held_at_blocked_keeps_the_lanes_session_home() {
-        let mut repo = fixture("cleanup-blocked-keeps-home");
+        let (mut repo, _root_guard) = fixture("cleanup-blocked-keeps-home");
         repo.config.dispatch.auto_commit = false;
 
         let worktree = crate::scratch::root("dispatch-cleanup-blocked-wt");
@@ -15599,7 +15610,7 @@ mod tests {
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
             f.branch = Some("task/demo".into());
-            f.worktree_path = Some(worktree.clone());
+            f.worktree_path = Some(worktree.to_path_buf());
         });
 
         let home = crate::scratch::root("dispatch-cleanup-blocked-home");
@@ -15654,7 +15665,7 @@ mod tests {
     /// first, the way `sweep_on_stop` does.
     #[test]
     fn clean_up_banks_a_lane_still_running_when_the_task_reaches_done() {
-        let mut repo = fixture("cleanup-banks");
+        let (mut repo, _root_guard) = fixture("cleanup-banks");
         priced(&mut repo, "priced-model");
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
@@ -15701,7 +15712,7 @@ mod tests {
 
     #[test]
     fn a_task_on_an_unknown_step_is_reported_not_guessed_at() {
-        let repo = fixture("unknown");
+        let (repo, _root_guard) = fixture("unknown");
         add_task(&repo, "demo", "not-a-real-step");
 
         let mux = FakeMux::new(vec![]);
@@ -15805,7 +15816,7 @@ mod tests {
     /// the `on_pass` route.
     #[test]
     fn a_command_step_runs_and_a_clean_exit_routes_on_pass() {
-        let repo = fixture("command-pass");
+        let (repo, _root_guard) = fixture("command-pass");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         // Writes into the worktree it was given, which is what the assertion
@@ -15839,7 +15850,7 @@ mod tests {
     /// never name one of them even after it genuinely ran.
     #[test]
     fn a_command_step_banks_a_launch_the_way_an_agent_lane_does() {
-        let repo = fixture("command-banks-launch");
+        let (repo, _root_guard) = fixture("command-banks-launch");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("true", false);
@@ -15863,7 +15874,7 @@ mod tests {
     /// `start_lanes`.
     #[test]
     fn a_command_step_whose_destination_has_no_slot_does_not_rerun() {
-        let mut repo = fixture("command-rerun");
+        let (mut repo, _root_guard) = fixture("command-rerun");
         // `review` is the only step `Pipelines::builtin` gives a real model
         // name (`claude-opus-5`), so capping that model's own slots is what
         // makes the destination un-placeable without touching anything else
@@ -15944,7 +15955,7 @@ mod tests {
     /// never reaches: that test's destination never gets a slot at all.
     #[test]
     fn a_command_steps_run_is_forgotten_once_its_destination_lands() {
-        let repo = fixture("command-rerun-forgets-on-landing");
+        let (repo, _root_guard) = fixture("command-rerun-forgets-on-landing");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("echo ran >> count.txt", false);
@@ -15995,7 +16006,7 @@ mod tests {
     /// command step. See `StageMovedBeforeFailure`.
     #[test]
     fn a_command_steps_run_is_forgotten_even_when_its_destination_fails_to_prompt() {
-        let repo = fixture("command-rerun-forgets-on-prompt-failure");
+        let (repo, _root_guard) = fixture("command-rerun-forgets-on-prompt-failure");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).refusing_to_prompt();
         let pipelines = pipelines_running("echo ran >> count.txt", false);
@@ -16041,7 +16052,7 @@ mod tests {
     /// closes it behind it.
     #[test]
     fn a_command_step_with_no_headless_key_runs_in_a_pane_and_closes_it() {
-        let repo = fixture("command-pane-pass");
+        let (repo, _root_guard) = fixture("command-pane-pass");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -16072,7 +16083,7 @@ mod tests {
     /// own `key`.
     #[test]
     fn a_split_command_panes_label_is_only_its_step_not_the_task() {
-        let repo = fixture("command-pane-split-label");
+        let (repo, _root_guard) = fixture("command-pane-split-label");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -16110,7 +16121,7 @@ mod tests {
     /// pane keeps both — same as the identity it is already keyed on.
     #[test]
     fn a_grouped_command_panes_label_keeps_task_and_step() {
-        let repo = fixture("command-pane-grouped-label");
+        let (repo, _root_guard) = fixture("command-pane-grouped-label");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![])
             .offering_panes()
@@ -16139,7 +16150,7 @@ mod tests {
     /// ordinary process inheritance.
     #[test]
     fn a_paned_commands_environment_carries_what_the_dispatcher_process_has() {
-        let repo = fixture("command-pane-env");
+        let (repo, _root_guard) = fixture("command-pane-env");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -16173,7 +16184,7 @@ mod tests {
     /// worktree, run against the main checkout's stale binary.
     #[test]
     fn a_paned_command_never_inherits_the_dispatchers_own_directory() {
-        let repo = fixture("command-pane-pwd");
+        let (repo, _root_guard) = fixture("command-pane-pwd");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -16205,7 +16216,7 @@ mod tests {
     /// dispatcher's pane rather than its own.
     #[test]
     fn a_paned_command_never_inherits_the_dispatchers_own_pane_identity() {
-        let repo = fixture("command-pane-mux-identity");
+        let (repo, _root_guard) = fixture("command-pane-mux-identity");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
@@ -16237,7 +16248,7 @@ mod tests {
     /// run — no pane is ever asked for.
     #[test]
     fn headless_true_never_asks_for_a_pane() {
-        let repo = fixture("command-headless");
+        let (repo, _root_guard) = fixture("command-headless");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let mut pipelines = pipelines_running("echo hidden", false);
@@ -16265,7 +16276,7 @@ mod tests {
     /// is retried later.
     #[test]
     fn a_failing_paned_commands_pane_closes_on_departure() {
-        let repo = fixture("command-pane-fail");
+        let (repo, _root_guard) = fixture("command-pane-fail");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("exit 1", false);
@@ -16326,7 +16337,7 @@ mod tests {
     /// first — the command cuts the task's worktree itself.
     #[test]
     fn a_queued_task_whose_entry_is_a_command_step_starts_it() {
-        let repo = fixture("command-entry");
+        let (repo, _root_guard) = fixture("command-entry");
         // The fake multiplexer hands back this path and creates nothing, which
         // is enough for every test about lanes. A command step runs a real
         // process in it.
@@ -16365,7 +16376,7 @@ mod tests {
     /// opening on a `run:` step look like an empty queue.
     #[test]
     fn a_candidate_with_no_agent_is_reported_rather_than_skipped() {
-        let repo = fixture("no-agent");
+        let (repo, _root_guard) = fixture("no-agent");
         let mut pipelines = Pipelines::builtin();
         let name = "default".to_string();
         pipelines
@@ -16400,7 +16411,7 @@ mod tests {
     // covers: step.on_fail — where a step's failure sends the task
     #[test]
     fn a_failing_command_routes_on_fail() {
-        let repo = fixture("command-fail");
+        let (repo, _root_guard) = fixture("command-fail");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("exit 2", false);
@@ -16420,7 +16431,7 @@ mod tests {
     // covers: the `run:` step exiting non-zero — what it leaves on the task
     #[test]
     fn a_failing_command_writes_the_step_code_and_log_onto_the_task() {
-        let repo = fixture("command-fail-onto-task");
+        let (repo, _root_guard) = fixture("command-fail-onto-task");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("exit 2", false);
@@ -16443,7 +16454,7 @@ mod tests {
     /// carry forward, and every ordinary pass would otherwise grow the file.
     #[test]
     fn a_clean_command_exit_writes_nothing_onto_the_task() {
-        let repo = fixture("command-pass-writes-nothing");
+        let (repo, _root_guard) = fixture("command-pass-writes-nothing");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("exit 0", false);
@@ -16482,7 +16493,7 @@ mod tests {
     /// one kind of run that has a person to stop for.
     #[test]
     fn an_attended_run_parks_on_blocked_instead_of_staffing_it() {
-        let repo = fixture("blocked-attended");
+        let (repo, _root_guard) = fixture("blocked-attended");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_failing_to_blocked();
@@ -16514,7 +16525,7 @@ mod tests {
     /// had no origin to carry it back to.
     #[test]
     fn a_command_step_blocking_records_the_step_it_blocked_on() {
-        let repo = fixture("blocked-origin-direct");
+        let (repo, _root_guard) = fixture("blocked-origin-direct");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_failing_to_blocked();
@@ -16534,7 +16545,7 @@ mod tests {
     /// changed about the destination, and it used to lose the origin with it.
     #[test]
     fn a_spent_loop_budget_redirecting_a_command_to_blocked_still_records_the_origin() {
-        let repo = fixture("blocked-origin-budget");
+        let (repo, _root_guard) = fixture("blocked-origin-budget");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
 
@@ -16577,7 +16588,7 @@ mod tests {
     /// `blocked` exactly as it always did.
     #[test]
     fn an_unattended_run_still_staffs_blocked_on_arrival() {
-        let repo = unattended_fixture("blocked-unattended");
+        let (repo, _root_guard) = unattended_fixture("blocked-unattended");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_failing_to_blocked();
@@ -16599,7 +16610,7 @@ mod tests {
     /// in which no other task can move.
     #[test]
     fn a_pass_does_not_wait_for_a_running_command() {
-        let repo = fixture("command-running");
+        let (repo, _root_guard) = fixture("command-running");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", false);
@@ -16635,7 +16646,7 @@ mod tests {
     /// and the command is still running behind it.
     #[test]
     fn a_background_command_lets_the_task_move_on() {
-        let repo = fixture("command-background");
+        let (repo, _root_guard) = fixture("command-background");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", true);
@@ -16673,7 +16684,7 @@ mod tests {
     /// isolates one behaviour from the other.
     #[test]
     fn a_background_commands_failure_routes_the_task_wherever_it_has_moved_on() {
-        let repo = fixture("command-background-fail");
+        let (repo, _root_guard) = fixture("command-background-fail");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let mut pipelines = pipelines_running("exit 1", true);
@@ -16757,7 +16768,7 @@ mod tests {
     /// as unread as a step with no `on_fail` leaves every code.
     #[test]
     fn a_background_commands_success_leaves_the_task_where_it_already_is() {
-        let repo = fixture("command-background-pass");
+        let (repo, _root_guard) = fixture("command-background-pass");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let mut pipelines = pipelines_running("exit 0", true);
@@ -16818,7 +16829,7 @@ mod tests {
     /// tab has no more live work in that pane to show.
     #[test]
     fn a_background_commands_pane_closes_at_reap() {
-        let repo = fixture("command-background-pane");
+        let (repo, _root_guard) = fixture("command-background-pane");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
         // No `on_fail`: proves the pane closes even though nothing routes on
@@ -16878,7 +16889,7 @@ mod tests {
     /// a placement that failed once.
     #[test]
     fn a_background_command_already_running_still_lets_the_task_move_on() {
-        let repo = fixture("command-background-rearrival");
+        let (repo, _root_guard) = fixture("command-background-rearrival");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", true);
@@ -16913,7 +16924,7 @@ mod tests {
     /// into a directory that no longer exists.
     #[test]
     fn cleanup_stops_a_background_command_still_running() {
-        let repo = fixture("command-cleanup");
+        let (repo, _root_guard) = fixture("command-cleanup");
         let path = add_task_with(&repo, "demo", "done", |front| {
             front.branch = Some("task/demo".into());
             front.workspace_id = Some("w1".into());
@@ -16941,7 +16952,7 @@ mod tests {
     /// about it — so the step's own timeout is the only thing that ends it.
     #[test]
     fn a_command_that_runs_past_its_timeout_is_stopped_and_routed() {
-        let repo = fixture("command-timeout");
+        let (repo, _root_guard) = fixture("command-timeout");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running_for("sleep 300", false, Duration::from_millis(300));
@@ -16986,7 +16997,7 @@ mod tests {
     /// ever reaps.
     #[test]
     fn a_background_command_past_its_timeout_is_reaped() {
-        let repo = fixture("command-timeout-background");
+        let (repo, _root_guard) = fixture("command-timeout-background");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running_for("sleep 300", true, Duration::from_millis(300));
@@ -17074,7 +17085,7 @@ mod tests {
     /// Its own run then starts on a later pass.
     #[test]
     fn a_serial_command_step_runs_for_one_task_at_a_time() {
-        let repo = fixture("command-serial");
+        let (repo, _root_guard) = fixture("command-serial");
         let login = add_task_with_worktree(&repo, "a-login", "implement");
         let export = add_task_with_worktree(&repo, "b-export", "implement");
         let release = repo.root.join("release");
@@ -17136,7 +17147,7 @@ mod tests {
     /// what is waited on is the run, not where the task that started it is.
     #[test]
     fn a_serial_background_run_holds_the_step_after_its_task_moves_on() {
-        let repo = fixture("command-serial-background");
+        let (repo, _root_guard) = fixture("command-serial-background");
         let login = add_task_with_worktree(&repo, "a-login", "implement");
         let export = add_task_with_worktree(&repo, "b-export", "implement");
         let release = repo.root.join("release");
@@ -17177,7 +17188,7 @@ mod tests {
     /// pipeline is a different step, and a run of it holds nothing here.
     #[test]
     fn a_serial_step_is_not_held_by_the_same_step_in_another_pipeline() {
-        let repo = fixture("command-serial-other-pipeline");
+        let (repo, _root_guard) = fixture("command-serial-other-pipeline");
         let release = repo.root.join("release");
         let mut pipelines = pipelines_running_serial(&run_until(&release), false);
         let mut other = pipelines.get("default").unwrap().clone();
@@ -17216,7 +17227,7 @@ mod tests {
     /// it, exactly as it always has.
     #[test]
     fn a_command_step_without_serial_starts_for_every_task() {
-        let repo = fixture("command-not-serial");
+        let (repo, _root_guard) = fixture("command-not-serial");
         add_task_with_worktree(&repo, "a-login", "implement");
         add_task_with_worktree(&repo, "b-export", "implement");
         let release = repo.root.join("release");
@@ -17278,7 +17289,7 @@ mod tests {
     /// and only the report contract differs between the two.
     #[test]
     fn a_gated_step_and_the_step_beside_it_differ_only_in_the_report_contract() {
-        let repo = fixture("checkpoint-briefing");
+        let (repo, _root_guard) = fixture("checkpoint-briefing");
         add_task(&repo, "t", "ask");
         let task = repo.task("t").unwrap();
 
@@ -17333,7 +17344,7 @@ mod tests {
     /// invite a lane to stop where it never should.
     #[test]
     fn an_ungated_step_is_told_nothing_about_gates() {
-        let repo = fixture("gate-silent");
+        let (repo, _root_guard) = fixture("gate-silent");
         add_task(&repo, "t", "implement");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
@@ -17351,7 +17362,7 @@ mod tests {
     /// should ever mention `READING THE RUN` or offer the command.
     #[test]
     fn only_blocked_names_spoolway_resume() {
-        let repo = fixture("only-blocked-names-resume");
+        let (repo, _root_guard) = fixture("only-blocked-names-resume");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let blocked_step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
@@ -17388,7 +17399,7 @@ mod tests {
     /// sentence a gated step's own lane would get.
     #[test]
     fn the_unblockers_contract_names_the_gated_step_it_stands_in_for() {
-        let repo = fixture("unblocker-gate-contract");
+        let (repo, _root_guard) = fixture("unblocker-gate-contract");
         let yaml = "steps:\n  \
                      - id: implement\n    agent: pi\n    on_pass: review\n  \
                      - id: review\n    agent: pi\n    on_pass: look\n  \
@@ -17441,7 +17452,7 @@ mod tests {
     /// contract's `--stage` form and trailing sentence both stay unchanged.
     #[test]
     fn the_unblockers_contract_names_a_command_steps_own_craft() {
-        let repo = fixture("unblocker-command-contract");
+        let (repo, _root_guard) = fixture("unblocker-command-contract");
         let yaml = "steps:\n  \
                      - id: build\n    run: cargo build --release\n    on_pass: done\n  \
                      - id: blocked\n    agent: pi\n    session: true\n";
@@ -17490,7 +17501,7 @@ mod tests {
     /// path itself, not the name that resolves to it.
     #[test]
     fn the_opening_prompt_carries_only_the_mechanics_this_step_has() {
-        let repo = fixture("prompt-mechanics");
+        let (repo, _root_guard) = fixture("prompt-mechanics");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let task = reload(&add_task(&repo, "demo", "review"));
@@ -17527,7 +17538,7 @@ mod tests {
     /// something that will not be there.
     #[test]
     fn the_prompt_contract_promises_no_variable_a_lane_lacks() {
-        let repo = fixture("contract-environment");
+        let (repo, _root_guard) = fixture("contract-environment");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]);
 
@@ -17552,7 +17563,7 @@ mod tests {
     /// by one paragraph naming the step and the task it actually has.
     #[test]
     fn every_lane_is_told_it_is_one_step_of_one_task_in_spoolway() {
-        let repo = fixture("prompt-situation");
+        let (repo, _root_guard) = fixture("prompt-situation");
         let pipelines = Pipelines::builtin();
 
         for (pipeline, step) in [
@@ -17604,7 +17615,7 @@ mod tests {
     /// reports as a question.
     #[test]
     fn every_lane_is_told_that_nothing_will_wake_it() {
-        let repo = fixture("prompt-no-wakeup");
+        let (repo, _root_guard) = fixture("prompt-no-wakeup");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("handover").unwrap();
@@ -17624,7 +17635,7 @@ mod tests {
     /// prompt alone.
     #[test]
     fn the_opening_prompt_is_one_sentence_naming_the_task_file() {
-        let repo = fixture("prompt-shrunk");
+        let (repo, _root_guard) = fixture("prompt-shrunk");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17648,7 +17659,7 @@ mod tests {
     // covers: step.skills — opening_prompt emits one leading `/name` per skill, in order
     #[test]
     fn the_opening_prompt_leads_with_one_slash_invocation_per_skill() {
-        let repo = fixture("prompt-skills");
+        let (repo, _root_guard) = fixture("prompt-skills");
         let plain_pipeline = Pipelines::builtin().get("default").unwrap().clone();
         let plain_step = plain_pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
@@ -17685,7 +17696,7 @@ mod tests {
     // covers: step.skills — opening_prompt puts every skill and the briefing on one line
     #[test]
     fn a_step_with_skills_produces_one_line_with_no_newline() {
-        let repo = fixture("prompt-skills");
+        let (repo, _root_guard) = fixture("prompt-skills");
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         pipeline
             .steps
@@ -17720,7 +17731,7 @@ mod tests {
     /// prompt's true final line is that refusal, not `--handoff`.
     #[test]
     fn the_system_prompt_ends_with_the_report_contract() {
-        let repo = fixture("prompt-contract");
+        let (repo, _root_guard) = fixture("prompt-contract");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17745,7 +17756,7 @@ mod tests {
     /// LANE` keeps.
     #[test]
     fn what_you_write_down_follows_what_you_have_directly() {
-        let repo = fixture("prompt-write-down-placement");
+        let (repo, _root_guard) = fixture("prompt-write-down-placement");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17773,7 +17784,7 @@ mod tests {
     /// own row.
     #[test]
     fn what_you_write_down_names_all_three_builtin_headings() {
-        let repo = fixture("prompt-write-down-headings");
+        let (repo, _root_guard) = fixture("prompt-write-down-headings");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17792,7 +17803,7 @@ mod tests {
     /// from the left margin whichever block's row it is.
     #[test]
     fn what_you_write_down_shares_what_you_haves_label_column() {
-        let repo = fixture("prompt-write-down-column");
+        let (repo, _root_guard) = fixture("prompt-write-down-column");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17826,7 +17837,7 @@ mod tests {
     /// lane always says what happens after a person acts.
     #[test]
     fn the_composed_prompt_is_under_the_word_budget_for_the_plain_case() {
-        let repo = fixture("prompt-word-budget");
+        let (repo, _root_guard) = fixture("prompt-word-budget");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17844,7 +17855,7 @@ mod tests {
     /// double it.
     #[test]
     fn no_heading_gap_is_more_than_one_blank_line() {
-        let repo = fixture("prompt-no-double-blank");
+        let (repo, _root_guard) = fixture("prompt-no-double-blank");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17864,7 +17875,7 @@ mod tests {
     /// usable form (`-m "..."`) rather than the bare flag.
     #[test]
     fn the_blocked_steps_report_contract_offers_pass_and_pause_only() {
-        let repo = fixture("prompt-contract-blocked");
+        let (repo, _root_guard) = fixture("prompt-contract-blocked");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
@@ -17906,7 +17917,7 @@ mod tests {
     /// block at all.
     #[test]
     fn a_step_whose_fail_and_block_routes_differ_offers_fail_with_no_refusal() {
-        let repo = fixture("prompt-contract-fail-offered");
+        let (repo, _root_guard) = fixture("prompt-contract-fail-offered");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("review").unwrap();
@@ -17932,7 +17943,7 @@ mod tests {
     /// which is what lets it open with "Fix pass" rather than a hedge.
     #[test]
     fn the_fix_pass_is_named_only_when_review_actually_failed_it_back() {
-        let repo = fixture("prompt-findings");
+        let (repo, _root_guard) = fixture("prompt-findings");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("implement").unwrap();
@@ -17955,7 +17966,7 @@ mod tests {
     /// that a `system_prompt` calling this a fix pass could contradict.
     #[test]
     fn a_fix_pass_composes_both_halves_without_contradicting_itself() {
-        let repo = fixture("fix-pass-both-halves");
+        let (repo, _root_guard) = fixture("fix-pass-both-halves");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         // `implement` is a `session:` step, and `review`'s own `on_fail` is
@@ -17987,7 +17998,7 @@ mod tests {
     /// exit was the round cap. The paragraph names the step and its log.
     #[test]
     fn a_lane_a_command_step_failed_into_is_told_which_one_and_where_to_read_it() {
-        let repo = fixture("prompt-command-fail");
+        let (repo, _root_guard) = fixture("prompt-command-fail");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         // `handover` is the shipped pipeline's command step (`spoolway
@@ -18011,7 +18022,7 @@ mod tests {
     /// that step reported, and what it said is already in the task file.
     #[test]
     fn arriving_from_a_lane_is_not_a_failed_command() {
-        let repo = fixture("prompt-command-lane");
+        let (repo, _root_guard) = fixture("prompt-command-lane");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("review").unwrap();
@@ -18028,7 +18039,7 @@ mod tests {
     /// so the ambiguous case says nothing at all.
     #[test]
     fn a_command_step_routing_both_ways_to_one_lane_claims_nothing() {
-        let repo = fixture("prompt-command-both");
+        let (repo, _root_guard) = fixture("prompt-command-both");
         let mut pipelines = Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             for step in &mut pipeline.steps {
@@ -18058,7 +18069,7 @@ mod tests {
     /// process that is not there.
     #[test]
     fn a_gated_headless_lane_gives_its_slot_back() {
-        let repo = fixture("waiting-slot-detached");
+        let (repo, _root_guard) = fixture("waiting-slot-detached");
         add_task_with(&repo, "gated", "merge", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -18113,12 +18124,13 @@ mod tests {
     // covers: step.effort — a step's effort reaches the lane on a kind whose argv has somewhere to put it
     #[test]
     fn a_steps_effort_is_rendered_on_a_kind_that_carries_the_flag() {
-        let repo = fixture("effort-flag");
+        let (repo, _root_guard) = fixture("effort-flag");
+        let worktree = a_checkout("dispatch-effort-flag");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(a_checkout("dispatch-effort-flag"));
+            f.worktree_path = Some(worktree.to_path_buf());
         });
         let mux = FakeMux::new(vec![]);
 
@@ -18186,7 +18198,7 @@ mod tests {
     /// `spoolway resume` reads to undo the hold.
     #[test]
     fn a_failing_queued_hook_lands_the_task_on_paused() {
-        let mut repo = fixture("hook-queued-pause");
+        let (mut repo, _root_guard) = fixture("hook-queued-pause");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
@@ -18227,7 +18239,7 @@ mod tests {
     /// first step instead means `fire` was never called for it.
     #[test]
     fn a_trial_arm_never_fires_the_queued_issue_tracking_hook() {
-        let mut repo = fixture("hook-queued-trial-suppressed");
+        let (mut repo, _root_guard) = fixture("hook-queued-trial-suppressed");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |front| {
@@ -18248,7 +18260,7 @@ mod tests {
     /// run for a trial arm, so the arm archives straight through.
     #[test]
     fn a_trial_arm_never_fires_the_done_issue_tracking_hook() {
-        let mut repo = fixture("hook-done-trial-suppressed");
+        let (mut repo, _root_guard) = fixture("hook-done-trial-suppressed");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::DONE, |front| {
@@ -18276,7 +18288,7 @@ mod tests {
     /// its entry step is proof `fire` was never called for it on either.
     #[test]
     fn a_tracking_off_task_never_fires_the_queued_issue_tracking_hook() {
-        let mut repo = fixture("hook-queued-tracking-off-suppressed");
+        let (mut repo, _root_guard) = fixture("hook-queued-tracking-off-suppressed");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |front| {
@@ -18310,7 +18322,7 @@ mod tests {
     /// no run file appears under the tracking directory for it at all.
     #[test]
     fn a_tracking_off_task_never_fires_the_done_issue_tracking_hook() {
-        let mut repo = fixture("hook-done-tracking-off-suppressed");
+        let (mut repo, _root_guard) = fixture("hook-done-tracking-off-suppressed");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::DONE, |front| {
@@ -18346,7 +18358,7 @@ mod tests {
     /// fix, this task would have started a lane on the very first pass.
     #[test]
     fn a_slow_failing_queued_hook_never_starts_the_task() {
-        let mut repo = fixture("hook-queued-slow-pause");
+        let (mut repo, _root_guard) = fixture("hook-queued-slow-pause");
         // A second, not three tenths of one. The three passes below have to
         // land inside the hook's own run, and on a loaded CI runner a pass
         // plus its 50ms wait was taking a tenth of a second on its own — so
@@ -18383,7 +18395,8 @@ mod tests {
     #[test]
     fn no_hook_configured_never_holds_a_queued_task() {
         for hook in ["", "../escapes.sh"] {
-            let mut repo = fixture(&format!("hook-queued-unconfigured-{}", hook.len()));
+            let (mut repo, _root_guard) =
+                fixture(&format!("hook-queued-unconfigured-{}", hook.len()));
             repo.config.issue_tracking.hook = hook.into();
             let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
             let mux = FakeMux::new(vec![]);
@@ -18402,7 +18415,7 @@ mod tests {
     /// exited clean — a passing `queued` hook alone must not be enough.
     #[test]
     fn a_passing_hook_fires_started_too_before_the_task_launches() {
-        let mut repo = fixture("hook-started-fires");
+        let (mut repo, _root_guard) = fixture("hook-started-fires");
         write_hook(&repo, "ok.sh", "exit 0");
         repo.config.issue_tracking.hook = "ok.sh".into();
         let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
@@ -18429,7 +18442,7 @@ mod tests {
     /// own hook, run first, passed clean.
     #[test]
     fn a_failing_started_hook_lands_the_task_on_paused() {
-        let mut repo = fixture("hook-started-pause");
+        let (mut repo, _root_guard) = fixture("hook-started-pause");
         write_hook(
             &repo,
             "fail-started.sh",
@@ -18458,7 +18471,7 @@ exit 0"#,
     /// archive when the event was `done`.
     #[test]
     fn a_failing_done_hook_holds_the_task_out_of_the_archive() {
-        let mut repo = fixture("hook-done-pause");
+        let (mut repo, _root_guard) = fixture("hook-done-pause");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task(&repo, "demo", crate::pipeline::DONE);
@@ -18480,7 +18493,7 @@ exit 0"#,
     /// about the task's stage moves.
     #[test]
     fn a_failing_hook_on_blocked_only_records_the_failure() {
-        let mut repo = fixture("hook-blocked-record");
+        let (mut repo, _root_guard) = fixture("hook-blocked-record");
         write_hook(&repo, "fail.sh", "exit 1");
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
@@ -18511,7 +18524,7 @@ exit 0"#,
     /// branch this function exists to clean up was left behind.
     #[test]
     fn reclaim_scratch_matches_a_worktree_reached_through_a_symlink() {
-        let repo = fixture("reclaim-scratch-symlink");
+        let (repo, _root_guard) = fixture("reclaim-scratch-symlink");
         let real = crate::scratch::root("reclaim-scratch-symlink-real");
         let _ = std::fs::remove_dir_all(&real);
         std::fs::create_dir_all(&real).unwrap();
@@ -18550,7 +18563,7 @@ exit 0"#,
     /// branch behind; the fallback has to be the raw path instead.
     #[test]
     fn reclaim_scratch_matches_a_worktree_whose_checkout_is_already_gone() {
-        let repo = fixture("reclaim-scratch-gone");
+        let (repo, _root_guard) = fixture("reclaim-scratch-gone");
 
         let scratch = repo.scratch_dir().join("demo");
         std::fs::create_dir_all(&scratch).unwrap();

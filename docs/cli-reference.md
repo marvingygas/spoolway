@@ -578,6 +578,20 @@ A command step marked `first: true` prints `first-of-chain` the same way, in pla
 `entry:` line, naming the file it came from. See [Private
 pipelines](pipelines.md#private-pipelines).
 
+### `spoolway pipeline show --json`
+
+The same pipelines as JSON, each with its full list of steps.
+
+```
+$ spoolway pipeline show --json
+{"pipelines": [{"name": "bugfix", "entry": "reproduce", "description": "...", "source": "tracked", "file": null, "steps": [{"id": "reproduce", "kind": "agent", "description": "...", "agent": "claude", "prompt": "reproducer", "model": "claude-sonnet-5", "effort": "medium", "session": true, "slot": true, "gate": false, "loop": null, "loop_exit": null, "on_pass": "fix", "on_fail": null, "run": null, "timeout_seconds": null, "background": false, "headless": false, "last": false, "first": false, "serial": false}, ...]}, ...]}
+```
+
+`source` and `file` read the same as [`pipeline list
+--json`](#spoolway-pipeline-list---json). `kind` is `"agent"`, `"command"` or `"terminal"`.
+`loop` is `null` for a step with no `loop:` limit; `timeout_seconds` is `null` for an agent
+step.
+
 ### `spoolway pipeline check`
 
 Validate every pipeline file, its agent references and its prompts against the config. This
@@ -594,7 +608,8 @@ A missing or overlong `description:` is a warning, not a failure.
 ### `spoolway pipeline contract`
 
 Print the pipeline format: every key, every rule refused at load, this project's agent
-profiles and prompts, and a blank pipeline to copy.
+profiles and prompts, and a blank pipeline to copy. It runs even when `.spoolway/pipelines/`
+is empty, since the format it prints needs no pipeline of this project's own.
 
 Copy the blank to `.spoolway/pipelines/<name>.yml`, delete what you do not need, and run
 `spoolway pipeline check`.
@@ -651,9 +666,23 @@ A step the pipeline does not have, a key the merge refuses, or `id:` set on the 
 out of the merge instead: the command still runs, and prints one stderr line naming what it
 left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
 
+`<name>` may also name a private pipeline. The patch is written the same way, but it only
+starts applying once [`spoolway pipeline promote <name>`](#spoolway-pipeline-promote-name)
+makes the pipeline tracked:
+
+```
+$ spoolway pipeline override strict --set implement.model=x
+
+  wrote ~/.spoolway/spoolway/overrides/pipelines/strict.yml
+    implement.model   claude-sonnet-5 -> x
+
+  waiting on `spoolway pipeline promote strict` — a private pipeline's patch only starts
+  applying once it is tracked. `spoolway override drop strict` to clear it.
+```
+
 ### `spoolway pipeline copy <from> <to>`
 
-Copy a pipeline and its task skeleton into the private layer.
+Copy a pipeline into the private layer, along with a task skeleton to read from.
 
 ```
 $ spoolway pipeline copy impl impl-strict
@@ -661,9 +690,20 @@ wrote    ~/.spoolway/proj-ab12cd34/local/pipelines/impl-strict.yml
 wrote    ~/.spoolway/proj-ab12cd34/local/templates/tasks/impl-strict.md
 ```
 
-`<from>` may already be tracked or private. A `<to>` that already names a pipeline, tracked or
-private, is refused, naming `spoolway pipeline list`. In home mode, where the whole setup is
-already private, this writes into the workspace's own `config/` instead. `--json` prints
+The skeleton written is whatever `from` would hand a task queued on it right now: `from`'s own
+file if it has one, down to the built-in. When `from` names an explicit `task_template:`, the
+copy keeps that same `task_template:` and shares the named skeleton instead of writing a new
+one, so `--json` then lists only the pipeline file.
+
+`<from>` may already be tracked or private. Both `<from>` and `<to>` must be one plain name:
+not empty, not absolute, and holding none of `/`, `\` or `..`; anything else is refused, naming
+the bad name. A `<to>` that already names a pipeline, tracked or private, is also refused,
+naming `spoolway pipeline list`. A `<to>` whose skeleton already exists, tracked or private, is
+refused the same way, so a copy never replaces an existing skeleton. Run from a linked
+worktree, both checks also cover the main checkout's tracked files, naming the clashing file:
+the main checkout and the dispatcher load those files even when the worktree's own checkout
+has never picked up the commit that added them. In home mode, where the whole setup is already
+private, this writes into the workspace's own `config/` instead. `--json` prints
 `{"wrote": [<path>, ...]}`, with each path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
 
@@ -679,13 +719,36 @@ moved    local/prompts/reviewer-strict/        ->  .spoolway/prompts/reviewer-st
 moved    local/templates/tasks/impl-strict.md  ->  .spoolway/templates/tasks/impl-strict.md
 ```
 
+The skeleton moved is the one `task_template:` names, the pipeline's own name when it sets
+none — the same file a task queued on it would read.
+
+Refused when `<name>` names no private pipeline. If `<name>` is already a tracked pipeline's
+name, the message says so plainly and names the tracked file, rather than the generic "no
+private pipeline named" message a name that is missing outright gets.
+
 Refused inside a linked worktree, naming the command to run in the main checkout instead — the
 dispatcher reads the main checkout's tracked files, never a worktree's own copy. Refused
-against a clash with any tracked file, naming it. Refused in home mode, where the whole setup
-is already private and there is nothing to promote into. Nothing is committed. `--json` prints
-`{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and `to` relative to
-the checkout, matching the two columns above. See [Private
-pipelines](pipelines.md#private-pipelines).
+against a clash with any tracked file, naming it. Refused if a step names a prompt, or the
+pipeline names a `task_template:`, that is not one plain name, or if a private prompt's folder
+holds a symlinked directory, before anything is moved. Refused if another private pipeline
+names the same skeleton, naming it — promoting one must not pull the file out from under the
+other. Refused in home mode, where the whole setup is already private and there is nothing to
+promote into. Nothing is committed.
+
+A promote that fails partway through puts every file back where it was. Nothing is left tracked
+or deleted halfway, and the same `spoolway pipeline promote <name>` can be run again.
+
+If an override file was already waiting on this pipeline, or on a prompt it names — written by
+`pipeline override` or `prompt override` while the target was still private — promote names it
+once the move starts it applying:
+
+```
+  ~/.spoolway/proj-ab12cd34/overrides/pipelines/impl-strict.yml already exists and will start applying now that it is tracked
+```
+
+`--json` prints `{"moved": [{"from", "to"}, ...]}`, `from` relative to the project's home and
+`to` relative to the checkout, matching the two columns above. It carries no line for a
+waiting override file. See [Private pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway prompt contract`
 
@@ -701,9 +764,22 @@ spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
 | `--pipeline <PIPELINE>` | required unless `--task` names one | Which pipeline the step belongs to |
 | `--task <TASK>` | a sample task | Render against a real queued task |
 
+With neither `--pipeline` nor `--task`, and no pipeline yet in the project, it prints a line
+pointing at `spoolway pipeline contract` instead of a step's contract: there is no step yet to
+render against.
+
 ### `spoolway prompt list`
 
-Print every prompt and which steps run it.
+Print every prompt and which steps run it. A private prompt — one with no tracked file of the
+same name, see [Private prompts](prompts.md#private-prompts) — is listed too, with `private`
+first in its row:
+
+```
+PROMPT       USED BY
+implementer  impl/implement
+reviewer     impl/review, bugfix/review
+impl2        private, — nothing runs it
+```
 
 ### `spoolway prompt show <name>`
 
@@ -714,19 +790,30 @@ Print one prompt file.
 Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md` to edit there. An override
 replaces the whole file. See the [overrides layer](configuration.md#the-overrides-layer).
 
+`<name>` may also be a private prompt. The fork is written the same way, but it only starts
+applying once the pipeline that runs it is promoted. See [Private
+prompts](prompts.md#private-prompts).
+
 ### `spoolway prompt copy <from> <to>`
 
-Copy a prompt into the private layer.
+Copy a prompt into the private layer, along with any assets it uses.
 
 ```
 $ spoolway prompt copy reviewer reviewer-strict
 wrote    ~/.spoolway/proj-ab12cd34/local/prompts/reviewer-strict/PROMPT.md
 ```
 
-`<from>` may already be tracked or private. A `<to>` that already names a prompt, tracked or
-private, is refused, naming `spoolway prompt list`. In home mode, where the whole setup is
-already private, this writes into the workspace's own `config/prompts/<to>/` instead. `--json`
-prints `{"wrote": [<path>]}`, with the path in full. See [Private
+This copies the whole prompt folder `from` names, `assets/` included, not just its
+`PROMPT.md`. A source folder holding a symlinked directory is refused outright, naming it,
+and nothing is copied. `<from>` may already be tracked or private. Both `<from>` and `<to>`
+must be one plain name: not empty, not absolute, and holding none of `/`, `\` or `..`;
+anything else is refused, naming the bad name. A `<to>` that already names a prompt, tracked or
+private, is also refused, naming `spoolway prompt list`. Run from a linked worktree, that check
+also covers the main checkout's tracked prompts, naming the clashing file: the main checkout
+and the dispatcher load those files even when the worktree's own checkout has never picked up
+the commit that added them. In home mode, where the whole setup is already private, this
+writes into the workspace's own `config/prompts/<to>/` instead. `--json` prints
+`{"wrote": [<path>]}`, with the path in full. See [Private
 pipelines](pipelines.md#private-pipelines).
 
 ### `spoolway agent list`
@@ -787,7 +874,9 @@ Print the prose template a project owns and where it lives.
 
 ### `spoolway hook contract`
 
-Print every event an issue-tracking hook runs on and the environment each one carries. See
+Print every event an issue-tracking hook runs on and the environment each one carries, and
+close with this project's own hooks folder: `.spoolway/hooks/` in repo mode, or the workspace's
+`config/hooks/` in home mode. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
 
 | Event | When it runs |
@@ -903,22 +992,44 @@ the tracker and the project key. With no terminal it takes the defaults.
 Before any of that, it prints the project directory it resolved and waits for a yes — a path you
 do not recognise is the whole of the check, and it matters most when `init` was reached from a
 keybinding rather than typed in a directory you were looking at. Answering no writes nothing and
-exits 0. With nobody there to answer, that question takes its default, which is no, so a script
-or CI runner passes `--yes`.
+exits 0. With no terminal to answer, that question takes its default, which is no; `init` then
+prints one line saying nothing was written and that `--yes` answers it, so a script, CI runner
+or agent passes `--yes`.
+
+Run from a linked worktree, the directory it resolves to is the main checkout the worktree was
+cut from, never the worktree itself — `init` never writes into a worktree or binds it as its own
+project. When the main checkout cannot be found this way, `init` refuses and says to run it in
+the main checkout, or to pass `-C <main checkout>`.
 
 `Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
 default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
 `home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
 checkout or its `.git`. With no workspace yet, home mode creates one; with workspaces already
-there, `init` also asks `Which workspace should this checkout use?`, and `--workspace <name>`
-or `--workspace new` answers it. Joining a workspace keeps its `config/` exactly as it is and
-skips the example and tracker questions. With nobody to ask and no `--workspace`, `init` starts
-a new workspace rather than joining one unasked. See [Home mode](concepts.md#home-mode).
+there, `init` also asks `Which workspace should this checkout use?`, naming each workspace's
+repository and sorting one already holding a clone of this repository to the top, and
+`--workspace <name>` or `--workspace new` answers it without asking. `new` is always the
+default. Joining a workspace keeps its `config/` exactly as it is and skips the example and
+tracker questions; `--tracker`, `--project-key`, `--examples` or `--no-examples` passed anyway
+are ignored, and `init` prints a note naming which. With nobody to ask and no `--workspace`,
+`init` starts a new workspace, the same default the menu takes; when a workspace already holds
+a clone of this repository, it
+prints that workspace's name and how to join it first. See [Home
+mode](concepts.md#home-mode). Either mode needs a real git repository behind the checkout; a
+plain folder is refused.
+
+Repo mode refuses outright, before writing anything, when the checkout is your home directory:
+`~/.spoolway` there is already spoolway's own state directory, so it can never also hold a
+project's tracked setup. The refusal says to run `--setup home` instead, or to run `init` in the
+actual project checkout. Home mode is unaffected, since it never writes into the checkout.
 
 Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`,
+`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own, and
 `--workspace <name>` naming a workspace other than the one a checkout already uses. Each
-refusal names the command to run instead.
+refusal names the command to run instead. To actually move a clone from the workspace it uses
+now to another, run [`spoolway workspace move`](#spoolway-workspace-move-to).
+
+Joining a workspace whose `config/` has gone missing is refused too, naming the missing path.
 
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
@@ -937,13 +1048,13 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 |---|---|---|
 | `--setup <repo\|home>` | `repo` | Answer `Where should this project's setup live?` without asking |
 | `--workspace <NAME\|new>` | | Answer `Which workspace should this checkout use?` without asking. Implies `--setup home`. `new` starts a workspace; a name joins one that already exists |
-| `--provider <claude\|codex>` | `claude` | The coding agent whose skills are installed and which becomes the project's agent profile |
+| `--provider <claude\|codex\|pi>` | the project's own provider, or `claude` on a fresh one | The coding agent whose skills are installed and which becomes the project's agent profile |
 | `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts, task templates and ticket templates. Also the answer with nobody to ask |
 | `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
-| `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira |
+| `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |
 | `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
-| `--force` | | Overwrite existing config, pipeline and prompt files |
+| `--force` | | Overwrite existing config, pipeline and prompt files. In a home-mode clone, names the other clones that share that config before rewriting it |
 | `--adopt <NAME>` | | Bind this checkout to the home already at `~/.spoolway/<NAME>/` and stamp it with that home's id. `NAME` is the home's directory name, such as `api-8w4r2c`. Prints what that home already holds |
 | `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
 | `--take-over` | | Accepted and ignored |
@@ -952,12 +1063,42 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 a repo-mode home: it rewrites that `dispatcher` clone entry's path, in the named workspace's
 `project.toml`, to this checkout, and keeps that dispatcher's queue, archive and worktrees.
 Nothing is stamped into `.git` either way. This is the exact command the "no spoolway project
-found" error prints for a clone whose folder moved. See [Home mode](concepts.md#home-mode).
+found" error prints for a clone whose folder moved, shell-quoted and naming the entry's old
+path. `--adopt <workspace>`, naming a workspace with no `/<dispatcher>`, is refused, naming the
+dispatchers that workspace has so you can add the right one. See [Home
+mode](concepts.md#home-mode).
 
-Run again in a project that already has a config, it installs skills, restores any example file
-that went missing, and otherwise changes nothing. Hook scripts are written only when a tracker
-is chosen, whichever one, so switching trackers later is a `spoolway config set
-issue_tracking.hook` away. See [Installation and setup](installation.md#scaffolding-a-project).
+Run again in a project that already has a config, it installs skills for the project's own
+configured provider, restores any example file that went missing, and otherwise changes
+nothing: with no `--provider`, it keeps the provider already configured rather than falling
+back to `claude`, and a `--tracker` with no `--project-key` keeps the project's existing key
+instead of blanking it. Hook scripts are written only when a tracker is chosen, whichever one,
+so switching trackers later is a `spoolway config set issue_tracking.hook` away. See
+[Installation and setup](installation.md#scaffolding-a-project).
+
+### `spoolway workspace move <to>`
+
+Move this checkout from the home-mode workspace it is listed in now to `to`, taking its
+dispatcher folder — queue, archive and worktrees — along with it. The folder keeps its current
+name at `to` unless that name is already taken there, in which case the move is refused; pass
+`--dispatcher <name>` to choose a different name.
+
+Refused while a dispatcher is running over the clone's current dispatcher folder, or while a
+live process is working in one of its worktrees. An idle worktree — one nothing is currently
+working in — moves along with the rest of the folder and is repaired in place afterwards. `to`
+must be a workspace `spoolway init --setup home` has listed; a 0.6.0 repo-mode home is refused
+as a destination, the same as it is left out of `init`'s own workspace menu.
+
+```
+spoolway workspace move other-workspace
+spoolway workspace move other-workspace --dispatcher api-2
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--dispatcher <NAME>` | the clone's current dispatcher name | The dispatcher folder's name at `to`, when the name it already has there is taken |
+
+See [Home mode](concepts.md#home-mode).
 
 ### `spoolway install <provider>`
 
@@ -1077,10 +1218,18 @@ $ spoolway doctor
 |---|---|---|
 | `-v`, `--verbose` | | Print every check, including the ones that passed |
 | `--no-live` | | Skip the throwaway-pane check |
+| `--live` | | Run the throwaway-pane check even from outside the herdr pane it would open a pane in |
 
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
 `--json` prints the findings as one object. The `bound to its home` check, under `-v`, names
 whether the project runs in repo mode or home mode. See [Home mode](concepts.md#home-mode).
+
+The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
+open one in. From any other shell — a script, a test sandbox, another agent's terminal — it
+skips the check with a note instead. A running herdr server answers even without `HERDR_*`
+set, so without this skip the check would open its pane in the caller's own real herdr
+session. `--live` runs the check anyway; `--no-live` always skips it. The two flags conflict
+and cannot be combined.
 
 ### `spoolway herdr bind`
 

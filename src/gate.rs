@@ -46,7 +46,16 @@ fn behind(repo: &Repo) -> Result<bool> {
         dry_run: true,
         replace: Vec::new(),
     };
-    let outcomes = crate::sync::scan(repo, &dry)?;
+    // Not `?`: `crate::sync::config` now fails the whole scan outright on a
+    // `config.toml` it cannot even parse, naming the file — the right thing
+    // for `sync` itself to say, but the wrong thing for this module, whose
+    // own doc promises that nothing here stops a command. An ordinary
+    // command hitting that in passing, on a checkout a stamp already calls
+    // behind, reads as "not behind" instead: `sync` is still the thing that
+    // will say so, the moment somebody actually runs it.
+    let Ok(outcomes) = crate::sync::scan(repo, &dry) else {
+        return Ok(false);
+    };
     let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
     Ok(!wrote.is_empty() || !removed.is_empty())
 }
@@ -126,19 +135,22 @@ mod tests {
     // `checkout` and `root` the same path, as `sync`'s own fixture keeps
     // them: `Repo::checkout_note` only shells out to `git branch` once the
     // two differ, and a scratch directory here is no git repository at all.
-    fn fixture(name: &str) -> Repo {
+    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("gate-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         std::fs::create_dir_all(root.join(".spoolway/templates")).unwrap();
         let home = root.join(".home");
         std::fs::create_dir_all(&home).unwrap();
-        Repo {
-            checkout: root.clone(),
+        (
+            Repo {
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config: Config::default(),
+                home,
+            },
             root,
-            config: Config::default(),
-            home,
-        }
+        )
     }
 
     /// The stamp claims a release that never shipped, so [`crate::sync::
@@ -167,7 +179,7 @@ mod tests {
     /// untouched.
     #[test]
     fn a_behind_checkout_at_a_terminal_prints_the_line_and_writes_nothing() {
-        let repo = fixture("notify");
+        let (repo, _root_guard) = fixture("notify");
         make_stale(&repo);
         let before = stamp(&repo);
         assert_eq!(
@@ -182,7 +194,7 @@ mod tests {
     /// behind or not.
     #[test]
     fn json_a_lane_and_no_terminal_each_print_nothing() {
-        let repo = fixture("notify-gated");
+        let (repo, _root_guard) = fixture("notify-gated");
         make_stale(&repo);
         for (in_lane, json, tty) in [
             (false, true, true),
@@ -202,7 +214,7 @@ mod tests {
     /// has nothing to compare against.
     #[test]
     fn no_stamp_at_all_prints_nothing() {
-        let repo = fixture("no-stamp");
+        let (repo, _root_guard) = fixture("no-stamp");
         assert_eq!(notified(&repo, false, false, true), "");
         assert!(sync_popup(&repo).unwrap().is_none());
     }
@@ -212,7 +224,7 @@ mod tests {
     /// the notice is for a stamp *and* a scan that both say so.
     #[test]
     fn a_stale_stamp_with_nothing_to_scan_prints_nothing() {
-        let repo = fixture("stale-nothing-to-do");
+        let (repo, _root_guard) = fixture("stale-nothing-to-do");
         make_stale(&repo);
         // A rendered config already in the canonical shape `sync` would
         // write, so `scan`'s own `config()` reports `Kept` rather than a
@@ -223,11 +235,26 @@ mod tests {
         assert!(sync_popup(&repo).unwrap().is_none());
     }
 
+    /// A stale stamp over a `config.toml` this binary cannot even parse
+    /// prints nothing and does not fail the command: `crate::sync::config`
+    /// now fails the whole scan on a file like this, which is right for
+    /// `sync` itself to say but wrong for this module's own promise that
+    /// nothing here stops a command — `sync` is still the thing that will
+    /// say so, the moment somebody actually runs it.
+    #[test]
+    fn a_stale_stamp_over_a_config_that_does_not_parse_prints_nothing() {
+        let (repo, _root_guard) = fixture("stale-unparseable-config");
+        make_stale(&repo);
+        std::fs::write(Config::path_in(&repo.checkout), "garbage = [\n").unwrap();
+        assert_eq!(notified(&repo, false, false, true), "");
+        assert_eq!(sync_popup(&repo).unwrap(), None);
+    }
+
     /// Bare `spoolway`'s popup: the one sentence, titled `update installed`,
     /// over `[enter] dismiss` — and building it writes nothing.
     #[test]
     fn the_popup_carries_the_line_over_enter_dismiss() {
-        let repo = fixture("popup");
+        let (repo, _root_guard) = fixture("popup");
         make_stale(&repo);
         let before = stamp(&repo);
         let panel = sync_popup(&repo)
@@ -249,7 +276,7 @@ mod tests {
     /// popup shows.
     #[test]
     fn a_pipeline_sync_would_migrate_is_told_printed_not_as_a_popup() {
-        let repo = fixture("popup-retired-shape");
+        let (repo, _root_guard) = fixture("popup-retired-shape");
         let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
         let retired = "steps:\n  \

@@ -20,10 +20,22 @@ role uses. A step's `prompt:` names it and defaults to the step's own id. A step
 A private prompt lives at `local/prompts/<name>/PROMPT.md`, under the project's own home
 rather than the checkout, in the same directory shape as a tracked prompt. See [Private
 pipelines](pipelines.md#private-pipelines). It answers only when the tracked prompt of that
-name is absent, only in repo mode, and only in the directory shape above: a flat
-`local/prompts/<name>.md` is not read.
+name is absent, only in repo mode, only when `<name>` is one plain name with no `/`, and only
+in the directory shape above: a flat `local/prompts/<name>.md` is not read.
 
-A private prompt whose name matches a tracked one is refused, naming both files.
+A private prompt whose name matches a tracked one is refused, naming both: the private file,
+and the tracked one in whichever shape actually exists, the directory `<name>/PROMPT.md` or
+the flat `<name>.md`.
+
+A private pipeline's step whose prompt is in neither layer is told so by both paths at once —
+the tracked `.spoolway/prompts/<name>/` and the private `local/prompts/<name>/` — with a
+reminder that the private layer never reads a flat `local/prompts/<name>.md`.
+
+`spoolway prompt list` and `spoolway prompt override` find a private prompt the same way
+`spoolway prompt show` does. `prompt list` marks its row `private`. `prompt override` forks it
+into the overrides layer, but the fork only starts applying once the pipeline that runs it is
+promoted, since an override patches a tracked file and a private prompt is not one. See [The
+overrides layer](configuration.md#the-overrides-layer).
 
 ## A prompt is prose, and nothing else
 

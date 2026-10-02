@@ -2039,16 +2039,9 @@ pub mod registry {
             }),
         }
         known.sort_by(|a, b| a.home.cmp(&b.home));
-        if let Some(parent) = path.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            return;
-        }
-        if let Ok(body) = serde_json::to_string_pretty(&known) {
-            // Written whole rather than appended: it is a set, not a log, and
-            // a torn write of a few paths costs nothing to rebuild.
-            let _ = crate::task::write_atomic(&path, format!("{body}\n"));
-        }
+        // Written whole rather than appended: it is a set, not a log, and a
+        // torn write of a few paths costs nothing to rebuild.
+        write_at(&path, &known);
     }
 
     /// Known project roots that still look like projects, oldest
@@ -2091,21 +2084,57 @@ pub mod registry {
     /// one with no resolvable home (no git repository behind it, or a
     /// permissions problem) is dropped rather than kept as an entry
     /// nothing could ever look up again.
+    ///
+    /// An entry whose `home` *and* `root` are both gone from disk is
+    /// dropped here too, and the file is rewritten without it — the
+    /// registry otherwise only ever grows, since `register` only appends
+    /// or replaces and nothing else has ever pruned it. Either path alone
+    /// existing is kept: a fixture root with no binding of its own (no
+    /// `.git`, so its `home` is never created) is exactly the common case
+    /// in the tests below, and a home kept current by `repo::bind` with
+    /// its `root` since moved is the renamed-checkout case `list` already
+    /// relies on. The write is best-effort, same as `register`'s: a
+    /// failure to persist the prune is not worth losing the read over.
     fn list_at(path: &Path) -> Vec<Entry> {
         let Ok(raw) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
-        if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(&raw) {
-            return entries;
-        }
-        serde_json::from_str::<Vec<PathBuf>>(&raw)
-            .unwrap_or_default()
+        let entries = if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(&raw) {
+            entries
+        } else {
+            serde_json::from_str::<Vec<PathBuf>>(&raw)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|root| {
+                    let home = crate::mux::project_home(&root).ok()?;
+                    Some(Entry { home, root })
+                })
+                .collect()
+        };
+        let total = entries.len();
+        let live: Vec<Entry> = entries
             .into_iter()
-            .filter_map(|root| {
-                let home = crate::mux::project_home(&root).ok()?;
-                Some(Entry { home, root })
-            })
-            .collect()
+            .filter(|entry| entry.home.exists() || entry.root.exists())
+            .collect();
+        if live.len() != total {
+            write_at(path, &live);
+        }
+        live
+    }
+
+    /// The write half of [`register`] and [`list_at`]'s pruning, shared so
+    /// neither has to restate "write the set whole, atomically, best
+    /// effort" — see [`register`]'s own comment for why a torn write here
+    /// costs nothing to rebuild.
+    fn write_at(path: &Path, known: &[Entry]) {
+        if let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return;
+        }
+        if let Ok(body) = serde_json::to_string_pretty(known) {
+            let _ = crate::task::write_atomic(path, format!("{body}\n"));
+        }
     }
 
     /// What a project is called on a report: the last component of its path.
@@ -3422,7 +3451,7 @@ mod tests {
 
     /// A scratch home laid out the way each agent lays out its own, holding one
     /// transcript under the session id spoolway would have pinned.
-    fn home_with(kind: &str, session: &str, lines: &str) -> PathBuf {
+    fn home_with(kind: &str, session: &str, lines: &str) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("usage-{kind}-{session}"));
         let (dir, file) = match kind {
             // Both shard by an escaping of the lane's working directory, which
@@ -4200,7 +4229,7 @@ mod tests {
     /// distance.
     #[test]
     fn read_cached_picks_up_only_what_was_appended_since() {
-        let (repo, _) = fixture("read-cached");
+        let (repo, _, _root_guard) = fixture("read-cached");
 
         append(&repo, &minimal_entry("first")).unwrap();
         let after_first = read_cached(&repo);
@@ -4226,7 +4255,7 @@ mod tests {
     /// check would still trust (review finding 41).
     #[test]
     fn read_cached_re_reads_a_ledger_rewritten_in_place() {
-        let (repo, _) = fixture("read-cached-rewrite");
+        let (repo, _, _root_guard) = fixture("read-cached-rewrite");
         append(&repo, &minimal_entry("keep")).unwrap();
         append(&repo, &minimal_entry("drop")).unwrap();
 
@@ -4292,7 +4321,7 @@ mod tests {
     /// the mockup's "usage rows for 3 trial tasks" counts arms, not lanes.
     #[test]
     fn trial_task_count_counts_distinct_tasks_not_rows() {
-        let (repo, _) = fixture("trial-task-count");
+        let (repo, _, _root_guard) = fixture("trial-task-count");
         let mut a1 = minimal_entry("alpha-1");
         a1.trial = Some("t1".into());
         a1.step = "implement".into();
@@ -4496,6 +4525,50 @@ mod tests {
             "registered twice or kept a ghost"
         );
         assert_eq!(registry::name_of(&live), "live");
+
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `registry::list` already hides a dead entry from its caller, but
+    /// nothing ever drops it from `projects.json` itself — the file a
+    /// deleted checkout was ever registered under keeps growing forever,
+    /// since every `register` call only ever appends or replaces, never
+    /// prunes. A registry that has filtered an entry out of every answer
+    /// it gives should stop carrying it at all.
+    #[test]
+    fn listing_the_registry_drops_a_dead_entry_from_the_file_on_disk() {
+        let _guard = registry_env_lock();
+        let home = crate::scratch::root("registry-prune-disk");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &home);
+
+        let live = home.join("live");
+        std::fs::create_dir_all(live.join(crate::config::STATE_DIR)).unwrap();
+        let gone = home.join("gone");
+
+        registry::register(&live);
+        registry::register(&gone);
+
+        // `gone` is already missing from `list()`'s answer (covered above);
+        // the question here is whether the file backing it still says so.
+        let _ = registry::list();
+
+        let path = registry::path().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("gone"),
+            "a dead entry is still on disk after list(): {raw}"
+        );
+        assert!(
+            raw.contains("live"),
+            "pruning the dead entry also lost the live one: {raw}"
+        );
 
         match previous {
             Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
@@ -4804,7 +4877,7 @@ mod tests {
     /// bury it.
     static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn fixture(name: &str) -> (Repo, PathBuf) {
+    fn fixture(name: &str) -> (Repo, PathBuf, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("skill-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
@@ -4820,12 +4893,13 @@ mod tests {
         let home = root.join("home");
         (
             Repo {
-                checkout: root.clone(),
-                root,
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
                 config,
                 home,
             },
             transcript,
+            root,
         )
     }
 
@@ -4864,7 +4938,7 @@ mod tests {
     /// it (review finding 36).
     #[test]
     fn bank_lane_appends_only_a_lanes_unbanked_delta() {
-        let (repo, _) = fixture("bank-lane");
+        let (repo, _, _root_guard) = fixture("bank-lane");
         let harvest = |input, output, turns| Harvest {
             model: "claude-opus-5".to_string(),
             tokens: Tokens {
@@ -5007,7 +5081,7 @@ mod tests {
     /// session appends nothing.
     #[test]
     fn a_settled_lane_whose_transcript_grew_gains_one_line_then_nothing() {
-        let (repo, path) = fixture("settled-lane-grew");
+        let (repo, path, _root_guard) = fixture("settled-lane-grew");
         let torn_down = Entry {
             ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
             task: "demo".into(),
@@ -5052,7 +5126,7 @@ mod tests {
     #[test]
     fn sweep_catches_up_a_settled_lane_the_dispatcher_has_let_go() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, _) = fixture("sweep-settled-lane");
+        let (repo, _, _root_guard) = fixture("sweep-settled-lane");
         let session = "0198e2c0-8888-4000-8000-000000000008";
         let home = home_with("claude", session, &transcript(&[("", 100), ("", 500)]));
 
@@ -5096,7 +5170,7 @@ mod tests {
     #[test]
     fn sweep_leaves_a_lane_the_dispatcher_still_owns_alone() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, _) = fixture("sweep-live-lane");
+        let (repo, _, _root_guard) = fixture("sweep-live-lane");
         let session = "0198e2c0-9999-4000-8000-000000000009";
         let home = home_with("claude", session, &transcript(&[("", 100), ("", 500)]));
 
@@ -5144,7 +5218,7 @@ mod tests {
     /// carries no `outcome` — the turns swept up here were never judged.
     #[test]
     fn the_catch_up_line_copies_the_lanes_own_columns_and_carries_no_outcome() {
-        let (repo, path) = fixture("settled-lane-columns");
+        let (repo, path, _root_guard) = fixture("settled-lane-columns");
         let lane = Entry {
             ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
             task: "demo".into(),
@@ -5186,7 +5260,7 @@ mod tests {
     /// cost this gate removes.
     #[test]
     fn a_settled_lane_whose_transcript_has_not_moved_is_not_read() {
-        let (repo, path) = fixture("settled-lane-still");
+        let (repo, path, _root_guard) = fixture("settled-lane-still");
         // The transcript holds spend the ledger has never seen...
         std::fs::write(&path, transcript(&[("", 100), ("", 999)])).unwrap();
         // ...but its clock sits before the line the dispatcher last banked.
@@ -5220,7 +5294,7 @@ mod tests {
     /// proof nothing came after it.
     #[test]
     fn a_transcript_touched_at_the_banked_lines_instant_is_read() {
-        let (repo, path) = fixture("settled-lane-tie");
+        let (repo, path, _root_guard) = fixture("settled-lane-tie");
         let banked = Entry {
             ts: chrono::Utc::now().to_rfc3339(),
             task: "demo".into(),
@@ -5255,7 +5329,7 @@ mod tests {
     /// read it.
     #[test]
     fn a_record_landing_after_the_harvest_watermark_is_still_swept() {
-        let (repo, path) = fixture("settled-lane-watermark");
+        let (repo, path, _root_guard) = fixture("settled-lane-watermark");
         let torn_down = Entry {
             ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
             task: "demo".into(),
@@ -5302,12 +5376,12 @@ mod tests {
     /// way `home_with` lays claude's and pi's out, so `sweep_dirs` can be
     /// driven with both real directories on disk that `Config::watch_roots`
     /// requires.
-    fn dir_fixture(name: &str) -> (Repo, PathBuf) {
-        let (mut repo, _) = fixture(name);
+    fn dir_fixture(name: &str) -> (Repo, PathBuf, crate::scratch::ScratchRoot) {
+        let (mut repo, _, root_guard) = fixture(name);
         std::fs::create_dir_all(&repo.root).unwrap();
         repo.root = repo.root.canonical().unwrap();
         let root = repo.root.clone();
-        (repo, root)
+        (repo, root, root_guard)
     }
 
     /// A transcript in the shape a real one carries `cwd` in: one record per
@@ -5347,7 +5421,7 @@ mod tests {
     /// scratch home — the directory name is nonsense on purpose, since the
     /// walk must read `cwd` off the transcript and never reproduce the
     /// escaping that names the directory.
-    fn claude_home_with(name: &str, session: &str, lines: &str) -> PathBuf {
+    fn claude_home_with(name: &str, session: &str, lines: &str) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("dir-sweep-{name}"));
         let dir = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
         std::fs::create_dir_all(&dir).unwrap();
@@ -5361,7 +5435,7 @@ mod tests {
     #[test]
     fn a_transcript_under_a_watched_root_is_banked_as_a_directory_line() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-match");
+        let (repo, root, _root_guard) = dir_fixture("dir-match");
         let session = "0198e2c0-1111-4000-8000-00000000d001";
         let home = claude_home_with("match", session, &transcript_in(&root, &[("", 42)]));
 
@@ -5390,7 +5464,7 @@ mod tests {
     #[test]
     fn a_transcript_outside_every_watched_root_banks_nothing() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, _root) = dir_fixture("dir-no-match");
+        let (repo, _root, _root_guard) = dir_fixture("dir-no-match");
         let elsewhere = crate::scratch::root("dir-sweep-elsewhere-cwd");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let session = "0198e2c0-2222-4000-8000-00000000d002";
@@ -5409,7 +5483,7 @@ mod tests {
     #[test]
     fn a_transcript_with_no_readable_cwd_banks_nothing() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, _root) = dir_fixture("dir-no-cwd");
+        let (repo, _root, _root_guard) = dir_fixture("dir-no-cwd");
         let session = "0198e2c0-3333-4000-8000-00000000d003";
         let lines = format!(
             "{}\n",
@@ -5457,7 +5531,7 @@ mod tests {
     #[test]
     fn a_session_already_banked_as_a_lane_is_never_banked_as_a_directory_line() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-lane-drop");
+        let (repo, root, _root_guard) = dir_fixture("dir-lane-drop");
         let session = "0198e2c0-4444-4000-8000-00000000d004";
         let home = claude_home_with("lane-drop", session, &transcript_in(&root, &[("", 42)]));
 
@@ -5497,7 +5571,7 @@ mod tests {
     #[test]
     fn sweep_dirs_leaves_a_lane_the_dispatcher_still_owns_alone_even_with_no_ledger_line_yet() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-live-lane");
+        let (repo, root, _root_guard) = dir_fixture("dir-live-lane");
         let session = "0198e2c0-8080-4000-8000-00000000d008";
         let home = claude_home_with("live-lane", session, &transcript_in(&root, &[("", 42)]));
 
@@ -5528,7 +5602,7 @@ mod tests {
     #[test]
     fn a_directory_session_swept_twice_appends_only_the_delta() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-delta");
+        let (repo, root, _root_guard) = dir_fixture("dir-delta");
         let session = "0198e2c0-5555-4000-8000-00000000d005";
         let home = claude_home_with("delta", session, &transcript_in(&root, &[("", 42)]));
 
@@ -5569,7 +5643,7 @@ mod tests {
     #[test]
     fn a_directory_sessions_transcript_untouched_since_its_last_line_is_not_read() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-mtime-gate");
+        let (repo, root, _root_guard) = dir_fixture("dir-mtime-gate");
         let session = "0198e2c0-6666-4000-8000-00000000d006";
         let home = claude_home_with("mtime-gate", session, &transcript_in(&root, &[("", 42)]));
 
@@ -5625,7 +5699,7 @@ mod tests {
     #[test]
     fn a_pi_transcript_under_a_watched_root_is_banked_too() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-pi-match");
+        let (repo, root, _root_guard) = dir_fixture("dir-pi-match");
         let session = "0198e2c0-7777-4000-8000-00000000d007";
         let scratch_root = crate::scratch::root(&format!("dir-sweep-pi-{session}"));
         let dir = scratch_root.join(".pi/agent/sessions/nonsense-escaping");
@@ -5708,7 +5782,7 @@ mod tests {
     #[test]
     fn a_hand_session_in_a_tasks_worktree_is_banked_onto_that_tasks_step() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-task-worktree");
+        let (repo, root, _root_guard) = dir_fixture("dir-task-worktree");
         let worktree = root.join("nonexistent-task-worktree");
 
         write_task(&repo.queue_dir(), "wt-task", "review", &worktree);
@@ -5773,7 +5847,7 @@ mod tests {
     #[test]
     fn a_hand_session_started_between_two_lane_lines_is_banked_on_the_later_step() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-task-worktree-mid-step");
+        let (repo, root, _root_guard) = dir_fixture("dir-task-worktree-mid-step");
         let worktree = root.join("nonexistent-task-worktree");
 
         write_task(&repo.queue_dir(), "wt-task2", "review", &worktree);
@@ -5837,7 +5911,7 @@ mod tests {
     #[test]
     fn a_hand_session_opened_while_the_task_is_paused_is_banked_on_the_step_it_was_held_from() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-task-worktree-paused");
+        let (repo, root, _root_guard) = dir_fixture("dir-task-worktree-paused");
         let worktree = root.join("nonexistent-task-worktree");
 
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
@@ -5892,7 +5966,7 @@ mod tests {
     #[test]
     fn a_hand_sessions_later_subagent_is_banked_on_its_parents_step() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-hand-subagent-later");
+        let (repo, root, _root_guard) = dir_fixture("dir-hand-subagent-later");
         let worktree = root.join("nonexistent-task-worktree");
 
         write_task(&repo.queue_dir(), "wt-task5", "implement", &worktree);
@@ -5956,7 +6030,7 @@ mod tests {
     #[test]
     fn a_hand_sessions_subagent_found_with_it_is_banked_on_its_parents_step() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-hand-subagent-same");
+        let (repo, root, _root_guard) = dir_fixture("dir-hand-subagent-same");
         let worktree = root.join("nonexistent-task-worktree");
 
         write_task(&repo.queue_dir(), "wt-task6", "review", &worktree);
@@ -6011,7 +6085,7 @@ mod tests {
     #[test]
     fn a_hand_session_in_a_worktree_with_no_task_is_banked_on_the_project_root() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-non-task-worktree");
+        let (repo, root, _root_guard) = dir_fixture("dir-non-task-worktree");
 
         crate::scratch::git_init(&root, &[]);
         std::fs::write(root.join("README.md"), "demo").unwrap();
@@ -6077,7 +6151,7 @@ mod tests {
     #[test]
     fn an_orphaned_directory_under_the_worktree_root_is_banked_on_the_project_root() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-worktree-root-orphan");
+        let (repo, root, _root_guard) = dir_fixture("dir-worktree-root-orphan");
 
         let home = crate::scratch::root("dir-sweep-wt-root-orphan");
         std::fs::create_dir_all(&home).unwrap();
@@ -6118,7 +6192,7 @@ mod tests {
     #[test]
     fn a_lane_sessions_own_subagent_is_never_banked_as_a_hand_session() {
         let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, root) = dir_fixture("dir-lane-subagent");
+        let (repo, root, _root_guard) = dir_fixture("dir-lane-subagent");
         let worktree = root.join("lane-worktree");
 
         write_task(&repo.queue_dir(), "wt-task3", "implement", &worktree);
@@ -6243,7 +6317,7 @@ mod tests {
     /// between, so every line below has to come back out whole.
     #[test]
     fn two_writers_racing_append_leave_every_line_parseable() {
-        let (repo, _) = fixture("append-race");
+        let (repo, _, _root_guard) = fixture("append-race");
         let repo = std::sync::Arc::new(repo);
 
         let writers = 16;

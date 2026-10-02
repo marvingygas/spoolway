@@ -883,16 +883,19 @@ mod tests {
     use crate::config::Config;
     use crate::task::Frontmatter;
 
-    fn fixture(name: &str) -> Repo {
+    fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("tracking-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".spoolway/hooks")).unwrap();
-        Repo {
-            checkout: root.clone(),
-            root: root.clone(),
-            config: Config::default(),
-            home: root.join(".home"),
-        }
+        (
+            Repo {
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config: Config::default(),
+                home: root.join(".home"),
+            },
+            root,
+        )
     }
 
     /// Writes `.spoolway/hooks/<name>`, executable, and points the repo's
@@ -990,7 +993,7 @@ mod tests {
     /// touched `[issue_tracking]` gets no directory, no process, nothing.
     #[test]
     fn a_blank_hook_fires_nothing() {
-        let repo = fixture("blank");
+        let (repo, _root_guard) = fixture("blank");
         let t = task("demo", |_| {});
         fire(&repo, &t, crate::pipeline::QUEUED, 1).unwrap();
         assert!(!repo.tracking_dir().join("demo · queued.exit").exists());
@@ -1002,7 +1005,7 @@ mod tests {
     /// name, and its own exit code is what a later pass reads back.
     #[test]
     fn a_configured_hook_runs_with_the_full_environment() {
-        let mut repo = fixture("env");
+        let (mut repo, _root_guard) = fixture("env");
         with_hook(&mut repo, "echo.sh", "env | sort; exit 3");
         // `failure_count` only counts a key whose task is still in the
         // queue — so the task has to actually be there.
@@ -1058,7 +1061,7 @@ mod tests {
     /// project (review finding 64).
     #[test]
     fn a_failure_from_an_archived_task_stops_showing_on_the_board() {
-        let mut repo = fixture("archived-failure");
+        let (mut repo, _root_guard) = fixture("archived-failure");
         with_hook(&mut repo, "fail.sh", "exit 1");
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
         std::fs::write(
@@ -1108,7 +1111,7 @@ mod tests {
     /// the queue.
     #[test]
     fn a_failed_fetch_still_counts_though_it_names_no_task() {
-        let repo = fixture("fetch-counts");
+        let (repo, _root_guard) = fixture("fetch-counts");
         std::fs::create_dir_all(repo.tracking_dir()).unwrap();
         let key = fetch_key("https://github.com/o/r/issues/42");
         std::fs::write(repo.tracking_dir().join(format!("{key}.exit")), "9\n").unwrap();
@@ -1120,7 +1123,7 @@ mod tests {
     /// start a second process.
     #[test]
     fn a_hook_fires_once_per_task_per_event() {
-        let mut repo = fixture("once");
+        let (mut repo, _root_guard) = fixture("once");
         with_hook(&mut repo, "mark.sh", "echo ran");
         let t = task("demo", |_| {});
 
@@ -1142,7 +1145,7 @@ mod tests {
     /// other event and every task that is not last.
     #[test]
     fn group_last_is_set_only_for_the_last_open_task_at_done() {
-        let repo = fixture("group-last");
+        let (repo, _root_guard) = fixture("group-last");
         let t = task("demo", |f| f.group = Some("g".into()));
 
         assert!(build_env(&repo, &t, crate::pipeline::DONE, 1).contains_key("SPOOLWAY_GROUP_LAST"));
@@ -1170,7 +1173,7 @@ mod tests {
             table.iter().map(|(name, _)| *name).collect()
         }
 
-        let repo = fixture("hook-contract-vars");
+        let (repo, _root_guard) = fixture("hook-contract-vars");
         let t = task("demo", |f| f.group = Some("g".into()));
 
         // `open_env` never sees `SPOOLWAY_OUT`, `SPOOLWAY_EPIC_BODY` or
@@ -1292,7 +1295,7 @@ mod tests {
     /// and trusted to stay inside it.
     #[test]
     fn a_hook_naming_a_path_fires_nothing() {
-        let mut repo = fixture("path-traversal");
+        let (mut repo, _root_guard) = fixture("path-traversal");
         repo.config.issue_tracking.hook = "../escaped".into();
         let t = task("demo", |_| {});
 
@@ -1311,7 +1314,7 @@ mod tests {
     /// and actually restarts it.
     #[test]
     fn forget_lets_fire_restart_a_failed_run() {
-        let mut repo = fixture("forget");
+        let (mut repo, _root_guard) = fixture("forget");
         with_hook(&mut repo, "flaky.sh", "exit 1");
         let t = task("demo", |_| {});
 
@@ -1336,7 +1339,7 @@ mod tests {
     /// the same "no configuration, no behaviour" contract [`fire`] gives.
     #[test]
     fn open_ticket_with_no_hook_starts_nothing() {
-        let repo = fixture("open-no-hook");
+        let (repo, _root_guard) = fixture("open-no-hook");
         let t = task("demo", |_| {});
         assert_eq!(
             open_ticket(&repo, &t, 1, "", "", "", "demo.md").unwrap(),
@@ -1350,7 +1353,7 @@ mod tests {
     /// template, not the placeholder text.
     #[test]
     fn open_ticket_reads_the_answer_and_writes_both_rendered_bodies() {
-        let mut repo = fixture("open-answers");
+        let (mut repo, _root_guard) = fixture("open-answers");
         // `resolve_tracking` never falls back to the shipped
         // `assets/tracking/epic.md` at render time any more — a project's
         // own file is the only thing it reads — so this writes one to
@@ -1432,7 +1435,7 @@ mod tests {
     /// itself said it did not finish cleanly.
     #[test]
     fn open_ticket_reports_a_failed_exit() {
-        let mut repo = fixture("open-fails");
+        let (mut repo, _root_guard) = fixture("open-fails");
         with_hook(&mut repo, "boom.sh", "exit 7");
         let t = task("split-fields", |_| {});
 
@@ -1447,7 +1450,7 @@ mod tests {
     /// gives.
     #[test]
     fn fetch_issue_with_no_hook_starts_nothing() {
-        let repo = fixture("fetch-no-hook");
+        let (repo, _root_guard) = fixture("fetch-no-hook");
         assert_eq!(fetch_issue(&repo, "57").unwrap(), FetchResult::NoHook);
     }
 
@@ -1456,7 +1459,7 @@ mod tests {
     /// not left to answer an empty issue that reads as a real one.
     #[test]
     fn fetch_issue_with_no_fetch_branch_runs_nothing() {
-        let mut repo = fixture("fetch-unimplemented");
+        let (mut repo, _root_guard) = fixture("fetch-unimplemented");
         with_hook(
             &mut repo,
             "old.sh",
@@ -1478,7 +1481,7 @@ mod tests {
     /// `SPOOLWAY_OUT`, with the reference and project key it was given.
     #[test]
     fn fetch_issue_reads_the_answer_back() {
-        let mut repo = fixture("fetch-answers");
+        let (mut repo, _root_guard) = fixture("fetch-answers");
         repo.config.issue_tracking.project_key = "acme/app".into();
         with_hook(
             &mut repo,
@@ -1500,7 +1503,7 @@ mod tests {
     /// A hook that exits non-zero on `fetch` is `Failed`, the same as `open`.
     #[test]
     fn fetch_issue_reports_a_failed_exit() {
-        let mut repo = fixture("fetch-fails");
+        let (mut repo, _root_guard) = fixture("fetch-fails");
         with_hook(
             &mut repo,
             "boom.sh",
@@ -1530,7 +1533,7 @@ mod tests {
     /// all — reports nothing.
     #[test]
     fn missing_fetch_branch_names_a_hook_with_no_fetch_case() {
-        let repo = fixture("missing-fetch");
+        let (repo, _root_guard) = fixture("missing-fetch");
         std::fs::write(
             repo.checkout.join(".spoolway/hooks/old.sh"),
             "#!/bin/sh\ncase \"$SPOOLWAY_EVENT\" in blocked|paused) ;; *) exit 0 ;; esac\n",
@@ -1556,7 +1559,7 @@ mod tests {
     /// `epic=` already does.
     #[test]
     fn read_answer_parses_slug_and_url_when_present_and_blank_when_not() {
-        let repo = fixture("read-answer-slug");
+        let (repo, _root_guard) = fixture("read-answer-slug");
         let with = repo.tracking_dir().join("with.out");
         std::fs::create_dir_all(repo.tracking_dir()).unwrap();
         std::fs::write(
@@ -1586,7 +1589,7 @@ mod tests {
     /// does — or the flag being off — reports nothing.
     #[test]
     fn missing_slug_line_names_a_hook_that_never_writes_one() {
-        let repo = fixture("missing-slug");
+        let (repo, _root_guard) = fixture("missing-slug");
         std::fs::write(
             repo.checkout.join(".spoolway/hooks/old.sh"),
             "#!/bin/sh\n{ echo \"epic=$SPOOLWAY_EPIC\"; echo \"ticket=x\"; } >\"$SPOOLWAY_OUT\"\n",
@@ -1712,8 +1715,11 @@ exit 0
     /// (absent) real one on `PATH`. Returns the fixture, a `demo` task on
     /// `task/demo` naming `ticket` as given, and the `stub/` directory the
     /// test still needs to seed before calling [`fire`].
-    fn github_done_fixture(name: &str, ticket: &str) -> (Repo, Task, PathBuf) {
-        let mut repo = fixture(name);
+    fn github_done_fixture(
+        name: &str,
+        ticket: &str,
+    ) -> (Repo, Task, PathBuf, crate::scratch::ScratchRoot) {
+        let (mut repo, root_guard) = fixture(name);
         let stub = repo.root.join("stub");
         write_stub_gh(&stub.join("bin"));
 
@@ -1736,7 +1742,7 @@ exit 0
             f.extra
                 .insert("ticket".into(), serde_norway::Value::String(ticket.into()));
         });
-        (repo, t, stub)
+        (repo, t, stub, root_guard)
     }
 
     /// [`github_done_fixture`]'s own counterpart for the `open` branch's
@@ -1746,8 +1752,8 @@ exit 0
     /// `spoolway:*` labels every group and task already carries, so a test
     /// naming its own labels beside them proves the hook creates only what
     /// is actually missing.
-    fn github_open_fixture(name: &str) -> (Repo, PathBuf) {
-        let mut repo = fixture(name);
+    fn github_open_fixture(name: &str) -> (Repo, PathBuf, crate::scratch::ScratchRoot) {
+        let (mut repo, root_guard) = fixture(name);
         let stub = repo.root.join("stub");
         write_stub_gh(&stub.join("bin"));
         std::fs::write(
@@ -1763,7 +1769,7 @@ exit 0
             .1;
         let script = pin_path_after_shebang(real, &stub.join("bin"));
         with_hook(&mut repo, "github.sh", &script);
-        (repo, stub)
+        (repo, stub, root_guard)
     }
 
     /// Acceptance criteria: `open` creates only the labels `gh label list`
@@ -1772,7 +1778,7 @@ exit 0
     /// `spoolway:*` labels each already carries.
     #[test]
     fn github_sh_open_creates_missing_labels_and_adds_them_to_both_issues() {
-        let (repo, stub) = github_open_fixture("open-labels-new-epic");
+        let (repo, stub, _root_guard) = github_open_fixture("open-labels-new-epic");
         let t = task("demo", |f| {
             f.title = "add labels".into();
             f.group = Some("labelled-group".into());
@@ -1825,7 +1831,7 @@ exit 0
     /// older one as missing the same way.
     #[test]
     fn github_sh_open_matches_an_existing_label_case_insensitively() {
-        let (repo, stub) = github_open_fixture("open-labels-case-insensitive");
+        let (repo, stub, _root_guard) = github_open_fixture("open-labels-case-insensitive");
         std::fs::write(
             stub.join("existing_labels"),
             "spoolway:group\nspoolway:task\nBug\n",
@@ -1859,7 +1865,7 @@ exit 0
     /// rather than only the first one's.
     #[test]
     fn github_sh_open_adds_a_later_tasks_labels_onto_an_already_open_epic() {
-        let (repo, stub) = github_open_fixture("open-labels-existing-epic");
+        let (repo, stub, _root_guard) = github_open_fixture("open-labels-existing-epic");
         let t = task("demo", |f| {
             f.title = "second of the group".into();
             f.group = Some("labelled-group".into());
@@ -1904,7 +1910,7 @@ exit 0
     /// workflow's job, once the pull request actually merges.
     #[test]
     fn github_sh_done_hands_the_ticket_to_its_pull_request_without_closing_it() {
-        let (repo, t, stub) =
+        let (repo, t, stub, _root_guard) =
             github_done_fixture("done-handoff", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
 
@@ -1943,7 +1949,7 @@ exit 0
     /// past.
     #[test]
     fn github_sh_done_fails_when_the_pull_request_lookup_fails() {
-        let (repo, t, stub) =
+        let (repo, t, stub, _root_guard) =
             github_done_fixture("done-lookup-fails", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_view_fail"), "").unwrap();
 
@@ -1981,7 +1987,8 @@ exit 0
     /// nonzero exit is.
     #[test]
     fn github_sh_done_fails_when_no_pull_request_is_found() {
-        let (repo, t, stub) = github_done_fixture("done-no-pr", "https://github.com/o/r/issues/12");
+        let (repo, t, stub, _root_guard) =
+            github_done_fixture("done-no-pr", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "").unwrap();
 
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
@@ -1998,7 +2005,7 @@ exit 0
     /// handoff a close-on-merge workflow cannot yet see.
     #[test]
     fn github_sh_done_stops_when_the_marker_comment_fails() {
-        let (repo, t, stub) =
+        let (repo, t, stub, _root_guard) =
             github_done_fixture("done-marker-fails", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
         std::fs::write(stub.join("pr_comment_fail"), "").unwrap();
@@ -2019,7 +2026,7 @@ exit 0
     /// nothing downstream of the failed call runs.
     #[test]
     fn github_sh_done_stops_when_the_label_swap_fails() {
-        let (repo, t, stub) =
+        let (repo, t, stub, _root_guard) =
             github_done_fixture("done-label-fails", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
         std::fs::write(stub.join("issue_edit_fail"), "").unwrap();
@@ -2042,7 +2049,7 @@ exit 0
     /// failed.
     #[test]
     fn github_sh_done_fails_when_the_final_comment_fails() {
-        let (repo, t, stub) =
+        let (repo, t, stub, _root_guard) =
             github_done_fixture("done-comment-fails", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
         std::fs::write(stub.join("issue_comment_fail"), "").unwrap();

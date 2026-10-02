@@ -271,7 +271,7 @@ pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config
         "no stale .git/index.lock".into(),
         crate::commands::dispatch::check_index_lock(repo),
     ));
-    report.record_all(agent_checks(pipelines, config));
+    report.record_all(agent_checks(repo, pipelines, config));
     report.record_all(model_health_checks(pipelines, config));
     report.record_all(agent_kind_checks(config));
     // `doctor_sync`'s own rows are the ones tagged `Warning::File` below —
@@ -333,6 +333,23 @@ fn cheap_branch_checks(repo: &Repo, tasks: &[Task]) -> Vec<Finding> {
     }
 }
 
+/// How `doctor` should treat the live pane check — one argument standing in
+/// for `--no-live` and `--live`, which `clap` already keeps mutually
+/// exclusive (see `DoctorArgs`), rather than two separate bools that would
+/// push [`doctor`] over `clippy::too_many_arguments` for a distinction
+/// [`live_check`] alone needs to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveCheckMode {
+    /// Run the check only when [`Mux::in_own_pane`] says this process
+    /// actually is one.
+    Default,
+    /// `--no-live`: never run it, whatever `in_own_pane` answers.
+    Skip,
+    /// `--live`: run it even when `in_own_pane` says this process is
+    /// outside the backend's own pane.
+    Forced,
+}
+
 /// Check that everything the configured pipeline needs is actually present,
 /// before a dispatch pass discovers it the hard way.
 ///
@@ -355,7 +372,7 @@ pub fn doctor(
     home_error: Option<anyhow::Error>,
     verbose: bool,
     json: bool,
-    no_live: bool,
+    live: LiveCheckMode,
 ) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
@@ -438,7 +455,7 @@ pub fn doctor(
     ));
     report.record(mux_finding(&mux));
     match &mux {
-        Ok(m) => report.record(live_check(m.as_ref(), no_live)),
+        Ok(m) => report.record(live_check(m.as_ref(), live)),
         Err(_) => report.record(Finding::NoteVerbose(
             "no live pane check: the backend could not be resolved".into(),
         )),
@@ -458,7 +475,7 @@ pub fn doctor(
             Err(err) => Err(anyhow::anyhow!("{err:#}")),
         },
     ));
-    report.record_all(agent_checks(pipelines, &config));
+    report.record_all(agent_checks(repo, pipelines, &config));
     report.record_all(model_health_checks(pipelines, &config));
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
@@ -587,8 +604,9 @@ fn doctor_unconfigured(
         None => report.note_verbose("no dispatcher running"),
     }
     report.note(format!(
-        "{} does not parse (this checkout's own copy)",
-        relative(&repo.checkout, &Config::path_in(&repo.checkout))
+        "{} does not parse ({})",
+        relative(&repo.checkout, &Config::path_in(&repo.checkout)),
+        config_owner_label(repo),
     ));
 
     finish(&report, verbose, json)
@@ -614,18 +632,23 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
         "bound to its home".into(),
         match home_error {
             Some(err) => Err(anyhow::anyhow!("{err:#}")),
-            // The mode is named here, not as a row of its own, so it reads
-            // exactly where a person already looks to see what this
-            // checkout is bound to — see the `home-mode-discovery` task's
-            // "doctor says which mode the project is in", which names both
-            // modes, not only home mode.
-            None => Ok(Some(match crate::repo::workspace_clone(&repo.checkout) {
-                Some(_) => format!(
+            // The fallible scan, not the lenient `workspace_clone`: a
+            // workspace file elsewhere that cannot be read or parsed is
+            // exactly what `doctor` exists to name, so it is reported here
+            // rather than silently read as "repo mode" instead.
+            None => match crate::repo::workspace_clone_checked(&repo.checkout) {
+                Err(err) => Err(err),
+                // The mode is named here, not as a row of its own, so it reads
+                // exactly where a person already looks to see what this
+                // checkout is bound to — see the `home-mode-discovery` task's
+                // "doctor says which mode the project is in", which names both
+                // modes, not only home mode.
+                Ok(Some(_)) => Ok(Some(format!(
                     "{} — home mode, setup read from {}",
                     repo.home.display(),
                     repo.setup_dir().display()
-                ),
-                None => match crate::repo::binding_at(&repo.home) {
+                ))),
+                Ok(None) => Ok(Some(match crate::repo::binding_at(&repo.home) {
                     Some((id, root)) => {
                         format!(
                             "{} — repo mode, id {id}, root {}",
@@ -634,10 +657,22 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
                         )
                     }
                     None => format!("{} — repo mode", repo.home.display()),
-                },
-            })),
+                })),
+            },
         },
     )
+}
+
+/// Whether `config.toml` is this checkout's own to claim, or the workspace's
+/// shared one every clone reads instead — home mode's whole point: `config/`
+/// sits beside the workspace, not inside any one clone, so calling it "this
+/// checkout's own copy" there names an owner the file does not have.
+fn config_owner_label(repo: &Repo) -> &'static str {
+    if crate::repo::workspace_clone(&repo.checkout).is_some() {
+        "the workspace's shared config"
+    } else {
+        "this checkout's own copy"
+    }
 }
 
 /// The checks that only need the checkout's own loaded `config` and whether
@@ -657,8 +692,9 @@ fn config_checks(
     findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(
-            "{} — this checkout's own copy",
-            Config::path_in(&repo.checkout).display()
+            "{} — {}",
+            Config::path_in(&repo.checkout).display(),
+            config_owner_label(repo),
         ))),
     ));
     // The checkout's file parsing says nothing about the project's own copy —
@@ -1209,20 +1245,45 @@ fn mux_finding(mux: &Result<Box<dyn Mux>>) -> Finding {
 /// [`crate::command_step::Runs`] gives a real command step, so this is
 /// exactly the path a lane's own turn takes, not a stand-in for it.
 ///
-/// `no_live` is `--no-live`: skips this row alone, leaving every other check
-/// unchanged, for a machine where opening a real pane is slow or noisy
-/// (CI, say) but the rest of `doctor` is still worth running.
+/// `live` is [`LiveCheckMode::Skip`] for `--no-live`: skips this row alone,
+/// leaving every other check unchanged, for a machine where opening a real
+/// pane is slow or noisy (CI, say) but the rest of `doctor` is still worth
+/// running.
 ///
 /// A backend with no real pane to test — headless, whose panes are names
 /// rather than processes — answers with a note instead of a check: nothing
 /// was opened, so there is nothing to say passed or failed.
-fn live_check(mux: &dyn Mux, no_live: bool) -> Finding {
-    if no_live {
+///
+/// Also skipped, with its own note, when [`Mux::in_own_pane`] says this
+/// process is not actually inside the backend it is about to open a pane
+/// in — a herdr server answers `is_available` from any shell, with or
+/// without `HERDR_*` set, so without this gate a plain `doctor` run outside
+/// herdr would open a throwaway pane in the caller's real session instead
+/// of a sandbox nobody is watching. [`LiveCheckMode::Forced`] (`--live`) is
+/// the only way past that gate, for the one caller who really is asking to
+/// reach into a herdr session from outside a pane in it.
+fn live_check(mux: &dyn Mux, live: LiveCheckMode) -> Finding {
+    if live == LiveCheckMode::Skip {
         return Finding::NoteVerbose("--no-live: skipped the live pane check".into());
     }
     if !mux.is_available() {
         // Already a `FAIL` on `lanes can be started` — nothing more to say.
         return Finding::NoteVerbose("no live pane check: this backend is not available".into());
+    }
+    // A herdr server answers `agent list` (and so `is_available`) from any
+    // shell, with or without `HERDR_*` set — the same reason
+    // `commands::dispatch`'s own pane gate reads `in_own_pane` rather than
+    // `is_available` before it will start a lane. Opening a throwaway pane
+    // here for a caller not actually inside this session would land it in
+    // the person's real herdr instead of a sandbox nobody is watching.
+    // `--live` is the deliberate override for the caller who means to reach
+    // outside their own pane anyway.
+    if live != LiveCheckMode::Forced && !mux.in_own_pane() {
+        return Finding::NoteVerbose(
+            "no live pane check: not inside a herdr pane — run doctor from inside herdr, or \
+             pass --live, to check this"
+                .into(),
+        );
     }
     match live_pane(mux) {
         Ok(Some(note)) => Finding::Check("a lane really starts".into(), Ok(Some(note))),
@@ -1243,23 +1304,38 @@ fn live_check(mux: &dyn Mux, no_live: bool) -> Finding {
 /// `Ok(None)` from a backend whose [`Workspace::tab_id`] is absent —
 /// headless, which hands back a pane id that names no real process — since
 /// there is nothing here for [`Mux::run_in_pane`] to run a script in.
+///
+/// The scratch directory is removed on every way out — the early `Ok(None)`,
+/// every `?` that bails before that, and the final outcome whether it is
+/// `Ok` or `Err` — rather than left for [`crate::scratch::root`]'s own later
+/// sweep: that sweep is for a run a crash cut short, not for a check that
+/// ran to completion and has nothing left to explain by leaving its folder
+/// behind.
 fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
     let dir = crate::scratch::root("doctor-live");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let result = live_pane_in(&dir, mux);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
 
-    let workspace = mux.create_pane(&dir, "doctor")?;
+/// [`live_pane`]'s own body, pulled apart so the directory it works in can be
+/// cleaned up on every exit from that function alike, including the ones
+/// this inner call reaches through `?`.
+fn live_pane_in(dir: &Path, mux: &dyn Mux) -> Result<Option<String>> {
+    let workspace = mux.create_pane(dir, "doctor")?;
     let Some(tab_id) = workspace.tab_id.clone() else {
         return Ok(None);
     };
 
-    let runs = crate::command_step::Runs::new(&dir);
+    let runs = crate::command_step::Runs::new(dir);
     let key = "doctor · live";
     let env = std::collections::BTreeMap::new();
     let script = runs.script_for_pane(key, "true", &env)?;
 
     let started = std::time::Instant::now();
     let outcome = mux
-        .run_in_pane(&tab_id, &dir, "doctor", "doctor", &script, &env)
+        .run_in_pane(&tab_id, dir, "doctor", "doctor", &script, &env)
         .and_then(|pane| {
             pane.ok_or_else(|| {
                 anyhow::anyhow!("{} reports panes but ran nothing in one", mux.name())
@@ -1290,13 +1366,27 @@ fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
     })
 }
 
+/// Where a project's own pipeline files actually sit — the workspace's
+/// `config/pipelines/<name>.yml` in home mode, `.spoolway/pipelines/<name>.yml`
+/// in repo mode — for the hints below that point a person at "give this step
+/// a model" rather than at a file that does not exist under this checkout.
+fn pipelines_hint(repo: &Repo) -> String {
+    let dir = if crate::repo::workspace_clone(&repo.checkout).is_some() {
+        "config/pipelines"
+    } else {
+        ".spoolway/pipelines"
+    };
+    format!("{dir}/<name>.yml")
+}
+
 /// Per agent profile a pipeline actually references: whether its binary is on
 /// PATH, whether every step that runs on it names a model, and whether its
 /// permission mode is one spoolway recognises. Three checks per agent rather
 /// than one, because each is fixed a different way and a person should not
 /// have to guess which of three things "agent `x` is broken" means.
-fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let pipelines_hint = pipelines_hint(repo);
     for (agent, steps) in pipelines.referenced_agents() {
         let outcome = config.agent(agent).and_then(|profile| {
             let found = which(&profile.kind);
@@ -1317,18 +1407,18 @@ fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         // a person and launches no agent. Config checks enforce its model once
         // unattended mode actually staffs it; do not misdirect an attended
         // project to pipeline YAML for this config-derived blank.
-        let model = if steps
+        let missing: Vec<&str> = steps
             .iter()
-            .filter(|step| config.unattended.enabled || **step != crate::pipeline::BLOCKED)
-            .all(|step| pipelines.step_has_model(step))
-        {
-            Ok(Some(
-                "set per step in .spoolway/pipelines/<name>.yml".into(),
-            ))
+            .copied()
+            .filter(|step| config.unattended.enabled || *step != crate::pipeline::BLOCKED)
+            .filter(|step| !pipelines.step_has_model(step))
+            .collect();
+        let model = if missing.is_empty() {
+            Ok(Some(format!("set per step in {pipelines_hint}")))
         } else {
             Err(anyhow::anyhow!(
-                "some step running on `{agent}` names no model: — give it one in \
-                 .spoolway/pipelines/<name>.yml"
+                "{missing:?} names no model, running on `{agent}` — give it one in \
+                 {pipelines_hint}"
             ))
         };
         findings.push(Finding::Check(
@@ -1372,8 +1462,14 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         .get(crate::models::PLACEHOLDER)
         .cloned()
         .unwrap_or_default();
+    // Labelled apart from `agent \`x\` has a model`'s own check, even though
+    // both are about a step's `model:` — that one already fails and lists
+    // the steps when one is missing outright, and a passing row here with
+    // the old label "a model is named for every step" read as contradicting
+    // it, right next to it in the report, on a project this placeholder
+    // check was never about.
     findings.push(Finding::Check(
-        "a model is named for every step".into(),
+        "no step still names the spoolway placeholder model".into(),
         match unset.is_empty() {
             true => Ok(None),
             false => Err(anyhow::anyhow!(
@@ -1659,8 +1755,9 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
             if used.contains_key(&entry.name) {
                 continue;
             }
+            let label = if entry.private { " (private)" } else { "" };
             findings.push(Finding::Note(format!(
-                "prompt `{}` is run by no step",
+                "prompt `{}`{label} is run by no step",
                 entry.name
             )));
         }
@@ -1993,7 +2090,11 @@ mod tests {
     /// and a linked worktree's checkout without paying for real git. What
     /// `doctor` reads is a function of which directory it is handed, not of
     /// anything git-specific, so this is enough to pin that down.
-    fn two_configs(name: &str, root_body: &str, checkout_body: &str) -> (PathBuf, PathBuf) {
+    fn two_configs(
+        name: &str,
+        root_body: &str,
+        checkout_body: &str,
+    ) -> (PathBuf, PathBuf, crate::scratch::ScratchRoot) {
         let base = crate::scratch::root(&format!("doctor-{name}"));
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("root");
@@ -2003,7 +2104,7 @@ mod tests {
             std::fs::create_dir_all(&state).unwrap();
             std::fs::write(state.join("config.toml"), body).unwrap();
         }
-        (root, checkout)
+        (root, checkout, base)
     }
 
     /// `--json`'s reading of a report: a `kind` tag per row, and the same
@@ -2048,7 +2149,7 @@ mod tests {
     /// override` or its siblings.
     #[test]
     fn override_layer_note_is_silent_with_no_layer() {
-        let repo = crate::commands::testutil::fixture("doctor-override-note-empty");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-override-note-empty");
         assert!(override_layer_note(&repo).is_empty());
     }
 
@@ -2058,7 +2159,7 @@ mod tests {
     /// all.
     #[test]
     fn override_layer_note_names_an_active_layer() {
-        let repo = crate::commands::testutil::fixture("doctor-override-note-active");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-override-note-active");
         let overrides = repo.overrides_dir();
         std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
         std::fs::write(
@@ -2081,7 +2182,7 @@ mod tests {
     /// read `collect_override_rows`.
     #[test]
     fn override_layer_note_names_a_stale_entry_with_its_reason() {
-        let repo = crate::commands::testutil::fixture("doctor-override-note-stale");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-override-note-stale");
         std::fs::create_dir_all(repo.checkout.join(".spoolway/pipelines")).unwrap();
         std::fs::write(
             repo.checkout.join(".spoolway/pipelines/default.yml"),
@@ -2121,9 +2222,10 @@ mod tests {
     /// that `Pipelines::load` now refuses (finding 25).
     #[test]
     fn the_model_check_points_at_the_pipelines_directory() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-model-check-points");
         let pipelines = crate::pipeline::Pipelines::builtin();
         let config = Config::default();
-        let findings = agent_checks(&pipelines, &config);
+        let findings = agent_checks(&repo, &pipelines, &config);
 
         let notes: Vec<String> = findings
             .iter()
@@ -2146,6 +2248,8 @@ mod tests {
 
     #[test]
     fn an_attended_synthetic_blocked_step_needs_no_model() {
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("doctor-attended-blocked-no-model");
         let mut pipelines = crate::pipeline::Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             pipeline
@@ -2158,18 +2262,52 @@ mod tests {
         let mut config = Config::default();
         config.unattended.blocked_model.clear();
 
-        let attended = agent_checks(&pipelines, &config);
+        let attended = agent_checks(&repo, &pipelines, &config);
         assert!(attended.iter().all(|finding| match finding {
             Finding::Check(label, result) if label.ends_with("has a model") => result.is_ok(),
             _ => true,
         }));
 
         config.unattended.enabled = true;
-        let unattended = agent_checks(&pipelines, &config);
+        let unattended = agent_checks(&repo, &pipelines, &config);
         assert!(unattended.iter().any(|finding| match finding {
             Finding::Check(label, result) if label.ends_with("has a model") => result.is_err(),
             _ => false,
         }));
+    }
+
+    /// The failing "has a model" row names the step that is missing one,
+    /// rather than the generic "some step" it used to say with nothing
+    /// after the colon — see the `home-mode-messages` task.
+    #[test]
+    fn the_has_a_model_failure_names_the_missing_step() {
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("doctor-model-check-names-step");
+        let mut pipelines = crate::pipeline::Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline
+                .steps
+                .iter_mut()
+                .find(|step| step.id == crate::pipeline::BLOCKED)
+                .unwrap()
+                .model = None;
+        }
+        let mut config = Config::default();
+        config.unattended.enabled = true;
+        config.unattended.blocked_model.clear();
+
+        let findings = agent_checks(&repo, &pipelines, &config);
+        let failure = findings
+            .iter()
+            .find_map(|finding| match finding {
+                Finding::Check(label, Err(err)) if label.ends_with("has a model") => {
+                    Some(format!("{err:#}"))
+                }
+                _ => None,
+            })
+            .expect("the model check fails");
+        assert!(failure.contains(crate::pipeline::BLOCKED), "{failure}");
+        assert!(!failure.contains("some step running on"), "{failure}");
     }
 
     /// One note per `[models]` entry that sets `slots` or `exclusive` without
@@ -2284,7 +2422,7 @@ mod tests {
     /// is not.
     #[test]
     fn a_prompt_no_step_runs_is_noted_and_a_used_one_is_silent() {
-        let repo = scratch_repo("orphan-prompt");
+        let (repo, _root_guard) = scratch_repo("orphan-prompt");
         for name in ["worker", "summariser"] {
             let file = crate::prompt::directory_form(&repo, name);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -2311,7 +2449,7 @@ mod tests {
 
     #[test]
     fn names_key_reads_whichever_directory_it_is_given() {
-        let (root, checkout) = two_configs(
+        let (root, checkout, _base_guard) = two_configs(
             "names-key",
             "[dispatch]\nmax_launches = 3\n",
             "[dispatch]\nworktree_root = \"x\"\n",
@@ -2349,16 +2487,19 @@ mod tests {
     /// A `Repo` whose checkout is a scratch directory, real enough for
     /// `issue_tracking_checks` to stat a hook path against — nothing else
     /// reads `config` or `home` here, so both are defaults.
-    fn scratch_repo(name: &str) -> Repo {
+    fn scratch_repo(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let checkout = crate::scratch::root(&format!("doctor-{name}"));
         let _ = std::fs::remove_dir_all(&checkout);
         std::fs::create_dir_all(&checkout).unwrap();
-        Repo {
-            root: checkout.clone(),
-            home: checkout.join(".home"),
+        (
+            Repo {
+                root: checkout.to_path_buf(),
+                home: checkout.join(".home"),
+                checkout: checkout.to_path_buf(),
+                config: Config::default(),
+            },
             checkout,
-            config: Config::default(),
-        }
+        )
     }
 
     /// A hook named with nothing to hand it: `project_key` blank while
@@ -2367,7 +2508,7 @@ mod tests {
     /// than on `hook` itself.
     #[test]
     fn issue_tracking_checks_refuses_a_hook_with_a_blank_project_key() {
-        let repo = scratch_repo("blank-project-key");
+        let (repo, _root_guard) = scratch_repo("blank-project-key");
         let findings = issue_tracking_checks(&repo, &tracking("record.sh"));
         let Finding::Check(label, outcome) = &findings[0] else {
             panic!("{:?}", findings[0])
@@ -2383,7 +2524,7 @@ mod tests {
     /// `crate::tracking::is_bare_filename`.
     #[test]
     fn issue_tracking_checks_refuses_a_hook_that_is_not_a_bare_filename() {
-        let repo = scratch_repo("not-bare");
+        let (repo, _root_guard) = scratch_repo("not-bare");
         let findings = issue_tracking_checks(&repo, &tracking("../record.sh"));
         let Finding::Check(label, outcome) = &findings[1] else {
             panic!("{:?}", findings[1])
@@ -2399,7 +2540,7 @@ mod tests {
     /// config naming a script that was renamed or never copied in.
     #[test]
     fn issue_tracking_checks_refuses_a_hook_naming_a_script_that_does_not_exist() {
-        let repo = scratch_repo("missing-script");
+        let (repo, _root_guard) = scratch_repo("missing-script");
         let findings = issue_tracking_checks(&repo, &tracking("ghost.sh"));
         let Finding::Check(label, outcome) = &findings[2] else {
             panic!("{:?}", findings[2])
@@ -2415,7 +2556,7 @@ mod tests {
     /// names it, unlike the three checks above, which run for any hook.
     #[test]
     fn issue_tracking_checks_requires_acli_and_jq_for_the_jira_hook() {
-        let repo = scratch_repo("jira-hook");
+        let (repo, _root_guard) = scratch_repo("jira-hook");
         let hook = crate::cli::Tracker::Jira.hook_name();
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
@@ -2587,7 +2728,7 @@ mod tests {
     /// is set absurdly high and passing when it plainly is not.
     #[test]
     fn issue_tracking_checks_enforces_a_declared_tool_version() {
-        let repo = scratch_repo("requires-version");
+        let (repo, _root_guard) = scratch_repo("requires-version");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
@@ -2661,7 +2802,7 @@ mod tests {
     /// different name.
     #[test]
     fn issue_tracking_checks_defers_to_the_existing_not_on_path_failure() {
-        let repo = scratch_repo("requires-missing-tool");
+        let (repo, _root_guard) = scratch_repo("requires-missing-tool");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
@@ -2684,7 +2825,7 @@ mod tests {
     /// now exists.
     #[test]
     fn issue_tracking_checks_is_unchanged_with_no_requires_line() {
-        let repo = scratch_repo("no-requires");
+        let (repo, _root_guard) = scratch_repo("no-requires");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(hooks_dir.join("plain.sh"), "#!/bin/sh\nexit 0\n").unwrap();
@@ -2703,7 +2844,7 @@ mod tests {
     /// both when the script does write the line and when the flag is off.
     #[test]
     fn issue_tracking_checks_reports_key_in_names_without_a_slug_line() {
-        let repo = scratch_repo("slug-gap");
+        let (repo, _root_guard) = scratch_repo("slug-gap");
         let hooks_dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&hooks_dir).unwrap();
         std::fs::write(
@@ -2875,16 +3016,17 @@ mod tests {
     /// panes to test — [`crate::headless::Headless::create_pane`] hands back
     /// a `tab_id` of `None`, which is exactly the shape `live_check` has to
     /// answer with a note rather than a check for.
-    fn headless_mux(name: &str) -> crate::headless::Headless {
+    fn headless_mux(name: &str) -> (crate::headless::Headless, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("doctor-live-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        crate::headless::Headless::new(
+        let mux = crate::headless::Headless::new(
             &root,
             &crate::config::DispatchConfig::default(),
-            root.clone(),
+            root.to_path_buf(),
         )
-        .unwrap()
+        .unwrap();
+        (mux, root)
     }
 
     /// `--no-live` skips the row outright, without asking the backend
@@ -2892,9 +3034,9 @@ mod tests {
     /// counts towards `problems()` either way.
     #[test]
     fn no_live_skips_the_row_without_touching_the_backend() {
-        let mux = headless_mux("no-live");
+        let (mux, _root_guard) = headless_mux("no-live");
         assert!(matches!(
-            live_check(&mux, true),
+            live_check(&mux, LiveCheckMode::Skip),
             Finding::NoteVerbose(text) if text.contains("--no-live")
         ));
     }
@@ -2909,11 +3051,254 @@ mod tests {
     /// instead.
     #[test]
     fn a_backend_with_no_real_pane_is_a_note_not_a_check() {
-        let mux = headless_mux("no-real-pane");
+        let (mux, _root_guard) = headless_mux("no-real-pane");
         assert!(matches!(
-            live_check(&mux, false),
+            live_check(&mux, LiveCheckMode::Default),
             Finding::NoteVerbose(text) if text.contains("no real pane")
         ));
+    }
+
+    /// Stands in for a herdr server the caller is not actually inside: it
+    /// answers `agent list` fine (`is_available` is `true`, exactly as a
+    /// server reachable from any shell does, with or without `HERDR_*` set),
+    /// but `in_own_pane` is `false`, the signal `commands::dispatch`'s own
+    /// pane gate already reads for the same fact. Every pane-opening call
+    /// panics: if `live_check` ever reaches one of them for a caller outside
+    /// herdr, that is the bug this stands in to catch, not something to
+    /// quietly tolerate.
+    struct OutsideHerdr;
+
+    impl Mux for OutsideHerdr {
+        fn name(&self) -> &'static str {
+            "herdr"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable(&self) -> String {
+            unimplemented!()
+        }
+        fn in_own_pane(&self) -> bool {
+            false
+        }
+        fn resident_while_waiting(&self) -> bool {
+            true
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            unimplemented!()
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &std::path::Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(
+            &self,
+            _cwd: &std::path::Path,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            panic!("live_check opened a pane in a herdr server the caller is not inside");
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &std::path::Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// A caller outside herdr altogether — no `HERDR_*` variables, just a
+    /// server that happens to answer — gets no live pane opened in the
+    /// person's real session. `live_check` should read `in_own_pane`, the
+    /// exact signal `commands::dispatch`'s own pane gate already trusts for
+    /// this, and skip with a note instead of calling through to
+    /// `live_pane`.
+    #[test]
+    fn live_check_skips_a_herdr_server_the_caller_is_not_inside() {
+        let mux = OutsideHerdr;
+        assert!(matches!(
+            live_check(&mux, LiveCheckMode::Default),
+            Finding::NoteVerbose(text) if text.contains("not inside") || text.contains("herdr")
+        ));
+    }
+
+    /// The same herdr-shaped backend as [`OutsideHerdr`], but reachable on
+    /// purpose: `create_pane` records the directory it was handed in `seen`
+    /// and answers with an error instead of panicking. That lets a test tell
+    /// `--live` apart from the unforced path by what comes back — a `Check`
+    /// naming `live_pane`'s own failure, not the skip note — and lets
+    /// `live_pane_removes_its_scratch_directory_even_on_failure` find the
+    /// directory without scanning the shared temporary one.
+    struct FailsToCreatePane {
+        /// What `Mux::in_own_pane` answers — `false` for a caller outside
+        /// this herdr session, the case `--live` exists to override.
+        in_own_pane: bool,
+        seen: std::sync::Mutex<Option<std::path::PathBuf>>,
+    }
+
+    impl FailsToCreatePane {
+        fn new(in_own_pane: bool) -> Self {
+            Self {
+                in_own_pane,
+                seen: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl Mux for FailsToCreatePane {
+        fn name(&self) -> &'static str {
+            "herdr"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable(&self) -> String {
+            unimplemented!()
+        }
+        fn in_own_pane(&self) -> bool {
+            self.in_own_pane
+        }
+        fn resident_while_waiting(&self) -> bool {
+            true
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            unimplemented!()
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &std::path::Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(
+            &self,
+            cwd: &std::path::Path,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            *self.seen.lock().unwrap() = Some(cwd.to_path_buf());
+            Err(anyhow::anyhow!("deliberate failure"))
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &std::path::Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// `--live` is the override: it reaches `live_pane` even for a caller
+    /// `in_own_pane` says is outside this herdr session, rather than taking
+    /// the skip `live_check_skips_a_herdr_server_the_caller_is_not_inside`
+    /// proves for the unforced path.
+    #[test]
+    fn force_live_bypasses_the_in_own_pane_gate() {
+        let mux = FailsToCreatePane::new(false);
+        assert!(matches!(
+            live_check(&mux, LiveCheckMode::Forced),
+            Finding::Check(label, Err(_)) if label == "a lane really starts"
+        ));
+    }
+
+    /// `live_pane`'s own scratch directory is gone once the check is over,
+    /// whether or not it ever got as far as opening a pane — here,
+    /// `create_pane` fails immediately, the earliest a real check can fail,
+    /// and the directory `live_pane` made before calling it must still be
+    /// cleaned up. [`FailsToCreatePane`] records the directory it was handed
+    /// in `seen`, rather than this test scanning the shared temporary
+    /// directory for it: several `cargo test` processes walk that directory at once —
+    /// see `scratch`'s own module doc — so reading it back here would be
+    /// exactly the race that module exists to avoid.
+    #[test]
+    fn live_pane_removes_its_scratch_directory_even_on_failure() {
+        let mux = FailsToCreatePane::new(true);
+        assert!(live_pane(&mux).is_err());
+
+        let dir = mux
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("live_pane must call create_pane before failing");
+        assert!(
+            !dir.exists(),
+            "live_pane left its scratch directory behind: {}",
+            dir.display()
+        );
     }
 
     /// A file missing from a project `init` never wrote is not *behind* —
@@ -3068,8 +3453,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3126,8 +3511,8 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: workspace.join("dispatchers").join("api"),
         };
@@ -3146,6 +3531,44 @@ mod tests {
         );
     }
 
+    /// A home-mode checkout has no `.spoolway/` of its own — the model hint
+    /// and the `config parses` note must name the workspace's shared
+    /// `config/`, not a path under this checkout that does not exist, and
+    /// never call it "this checkout's own copy".
+    #[test]
+    fn home_mode_pipeline_and_config_messages_name_the_workspace_not_the_checkout() {
+        let root = crate::scratch::root("doctor-home-mode-messages");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("doctor-home-mode-messages-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let workspace = home.join(".spoolway").join("ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"ws\"\nclones = [{{ root = \"{}\", dispatcher = \"api\" }}]\n",
+                root.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let repo = Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+            home: workspace.join("dispatchers").join("api"),
+        };
+
+        crate::platform::test_home::with_home(&home, || {
+            let hint = pipelines_hint(&repo);
+            assert_eq!(hint, "config/pipelines/<name>.yml", "{hint}");
+
+            let owner = config_owner_label(&repo);
+            assert_eq!(owner, "the workspace's shared config", "{owner}");
+            assert_ne!(owner, "this checkout's own copy");
+        });
+    }
+
     /// Whatever `bind` could not settle — every one of the seven states the
     /// `binding-record` task defines, surfaced here as `Repo::discover_lenient`'s
     /// own `home_error` — is a failed check carrying `bind`'s own message,
@@ -3156,8 +3579,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3190,8 +3613,8 @@ mod tests {
         let home = root.join(".home");
         assert!(!home.exists());
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home,
         };
@@ -3206,7 +3629,7 @@ mod tests {
             Some(home_error),
             false,
             false,
-            true,
+            LiveCheckMode::Skip,
         );
 
         assert!(
@@ -3227,8 +3650,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
-            checkout: root.clone(),
-            root: root.clone(),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
             config: Config::default(),
             home: root.join(".home"),
         };
@@ -3324,6 +3747,58 @@ mod tests {
         );
     }
 
+    /// Acceptance criterion 6 of `workspace-scan-strict`, `doctor`'s own
+    /// corner: `registration_check` now reaches
+    /// `crate::repo::workspace_clone_checked`, the strict scan, for every
+    /// project — repo mode included. A `~/.spoolway/` holding everything a
+    /// 0.6.0 (or legacy) install could leave beside a real workspace must
+    /// not turn into a finding here either.
+    #[test]
+    fn registration_check_is_unaffected_by_a_mixed_home_from_older_installs() {
+        let root = crate::scratch::root("doctor-mixed-home");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("doctor-mixed-home-dollar-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let state = home.join(".spoolway");
+        std::fs::create_dir_all(&state).unwrap();
+
+        // A 0.6.0 repo-mode home: an ordinary `Binding`, no `clones`, no
+        // `config/`/`dispatchers/` beside it.
+        let repo_mode = state.join("repo-mode-home-abc123");
+        std::fs::create_dir_all(&repo_mode).unwrap();
+        std::fs::write(
+            repo_mode.join("project.toml"),
+            "id = \"abc123\"\nroot = \"/some/other/checkout\"\n",
+        )
+        .unwrap();
+        // A legacy home: no `project.toml` at all.
+        std::fs::create_dir_all(state.join("spoolway")).unwrap();
+        // A folder that is no home at all.
+        std::fs::create_dir_all(state.join("logs")).unwrap();
+
+        let repo = Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+
+        let finding =
+            crate::platform::test_home::with_home(&home, || registration_check(&repo, None));
+        let Finding::Check(label, outcome) = finding else {
+            panic!("registration_check always returns a Check");
+        };
+        assert_eq!(label, "bound to its home");
+        let message = outcome.expect(
+            "a mixed ~/.spoolway/ must not turn into a finding for a project none of it lists",
+        );
+        assert!(
+            message.is_some_and(|m| m.contains("repo mode")),
+            "this checkout is in repo mode and none of the mixed siblings should change that"
+        );
+    }
+
     /// [`warnings_from_rows`]'s own mapping, task `warnings-screen`'s
     /// acceptance criterion 1: a passing row has no room on the screen, a
     /// failure becomes a problem, a note in the `doctor_sync` range becomes a
@@ -3376,7 +3851,7 @@ mod tests {
     /// or the one that opens a real pane.
     #[test]
     fn cheap_findings_excludes_network_pane_and_override_layer_checks() {
-        let repo = crate::commands::testutil::fixture("doctor-cheap-findings");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-findings");
         let overrides = repo.overrides_dir();
         std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
         std::fs::write(

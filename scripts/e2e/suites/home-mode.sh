@@ -86,6 +86,39 @@ else ok "no .spoolway/ reappears in the checkout"; fi
 if [ -z "$(git status --porcelain)" ]; then ok "the checkout is left clean"
 else bad "the checkout is left clean"; git status --porcelain | sed 's/^/        /'; fi
 
+# --------------------------------------------------- sync keeps the promise
+# `init` is not the only command that promises a home-mode checkout nothing
+# is written into it or its `.git` — `sync` does too, and until it carried
+# its own `home_mode` check it broke that promise on exactly the two files a
+# project migrating into home mode is most likely to still be carrying: a
+# tracked `.gitignore` with spoolway's old marked block, and an installed
+# skill folder from before the checkout moved its setup into the workspace.
+cat >> .gitignore <<GITIGNORE
+
+# >>> spoolway >>>
+/.spoolway/
+# <<< spoolway <<<
+GITIGNORE
+mkdir -p .claude/skills/spoolway-config
+echo "stale, from before this checkout moved into the workspace" \
+  > .claude/skills/spoolway-config/SKILL.md
+must "the stale .gitignore block and skill folder are committed" git add .gitignore .claude
+must "the stale .gitignore block and skill folder are committed" \
+  git commit -qm "e2e: a stale spoolway .gitignore block and skill folder"
+before_sync=$(git rev-parse HEAD)
+
+works "a dry-run sync runs cleanly in home mode" "$SPOOLWAY" sync --dry-run
+works "a real sync runs cleanly in home mode" "$SPOOLWAY" sync
+if [ "$(git rev-parse HEAD)" = "$before_sync" ] && [ -z "$(git status --porcelain --ignored)" ]; then
+  ok "sync leaves the checkout unchanged"
+else
+  bad "sync leaves the checkout unchanged"
+  git status --porcelain --ignored | sed 's/^/        /'
+fi
+has "the .gitignore still carries spoolway's old block" "# >>> spoolway >>>" .gitignore
+has "the stale skill file is unchanged" "stale, from before this checkout moved into the workspace" \
+  .claude/skills/spoolway-config/SKILL.md
+
 # ------------------------------------------- init writes the workspace
 # A git repository spoolway has never seen, set up in home mode by `init`
 # itself with every question answered by a flag and no terminal attached.

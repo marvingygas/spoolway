@@ -704,7 +704,7 @@ mod tests {
     /// screen has to open onto an empty list rather than refuse to start.
     #[test]
     fn a_project_with_no_pending_directory_lists_none() {
-        let repo = crate::commands::testutil::fixture("pending-none");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-none");
         assert!(list_groups(&repo).unwrap().is_empty());
     }
 
@@ -729,7 +729,7 @@ mod tests {
     /// many tasks named it, and each row carrying every one of them.
     #[test]
     fn tasks_gather_into_one_row_per_distinct_group() {
-        let repo = crate::commands::testutil::fixture("pending-groups");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-groups");
         write(
             &repo,
             "split-fields.md",
@@ -757,7 +757,7 @@ mod tests {
     /// the queue by.
     #[test]
     fn a_group_is_the_string_verbatim() {
-        let repo = crate::commands::testutil::fixture("pending-verbatim");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-verbatim");
         write(&repo, "a.md", &doc("a", "plans/auth", ""));
         write(&repo, "b.md", &doc("b", "auth", ""));
 
@@ -770,7 +770,7 @@ mod tests {
     /// backwards.
     #[test]
     fn a_groups_tasks_are_ordered_dependencies_first() {
-        let repo = crate::commands::testutil::fixture("pending-order");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-order");
         write(
             &repo,
             "scan-pending.md",
@@ -792,7 +792,7 @@ mod tests {
     /// must not drop the task out of the pane.
     #[test]
     fn a_dependency_outside_the_group_orders_nothing() {
-        let repo = crate::commands::testutil::fixture("pending-order-outside");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-order-outside");
         write(
             &repo,
             "one.md",
@@ -808,7 +808,7 @@ mod tests {
     /// every task rather than looping for want of an eligible one.
     #[test]
     fn a_cycle_still_lists_every_task() {
-        let repo = crate::commands::testutil::fixture("pending-cycle");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-cycle");
         write(&repo, "a.md", &doc("a", "loop", "depends_on: [b]\n"));
         write(&repo, "b.md", &doc("b", "loop", "depends_on: [a]\n"));
 
@@ -822,7 +822,7 @@ mod tests {
     /// for the one case the screen has to say so out loud.
     #[test]
     fn a_task_with_no_readable_group_is_skipped() {
-        let repo = crate::commands::testutil::fixture("pending-ungrouped");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-ungrouped");
         write(&repo, "good.md", &doc("good", "issue-42", ""));
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
@@ -849,7 +849,7 @@ mod tests {
     /// would be paying for a listing nobody looks at.
     #[test]
     fn unreadable_is_empty_when_every_task_reads() {
-        let repo = crate::commands::testutil::fixture("pending-all-readable");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-all-readable");
         write(&repo, "a.md", &doc("a", "issue-42", ""));
         write(&repo, "b.md", &doc("b", "issue-42", ""));
 
@@ -860,7 +860,7 @@ mod tests {
     /// and above all no page is scanned for one.
     #[test]
     fn only_markdown_tasks_are_read() {
-        let repo = crate::commands::testutil::fixture("pending-md-only");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-md-only");
         write(&repo, "a.md", &doc("a", "issue-42", ""));
         std::fs::write(repo.pending_dir().join("a.html"), "<html></html>").unwrap();
 
@@ -875,7 +875,7 @@ mod tests {
     /// list altogether.
     #[test]
     fn a_group_already_in_the_queue_is_marked_and_sorted_last() {
-        let repo = crate::commands::testutil::fixture("pending-already-queued");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-already-queued");
         write(&repo, "done.md", &doc("done", "old-group", ""));
         write(&repo, "fresh.md", &doc("fresh", "new-group", ""));
         std::fs::write(
@@ -895,7 +895,7 @@ mod tests {
     /// hiding the work that is left.
     #[test]
     fn a_group_only_partly_queued_is_still_queueable() {
-        let repo = crate::commands::testutil::fixture("pending-part-queued");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-part-queued");
         write(&repo, "one.md", &doc("one", "issue-42", ""));
         write(&repo, "two.md", &doc("two", "issue-42", ""));
         std::fs::write(
@@ -914,7 +914,7 @@ mod tests {
     /// row, built entirely from the queue directory instead.
     #[test]
     fn a_group_with_no_pending_tasks_still_lists_from_the_queue() {
-        let repo = crate::commands::testutil::fixture("pending-queue-only");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-queue-only");
         std::fs::write(
             repo.queue_dir().join("shipped.md"),
             "---\nid: shipped\ntitle: shipped, done\ngroup: already-gone\nstage: queued\n\
@@ -939,7 +939,7 @@ mod tests {
     /// ones — the third source this whole feature adds.
     #[test]
     fn a_group_wholly_in_the_archive_still_lists() {
-        let repo = crate::commands::testutil::fixture("pending-archive-only");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-archive-only");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("finished.md"),
@@ -961,7 +961,7 @@ mod tests {
     /// not `Done`, since one of its tasks has not reached the archive yet.
     #[test]
     fn a_group_half_archived_and_half_queued_lists_its_whole_chain() {
-        let repo = crate::commands::testutil::fixture("pending-mixed-states");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-mixed-states");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("first.md"),
@@ -993,7 +993,7 @@ mod tests {
     /// is not.
     #[test]
     fn a_pending_task_already_archived_reads_as_done() {
-        let repo = crate::commands::testutil::fixture("pending-already-archived");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-already-archived");
         write(&repo, "done.md", &doc("done", "old-group", ""));
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
@@ -1012,7 +1012,7 @@ mod tests {
     /// validating it.
     #[test]
     fn a_task_carries_its_title_and_its_waits_on() {
-        let repo = crate::commands::testutil::fixture("pending-fields");
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-fields");
         write(
             &repo,
             "b.md",

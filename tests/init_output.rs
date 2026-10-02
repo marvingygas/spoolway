@@ -50,6 +50,34 @@ impl Project {
     fn init(&self, provider: &str) -> Output {
         self.run(&["init", "--yes", "--provider", provider, "--tracker", "none"])
     }
+
+    /// [`Project::run`], but without asserting success — for a command
+    /// whose outcome, pass or fail, the test asserts on itself rather than
+    /// have it swallowed by an `assert!` that only prints it and panics.
+    fn run_allowing_failure(&self, args: &[&str]) -> Output {
+        let home = self.0.join("home");
+        Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(args)
+            .current_dir(&self.0)
+            .env("HOME", home)
+            .output()
+            .expect("run spoolway")
+    }
+
+    /// `init` with no `--yes` and nothing on stdin — the shape an agent with
+    /// no terminal runs it in, and the one `crate::ask::confirm` cannot ask
+    /// a question through.
+    fn init_with_no_terminal_and_no_yes(&self) -> Output {
+        use std::process::Stdio;
+        let home = self.0.join("home");
+        Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(["init"])
+            .current_dir(&self.0)
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run spoolway")
+    }
 }
 
 impl AsRef<Path> for Project {
@@ -205,7 +233,9 @@ fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
         "{out}"
     );
     assert!(
-        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        out.ends_with(&format!(
+            "Skills installed successfully, into .claude/skills.\n{CLOSING_LINES}"
+        )),
         "{out}"
     );
     assert_scaffold(&project, "claude");
@@ -222,12 +252,18 @@ fn repeat_init_that_adds_skills_omits_project_success() {
     let paths = scaffold_paths(&project);
     let out = stdout(&project.run(&["init", "--yes", "--provider", "codex"]));
 
-    // Nothing was missing, so every file gets a `kept` row rather than a
-    // `wrote` one, and the run closes by saying so — no tracker flag was
-    // given, so `[issue_tracking]` was never touched either.
+    // Nothing in the scaffold was missing, so every file gets a `kept` row
+    // rather than a `wrote` one — no tracker flag was given, so
+    // `[issue_tracking]` was never touched either. But switching providers
+    // installs Codex's skills for the first time, so this run did write
+    // something after all, and must not also close on "nothing to
+    // install" right next to the line saying the opposite.
     assert_report_rows(&out, "kept", &paths);
-    assert!(out.contains("Skills installed successfully.\n"), "{out}");
-    assert!(out.trim_end().ends_with("nothing to install."), "{out}");
+    assert!(
+        out.contains("Skills installed successfully, into .agents/skills.\n"),
+        "{out}"
+    );
+    assert!(!out.trim_end().ends_with("nothing to install."), "{out}");
     assert!(!out.contains("Project initialized successfully."));
     assert!(project.as_ref().join(".claude/skills").is_dir());
     let codex_plan = project
@@ -244,6 +280,26 @@ fn repeat_init_that_adds_skills_omits_project_success() {
         std::fs::read(project.as_ref().join(".spoolway/pipelines/default.yml")).unwrap(),
         pipeline_before
     );
+}
+
+/// A plain repeat `init` with the same provider and nothing missing writes
+/// nothing at all — not the scaffold, not the skills — so it must say so
+/// once, not twice in a way that reads as contradicting itself: never both
+/// "Skills installed successfully." (nothing was actually installed just
+/// now) and "nothing to install." in the same run.
+#[test]
+fn a_plain_repeat_init_says_nothing_to_install_exactly_once() {
+    let project = Project::new("plain-repeat");
+    project.init("claude");
+
+    let out = stdout(&project.run(&["init", "--yes", "--provider", "claude"]));
+
+    assert!(!out.contains("Skills installed successfully."), "{out}");
+    assert!(
+        out.contains("Skills already installed, in .claude/skills.\n"),
+        "{out}"
+    );
+    assert!(out.trim_end().ends_with("nothing to install."), "{out}");
 }
 
 /// A repeat `init` that restores nothing but a missing prompt *asset* —
@@ -271,7 +327,13 @@ fn repeat_init_that_restores_only_a_missing_prompt_asset_writes_that_one_path_an
         "{out}"
     );
     assert_report_rows(&out, "kept", &kept);
-    assert!(out.contains("Skills installed successfully.\n"), "{out}");
+    // Claude's skills were already installed by the first `init`, and this
+    // run names the same provider with no `--force`, so nothing about them
+    // was actually (re)written — "already", not "successfully".
+    assert!(
+        out.contains("Skills already installed, in .claude/skills.\n"),
+        "{out}"
+    );
     assert!(
         asset.exists(),
         "the missing asset must actually be restored"
@@ -486,7 +548,7 @@ fn a_fresh_init_without_examples_makes_empty_folders_and_names_the_skill() {
     assert!(!project.as_ref().join(".spoolway/hooks").exists());
     assert!(
         out.ends_with(
-            "Skills installed successfully.\n\
+            "Skills installed successfully, into .claude/skills.\n\
              Project initialized successfully.\n\
              Use the spoolway-config skill to create pipelines.\n"
         ),
@@ -533,7 +595,9 @@ fn a_fresh_init_with_examples_and_github_writes_both() {
     assert_report_rows(&out, "wrote", &paths);
     assert!(!project.as_ref().join(".github").exists());
     assert!(
-        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        out.ends_with(&format!(
+            "Skills installed successfully, into .claude/skills.\n{CLOSING_LINES}"
+        )),
         "{out}"
     );
 }
@@ -560,7 +624,9 @@ fn forced_init_reprints_every_wrote_row_and_closes_like_a_fresh_run() {
     assert_report_rows(&out, "wrote", &scaffold_paths(&project));
     assert!(!out.contains("stamped"), "{out}");
     assert!(
-        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        out.ends_with(&format!(
+            "Skills installed successfully, into .agents/skills.\n{CLOSING_LINES}"
+        )),
         "{out}"
     );
     assert_eq!(stderr(&result), "");
@@ -582,13 +648,13 @@ fn init_rejects_the_removed_agent_and_model_flags() {
 }
 
 #[test]
-fn standalone_install_uses_the_concise_success_message() {
+fn standalone_install_names_where_it_installed() {
     let project = Project::new("install");
     project.init("claude");
 
     assert_eq!(
         stdout(&project.run(&["install", "codex"])),
-        "Skills installed successfully.\n"
+        "Skills installed successfully, into .agents/skills.\n"
     );
 }
 
@@ -623,7 +689,10 @@ fn a_fresh_init_prints_the_stamped_line_below_its_other_rows() {
             .unwrap_or_else(|| panic!("{needle:?} is not in {output:?}"))
     };
     assert!(at(removed) < at(&stamped), "{output:?}");
-    assert_eq!(lines[at(&stamped) + 1], "Skills installed successfully.");
+    assert_eq!(
+        lines[at(&stamped) + 1],
+        "Skills installed successfully, into .claude/skills."
+    );
 }
 
 /// Every file and directory under `from`, copied to the same relative path
@@ -830,4 +899,339 @@ fn prompt_contract_in_a_linked_worktree_reads_the_worktrees_own_pipeline() {
         .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
         .current_dir(&root)
         .status();
+}
+
+/// `init --no-examples` leaves `pipelines/` empty, and the skill's own next
+/// step — `spoolway pipeline contract` and `spoolway prompt contract` — has
+/// to work in exactly that project, since those are the two commands that
+/// print the formats it writes the first pipeline from. Neither command's
+/// own output depends on a project pipeline existing, so an empty
+/// `pipelines/` directory must not fail them — see
+/// `crate::pipeline::Pipelines::load_or_empty`.
+#[test]
+fn pipeline_contract_and_prompt_contract_succeed_with_no_pipelines_defined() {
+    let project = Project::new("contract-no-pipelines");
+    project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--no-examples",
+        "--tracker",
+        "none",
+    ]);
+    assert_eq!(
+        std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
+            .unwrap()
+            .count(),
+        0,
+        "fixture must start with no project pipelines defined"
+    );
+
+    let pipeline_out = project.run_allowing_failure(&["pipeline", "contract"]);
+    assert!(
+        pipeline_out.status.success(),
+        "pipeline contract failed with no project pipelines: {}",
+        stderr(&pipeline_out)
+    );
+
+    let prompt_out = project.run_allowing_failure(&["prompt", "contract"]);
+    assert!(
+        prompt_out.status.success(),
+        "prompt contract failed with no project pipelines: {}",
+        stderr(&prompt_out)
+    );
+}
+
+/// A repeat `init` with no `--provider` and a missing `pipelines/` folder
+/// restores it for the project's own configured provider, not the menu's
+/// first entry (`claude`), and installs only that provider's skills.
+#[test]
+fn a_repeat_init_with_no_provider_restores_the_projects_own_provider() {
+    let project = Project::new("repeat-no-provider");
+    project.init("codex");
+    std::fs::remove_dir_all(project.as_ref().join(".spoolway/pipelines")).unwrap();
+
+    project.run(&["init", "--yes"]);
+
+    let pipeline =
+        std::fs::read_to_string(project.as_ref().join(".spoolway/pipelines/default.yml")).unwrap();
+    assert!(pipeline.contains("agent: codex"), "{pipeline}");
+    assert!(!pipeline.contains("agent: claude"), "{pipeline}");
+    assert!(
+        !project.as_ref().join(".claude/skills").exists(),
+        "only the project's own provider's skills should be installed"
+    );
+    assert!(project.as_ref().join(".agents/skills").is_dir());
+}
+
+/// A fresh project has no existing key to fall back on, so choosing a
+/// tracker with no `--project-key` and nobody to ask warns, naming
+/// `--project-key`, and still writes the empty key rather than refusing.
+#[test]
+fn a_fresh_tracker_with_no_project_key_warns_and_writes_an_empty_key() {
+    let project = Project::new("tracker-no-key-fresh");
+
+    let out = stdout(&project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+    ]));
+
+    assert!(out.contains("--project-key"), "{out}");
+    let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
+    assert!(config.contains("project_key = \"\""), "{config}");
+}
+
+/// The established-project half of the same bug: a repeat `--tracker` with
+/// no `--project-key` and nobody to ask keeps the key the project already
+/// has, and — since there is one to keep — prints no warning about it.
+#[test]
+fn a_repeat_tracker_with_no_project_key_keeps_the_existing_one_and_warns_only_when_none() {
+    let project = Project::new("tracker-no-key-repeat");
+    project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+        "--project-key",
+        "acme/app",
+    ]);
+
+    let out = stdout(&project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+    ]));
+
+    assert!(!out.contains("--project-key"), "{out}");
+    let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
+    assert!(config.contains("project_key = \"acme/app\""), "{config}");
+}
+
+/// `init --force` in a home-mode clone rewrites `config/`, shared by every
+/// clone in that workspace — so it must name the others sharing it before
+/// doing that, not reset a teammate's setup with no warning at all.
+#[test]
+fn force_in_a_home_mode_clone_names_the_other_clones_before_rewriting_their_config() {
+    let base = std::env::temp_dir().join(format!(
+        "spoolway-init-output-force-home-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = base.join("home");
+    let first = base.join("first");
+    let second = base.join("second");
+    for root in [&first, &second] {
+        std::fs::create_dir_all(root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    let run = |root: &Path, args: &[&str]| -> Output {
+        let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(args)
+            .current_dir(root)
+            .env("HOME", &home)
+            .output()
+            .expect("run spoolway");
+        assert!(
+            output.status.success(),
+            "spoolway failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    run(
+        &first,
+        &[
+            "init",
+            "--yes",
+            "--setup",
+            "home",
+            "--workspace",
+            "new",
+            "--provider",
+            "claude",
+            "--tracker",
+            "none",
+        ],
+    );
+    let workspace_name = std::fs::read_dir(home.join(".spoolway"))
+        .expect("read ~/.spoolway")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("first-"))
+        .expect("the fresh workspace folder, labelled after the first clone");
+    run(
+        &second,
+        &[
+            "init",
+            "--yes",
+            "--workspace",
+            &workspace_name,
+            "--provider",
+            "claude",
+            "--tracker",
+            "none",
+        ],
+    );
+
+    let out = stdout(&run(
+        &second,
+        &["init", "--force", "--yes", "--provider", "claude"],
+    ));
+
+    assert!(
+        out.contains(&first.canonicalize().unwrap().display().to_string())
+            || out.contains(&first.display().to_string()),
+        "expected the first clone's path named before the shared config was rewritten:\n{out}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A clone joining a workspace uses the setup already chosen there, so
+/// `--tracker`, `--project-key` and `--examples` do nothing on that run —
+/// but the run has to say so, rather than silently dropping them with no
+/// trace beyond their absence from `config.toml`.
+#[test]
+fn joining_a_workspace_names_the_flags_it_ignored() {
+    let base = std::env::temp_dir().join(format!(
+        "spoolway-init-output-join-ignored-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = base.join("home");
+    let first = base.join("first");
+    let second = base.join("second");
+    for root in [&first, &second] {
+        std::fs::create_dir_all(root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    let run = |root: &Path, args: &[&str]| -> Output {
+        let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args(args)
+            .current_dir(root)
+            .env("HOME", &home)
+            .output()
+            .expect("run spoolway");
+        assert!(
+            output.status.success(),
+            "spoolway failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    run(
+        &first,
+        &[
+            "init",
+            "--yes",
+            "--setup",
+            "home",
+            "--workspace",
+            "new",
+            "--provider",
+            "claude",
+            "--tracker",
+            "none",
+        ],
+    );
+    let workspace_name = std::fs::read_dir(home.join(".spoolway"))
+        .expect("read ~/.spoolway")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("first-"))
+        .expect("the fresh workspace folder, labelled after the first clone");
+
+    let out = stdout(&run(
+        &second,
+        &[
+            "init",
+            "--yes",
+            "--workspace",
+            &workspace_name,
+            "--provider",
+            "claude",
+            "--tracker",
+            "github",
+            "--project-key",
+            "o/r",
+            "--examples",
+        ],
+    ));
+
+    assert!(out.contains("ignored"), "{out}");
+    assert!(out.contains("--tracker"), "{out}");
+    assert!(out.contains("--project-key"), "{out}");
+    assert!(out.contains("--examples"), "{out}");
+    let config = std::fs::read_to_string(
+        home.join(".spoolway")
+            .join(&workspace_name)
+            .join("config")
+            .join("config.toml"),
+    )
+    .unwrap();
+    assert!(
+        !config.contains("hook = \"github.sh\"") && !config.contains("project_key = \"o/r\""),
+        "the joining run's --tracker must not have touched the shared config:\n{config}"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// `init` with nobody to answer its confirmation writes nothing — the
+/// declared-default path `crate::ask::confirm` takes when stdin is not a
+/// terminal. An agent has no terminal either, so writing nothing has to
+/// come with a word of explanation rather than pass for success: a line
+/// saying nothing was written and that `--yes` is how to answer the
+/// confirmation.
+#[test]
+fn init_with_no_terminal_and_no_yes_says_nothing_was_written() {
+    let project = Project::new("no-terminal-no-yes");
+
+    let result = project.init_with_no_terminal_and_no_yes();
+    let out = stdout(&result);
+
+    assert!(result.status.success(), "{}", stderr(&result));
+    assert!(
+        !project.as_ref().join(".spoolway").exists(),
+        "nothing should have been written:\n{out}"
+    );
+    assert!(
+        out.lines().any(|line| line.contains("--yes")
+            && (line.contains("nothing") || line.contains("wrote nothing"))),
+        "expected a line saying nothing was written and naming --yes, got:\n{out}"
+    );
 }
