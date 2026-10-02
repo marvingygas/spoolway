@@ -39,12 +39,18 @@ struct Answers {
 impl Answers {
     /// Flags first, then the person, then the default — and the person is
     /// skipped whenever [`crate::ask::interactive`] says there is not one.
-    fn gather(root: &Path, args: &InitArgs) -> Result<Self> {
+    ///
+    /// `new_setup` says the setup is a new workspace's whatever `root`
+    /// resolves to now: a listed checkout moving into a new workspace still
+    /// reads its old workspace's `config.toml` until the move, and taking
+    /// that for an established project would skip the very questions the
+    /// new workspace's empty `config/` needs answered.
+    fn gather(root: &Path, args: &InitArgs, new_setup: bool) -> Result<Self> {
         // Whether the config this run renders will actually be written.
         // `Placer::file` decides the same thing for every file later on; this
         // is the one case where the decision has to be made early, because it
         // is what makes these questions worth asking.
-        let fresh = args.force || !Config::path_in(root).exists();
+        let fresh = new_setup || args.force || !Config::path_in(root).exists();
 
         let provider = Self::provider(root, args, fresh)?;
         let examples = Self::examples(root, args, fresh)?;
@@ -103,8 +109,8 @@ impl Answers {
         }
     }
 
-    /// The answers for a checkout joining a workspace: the agent question
-    /// alone, as the mockup draws it. The setup is the workspace's and
+    /// The answers for a checkout joining a workspace, or moving into one
+    /// that already has a setup: the agent question alone. The setup is the workspace's and
     /// already chosen — its examples, its tracker — so asking either again
     /// would take an answer this run has nowhere to put, and writing one into
     /// the shared `config/` would change every other clone's setup from here.
@@ -116,6 +122,12 @@ impl Answers {
     /// so a person who typed one does not have to notice its absence from
     /// `config.toml` to learn it did nothing.
     fn joining(root: &Path, args: &InitArgs) -> Result<Self> {
+        // Ignored, but still checked: a value no other run would accept is
+        // a mistake worth stopping on before the join writes anything, not
+        // one to wave through because this run happens not to use it.
+        if let Some(raw) = args.tracker.as_deref().filter(|raw| !raw.is_empty()) {
+            parse_tracker(raw)?;
+        }
         let mut ignored = Vec::new();
         if args.tracker.is_some() {
             ignored.push("--tracker");
@@ -251,13 +263,8 @@ impl Answers {
     /// `gh` hook nobody asked for.
     fn tracker(root: &Path, args: &InitArgs, fresh: bool) -> Result<Option<(Tracker, String)>> {
         let tracker = match args.tracker.as_deref() {
-            // A value answers outright — `--tracker github` — parsed by the
-            // same case-insensitive rule clap's own `value_enum` uses, since
-            // `InitArgs::tracker` is a plain string now (see its own doc).
-            Some(raw) if !raw.is_empty() => <Tracker as clap::ValueEnum>::from_str(raw, true)
-                .map_err(|message| {
-                    anyhow::anyhow!("--tracker: {message} — pick `github`, `jira` or `none`")
-                })?,
+            // A value answers outright — `--tracker github`.
+            Some(raw) if !raw.is_empty() => parse_tracker(raw)?,
             // The flag absent entirely, or given bare (`--tracker` with no
             // value, filled in by `default_missing_value`): both fall
             // through to the picker below, whatever the project's age.
@@ -363,32 +370,55 @@ impl Answers {
     }
 }
 
+/// A `--tracker` value, parsed by the same case-insensitive rule clap's own
+/// `value_enum` uses, since `InitArgs::tracker` is a plain string (see its
+/// own doc). The refusal lists the trackers off clap's own list, so a new
+/// tracker is named here without anyone editing this message.
+fn parse_tracker(raw: &str) -> Result<Tracker> {
+    <Tracker as clap::ValueEnum>::from_str(raw, true).map_err(|message| {
+        let names: Vec<String> = <Tracker as clap::ValueEnum>::value_variants()
+            .iter()
+            .map(|tracker| format!("`{}`", tracker.name()))
+            .collect();
+        anyhow::anyhow!("--tracker: {message} — pick one of {}", names.join(", "))
+    })
+}
+
 /// Where this run puts the project's setup, settled before anything is
 /// written — the answers to "Where should this project's setup live?" and,
-/// in home mode, "Which workspace should this checkout use?".
+/// in home mode, the workspace menu ([`WORKSPACE_QUESTION`]).
 enum Placement {
     /// A tracked `.spoolway/` in the checkout, as `init` always did — or a
     /// checkout whose setup `--adopt`/`--new-id` settles on its own.
     Repo,
-    /// A checkout some workspace already lists: a repeat run, set up in
-    /// that workspace's `config/` exactly as a repeat repo-mode run is.
+    /// A checkout some workspace already lists, staying there: a repeat
+    /// run, set up in that workspace's `config/` exactly as a repeat
+    /// repo-mode run is.
     Listed,
     /// Start a new workspace for this checkout.
     New,
-    /// Add this checkout to the workspace with this folder name.
+    /// Add this checkout to the workspace with this folder name — or take
+    /// over the queue of a gone checkout of the same repository there; see
+    /// [`crate::repo::join_workspace`].
     Join(String),
+    /// Move a checkout some workspace already lists into the workspace with
+    /// this folder name, or into a new workspace for `None`; see
+    /// [`crate::repo::move_checkout`].
+    Move(Option<String>),
 }
 
 impl Placement {
     /// Flags first, then the person, then the default — the same order
     /// [`Answers::gather`] takes.
     ///
-    /// A checkout whose setup already lives somewhere is not asked at all:
-    /// one a workspace lists stays in home mode, and one with a tracked
-    /// `.spoolway/` stays in repo mode. A flag asking to move either is
-    /// refused rather than ignored, because moving a project between the two
-    /// is not something `init` does, and a silent repeat run would read as
-    /// if it had.
+    /// A checkout whose setup already lives somewhere is not asked where
+    /// its setup should live: one a workspace lists stays in home mode, and
+    /// one with a tracked `.spoolway/` stays in repo mode. A flag asking to
+    /// switch either between the two modes is refused rather than ignored,
+    /// because that is not something `init` does, and a silent repeat run
+    /// would read as if it had. A listed checkout may still move between
+    /// workspaces: at a terminal it is shown the workspace menu, and
+    /// `--workspace <other>` moves it without asking.
     fn choose(root: &Path, args: &InitArgs) -> Result<Self> {
         let placement = Self::choose_any(root, args)?;
         // Repo mode only: `root` being `$HOME` itself means its tracked
@@ -441,17 +471,20 @@ impl Placement {
                     root.display()
                 );
             }
-            if let Some(wanted) = &args.workspace
-                && *wanted != name
-            {
-                bail!(
-                    "{} already uses workspace {name} — init does not move a checkout to \
-                     another workspace\n  run `spoolway init` without --workspace, or with \
-                     `--workspace {name}`, to repeat the setup in its own workspace",
-                    root.display()
-                );
-            }
-            return Ok(Self::Listed);
+            // A listed checkout stays where it is unless it is asked to
+            // move: by `--workspace`, or by a person picking another
+            // workspace in the menu. With nobody to ask, a repeat run is a
+            // repeat run, as it always was.
+            return Ok(match args.workspace.as_deref() {
+                Some(wanted) if wanted == name => Self::Listed,
+                Some(NEW_WORKSPACE) => Self::Move(None),
+                Some(wanted) => Self::Move(Some(wanted.to_string())),
+                None if !crate::ask::interactive() => Self::Listed,
+                None => match pick_workspace(root, Some(&name))? {
+                    Some(picked) if picked == name => Self::Listed,
+                    picked => Self::Move(picked),
+                },
+            });
         }
         if crate::config::tracked_setup_dir_in(root).is_dir() {
             if asked_home {
@@ -504,21 +537,7 @@ impl Placement {
             );
         }
 
-        let mut workspaces = crate::repo::workspaces();
-        // This checkout's own repository, so a workspace already holding a
-        // clone of it can be sorted to the top of the menu and marked, and a
-        // non-interactive run can say it exists rather than quietly starting
-        // a second one next to it. A stable sort: `workspaces()` is already
-        // sorted by name, and nothing here should reorder two workspaces
-        // that agree on whether they match.
-        let this_repo = crate::repo::repo_identity(root);
-        let same_repo = |workspace: &crate::repo::WorkspaceSummary| {
-            matches!(
-                (&this_repo, &workspace.repo_identity),
-                (Some(this), Some(theirs)) if this.same_as(theirs)
-            )
-        };
-        workspaces.sort_by_key(|workspace| !same_repo(workspace));
+        let workspaces = crate::repo::workspaces();
         match args.workspace.as_deref() {
             Some(NEW_WORKSPACE) => Ok(Self::New),
             Some(name) => {
@@ -536,68 +555,111 @@ impl Placement {
             }
             None if workspaces.is_empty() => Ok(Self::New),
             // Nobody to ask: a new workspace rather than the menu's default
-            // — the same default the interactive menu below takes when
-            // Enter is pressed without reading it, so the two agree even
-            // when a workspace already holds this very repository. That
-            // case still gets said out loud, since criterion 3 asks for it,
-            // but as a note rather than a refusal: a script that used to
-            // get a new workspace here must still get one, only now told
-            // there was another way.
+            // — the same default the interactive menu takes when Enter is
+            // pressed without reading it, so the two agree even when a
+            // workspace already holds this very repository. That case is
+            // said out loud: a script that used to get a new workspace here
+            // still gets one, and is told which flag joins the other instead
+            // on a later run, where a listed checkout given `--workspace`
+            // moves there.
             None if !crate::ask::interactive() => {
-                if let Some(existing) = workspaces.iter().find(|workspace| same_repo(workspace)) {
+                let mine = crate::repo::root_commit(root);
+                if let Some(existing) = workspaces
+                    .iter()
+                    .find(|workspace| workspace.holds_repository_of(root, mine.as_deref()))
+                {
                     println!(
-                        "  workspace {} already holds a clone of this repository — join it \
-                         with `spoolway init --setup home --workspace {}`, or pass `--workspace \
-                         new` to start a separate one on purpose",
-                        existing.name, existing.name,
+                        "  note  workspace {name} already holds a clone of this repository.\n        \
+                         Starting a new workspace, because nobody is here to pick one.\n        \
+                         To use {name} instead, run `spoolway init --workspace {name}`.",
+                        name = existing.name,
                     );
                 }
                 Ok(Self::New)
             }
-            None => {
-                let notes: Vec<String> = workspaces
-                    .iter()
-                    .map(|workspace| {
-                        let repo = workspace.repo_display.as_deref().unwrap_or("no clones");
-                        // The marker goes first: `crate::ask::choose` cuts
-                        // every row to the terminal's width from the right,
-                        // so anything appended after a long repository
-                        // string — an origin URL, most often — would be the
-                        // first thing lost to it instead of the thing a
-                        // person most needs to see at a glance.
-                        if same_repo(workspace) {
-                            format!("this repository — used by {repo}")
-                        } else {
-                            format!("used by {repo}")
-                        }
-                    })
-                    .collect();
-                let mut menu: Vec<(&str, &str)> = workspaces
-                    .iter()
-                    .zip(&notes)
-                    .map(|(workspace, note)| (workspace.name.as_str(), note.as_str()))
-                    .collect();
-                menu.push((NEW_WORKSPACE, "start a new workspace"));
-                // `new` is the safe default: joining shares one setup with
-                // every clone already in the chosen workspace, so pressing
-                // Enter without reading the menu must never land there.
-                let default = workspaces.len();
-                let picked = crate::ask::choose(
-                    "Which workspace should this checkout use?",
-                    &menu,
-                    default,
-                )?;
-                Ok(match workspaces.get(picked) {
-                    Some(workspace) => Self::Join(workspace.name.clone()),
-                    None => Self::New,
-                })
-            }
+            None => Ok(match pick_workspace(root, None)? {
+                Some(name) => Self::Join(name),
+                None => Self::New,
+            }),
         }
     }
 }
 
-/// The answer to "Which workspace should this checkout use?", and the
-/// `--workspace` value, that starts a new workspace rather than naming one.
+/// The workspace menu's question, the same for a checkout joining a
+/// workspace and for one moving to another.
+const WORKSPACE_QUESTION: &str = "Select the spoolway workspace for this checkout.\nPick an existing workspace or create a new one.";
+
+/// The menu entry, last on the workspace menu, that starts a new workspace.
+const NEW_WORKSPACE_ENTRY: &str = "Create a new workspace";
+
+/// Ask which workspace this checkout uses, and answer the folder name picked,
+/// or `None` for [`NEW_WORKSPACE_ENTRY`].
+///
+/// `current` is the workspace a listed checkout uses now. It comes first,
+/// marked `current`, and is the default, so Enter changes nothing. Only
+/// workspaces it may move into follow it — never one of another repository,
+/// see [`crate::repo::WorkspaceSummary::may_move_into`]. An unlisted checkout
+/// sees every workspace, those of its own repository first, and defaults to
+/// a new workspace: joining shares one setup with every clone already in the
+/// chosen workspace, so pressing Enter without reading must never land there.
+///
+/// The note beside a workspace is `same repository` when it holds a clone of
+/// this one, and otherwise the repository it holds. The marker is the whole
+/// note, so the line fits 80 columns however long that repository's origin
+/// is; [`crate::ask::choose`] cuts a row at the terminal's width from the
+/// right, and an origin after the marker used to be the part lost.
+fn pick_workspace(root: &Path, current: Option<&str>) -> Result<Option<String>> {
+    let mine = crate::repo::root_commit(root);
+    let mut workspaces = crate::repo::workspaces();
+    if let Some(current) = current {
+        workspaces.retain(|workspace| {
+            workspace.name == current || workspace.may_move_into(root, mine.as_deref())
+        });
+    }
+    // A stable sort: `workspaces()` is already sorted by name, and nothing
+    // here should reorder two workspaces that agree on where they belong.
+    workspaces.sort_by_key(|workspace| {
+        (
+            Some(workspace.name.as_str()) != current,
+            !workspace.holds_repository_of(root, mine.as_deref()),
+        )
+    });
+    let notes: Vec<String> = workspaces
+        .iter()
+        .map(|workspace| {
+            if Some(workspace.name.as_str()) == current {
+                "current".to_string()
+            } else if workspace.holds_repository_of(root, mine.as_deref()) {
+                "same repository".to_string()
+            } else {
+                workspace
+                    .repo_display
+                    .clone()
+                    .unwrap_or_else(|| "no checkouts".to_string())
+            }
+        })
+        .collect();
+    let mut menu: Vec<(&str, &str)> = workspaces
+        .iter()
+        .zip(&notes)
+        .map(|(workspace, note)| (workspace.name.as_str(), note.as_str()))
+        .collect();
+    menu.push((NEW_WORKSPACE_ENTRY, ""));
+    let default = match current {
+        Some(current) => workspaces
+            .iter()
+            .position(|workspace| workspace.name == current)
+            .unwrap_or(workspaces.len()),
+        None => workspaces.len(),
+    };
+    let picked = crate::ask::choose(WORKSPACE_QUESTION, &menu, default)?;
+    Ok(workspaces
+        .get(picked)
+        .map(|workspace| workspace.name.clone()))
+}
+
+/// The `--workspace` value that starts a new workspace rather than naming
+/// one — what [`NEW_WORKSPACE_ENTRY`] answers on the menu.
 const NEW_WORKSPACE: &str = "new";
 
 /// `path` as `init`'s report rows name it: relative to the checkout when it
@@ -947,7 +1009,12 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // rest of the run keys the joining case off: that workspace's setup is
     // shared and already chosen, so nothing below writes into `config/`.
     let placement = Placement::choose(root, args)?;
-    let joined = matches!(placement, Placement::Join(_));
+    // A move is refused here, right after the menu and before any question
+    // or write, so a refusal leaves everything as it was.
+    if let Placement::Move(to) = &placement {
+        crate::repo::check_move(root, to.as_deref())?;
+    }
+    let joined = matches!(placement, Placement::Join(_) | Placement::Move(Some(_)));
 
     // Every flag validated and every question answered before the first
     // write below — `Answers::gather`/`Answers::joining` only read and ask,
@@ -960,14 +1027,37 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     let answers = if joined {
         Answers::joining(root, args)?
     } else {
-        Answers::gather(root, args)?
+        Answers::gather(root, args, matches!(placement, Placement::Move(None)))?
     };
 
-    let placed = match &placement {
-        Placement::New => Some(crate::repo::create_workspace(root)?),
-        Placement::Join(name) => Some(crate::repo::join_workspace(root, name)?),
-        Placement::Repo | Placement::Listed => None,
-    };
+    // What the closing lines say about where this checkout went. `bound` is
+    // the row a new workspace prints; a join or a move says it in a sentence
+    // instead, as the last thing the run prints.
+    let mut bound = None;
+    let mut placed_lines = Vec::new();
+    match &placement {
+        Placement::New => bound = Some(crate::repo::create_workspace(root)?),
+        Placement::Join(name) => {
+            crate::repo::join_workspace(root, name)?;
+            placed_lines.push(format!("Joined workspace {name}."));
+        }
+        Placement::Move(to) => {
+            let moved = crate::repo::move_checkout(root, to.as_deref())?;
+            let name = moved
+                .clone
+                .workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            placed_lines.push(format!("Moved to workspace {name}."));
+            if let Some(removed) = moved.removed {
+                placed_lines.push(format!(
+                    "Removed workspace {removed}. It held no other checkout."
+                ));
+            }
+        }
+        Placement::Repo | Placement::Listed => {}
+    }
 
     // A project's home is keyed off an id stamped into its own common git
     // directory, checked against that home's own record of which checkout
@@ -1072,12 +1162,8 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     let mut wrote_any = false;
 
     if joined {
-        // The workspace's setup, shared with every clone already in it and
-        // left exactly as it is: one row for the folder, as the mockup draws.
-        let setup = crate::config::setup_dir_in(root);
-        placer
-            .rows
-            .push(report_row("kept", &format!("{}/", shown(root, &setup))));
+        // The workspace's setup, shared with every clone already in it, is
+        // left exactly as it is, and the closing line names the workspace.
     } else {
         // `--force` in a home-mode clone rewrites `state` — this workspace's
         // shared `config/`, read by every other clone's own `init`/`sync` —
@@ -1178,7 +1264,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     }
     // Home mode's counterpart to the `stamped` line: the workspace entry this
     // run added is the whole of the binding, so it is named instead.
-    if let Some(clone) = &placed {
+    if let Some(clone) = &bound {
         println!(
             "{}",
             report_row(
@@ -1232,12 +1318,14 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // one place `init` says what to do next, so they stay on stdout where
     // they were. Nothing in this task's acceptance criteria asks about
     // them.
+    for line in &placed_lines {
+        println!("{line}");
+    }
     if joined {
-        // A clone joining a workspace is a new project for this checkout,
-        // but its setup — and whatever it still needs — is the workspace's
-        // and was settled by whoever started it, so the next-step lines
-        // below are not this run's to repeat.
-        println!("Project initialized successfully.");
+        // A clone joining a workspace, or moving into one, uses a setup
+        // whoever started that workspace settled, so the next-step lines
+        // below are not this run's to repeat: the line above is the whole
+        // of what it says.
     } else if !already_initialized {
         println!("Project initialized successfully.");
         if answers.examples {
@@ -2626,7 +2714,8 @@ mod tests {
 
     /// Moving a project between the two modes is not something `init` does,
     /// so a flag asking for it is refused before anything is written, and a
-    /// `--workspace` naming nothing is refused naming what is there.
+    /// `--workspace` naming nothing is refused — for a fresh checkout naming
+    /// what is there, and for a listed one leaving it where it was.
     #[test]
     fn a_setup_flag_that_would_move_a_project_is_refused() {
         let parent = crate::scratch::root("init-home-refused");
@@ -2669,10 +2758,19 @@ mod tests {
                 .to_string_lossy()
                 .into_owned();
             let err = init(&home_mode, &home_args("elsewhere")).unwrap_err();
-            assert!(err.to_string().contains("already uses workspace"), "{err}");
             assert!(
-                err.to_string().contains(&format!("`--workspace {name}`")),
-                "the refusal names the checkout's own workspace: {err}"
+                err.to_string().contains("no workspace named elsewhere"),
+                "a move to a workspace that does not exist is refused: {err}"
+            );
+            assert_eq!(
+                crate::repo::workspace_clone(&home_mode)
+                    .unwrap()
+                    .workspace
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy(),
+                name,
+                "the refused move left the checkout where it was"
             );
 
             let other = home_mode_checkout(&parent, "other");
@@ -2682,6 +2780,314 @@ mod tests {
                 "{err}"
             );
             assert!(crate::repo::workspace_clone(&other).is_none());
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// [`home_mode_checkout`] with one commit, so it has a root commit —
+    /// what tells a takeover or a move that a workspace holds the same
+    /// repository. The message is the name, so two of these never share a
+    /// root commit by accident of being made in the same second.
+    fn committed_checkout(parent: &Path, name: &str) -> std::path::PathBuf {
+        let root = home_mode_checkout(parent, name);
+        crate::repo::run(&root, "git", &["commit", "--allow-empty", "-q", "-m", name]).unwrap();
+        root
+    }
+
+    /// A `git clone` of `source` at `parent/name`: the same repository,
+    /// so the same root commit.
+    fn clone_of(source: &Path, parent: &Path, name: &str) -> std::path::PathBuf {
+        let root = parent.join(name);
+        std::fs::create_dir_all(parent).unwrap();
+        crate::repo::run(
+            parent,
+            "git",
+            &[
+                "clone",
+                "-q",
+                source.to_str().unwrap(),
+                root.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        root
+    }
+
+    /// Every file under `dir` with its bytes, for checking a workspace's
+    /// `config/` byte for byte.
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        listing(dir)
+            .into_iter()
+            .filter(|rel| dir.join(rel).is_file())
+            .map(|rel| {
+                let bytes = std::fs::read(dir.join(&rel)).unwrap();
+                (rel, bytes)
+            })
+            .collect()
+    }
+
+    /// The folder name of the workspace that lists `root`.
+    fn workspace_name_of(root: &Path) -> String {
+        crate::repo::workspace_clone(root)
+            .expect("the checkout is listed")
+            .workspace
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// A queued task `id` in `clone`'s queue, holding a worktree when
+    /// `worktree` names one.
+    fn queue_task(root: &Path, id: &str, worktree: Option<&str>) {
+        let home = crate::repo::workspace_clone(root).unwrap().home_dir();
+        let queue = home.join(crate::config::QUEUE_DIR);
+        std::fs::create_dir_all(&queue).unwrap();
+        let held = worktree
+            .map(|path| format!("worktree_path: {path}\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            queue.join(format!("{id}.md")),
+            format!("---\nid: {id}\ntitle: {id}\nstage: queued\n{held}---\n## Goal\n\nx\n"),
+        )
+        .unwrap();
+    }
+
+    /// Joining a workspace in which exactly one entry has this repository's
+    /// root commit and a folder that is gone takes over that entry's queue:
+    /// no new dispatcher folder, the gone checkout's task reachable from
+    /// here, and the shared `config/` byte for byte the same.
+    #[test]
+    fn joining_takes_over_the_one_gone_checkout_of_this_repository() {
+        let parent = crate::scratch::root("init-home-takeover");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let second = clone_of(&first, &parent.join("elsewhere"), "api2");
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let name = workspace_name_of(&first);
+            queue_task(&first, "d1", None);
+            let config = crate::repo::workspace_clone(&first).unwrap().config_dir();
+            let before = snapshot(&config);
+            std::fs::remove_dir_all(&first).unwrap();
+
+            init(&second, &home_args(&name)).expect("join");
+
+            let clone = crate::repo::workspace_clone(&second).expect("the clone is listed");
+            assert_eq!(
+                clone.dispatcher, "api",
+                "the gone checkout's entry is taken over"
+            );
+            assert!(
+                clone.home_dir().join("queue").join("d1.md").is_file(),
+                "its queue comes along"
+            );
+            assert_eq!(
+                std::fs::read_dir(clone.workspace.join("dispatchers"))
+                    .unwrap()
+                    .count(),
+                1,
+                "no second dispatcher folder is made"
+            );
+            assert_eq!(
+                snapshot(&config),
+                before,
+                "config/ is byte for byte the same"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// With two gone entries of this repository there is no telling which
+    /// one this checkout replaces, and with none there is nothing to take
+    /// over: both join as a new checkout, and leave `config/` as it was. A
+    /// checkout with no root commit never takes over.
+    #[test]
+    fn joining_takes_over_nothing_with_two_gone_entries_or_no_root_commit() {
+        let parent = crate::scratch::root("init-home-no-takeover");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let gone_a = clone_of(&first, &parent.join("a"), "api");
+        let gone_b = clone_of(&first, &parent.join("b"), "api");
+        let joiner = clone_of(&first, &parent.join("c"), "api");
+        let empty = home_mode_checkout(&parent.join("d"), "api");
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let name = workspace_name_of(&first);
+            init(&gone_a, &home_args(&name)).expect("join a");
+            init(&gone_b, &home_args(&name)).expect("join b");
+            let config = crate::repo::workspace_clone(&first).unwrap().config_dir();
+            let before = snapshot(&config);
+            std::fs::remove_dir_all(&gone_a).unwrap();
+            std::fs::remove_dir_all(&gone_b).unwrap();
+
+            init(&joiner, &home_args(&name)).expect("join c");
+            assert_eq!(
+                crate::repo::workspace_clone(&joiner).unwrap().dispatcher,
+                "api-4",
+                "two gone entries: a new checkout, not a guess"
+            );
+            assert_eq!(snapshot(&config), before);
+
+            // The gone checkout's root commit is recorded, but this one has
+            // none to match it with.
+            std::fs::remove_dir_all(&joiner).unwrap();
+            std::fs::remove_dir_all(&first).unwrap();
+            init(&empty, &home_args(&name)).expect("join d");
+            assert_eq!(
+                crate::repo::workspace_clone(&empty).unwrap().dispatcher,
+                "api-5",
+                "no root commit: never a takeover"
+            );
+            assert_eq!(snapshot(&config), before);
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A join checks `--tracker` even though it does not apply it, before it
+    /// writes anything.
+    #[test]
+    fn a_bad_tracker_value_refuses_a_join_before_it_lists_the_checkout() {
+        let parent = crate::scratch::root("init-home-join-bad-tracker");
+        let home = parent.join("home");
+        let first = home_mode_checkout(&parent, "api");
+        let second = home_mode_checkout(&parent.join("b"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let name = workspace_name_of(&first);
+            let args = InitArgs {
+                tracker: Some("gitlab".to_string()),
+                ..home_args(&name)
+            };
+            let err = init(&second, &args).unwrap_err();
+            assert!(err.to_string().contains("--tracker"), "{err}");
+            assert!(crate::repo::workspace_clone(&second).is_none());
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Picking another workspace moves the checkout — but not while any of
+    /// its tasks holds a worktree, and then with nothing written and every
+    /// such task named.
+    #[test]
+    fn a_move_is_refused_while_tasks_hold_worktrees_and_writes_nothing() {
+        let parent = crate::scratch::root("init-home-move-refused");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let second = clone_of(&first, &parent.join("b"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            init(&second, &home_args(NEW_WORKSPACE)).expect("second init");
+            let target = workspace_name_of(&second);
+            queue_task(&first, "c1", Some("/somewhere/task-c1"));
+            queue_task(&first, "c2", Some("/somewhere/task-c2"));
+            queue_task(&first, "c3", None);
+            let state = home.join(".spoolway");
+            let before = snapshot(&state);
+
+            let err = init(&first, &home_args(&target)).unwrap_err().to_string();
+            assert!(
+                err.contains("c1 and c2 hold worktrees in this checkout"),
+                "every holding task is named, and only those: {err}"
+            );
+            assert!(err.contains("Finish or unqueue them"), "{err}");
+            assert_eq!(snapshot(&state), before, "nothing is written");
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A move never crosses repositories, and there is no flag to force it.
+    #[test]
+    fn a_move_into_a_workspace_of_another_repository_is_refused() {
+        let parent = crate::scratch::root("init-home-move-other-repo");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let other = committed_checkout(&parent, "web");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            init(&other, &home_args(NEW_WORKSPACE)).expect("other init");
+            let from = workspace_name_of(&first);
+            let target = workspace_name_of(&other);
+            let state = home.join(".spoolway");
+            let before = snapshot(&state);
+
+            let err = init(&first, &home_args(&target)).unwrap_err().to_string();
+            assert!(err.contains("holds another repository"), "{err}");
+            assert_eq!(snapshot(&state), before, "nothing is written");
+            assert_eq!(workspace_name_of(&first), from);
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A move carries the checkout's queue into the workspace it picked,
+    /// leaves that workspace's `config/` byte for byte the same, and removes
+    /// the workspace it emptied together with its registry entry.
+    #[test]
+    fn a_move_carries_the_queue_and_removes_the_workspace_it_emptied() {
+        let parent = crate::scratch::root("init-home-move-done");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let second = clone_of(&first, &parent.join("b"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            init(&second, &home_args(NEW_WORKSPACE)).expect("second init");
+            let from = crate::repo::workspace_clone(&first).unwrap().workspace;
+            let target = workspace_name_of(&second);
+            let config = crate::repo::workspace_clone(&second).unwrap().config_dir();
+            let before = snapshot(&config);
+            queue_task(&first, "c3", None);
+
+            init(&first, &home_args(&target)).expect("move");
+
+            let clone = crate::repo::workspace_clone(&first).unwrap();
+            assert_eq!(workspace_name_of(&first), target);
+            assert_eq!(
+                clone.dispatcher, "api-2",
+                "a taken name draws the next free one"
+            );
+            assert!(clone.home_dir().join("queue").join("c3.md").is_file());
+            assert_eq!(
+                snapshot(&config),
+                before,
+                "config/ is byte for byte the same"
+            );
+            assert!(!from.exists(), "the emptied workspace is removed");
+            if let Some(registry) = crate::usage::registry::path() {
+                let raw = std::fs::read_to_string(registry).unwrap_or_default();
+                assert!(
+                    !raw.contains(&from.display().to_string()),
+                    "its projects.json entry goes with it: {raw}"
+                );
+            }
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// `--workspace new` from a listed checkout moves it into a new workspace
+    /// set up from scratch, and the one it left keeps every other checkout.
+    #[test]
+    fn a_listed_checkout_can_move_into_a_new_workspace() {
+        let parent = crate::scratch::root("init-home-move-new");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let second = clone_of(&first, &parent.join("b"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let from = workspace_name_of(&first);
+            init(&second, &home_args(&from)).expect("join");
+
+            init(&second, &home_args(NEW_WORKSPACE)).expect("move to a new workspace");
+
+            let clone = crate::repo::workspace_clone(&second).unwrap();
+            assert_ne!(workspace_name_of(&second), from);
+            assert!(clone.config_dir().join("config.toml").is_file());
+            assert_eq!(workspace_name_of(&first), from, "the first checkout stays");
+            assert!(
+                home.join(".spoolway").join(&from).is_dir(),
+                "a workspace still holding a checkout is kept"
+            );
         });
         let _ = std::fs::remove_dir_all(&parent);
     }

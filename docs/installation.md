@@ -89,10 +89,10 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 |---|---|---|
 | Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | Where should this project's setup live? | `--setup repo\|home` | `repo` |
-| Which workspace should this checkout use? (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
+| The workspace menu (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
 | The coding agent you plan in | `--provider claude\|codex` | `claude` |
-| Install the example setup? (skipped when joining a workspace) | `--examples`/`--no-examples` | yes |
-| The issue tracker (skipped when joining a workspace) | `--tracker github\|jira\|none` | `none` |
+| Install the example setup? (skipped when joining or moving into an existing workspace) | `--examples`/`--no-examples` | yes |
+| The issue tracker (skipped when joining or moving into an existing workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
@@ -165,38 +165,45 @@ clone, a `project.toml` listing it, and a `config/` scaffolded the same way the 
 scaffolds a repo-mode checkout's `.spoolway/`. `<label>` and `<id>` take the same shape a
 repo-mode home's own folder does.
 
-With workspaces already there, `init` also asks which one this checkout uses. Each row names the
-repository its clones belong to — the first clone's `origin` URL, or its path shortened under
-`~` when it has none — plus `new`. A workspace already holding a clone of this same repository
-sorts to the top of the list, marked as the repository this checkout belongs to. `new` is always
-the default, so pressing Enter without reading the menu starts a fresh workspace rather than
-joining one.
+With workspaces already there, `init` asks the workspace menu instead: "Select the spoolway
+workspace for this checkout. Pick an existing workspace or create a new one." A checkout no
+workspace lists yet sees every workspace, those of this repository marked `same repository` and
+listed first, and `Create a new workspace` last as the default, so pressing Enter without
+reading the menu starts a fresh workspace. A checkout a workspace already lists sees that
+workspace first, marked `current` and still the default, then every other workspace of this
+repository, then `Create a new workspace`.
 
-Joining a workspace keeps its `config/` exactly as it is, skips the example and tracker
-questions, and adds this clone to its `project.toml` with a dispatcher folder of its own — the
-clone's directory name, with `-2` added when that name is taken.
+Joining a workspace, or moving into one that already exists, keeps its `config/` exactly as it
+is, skips the example and tracker questions, and adds this clone to its `project.toml` with a
+dispatcher folder of its own — the clone's directory name, with `-2` added when that name is
+taken. The run ends with one line naming where the checkout went, `Joined workspace <name>.` or
+`Moved to workspace <name>.`, since the workspace's setup is already settled. Moving into a new
+workspace scaffolds its `config/` from scratch instead, asking the usual questions, with the
+same closing line added to say where the checkout went.
 
-With nobody to ask and no `--workspace`, `init` starts a new workspace, the same default the
-menu above takes. When a workspace already holds a clone of this repository, it prints that
-workspace's name and the command that joins it, then still starts the new workspace.
+With nobody to ask and no `--workspace`, an unlisted checkout starts a new workspace, the same
+default the menu above takes. When a workspace already holds a clone of this repository, `init`
+prints a note naming it and the `--workspace` that joins it instead, then still starts the new
+workspace. A listed checkout with nobody to ask stays where it is.
 
 Skills install into the coding agent's user folder instead of the project's own, since a
 project skill folder sits inside a checkout that home mode promises to leave untouched. See [The
 pipeline skills](#the-pipeline-skills).
 
 Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`,
-`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own, and
-`--workspace <name>` naming a workspace other than the one a checkout already uses. Each
+already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
+`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own. Each
 refusal names the command to run instead. See [Home mode](concepts.md#home-mode).
 
-Joining a workspace whose `config/` has gone missing is refused too, naming the missing path.
+Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
+the missing path.
 
-To actually move a clone already listed in one workspace to another, run `spoolway workspace
-move <to>`. It carries the clone's dispatcher folder — queue, archive and worktrees — along with
-it, under its current name unless `--dispatcher <name>` picks a different one. It refuses while a
-dispatcher is running over that folder, while a live process is working in one of its worktrees,
-or when the destination already has a dispatcher folder by that name. See [CLI
+Picking another workspace in the menu, or passing `--workspace <other>`, moves a listed checkout
+there, carrying its queue, archive and worktrees along. The move is refused, with nothing
+written, while any of its tasks holds a worktree, naming each one, and for a workspace of another
+repository, with no flag to force it. A workspace the move leaves with no checkout listed is
+removed, and the move prints that it was removed. `spoolway workspace move <to>` moves a
+checkout the same way, under its own, separate checks — see [CLI
 reference](cli-reference.md#spoolway-workspace-move-to).
 
 ```
@@ -210,15 +217,23 @@ Skills installed successfully, into ~/.claude/skills.
 Project initialized successfully.
 ```
 
-A second clone joining that workspace keeps its `config/`:
+A second clone joining that workspace keeps its `config/` and ends with the workspace it joined:
 
 ```
 $ spoolway init --setup home --workspace api-k7f2q9 --provider claude --yes
 ...
-  kept   ~/.spoolway/api-k7f2q9/config/
-  bound  /home/you/work/api-review  ->  ~/.spoolway/api-k7f2q9/dispatchers/api-review/
 Skills already installed, in ~/.claude/skills.
-Project initialized successfully.
+Joined workspace api-k7f2q9.
+```
+
+Picking another workspace moves a checkout already listed in one, and says where it went:
+
+```
+$ spoolway init --workspace other-h4m1xs --provider claude --yes
+...
+Skills already installed, in ~/.claude/skills.
+Moved to workspace other-h4m1xs.
+Removed workspace api-k7f2q9. It held no other checkout.
 ```
 
 ### The pipeline skills

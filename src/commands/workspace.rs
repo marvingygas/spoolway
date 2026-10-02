@@ -1,8 +1,7 @@
 //! `spoolway workspace move`: move a home-mode clone from the workspace it
-//! uses now to another, taking its dispatcher folder with it — the
-//! documented way out for a clone that ended up in the wrong workspace,
-//! `init --workspace <other>` itself having always refused to be that (see
-//! `Placement::choose_any`'s own refusal).
+//! uses now to another, taking its dispatcher folder with it. `spoolway
+//! init` moves a checkout too, by its workspace menu or `--workspace
+//! <other>`, with the stricter checks of `crate::repo::move_checkout`.
 
 use super::*;
 

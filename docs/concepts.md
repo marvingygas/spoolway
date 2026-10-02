@@ -54,10 +54,13 @@ home takes, with a `dispatchers/<name>/` for this checkout and a `config/` scaff
 way `spoolway init` scaffolds a repo-mode checkout's `.spoolway/`. See [Scaffolding a
 project](installation.md#scaffolding-a-project). With `--workspace <name>`, it adds this
 checkout to that workspace instead, with a dispatcher folder of its own — the checkout's
-directory name, with `-2` added when that name is already taken —
-and leaves the workspace's `config/` exactly as it is. Nothing is written into the checkout or
-its `.git` either way, and skills install into the coding agent's user folder instead of the
-project's own.
+directory name, with `-2` added when that name is already taken — and leaves the workspace's
+`config/` exactly as it is. When exactly one of that workspace's entries shares this checkout's
+root commit and its folder no longer exists, joining takes over that entry instead of adding a
+new one, so this checkout carries on its queue, archive and worktrees without asking. A checkout
+with no root commit of its own, such as a shallow clone, never takes over an entry. Nothing is
+written into the checkout or its `.git` either way, and skills install into the coding agent's
+user folder instead of the project's own.
 
 `--setup home` is refused when the repository's default branch tracks a `.spoolway/` of its
 own, even from a checkout on some other branch that carries none: switching back to the default
@@ -101,11 +104,18 @@ up for. Each refusal says why, and what to run instead. Naming the workspace alo
 `/<dispatcher>`, is refused too, listing that workspace's dispatchers so you can add the right
 one.
 
-A clone moves from the workspace it is listed in to another with `spoolway workspace move
-<to>`, carrying its dispatcher folder along under its current name unless `--dispatcher <name>`
-picks a different one. It refuses while a dispatcher is running over that folder, or while a
-live process is working in one of its worktrees. `to` must be a workspace `spoolway init
---setup home` has listed; a 0.6.0 repo-mode home is refused as a destination.
+A clone also moves between workspaces through `spoolway init`'s own menu, or `--workspace
+<other>` on a checkout a workspace already lists: picking another workspace moves the checkout,
+carrying its dispatcher folder — queue, archive and worktrees — along. It refuses, writing
+nothing, while any of the checkout's tasks holds a worktree, naming each one, and for a
+workspace of another repository, with no flag to force it. A workspace the move leaves with no
+checkout listed is removed, together with its usage-registry entry.
+
+`spoolway workspace move <to>` moves a clone the same way, under its own, separate checks. It
+carries the dispatcher folder along under its current name unless `--dispatcher <name>` picks a
+different one, and refuses while a dispatcher is running over that folder, or while a live
+process is working in one of its worktrees. `to` must be a workspace `spoolway init --setup
+home` has listed; a 0.6.0 repo-mode home is refused as a destination.
 
 `--new-id`, and `--adopt <name>` with no workspace prefix, are also refused on a checkout a
 workspace already lists. Stamping a repo-mode id into its `.git` would claim it a second way.

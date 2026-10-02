@@ -931,7 +931,7 @@ fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
 /// poison the entry for every later `--adopt`; comparing against it (see
 /// [`commit_exists`]) would refuse the very re-clone that made it. Checked
 /// first, before `rev-list` ever runs, so neither ever happens.
-fn root_commit(dir: &Path) -> Option<String> {
+pub(crate) fn root_commit(dir: &Path) -> Option<String> {
     if run(dir, "git", &["rev-parse", "--is-shallow-repository"])
         .is_ok_and(|out| out.trim() == "true")
     {
@@ -948,44 +948,6 @@ fn origin_url(dir: &Path) -> Option<String> {
     let url = run(dir, "git", &["remote", "get-url", "origin"]).ok()?;
     let url = url.trim();
     (!url.is_empty()).then(|| url.to_string())
-}
-
-/// The repository `dir` belongs to, for telling two clones of the same
-/// project apart from two unrelated ones — what `init`'s workspace menu
-/// (acceptance criterion: workspaces of this checkout's own repository
-/// listed first and marked) and its non-interactive note compare.
-///
-/// Two signals rather than one, because neither answers for every pair of
-/// clones on its own. `origin`'s URL agrees for two clones of the same
-/// remote even before either has a commit, but not for a `git clone` of a
-/// local checkout (whose `origin` is that checkout's path, while the
-/// checkout itself has none) or for one clone over SSH and one over HTTPS.
-/// [`root_commit`] agrees for all of those, but not before the first commit.
-/// [`RepoIdentity::same_as`] takes either.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RepoIdentity {
-    origin: Option<String>,
-    root: Option<String>,
-}
-
-impl RepoIdentity {
-    /// Whether `self` and `other` are the same repository: the same `origin`
-    /// URL, or the same root commit. Two identities that know neither never
-    /// match.
-    pub(crate) fn same_as(&self, other: &RepoIdentity) -> bool {
-        let agree = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
-        agree(&self.origin, &other.origin) || agree(&self.root, &other.root)
-    }
-}
-
-/// `dir`'s [`RepoIdentity`] — `None` when neither signal answers: no
-/// `origin` remote, and no commits yet, or `git` could not be asked.
-pub(crate) fn repo_identity(dir: &Path) -> Option<RepoIdentity> {
-    let identity = RepoIdentity {
-        origin: origin_url(dir),
-        root: root_commit(dir),
-    };
-    (identity.origin.is_some() || identity.root.is_some()).then_some(identity)
 }
 
 /// Whether `dir`'s repository actually holds `commit` — what
@@ -1552,10 +1514,11 @@ fn home_recording(root: &Path) -> Option<PathBuf> {
 /// `home-mode-discovery` task and the plan's `#d-path-binding` drawing.
 /// Written by a home-mode `spoolway init`, which creates one with
 /// [`create_workspace`] or adds a clone to one with [`join_workspace`], and
-/// rewritten in place by [`adopt_workspace_clone`], which changes only a
-/// clone entry's own `root`, on a person's explicit
-/// `spoolway init --adopt <workspace>/<dispatcher>`. Nothing ever removes a
-/// clone entry.
+/// rewritten in place by [`adopt_workspace_clone`] and by a join that takes
+/// over a gone checkout's entry, both of which change only a clone entry's
+/// own `root`. A move ([`move_clone`], reached from `spoolway init`'s menu
+/// through [`move_checkout`] and from `spoolway workspace move`) is the one
+/// thing that takes an entry out, and puts it into another workspace.
 ///
 /// Its `clones` field is what tells this shape apart from an ordinary
 /// [`Binding`], which this same [`BINDING_FILE`] name holds for a repo-mode
@@ -2747,12 +2710,10 @@ fn workspace_lock_path(workspace: &Path) -> PathBuf {
 /// Write `workspace`'s `project.toml` whole, in the same explained-header
 /// style [`write_binding`] uses for a repo-mode home's own record. The one
 /// place a workspace's own file is ever written by this binary: by `init`,
-/// through [`create_workspace`] and [`join_workspace`], and by
-/// [`adopt_workspace_clone`] on a person's own
-/// `spoolway init --adopt <workspace>/<dispatcher>`. None of them removes a
-/// clone entry, including a stale one nothing has re-attached (the
-/// `home-mode-discovery` task's own non-goal on not going further than
-/// reporting one).
+/// through [`create_workspace`], [`join_workspace`] and [`move_checkout`],
+/// by [`adopt_workspace_clone`] on a person's own
+/// `spoolway init --adopt <workspace>/<dispatcher>`, and by [`move_clone`].
+/// Only a move takes an entry out; a stale one nothing has taken over stays.
 fn write_workspace(workspace: &Path, toml_value: &WorkspaceToml) -> Result<()> {
     let body = format!(
         "# The clones that read this workspace's config/, each found by its path.\n\
@@ -2767,23 +2728,54 @@ fn write_workspace(workspace: &Path, toml_value: &WorkspaceToml) -> Result<()> {
     crate::task::write_atomic(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
-/// One workspace as `init`'s "Which workspace should this checkout use?"
-/// menu lists it: its folder name under `~/.spoolway/`, and the repository
-/// its clones belong to.
+/// One workspace as `init`'s workspace menu lists it: its folder name under
+/// `~/.spoolway/`, the repository its clones belong to, and every root commit
+/// its clone entries record.
 pub(crate) struct WorkspaceSummary {
     pub(crate) name: String,
     /// The repository this workspace's clones belong to, as the menu row
-    /// shows it: the first still-listed clone's `origin` URL, shortened
-    /// under `$HOME` when it has none, as its own path instead. `None` when
-    /// the workspace lists no clones at all — once only ever true for a
-    /// `project.toml` nobody had joined yet, but now also reachable through
-    /// [`move_clone`], which can move a workspace's last clone out of it
-    /// and leave it standing, real but empty.
+    /// shows it for a workspace of another repository: the first listed
+    /// clone's `origin` URL, or its path shortened under `$HOME` when it has
+    /// none. `None` when the workspace lists no clones at all.
     pub(crate) repo_display: Option<String>,
-    /// The same clone's own [`repo_identity`] — never shown, only compared,
-    /// to tell whether this workspace already holds the checkout `init` is
-    /// running from.
-    pub(crate) repo_identity: Option<RepoIdentity>,
+    /// Every distinct root commit across the workspace's clone entries:
+    /// each entry's recorded `root_commit`, or, for an entry written before
+    /// that field existed, the commit read off its folder while it still
+    /// exists. Every clone counts, not only the first: the first entry is
+    /// often a checkout long since deleted, and a workspace whose first
+    /// entry recorded nothing used to read as another repository even with
+    /// a clone of this one listed right after it.
+    root_commits: Vec<String>,
+}
+
+impl WorkspaceSummary {
+    /// Whether this workspace holds a clone of the repository `root` is
+    /// a checkout of, `mine` being `root`'s own [`root_commit`]. Same
+    /// repository means the same root commit, nothing weaker: an `origin`
+    /// URL is spelled differently over SSH and HTTPS and is missing on a
+    /// local clone, so it was dropped as a signal. A recorded commit is also
+    /// accepted when `root` merely holds it, through [`commit_exists`],
+    /// because a repository with several root commits names whichever one
+    /// its current branch reaches first. A checkout with no root commit — no
+    /// commits yet, or a shallow clone — matches nothing.
+    pub(crate) fn holds_repository_of(&self, root: &Path, mine: Option<&str>) -> bool {
+        let Some(mine) = mine else { return false };
+        self.root_commits
+            .iter()
+            .any(|commit| commit == mine || commit_exists(root, commit))
+    }
+
+    /// Whether `root` may move into this workspace: one holding its own
+    /// repository, never another's. A checkout with no root commit has
+    /// nothing to compare, so it may move only into a workspace that has no
+    /// root commit recorded either — anything else could be an unrelated
+    /// repository, and a move carries the checkout's queue with it.
+    pub(crate) fn may_move_into(&self, root: &Path, mine: Option<&str>) -> bool {
+        match mine {
+            Some(_) => self.holds_repository_of(root, mine),
+            None => self.root_commits.is_empty(),
+        }
+    }
 }
 
 /// Every workspace under `~/.spoolway/`, sorted by name so the menu reads
@@ -2801,16 +2793,32 @@ pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
         .into_iter()
         .filter_map(|(path, toml)| {
             let name = path.file_name()?.to_string_lossy().into_owned();
-            let main = toml.clones.first().map(|clone| clone.root.clone());
-            let repo_identity = main.as_deref().and_then(repo_identity);
-            let repo_display = main.as_deref().map(|root| match origin_url(root) {
-                Some(url) => url,
-                None => shorten_home(root),
-            });
+            let repo_display = toml
+                .clones
+                .first()
+                .map(|clone| match origin_url(&clone.root) {
+                    Some(url) => url,
+                    None => shorten_home(&clone.root),
+                });
+            let mut root_commits: Vec<String> = Vec::new();
+            for clone in &toml.clones {
+                let commit = clone.root_commit.clone().or_else(|| {
+                    clone
+                        .root
+                        .exists()
+                        .then(|| root_commit(&clone.root))
+                        .flatten()
+                });
+                if let Some(commit) = commit
+                    && !root_commits.contains(&commit)
+                {
+                    root_commits.push(commit);
+                }
+            }
             Some(WorkspaceSummary {
                 name,
                 repo_display,
-                repo_identity,
+                root_commits,
             })
         })
         .collect();
@@ -2830,6 +2838,34 @@ pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
 pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
     require_utf8_root(root)?;
     require_git_repository(root)?;
+    let (workspace, id, label) = new_workspace_folder(root)?;
+    let clone = WorkspaceClone {
+        workspace: workspace.clone(),
+        dispatcher: label,
+    };
+    let home = clone.home_dir();
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    // Written last, so a workspace is only ever found — by `all_workspaces`,
+    // which reads nothing but this file — once its folders are all there.
+    write_workspace(
+        &workspace,
+        &WorkspaceToml {
+            id,
+            clones: vec![CloneEntry {
+                root: root.to_path_buf(),
+                dispatcher: clone.dispatcher.clone(),
+                root_commit: root_commit(root),
+            }],
+        },
+    )?;
+    Ok(clone)
+}
+
+/// A fresh `~/.spoolway/<label>-<id>/` with an empty `config/` and
+/// `dispatchers/`, and no `project.toml` yet — the part of
+/// [`create_workspace`] that [`move_checkout`] shares when a checkout moves
+/// into a new workspace. Answers the folder, its id and `root`'s label.
+fn new_workspace_folder(root: &Path) -> Result<(PathBuf, String, String)> {
     let state = crate::mux::state_root();
     std::fs::create_dir_all(&state).with_context(|| format!("creating {}", state.display()))?;
     let label = sanitize_label(&crate::mux::project_label(root));
@@ -2848,27 +2884,10 @@ pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
             }
         }
     };
-    let clone = WorkspaceClone {
-        workspace: workspace.clone(),
-        dispatcher: label,
-    };
-    for dir in [clone.config_dir(), clone.home_dir()] {
+    for dir in [workspace.join("config"), workspace.join("dispatchers")] {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    // Written last, so a workspace is only ever found — by `all_workspaces`,
-    // which reads nothing but this file — once its folders are all there.
-    write_workspace(
-        &workspace,
-        &WorkspaceToml {
-            id,
-            clones: vec![CloneEntry {
-                root: root.to_path_buf(),
-                dispatcher: clone.dispatcher.clone(),
-                root_commit: root_commit(root),
-            }],
-        },
-    )?;
-    Ok(clone)
+    Ok((workspace, id, label))
 }
 
 /// Add `root` to the workspace named `name` under `~/.spoolway/`, with a
@@ -2880,6 +2899,11 @@ pub(crate) fn create_workspace(root: &Path) -> Result<WorkspaceClone> {
 /// already under `dispatchers/` that a clone entry no longer names, whose
 /// queue and worktrees must not be picked up by a clone they never belonged
 /// to. A checkout the workspace already lists keeps its own entry.
+///
+/// One case takes over an entry instead of adding one: exactly one entry of
+/// this repository, by root commit, whose folder no longer exists. Its
+/// `root` is rewritten to this checkout, and this checkout carries on with
+/// its queue, archive and worktrees — see the comment where it happens.
 pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> {
     require_utf8_root(root)?;
     require_git_repository(root)?;
@@ -2933,6 +2957,35 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
             config.display()
         );
     }
+    // A checkout of this repository whose folder is gone left its queue
+    // behind under its own dispatcher folder. Exactly one such entry is
+    // taken over without asking: this checkout is that clone moved or
+    // re-cloned, and its tasks carry on. None means an ordinary join, and
+    // two or more means there is no telling which one this checkout
+    // replaces, so it joins as new rather than guessing. The root commit is
+    // what makes it the same repository; a checkout with none — no commits
+    // yet, or a shallow clone — never takes over, and neither does an entry
+    // that recorded none.
+    let mine = root_commit(root);
+    if let Some(mine) = &mine {
+        let mut gone = parsed.clones.iter_mut().filter(|clone| {
+            !clone.root.exists()
+                && clone
+                    .root_commit
+                    .as_deref()
+                    .is_some_and(|commit| commit == mine || commit_exists(root, commit))
+        });
+        if let (Some(entry), None) = (gone.next(), gone.next()) {
+            entry.root = root.to_path_buf();
+            entry.root_commit = Some(mine.clone());
+            let clone = WorkspaceClone {
+                workspace: workspace.clone(),
+                dispatcher: entry.dispatcher.clone(),
+            };
+            write_workspace(&workspace, &parsed)?;
+            return Ok(clone);
+        }
+    }
     let base = sanitize_label(&crate::mux::project_label(root));
     let taken = |candidate: &str| {
         parsed
@@ -2959,7 +3012,7 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
     parsed.clones.push(CloneEntry {
         root: root.to_path_buf(),
         dispatcher,
-        root_commit: root_commit(root),
+        root_commit: mine,
     });
     // A failure here has already created `home` above — remove it rather
     // than leave a dispatcher folder no entry in `project.toml` ever claims,
@@ -2969,6 +3022,210 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
         return Err(err);
     }
     Ok(clone)
+}
+
+/// The ids of every task queued in `clone`'s dispatcher folder that holds a
+/// worktree, sorted — what refuses a move through `spoolway init`.
+///
+/// A task holding a worktree records its path in `worktree_path`, and that
+/// path sits under the dispatcher folder a move renames. Left as it is, the
+/// task would run as borrowed from a path that no longer exists, and its
+/// worktree and branch would be left behind; rewritten, it would still point
+/// git at a worktree the dispatcher did not cut there. So the move waits
+/// until the task is finished or unqueued instead. A queue file that does not
+/// parse counts when its text carries a `worktree_path:` line, since a
+/// refusal is cheaper than a stranded worktree.
+pub(crate) fn tasks_holding_worktrees(clone: &WorkspaceClone) -> Result<Vec<String>> {
+    let (tasks, problems) =
+        crate::task::load_dir(&clone.home_dir().join(crate::config::QUEUE_DIR))?;
+    let mut held: Vec<String> = tasks
+        .iter()
+        .filter(|task| task.front.worktree_path.is_some())
+        .map(|task| task.id().to_string())
+        .collect();
+    for problem in problems {
+        let raw = std::fs::read_to_string(&problem.path).unwrap_or_default();
+        if raw.lines().any(|line| line.starts_with("worktree_path:"))
+            && let Some(stem) = problem.path.file_stem()
+        {
+            held.push(stem.to_string_lossy().into_owned());
+        }
+    }
+    held.sort();
+    Ok(held)
+}
+
+/// What [`move_checkout`] did: where the checkout is listed now, and the
+/// folder name of the workspace the move emptied and removed, if it did.
+pub(crate) struct Moved {
+    pub(crate) clone: WorkspaceClone,
+    pub(crate) removed: Option<String>,
+}
+
+/// Move `root` from the workspace that lists it into the workspace named
+/// `to`, or into a new workspace when `to` is `None` — what picking another
+/// workspace in `spoolway init`'s menu does.
+///
+/// Refused, with nothing written, in three cases. A task in this checkout's
+/// queue holds a worktree (see [`tasks_holding_worktrees`]), and the refusal
+/// names each one. `to` holds another repository (see
+/// [`WorkspaceSummary::may_move_into`]), and nothing forces that. `to` has
+/// lost its `config/`, which a moved checkout would then read no setup from.
+///
+/// The dispatcher folder keeps its name at `to` when it is free there, and
+/// otherwise takes the first free `-2`, `-3` and so on: with no task holding
+/// a worktree, nothing records the folder's path, so renaming it is safe.
+/// The live-work checks and the folder rename are [`move_clone`]'s.
+///
+/// The workspace the move leaves with no clone listed is removed, with its
+/// `config/` and its entry in the usage registry's `projects.json`: nothing
+/// can reach that setup any more, and it would otherwise sit in every later
+/// workspace menu as a workspace with no checkouts.
+pub(crate) fn move_checkout(root: &Path, to: Option<&str>) -> Result<Moved> {
+    let from = check_move(root, to)?;
+    let (to_name, fresh) = match to {
+        Some(to) => (to.to_string(), None),
+        None => {
+            let (workspace, id, _label) = new_workspace_folder(root)?;
+            write_workspace(
+                &workspace,
+                &WorkspaceToml {
+                    id,
+                    clones: Vec::new(),
+                },
+            )?;
+            let name = workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (name, Some(workspace))
+        }
+    };
+
+    let to_workspace = crate::mux::state_root().join(&to_name);
+    let listed: Vec<String> = std::fs::read_to_string(to_workspace.join(BINDING_FILE))
+        .ok()
+        .and_then(|raw| toml::from_str::<WorkspaceToml>(&raw).ok())
+        .map(|toml| {
+            toml.clones
+                .into_iter()
+                .map(|clone| clone.dispatcher)
+                .collect()
+        })
+        .unwrap_or_default();
+    let free = |candidate: &str| {
+        !listed.iter().any(|name| name == candidate)
+            && !to_workspace.join("dispatchers").join(candidate).exists()
+    };
+    let base = from.dispatcher.clone();
+    let dispatcher = std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}-{n}")))
+        .find(|candidate| free(candidate))
+        .expect("an unbounded run of names always has a free one");
+
+    let clone = match move_clone(root, &to_name, Some(&dispatcher)) {
+        Ok(clone) => clone,
+        Err(err) => {
+            // A new workspace made only to receive this checkout is taken
+            // back out, so a refused move leaves no empty workspace behind.
+            if let Some(workspace) = fresh {
+                let _ = std::fs::remove_dir_all(workspace);
+            }
+            return Err(err);
+        }
+    };
+    let removed = remove_if_empty(&from.workspace)?;
+    Ok(Moved { clone, removed })
+}
+
+/// Every refusal [`move_checkout`] makes before it writes anything, and the
+/// workspace `root` moves out of. `spoolway init` calls this right after its
+/// menu, before asking anything else, so a refused move costs nothing; the
+/// move calls it again, since time has passed in between.
+pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone> {
+    require_utf8_root(root)?;
+    let from = workspace_clone_checked(root)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is not in any workspace, so there is nothing to move",
+            root.display()
+        )
+    })?;
+    let held = tasks_holding_worktrees(&from)?;
+    if !held.is_empty() {
+        let (verb, noun, them) = if held.len() == 1 {
+            ("holds", "a worktree", "it")
+        } else {
+            ("hold", "worktrees", "them")
+        };
+        bail!(
+            "{} {verb} {noun} in this checkout.\n  Finish or unqueue {them}, then run `spoolway \
+             init` again.",
+            and_list(&held),
+        );
+    }
+    let Some(to) = to else { return Ok(from) };
+    let Some(target) = workspaces().into_iter().find(|w| w.name == to) else {
+        bail!(
+            "no workspace named {to} exists under {}.\n  Run `spoolway init` and pick one from \
+             the menu.",
+            shorten_home(&crate::mux::state_root())
+        );
+    };
+    if !target.may_move_into(root, root_commit(root).as_deref()) {
+        bail!(
+            "workspace {to} holds another repository, so this checkout cannot move there.\n  \
+             Run `spoolway init` and pick a workspace of this repository, or create a new one."
+        );
+    }
+    let config = crate::mux::state_root().join(to).join("config");
+    if !config.is_dir() {
+        bail!(
+            "workspace {to} has no setup: {} is missing.\n  Restore it, or run `spoolway init` \
+             and pick another workspace.",
+            config.display()
+        );
+    }
+    Ok(from)
+}
+
+/// `items` as a sentence names them: `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Remove `workspace` when its `project.toml` lists no clone, together with
+/// every usage-registry entry whose home sits inside it, and answer its
+/// folder name. The clone list is read under the workspace's own lock, so a
+/// join that landed first keeps the workspace. The lock is let go before the
+/// folder goes, because it lives inside it and Windows refuses to delete an
+/// open file.
+fn remove_if_empty(workspace: &Path) -> Result<Option<String>> {
+    let empty = {
+        let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(workspace))?;
+        let record = workspace.join(BINDING_FILE);
+        let raw = std::fs::read_to_string(&record)
+            .with_context(|| format!("reading {}", record.display()))?;
+        let parsed: WorkspaceToml = toml::from_str(&raw).with_context(|| {
+            format!(
+                "{} does not read as a workspace's project.toml",
+                record.display()
+            )
+        })?;
+        parsed.clones.is_empty()
+    };
+    if !empty {
+        return Ok(None);
+    }
+    std::fs::remove_dir_all(workspace)
+        .with_context(|| format!("removing {}", workspace.display()))?;
+    crate::usage::registry::forget_under(workspace);
+    Ok(workspace
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned()))
 }
 
 /// `spoolway workspace move <to>`: move `root`'s home-mode registration from
@@ -3338,9 +3595,9 @@ fn require_utf8_root(root: &Path) -> Result<()> {
 fn require_git_repository(root: &Path) -> Result<()> {
     if common_git_dir(root)?.is_none() {
         bail!(
-            "{} has no git repository behind it — spoolway finds a home-mode checkout again \
-             through its git toplevel, so there is nowhere to bound that search without one. \
-             Run `git init` here first.",
+            "{} is not a git repository. A home-mode workspace lists a checkout by its git \
+             repository, so it needs one.\n  Run `git init` here first, then `spoolway init` \
+             again.",
             root.display()
         );
     }
@@ -4609,24 +4866,35 @@ mod tests {
         );
     }
 
-    /// Two clones of one repository are the same repository however each
-    /// was made. A `git clone` of a local checkout has that checkout's path
-    /// as its `origin` while the checkout has no `origin` at all, and one
-    /// clone over SSH and one over HTTPS name two different URLs: the root
-    /// commit is what agrees there. Before any commit, the shared `origin`
-    /// is. An unrelated repository agrees on neither.
+    /// A workspace holds this checkout's repository when any of its clone
+    /// entries shares this checkout's root commit — not only the first. A
+    /// `git clone` of a local checkout agrees on the root commit even though
+    /// its `origin` is that checkout's path. An unrelated repository agrees
+    /// on nothing, and a checkout with no commits matches no workspace and
+    /// may move only into one that records no root commit either.
     #[test]
-    fn repo_identity_matches_clones_of_one_repository_however_each_was_made() {
-        let parent = crate::scratch::root("repo-identity");
+    fn a_workspace_holds_this_repository_when_any_clone_shares_its_root_commit() {
+        let (home, _home_guard) = scratch_home("holds-repository");
+        let parent = crate::scratch::root("holds-repository");
+        let commit = |dir: &Path, message: &str| {
+            run(
+                dir,
+                "git",
+                &["commit", "--allow-empty", "-q", "-m", message],
+            )
+            .unwrap();
+        };
         let first = parent.join("api");
-        std::fs::create_dir_all(&first).unwrap();
-        crate::scratch::git_init(&first, &["-b", "main"]);
-        run(
-            &first,
-            "git",
-            &["commit", "--allow-empty", "-q", "-m", "root"],
-        )
-        .unwrap();
+        let unrelated = parent.join("other");
+        let third = parent.join("third");
+        let empty = parent.join("empty");
+        for dir in [&first, &unrelated, &third, &empty] {
+            std::fs::create_dir_all(dir).unwrap();
+            crate::scratch::git_init(dir, &["-b", "main"]);
+        }
+        commit(&first, "root");
+        commit(&unrelated, "another root");
+        commit(&third, "a third root");
         let local = parent.join("api-review");
         run(
             &parent,
@@ -4639,68 +4907,48 @@ mod tests {
             ],
         )
         .unwrap();
-        let identity = |dir: &Path| repo_identity(dir).unwrap();
-        assert!(
-            identity(&local).same_as(&identity(&first)),
-            "a local clone's origin is the first checkout's path, but the root commit agrees"
-        );
 
-        let ssh = parent.join("api-ssh");
-        run(
-            &parent,
-            "git",
-            &[
-                "clone",
-                "-q",
-                first.to_str().unwrap(),
-                ssh.to_str().unwrap(),
-            ],
-        )
-        .unwrap();
-        run(
-            &ssh,
-            "git",
-            &["remote", "set-url", "origin", "git@example.com:api.git"],
-        )
-        .unwrap();
-        run(
-            &local,
-            "git",
-            &["remote", "set-url", "origin", "https://example.com/api.git"],
-        )
-        .unwrap();
-        assert!(
-            identity(&ssh).same_as(&identity(&local)),
-            "SSH and HTTPS clones of one remote"
-        );
+        crate::platform::test_home::with_home(&home, || {
+            // The unrelated repository is the workspace's first entry, and
+            // the clone of `first` only its second.
+            let created = create_workspace(&unrelated).unwrap();
+            let name = created
+                .workspace
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            join_workspace(&local, &name).unwrap();
+            let summary = workspaces()
+                .into_iter()
+                .find(|workspace| workspace.name == name)
+                .unwrap();
 
-        let unrelated = parent.join("other");
-        std::fs::create_dir_all(&unrelated).unwrap();
-        crate::scratch::git_init(&unrelated, &["-b", "main"]);
-        run(
-            &unrelated,
-            "git",
-            &["commit", "--allow-empty", "-q", "-m", "another root"],
-        )
-        .unwrap();
-        assert!(!identity(&unrelated).same_as(&identity(&first)));
+            let mine = root_commit(&first);
+            assert!(
+                summary.holds_repository_of(&first, mine.as_deref()),
+                "the second entry's root commit counts"
+            );
+            assert!(summary.may_move_into(&first, mine.as_deref()));
 
-        let empty_a = parent.join("empty-a");
-        let empty_b = parent.join("empty-b");
-        for dir in [&empty_a, &empty_b] {
-            std::fs::create_dir_all(dir).unwrap();
-            crate::scratch::git_init(dir, &["-b", "main"]);
-            run(
-                dir,
-                "git",
-                &["remote", "add", "origin", "https://example.com/new.git"],
-            )
-            .unwrap();
-        }
-        assert!(
-            identity(&empty_a).same_as(&identity(&empty_b)),
-            "before any commit, the shared origin is what agrees"
-        );
+            create_workspace(&third).unwrap();
+            let only_unrelated = workspaces()
+                .into_iter()
+                .find(|workspace| workspace.name != name)
+                .unwrap();
+            assert!(
+                !only_unrelated.holds_repository_of(&first, mine.as_deref()),
+                "a workspace of another repository is not this one"
+            );
+            assert!(!only_unrelated.may_move_into(&first, mine.as_deref()));
+
+            assert_eq!(root_commit(&empty), None);
+            assert!(!summary.holds_repository_of(&empty, None));
+            assert!(
+                !summary.may_move_into(&empty, None),
+                "a checkout with no root commit cannot move into a workspace that records one"
+            );
+        });
         let _ = std::fs::remove_dir_all(&parent);
     }
 

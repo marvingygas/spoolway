@@ -13,8 +13,10 @@
 # `init --setup home` writes a workspace itself now, and the last section runs
 # it for real: in a fresh git repository, and again from a second clone that
 # joins the same workspace, checking that neither checkout nor its `.git` is
-# touched. Which questions it asks and what each flag answers is unit-tested
-# in src/commands/init.rs. The lane pass above it still builds its workspace
+# touched. Then a third clone takes over the queue of the second once its
+# folder is gone, and the first moves into a new workspace and back, the
+# emptied workspace removed. Which questions it asks and what each flag
+# answers is unit-tested in src/commands/init.rs. The lane pass above it still builds its workspace
 # by hand, by moving an ordinary setup out of the checkout, because the
 # harness's fixture helpers rewrite a checkout's own `.spoolway/` in place.
 set -uo pipefail
@@ -173,8 +175,8 @@ cd "$SECOND" || exit 2
 ls -A .git > "$LIVE/review.git-before"
 config_before=$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)
 
-says "joining reports config/ as kept" "kept     ~/.spoolway/$(basename "$WS2")/config/" "$SPOOLWAY" init --setup home \
-  --workspace "$(basename "$WS2")" --provider claude --yes </dev/null
+says "joining says which workspace it joined" "Joined workspace $(basename "$WS2")." "$SPOOLWAY" init \
+  --setup home --workspace "$(basename "$WS2")" --provider claude --yes </dev/null
 if [ "$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)" = "$config_before" ]; then
   ok "joining leaves the shared config/ unchanged"
 else bad "joining leaves the shared config/ unchanged"; fi
@@ -188,5 +190,69 @@ else bad "git status shows nothing in the second clone"; git status --porcelain 
 if ls -A .git | diff -q "$LIVE/review.git-before" - >/dev/null && [ -z "$(find .git -iname '*spoolway*')" ]; then
   ok ".git holds nothing in the second clone"
 else bad ".git holds nothing in the second clone"; fi
+
+# --------------------------------------------- a gone clone is taken over
+# The second clone has a task queued, then its folder is deleted. A fresh clone
+# of the same repository joining the workspace is the one gone entry with
+# this root commit, so it takes over that entry's queue without asking, says
+# only that it joined, and leaves the shared config/ exactly as it was.
+NAME2=$(basename "$WS2")
+# Written straight into the dispatcher folder's queue: what is being checked
+# is whose queue it is after the takeover, not how it got there.
+mkdir -p "$WS2/dispatchers/api-review/queue"
+task_doc "$WS2/dispatchers/api-review/queue/d1.md" d1 "$BODY" "stage: queued"
+cd "$LIVE" || exit 2
+rm -rf "$SECOND"
+THIRD="$LIVE/moved/api-review"
+must "a fresh clone of the same repository" git clone -q "$FRESH" "$THIRD"
+cd "$THIRD" || exit 2
+config_before=$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)
+out=$("$SPOOLWAY" init --workspace "$NAME2" --provider claude --yes </dev/null 2>&1)
+if grep -qxF "Joined workspace $NAME2." <<<"$out"; then ok "the takeover says only that it joined"
+else bad "the takeover says only that it joined"; sed 's/^/        /' <<<"$out"; fi
+has "project.toml now names the fresh clone" "root = \"$(pwd -P)\"" "$WS2/project.toml"
+if [ "$(ls "$WS2/dispatchers" | wc -l)" -eq 2 ]; then ok "no third dispatcher folder is made"
+else bad "no third dispatcher folder is made"; ls -A "$WS2/dispatchers" | sed 's/^/        /'; fi
+says "the gone clone's task is this checkout's now" "d1" "$SPOOLWAY" queue list
+if [ "$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)" = "$config_before" ]; then
+  ok "taking over leaves the shared config/ unchanged"
+else bad "taking over leaves the shared config/ unchanged"; fi
+
+# ----------------------------------------------------- moving a checkout
+# The first clone moves into a new workspace, then back. The way back is
+# refused while one of its tasks holds a worktree, and once it is clear, the
+# move removes the workspace it emptied.
+cd "$FRESH" || exit 2
+before_ws=$(ls "$HOME/.spoolway")
+says "a move into a new workspace says where it went" "Moved to workspace api-" \
+  "$SPOOLWAY" init --workspace new --provider claude --examples --tracker none --yes </dev/null
+WS3=
+for dir in "$HOME"/.spoolway/api-*/; do
+  name=$(basename "$dir")
+  grep -qxF "$name" <<<"$before_ws" || WS3="$HOME/.spoolway/$name"
+done
+if [ -n "$WS3" ] && [ -f "$WS3/config/config.toml" ] && [ -d "$WS3/dispatchers/api" ]; then
+  ok "the new workspace has a setup and the moved dispatcher folder"
+else bad "the new workspace has a setup and the moved dispatcher folder"; ls -A "$HOME/.spoolway" | sed 's/^/        /'; fi
+lacks "the workspace it left no longer lists it" "root = \"$(pwd -P)\"" "$WS2/project.toml"
+if [ -d "$WS2" ]; then ok "a workspace still holding a checkout is kept"
+else bad "a workspace still holding a checkout is kept"; fi
+
+task_doc "$WS3/dispatchers/api/queue/c1.md" c1 "$BODY" "stage: implement" \
+  "worktree_path: $WS3/dispatchers/api/worktrees/task-c1"
+ws3_before=$(cat "$WS3/project.toml")
+refuses "a move waits while a task holds a worktree" "c1 holds a worktree" \
+  "$SPOOLWAY" init --workspace "$NAME2" --provider claude --yes </dev/null
+if [ "$(cat "$WS3/project.toml")" = "$ws3_before" ]; then ok "the refused move wrote nothing"
+else bad "the refused move wrote nothing"; fi
+rm -f "$WS3/dispatchers/api/queue/c1.md"
+
+out=$("$SPOOLWAY" init --workspace "$NAME2" --provider claude --yes </dev/null 2>&1)
+if grep -qxF "Moved to workspace $NAME2." <<<"$out" \
+  && grep -qxF "Removed workspace $(basename "$WS3"). It held no other checkout." <<<"$out"; then
+  ok "the move back says where it went and which workspace it removed"
+else bad "the move back says where it went and which workspace it removed"; sed 's/^/        /' <<<"$out"; fi
+if [ -e "$WS3" ]; then bad "the emptied workspace is removed"; else ok "the emptied workspace is removed"; fi
+has "the first clone is listed back in its workspace" "root = \"$(pwd -P)\"" "$WS2/project.toml"
 
 finish

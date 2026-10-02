@@ -642,8 +642,14 @@ pub struct EvalArgs {
         writes nothing into the checkout or its `.git`; skills go to the agent's user \
         folder. When workspaces already exist, `init` asks which one this checkout uses, and \
         `--workspace <name>` or `--workspace new` answers it. Joining one keeps its \
-        `config/` as it is and skips the example and tracker questions. With nobody to ask \
-        and no `--workspace`, a new workspace is started.\n\n\
+        `config/` as it is and skips the example and tracker questions. Joining takes over \
+        the queue of a checkout of this repository whose folder is gone, when exactly one \
+        such checkout is listed there. With nobody to ask and no `--workspace`, a new \
+        workspace is started.\n\n\
+        Run again in a home-mode checkout, `init` shows the same menu with its current \
+        workspace first. Picking another workspace of the same repository, or a new one, \
+        moves the checkout and its queue there. A move waits until no task holds a \
+        worktree, and a workspace the move leaves empty is removed.\n\n\
         Every run prints the project directory it resolved and waits for a yes before it \
         writes anything: a path you do not recognise is the whole of the check. With nobody \
         there to answer, that question takes its default — no — and nothing is written, so a \
@@ -686,9 +692,9 @@ pub struct InitArgs {
     /// Accepted for compatibility; does nothing. A project's home used to
     /// be claimed by basename, and this forced a claim through when the
     /// checkout that basename belonged to was gone but its state was not
-    /// empty. A home keyed by id instead settles that same case on its own
-    /// — see acceptance criterion 2 of the `binding-record` task — so there
-    /// is nothing left for this flag to force.
+    /// empty. A home keyed by id settles that same case on its own: a home
+    /// whose recorded checkout is gone moves to this one. There is nothing
+    /// left for this flag to force.
     #[arg(long)]
     pub take_over: bool,
 
@@ -759,10 +765,12 @@ pub struct InitArgs {
     #[arg(long, value_enum, conflicts_with_all = ["adopt", "new_id"])]
     pub setup: Option<Setup>,
 
-    /// Answer `Which workspace should this checkout use?` without asking:
-    /// the name of a workspace folder under `~/.spoolway/` to join, or `new`
-    /// to start one. Implies `--setup home`. With nobody to ask and no flag,
-    /// a new workspace is started rather than joining one unasked.
+    /// Answer the workspace menu without asking: the name of a workspace
+    /// folder under `~/.spoolway/`, or `new` for a new workspace. Implies
+    /// `--setup home`. A checkout in no workspace joins the one named; one
+    /// already in a workspace moves to it. With nobody to ask and no flag, a
+    /// new checkout starts a new workspace rather than joining one unasked,
+    /// and a listed one stays where it is.
     #[arg(long, value_name = "NAME", conflicts_with_all = ["adopt", "new_id"])]
     pub workspace: Option<String>,
 }
