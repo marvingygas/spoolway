@@ -160,16 +160,23 @@ fn read(path: &std::path::Path) -> Option<String> {
 /// is meant to start from, written there by `spoolway init` — see
 /// `tracking-scripts`, which wires that up — and a project that has not run
 /// that yet, or has deleted the file, has written no ticket body of its own
-/// at all. Substituting the shipped prose in that case would render a
-/// project's tracker in spoolway's own words instead of saying nothing was
-/// customised; a single line naming the task is the honest answer, plain
+/// at all. A single line naming the task is the honest answer there, plain
 /// enough that nobody mistakes it for the project's own words.
+///
+/// Deliberately not [`read`]: that helper reads an empty file the same as a
+/// missing one, which was right while the shipped `epic.md`/`ticket.md`
+/// always carried real prose and an empty file could only mean someone had
+/// deleted it by hand. Both ship empty now — `init` writes exactly that
+/// file to every new project — and the hooks that call this depend on an
+/// empty result meaning "nothing of the project's own to add", not on it
+/// being read as "never written" and silently replaced by a line of
+/// spoolway's own. Only a path that does not exist at all still falls back.
 pub fn resolve_tracking(repo: &Repo, name: &str) -> String {
-    let dir = repo.tracking_templates_dir();
-    if let Some(contents) = read(&dir.join(format!("{name}.md"))) {
-        return contents;
+    let path = repo.tracking_templates_dir().join(format!("{name}.md"));
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(_) => "Opened automatically for task `${SPOOLWAY_TASK}`.\n".to_string(),
     }
-    "Opened automatically for task `${SPOOLWAY_TASK}`.\n".to_string()
 }
 
 /// Render a tracking template by substituting every `${SPOOLWAY_*}`
@@ -495,6 +502,36 @@ mod tests {
         let epic = resolve_tracking(&repo, "epic");
         assert_eq!(epic, "Opened automatically for task `${SPOOLWAY_TASK}`.\n");
         assert_ne!(epic, crate::assets::tracking_template("epic").unwrap());
+    }
+
+    /// `init` now writes `epic.md`/`ticket.md` empty into every new project
+    /// (the shipped templates ship empty themselves), so a present-but-empty
+    /// file has to render as the empty string — the hooks that build a
+    /// Story/Sub-task body depend on that to tell "nothing of the project's
+    /// own to add" apart from "never written at all". Before this, an empty
+    /// file read exactly like a missing one and silently fell back to the
+    /// single-line default, which would have put that line into every new
+    /// project's issue body forever.
+    #[test]
+    fn an_empty_tracking_template_renders_empty_not_the_single_line_fallback() {
+        let root = crate::scratch::root("task-template-tracking-empty");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(crate::config::TRACKING_TEMPLATES_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("epic.md"), "").unwrap();
+        let repo = Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: crate::config::Config::default(),
+            home: dir.join(".home"),
+        };
+
+        assert_eq!(resolve_tracking(&repo, "epic"), "");
+        // `ticket.md` was never written at all, so it still falls back.
+        assert_eq!(
+            resolve_tracking(&repo, "ticket"),
+            "Opened automatically for task `${SPOOLWAY_TASK}`.\n"
+        );
     }
 
     /// The substitution `render_tracking` does: every `${SPOOLWAY_*}` the

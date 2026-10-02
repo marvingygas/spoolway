@@ -370,6 +370,384 @@ mod tests {
         );
     }
 
+    /// `jira.sh`'s own Markdown-to-ADF converter, pulled out of its shipped
+    /// source rather than copied into this test a second time — a change to
+    /// the heredoc below is exercised here automatically, with nothing to
+    /// keep in sync by hand. The program lives between the single-quoted
+    /// heredoc marker and the line that closes it.
+    fn adf_filter() -> &'static str {
+        let script = hook_script("jira.sh");
+        let open_marker = script
+            .find("<<'JQ'")
+            .expect("jira.sh no longer opens its ADF_FILTER heredoc");
+        let start = script[open_marker..]
+            .find('\n')
+            .map(|offset| open_marker + offset + 1)
+            .expect("jira.sh's ADF_FILTER heredoc opener has no end of line");
+        let rest = &script[start..];
+        let end = rest
+            .find("\nJQ\n")
+            .expect("jira.sh no longer closes its ADF_FILTER heredoc");
+        &rest[..end]
+    }
+
+    /// Runs `$md` through [`adf_filter`] with a real `jq`, the same way
+    /// `to_adf_file` in `jira.sh` does, and returns the parsed ADF document.
+    /// `jq` is one of the hook's own declared hard dependencies (see the
+    /// script's header), so a test environment missing it fails loudly
+    /// rather than skipping a check it never ran.
+    fn run_adf_filter(md: &str) -> serde_json::Value {
+        use std::process::{Command, Stdio};
+        let output = Command::new("jq")
+            .args(["-n", "--arg", "md"])
+            .arg(md)
+            .arg(adf_filter())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("jq must be on PATH to run this test — it is jira.sh's own hard dependency");
+        assert!(
+            output.status.success(),
+            "jq rejected this Markdown: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("jq's own output is not valid JSON: {e}"))
+    }
+
+    /// Every `text` leaf anywhere in an ADF document, concatenated with a
+    /// space between — what a reader would actually see written out.
+    fn adf_text(value: &serde_json::Value) -> String {
+        let mut out = Vec::new();
+        fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if map.get("type").and_then(|t| t.as_str()) == Some("text")
+                        && let Some(text) = map.get("text").and_then(|t| t.as_str())
+                    {
+                        out.push(text.to_string());
+                    }
+                    for v in map.values() {
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(value, &mut out);
+        out.join(" ")
+    }
+
+    /// Every `link` mark's `href` anywhere in an ADF document, in the order
+    /// they appear — `adf_text` only ever sees a link's visible text, never
+    /// the address it points at, so the loss check below needs this to
+    /// prove a link's `[text](url)` survives as a whole, not just its text.
+    fn adf_hrefs(value: &serde_json::Value) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if map.get("type").and_then(|t| t.as_str()) == Some("link")
+                        && let Some(href) = map
+                            .get("attrs")
+                            .and_then(|a| a.get("href"))
+                            .and_then(|h| h.as_str())
+                    {
+                        out.push(href.to_string());
+                    }
+                    for v in map.values() {
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(value, &mut out);
+        out
+    }
+
+    /// The visible prose of a Markdown section this converter is meant to
+    /// handle, with every syntax marker it consumes removed and every
+    /// `[text](url)` link's address pulled out on its own — so what is left
+    /// is exactly the characters a reader would see on the page, in order,
+    /// with its link addresses alongside, never mixed into the text.
+    ///
+    /// Whitespace is dropped last, rather than used to split words: a
+    /// bulletList's own `listItem`s each render as a *separate* ADF node
+    /// [`adf_text`] joins back together with an inserted space, which can
+    /// land right next to punctuation the source never put a space before
+    /// (a code span followed by a comma, say). Comparing word by word would
+    /// read that reformatting as a dropped or split word; comparing with no
+    /// whitespace at all compares content only, in the order it appears,
+    /// immune to exactly how much space sits between two nodes.
+    ///
+    /// A fenced code block's own lines pass through untouched — no heading,
+    /// bullet or mark stripping inside one, since a shell comment's leading
+    /// `#` or a snippet's own backtick is the block's real content, not
+    /// Markdown syntax this converter interprets — and the fence markers
+    /// themselves (`` ``` ``, with or without a language) are dropped, the
+    /// same way the rendered `codeBlock` carries only what was inside them.
+    ///
+    /// Link, bold and inline-code markers are resolved on each finished
+    /// block's *whole* accumulated text, not line by line: the archive
+    /// wraps a long bullet or numbered item across source lines, so a
+    /// `` `backtick span` `` or a link can open on one line and close on the
+    /// next. `jira.sh`'s own converter sees the same lines and only runs
+    /// its own inline scan once a block's lines are joined with `" "`
+    /// (`md_to_adf`'s `buf | join(" ") | inline_nodes`) — so matching that
+    /// order here is what makes a span crossing a source line resolve on
+    /// both sides instead of only on the real one.
+    ///
+    /// Which block a line belongs to, and whether its own leading `##`,
+    /// `-` or `1.` is a real marker to strip or part of the prose, is
+    /// decided by the exact same, indentation-sensitive rules `md_to_adf`
+    /// itself uses — an indented line such as `    ## not a heading`,
+    /// four spaces deep in an *indented* code block this converter does
+    /// not implement at all, starts with none of those at column zero, so
+    /// neither side treats it as one; a line-by-line approximation that
+    /// trims leading space before checking got this wrong (review finding
+    /// in this task's own history). Reusing the real decision, rather than
+    /// a second guess at it, is the only way this check can trust a
+    /// mismatch to mean an actual loss.
+    // The final `flush_list!()` call at end of input sets `list_active =
+    // false` with nothing left to read it afterward — correct, since every
+    // other call site needs that reset before the next line is classified.
+    #[allow(unused_assignments)]
+    fn visible_text_and_links(markdown: &str) -> (String, Vec<String>) {
+        let top_bullet = regex::Regex::new(r"^(?:-|[0-9]+\.) ").unwrap();
+        let nested_bullet = regex::Regex::new(r"^  +(?:-|[0-9]+\.) ").unwrap();
+
+        // One left-to-right tokenizer, not three separate find-and-replace
+        // passes — a pass-per-mark order can't mirror `scan`'s own
+        // priority, where a `` `code span` `` already claims everything up
+        // to its own closing backtick, `**` included, before the bold
+        // alternative is ever tried at that position. Three sequential
+        // passes strip the backticks around `` `assets/**` `` first (as
+        // `code`), which then exposes its bare `**` to the *next* pass as
+        // if it were real bold syntax — the same two markers
+        // [`visible_text_and_links`]'s own doc already names, wrongly
+        // merged a second time by passes instead of a scan. Named capture
+        // groups say which alternative actually matched the leftmost spot;
+        // the gap between one match and the next is literal text, kept
+        // exactly as it is, covering a stray `*`, `` ` `` or `[` the same
+        // way the real converter's own catch-all alternatives do.
+        let token = regex::Regex::new(concat!(
+            r"(?P<code>`[^`]*`)",
+            r"|(?P<bold>\*\*(?:[^*\s][^*]*[^*\s]|[^*\s])\*\*)",
+            r"|\[(?P<ltext>[^\]]*)\]\((?P<lhref>[^)]*)\)",
+        ))
+        .unwrap();
+
+        let mut blocks: Vec<String> = Vec::new();
+        let mut hrefs: Vec<String> = Vec::new();
+        let mut buf = String::new();
+        let mut list_items: Vec<String> = Vec::new();
+        let mut list_active = false;
+        let mut in_code = false;
+        let mut code_lines: Vec<&str> = Vec::new();
+
+        let inline = |raw: &str, hrefs: &mut Vec<String>| -> String {
+            let mut out = String::new();
+            let mut last = 0;
+            for caps in token.captures_iter(raw) {
+                let whole = caps.get(0).unwrap();
+                out.push_str(&raw[last..whole.start()]);
+                if let Some(c) = caps.name("code") {
+                    let s = c.as_str();
+                    out.push_str(&s[1..s.len() - 1]);
+                } else if let Some(b) = caps.name("bold") {
+                    let s = b.as_str();
+                    out.push_str(&s[2..s.len() - 2]);
+                } else if let Some(t) = caps.name("ltext") {
+                    out.push_str(t.as_str());
+                    hrefs.push(caps.name("lhref").map_or("", |h| h.as_str()).to_string());
+                }
+                last = whole.end();
+            }
+            out.push_str(&raw[last..]);
+            out
+        };
+
+        macro_rules! flush_para {
+            () => {
+                if !buf.trim().is_empty() {
+                    blocks.push(inline(&buf, &mut hrefs));
+                }
+                buf.clear();
+            };
+        }
+        macro_rules! flush_list {
+            () => {
+                for item in list_items.drain(..) {
+                    blocks.push(inline(&item, &mut hrefs));
+                }
+                list_active = false;
+            };
+        }
+
+        for line in markdown.lines() {
+            if line.starts_with("```") {
+                if in_code {
+                    blocks.push(code_lines.join("\n"));
+                    code_lines.clear();
+                    in_code = false;
+                } else {
+                    flush_para!();
+                    flush_list!();
+                    in_code = true;
+                }
+                continue;
+            }
+            if in_code {
+                code_lines.push(line);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("## ") {
+                flush_para!();
+                flush_list!();
+                blocks.push(inline(rest, &mut hrefs));
+            } else if let Some(m) = top_bullet.find(line) {
+                if !list_active {
+                    flush_para!();
+                }
+                list_active = true;
+                list_items.push(line[m.end()..].to_string());
+            } else if list_active && let Some(m) = nested_bullet.find(line) {
+                list_items.push(line[m.end()..].to_string());
+            } else if line.trim().is_empty() {
+                flush_para!();
+                flush_list!();
+            } else if list_active {
+                let last = list_items.last_mut().expect("list_active implies an item");
+                last.push(' ');
+                last.push_str(line.trim_start());
+            } else {
+                buf.push(' ');
+                buf.push_str(line);
+            }
+        }
+        flush_para!();
+        flush_list!();
+        if in_code {
+            blocks.push(code_lines.join("\n"));
+        }
+
+        (blocks.join(" "), hrefs)
+    }
+
+    /// All whitespace removed — see [`visible_text_and_links`]'s own doc for
+    /// why that, not a word split, is what the loss check below compares.
+    fn squash(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// The Context and Acceptance criteria of every task this project has
+    /// ever archived, captured as `tests/fixtures/adf_corpus.json` so the
+    /// check below runs the same way on every machine rather than reading a
+    /// live, local `archive/` directory that is a dispatcher's own working
+    /// state and not part of the repository. `jira.sh`'s converter must turn
+    /// every one of them into valid ADF that reproduces the same visible
+    /// characters, in the same order, with the same link addresses — not
+    /// merely as many characters, which a converter that swapped, duplicated
+    /// or re-split words could still pass.
+    #[test]
+    fn jira_sh_adf_filter_loses_no_text_from_any_archived_task() {
+        #[derive(serde::Deserialize)]
+        struct Section {
+            task: String,
+            heading: String,
+            markdown: String,
+        }
+        let corpus: Vec<Section> =
+            serde_json::from_str(include_str!("../tests/fixtures/adf_corpus.json"))
+                .expect("tests/fixtures/adf_corpus.json must be a JSON array of sections");
+        assert!(!corpus.is_empty(), "the ADF corpus fixture is empty");
+
+        for section in &corpus {
+            let doc = run_adf_filter(&section.markdown);
+            assert_eq!(
+                doc.get("type").and_then(|t| t.as_str()),
+                Some("doc"),
+                "{}/{}: not an ADF document: {doc}",
+                section.task,
+                section.heading
+            );
+            let (original_text, original_hrefs) = visible_text_and_links(&section.markdown);
+            let rendered_hrefs = adf_hrefs(&doc);
+            assert_eq!(
+                squash(&original_text),
+                squash(&adf_text(&doc)),
+                "{}/{}: the rendered ADF's visible text does not match the source, in order",
+                section.task,
+                section.heading
+            );
+            assert_eq!(
+                original_hrefs, rendered_hrefs,
+                "{}/{}: the rendered ADF's link addresses do not match the source, in order",
+                section.task, section.heading
+            );
+        }
+    }
+
+    /// The one difference `.spoolway/hooks/jira.sh` (this project's own
+    /// control plane, not the binary it builds) is allowed to carry against
+    /// the shipped `jira.sh` above — a guard this project added because it
+    /// moved to Jira after some of its own tickets were already GitHub
+    /// issue URLs, which `acli` can never resolve. Kept here as its own
+    /// constant, rather than inlined into the test below, so the one
+    /// sanctioned drift is named in exactly one place.
+    const JIRA_KAN_GUARD: &str = r#"
+# A task queued before this project moved to Jira still carries a GitHub
+# issue URL as its ticket — skip it, since acli can never resolve that key.
+case "$SPOOLWAY_TICKET" in
+  "$project"-[0-9]*) ;;
+  *) exit 0 ;;
+esac
+"#;
+
+    /// `.spoolway/hooks/github.sh` and `.spoolway/hooks/jira.sh` are this
+    /// project's own copies of the hooks it ships to every other project —
+    /// proof that the shipped scripts actually run, not a second
+    /// implementation of them. A copy that drifts hides a fix from this
+    /// project the moment it diverges, which is what sent both scripts
+    /// out of sync before this task: `github.sh` had fallen back to an
+    /// older `sh` rewrite with no labels and no ERR trap, and `jira.sh` was
+    /// missing only its own `KAN-` guard. This fails the moment either
+    /// copy changes beyond that one guard, in either direction.
+    #[test]
+    fn dot_spoolway_hooks_match_the_shipped_ones_beyond_the_kan_guard() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let github_shipped = hook_script("github.sh");
+        let github_copy = std::fs::read_to_string(root.join(".spoolway/hooks/github.sh"))
+            .expect("read .spoolway/hooks/github.sh");
+        assert_eq!(
+            github_copy, github_shipped,
+            ".spoolway/hooks/github.sh has drifted from the shipped github.sh"
+        );
+
+        let jira_shipped = hook_script("jira.sh");
+        let jira_copy = std::fs::read_to_string(root.join(".spoolway/hooks/jira.sh"))
+            .expect("read .spoolway/hooks/jira.sh");
+        let without_guard = jira_copy.replacen(JIRA_KAN_GUARD, "", 1);
+        assert_eq!(
+            without_guard, jira_shipped,
+            ".spoolway/hooks/jira.sh has drifted from the shipped jira.sh beyond its own KAN- \
+             guard"
+        );
+    }
+
     /// Nothing parses a prompt any more, which makes one thing worth asserting
     /// instead: that every shipped prompt is prose and carries no leftover
     /// marker from the format that used to partition these files. A stray
