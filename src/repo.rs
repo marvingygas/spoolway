@@ -493,8 +493,9 @@ impl Repo {
         self.under_setup(crate::config::JOBS_FILE)
     }
 
-    /// Where a project overrides `epic.md` and `ticket.md`, the two bodies
-    /// the `open` hook renders — see [`crate::task_template::resolve_tracking`].
+    /// Where `epic.md` and `ticket.md` are seeded into a project by `init`
+    /// — unread by anything now that the `open` hook builds the whole issue
+    /// body itself. See [`crate::assets::TRACKING_TEMPLATES`].
     pub fn tracking_templates_dir(&self) -> PathBuf {
         self.under_setup(crate::config::TRACKING_TEMPLATES_DIR)
     }

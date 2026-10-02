@@ -130,11 +130,11 @@ pub fn task_template(name: &str) -> Option<&'static str> {
 /// `spoolway sync` never touches either, once `init` has written them: the
 /// same rule a task skeleton or a prompt already follows.
 ///
-/// [`crate::task_template::resolve_tracking`] never falls back to these at
-/// render time — a project with neither file written gets a single line
-/// naming the task instead, never this prose silently standing in for its
-/// own. Neither carries the word "spoolway": the rendered body is the
-/// project's own ticket, not a spoolway one — see this module's own test.
+/// Nothing reads either at runtime any more — the `open` hook builds the
+/// whole issue body itself, from the task file and the group description —
+/// so this pair is seeded into every new project by `init` and then read by
+/// nothing. Neither carries the word "spoolway": whatever a project once put
+/// in one was its own words, not spoolway's — see this module's own test.
 pub const TRACKING_TEMPLATES: &[(&str, &str)] = &[
     ("epic", include_str!("../assets/tracking/epic.md")),
     ("ticket", include_str!("../assets/tracking/ticket.md")),
@@ -143,8 +143,7 @@ pub const TRACKING_TEMPLATES: &[(&str, &str)] = &[
 /// Read one of [`TRACKING_TEMPLATES`] by name — what `crate::update`'s own
 /// `shipped_for` hands `--replace` for a tracking template, the same way it
 /// already does for a task skeleton and a prompt; `init` itself still places
-/// the pair by iterating the slice above directly, and `resolve_tracking`
-/// never falls back to either by name.
+/// the pair by iterating the slice above directly.
 pub fn tracking_template(name: &str) -> Option<&'static str> {
     TRACKING_TEMPLATES
         .iter()

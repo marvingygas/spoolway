@@ -130,7 +130,7 @@ flowchart LR
 | `.spoolway/prompts/<name>/PROMPT.md` | The five sample prompts, with the example setup. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
-| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders, with the example setup. |
+| `.spoolway/templates/tracking/` | `epic.md` and `ticket.md`, with the example setup. Nothing reads either; the `open` hook builds the whole issue body itself. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`, written only when a tracker is chosen. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |

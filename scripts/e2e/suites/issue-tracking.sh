@@ -743,14 +743,13 @@ ISSUE_NUM=${TICKET##*/}
 EPIC_NUM=${EPIC##*/}
 has "the stub's issue was created against the configured project" \
   "repo=acme/app" "$GH_STUB_ISSUES/$ISSUE_NUM"
-# The task's own words alone now — its `## Acceptance criteria` (this
-# fixture's body has no `## Context`, so that heading is skipped entirely),
-# never the ticket template's old "Mirrors task …" line: `ticket.md` ships
-# empty, so nothing of the template survives into the body at all.
+# The task's own words alone — its `## Acceptance criteria` (this fixture's
+# body has no `## Context`, so that heading is skipped entirely). The hook
+# builds the whole body itself now; nothing is ever appended to it.
 has "the ticket body carries the task's own Acceptance criteria" \
   '`notes/<id>.md` exists, opens with `# <id>`, and has one sentence under it' \
   "$GH_STUB_ISSUES/$ISSUE_NUM.body"
-lacks "and never the old ticket template's own words" \
+lacks "and never a line spoolway itself might have appended" \
   "Mirrors task" "$GH_STUB_ISSUES/$ISSUE_NUM.body"
 lacks "nor the \`## Intend\` section — the plan's framing, not the task's own words" \
   "## Intend" "$GH_STUB_ISSUES/$ISSUE_NUM.body"
@@ -806,9 +805,8 @@ fi
 # body and `cmp` the full captured file against it.
 #
 # The epic body is the full, multiline `group_description:` alone, flat,
-# with nothing appended: `epic.md` ships empty now, so a project that has
-# not written anything of its own into it gets no trailing section at all
-# — not even a blank line for one.
+# with nothing appended — the hook never appends anything to it, not even
+# a trailing blank line.
 PAIR_BODY="$GH_STUB_ISSUES/${PAIR_EPIC##*/}.body"
 printf '%s\n' \
   "Proving a shared epic and native parent/blocked-by links." \
@@ -1071,6 +1069,18 @@ else
 fi
 JIRA_EPIC_KEY=${JIRA_EPIC##*/}
 JIRA_TICKET_KEY=${JIRA_TICKET##*/}
+
+# Risk the decision record calls out: with `$SPOOLWAY_EPIC_BODY`/
+# `$SPOOLWAY_TICKET_BODY` gone, `jira.sh` names its ADF scratch files after
+# `$SPOOLWAY_OUT` instead — still under the tracking directory, never the
+# working directory the hook actually runs in (`$LIVE/proj`, this suite's
+# own checkout, cd'd into once by `new_repo` and never left).
+works "the Story's ADF scratch file sits beside \$SPOOLWAY_OUT, under tracking/" \
+  test -f "$SPOOLWAY_PROJECT_HOME/tracking/jira-open-check · open.out.epic-body.adf.json"
+works "the Sub-task's ADF scratch file does too" \
+  test -f "$SPOOLWAY_PROJECT_HOME/tracking/jira-open-check · open.out.ticket-body.adf.json"
+works "neither ADF scratch file landed in the working directory instead" \
+  sh -c '! ls -- *.adf.json >/dev/null 2>&1'
 
 has "the Story's own title is the group name, not the description" \
   "summary=jira-single" "$ACLI_STUB_DIR/$JIRA_EPIC_KEY"

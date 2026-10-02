@@ -168,8 +168,6 @@ pub fn open_ticket(
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let key = Runs::key("open", task.id());
     let out_path = dir.join(format!("{key}.out"));
-    let epic_body_path = dir.join(format!("{key}.epic-body.md"));
-    let ticket_body_path = dir.join(format!("{key}.ticket-body.md"));
     let _ = std::fs::remove_file(&out_path);
 
     let mut env = open_env(
@@ -181,29 +179,7 @@ pub fn open_ticket(
         group_description,
         task_file,
     );
-    std::fs::write(
-        &epic_body_path,
-        crate::task_template::render_tracking(
-            &crate::task_template::resolve_tracking(repo, "epic"),
-            &env,
-        ),
-    )?;
-    std::fs::write(
-        &ticket_body_path,
-        crate::task_template::render_tracking(
-            &crate::task_template::resolve_tracking(repo, "ticket"),
-            &env,
-        ),
-    )?;
     env.insert("SPOOLWAY_OUT".to_string(), out_path.display().to_string());
-    env.insert(
-        "SPOOLWAY_EPIC_BODY".to_string(),
-        epic_body_path.display().to_string(),
-    );
-    env.insert(
-        "SPOOLWAY_TICKET_BODY".to_string(),
-        ticket_body_path.display().to_string(),
-    );
 
     let run_line = crate::platform::quote(&hook.display().to_string());
     let runs = runs(repo);
@@ -296,14 +272,6 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
         "SPOOLWAY_OUT",
         "where to write the answer: `epic=`, `ticket=`, `slug=` and `url=` lines, any \
          order, all optional",
-    ),
-    (
-        "SPOOLWAY_EPIC_BODY",
-        "a file rendered from `.spoolway/templates/tracking/epic.md`",
-    ),
-    (
-        "SPOOLWAY_TICKET_BODY",
-        "a file rendered from `.spoolway/templates/tracking/ticket.md`",
     ),
 ];
 
@@ -1177,15 +1145,12 @@ mod tests {
         let (repo, _root_guard) = fixture("hook-contract-vars");
         let t = task("demo", |f| f.group = Some("g".into()));
 
-        // `open_env` never sees `SPOOLWAY_OUT`, `SPOOLWAY_EPIC_BODY` or
-        // `SPOOLWAY_TICKET_BODY` — `open_ticket` adds those three once the
-        // tracking directory it points into exists — so they are added here
-        // exactly the way that caller does, rather than expected of
+        // `open_env` never sees `SPOOLWAY_OUT` — `open_ticket` adds it once
+        // the tracking directory it points into exists — so it is added
+        // here exactly the way that caller does, rather than expected of
         // `open_env` itself.
         let mut open = open_env(&repo, &t, 1, "", "", "", "demo.md");
         open.insert("SPOOLWAY_OUT".to_string(), String::new());
-        open.insert("SPOOLWAY_EPIC_BODY".to_string(), String::new());
-        open.insert("SPOOLWAY_TICKET_BODY".to_string(), String::new());
         let open_keys: BTreeSet<&str> = open.keys().map(String::as_str).collect();
         assert_eq!(
             open_keys,
@@ -1210,7 +1175,7 @@ mod tests {
         );
 
         // `fetch_env` never sees `SPOOLWAY_OUT` either — `fetch_issue` adds
-        // it the same way `open_ticket` adds its own three.
+        // it the same way `open_ticket` adds its own.
         let mut fetch = fetch_env("o/r#42", "");
         fetch.insert("SPOOLWAY_OUT".to_string(), String::new());
         let fetch_keys: BTreeSet<&str> = fetch.keys().map(String::as_str).collect();
@@ -1349,29 +1314,18 @@ mod tests {
     }
 
     /// A hook that answers cleanly hands back exactly what it wrote to
-    /// `SPOOLWAY_OUT`, and both body files it named in `SPOOLWAY_EPIC_BODY`
-    /// / `SPOOLWAY_TICKET_BODY` actually exist and carry the substituted
-    /// template, not the placeholder text.
+    /// `SPOOLWAY_OUT`. The hook builds the whole issue body itself, from
+    /// `SPOOLWAY_TASK_FILE` and `SPOOLWAY_GROUP_DESCRIPTION` alone — this
+    /// proves both actually reach it, rather than a file spoolway rendered
+    /// for it.
     #[test]
-    fn open_ticket_reads_the_answer_and_writes_both_rendered_bodies() {
+    fn open_ticket_reads_the_answer_and_hands_the_hook_the_task_file_and_description() {
         let (mut repo, _root_guard) = fixture("open-answers");
-        // `resolve_tracking` never falls back to the shipped
-        // `assets/tracking/epic.md` at render time any more — a project's
-        // own file is the only thing it reads — so this writes one to
-        // actually exercise the substitution rather than the single-line
-        // fallback every project without one gets.
-        std::fs::create_dir_all(repo.tracking_templates_dir()).unwrap();
-        std::fs::write(
-            repo.tracking_templates_dir().join("epic.md"),
-            "Opened for group `${SPOOLWAY_GROUP}`. Plan: ${SPOOLWAY_SOURCE}\n",
-        )
-        .unwrap();
         with_hook(
             &mut repo,
             "open.sh",
-            r#"cat "$SPOOLWAY_EPIC_BODY" >"$SPOOLWAY_EPIC_BODY.seen"
-               cat "$SPOOLWAY_TASK_FILE" >"$SPOOLWAY_EPIC_BODY.task-file.seen"
-               echo "$SPOOLWAY_GROUP_DESCRIPTION" >"$SPOOLWAY_EPIC_BODY.description.seen"
+            r#"cat "$SPOOLWAY_TASK_FILE" >"$SPOOLWAY_OUT.task-file.seen"
+               echo "$SPOOLWAY_GROUP_DESCRIPTION" >"$SPOOLWAY_OUT.description.seen"
                { echo "epic=$SPOOLWAY_GROUP_SIZE-parents:$SPOOLWAY_DEPENDS_TICKETS"; \
                  echo "ticket=acme/app#43"; } >"$SPOOLWAY_OUT""#,
         );
@@ -1407,25 +1361,19 @@ mod tests {
         );
 
         let key = Runs::key("open", "scan-pending");
-        let seen =
-            std::fs::read_to_string(repo.tracking_dir().join(format!("{key}.epic-body.md.seen")))
-                .unwrap();
-        assert!(seen.contains("group `scanner-rework`"), "{seen}");
-        assert!(seen.contains("/plans/scanner-rework.html"), "{seen}");
-
         // `SPOOLWAY_TASK_FILE` names a path the hook can actually open and
         // read — the task's real, current contents, not the queue path
         // `validate_batch` has merely decided on.
         let task_file_seen = std::fs::read_to_string(
             repo.tracking_dir()
-                .join(format!("{key}.epic-body.md.task-file.seen")),
+                .join(format!("{key}.out.task-file.seen")),
         )
         .unwrap();
         assert_eq!(task_file_seen, "the task's own live contents\n");
 
         let description_seen = std::fs::read_to_string(
             repo.tracking_dir()
-                .join(format!("{key}.epic-body.md.description.seen")),
+                .join(format!("{key}.out.description.seen")),
         )
         .unwrap();
         assert_eq!(description_seen.trim(), "Mirrors a group of scans.");
