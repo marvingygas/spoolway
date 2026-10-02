@@ -4447,8 +4447,19 @@ fn task_pipeline<'a>(doc: &str, pipelines: &'a Pipelines) -> Result<&'a Pipeline
 
 /// A peek at a task's own `pipeline:` key, without the rest of
 /// `parse_submission`'s validation — the gate picker needs a pipeline's
-/// steps before a task has a `base:` to be validated against at all,
-/// and the tasks pane's own `Pipeline:` row needs nothing more than this.
+/// steps before a task has a `base:` to be validated against at all.
+///
+/// [`tasks_pane_lines`] does not call this any more: a `PendingTask`'s own
+/// `pipeline` field already carries what this would read, parsed once
+/// while `pending::list_groups_in` built it — see that field's own
+/// comment. Three callers still parse here, on every draw that reads it.
+/// The routines pane (`routine_task_lines`) has no choice: a `RoutineTask`
+/// carries none of `PendingTask`'s precomputed fields. The gate picker
+/// ([`task_pipeline`], used by `handle_gate_key` and `gate_panel`) and the
+/// trial picker's tick list (`TrialState::new`) do hold a `PendingTask`
+/// whose `pipeline` field already has this value; they were left on this
+/// path because neither runs on the idle per-second redraw the queue tab
+/// was slow on, only while one of those pickers is open.
 fn doc_pipeline_name(doc: &str) -> Option<String> {
     let (yaml, _) = crate::task::split_fence(doc).ok()?;
     let value: serde_norway::Value = serde_norway::from_str(yaml).ok()?;
@@ -4457,15 +4468,6 @@ fn doc_pipeline_name(doc: &str) -> Option<String> {
         .get("pipeline")?
         .as_str()
         .map(str::to_string)
-}
-
-/// A peek at a task's own `base:` key, the same shallow way
-/// [`doc_pipeline_name`] reads `pipeline:` — `None` for a blank one too,
-/// which `enter` treats exactly as an absent one.
-fn doc_base(doc: &str) -> Option<String> {
-    let (yaml, _) = crate::task::split_fence(doc).ok()?;
-    let value: serde_norway::Value = serde_norway::from_str(yaml).ok()?;
-    super::pending::front_str(&value, "base")
 }
 
 fn handle_gate_key(
@@ -5054,18 +5056,29 @@ fn tasks_pane_lines(
         };
         lines.push(task_row(marker, &task.id, tail, width));
 
+        // `task.pipeline`, `task.depends_on` and `task.base`, not a parse
+        // of `task.doc` apiece: these three rows used to each call their
+        // own `doc_pipeline_name`/`depends_on`/`doc_base`, splitting and
+        // parsing the same doc three times over on every draw of the
+        // highlighted group. `pending::list_groups_in` parses each task's
+        // front matter once, while building it, and fills these three
+        // fields from that one parse — see `PendingTask::depends_on`'s own
+        // comment — so drawing the pane now parses nothing at all.
+
         // There is no project default any more, so a task naming no
         // pipeline of its own reads as unassigned here — the same as
         // `task_pipeline` resolves nothing for it, and `parse_submission`
         // refuses it outright once it is actually submitted.
-        let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
+        let pipeline = task
+            .pipeline
+            .clone()
+            .unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
         lines.extend(labeled_row("Pipeline:", &pipeline, width));
 
-        let depends_on = super::pending::depends_on(&task.doc);
-        let depends_value = if depends_on.is_empty() {
+        let depends_value = if task.depends_on.is_empty() {
             "-".to_string()
         } else {
-            depends_on.join(", ")
+            task.depends_on.join(", ")
         };
         lines.extend(labeled_row("Depends on:", &depends_value, width));
 
@@ -5077,8 +5090,10 @@ fn tasks_pane_lines(
         // sent on the board checkout's branch — see `board_branch` — so
         // that is what it shows, and `-` only when the checkout is
         // detached and `enter` would refuse it.
-        if depends_on.is_empty() {
-            let base = doc_base(&task.doc)
+        if task.depends_on.is_empty() {
+            let base = task
+                .base
+                .clone()
                 .or_else(|| state.board_branch.clone())
                 .unwrap_or_else(|| "-".to_string());
             lines.extend(labeled_row("Base:", &base, width));
@@ -10724,6 +10739,59 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("touches") || line.contains("src/wire.rs")),
             "the pane never draws a task's touches, got {lines:?}"
+        );
+    }
+
+    /// `queue-tab-reads-changed-only`: one draw of the tasks pane used to
+    /// parse the highlighted task's own front matter three times over —
+    /// once each through `doc_pipeline_name`, `depends_on` and `doc_base` —
+    /// rather than once. `pending::list_groups_in` now parses a task's
+    /// front matter once while building it, filling `PendingTask::pipeline`,
+    /// `depends_on` and `base` from that one parse, and `tasks_pane_lines`
+    /// only reads those three fields: a draw over an unchanged file parses
+    /// nothing at all, not even once.
+    ///
+    /// Counted through `list_groups_in`'s own cache-and-counter arguments,
+    /// not a process-wide counter: ~40 sibling tests in this module call
+    /// `tasks_pane_lines`, `TrialState::new`, `doc_pipeline_name` or
+    /// `depends_on`, and the first version of this test read a shared
+    /// static any of them could bump — seen failing 16 times in 150
+    /// parallel runs (review finding 1). A cache and counter this test
+    /// owns outright cannot be touched by any other test.
+    #[test]
+    fn tasks_pane_lines_reads_a_tasks_front_matter_parsed_once_not_reparsed_per_draw() {
+        let (repo, _root_guard) = fixture("tasks-pane-parse-once");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+
+        let mut cache = std::collections::HashMap::new();
+        let mut parsed = 0usize;
+        let groups = super::pending::list_groups_in(&repo, &mut cache, &mut parsed).unwrap();
+        assert_eq!(
+            parsed, 1,
+            "one task, new to the cache, is parsed exactly once while list_groups builds it"
+        );
+
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new();
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Pipeline:") && line.contains("default")),
+            "tasks_pane_lines must still draw the task's own pipeline off the \
+             field list_groups already filled in, got {lines:?}"
+        );
+
+        // The per-second reload path: a second build over the same,
+        // unchanged file must parse nothing, not once per draw.
+        // `tasks_pane_lines` itself never parses anything any more, so
+        // `list_groups_in`'s own count is the whole of what is left to
+        // check.
+        let mut parsed_again = 0usize;
+        let _ = super::pending::list_groups_in(&repo, &mut cache, &mut parsed_again).unwrap();
+        assert_eq!(
+            parsed_again, 0,
+            "a reload over an unchanged file must parse nothing, not once per draw"
         );
     }
 
