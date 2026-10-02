@@ -7147,11 +7147,10 @@ mod screen_tests {
     /// A second `load` over the same `repo` with nothing changed on disk
     /// must not pay to read every transcript again — see the task's own
     /// account of `[r]` and the filter panel's `enter`, both of which call
-    /// `load` again through the very same `repo` the first call used. Timed
-    /// the same way as
-    /// `load_reads_each_transcript_once_so_its_time_grows_about_linearly_with_sessions`,
-    /// but against a second load over the same unchanged files rather than
-    /// against a larger session count.
+    /// `load` again through the very same `repo` the first call used.
+    /// Counted rather than timed — see `crate::usage::session_reads_under` —
+    /// because a second load racing the rest of the suite for the same cores
+    /// could come in slower than half the first while reading nothing at all.
     ///
     /// Also checks the two cases a cache has to get right rather than just
     /// go fast: a transcript that changed since the last load is read again
@@ -7168,15 +7167,15 @@ mod screen_tests {
 
         let (first, second, changed, deleted_gone) =
             crate::platform::test_home::with_home(&home, || {
-                let start = std::time::Instant::now();
+                let before = crate::usage::session_reads_under(&home);
                 let loaded = load(&repo, &no_filters()).unwrap();
                 assert_eq!(loaded.dirs.len(), N * 2);
-                let first = start.elapsed();
+                let first = crate::usage::session_reads_under(&home) - before;
 
-                let start = std::time::Instant::now();
+                let before = crate::usage::session_reads_under(&home);
                 let loaded = load(&repo, &no_filters()).unwrap();
                 assert_eq!(loaded.dirs.len(), N * 2);
-                let second = start.elapsed();
+                let second = crate::usage::session_reads_under(&home) - before;
 
                 // perf-0000's transcript grows a new skill marker — its size
                 // and mtime both move.
@@ -7207,10 +7206,15 @@ mod screen_tests {
         std::fs::remove_dir_all(&home).ok();
 
         assert!(
-            second.as_secs_f64() < first.as_secs_f64() / 2.0,
-            "a second load with nothing changed on disk took {second:?}, against {first:?} for \
-             the first, over the same {N} sessions and their subagents — it should have reused \
-             every transcript it already read instead of reading all of them again",
+            first >= N * 2,
+            "the first load read only {first} transcripts, fewer than the {} sessions and \
+             subagents it has rows for",
+            N * 2,
+        );
+        assert_eq!(
+            second, 0,
+            "a second load with nothing changed on disk read {second} transcripts again, \
+             against {first} for the first — it should have reused every one it already read",
         );
         assert!(
             changed,

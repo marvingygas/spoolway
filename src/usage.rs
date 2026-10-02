@@ -3244,6 +3244,10 @@ fn cached_session_read_from_path(path: &Path) -> SessionRead {
     }
     // Read unlocked, so a slow parse on one thread never blocks every other
     // thread's cache hits — see this function's own doc comment.
+    #[cfg(test)]
+    if let Ok(mut reads) = SESSION_READS.lock() {
+        reads.push(path.to_path_buf());
+    }
     let read = session_read_from_path(path);
     if let Ok(mut guard) = cache.lock() {
         guard.insert(
@@ -3256,6 +3260,24 @@ fn cached_session_read_from_path(path: &Path) -> SessionRead {
         );
     }
     read
+}
+
+/// Every transcript [`cached_session_read_from_path`] actually read rather
+/// than answered from its cache, in the order it read them. Test-only, so a
+/// test can count its own reads exactly — by the paths under its own scratch
+/// directory — instead of timing two loads against each other while the rest
+/// of the suite competes for the same cores.
+#[cfg(test)]
+static SESSION_READS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// How many transcripts under `dir` [`cached_session_read_from_path`] has
+/// actually read so far, in this process — see [`SESSION_READS`].
+#[cfg(test)]
+pub(crate) fn session_reads_under(dir: &Path) -> usize {
+    SESSION_READS
+        .lock()
+        .map(|reads| reads.iter().filter(|path| path.starts_with(dir)).count())
+        .unwrap_or(0)
 }
 
 /// One transcript's entry in [`cached_session_read_from_path`]'s cache.
