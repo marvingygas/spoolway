@@ -105,6 +105,11 @@ chmod +x .spoolway/hooks/record.sh
 
 must "the hook is named" "$SPOOLWAY" config set issue_tracking.hook record.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/app
+# `key_in_names` is on by default, and `record.sh` never answers `slug=` —
+# which `doctor` rightly reports. Off here, so everything below starts from
+# unprefixed names; the `key_in_names` section turns it on for itself.
+must "and key_in_names off, since record.sh writes no slug=" \
+  "$SPOOLWAY" config set issue_tracking.key_in_names false
 
 # `doctor` reads the same table straight off a real config.toml on a real
 # checkout, which `doctor()` itself does not decouple from — it also pulls

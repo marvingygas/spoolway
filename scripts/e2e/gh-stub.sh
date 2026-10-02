@@ -16,7 +16,7 @@
 #
 # Issues are the same shape, under $GH_STUB_ISSUES: `<n>` holds `repo=` and
 # `title=`, `<n>.body` is the file `-F` named, `<n>.comment` is the last
-# comment posted (`--body-file -` reads it off stdin), and `<n>.closed`
+# comment posted (`--body`, or `--body-file -` off stdin), and `<n>.closed`
 # exists once `gh issue close` has run. `<n>.labels` is a plain list, one
 # label per line, seeded by `issue create --label` and mutated in place by
 # `issue edit --add-label`/`--remove-label` — the marker-and-label design's
@@ -319,14 +319,16 @@ case "${1:-}" in
         fi
         ;;
       comment)
-        # `gh issue comment <url-or-number> --body-file -` — the target is the
-        # third word, not the second: `issue` and `comment` are both consumed
-        # before it.
+        # `gh issue comment <url-or-number> --body-file -`, or `--body <text>`
+        # as `github.sh`'s review hand-off posts it — the target is the third
+        # word, not the second: `issue` and `comment` are both consumed before
+        # it.
         url=$3
         shift 3
-        bodyfile=""
+        bodyfile="" body=""
         while [ $# -gt 0 ]; do
           case "$1" in
+            --body) body=$2; shift 2 ;;
             --body-file) bodyfile=$2; shift 2 ;;
             *) shift ;;
           esac
@@ -339,7 +341,9 @@ case "${1:-}" in
         # poll breaks on the empty one and the assertion reads nothing. A
         # rename within one directory is atomic, so the watcher sees either no
         # file or the whole comment.
-        if [ "$bodyfile" = "-" ]; then
+        if [ -z "$bodyfile" ]; then
+          printf '%s' "$body" > "$ISSUES/$n.comment.part"
+        elif [ "$bodyfile" = "-" ]; then
           cat > "$ISSUES/$n.comment.part"
         else
           cp "$bodyfile" "$ISSUES/$n.comment.part"
