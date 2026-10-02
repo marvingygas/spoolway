@@ -38,11 +38,12 @@
 //! instead of carrying a copy that can drift from the binary that actually
 //! enforces the format.
 //!
-//! `spoolway-plan` is the exception that does carry assets: its skeleton and
-//! the markup reference beside it, both from
-//! `assets/skills/claude/spoolway-plan/assets/`. They ship rather than being
-//! fetched because there is no command that prints them — a plan page is not
-//! a format the binary enforces, so nothing can regenerate one at runtime.
+//! `spoolway-plan` and `spoolway-calibrate` are the exceptions that do carry
+//! assets: the plan skeleton and the markup reference beside it, and the
+//! calibration report's skeleton, each from its skill's own
+//! `assets/skills/claude/<skill>/assets/`. They ship rather than being fetched
+//! because there is no command that prints them — a plan page or a report is
+//! not a format the binary enforces, so nothing can regenerate one at runtime.
 
 use std::path::{Path, PathBuf};
 
@@ -139,14 +140,20 @@ const SKILLS: &[Skill] = &[
         assets: &[],
     },
     // Reads lane-written task records and step-level evaluation and spend data
-    // back into the control plane that produced them. It uses both the agents'
-    // own reports and the numbers, then applies the changes the person chooses.
+    // back into whatever produced them — the control plane, and the scripts,
+    // skills and source the runs depend on. It uses both the agents' own
+    // reports and the numbers, then applies the changes the person chooses.
     Skill {
         name: "spoolway-calibrate",
         skill_md: include_str!("../assets/skills/claude/spoolway-calibrate/SKILL.md"),
         codex_skill_md: include_str!("../assets/skills/codex/spoolway-calibrate/SKILL.md"),
         pi_skill_md: include_str!("../assets/skills/pi/spoolway-calibrate/SKILL.md"),
-        assets: &[],
+        // The report every run fills, so its findings table looks the same
+        // each time. The Claude copy: it names no provider's tools.
+        assets: &[(
+            "report.md",
+            include_str!("../assets/skills/claude/spoolway-calibrate/assets/report.md"),
+        )],
     },
 ];
 
@@ -498,6 +505,10 @@ mod tests {
                 skills.join("spoolway-tasks").join("SKILL.md"),
                 skills.join("spoolway-config").join("SKILL.md"),
                 skills.join("spoolway-calibrate").join("SKILL.md"),
+                skills
+                    .join("spoolway-calibrate")
+                    .join("assets")
+                    .join("report.md"),
             ];
 
             assert_eq!(paths, expected, "{}", provider.name());
@@ -772,6 +783,13 @@ mod tests {
                 assert!(
                     skill.assets.iter().any(|(file, _)| *file == "page.md"),
                     "{} tells the agent to open assets/page.md but ships no such file",
+                    skill.name
+                );
+            }
+            if skill.skill_md.contains("assets/report.md") {
+                assert!(
+                    skill.assets.iter().any(|(file, _)| *file == "report.md"),
+                    "{} tells the agent to copy assets/report.md but ships no such file",
                     skill.name
                 );
             }
