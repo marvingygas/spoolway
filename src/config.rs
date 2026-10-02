@@ -2240,8 +2240,8 @@ mod tests {
     /// as one, the same way `Repo::root`'s ancestor walk already refuses to
     /// find a project there. `tracked_setup_dir_in` is the one place every
     /// other check in this area (`Placement::choose`, `bind`,
-    /// `adopt_workspace_clone`, `local::is_repo_mode`) goes through, so
-    /// fixing it here is what keeps `init --setup home --yes` from reading
+    /// `local::is_repo_mode`) goes through, so fixing it here is what
+    /// keeps `init --setup home --yes` from reading
     /// "already has a tracked `.spoolway/`" when run in `$HOME` itself.
     #[test]
     fn home_itself_never_carries_a_tracked_setup() {

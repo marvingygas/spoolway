@@ -750,9 +750,9 @@ fn a_moved_checkout_prints_exactly_one_line_when_the_old_one_is_gone() {
 }
 
 /// The same criterion's other cause: a home's recorded checkout still
-/// exists, but its own stamp has since moved on (`--new-id`, or a hand
-/// edit) — a stale copy taken before that still carries the old id prints
-/// the same one line, not two.
+/// exists, but its own stamp has since moved on (a hand edit, or a hand
+/// edit racing a crashed migration) — a stale copy taken before that still
+/// carries the old id prints the same one line, not two.
 #[test]
 fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
     let project = Project::new("moved-restamped");
@@ -763,21 +763,31 @@ fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
         .expect("read the original stamp")
         .trim()
         .to_string();
+    let label = std::fs::read_to_string(root.join(".git/spoolway-label"))
+        .expect("read the original label")
+        .trim()
+        .to_string();
 
-    // The original checkout mints itself a fresh id — the home keyed on
+    // The original checkout's stamp moves on by hand — the home keyed on
     // `old_id` is now stale, though the checkout on record for it still
-    // exists right where it was.
-    let restamp = Command::new(env!("CARGO_BIN_EXE_spoolway"))
-        .args(["init", "--yes", "--new-id"])
-        .current_dir(&root)
-        .env("HOME", &home)
-        .output()
-        .expect("run spoolway");
-    assert!(
-        restamp.status.success(),
-        "spoolway failed: {}",
-        String::from_utf8_lossy(&restamp.stderr)
-    );
+    // exists right where it was. A fresh home, keyed on the new id, is
+    // written right alongside it: this is exactly what `spoolway init`
+    // itself wrote the one time this checkout's id was first minted, just
+    // done again by hand rather than by a command.
+    let new_id = if old_id == "zzzzzz" {
+        "yyyyyy"
+    } else {
+        "zzzzzz"
+    };
+    let new_home = home.join(".spoolway").join(format!("{label}-{new_id}"));
+    std::fs::create_dir_all(&new_home).expect("create the fresh home");
+    std::fs::write(
+        new_home.join("project.toml"),
+        format!("id = {new_id:?}\nroot = {root:?}\n"),
+    )
+    .expect("write the fresh home's binding");
+    std::fs::write(root.join(".git/spoolway-id"), format!("{new_id}\n"))
+        .expect("re-stamp the checkout by hand");
 
     // A second checkout — a full copy of the first, taken before the
     // restamp — still carries `old_id`.

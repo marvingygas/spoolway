@@ -136,10 +136,8 @@ publish() {
 # based on.
 #
 # Any argument past the plan branch is passed straight to `spoolway init` —
-# `suites/warmth.sh` is the one caller that passes one, `--take-over`
-# (now a no-op kept for compatibility; see there), since it is also the one
-# suite that reuses the real `~/.spoolway/proj` home run to run rather than
-# a scratch `$HOME` of its own.
+# no caller passes one today, but the passthrough stays for a suite that
+# needs a specific `init` flag of its own.
 #
 # `dispatch.lane_quiet` is turned right down here for the same reason the
 # harness runs its dispatcher at a one-second interval: these suites run on a

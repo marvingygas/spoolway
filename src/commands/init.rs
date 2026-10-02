@@ -388,8 +388,7 @@ fn parse_tracker(raw: &str) -> Result<Tracker> {
 /// written — the answers to "Where should this project's setup live?" and,
 /// in home mode, the workspace menu ([`WORKSPACE_QUESTION`]).
 enum Placement {
-    /// A tracked `.spoolway/` in the checkout, as `init` always did — or a
-    /// checkout whose setup `--adopt`/`--new-id` settles on its own.
+    /// A tracked `.spoolway/` in the checkout, as `init` always did.
     Repo,
     /// A checkout some workspace already lists, staying there: a repeat
     /// run, set up in that workspace's `config/` exactly as a repeat
@@ -444,9 +443,6 @@ impl Placement {
     /// [`Self::choose`] before its one refusal that depends on the mode
     /// chosen.
     fn choose_any(root: &Path, args: &InitArgs) -> Result<Self> {
-        if args.adopt.is_some() || args.new_id {
-            return Ok(Self::Repo);
-        }
         let asked_home = args.setup == Some(Setup::Home) || args.workspace.is_some();
         if args.setup == Some(Setup::Repo) && args.workspace.is_some() {
             bail!("--workspace sets a project up in home mode, so it cannot go with --setup repo");
@@ -711,12 +707,11 @@ fn report_row(verb: &str, what: &str) -> String {
 }
 
 /// The mockup's second `bound` row: how much was already sitting under a
-/// home a checkout was just pointed at by name — the queue and archive
-/// task counts, whether a usage ledger exists, and how many worktrees are
-/// cut. `--adopt` prints this because it is the one case that can bind a
-/// checkout to a home carrying real state a person did not just watch
-/// `init` create empty; `migrate-legacy-home`'s own move prints it for the
-/// same reason, against the home it just moved.
+/// home a checkout just took over — the queue and archive task counts,
+/// whether a usage ledger exists, and how many worktrees are cut.
+/// `migrate-legacy-home`'s own move prints this against the home it just
+/// moved, the one case that can bind a checkout to a home carrying real
+/// state a person did not just watch `init` create empty.
 ///
 /// Worktrees are always counted at `home`'s own `worktrees` directory —
 /// every dispatched checkout lands there now, with no setting left to move
@@ -1063,44 +1058,23 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // directory, checked against that home's own record of which checkout
     // it belongs to — `crate::repo::bind` and friends, the whole of the
     // `binding-record` task. Every other command reaches the same check
-    // through `Repo::discover`; `init` is one of only two things allowed to
-    // write a binding *over* one that already disagrees, so it calls
-    // straight into the flags that do that rather than `Repo::discover`
-    // itself.
+    // through `Repo::discover`; `init` places, moves and re-attaches a
+    // checkout through its own menu, so it calls `bind` directly rather
+    // than `Repo::discover` itself.
     //
-    // `--take-over` is accepted and otherwise does nothing: the collision it
-    // used to resolve (two checkouts sharing one *basename*) cannot happen
-    // once a home is keyed by id instead, and the one case that looks like
-    // it now — a home whose recorded checkout is simply gone — settles
-    // itself without asking, per acceptance criterion 2 of that task.
-    //
-    // `already_stamped` is read before any of the three calls below run,
-    // since the ordinary one may be the very call that mints this
-    // checkout's id for the first time now — criterion 7, "no stamp where
-    // nothing records it binds itself once", no `spoolway init` required
-    // first any more. It is what lets the mockup's own "stamped" line,
-    // printed further down at its own position, tell a checkout that was
-    // freshly minted apart from a repeat run that only read its id back.
+    // `already_stamped` is read before `bind` runs, since that call may be
+    // the very one that mints this checkout's id for the first time now —
+    // criterion 7, "no stamp where nothing records it binds itself once",
+    // no `spoolway init` required first any more. It is what lets the
+    // mockup's own "stamped" line, printed further down at its own
+    // position, tell a checkout that was freshly minted apart from a
+    // repeat run that only read its id back.
     let stamp_path = crate::repo::id_file_path(root)?;
     let already_stamped = stamp_path.as_deref().is_some_and(|path| path.exists());
-    if let Some(name) = &args.adopt {
-        let home = crate::repo::adopt(root, name)?;
-        println!("  bound  {}  ->  {}/", root.display(), home.display());
-        println!("         {}", home_inventory_line(&home));
-    } else if args.new_id {
-        let home = crate::repo::restamp(root)?;
-        println!(
-            "  bound    {}  ->  {}/ (new id)",
-            root.display(),
-            home.display()
-        );
-    } else {
-        // The ordinary case: nothing to say unless the binding itself had
-        // something to record — a moved checkout prints its own one line
-        // from inside `bind` (acceptance criterion 2); a fresh one, silent
-        // criterion 7, stays silent here too.
-        crate::repo::bind(root)?;
-    }
+    // Nothing to say unless the binding itself had something to record — a
+    // moved checkout prints its own one line from inside `bind` (acceptance
+    // criterion 2); a fresh one, silent criterion 7, stays silent here too.
+    crate::repo::bind(root)?;
     let stamped_line = (!already_stamped)
         .then_some(stamp_path)
         .flatten()
@@ -1114,16 +1088,17 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             )
         });
 
-    // Read after binding rather than off `placement`, so a checkout
-    // `--adopt <workspace>/<dispatcher>` just re-attached counts as home mode
-    // too, and is kept out of its checkout exactly as a fresh one is.
+    // Read after binding rather than off `placement`, so a checkout just
+    // joined or taken over through the menu counts as home mode too, and
+    // is kept out of its checkout exactly as a fresh one is.
     let home_mode = crate::repo::workspace_clone(root).is_some();
 
     // A repeat run is how a project adds another provider's skills. Keep that
     // successful outcome distinct from creating (or deliberately replacing)
     // the project's scaffold. Read before anything below writes `config.toml`,
-    // and after binding, so a home-mode clone `--adopt` just re-attached reads
-    // its workspace's existing `config.toml` rather than the checkout's none.
+    // and after binding, so a home-mode clone just joined or re-attached
+    // reads its workspace's existing `config.toml` rather than the
+    // checkout's none.
     let already_initialized = Config::path_in(root).exists() && !args.force;
 
     let state = crate::config::setup_dir_in(root);
@@ -1928,112 +1903,6 @@ mod tests {
         );
     }
 
-    /// `--new-id` mints a checkout a fresh id even though it already carries
-    /// one, and moves it into the fresh home that id keys — the escape
-    /// hatch for two checkouts caught sharing one id (acceptance criterion 3
-    /// of `binding-record`).
-    #[test]
-    fn new_id_mints_a_fresh_id_and_a_fresh_home() {
-        let root = crate::scratch::root("init-new-id");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
-        run_init(&root, &confirmed()).expect("first init");
-        let before = std::fs::read_to_string(root.join(".git").join("spoolway-id")).unwrap();
-
-        run_init(
-            &root,
-            &InitArgs {
-                new_id: true,
-                ..confirmed()
-            },
-        )
-        .expect("--new-id");
-        let after = std::fs::read_to_string(root.join(".git").join("spoolway-id")).unwrap();
-
-        assert_ne!(before.trim(), after.trim(), "a fresh id was not minted");
-        let home = crate::platform::test_home::with_home(&home_for(&root), || {
-            crate::mux::project_home(&root)
-        })
-        .unwrap();
-        assert!(
-            home.join("project.toml").is_file(),
-            "the fresh home is bound to the checkout"
-        );
-    }
-
-    /// `--adopt <name>` binds a checkout to the home already sitting under
-    /// that name — even one that already recorded a different checkout —
-    /// the other escape hatch, for a home whose checkout is gone but which
-    /// nothing has restamped a new one to point at yet (criterion 4). The
-    /// name given is the mockup's own shape, `<label>-<id>`, not the bare
-    /// id alone — `spoolway init --adopt api-8w4r2c`.
-    #[test]
-    fn adopt_binds_to_the_home_already_sitting_under_that_name() {
-        let base = crate::scratch::root("init-adopt");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let home_root = base.join("home");
-
-        let original = base.join("original");
-        std::fs::create_dir_all(&original).unwrap();
-        crate::scratch::git_init(&original, &["-b", "plan/demo"]);
-        crate::platform::test_home::with_home(&home_root, || init(&original, &confirmed()))
-            .expect("stamp and bind the original checkout");
-        let id = std::fs::read_to_string(original.join(".git").join("spoolway-id"))
-            .unwrap()
-            .trim()
-            .to_string();
-        let home = crate::platform::test_home::with_home(&home_root, || {
-            crate::mux::project_home(&original)
-        })
-        .unwrap();
-        let name = home.file_name().unwrap().to_str().unwrap().to_string();
-        assert!(name.ends_with(&id), "{name}");
-
-        // The original checkout is gone; a fresh one adopts its home by name.
-        std::fs::remove_dir_all(&original).unwrap();
-        let fresh = base.join("fresh");
-        std::fs::create_dir_all(&fresh).unwrap();
-        crate::scratch::git_init(&fresh, &["-b", "plan/demo"]);
-
-        crate::platform::test_home::with_home(&home_root, || {
-            init(
-                &fresh,
-                &InitArgs {
-                    adopt: Some(name.clone()),
-                    ..confirmed()
-                },
-            )
-        })
-        .expect("--adopt");
-
-        let stamped = std::fs::read_to_string(fresh.join(".git").join("spoolway-id"))
-            .unwrap()
-            .trim()
-            .to_string();
-        assert_eq!(
-            stamped, id,
-            "the adopting checkout carries the id the named home is keyed on"
-        );
-
-        // The real regression: `fresh`'s own basename is not `original`'s,
-        // so if `adopt` left the checkout's label alone, the very next
-        // resolution would key off `fresh-<id>` — a home nothing ever
-        // wrote — rather than the one just adopted. Only a `Repo::discover`
-        // that lands back on the adopted home proves the label was
-        // actually overwritten to match it.
-        let repo = crate::platform::test_home::with_home(&home_root, || {
-            crate::repo::Repo::discover(&fresh)
-        })
-        .expect("the adopted home resolves on the very next command");
-        assert_eq!(
-            repo.home, home,
-            "discovery after --adopt must land back on the home just adopted, not a home \
-             keyed off this checkout's own current basename"
-        );
-    }
-
     /// The mockup's own second `bound` line, with real state under the
     /// home to count — an empty home (the common case, an ordinary `init`)
     /// is not enough on its own to prove the counters, only that they
@@ -2069,86 +1938,6 @@ mod tests {
             home_inventory_line(&fresh),
             "queue 0 . archive 0 . ledger (none) . worktrees 0"
         );
-    }
-
-    /// A name that is not a plain directory component must be refused
-    /// before any path is built from it — the acceptance criterion that
-    /// something able to escape `~/.spoolway/` (a separator, a `..`) never
-    /// reaches `state_root().join(...)`.
-    #[test]
-    fn adopt_refuses_a_name_that_would_escape_the_state_root() {
-        let root = crate::scratch::root("init-adopt-bad-name");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
-
-        let err = crate::platform::test_home::with_home(&home_for(&root), || {
-            init(
-                &root,
-                &InitArgs {
-                    adopt: Some("../../evil".to_string()),
-                    ..confirmed()
-                },
-            )
-        })
-        .expect_err("a name that could escape ~/.spoolway/ must be refused");
-        // `../../evil` carries a `/`, so this is refused by
-        // `adopt_workspace_clone`'s own check now — the `<workspace>/
-        // <dispatcher>` route `home-mode-discovery` added, tried before the
-        // single-component repo-mode form below ever sees it.
-        assert!(
-            format!("{err:#}").contains("not a plain `<workspace>/<dispatcher>` name"),
-            "{err:#}"
-        );
-        // And nothing was built from it: no directory escaping the scratch
-        // home's own `.spoolway/` exists.
-        assert!(!home_for(&root).join("..").join("evil").exists());
-    }
-
-    /// `name` itself passes [`crate::tracking::is_bare_filename`] — it is
-    /// one plain path component — but splitting it on its last `-` can
-    /// still leave a label half that is not: `-abc123` splits into an
-    /// empty label and the id `abc123`, and an empty label written to the
-    /// checkout's `spoolway-label` file is exactly the kind of value
-    /// [`crate::mux::project_home`] cannot key a resolvable path off. That
-    /// must be refused before `stamp_over` ever writes it, not discovered
-    /// the next time the checkout is used.
-    #[test]
-    fn adopt_refuses_a_name_whose_label_half_is_unusable() {
-        let root = crate::scratch::root("init-adopt-bad-label");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
-
-        let home_root = home_for(&root);
-        let bad_home = home_root.join(".spoolway").join("-abc123");
-        std::fs::create_dir_all(&bad_home).unwrap();
-
-        let err = crate::platform::test_home::with_home(&home_root, || {
-            init(
-                &root,
-                &InitArgs {
-                    adopt: Some("-abc123".to_string()),
-                    ..confirmed()
-                },
-            )
-        })
-        .expect_err("a name whose label half is empty must be refused");
-        let message = format!("{err:#}");
-        assert!(message.contains("-abc123"), "{message}");
-        // The rejected name is exactly what was just handed to `--adopt`,
-        // so telling the person to run the same command with the same name
-        // again cannot resolve anything — the guidance has to point at
-        // renaming the home, or at the other escape hatch, `--new-id`.
-        assert!(
-            !message.contains("Run `spoolway init --adopt <name>` again"),
-            "{message}"
-        );
-        assert!(message.to_lowercase().contains("rename"), "{message}");
-        assert!(message.contains("--new-id"), "{message}");
-
-        // Nothing was written: the checkout was left unstamped.
-        assert!(!root.join(".git").join("spoolway-id").exists());
     }
 
     /// Answering `github` writes the hook name and the project key into

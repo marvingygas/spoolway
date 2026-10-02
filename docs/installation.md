@@ -144,13 +144,10 @@ command checks the two against each other. A checkout nothing has recorded stamp
 writes the record on its first command, so a fresh clone works without running `init`. Where the
 two disagree, the command refuses and names both files by absolute path.
 
-`init --adopt <name>` binds this checkout to the home already at `~/.spoolway/<name>/`.
-`init --new-id` mints a fresh id and a fresh home. These two flags are the only way to write a
-binding over one that already exists.
-
 Delete the directory to forget every task, plan and lane. The next command refuses, because the
-checkout still carries a stamp no home holds. Run `spoolway init --new-id` to start clean. See
-[Runtime state](configuration.md#runtime-state).
+checkout still carries a stamp no home holds. Delete `.git/spoolway-id` too and run `spoolway
+init` again to mint a fresh id and a fresh home. See [Runtime
+state](configuration.md#runtime-state).
 
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
 version wrote there, outside home mode. A home-mode checkout keeps its `.gitignore`
@@ -202,9 +199,7 @@ Picking another workspace in the menu, or passing `--workspace <other>`, moves a
 there, carrying its queue, archive and worktrees along. The move is refused, with nothing
 written, while any of its tasks holds a worktree, naming each one, and for a workspace of another
 repository, with no flag to force it. A workspace the move leaves with no checkout listed is
-removed, and the move prints that it was removed. `spoolway workspace move <to>` moves a
-checkout the same way, under its own, separate checks — see [CLI
-reference](cli-reference.md#spoolway-workspace-move-to).
+removed, and the move prints that it was removed.
 
 ```
 $ spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes

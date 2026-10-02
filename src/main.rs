@@ -68,7 +68,7 @@ use anyhow::Result;
 use cli::{
     AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HerdrCommand, HookCommand,
     IssueCommand, JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand,
-    QueueCommand, TaskCommand, TemplateCommand, WorkspaceCommand,
+    QueueCommand, TaskCommand, TemplateCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -514,10 +514,6 @@ fn run() -> Result<()> {
                 Command::Hook(HookCommand::Contract) => commands::hook_contract(&repo),
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
-
-                Command::Workspace(WorkspaceCommand::Move(args)) => {
-                    commands::workspace_move(&repo.root, args)
-                }
 
                 Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
                 Command::Jobs(JobsCommand::Run(args)) => {

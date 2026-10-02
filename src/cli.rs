@@ -211,42 +211,6 @@ pub enum Command {
     /// them in.
     #[command(subcommand)]
     Herdr(HerdrCommand),
-
-    /// Move a home-mode clone from the workspace it uses now to another.
-    #[command(subcommand)]
-    Workspace(WorkspaceCommand),
-}
-
-/// `spoolway workspace move`.
-#[derive(Debug, Subcommand)]
-pub enum WorkspaceCommand {
-    /// Move this checkout from the workspace it is listed in now to `to`,
-    /// taking its dispatcher folder — queue, archive and worktrees — along
-    /// with it. The folder keeps its name unless that name is already taken
-    /// at `to`, in which case this refuses rather than silently drawing
-    /// `-2` the way joining a workspace does: pass `--dispatcher <name>` to
-    /// choose the new name yourself.
-    ///
-    /// Refused while a dispatcher is running over this clone's current
-    /// dispatcher folder, or while a live process is still working in one
-    /// of its worktrees — moving the folder out from under either would
-    /// pull the ground out from under real, live work. An idle worktree —
-    /// one nothing is actively working in, paused, blocked or held — moves
-    /// along with everything else and is repaired in place afterwards.
-    Move(WorkspaceMoveArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct WorkspaceMoveArgs {
-    /// The workspace to move this checkout into, by its folder name under
-    /// `~/.spoolway/`, as `spoolway init --setup home` lists it.
-    pub to: String,
-
-    /// The dispatcher folder's name at `to`, when the name this clone's
-    /// folder already has there is taken. Without it, a name already taken
-    /// at the destination is refused rather than silently renamed.
-    #[arg(long)]
-    pub dispatcher: Option<String>,
 }
 
 /// `spoolway herdr bind`/`unbind`.
@@ -336,7 +300,6 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
         "Setting up:",
         &[
             "init",
-            "workspace",
             "install",
             "update",
             "sync",
@@ -689,37 +652,6 @@ pub struct InitArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Accepted for compatibility; does nothing. A project's home used to
-    /// be claimed by basename, and this forced a claim through when the
-    /// checkout that basename belonged to was gone but its state was not
-    /// empty. A home keyed by id settles that same case on its own: a home
-    /// whose recorded checkout is gone moves to this one. There is nothing
-    /// left for this flag to force.
-    #[arg(long)]
-    pub take_over: bool,
-
-    /// Bind this checkout to the home already at `~/.spoolway/<NAME>/`,
-    /// even though the checkout's own stamp or that home's own record
-    /// currently disagrees with it — `NAME` is the home's own directory
-    /// name, `<label>-<id>` (for example `api-8w4r2c`), not the bare id
-    /// alone. One of the only two ways (with `--new-id`) to write a
-    /// binding over one that already exists.
-    ///
-    /// `NAME` in the form `<workspace>/<dispatcher>` re-attaches a
-    /// home-mode clone instead: the workspace's own `project.toml` has its
-    /// `dispatcher` clone entry rewritten to this checkout's current path,
-    /// keeping that dispatcher's queue, archive and worktrees — nothing
-    /// stamped into `.git` either way. This is the line the "no spoolway
-    /// project found" error prints for a clone whose folder moved.
-    #[arg(long, value_name = "NAME", conflicts_with = "new_id")]
-    pub adopt: Option<String>,
-
-    /// Mint this checkout a fresh id — and bind it to the fresh home that
-    /// id keys — even though it may already carry one. The other of the
-    /// only two ways to write a binding over one that already exists.
-    #[arg(long)]
-    pub new_id: bool,
-
     /// The coding agent you plan in, whose convention the skills are installed
     /// under. Asked at a terminal; with nobody to ask, an established
     /// project keeps its own configured provider and a fresh one gets
@@ -762,7 +694,7 @@ pub struct InitArgs {
     /// `repo` for a tracked `.spoolway/` in this checkout, `home` for a
     /// workspace under `~/.spoolway/` that writes nothing into the checkout.
     /// `repo` is also the answer when there is nobody to ask.
-    #[arg(long, value_enum, conflicts_with_all = ["adopt", "new_id"])]
+    #[arg(long, value_enum)]
     pub setup: Option<Setup>,
 
     /// Answer the workspace menu without asking: the name of a workspace
@@ -771,7 +703,7 @@ pub struct InitArgs {
     /// already in a workspace moves to it. With nobody to ask and no flag, a
     /// new checkout starts a new workspace rather than joining one unasked,
     /// and a listed one stays where it is.
-    #[arg(long, value_name = "NAME", conflicts_with_all = ["adopt", "new_id"])]
+    #[arg(long, value_name = "NAME")]
     pub workspace: Option<String>,
 }
 
@@ -1811,6 +1743,18 @@ mod tests {
     #[test]
     fn eval_month_is_gone() {
         assert!(Cli::try_parse_from(["spoolway", "eval", "--month", "2026-08"]).is_err());
+    }
+
+    /// `spoolway init` is the only way left to place, move or re-attach a
+    /// home-mode checkout: `--adopt`, `--new-id` and `--take-over` are
+    /// refused by the argument parser as unknown, and `spoolway workspace`
+    /// is an unknown command.
+    #[test]
+    fn the_removed_placement_flags_and_command_are_unknown() {
+        assert!(Cli::try_parse_from(["spoolway", "init", "--adopt", "api-8w4r2c"]).is_err());
+        assert!(Cli::try_parse_from(["spoolway", "init", "--new-id"]).is_err());
+        assert!(Cli::try_parse_from(["spoolway", "init", "--take-over"]).is_err());
+        assert!(Cli::try_parse_from(["spoolway", "workspace", "move", "other"]).is_err());
     }
 
     #[test]

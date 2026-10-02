@@ -1046,18 +1046,17 @@ checkout there, carrying its queue, archive and worktrees along. The move is ref
 nothing written, while any of its tasks holds a worktree, naming each one, and for a workspace
 of another repository, with no flag to force it. A workspace the move leaves with no checkout
 listed is removed, together with its entry in the usage registry, and the move prints that it
-was removed. `spoolway workspace move <to>` moves a checkout the same way under its own,
-separate checks — see [`spoolway workspace move <to>`](#spoolway-workspace-move-to).
+was removed.
 
 Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
 the missing path.
 
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
-that id and the checkout's path. A fresh clone binds itself on whatever command it runs first.
-`--adopt` and `--new-id` write a binding over one that already exists. A home-mode checkout is
-listed in its workspace's `project.toml` instead, with nothing stamped into `.git`. See [Runtime
-state](configuration.md#runtime-state).
+that id and the checkout's path. A fresh clone binds itself on whatever command it runs first; a
+checkout whose stamp and recorded home disagree is refused rather than silently rewritten. A
+home-mode checkout is listed in its workspace's `project.toml` instead, with nothing stamped
+into `.git`. See [Runtime state](configuration.md#runtime-state).
 
 ```
 spoolway init
@@ -1076,18 +1075,6 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |
 | `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
 | `--force` | | Overwrite existing config, pipeline and prompt files. In a home-mode clone, names the other clones that share that config before rewriting it |
-| `--adopt <NAME>` | | Bind this checkout to the home already at `~/.spoolway/<NAME>/` and stamp it with that home's id. `NAME` is the home's directory name, such as `api-8w4r2c`. Prints what that home already holds |
-| `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
-| `--take-over` | | Accepted and ignored |
-
-`NAME` in the form `<workspace>/<dispatcher>` re-attaches a home-mode clone instead of binding
-a repo-mode home: it rewrites that `dispatcher` clone entry's path, in the named workspace's
-`project.toml`, to this checkout, and keeps that dispatcher's queue, archive and worktrees.
-Nothing is stamped into `.git` either way. This is the exact command the "no spoolway project
-found" error prints for a clone whose folder moved, shell-quoted and naming the entry's old
-path. `--adopt <workspace>`, naming a workspace with no `/<dispatcher>`, is refused, naming the
-dispatchers that workspace has so you can add the right one. See [Home
-mode](concepts.md#home-mode).
 
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes
@@ -1096,30 +1083,6 @@ back to `claude`, and a `--tracker` with no `--project-key` keeps the project's 
 instead of blanking it. Hook scripts are written only when a tracker is chosen, whichever one,
 so switching trackers later is a `spoolway config set issue_tracking.hook` away. See
 [Installation and setup](installation.md#scaffolding-a-project).
-
-### `spoolway workspace move <to>`
-
-Move this checkout from the home-mode workspace it is listed in now to `to`, taking its
-dispatcher folder — queue, archive and worktrees — along with it. The folder keeps its current
-name at `to` unless that name is already taken there, in which case the move is refused; pass
-`--dispatcher <name>` to choose a different name.
-
-Refused while a dispatcher is running over the clone's current dispatcher folder, or while a
-live process is working in one of its worktrees. An idle worktree — one nothing is currently
-working in — moves along with the rest of the folder and is repaired in place afterwards. `to`
-must be a workspace `spoolway init --setup home` has listed; a 0.6.0 repo-mode home is refused
-as a destination, the same as it is left out of `init`'s own workspace menu.
-
-```
-spoolway workspace move other-workspace
-spoolway workspace move other-workspace --dispatcher api-2
-```
-
-| Flag | Default | What it does |
-|---|---|---|
-| `--dispatcher <NAME>` | the clone's current dispatcher name | The dispatcher folder's name at `to`, when the name it already has there is taken |
-
-See [Home mode](concepts.md#home-mode).
 
 ### `spoolway install <provider>`
 

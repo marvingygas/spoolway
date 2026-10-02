@@ -82,7 +82,6 @@ mod routines;
 mod stack;
 mod task;
 mod template;
-mod workspace;
 
 pub use agent::*;
 pub use config::*;
@@ -102,7 +101,6 @@ pub use report::*;
 pub use stack::*;
 pub use task::*;
 pub use template::*;
-pub use workspace::*;
 
 /// Where a program resolves on PATH, if at all.
 ///
