@@ -454,6 +454,24 @@ impl Placement {
         // New`/`Repo` below and converts the clone it could not read about
         // to repo mode instead of reporting what is actually wrong.
         if let Some(clone) = crate::repo::workspace_clone_checked(root)? {
+            // Listed, but the workspace's own `config/` is missing — a
+            // worse case than nothing being set up here at all, since the
+            // sibling clones `init` would otherwise ask nothing about still
+            // share it. Left to fall through, this reads the same as a
+            // checkout nobody has configured and writes a fresh default
+            // `config.toml` into a folder other clones expect to find their
+            // own setup in — see the `broken-workspace-skipped` task.
+            if !clone.config_dir().is_dir() {
+                bail!(
+                    "{} is listed as a clone of {}, but {} does not exist\n  restore it by \
+                     hand, or remove this checkout's entry from {} by hand to leave the \
+                     workspace",
+                    root.display(),
+                    clone.workspace.display(),
+                    clone.config_dir().display(),
+                    clone.workspace.join(crate::repo::BINDING_FILE).display(),
+                );
+            }
             let name = clone
                 .workspace
                 .file_name()
@@ -2424,6 +2442,39 @@ mod tests {
             std::fs::read_to_string(first.join(".git").join("spoolway-id")).is_err(),
             "must not stamp .git either"
         );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A clone a readable workspace still lists, but whose shared `config/`
+    /// was lost, must refuse naming the missing folder — not fall through
+    /// to treating the clone as unconfigured and writing a fresh default
+    /// `config.toml` into the very folder every other clone of that
+    /// workspace shares.
+    #[test]
+    fn init_refuses_a_listed_clone_whose_workspace_has_no_config_rather_than_writing_a_fresh_one() {
+        let parent = crate::scratch::root("init-listed-no-config");
+        let home = parent.join("home");
+        let first = home_mode_checkout(&parent, "api");
+
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let workspace = crate::repo::workspace_clone(&first).unwrap().workspace;
+            let config_dir = workspace.join("config");
+            std::fs::remove_dir_all(&config_dir).unwrap();
+
+            let err = init(&first, &home_args(NEW_WORKSPACE))
+                .expect_err("a listed clone with no shared config/ must refuse")
+                .to_string();
+            assert!(
+                err.contains(&config_dir.display().to_string()),
+                "error must name the missing folder {}, got: {err}",
+                config_dir.display(),
+            );
+            assert!(
+                !config_dir.is_dir(),
+                "must not write a fresh config/ back into the workspace"
+            );
+        });
         let _ = std::fs::remove_dir_all(&parent);
     }
 

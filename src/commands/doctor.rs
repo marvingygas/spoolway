@@ -632,23 +632,28 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
         "bound to its home".into(),
         match home_error {
             Some(err) => Err(anyhow::anyhow!("{err:#}")),
-            // The fallible scan, not the lenient `workspace_clone`: a
-            // workspace file elsewhere that cannot be read or parsed is
-            // exactly what `doctor` exists to name, so it is reported here
-            // rather than silently read as "repo mode" instead.
-            None => match crate::repo::workspace_clone_checked(&repo.checkout) {
+            // `workspace_clone_lenient`, not the strict `workspace_clone_
+            // checked`: by the time `repo` exists at all, `Repo::root` has
+            // already settled whether this checkout might be the one some
+            // broken workspace file elsewhere would have named — that is
+            // what refuses, long before `doctor` gets a `Repo` to report
+            // on. A broken file found here is never this checkout's own
+            // problem, so answering "repo mode" for it is correct, not a
+            // fallback; `bind_lenient`, already run above to get here, is
+            // what already noted it on `discover_lenient`'s way past.
+            None => match crate::repo::workspace_clone_lenient(&repo.checkout) {
                 Err(err) => Err(err),
                 // The mode is named here, not as a row of its own, so it reads
                 // exactly where a person already looks to see what this
                 // checkout is bound to — see the `home-mode-discovery` task's
                 // "doctor says which mode the project is in", which names both
                 // modes, not only home mode.
-                Ok(Some(_)) => Ok(Some(format!(
+                Ok((Some(_), _)) => Ok(Some(format!(
                     "{} — home mode, setup read from {}",
                     repo.home.display(),
                     repo.setup_dir().display()
                 ))),
-                Ok(None) => Ok(Some(match crate::repo::binding_at(&repo.home) {
+                Ok((None, _)) => Ok(Some(match crate::repo::binding_at(&repo.home) {
                     Some((id, root)) => {
                         format!(
                             "{} — repo mode, id {id}, root {}",
@@ -3602,6 +3607,46 @@ mod tests {
         );
     }
 
+    /// A repo-mode project, listed in no workspace at all, must not fail
+    /// `registration_check` merely because some *other* workspace's
+    /// `project.toml` elsewhere under the same `~/.spoolway/` is unreadable.
+    /// `registration_check` used to reach the strict `workspace_clone_
+    /// checked`, which refuses whenever nothing matches and some workspace
+    /// file nearby could not be read — the right call for a checkout that
+    /// might be the one that file would have named, wrong here, since
+    /// `Repo::root` already proved this checkout is a working project
+    /// before `doctor` ever built a `Repo` to check.
+    #[test]
+    fn registration_check_is_unaffected_by_an_unrelated_unreadable_workspace_file() {
+        let root = crate::scratch::root("doctor-repo-mode-broken-sibling");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = crate::scratch::root("doctor-repo-mode-broken-sibling-home");
+        let _ = std::fs::remove_dir_all(&home);
+        let broken = home.join(".spoolway").join("a-1x");
+        std::fs::create_dir_all(broken.join("config")).unwrap();
+        std::fs::write(broken.join(crate::repo::BINDING_FILE), "garbage = [\n").unwrap();
+        let repo = Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+            home: root.join(".spoolway"),
+        };
+
+        let note = crate::platform::test_home::with_home(&home, || {
+            let Finding::Check(label, outcome) = registration_check(&repo, None) else {
+                panic!("registration is a check, not a note");
+            };
+            assert_eq!(label, "bound to its home");
+            outcome
+                .unwrap_or_else(|err| {
+                    panic!("an unrelated broken file must not fail this: {err:#}")
+                })
+                .unwrap()
+        });
+        assert!(note.contains("repo mode"), "{note}");
+    }
+
     /// A home-mode checkout has no `.spoolway/` of its own — the model hint
     /// and the `config parses` note must name the workspace's shared
     /// `config/`, not a path under this checkout that does not exist, and
@@ -3819,11 +3864,11 @@ mod tests {
     }
 
     /// Acceptance criterion 6 of `workspace-scan-strict`, `doctor`'s own
-    /// corner: `registration_check` now reaches
-    /// `crate::repo::workspace_clone_checked`, the strict scan, for every
-    /// project — repo mode included. A `~/.spoolway/` holding everything a
-    /// 0.6.0 (or legacy) install could leave beside a real workspace must
-    /// not turn into a finding here either.
+    /// corner: `registration_check` reaches
+    /// `crate::repo::workspace_clone_lenient` for every project — repo mode
+    /// included. A `~/.spoolway/` holding everything a 0.6.0 (or legacy)
+    /// install could leave beside a real workspace must not turn into a
+    /// finding here either.
     #[test]
     fn registration_check_is_unaffected_by_a_mixed_home_from_older_installs() {
         let root = crate::scratch::root("doctor-mixed-home");

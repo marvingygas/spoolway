@@ -1245,3 +1245,72 @@ fn init_with_no_terminal_and_no_yes_says_nothing_was_written() {
         "expected a line saying nothing was written and naming --yes, got:\n{out}"
     );
 }
+
+/// A workspace `project.toml` elsewhere on the machine, broken by a typo —
+/// a `config/` folder beside it (so `all_workspaces` treats it as a real
+/// workspace rather than skipping it silently) and unparseable TOML inside
+/// it. Written directly under `project`'s own `HOME`, same as every other
+/// workspace fixture in this file, so it sits beside — never inside — the
+/// repo-mode project the test itself runs commands against.
+fn write_broken_workspace_file(project: &Project) -> PathBuf {
+    let broken = project.as_ref().join("home").join(".spoolway").join("a-1x");
+    std::fs::create_dir_all(broken.join("config")).unwrap();
+    std::fs::write(broken.join("project.toml"), "garbage = [\n").unwrap();
+    broken.join("project.toml")
+}
+
+/// Acceptance criterion 2: an unrelated project — repo mode here, listed in
+/// no workspace at all — prints exactly one note naming a broken workspace
+/// file elsewhere on the machine, then carries on to its own normal output.
+/// `bind` runs twice on an ordinary command (`main.rs`'s own update-check
+/// notice resolves the project leniently before the command arm resolves it
+/// again), so this is also the regression test for the note printing twice
+/// in one run.
+#[test]
+fn queue_list_in_an_unrelated_project_notes_a_broken_workspace_file_once() {
+    let project = Project::new("queue-list-broken-workspace");
+    project.init("claude");
+    let broken_file = write_broken_workspace_file(&project);
+
+    let result = project.run(&["queue", "list"]);
+    let out = stdout(&result);
+    let err = stderr(&result);
+
+    let note = format!("{} does not read as a workspace", broken_file.display());
+    assert_eq!(
+        err.matches(&note).count(),
+        1,
+        "expected exactly one note naming the broken file on stderr, got:\n{err}"
+    );
+    assert!(
+        !out.contains("does not read as a workspace"),
+        "the note belongs on stderr, not mixed into the command's own stdout:\n{out}"
+    );
+    assert!(
+        out.contains("No tasks queued."),
+        "the command's own normal output still follows the note:\n{out}"
+    );
+}
+
+/// The same broken-file note, with `--json`: the note still goes to stderr,
+/// once, and stdout is left as nothing but the parseable JSON `queue list
+/// --json` always prints — a machine reader of stdout alone never sees it.
+#[test]
+fn queue_list_json_in_an_unrelated_project_keeps_the_note_off_stdout() {
+    let project = Project::new("queue-list-broken-workspace-json");
+    project.init("claude");
+    let broken_file = write_broken_workspace_file(&project);
+
+    let result = project.run(&["queue", "list", "--json"]);
+    let out = stdout(&result);
+    let err = stderr(&result);
+
+    let note = format!("{} does not read as a workspace", broken_file.display());
+    assert_eq!(
+        err.matches(&note).count(),
+        1,
+        "expected exactly one note naming the broken file on stderr, got:\n{err}"
+    );
+    serde_json::from_str::<serde_json::Value>(&out)
+        .unwrap_or_else(|err| panic!("--json stdout must parse as JSON, got {err}:\n{out}"));
+}

@@ -1049,7 +1049,9 @@ listed is removed, together with its entry in the usage registry, and the move p
 was removed.
 
 Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
-the missing path.
+the missing path. `init` on a checkout a workspace already lists refuses the same way when that
+workspace's `config/` is missing, naming the missing path, instead of writing a fresh one into
+the workspace.
 
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding

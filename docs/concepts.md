@@ -78,12 +78,17 @@ workspace, so it names the other clones that share it before rewriting it.
 A checkout that has both a tracked `.spoolway/` and a clone entry in some workspace is refused.
 The error names both paths.
 
-A workspace's `project.toml` that cannot be read or parsed is refused by every command that
-scans workspaces. The error names the file. `spoolway init` refuses the same way instead of
-falling back to repo mode for a checkout that file would have listed.
+A workspace's `project.toml` that cannot be read or parsed stops only a checkout it might have
+listed. Every other command prints one note naming the file and carries on. A checkout that
+matches no readable workspace refuses instead, naming the file, because the file might be the
+one that would have listed it. `spoolway init` refuses the same way instead of falling back to
+repo mode for a checkout the file might list.
 
 A workspace whose `config/` is missing — deleted, or left behind by a join that failed before
-writing it — refuses a new join, naming the missing path.
+writing it — refuses a new join, naming the missing path. A clone the workspace already lists
+refuses every command the same way, naming the missing path, instead of falling through to the
+generic not-found message. `spoolway init` there refuses too, instead of writing a fresh
+`config/` into the workspace.
 
 A checkout listed more than once, in one workspace's `clones` or across several, is refused,
 naming every file and entry. A clone's `dispatcher` must be one plain name, with no path
