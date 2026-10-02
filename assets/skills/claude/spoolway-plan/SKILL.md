@@ -51,9 +51,8 @@ Every plan is written on the same spine, in this order:
 
 | Section | What goes in it |
 |---|---|
-| **Intend** | The outcome this plan means to produce, in one sentence a person can approve or reject — the page's lead, with nothing above it but the name, the tagline and the path. |
-| **Context** | What is true today, and the pressure on it. One drawing of the system as it is. |
-| **Decisions** | One record per decision, each led by a figure, then its risks and how each is mitigated, then one highlighted sentence stating the change that will now happen. |
+| **Context** | The outcome this plan means to produce, in one sentence a person can approve or reject, then what is true today and the pressure on it, in two or three sentences — the page's lead, with nothing above it but the name, the tagline and the path. |
+| **Decisions** | One record per decision, each led by a figure, then its risks and how each is mitigated, as a Risk and Mitigation table, then one highlighted sentence, prefixed "After implementation:", stating the change that will now happen. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
 **The page ends at the Mockup.** The breakdown is not on it: a task is written into
 the pending directory at step 7, and the page argues the shape those tasks were cut from.
@@ -72,10 +71,13 @@ in prose about functions and line edits.
 - **Every record has a figure, explained only after it**: forces, figure, what it doesn't show,
   its risks — nothing after re-explains it in words. Show code freely as supporting material
   under it, never first, never alone.
+- **A decision that changes how the system behaves today is drawn before and after**:
+  today's artifact in the `was` panel, the proposed one under it. A new feature has no before,
+  so it takes the after panel or a drawing alone — never an invented before.
 - **A figure is drawn from the vocabulary in `assets/page.md`**, which names every class and the
   three grounds — themed, lit, and `.raw` for a figure that is somebody else's product screen.
   A screen goes in `.raw` and paints its own colours; a diagram never does.
-- **Four sentences per record before the risks line**, and the risks line is never skipped — a
+- **Four sentences per record before the risks table**, and the risks table is never skipped — a
   record with no risk to name was not a decision. Each risk names its mitigation beside it;
   a risk with no mitigation is not finished.
 - **Every record ends on one highlighted sentence stating the change that will now happen** —
@@ -141,7 +143,7 @@ day it changes; a path stays true. Name the file that already holds the ground n
    grep -n '\[\[' <path>
    ```
 
-   Fill only Intend, Context, Decisions and Mockup. The page never carries tasks at all — not before
+   Fill only Context, Decisions and Mockup. The page never carries tasks at all — not before
    approval, not after.
 
    **Last act of the fill: the plan block.** `assets/page.md`'s "The machine copy" section

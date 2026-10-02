@@ -53,8 +53,9 @@ The plan page is one self-contained HTML file. A person reads it once to approve
 The binary never reads it. It lives outside the checkout, at
 `~/.spoolway/<label>-<id>/plans/<YYYY-MM-DD>-<slug>.html`.
 
-Every page has four sections in this order: Intend, Context, Decisions and Mockup. The
-template is `assets/skills/claude/spoolway-plan/assets/template.html`.
+Every page has three sections in this order: Context, Decisions and Mockup. Context opens on
+the one sentence a person can approve or reject, then two or three sentences on what is true
+today. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
 
 The page also carries a machine copy of its own words, in a `<script type="text/markdown"
 id="plan">` block at the foot of the page that a browser never shows. `/spoolway-plan` writes

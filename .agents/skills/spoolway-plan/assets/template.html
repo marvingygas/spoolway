@@ -228,14 +228,15 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
   color: var(--ink-soft); font-size: 0.94rem;
   border-left: 2px solid var(--rule); padding-left: 0.9rem;
 }
-.dec .risks { color: var(--ink-soft); }
-.dec .risks::before { content: "Risks: "; color: var(--ink-faint); }
+.dec table.risks { width: 100%; table-layout: fixed; }
+.dec table.risks th, .dec table.risks td { overflow-wrap: anywhere; }
 .dec .change {
   max-width: var(--measure); margin: 0; padding: 0.7rem 1rem;
   border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0;
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
   color: var(--ink); font-weight: 600;
 }
+.dec .change::before { content: "After implementation: "; color: var(--ink-faint); font-weight: 400; }
 
 .refs { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; font-size: 0.8rem; color: var(--ink-faint); }
 .refs code { font-family: var(--mono); color: var(--ink-soft); }
@@ -293,7 +294,6 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     <nav>
       <p class="eyebrow">On this page</p>
       <ul class="index">
-        <li><a href="#intend">Intend</a></li>
         <li><a href="#context">Context</a></li>
         <li><a href="#decisions">Decisions</a>
           <ul>
@@ -321,23 +321,12 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
       <span class="file">[[the absolute path this page is written to]]</span>
     </p>
 
-    <h2 id="intend">Intend</h2>
+    <h2 id="context">Context</h2>
 
     <p class="standfirst">[[The outcome this plan means to produce, in one sentence a person
     can approve or reject.]]</p>
 
-    <h2 id="context">Context</h2>
-
-    <p>[[What is true today, and the pressure on it.]]</p>
-
-    <figure>
-      <div class="frame">
-        <svg viewBox="0 0 800 300" role="img" aria-label="[[what the drawing shows, in a sentence]]">
-          [[the drawing]]
-        </svg>
-      </div>
-      <figcaption>[[What the reader should take from it.]]</figcaption>
-    </figure>
+    <p>[[What is true today, and the pressure on it, in two or three sentences.]]</p>
 
     <ul class="refs">
       <li><code>[[path]]</code> — [[what it already explains, so the page need not]]</li>
@@ -367,7 +356,12 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
         <li><code>[[path]]</code> — [[what it already explains]]</li>
       </ul>
 
-      <p class="risks">[[Each risk this decision carries and how it is mitigated, one sentence per pair.]]</p>
+      <table class="risks">
+        <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>[[a risk this decision carries]]</td><td>[[how it is mitigated]]</td></tr>
+        </tbody>
+      </table>
       <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
     <!-- /dec -->
@@ -392,7 +386,12 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
         to type themselves.]]</figcaption>
       </figure>
 
-      <p class="risks">[[Each risk this decision carries and how it is mitigated, one sentence per pair.]]</p>
+      <table class="risks">
+        <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>[[a risk this decision carries]]</td><td>[[how it is mitigated]]</td></tr>
+        </tbody>
+      </table>
       <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
     <!-- /dec -->
