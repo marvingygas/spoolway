@@ -49,7 +49,41 @@ pub fn report(
 
     let mut task = repo.task(&id)?;
     let pipeline = pipelines.for_task(&task)?;
-    let current = task.stage().to_string();
+    let mut current = task.stage().to_string();
+
+    // A lane started for a step that a person's own Escape (or the board's
+    // `p`) parked mid-turn, with no idea any of that happened, reports in
+    // against the step it actually ran — not `paused`, which is all the
+    // task's own stage says now. This report is itself proof the lane is
+    // alive and working, the same fact `dispatch::auto_restore_parked`
+    // otherwise waits for the next pass to see off the lane list — so it is
+    // undone here, ahead of the `started_for` guard below, rather than left
+    // for that pass to catch. Left alone for a gate (`paused_at` set —
+    // waiting on a decision, not a lane) or an escalated park
+    // (`tear_down_and_escalate`'s own road), where `started_for` still
+    // answers "no" below and the report is refused the way it always was.
+    if current == crate::pipeline::PAUSED
+        && !task.front.escalated
+        && task.front.paused_at.is_none()
+        && started_for.is_some_and(|step| task.front.parked_from.as_deref() == Some(step))
+    {
+        let parked_from = task.front.parked_from.clone().expect("checked above");
+        task.front.parked_from = None;
+        task.front.escalated = false;
+        task.front.resume = None;
+        // A stop's mark is spent by any resume, whoever sends it — see
+        // `back_onto_its_step`'s own clear of the same field. The stop
+        // popup's `i` parks with `parked_from` set exactly like a person's
+        // own Escape does, so this shape can be either; left set, the next
+        // `spoolway start` would read `resume_stop_parked` and carry this
+        // task through a gate with nobody there to answer it.
+        task.front.parked_by_stop = false;
+        task.set_stage_unbanked(
+            &parked_from,
+            "a late report landed on the step it parked from",
+        );
+        current = parked_from;
+    }
 
     // A lane may only report on the step it was started for.
     //
@@ -2381,6 +2415,93 @@ mod tests {
         task.save().unwrap();
         report_outcome(&repo, &pipelines, "stale", Outcome::Pass);
         assert_eq!(queued(&repo, "stale").stage(), "done");
+    }
+
+    /// A lane started for `work` reports in after a person's own Escape (or
+    /// the board's `p`) has already parked its task on `paused`, with
+    /// `parked_from: work` and `escalated: false`. The lane never knew any of
+    /// that happened — it is still mid-turn when the park lands, and its
+    /// report is for the step it was actually started on.
+    ///
+    /// Before `parked-task-resume`, the `started_for` guard read the task's
+    /// bare stage, `paused`, and refused every such report outright — bug gh
+    /// group `parked-task-resume`. A late report like this is applied as if
+    /// the task were still on `work`: the park is spent, and the report
+    /// routes the task on exactly as it would have without the park in the
+    /// way.
+    #[test]
+    fn a_late_report_from_a_parked_steps_own_lane_is_applied_as_if_it_never_parked() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("late-report-onto-a-park");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "late", &[]);
+        let pipelines = work_pipelines();
+
+        let mut task = queued(&repo, "late");
+        task.set_stage("work", None);
+        crate::status::park(&mut task, "a person's own Escape ended the turn", false);
+        task.save().unwrap();
+        assert_eq!(task.stage(), "paused");
+        assert_eq!(task.front.parked_from.as_deref(), Some("work"));
+        assert!(!task.front.escalated);
+        assert!(task.front.paused_at.is_none());
+
+        report_outcome_from(&repo, &pipelines, "late", Outcome::Pass, Some("work"));
+
+        let task = queued(&repo, "late");
+        assert_eq!(
+            task.stage(),
+            "done",
+            "a late report from the step it parked on must still route the task on"
+        );
+        assert_eq!(
+            task.front.parked_from, None,
+            "the park is spent by the report"
+        );
+        assert!(!task.front.escalated);
+    }
+
+    /// The same late report, but the park it lands on is the stop popup's
+    /// own — `park_under_lock`'s `by_stop` road, which leaves `parked_from`
+    /// set exactly like a person's own Escape does, plus `parked_by_stop`.
+    /// `back_onto_its_step` already clears that mark on every ordinary road
+    /// out of `paused` — see its own doc on "a stop's mark is spent by any
+    /// resume, whoever sends it" — and a late report has to spend it the
+    /// same way: left set, the next `spoolway start` would read
+    /// `resume_stop_parked` and carry this task through a gate with nobody
+    /// there to answer it.
+    #[test]
+    fn a_late_report_onto_a_stops_own_park_clears_its_mark_too() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("late-report-onto-a-stop-park");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stopped", &[]);
+        let pipelines = work_pipelines();
+
+        let mut task = queued(&repo, "stopped");
+        task.set_stage("work", None);
+        crate::status::park(&mut task, "interrupted when dispatching stopped", false);
+        task.front.parked_by_stop = true;
+        task.save().unwrap();
+        assert_eq!(task.stage(), "paused");
+        assert_eq!(task.front.parked_from.as_deref(), Some("work"));
+        assert!(task.front.parked_by_stop);
+
+        report_outcome_from(&repo, &pipelines, "stopped", Outcome::Pass, Some("work"));
+
+        let task = queued(&repo, "stopped");
+        assert_eq!(task.stage(), "done");
+        assert_eq!(task.front.parked_from, None);
+        assert!(
+            !task.front.parked_by_stop,
+            "a late report spends a stop's mark the same way back_onto_its_step does"
+        );
     }
 
     /// A pass that would route to a cleanup terminal is held at `blocked`

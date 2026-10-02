@@ -2361,9 +2361,11 @@ fn build_rows(
                 )
             }
             // The step a pass would carry it to, not a description of what it
-            // is waiting on — the same rule a block reads its resumability
-            // by, on exactly the same two conditions. Except when nothing
-            // here names a real step at all: no gate (`paused_at`) and no
+            // is waiting on — the same two conditions a block reads its
+            // resumability by, dependencies and a busy lane, except for a
+            // `p`/Escape park, whose own lane being busy does not count
+            // against it below. Also except when nothing here names a real
+            // step at all: no gate (`paused_at`) and no
             // `p`/`escalate_clock` park (`parked_from`) is exactly the shape
             // `park` leaves on a task still on `queued` — see `park`'s own
             // docs — and `resume_target` is the same answer `back_onto_its_step`
@@ -2378,8 +2380,23 @@ fn build_rows(
                 if never_started {
                     (State::Paused, "→ queued — [r] resumes it".to_string(), true)
                 } else {
-                    let resumable =
-                        graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
+                    // A row parked by a person's own Escape or the board's
+                    // `p` (`parked_from` set, `escalated: false`) is a
+                    // different case from a gate: its own lane is expected
+                    // to still be alive, typed into or working away, and `r`
+                    // has to reach it anyway rather than wait for that lane
+                    // to go quiet — see `dispatch::auto_restore_parked`,
+                    // which does the same thing on its own once the lane is
+                    // next seen `Working`. A gate (`paused_at` set, no
+                    // `parked_from`) and an escalated park still follow the
+                    // ordinary rule below unchanged — a person's own hand is
+                    // expected to look at those, and `r` racing a lane still
+                    // mid-turn there is exactly what `lane_busy` guards
+                    // against.
+                    let parked_by_a_person =
+                        task.front.parked_from.is_some() && !task.front.escalated;
+                    let resumable = graph.ready(task.id())
+                        && (parked_by_a_person || !lane_busy(lanes, &step_ids, task.id()));
                     let target = paused_next(task, pipeline);
                     // The word this pause caught, ahead of the arrow — "review
                     // failed → e2e" rather than a bare "→ e2e" — so a caught
@@ -5201,6 +5218,44 @@ mod tests {
         assert!(row.resumable, "{}", row.next);
         assert!(row.next.starts_with("[r] "), "{}", row.next);
         assert!(row.next.contains("spoolway resume"), "{}", row.next);
+    }
+
+    /// A row parked by a person's own Escape or the board's `p`
+    /// (`parked_from` set, `escalated: false`) is a different case from a
+    /// gate: its own lane is expected to still be alive, typed into or
+    /// working away, and `r` has to reach it anyway — bug gh group
+    /// `parked-task-resume`'s "`r` does nothing" case. A gate's row still
+    /// follows `a_paused_row_is_not_resumable_while_its_lane_is_busy`'s rule
+    /// unchanged; this is the one shape that does not.
+    #[test]
+    fn a_parked_row_is_resumable_even_while_its_lane_is_working_or_blocked() {
+        let (repo, _root_guard) = fixture("resume-parked-busy");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "gate-board", &[], None, Some("gate-board"));
+        let mut task = repo.task("gate-board").unwrap();
+        task.front.parked_from = Some("implement".into());
+        task.front.escalated = false;
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        let mut working = lane("gate-board · implement", &repo.root);
+        working.status = crate::mux::LaneStatus::Working;
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[working], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
+        assert!(
+            row.resumable,
+            "a parked row's own lane being Working must not hide the key: {}",
+            row.next
+        );
+
+        let mut blocked = lane("gate-board · implement", &repo.root);
+        blocked.status = crate::mux::LaneStatus::Blocked;
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[blocked], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
+        assert!(row.resumable, "nor Blocked: {}", row.next);
     }
 
     /// A blocked row that is actually parked for a person — nobody staffs

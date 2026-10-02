@@ -1212,8 +1212,11 @@ impl<'a> Dispatcher<'a> {
             // so a fall-through cycle in a pipeline's own wiring cannot spin
             // this pass forever. [`Dispatcher::route_reserved_stage`]'s own
             // `RetryStep` rounds the same loop for the same reason, on the
-            // one reserved stage (`queued`) that can move a task straight
-            // into a step worth looking at again this same pass.
+            // two reserved stages that can move a task straight into a step
+            // worth looking at again this same pass: `queued`, once its
+            // dependencies clear, and `paused`, once
+            // [`Dispatcher::auto_restore_parked`] puts a task back on the
+            // step its own lane was just seen working again on.
             let mut step = None;
             for _ in 0..=pipeline.steps.len() {
                 let stage = tasks[index].stage().to_string();
@@ -1886,13 +1889,23 @@ impl<'a> Dispatcher<'a> {
             }
             return Ok(Routed::NextTask);
         }
-        // Both of the two ways a task waits for a person, and both
-        // wait on the same verb now: `spoolway resume`. Nothing here
-        // starts, times or reroutes either — until then the only
-        // correct thing to do with them is leave them alone.
-        if stage == crate::pipeline::PAUSED
-            || (stage == crate::pipeline::BLOCKED && !pipeline.blocked_is_staffed(self.unattended))
-        {
+        // A `paused` task whose own lane came back to life on its own — a
+        // person typed a follow-up straight into the pane after an Escape,
+        // rather than pressing `r` — is the one `paused` shape this pass
+        // does not just leave alone: see `auto_restore_parked`. Everything
+        // else about `paused` is still nothing here starts, times or
+        // reroutes; the only correct thing to do with it is leave it be
+        // until a person's `spoolway resume` does.
+        if stage == crate::pipeline::PAUSED {
+            self.auto_restore_parked(task, owned, report)?;
+            if task.stage() != crate::pipeline::PAUSED {
+                return Ok(Routed::RetryStep);
+            }
+            return Ok(Routed::NextTask);
+        }
+        // The other of the two ways a task waits for a person — an
+        // unstaffed `blocked` waits on `spoolway resume` the same way.
+        if stage == crate::pipeline::BLOCKED && !pipeline.blocked_is_staffed(self.unattended) {
             return Ok(Routed::NextTask);
         }
         // A staffed `blocked` is the one reserved stage left standing —
@@ -2873,11 +2886,23 @@ impl<'a> Dispatcher<'a> {
     /// all, or one naming no session — a lane this dispatcher did not start,
     /// or a profile whose `args` never pass `{session_id}` through, has no
     /// transcript to read and so nothing to answer with beyond "no".
+    ///
+    /// Bounded against this lane's own `record.started_at` — see
+    /// [`crate::usage::last_written`] — so a lane `r` just relaunched onto a
+    /// carried session, idle for its first few seconds, is not parked a
+    /// second time by the very abort record that parked it the first time.
+    /// That record was written before this lane existed; nothing has
+    /// written to the transcript since, so its mtime still reads older than
+    /// `started_at`. A transcript this cannot find an mtime for answers
+    /// `false` rather than guess — the same "no, never an error" rule
+    /// `last_turn_aborted` itself follows.
     fn lane_ended_on_abort(&self, lane: &Lane) -> bool {
         self.lanes.get(&lane.name).is_some_and(|record| {
             !record.kind.is_empty()
                 && !record.session.is_empty()
                 && crate::usage::last_turn_aborted(&record.kind, &record.session)
+                && crate::usage::last_written(&record.kind, &record.session)
+                    .is_some_and(|written| written >= record.started_at)
         })
     }
 
@@ -2903,6 +2928,67 @@ impl<'a> Dispatcher<'a> {
             "{}: parked at `{}` — its own Escape ended the turn",
             task.id(),
             step.id
+        ));
+        Ok(())
+    }
+
+    /// Put a `paused` task back on `parked_from` by itself, once its own
+    /// lane for that step is seen `Working` again — a person typed a
+    /// follow-up straight into the pane after a person's own Escape or the
+    /// board's `p`, without ever pressing `r`. `route_reserved_stage`
+    /// otherwise leaves every `paused` task alone, so nothing else would
+    /// ever notice that lane came back on its own — see the "typed into the
+    /// pane after Escape" case bug gh group `parked-task-resume` opens with.
+    /// A late report from that same lane is the other half: it reaches
+    /// `report::report`'s own `started_for` guard directly, without waiting
+    /// for a pass to see this.
+    ///
+    /// A no-op for anything that is not this exact shape: an escalated park
+    /// (`tear_down_and_escalate`'s own road, which a person's own hand is
+    /// expected to look at), a gate (`paused_at` set — waiting on a decision,
+    /// not a lane), a stop's own park (`parked_by_stop` — the stop popup's
+    /// `i` interrupts the lane, and the mux can still read `Working` for a
+    /// pass or two before it dies; restoring then would undo the stop
+    /// mid-teardown), or a lane not seen `Working`. `Blocked` deliberately does
+    /// not qualify: a pane right after Escape can still read `Blocked` for a
+    /// tick before the mux catches up, and restoring on that reading would
+    /// race the Escape park itself rather than wait the one pass it takes to
+    /// settle. Nothing is relaunched either way; the lane is already
+    /// running.
+    ///
+    /// Clears `parked_from`, `escalated` and `resume` exactly the way
+    /// `unpark_quietly` leaves a busy lane's own park, since this is the same
+    /// kind of spend — a resume that needed no launch because the lane never
+    /// actually left. `parked_by_stop` is never set here, since a stop's
+    /// park is excluded above.
+    fn auto_restore_parked(
+        &mut self,
+        task: &mut Task,
+        owned: &[(String, String, &Lane)],
+        report: &mut Report,
+    ) -> Result<()> {
+        let Some(parked_from) = task.front.parked_from.clone() else {
+            return Ok(());
+        };
+        if task.front.escalated || task.front.paused_at.is_some() || task.front.parked_by_stop {
+            return Ok(());
+        }
+        let working = owned.iter().any(|(lane_step, lane_task, lane)| {
+            *lane_step == parked_from
+                && lane_task == task.id()
+                && lane.status == LaneStatus::Working
+        });
+        if !working {
+            return Ok(());
+        }
+        task.front.parked_from = None;
+        task.front.escalated = false;
+        task.front.resume = None;
+        task.set_stage_unbanked(&parked_from, "its lane was seen working again");
+        self.persist(task)?;
+        report.actions.push(format!(
+            "{}: put back on `{parked_from}` — its own lane was seen working again",
+            task.id()
         ));
         Ok(())
     }
@@ -11648,6 +11734,154 @@ mod tests {
         );
     }
 
+    /// A task parked by the Escape above is put back on its step by `r`, onto
+    /// the same carried session — relaunched, and idle for its first few
+    /// seconds. Its transcript still ends in the very abort record that
+    /// parked it the first time; nothing has been written to it since this
+    /// lane's own `started_at`. That old record must not park the task a
+    /// second time — bug gh group `parked-task-resume`'s "idle pane, `r`"
+    /// case.
+    ///
+    /// Before `parked-task-resume`, `lane_ended_on_abort` read only whether
+    /// the transcript's last record was an abort, with no bound against the
+    /// lane's own `started_at`, so a relaunched lane carrying a stale one was
+    /// parked right back onto `paused` on the very next settled pass.
+    #[test]
+    fn a_stale_escape_from_before_this_lane_started_does_not_park_it_again() {
+        let (repo, _root_guard) = fixture("stale-escape");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        // The abort record was written well before this lane's own
+        // `started_at` — exactly what a lane `r` just relaunched carries
+        // until it writes something new of its own.
+        let home = pi_home_aborted_before("aborted-session", 3600);
+        record_lane(
+            &repo,
+            "demo · implement",
+            "aborted-session",
+            &implement_kind(&repo),
+        );
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        let report = with_home(&home, || run_pass(&repo, &mux));
+        std::fs::remove_dir_all(&home).ok();
+
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            "implement",
+            "a stale Escape from before this lane started must not park it again"
+        );
+        assert_eq!(task.front.parked_from, None);
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|line| line.contains("demo") && line.contains("its own Escape")),
+            "got {:?}",
+            report.actions
+        );
+    }
+
+    /// A person's Escape parks a task, and the person then types a follow-up
+    /// right into the same pane — the lane is `Working` again. Before
+    /// `parked-task-resume`, the row stayed `paused` regardless:
+    /// `route_reserved_stage` left every `paused` task alone, so nothing ever
+    /// noticed the lane had come back on its own — bug gh group
+    /// `parked-task-resume`'s "typed into the pane after Escape" case.
+    ///
+    /// Now `auto_restore_parked` notices and lands the task back on its step
+    /// without anything being relaunched — the lane is already running — and
+    /// `parked_from`, `escalated` and `resume` cleared exactly the way
+    /// `unpark_quietly` leaves a busy lane's own park.
+    #[test]
+    fn a_parked_task_whose_lane_is_seen_working_again_is_put_back_on_its_step() {
+        let (repo, _root_guard) = fixture("auto-restore");
+        let path = add_task_with(&repo, "demo", crate::pipeline::PAUSED, |f| {
+            f.parked_from = Some("implement".into());
+            f.escalated = false;
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        record_lane(
+            &repo,
+            "demo · implement",
+            "typed-again-session",
+            &implement_kind(&repo),
+        );
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            "implement",
+            "the lane is already back at work, so the task should be too"
+        );
+        assert_eq!(task.front.parked_from, None);
+        assert!(!task.front.escalated);
+        assert_eq!(task.front.resume, None);
+        assert!(
+            mux.did("start").is_empty(),
+            "the live lane must not be relaunched: {:?}",
+            mux.did("start")
+        );
+    }
+
+    /// `scripts/e2e/suites/board-pause.sh`'s "one `i` interrupts every live
+    /// lane at once" section caught this for real: six live lanes get
+    /// `parked_by_stop: true` all at once, but each lane's own process takes
+    /// a moment to actually die after the interrupt is sent — so the mux can
+    /// still report `Working` for a pass or two after the park has already
+    /// been written. Before `auto_restore_parked` excepted `parked_by_stop`,
+    /// it read that lingering `Working` the same way it reads a person's
+    /// own typed follow-up, and undid the stop's own park mid-teardown —
+    /// `pass-race-3` landed back on `implement` instead of staying `paused`,
+    /// and the run never saw every lane settle, so `dispatcher stopped`
+    /// never printed. The non-goals are explicit: "No change to how `p`
+    /// interrupts a lane, or to the stop popup's `parked_by_stop`
+    /// handling" — this is exactly that road, from the other end.
+    #[test]
+    fn a_stop_parked_task_is_not_auto_restored_while_its_lane_still_reads_working() {
+        let (repo, _root_guard) = fixture("stop-park-race");
+        let path = add_task_with(&repo, "demo", crate::pipeline::PAUSED, |f| {
+            f.parked_from = Some("implement".into());
+            f.escalated = false;
+            f.parked_by_stop = true;
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        record_lane(
+            &repo,
+            "demo · implement",
+            "stop-session",
+            &implement_kind(&repo),
+        );
+
+        // The interrupt was just sent; the lane's own process has not
+        // actually died yet, so the mux still reports it `Working` for this
+        // one pass.
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            "paused",
+            "a stop's own park must survive until the interrupt actually lands, \
+             not be undone by auto-restore reading the same stale `Working`"
+        );
+        assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
+        assert!(
+            task.front.parked_by_stop,
+            "the stop's mark must still be there for the teardown that is coming"
+        );
+    }
+
     /// The other half of a hand interrupt: a settled lane with no aborted-turn
     /// record in its transcript takes exactly today's road, unaffected by the
     /// new branch ahead of it — reminded once here, the same outcome
@@ -13598,6 +13832,25 @@ mod tests {
             line,
         )
         .unwrap();
+        root
+    }
+
+    /// The same abort fixture as [`pi_home_aborted`], but with the transcript
+    /// file's own mtime backdated `age_secs` behind now — standing in for a
+    /// lane relaunched `age_secs` after the Escape that parked it the first
+    /// time, whose transcript still ends in that old record because nothing
+    /// has written to it since.
+    fn pi_home_aborted_before(session: &str, age_secs: i64) -> crate::scratch::ScratchRoot {
+        let root = pi_home_aborted(session);
+        let dir = root.join(".pi/agent/sessions/--home-someone-work--");
+        let path = dir.join(format!("2026-08-04T06-14-15-743Z_{session}.jsonl"));
+        let touched = std::time::SystemTime::now() - Duration::from_secs(age_secs.max(0) as u64);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(touched)
+            .unwrap();
         root
     }
 
