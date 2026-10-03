@@ -5,7 +5,9 @@
 //! records that it happened, so every reader that wants the list of archived
 //! tasks has had to parse the whole folder — a cost that grows for as long as
 //! history is kept. The index is a copy of what those readers use: id, group,
-//! title, pipeline, branch, `depends_on`, worktree path and archived time.
+//! title, pipeline, branch, `depends_on`, worktree path, base, whether the
+//! task was a trial arm, issue slug and url, the file's creation time and the
+//! archived time.
 //! The folder of `<id>.md` files stays exactly as it was and is still the
 //! source of truth; the index can always be rebuilt from it.
 //!
@@ -24,8 +26,10 @@
 //! next [`read`] rebuilds. A line that does not parse (a write torn by a
 //! crash) forces a rebuild for the same reason.
 //!
-//! Nothing reads the index yet beyond this module; readers move onto
-//! [`read`] separately.
+//! The board, the queue tab, `queue add` and eval read the archive through
+//! [`read`] and [`read_at`]; none of them lists or parses the folder while
+//! the index is current. A reader that needs more of one task than the index
+//! holds opens that task's `<id>.md` by name.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -59,6 +63,28 @@ pub struct Entry {
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<PathBuf>,
+    /// The branch the task's group lands on. `queue add` refuses a task
+    /// whose `base:` differs from its dependency's, archived or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// Whether the task was a trial arm. `queue add` leaves arms out of its
+    /// one-chain check, archived ones included.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trial: bool,
+    /// The task's issue-tracker slug, which `queue add` strips off its group
+    /// name when it compares groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// The issue URL the task carries as `url:`, which the board points a
+    /// group band's hyperlink at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// When the task's file was created, in nanoseconds since the epoch: its
+    /// birth time, or its modification time where the filesystem keeps no
+    /// birth time. The queue tab orders groups by it, so it needs more
+    /// precision than `archived_at` and a different meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_ns: Option<u64>,
     pub archived_at: i64,
 }
 
@@ -73,14 +99,167 @@ impl Entry {
             branch: task.front.branch.clone().unwrap_or_default(),
             depends_on: task.front.depends_on.clone(),
             worktree_path: task.front.worktree_path.clone(),
+            base: task.front.base.clone(),
+            trial: task.front.trial.is_some(),
+            slug: Some(task.extra_str("slug"))
+                .filter(|slug| !slug.is_empty())
+                .map(str::to_string),
+            url: Some(task.extra_str("url"))
+                .filter(|url| !url.is_empty())
+                .map(str::to_string),
+            created_ns: created_ns(&task.path),
             archived_at,
         }
     }
+
+    /// A [`Task`] carrying only what the index holds, for a reader that
+    /// wants archived tasks beside live ones without opening their files.
+    ///
+    /// `stage` is `done` because teardown archives a task only once it has
+    /// reached it. The body is empty and the path is where the file lives, so
+    /// a reader that needs more than the index holds opens that one file.
+    pub fn to_task(&self, archive: &Path) -> Task {
+        // Parsed once: only the id and the path differ between entries, and
+        // a parse per entry would cost what the index exists to save.
+        static BARE: std::sync::OnceLock<Task> = std::sync::OnceLock::new();
+        let mut task = BARE
+            .get_or_init(|| {
+                Task::parse(
+                    PathBuf::new(),
+                    &format!("---\nid: bare\nstage: {}\n---\n", crate::pipeline::DONE),
+                )
+                .expect("a bare id and stage always parse")
+            })
+            .clone();
+        task.path = archive.join(format!("{}.md", self.id));
+        task.front.id = self.id.clone();
+        task.front.title = self.title.clone();
+        task.front.group = Some(self.group.clone()).filter(|group| !group.is_empty());
+        task.front.pipeline = Some(self.pipeline.clone()).filter(|name| !name.is_empty());
+        task.front.branch = Some(self.branch.clone()).filter(|branch| !branch.is_empty());
+        task.front.depends_on = self.depends_on.clone();
+        task.front.worktree_path = self.worktree_path.clone();
+        task.front.base = self.base.clone();
+        if self.trial {
+            task.front.trial = Some(String::new());
+        }
+        for (key, value) in [("slug", &self.slug), ("url", &self.url)] {
+            if let Some(value) = value {
+                task.front
+                    .extra
+                    .insert(key.into(), serde_norway::Value::String(value.clone()));
+            }
+        }
+        task
+    }
+}
+
+/// When the file at `path` was created: its birth time, falling back to its
+/// modification time where the platform or filesystem has no birth time to
+/// give. The one definition, shared with the queue tab, which orders groups
+/// by it whether the time comes from here or from the index.
+pub fn created_at(path: &Path) -> Option<SystemTime> {
+    let meta = std::fs::metadata(path).ok()?;
+    meta.created().or_else(|_| meta.modified()).ok()
+}
+
+/// [`created_at`] in nanoseconds since the epoch — see [`Entry::created_ns`].
+fn created_ns(path: &Path) -> Option<u64> {
+    let at = created_at(path)?;
+    Some(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos() as u64)
 }
 
 #[cfg(test)]
 thread_local! {
     static REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What the reader tests share: archiving a task the way teardown does,
+/// counting the times a task file was opened, and making the files unreadable
+/// so a reader that opened one would be caught.
+#[cfg(test)]
+pub(crate) mod testutil {
+    use super::*;
+
+    /// How many times this thread has parsed the task files to rebuild.
+    pub(crate) fn rebuilds() -> usize {
+        REBUILDS.with(std::cell::Cell::get)
+    }
+
+    pub(crate) fn reset_rebuilds() {
+        REBUILDS.with(|c| c.set(0));
+    }
+
+    /// Write `archive/<id>.md` with `front` as extra front matter lines, and
+    /// return it parsed. The folder is left looking changed, as any new file
+    /// leaves it, but nothing is recorded in the index.
+    pub(crate) fn drop_in(repo: &Repo, id: &str, front: &str) -> Task {
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        let path = repo.archive_dir().join(format!("{id}.md"));
+        std::fs::write(
+            &path,
+            format!("---\nid: {id}\ntitle: t {id}\nstage: done\n{front}---\nbody\n"),
+        )
+        .unwrap();
+        Task::load(&path).unwrap()
+    }
+
+    /// Archive `id` as teardown does: bring the index up to date, add the
+    /// file, record it. The folder's time is pushed ahead first so a coarse
+    /// clock cannot make a reader's cache think nothing changed.
+    pub(crate) fn archive(repo: &Repo, id: &str, front: &str) {
+        let guard = lock(repo).unwrap();
+        ensure_current(repo, &guard);
+        let was_current = is_current(repo);
+        let task = drop_in(repo, id, front);
+        // Strictly later every call, so no two archivings share a folder time.
+        static BUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(5);
+        let ahead = BUMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::scratch::set_mtime(
+            &repo.archive_dir(),
+            SystemTime::now() + std::time::Duration::from_secs(ahead),
+        );
+        record(repo, &guard, was_current, &task, 1_790_000_000).unwrap();
+    }
+
+    /// Run `read` with every task file replaced by junk, keeping the
+    /// folder's time, so only the index can still say what was archived; the
+    /// files are put back afterwards.
+    pub(crate) fn with_unreadable_files<T>(repo: &Repo, read: impl FnOnce() -> T) -> T {
+        let dir = repo.archive_dir();
+        let folder = modified(&dir).unwrap();
+        let saved: Vec<(PathBuf, String)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(&path, "not a task").unwrap();
+                (path, text)
+            })
+            .collect();
+        crate::scratch::set_mtime(&dir, folder);
+        let out = read();
+        for (path, text) in saved {
+            std::fs::write(path, text).unwrap();
+        }
+        crate::scratch::set_mtime(&dir, folder);
+        out
+    }
+
+    /// Sweep `id` out of the archive the way retention does.
+    pub(crate) fn sweep(repo: &Repo, id: &str) {
+        let guard = lock(repo).unwrap();
+        let was_current = is_current(repo);
+        std::fs::remove_file(repo.archive_dir().join(format!("{id}.md"))).unwrap();
+        forget_missing(repo, &guard, was_current);
+    }
+
+    /// Delete the index, so the next read rebuilds it from the files.
+    pub(crate) fn lose_index(repo: &Repo) {
+        std::fs::remove_file(index_path(repo)).unwrap();
+    }
 }
 
 /// Proof that the archive index lock is held, required by every function that
@@ -110,8 +289,22 @@ pub fn lock(repo: &Repo) -> Option<Guard> {
     lock_within(repo, ArchiveIndexLock::MUTATE_WAIT)
 }
 
+/// The lock file for the archive folder `archive`: beside it, in the home,
+/// and never inside it, because a file created in `archive/` would move the
+/// folder's modification time that the index is compared against.
+pub fn lock_file_for(archive: &Path) -> PathBuf {
+    archive
+        .parent()
+        .unwrap_or(archive)
+        .join("archive-index.lock")
+}
+
 fn index_path(repo: &Repo) -> PathBuf {
-    repo.archive_dir().join(FILE_NAME)
+    index_at(&repo.archive_dir())
+}
+
+fn index_at(archive: &Path) -> PathBuf {
+    archive.join(FILE_NAME)
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -121,8 +314,11 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// Whether the index exists and was last made to match the folder as it is
 /// now. Says nothing about whether every line parses; [`read`] checks that.
 pub fn is_current(repo: &Repo) -> bool {
-    let dir = repo.archive_dir();
-    match (modified(&dir.join(FILE_NAME)), modified(&dir)) {
+    is_current_at(&repo.archive_dir())
+}
+
+fn is_current_at(archive: &Path) -> bool {
+    match (modified(&index_at(archive)), modified(archive)) {
         (Some(index), Some(folder)) => index == folder,
         _ => false,
     }
@@ -131,15 +327,11 @@ pub fn is_current(repo: &Repo) -> bool {
 /// Make the index's modification time equal the folder's, which is what
 /// [`is_current`] compares. Best effort: a failure leaves the index looking
 /// stale, and the next read rebuilds it.
-fn stamp(repo: &Repo) {
-    let dir = repo.archive_dir();
-    let Some(folder) = modified(&dir) else {
+fn stamp(archive: &Path) {
+    let Some(folder) = modified(archive) else {
         return;
     };
-    if let Ok(file) = std::fs::File::options()
-        .write(true)
-        .open(dir.join(FILE_NAME))
-    {
+    if let Ok(file) = std::fs::File::options().write(true).open(index_at(archive)) {
         let _ = file.set_modified(folder);
     }
 }
@@ -154,47 +346,94 @@ fn parse_lines(raw: &str) -> Option<Vec<Entry>> {
 
 /// Every archived task's entry, rebuilding the index first if it is missing,
 /// holds a line that does not parse, or no longer matches the folder.
+/// [`read_at`] without the error: a folder that cannot be listed reads as
+/// holding nothing.
+pub fn read(repo: &Repo) -> Vec<Entry> {
+    read_at(&repo.archive_dir()).unwrap_or_default()
+}
+
+/// [`read`] over the archive folder `archive`, for a caller that holds a
+/// folder rather than a [`Repo`]. An error only when the folder exists but
+/// cannot be listed, which a screen keeps showing what it had through rather
+/// than drawing an archive that looks empty.
 ///
 /// A current index is read without the lock. A rebuild takes it and checks
 /// again, because another process may have repaired the index while this one
 /// waited. If the lock cannot be had the entries are still returned, read
 /// from the files, and the index is left alone.
-// No reader of the archive calls this yet outside the tests; the board, queue
-// tab and `queue add` are the intended callers.
-#[allow(dead_code)]
-pub fn read(repo: &Repo) -> Vec<Entry> {
-    if let Some(entries) = read_current(repo) {
-        return entries;
+pub fn read_at(archive: &Path) -> Result<Vec<Entry>> {
+    if let Some(entries) = read_current(archive) {
+        return Ok(entries);
     }
-    match lock_within(repo, ArchiveIndexLock::READ_WAIT) {
-        Some(guard) => read_locked(repo, &guard),
-        None => load_entries(repo),
+    // Only a rebuild lists the folder, so only it can find the folder
+    // unlistable; a missing one is an empty archive, as it always was.
+    if let Err(err) = std::fs::read_dir(archive)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err).with_context(|| format!("reading {}", archive.display()));
     }
+    let lock = ArchiveIndexLock::acquire(&lock_file_for(archive), ArchiveIndexLock::READ_WAIT)
+        .ok()
+        .map(|lock| Guard { _lock: lock });
+    Ok(match lock {
+        Some(guard) => read_locked(archive, &guard, false),
+        None => load_entries(archive),
+    })
 }
 
-fn read_current(repo: &Repo) -> Option<Vec<Entry>> {
-    if !is_current(repo) {
+fn read_current(archive: &Path) -> Option<Vec<Entry>> {
+    if !is_current_at(archive) {
         return None;
     }
-    parse_lines(&std::fs::read_to_string(index_path(repo)).ok()?)
+    parse_lines(&std::fs::read_to_string(index_at(archive)).ok()?)
 }
 
-fn read_locked(repo: &Repo, guard: &Guard) -> Vec<Entry> {
-    read_current(repo).unwrap_or_else(|| rebuild(repo, guard))
+/// The current index, or the entries rebuilt from the files. A rebuild of an
+/// empty archive is written only if `write_empty`: a reader that writes a
+/// file into a project that archived nothing leaves a mark, which
+/// `queue add --dry-run` promises not to. A writer that is about to add to
+/// the index needs the file to exist, so it passes `true`.
+fn read_locked(archive: &Path, guard: &Guard, write_empty: bool) -> Vec<Entry> {
+    read_current(archive).unwrap_or_else(|| rebuild(archive, guard, write_empty))
+}
+
+/// One archived file as a [`Task`], or `None` if it will not parse.
+///
+/// A file with no `stage:` is read as `done`, which is where every archived
+/// task is. The queue tab always listed such a file, because it reads only a
+/// task's `group:`, `id:` and the like; refusing it here would drop it from
+/// that screen.
+fn load_lenient(path: &Path) -> Option<Task> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    Task::parse(path.to_path_buf(), &raw).ok().or_else(|| {
+        let rest = raw.strip_prefix("---\n")?;
+        Task::parse(
+            path.to_path_buf(),
+            &format!("---\nstage: {}\n{rest}", crate::pipeline::DONE),
+        )
+        .ok()
+    })
 }
 
 /// Parse the `<id>.md` files into entries.
 ///
 /// A task's archived time is its file's modification time: teardown renames
 /// the file in without touching it, so that is the moment it was last
-/// written before archiving. A file that will not parse is left out, as
-/// every reader of the folder leaves it out today.
-fn load_entries(repo: &Repo) -> Vec<Entry> {
+/// written before archiving. A file that will not parse is left out.
+fn load_entries(archive: &Path) -> Vec<Entry> {
     // The only place the task files are opened, so a test counts these to
     // prove a current index is read without them.
     #[cfg(test)]
     REBUILDS.with(|c| c.set(c.get() + 1));
-    let (tasks, _problems) = task::load_dir(&repo.archive_dir()).unwrap_or_default();
+    let mut tasks: Vec<Task> = std::fs::read_dir(archive)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| load_lenient(&path))
+        .collect();
+    tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
     tasks
         .iter()
         .map(|task| {
@@ -209,20 +448,22 @@ fn load_entries(repo: &Repo) -> Vec<Entry> {
 /// Rebuild the index from the `<id>.md` files and return what it now holds.
 /// If the index cannot be written the entries are still returned, so a
 /// read-only home reads slowly rather than wrongly.
-fn rebuild(repo: &Repo, guard: &Guard) -> Vec<Entry> {
-    let entries = load_entries(repo);
-    let _ = write_all(repo, guard, &entries);
+fn rebuild(archive: &Path, guard: &Guard, write_empty: bool) -> Vec<Entry> {
+    let entries = load_entries(archive);
+    if write_empty || !entries.is_empty() {
+        let _ = write_all(archive, guard, &entries);
+    }
     entries
 }
 
-fn write_all(repo: &Repo, _guard: &Guard, entries: &[Entry]) -> Result<()> {
+fn write_all(archive: &Path, _guard: &Guard, entries: &[Entry]) -> Result<()> {
     let mut out = String::new();
     for entry in entries {
         out.push_str(&serde_json::to_string(entry)?);
         out.push('\n');
     }
-    task::write_atomic(&index_path(repo), out)?;
-    stamp(repo);
+    task::write_atomic(&index_at(archive), out)?;
+    stamp(archive);
     Ok(())
 }
 
@@ -230,7 +471,7 @@ fn write_all(repo: &Repo, _guard: &Guard, entries: &[Entry]) -> Result<()> {
 /// that [`record`] has a current index to append to. The guard must be held
 /// from here until the append, so no other process's change lands between.
 pub fn ensure_current(repo: &Repo, guard: &Guard) {
-    let _ = read_locked(repo, guard);
+    let _ = read_locked(&repo.archive_dir(), guard, true);
 }
 
 /// Append the line for a task that has just been renamed into `archive/`.
@@ -250,7 +491,11 @@ pub fn record(
     if !was_current {
         return Ok(());
     }
-    let mut line = serde_json::to_string(&Entry::from_task(task, archived_at))?;
+    // `task` still names the queue file the rename moved, so the time comes
+    // from where the file is now.
+    let mut entry = Entry::from_task(task, archived_at);
+    entry.created_ns = created_ns(&repo.archive_dir().join(format!("{}.md", entry.id)));
+    let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
     let path = index_path(repo);
     let mut file = std::fs::OpenOptions::new()
@@ -261,7 +506,7 @@ pub fn record(
     file.write_all(line.as_bytes())
         .with_context(|| format!("appending to {}", path.display()))?;
     drop(file);
-    stamp(repo);
+    stamp(&repo.archive_dir());
     Ok(())
 }
 
@@ -287,7 +532,7 @@ pub fn forget_missing(repo: &Repo, guard: &Guard, was_current: bool) {
         .into_iter()
         .filter(|entry| dir.join(format!("{}.md", entry.id)).exists())
         .collect();
-    let _ = write_all(repo, guard, &kept);
+    let _ = write_all(&dir, guard, &kept);
 }
 
 #[cfg(test)]
@@ -364,7 +609,7 @@ mod tests {
             .unwrap();
         file.write_all(b"{\"id\":\"torn\",\"gro").unwrap();
         drop(file);
-        stamp(&repo);
+        stamp(&repo.archive_dir());
         assert!(is_current(&repo), "the torn line must be the only fault");
 
         let entries = read(&repo);

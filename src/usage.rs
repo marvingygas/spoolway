@@ -2807,9 +2807,18 @@ fn task_worktree_roots(repo: &Repo) -> Vec<(PathBuf, String)> {
         }
     };
     collect(repo.tasks().unwrap_or_default());
-    if let Ok((archived, _)) = crate::task::load_dir(&repo.archive_dir()) {
-        collect(archived);
-    }
+    // The archived tasks come from the archive index, which holds the three
+    // fields read here, so no archived file is opened. Sorted by id, the
+    // order a listing of the folder gave.
+    let mut indexed = crate::archive_index::read(repo);
+    indexed.sort_by(|a, b| a.id.cmp(&b.id));
+    let archive_dir = repo.archive_dir();
+    collect(
+        indexed
+            .iter()
+            .map(|entry| entry.to_task(&archive_dir))
+            .collect(),
+    );
     out
 }
 
@@ -7015,5 +7024,48 @@ mod tests {
         assert!(one.skills.is_empty());
         assert!(one.span.is_none());
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Eval finds an archived task's worktree through the archive index: no
+    /// task file is opened, and the list of worktree paths and ids is the one
+    /// the files give — a recorded `worktree_path` where there is one, both
+    /// branch-derived names where there is not — after archivings, a sweep
+    /// and a rebuild.
+    #[test]
+    fn task_worktree_roots_read_archived_tasks_from_the_index() {
+        use crate::archive_index::testutil::*;
+        let (repo, _, _root_guard) = fixture("roots-from-index");
+        archive(&repo, "kept", "group: g\nworktree_path: /w/kept\n");
+        archive(&repo, "bare", "group: g\nbranch: task/proj-bare\n");
+        archive(&repo, "doomed", "group: g\nworktree_path: /w/doomed\n");
+
+        let root = crate::mux::worktree_root(&repo.root).unwrap();
+        let expected = |ids: &[&str]| -> Vec<(PathBuf, String)> {
+            let mut out = Vec::new();
+            for id in ids {
+                match *id {
+                    "kept" => out.push((PathBuf::from("/w/kept"), "kept".to_string())),
+                    "doomed" => out.push((PathBuf::from("/w/doomed"), "doomed".to_string())),
+                    _ => {
+                        out.push((root.join("bare"), "bare".to_string()));
+                        out.push((
+                            root.join(crate::mux::branch_slug("task/proj-bare")),
+                            "bare".to_string(),
+                        ));
+                    }
+                }
+            }
+            out
+        };
+
+        reset_rebuilds();
+        let indexed = with_unreadable_files(&repo, || task_worktree_roots(&repo));
+        assert_eq!(rebuilds(), 0, "eval opened archived task files");
+        assert_eq!(indexed, expected(&["bare", "doomed", "kept"]));
+
+        sweep(&repo, "doomed");
+        assert_eq!(task_worktree_roots(&repo), expected(&["bare", "kept"]));
+        lose_index(&repo);
+        assert_eq!(task_worktree_roots(&repo), expected(&["bare", "kept"]));
     }
 }

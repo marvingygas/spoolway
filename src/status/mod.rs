@@ -3149,29 +3149,29 @@ fn finish_settled(
 struct ArchiveCache {
     dir: PathBuf,
     dir_mtime: SystemTime,
-    tasks: Arc<Vec<crate::task::Task>>,
+    tasks: Arc<Vec<crate::archive_index::Entry>>,
 }
 
-/// [`crate::task::load_dir`] over an archive directory, cached process-wide
-/// and re-read only once the directory's own mtime moves.
+/// [`crate::archive_index::read_at`] over an archive directory, cached
+/// process-wide and re-read only once the directory's own mtime moves.
 ///
 /// A directory's mtime changes exactly when an entry is added to or removed
 /// from it — a POSIX guarantee independent of any one file's own content —
 /// and an archived task file is never rewritten in place once filed: nothing
-/// deletes from `archive/` and nothing edits a task already there, so that
-/// one signal is enough to know a re-read is worth its cost. Parsing every
-/// file in a 1500-task archive on every one-second frame was the board's own
-/// comment calling itself the most expensive thing in a pass that decides
-/// nothing; this is the fix, in the same shape [`crate::usage::read_cached`]
-/// already takes for the ledger beside it.
+/// edits a task already there, so that one signal is enough to know a re-read
+/// is worth its cost. The re-read is of the archive index, one small file,
+/// and never of the task files themselves, so a task being archived adds one
+/// entry here however many are already held. Holding index entries rather
+/// than whole tasks also keeps every archived task's full text out of memory.
+/// This is the same shape [`crate::usage::read_cached`] takes for the ledger
+/// beside it.
 ///
 /// Returns a shared handle rather than an owned `Vec`, for the same reason
 /// `read_cached` does: a warm cache the directory's mtime says is still
 /// current hands back a clone of the `Arc` — a refcount bump — never a copy
 /// of however many tasks are archived. Only the pass that finds the mtime
-/// has moved pays to re-read the directory, and that is proportional to what
-/// is actually in it, not paid again by every idle frame after.
-fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
+/// has moved pays to re-read the index, not every idle frame after.
+fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::archive_index::Entry>>> {
     static CACHE: OnceLock<Mutex<Option<ArchiveCache>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let dir_mtime = std::fs::metadata(dir).and_then(|meta| meta.modified()).ok();
@@ -3183,7 +3183,7 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
         {
             return Ok(Arc::clone(&cached.tasks));
         }
-        let tasks = Arc::new(crate::task::load_dir(dir)?.0);
+        let tasks = Arc::new(crate::archive_index::read_at(dir)?);
         if let Some(dir_mtime) = dir_mtime {
             *guard = Some(ArchiveCache {
                 dir: dir.to_path_buf(),
@@ -3193,7 +3193,7 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
         }
         return Ok(tasks);
     }
-    Ok(Arc::new(crate::task::load_dir(dir)?.0))
+    Ok(Arc::new(crate::archive_index::read_at(dir)?))
 }
 
 /// One queue file [`cached_queue`] has already parsed: the bytes it parsed
@@ -3434,28 +3434,29 @@ fn done_rows(
     let archived = cached_archive(&repo.archive_dir())?;
     Ok(archived
         .iter()
-        .filter_map(|task| {
-            let group = task.front.group.clone()?;
+        .filter_map(|entry| {
+            let group = Some(entry.group.clone()).filter(|group| !group.is_empty())?;
             if !active_groups.contains(&group) {
                 return None;
             }
             Some(Row {
-                id: task.id().to_string(),
+                id: entry.id.clone(),
                 group: Some(group),
-                issue_url: issue_url_of(task),
+                issue_url: entry.url.clone(),
                 // An archived task's own group has already landed, so the
                 // board has nothing left to say about what it stacked onto —
                 // `stacked_after` is not even asked, since `done_rows` never
                 // holds the live queue this would need to look a dependency
                 // up in.
                 after: None,
-                stage: task.stage().to_string(),
-                // Read the same way a live row's is: an archived task's
-                // `rounds` are on file same as any other, and `step_text`
-                // still draws this count for a done row — only the paint
-                // branch in `step_cell` is skipped for one.
-                arrivals: task.rounds_at(task.stage()),
-                pipeline: archived_pipeline_name(pipelines, task.front.pipeline.as_deref()),
+                stage: crate::pipeline::DONE.to_string(),
+                // A task is archived at `done`, which is not a step, so no
+                // launch is ever banked there and a done row draws no count.
+                arrivals: 0,
+                pipeline: archived_pipeline_name(
+                    pipelines,
+                    Some(entry.pipeline.as_str()).filter(|name| !name.is_empty()),
+                ),
                 state: State::Done,
                 // An archived row's `Done` tier already puts it last within
                 // its group — see `Row::key` — so none of the run-order tiers
@@ -5264,6 +5265,67 @@ mod tests {
             2,
             "the cache must refresh once the directory's own mtime moves"
         );
+    }
+
+    /// The board's done rows come from the archive index: none of the three
+    /// readings below opens a task file, a task archived under a warm cache
+    /// adds its own entry and nothing else, and the rows are the ones the
+    /// files give after adds, a sweep and a rebuild.
+    #[test]
+    fn done_rows_read_the_index_and_match_the_files() {
+        use crate::archive_index::testutil::*;
+        let (repo, _root_guard) = fixture("done-rows-index");
+        let pipelines = Pipelines::builtin();
+        let active: BTreeSet<String> = ["auth".to_string()].into();
+        let url = "url: https://acme.example/1\n";
+        let rows_now = || {
+            let rows = done_rows(&repo, &pipelines, &active).unwrap();
+            rows.iter()
+                .map(|r| (r.id.clone(), r.issue_url.clone(), r.pipeline.clone()))
+                .collect::<Vec<_>>()
+        };
+        // What the files say, read the way the board read them before.
+        let from_files = || {
+            let (tasks, _) = crate::task::load_dir(&repo.archive_dir()).unwrap();
+            tasks
+                .iter()
+                .filter(|t| t.front.group.as_deref() == Some("auth"))
+                .map(|t| {
+                    (
+                        t.id().to_string(),
+                        issue_url_of(t),
+                        archived_pipeline_name(&pipelines, t.front.pipeline.as_deref()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        archive(&repo, "a", &format!("group: auth\npipeline: impl\n{url}"));
+        archive(&repo, "b", "group: auth\n");
+        archive(&repo, "other", "group: elsewhere\n");
+        assert_eq!(rows_now(), from_files());
+        assert_eq!(rows_now().len(), 2, "the other group has nothing queued");
+
+        // Warm now. With every file unreadable only the index can answer.
+        reset_rebuilds();
+        let before = cached_archive(&repo.archive_dir()).unwrap().len();
+        let unreadable = with_unreadable_files(&repo, rows_now);
+        assert_eq!(unreadable, from_files());
+        assert_eq!(rebuilds(), 0, "a screen read opened task files");
+
+        archive(&repo, "c", "group: auth\n");
+        let after = cached_archive(&repo.archive_dir()).unwrap();
+        assert_eq!(after.len(), before + 1, "the new task adds one entry");
+        assert_eq!(rebuilds(), 0, "archiving one task opened another's file");
+        assert_eq!(rows_now(), from_files());
+
+        // A sweep and a rebuild agree with the files that remain.
+        sweep(&repo, "a");
+        assert_eq!(rows_now(), from_files());
+        assert_eq!(rebuilds(), 0);
+        lose_index(&repo);
+        assert_eq!(rows_now(), from_files());
+        assert_eq!(rows_now().len(), 2, "b and c remain");
     }
 
     /// `board-reads-changed-only`: `render` used to call

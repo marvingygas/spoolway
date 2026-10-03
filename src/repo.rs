@@ -566,7 +566,7 @@ impl Repo {
     /// it, because a file created inside `archive/` would move the folder's
     /// modification time that the index is compared against.
     pub fn archive_index_lock_file(&self) -> PathBuf {
-        self.home().join("archive-index.lock")
+        crate::archive_index::lock_file_for(&self.archive_dir())
     }
 
     /// The running dispatcher's own lock, if there is one.

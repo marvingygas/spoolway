@@ -2183,11 +2183,20 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     // — every task it has ever had, not only what is still queued — because
     // a task that already landed and was archived still counts as that
     // group's root or tail, as long as the group is still open (see
-    // `groups_still_queued` above). Loaded once, here, rather than through
-    // `status::mod`'s own `cached_archive`: that cache is tuned for a
-    // per-second board redraw, and this runs once per `queue add` or `task
-    // contract` call.
-    let (archived, _) = crate::task::load_dir(&repo.archive_dir())?;
+    // `groups_still_queued` above). Read once, here, from the archive index
+    // rather than through `status::mod`'s own `cached_archive`: that cache is
+    // tuned for a per-second board redraw, and this runs once per `queue add`
+    // or `task contract` call. The index costs one small file however many
+    // tasks have finished, and holds every field this function reads of an
+    // archived task, so no archived file is opened here. Sorted by id, the
+    // order the folder listing gave, which the messages below name tasks in.
+    let archive_dir = repo.archive_dir();
+    let mut indexed = crate::archive_index::read_at(&archive_dir)?;
+    indexed.sort_by(|a, b| a.id.cmp(&b.id));
+    let archived: Vec<Task> = indexed
+        .iter()
+        .map(|entry| entry.to_task(&archive_dir))
+        .collect();
     let archived_ids: BTreeSet<String> = archived.iter().map(|t| t.id().to_string()).collect();
     tasks.extend(archived);
     // A caller may hand this an id that is already on disk — a task
@@ -3212,7 +3221,7 @@ impl TrialState {
         let ticked: std::collections::BTreeSet<String> = group
             .tasks
             .iter()
-            .filter_map(|task| doc_pipeline_name(&task.doc))
+            .filter_map(|task| doc_pipeline_name(&task.text().ok()?))
             .filter(|name| names.contains(&name.as_str()))
             .collect();
         let cursor = names
@@ -4648,7 +4657,10 @@ fn handle_gate_key(
     // against once it is actually submitted — a malformed `pipeline:` on it
     // degrades to "no steps to page through" here rather than a panic, and is
     // caught properly, with a real error, at submit time.
-    let pipeline = task_pipeline(&task.doc, pipelines).ok();
+    let pipeline = task
+        .text()
+        .ok()
+        .and_then(|doc| task_pipeline(&doc, pipelines).ok());
     let steps = pipeline.map_or(0, |p| p.steps.len());
 
     match key {
@@ -5996,7 +6008,7 @@ fn gate_panel(
 ) -> Option<Vec<String>> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     let task = group.tasks.get(state.task_cursor)?;
-    let pipeline = task_pipeline(&task.doc, pipelines).ok()?;
+    let pipeline = task_pipeline(&task.text().ok()?, pipelines).ok()?;
 
     let chosen = state.gates.get(&task_key(task));
     let mut body = vec![String::new()];
@@ -6896,9 +6908,18 @@ fn begin_trial(
             minted.insert(id.clone());
             id_map.insert(task.id.clone(), id.clone());
 
+            let text = match task.text() {
+                Ok(text) => text,
+                Err(err) => {
+                    return outcome(
+                        "trial refused",
+                        format!("reading {}: {err}", task.path.display()),
+                    );
+                }
+            };
             let mut arm = match build_trial_arm(
                 &task.path.display().to_string(),
-                &task.doc,
+                &text,
                 base,
                 &id,
                 &stamp,
@@ -7015,7 +7036,16 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
     }
     for task in &group.tasks {
         let path = dir.join(format!("{}.md", task.id));
-        let reset = match reset_for_reuse(&task.path.display().to_string(), &task.doc) {
+        let text = match task.text() {
+            Ok(text) => text,
+            Err(err) => {
+                return outcome(
+                    "not saved",
+                    format!("s: reading {}: {err}", task.path.display()),
+                );
+            }
+        };
+        let reset = match reset_for_reuse(&task.path.display().to_string(), &text) {
             Ok(reset) => reset,
             Err(err) => {
                 return outcome(
@@ -7937,6 +7967,117 @@ mod tests {
             !repo.queue_dir().join("sessions.md").exists(),
             "a task that could never start should not have been written"
         );
+    }
+
+    /// `queue add` checks `depends_on` against the archive index: no task
+    /// file is opened for it, and every accept and refuse answer is the one
+    /// the files give — after archivings, a sweep and a rebuild. The cases
+    /// cover what the check reads of an archived task: its group, its base
+    /// and whether it was a trial arm.
+    #[test]
+    fn check_dependencies_set_answers_from_the_index_as_it_did_from_the_files() {
+        use crate::archive_index::testutil::*;
+        let (repo, _root_guard) = fixture("deps-from-index");
+        archive(&repo, "login", "group: auth\nbase: plan/demo\n");
+        archive(
+            &repo,
+            "arm",
+            "group: auth-arm\ntrial: t1\nbase: plan/demo\n",
+        );
+        archive(&repo, "doomed", "group: gone\n");
+        // Two groups that still have a live member, so their archived tasks
+        // count. `chain` holds an archived trial arm beside its real root:
+        // counting the arm would give the group a second root. `feat` holds
+        // an archived root under a slug-prefixed group name that only
+        // stripping the slug puts in the same group as the live root.
+        archive(&repo, "chain-root", "group: chain\n");
+        archive(&repo, "chain-arm", "group: chain\ntrial: t1\n");
+        archive(&repo, "feat-root", "group: proj-1-feat\nslug: proj-1\n");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        for (id, front) in [
+            ("chain-live", "group: chain\ndepends_on: [chain-root]\n"),
+            ("feat-live", "group: feat\n"),
+        ] {
+            Task::parse(
+                repo.queue_dir().join(format!("{id}.md")),
+                &format!(
+                    "---\nid: {id}\ntitle: {id}\nstage: implement\npipeline: impl\n{front}---\n"
+                ),
+            )
+            .unwrap()
+            .save()
+            .unwrap();
+        }
+
+        let batch = |id: &str, front: &str| {
+            Task::parse(
+                repo.queue_dir().join(format!("{id}.md")),
+                &format!(
+                    "---\nid: {id}\ntitle: {id}\nstage: implement\npipeline: impl\n{front}---\n"
+                ),
+            )
+            .unwrap()
+        };
+        let answers = || {
+            let cases = [
+                ("ok", "group: auth\nbase: plan/demo\ndepends_on: [login]\n"),
+                (
+                    "stacked",
+                    "group: next\nbase: plan/demo\ndepends_on: [login]\n",
+                ),
+                (
+                    "other-base",
+                    "group: auth\nbase: plan/other\ndepends_on: [login]\n",
+                ),
+                ("typo", "group: auth\ndepends_on: [ghost]\n"),
+                ("on-arm", "group: second\ndepends_on: [arm]\n"),
+                ("chain-next", "group: chain\ndepends_on: [chain-live]\n"),
+                ("feat-next", "group: feat\ndepends_on: [feat-live]\n"),
+            ];
+            cases
+                .iter()
+                .map(|(id, front)| {
+                    let mut tasks = [batch(id, front)];
+                    check_dependencies_set(&repo, &mut tasks).map_err(|e| format!("{e:#}"))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        reset_rebuilds();
+        let indexed = with_unreadable_files(&repo, answers);
+        assert_eq!(rebuilds(), 0, "queue add opened archived task files");
+        assert!(indexed[0].is_ok(), "{:?}", indexed[0]);
+        assert!(indexed[1].is_ok(), "{:?}", indexed[1]);
+        let refusal = |at: usize| indexed[at].clone().unwrap_err();
+        assert!(
+            refusal(2).contains("is based on `plan/other`"),
+            "{}",
+            refusal(2)
+        );
+        assert!(
+            refusal(3).contains("neither the queue nor the archive"),
+            "{}",
+            refusal(3)
+        );
+        assert!(
+            indexed[5].is_ok(),
+            "an archived trial arm is no second root: {:?}",
+            indexed[5]
+        );
+        assert!(
+            refusal(6).contains("no dependency in it"),
+            "the slug must put the archived root in the live group: {}",
+            refusal(6)
+        );
+
+        // The same answers after another archiving, a sweep and a rebuild.
+        assert_eq!(answers(), indexed);
+        archive(&repo, "later", "group: unrelated\n");
+        assert_eq!(answers(), indexed);
+        sweep(&repo, "doomed");
+        assert_eq!(answers(), indexed);
+        lose_index(&repo);
+        assert_eq!(answers(), indexed);
     }
 
     /// The same refusal, but naming the age rather than leaving a swept

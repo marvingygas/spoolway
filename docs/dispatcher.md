@@ -476,15 +476,32 @@ When a task reaches `done`:
 | `branch` | The task's branch. |
 | `depends_on` | The ids the task depended on. |
 | `worktree_path` | The task's worktree. Left out when the task had none. |
+| `base` | The branch the task's group lands on. Left out when the task has none. |
+| `trial` | `true` when the task was a trial arm. Left out otherwise. |
+| `slug` | The task's issue slug. Left out when the task has none. |
+| `url` | The task's issue URL. Left out when the task has none. |
+| `created_ns` | When the task file was created, in nanoseconds. It is the file's modification time on a filesystem that keeps no creation time. |
 | `archived_at` | When the task was archived, in Unix seconds. |
 
-Reading the index never opens a task file while the index matches the folder. The index
-matches when its modification time equals the modification time of `archive/`. Each write to the
-index sets its time to the folder's.
+Four readers list archived tasks from the index:
+
+| Reader | Uses it for |
+|---|---|
+| The board | The done rows and the issue link on a group band. |
+| The queue tab | The archived groups, ordered by `created_ns`. |
+| `spoolway queue add` and `spoolway task contract` | The check that a `depends_on` names a queued or archived task. |
+| `spoolway eval` | The worktree path of each archived task. |
+
+None of them opens a task file while the index matches the folder. The queue tab opens one
+archived file by name when a key needs that task's text. The index matches when its modification
+time equals the modification time of `archive/`. Each write to the index sets its time to the
+folder's.
+
+Archiving a task adds its line to a screen's cache without reading any other archived file.
 
 The index is rebuilt from the `<id>.md` files when it is missing, when a line does not parse, or
 when the folder has changed since the index was written. A file that does not parse is left out.
-A rebuilt line uses the file's modification time as `archived_at`.
+A rebuilt line uses the file's modification time as `archived_at` and the file's creation time as `created_ns`.
 
 The retention sweep removes the line of every archive file it deletes. It never deletes
 `index.jsonl` itself. See `retention_days` in [Configuration](configuration.md).

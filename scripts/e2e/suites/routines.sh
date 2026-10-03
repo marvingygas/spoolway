@@ -126,9 +126,11 @@ has "and its own group" "group: release" \
 
 # A group whose one document lives only in the archive — the shape a task
 # already run once through a pipeline has, carrying every key spoolway
-# stamped on that run. `list_groups` reads it straight out of `archive/`,
-# verbatim, so this is `s` over exactly what a finished task looks like, not
-# a fresh producer's document. Not `queue/`: the queue tab never lists a
+# stamped on that run. `list_groups` lists it from `archive/index.jsonl`,
+# rebuilt here because the file was dropped in by hand, and `s` then opens
+# the one `archive/<id>.md` by name and saves it verbatim, so this is `s`
+# over exactly what a finished task looks like, not a fresh producer's
+# document. Not `queue/`: the queue tab never lists a
 # queued group, and its filter never reaches one. `f` narrows the picker to
 # it by name, which reaches a done group without `h`.
 #

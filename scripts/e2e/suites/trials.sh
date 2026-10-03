@@ -143,9 +143,9 @@ works "both source tasks are left exactly where they were" \
 # A second template, this one already run through a pipeline once: its sole
 # document lives in the archive, carrying every key spoolway stamped on that
 # run — `stage:` chief among them, which `parse_submission` refuses outright.
-# `list_groups` reads such a group's task straight out of `archive/`,
-# verbatim, so forking it is `t` over exactly the shape a task archived
-# earlier has. Not `queue/`: the queue tab never lists a queued group, and
+# `list_groups` lists such a group from `archive/index.jsonl`, and `t` opens
+# its one `archive/<id>.md` by name and reads it verbatim, so forking it is
+# `t` over exactly the shape a task archived earlier has. Not `queue/`: the queue tab never lists a queued group, and
 # its filter never reaches one. `f` narrows to it by name, `enter` leaves the search
 # box keeping the query, and `t` then reaches it straight from the groups
 # pane, with no `Tab` needed. Nothing is ticked, since the task names no
