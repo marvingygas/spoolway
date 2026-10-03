@@ -1014,12 +1014,12 @@ lacks "\`h\` never lists a group whose tasks are only in the queue now" \
   "screen-shipped-group" "$LIVE/queue-screen-only.out"
 
 # --------------------------------------------------- the archive's own rows
-# `list_groups` now reads `archive/` as a third source, and `h` switches the
-# left pane between queueable only and queueable plus done. Only the real
-# binary, run against a task a real
-# dispatcher actually archived, proves the wiring — `list_groups`'s own unit
-# tests read a synthetic fixture directory, never `Repo::archive_dir()`
-# after a real run.
+# `list_groups` reads the archive as a third source, through the line
+# teardown appends to `archive/index.jsonl`, and `h` switches the left pane
+# between queueable only and queueable plus done. Only the real binary, run
+# against a task a real dispatcher actually archived, proves the wiring —
+# `list_groups`'s own unit tests read a synthetic fixture directory, never
+# `Repo::archive_dir()` after a real run.
 task_doc "$LIVE/archived-row.md" archived-row "$BODY" \
   "group: arch-row"
 must "a task queued for the archive-cycling case" \

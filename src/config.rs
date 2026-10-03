@@ -347,6 +347,15 @@ pub struct HousekeepingConfig {
     /// this key existed, and still does until somebody lowers it.
     pub retention_days: u64,
 
+    /// How many days a finished task sits in `archive/` before
+    /// [`crate::retain`] deletes it, read off the file's own modification
+    /// time. `0` keeps every finished task forever, which is the default:
+    /// the archive is the record `spoolway eval`, `queue add` and the
+    /// calibrate skill read from, so losing it is a decision a person makes,
+    /// not an age the project guesses. [`HousekeepingConfig::retention_days`]
+    /// no longer reaches this folder.
+    pub archive_retention_days: u64,
+
     /// How old the shared model-price table may be before `spoolway doctor`
     /// notes it. `0` turns the note off without changing which table answers
     /// model lookups. Refreshing remains the explicit `spoolway models
@@ -365,10 +374,12 @@ impl Default for HousekeepingConfig {
             // half-year of history the first time they run this.
             calibrate_window: Duration::from_secs(14 * 86_400),
             // Thirty days is enough to look back at last week's run without
-            // ever having to, while still bounding a home that otherwise
-            // grows without end — see the plan's own cost line on the
-            // archive.
+            // ever having to, while still bounding the logs, composed
+            // prompts, scratch space and headless records that otherwise
+            // grow without end.
             retention_days: 30,
+            // Off: see the field's own doc.
+            archive_retention_days: 0,
             price_max_age_days: 30,
         }
     }

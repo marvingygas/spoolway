@@ -6,6 +6,7 @@
 //! calls for one. Nothing in the control flow is decided by a model.
 
 mod agent;
+mod archive_index;
 mod ask;
 mod assets;
 mod claim;
@@ -316,10 +317,11 @@ fn run() -> Result<()> {
                 )?;
             }
 
-            // Byproducts older than `housekeeping.retention_days` go, once per process —
-            // see `retain` for the fixed split between those and the
-            // directories a task's own work lives in, which this never
-            // touches. Here rather than behind `init`, `doctor` or the
+            // Byproducts older than `housekeeping.retention_days`, and archived
+            // tasks older than `housekeeping.archive_retention_days` when that
+            // is set, go, once per process — see `retain` for the fixed split
+            // between those and the directories a task's own work lives in,
+            // which this never touches. Here rather than behind `init`, `doctor` or the
             // `[config]` commands above: those exist to work on a project
             // whose config or layout is in question, and a sweep run ahead
             // of them would be one more thing to rule out.

@@ -60,7 +60,9 @@ pub(crate) struct PendingTask {
     /// one; `parse_submission` is what refuses it at submit time.
     pub(crate) description: Option<String>,
     /// The task itself, unread and unmodified, ready to hand to
-    /// `validate_batch` exactly as a `--from` entry would.
+    /// `validate_batch` exactly as a `--from` entry would. Empty for an
+    /// archived task, which is listed from the archive index without opening
+    /// its file; read it through [`PendingTask::text`].
     pub(crate) doc: String,
     /// Where this task's own id currently sits — see [`TaskState`].
     pub(crate) state: TaskState,
@@ -78,6 +80,19 @@ pub(crate) struct PendingTask {
     /// [`super::queue::tasks_pane_lines`]'s `Base:` row draws for a root
     /// task (one with no dependency of its own).
     pub(crate) base: Option<String>,
+}
+
+impl PendingTask {
+    /// The task's text: [`PendingTask::doc`], or for an archived task, whose
+    /// `doc` is empty, the one file it names. That read fails if retention
+    /// swept the file since the listing was made, and the caller says so
+    /// rather than treating the task as empty.
+    pub(crate) fn text(&self) -> std::io::Result<std::borrow::Cow<'_, str>> {
+        if self.doc.is_empty() && self.state == TaskState::Done {
+            return std::fs::read_to_string(&self.path).map(Into::into);
+        }
+        Ok(std::borrow::Cow::Borrowed(&self.doc))
+    }
 }
 
 /// A group's own stage, folded from every task it holds — see
@@ -181,8 +196,7 @@ fn newest_first(
 /// A task's own birth time, falling back to its modification time where
 /// the platform or filesystem has no birth time to give.
 fn created_time(path: &Path) -> Option<std::time::SystemTime> {
-    let meta = std::fs::metadata(path).ok()?;
-    meta.created().or_else(|_| meta.modified()).ok()
+    crate::archive_index::created_at(path)
 }
 
 /// One string off a task's frontmatter, without any of
@@ -278,7 +292,7 @@ pub(crate) fn pending_reads_here_under(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// [`list_groups`]'s own logic, taking its [`list_front`] cache and a
+/// [`list_groups`]'s own logic, taking its [`list_front_in`] cache and a
 /// freshly-parsed-file counter as plain arguments instead of reaching into
 /// a process-wide static for either — the same split
 /// [`super::status::cached_queue`] and `cached_queue_in` already make, and
@@ -309,7 +323,7 @@ pub(crate) fn list_groups_in(
     // what `front_cache` is pruned down to below, so a file removed or
     // queued away does not sit in the cache forever. The archive has no
     // entry here: it keeps its own, separately-pruned cache — see
-    // `archive_tasks`.
+    // `archive_tasks`, which reads the archive index instead.
     let mut seen_paths: std::collections::HashSet<PathBuf> = Default::default();
 
     for path in md_files(&dir)? {
@@ -453,16 +467,15 @@ pub(crate) fn list_groups_in(
     // group half archived and half still queued lists its whole chain rather
     // than only the half still in the queue — the gap this whole feature
     // exists to close. `archive_tasks`, not a fourth copy of the loop
-    // above: the archive is read fresh only when its own directory's mtime
-    // moves — see that function's own comment — rather than on every
-    // one-second reload the way the pending and queue directories still
-    // are, since pending and queue files are rewritten in place and
-    // archived ones never are.
-    for (group_name, task) in archive_tasks(&archive_dir)? {
+    // above: it lists the archive from its index, and only when the
+    // archive directory's mtime moves — see that function's own comment —
+    // rather than on every one-second reload the way the pending and queue
+    // directories still are, since pending and queue files are rewritten in
+    // place and archived ones never are.
+    for (group_name, task, created) in archive_tasks(&archive_dir)? {
         if spoken_for.contains(&task.id) {
             continue;
         }
-        let created = created_time(&task.path);
         let entry = groups.entry(group_name.clone()).or_insert_with(|| Group {
             name: group_name,
             tasks: Vec::new(),
@@ -580,30 +593,27 @@ fn in_reading_order(mut tasks: Vec<PendingTask>) -> Vec<PendingTask> {
 }
 
 /// [`crate::task::split_fence`] plus a YAML parse, the one actual parse
-/// [`list_front_in`] and [`archive_tasks`] both cache in front of.
+/// [`list_front_in`] caches in front of.
 fn parse_front(doc: &str) -> Option<serde_norway::Value> {
     let (yaml, _) = crate::task::split_fence(doc).ok()?;
     serde_norway::from_str(yaml).ok()
 }
 
-/// One path's own last-seen bytes and what they parsed to — [`list_front`]
-/// and [`list_front_in`]'s own cache shape, named so a caller outside this
-/// module (a test driving [`list_groups_in`] directly) can hold one of its
-/// own without reaching into either function's internals.
+/// One path's own last-seen bytes and what they parsed to — [`list_front_in`]'s
+/// own cache shape, named so a caller outside this module (a test driving
+/// [`list_groups_in`] directly) can hold one of its own without reaching into
+/// the function's internals.
 pub(crate) type ListFrontCache = HashMap<PathBuf, (String, Option<serde_norway::Value>)>;
 
 /// One task file's own front matter, parsed again only when its bytes have
 /// moved since the last call that read this same path — what
 /// [`list_groups_in`]'s pending and queue loops read a task's `group:`,
-/// `id:`, `title:`, `depends_on:`, `pipeline:` and `base:` off, and what
-/// [`archive_tasks`]'s own fresh read falls back to as well.
+/// `id:`, `title:`, `depends_on:`, `pipeline:` and `base:` off.
 ///
-/// [`list_front`] is the process-wide wrapper around this, for callers —
-/// just [`archive_tasks`] now — that have no cache of their own to offer;
-/// [`list_groups_in`] calls this directly with the cache its own caller
-/// handed it, which is how [`list_groups`] shares one cache across every
-/// real reload while a test can hand in one of its own instead — see
-/// [`list_groups`]'s own comment for why that split exists.
+/// [`list_groups_in`] calls this with the cache its own caller handed it,
+/// which is how [`list_groups`] shares one cache across every real reload
+/// while a test can hand in one of its own instead — see [`list_groups`]'s
+/// own comment for why that split exists.
 ///
 /// Keyed on the path *and* the bytes, the same pair
 /// [`super::status::cached_queue`]'s own `CachedQueueFile` keys on: content
@@ -643,25 +653,10 @@ fn list_front_in(
     value
 }
 
-/// [`list_front_in`] against the one process-wide cache, for a caller with
-/// no [`ListFrontCache`] of its own to pass in — just [`archive_tasks`]'s
-/// own fresh read. A poisoned lock falls back to a plain, uncached parse,
-/// the same fallback shape `cached_archive` and `cached_queue` take.
-fn list_front(path: &Path, doc: &str) -> Option<serde_norway::Value> {
-    static LIST_FRONT_CACHE: OnceLock<Mutex<ListFrontCache>> = OnceLock::new();
-    let cache = LIST_FRONT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-    let Ok(mut guard) = cache.lock() else {
-        return parse_front(doc);
-    };
-    let mut discarded = 0; // Nothing reads this; see the doc comment above.
-    list_front_in(path, doc, &mut guard, &mut discarded)
-}
-
 /// A task's own `depends_on:` list, read straight off an already-parsed
-/// [`serde_norway::Value`] — what [`list_groups_in`], [`depends_on`] and
-/// [`archive_tasks`] all want from one parse, each already holding its own
-/// `Value` by the time it asks.
+/// [`serde_norway::Value`] — what [`list_groups_in`] and [`depends_on`] both
+/// want from one parse, each already holding its own `Value` by the time it
+/// asks.
 pub(crate) fn front_depends_on(front: &serde_norway::Value) -> Vec<String> {
     front
         .as_mapping()
@@ -678,9 +673,8 @@ pub(crate) fn front_depends_on(front: &serde_norway::Value) -> Vec<String> {
 /// A task's own `pipeline:` key, read straight off an already-parsed
 /// [`serde_norway::Value`] — the same shallow read
 /// [`super::queue::doc_pipeline_name`] makes starting from a raw doc
-/// string, kept as its own function so [`list_groups_in`] and
-/// [`archive_tasks`] can fill [`PendingTask::pipeline`] from a `Value` they
-/// already hold rather than handing the doc back to be split and parsed
+/// string, kept as its own function so [`list_groups_in`] can fill
+/// [`PendingTask::pipeline`] from a `Value` it already holds rather than handing the doc back to be split and parsed
 /// again. `None` for a task naming no pipeline of its own; unlike
 /// [`front_str`], an empty `pipeline: ""` reads as `Some(String::new())`
 /// rather than `None`, matching `doc_pipeline_name`'s own reading exactly.
@@ -714,81 +708,73 @@ pub(crate) fn depends_on(doc: &str) -> Vec<String> {
     front_depends_on(&value)
 }
 
-/// One task file already filed under [`Repo::archive_dir`], as
-/// [`list_groups_in`]'s third source wants it — the task's own `group:`
-/// paired with the rest of it already built into a [`PendingTask`] marked
-/// [`TaskState::Done`].
+/// One archived task, as [`list_groups_in`]'s third source wants it — the
+/// task's own `group:` paired with the rest of it already built into a
+/// [`PendingTask`] marked [`TaskState::Done`], and the time it counts as
+/// created for ordering its group.
 ///
-/// Read again only when the archive directory's own modified time has
-/// moved since the last call — the one-second reload's cost otherwise
-/// grows with the archive — and the one
-/// thing [`list_front_in`]'s per-file byte cache cannot give on its own,
-/// since it still has to open and read every file to find out none of
-/// them changed. Archived files are never rewritten in place (only filed
-/// in or swept out), so the directory's own mtime is enough to answer "did
-/// anything in here change" without walking it at all: a one-second
-/// reload over an archive that gained no new task reads no file in it,
-/// where [`list_front_in`] alone would still have opened and read every
-/// one of them to learn that nothing had changed.
+/// Built from `archive/index.jsonl` through [`crate::archive_index`], not
+/// from the task files, so a one-second reload costs one small file however
+/// many tasks have finished. The task's text is left out of the
+/// [`PendingTask`] and is read from its file by [`PendingTask::text`] when a
+/// key needs that one task.
 ///
+/// Read again only when the archive directory's own modified time has moved
+/// since the last call: the index is stamped with that time whenever it
+/// matches the folder, so a task filed in or swept out always moves it.
 /// Keyed by the directory path and its mtime together, the same pair
-/// [`super::status::cached_archive`] keys its own single-slot cache by,
-/// for the same reason: two different tests' archive directories never
-/// collide, since each is a distinct path under its own fixture root.
+/// [`super::status::cached_archive`] keys its own single-slot cache by, for
+/// the same reason: two different tests' archive directories never collide,
+/// since each is a distinct path under its own fixture root.
 ///
 /// A poisoned lock falls back to a plain, uncached read, the same
 /// fallback shape `cached_archive` and `cached_queue` take.
 ///
-/// A directory that will not list is an error, as it was before this
-/// cache: [`list_groups`] fails and `reload` keeps the groups already on
-/// screen. Swallowing it into an empty listing instead would drop every
-/// archive-only group from the screen, and caching that empty listing
-/// under the directory's mtime would keep them dropped until a task was
-/// next filed or swept. For the same reason a pass that skipped a file it
-/// could not read is returned but never cached, so that file is tried
-/// again on the next reload rather than staying absent.
-fn archive_tasks(dir: &Path) -> Result<Vec<(String, PendingTask)>> {
+/// A directory that will not list is an error: [`list_groups`] fails and
+/// `reload` keeps the groups already on screen. Swallowing it into an empty
+/// listing instead would drop every archive-only group from the screen, and
+/// caching that empty listing under the directory's mtime would keep them
+/// dropped until a task was next filed or swept.
+fn archive_tasks(dir: &Path) -> Result<Vec<ArchivedTask>> {
+    fn fresh(dir: &Path) -> Result<Vec<ArchivedTask>> {
+        let mut out = Vec::new();
+        for entry in crate::archive_index::read_at(dir)? {
+            let group = entry.group.trim();
+            if group.is_empty() {
+                continue;
+            }
+            let trimmed = |text: &str| Some(text.trim().to_string()).filter(|t| !t.is_empty());
+            out.push((
+                group.to_string(),
+                PendingTask {
+                    description: trimmed(&entry.title),
+                    depends_on: entry.depends_on.clone(),
+                    pipeline: Some(entry.pipeline.clone()).filter(|name| !name.is_empty()),
+                    base: entry.base.as_deref().and_then(trimmed),
+                    path: dir.join(format!("{}.md", entry.id)),
+                    id: entry.id.clone(),
+                    doc: String::new(),
+                    state: TaskState::Done,
+                },
+                // The file's creation time, as `created_time` read it off the
+                // file itself; the archived time only for an entry written
+                // before the index held it.
+                std::time::UNIX_EPOCH.checked_add(match entry.created_ns {
+                    Some(ns) => std::time::Duration::from_nanos(ns),
+                    None => std::time::Duration::from_secs(entry.archived_at.max(0) as u64),
+                }),
+            ));
+        }
+        // The folder listing's order, which tasks of one group reach
+        // `in_reading_order` in.
+        out.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+        Ok(out)
+    }
+
     struct ArchiveCache {
         dir: PathBuf,
         mtime: std::time::SystemTime,
-        tasks: Vec<(String, PendingTask)>,
-    }
-    /// The listing, and whether every file in it was read — only a
-    /// complete pass is safe to cache.
-    fn fresh(dir: &Path) -> Result<(Vec<(String, PendingTask)>, bool)> {
-        let paths = md_files(dir)?;
-        let mut complete = true;
-        let mut out = Vec::new();
-        for path in paths {
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let id = id.to_string();
-            let Ok(doc) = std::fs::read_to_string(&path) else {
-                complete = false;
-                continue;
-            };
-            let Some(front) = list_front(&path, &doc) else {
-                continue;
-            };
-            let Some(group) = front_str(&front, "group") else {
-                continue;
-            };
-            out.push((
-                group,
-                PendingTask {
-                    description: front_str(&front, "title"),
-                    depends_on: front_depends_on(&front),
-                    pipeline: front_pipeline_name(&front),
-                    base: front_str(&front, "base"),
-                    path,
-                    id,
-                    doc,
-                    state: TaskState::Done,
-                },
-            ));
-        }
-        Ok((out, complete))
+        tasks: Vec<ArchivedTask>,
     }
 
     static CACHE: OnceLock<Mutex<Option<ArchiveCache>>> = OnceLock::new();
@@ -796,7 +782,7 @@ fn archive_tasks(dir: &Path) -> Result<Vec<(String, PendingTask)>> {
     let dir_mtime = std::fs::metadata(dir).and_then(|meta| meta.modified()).ok();
 
     let Ok(mut guard) = cache.lock() else {
-        return fresh(dir).map(|(tasks, _)| tasks);
+        return fresh(dir);
     };
     if let (Some(cached), Some(dir_mtime)) = (guard.as_ref(), dir_mtime)
         && cached.dir == dir
@@ -804,8 +790,8 @@ fn archive_tasks(dir: &Path) -> Result<Vec<(String, PendingTask)>> {
     {
         return Ok(cached.tasks.clone());
     }
-    let (tasks, complete) = fresh(dir)?;
-    if let (true, Some(dir_mtime)) = (complete, dir_mtime) {
+    let tasks = fresh(dir)?;
+    if let Some(dir_mtime) = dir_mtime {
         *guard = Some(ArchiveCache {
             dir: dir.to_path_buf(),
             mtime: dir_mtime,
@@ -814,6 +800,10 @@ fn archive_tasks(dir: &Path) -> Result<Vec<(String, PendingTask)>> {
     }
     Ok(tasks)
 }
+
+/// What [`archive_tasks`] hands [`list_groups_in`] for one archived task: its
+/// group, the row, and the time that orders the group.
+type ArchivedTask = (String, PendingTask, Option<std::time::SystemTime>);
 
 // ===================== The `/` filter's own scorer =========================
 //
@@ -1488,6 +1478,128 @@ mod tests {
         assert!(
             archive_tasks(&not_a_dir).is_err(),
             "a failed listing must not be cached as an empty one"
+        );
+    }
+
+    /// The queue tab lists archived tasks from the archive index: nothing
+    /// below opens a task file, a task archived under a warm cache adds its
+    /// own row and nothing else, and the listing is what the files give after
+    /// adds, a sweep and a rebuild. The task's text is read from its own
+    /// file, and only when asked for.
+    #[test]
+    fn list_groups_reads_archived_tasks_from_the_index_and_matches_the_files() {
+        use crate::archive_index::testutil::*;
+        let (repo, _root_guard) = crate::commands::testutil::fixture("pending-archive-index");
+        let front = "group: g\npipeline: impl\nbase: plan/demo\n";
+        archive(&repo, "a", front);
+        archive(&repo, "b", &format!("{front}depends_on: [a]\n"));
+        archive(&repo, "bare", "group: other\n");
+        // Created a moment apart, the later one's file modified earliest, so
+        // an order taken from modification or archiving time would differ.
+        let nudge = |id: &str, secs: u64| {
+            crate::scratch::set_mtime(
+                &repo.archive_dir().join(format!("{id}.md")),
+                std::time::SystemTime::now() + std::time::Duration::from_secs(secs),
+            );
+        };
+        // Only where files have a birth time to tell apart from the
+        // modification time; elsewhere both read the same and nothing is
+        // being distinguished.
+        if std::fs::metadata(repo.archive_dir().join("a.md"))
+            .unwrap()
+            .created()
+            .is_ok()
+        {
+            nudge("a", 50);
+            nudge("bare", 10);
+        }
+
+        // The listing the folder gives, field by field.
+        let from_files = || {
+            let mut rows = Vec::new();
+            for path in md_files(&repo.archive_dir()).unwrap() {
+                let doc = std::fs::read_to_string(&path).unwrap();
+                let front = parse_front(&doc).unwrap();
+                rows.push((
+                    front_str(&front, "group").unwrap(),
+                    front_str(&front, "id").unwrap(),
+                    front_str(&front, "title"),
+                    front_depends_on(&front),
+                    front_pipeline_name(&front),
+                    front_str(&front, "base"),
+                ));
+            }
+            rows
+        };
+        // Group order as `created_time` of each group's newest file gives it,
+        // names breaking ties, which is what the folder-reading listing used.
+        let group_order = |repo: &Repo| -> Vec<String> {
+            list_groups(repo)
+                .unwrap()
+                .into_iter()
+                .map(|g| g.name)
+                .collect()
+        };
+        let order_from_files = |repo: &Repo| -> Vec<String> {
+            let mut groups: BTreeMap<String, Option<std::time::SystemTime>> = BTreeMap::new();
+            for path in md_files(&repo.archive_dir()).unwrap() {
+                let doc = std::fs::read_to_string(&path).unwrap();
+                let group = front_str(&parse_front(&doc).unwrap(), "group").unwrap();
+                let created = created_time(&path);
+                let entry = groups.entry(group).or_insert(None);
+                if newest_first(created, *entry) == std::cmp::Ordering::Less {
+                    *entry = created;
+                }
+            }
+            let mut order: Vec<_> = groups.into_iter().collect();
+            order.sort_by(|a, b| newest_first(a.1, b.1).then_with(|| a.0.cmp(&b.0)));
+            order.into_iter().map(|(name, _)| name).collect()
+        };
+        let from_index = |repo: &Repo| {
+            let mut rows = Vec::new();
+            for group in list_groups(repo).unwrap() {
+                for t in group.tasks {
+                    assert_eq!(t.state, TaskState::Done);
+                    rows.push((
+                        group.name.clone(),
+                        t.id,
+                        t.description,
+                        t.depends_on,
+                        t.pipeline,
+                        t.base,
+                    ));
+                }
+            }
+            rows.sort_by(|a, b| a.1.cmp(&b.1));
+            rows
+        };
+        assert_eq!(from_index(&repo), from_files());
+        assert_eq!(group_order(&repo), order_from_files(&repo));
+
+        reset_rebuilds();
+        let unreadable = with_unreadable_files(&repo, || from_index(&repo));
+        assert_eq!(unreadable.len(), 3);
+        assert_eq!(rebuilds(), 0, "a screen read opened task files");
+
+        archive(&repo, "c", &format!("{front}depends_on: [b]\n"));
+        assert_eq!(from_index(&repo), from_files());
+        assert_eq!(rebuilds(), 0, "archiving one task opened another's file");
+
+        assert_eq!(group_order(&repo), order_from_files(&repo));
+        sweep(&repo, "a");
+        assert_eq!(from_index(&repo), from_files());
+        assert_eq!(group_order(&repo), order_from_files(&repo));
+        lose_index(&repo);
+        assert_eq!(from_index(&repo), from_files());
+        assert_eq!(group_order(&repo), order_from_files(&repo));
+
+        let groups = list_groups(&repo).unwrap();
+        let task = &groups.iter().find(|g| g.name == "g").unwrap().tasks[0];
+        assert!(task.doc.is_empty(), "the listing carries no task text");
+        assert_eq!(
+            task.text().unwrap(),
+            std::fs::read_to_string(&task.path).unwrap(),
+            "the text is the file's own"
         );
     }
 

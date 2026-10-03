@@ -69,11 +69,12 @@ The shared dispatch workspace sits at `~/.spoolway/.dispatcher/`. A project home
 `-<id>`, so the two can never collide. See [One home for every run, in every
 project](dispatcher.md#one-home-for-every-run-in-every-project).
 
-| Directory | Holds | Swept by `retention_days` |
+| Directory | Holds | Swept by |
 |---|---|---|
-| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | No |
-| `archive/`, `scratch/`, `headless/`, `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | Yes |
-| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
+| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
+| `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
+| `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | `retention_days` |
+| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
@@ -202,18 +203,21 @@ These keys apply only when nobody is watching. See [Unattended runs](pipelines.m
 update_check = true
 calibrate_window = "14d"
 retention_days = 30
+archive_retention_days = 0
 price_max_age_days = 30
 ```
 
 | Key | Default | What it controls |
 |---|---|---|
 | `update_check` | `true` | Tell a person at a terminal when a newer release is out. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
-| `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. Keep it below `retention_days`. |
-| `retention_days` | `30` | Days before an entry in a swept directory is deleted. `0` keeps everything. A `scratch/` or `headless/` entry of a task still in the queue is kept. |
+| `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
+| `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. A `scratch/` or `headless/` entry of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
+| `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
 | `price_max_age_days` | `30` | Days before `spoolway doctor` notes that the price table is old. `0` turns the note off. Refresh with `spoolway models refresh`. See [Pricing](cost.md#pricing). |
 
 Archiving a task removes its files under `tracking/`, `commands/` and its session home at
-once. `queue add` cannot name a `depends_on` that was swept out of `archive/`.
+once. `queue add` cannot name a `depends_on` that was swept out of `archive/`, which happens
+only when `archive_retention_days` is set.
 
 ## `[watch]` — directories whose own sessions count as this project's spend
 
