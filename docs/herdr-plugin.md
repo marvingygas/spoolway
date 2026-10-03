@@ -47,8 +47,9 @@ directly rather than `herdr plugin action invoke` — bare `spoolway` when that 
 `spoolway herdr unbind` finds and removes exactly those blocks, by their `key =`/`command =`
 lines, and leaves everything else in the file untouched. It also removes the two blocks 0.6.0's
 `bind` wrote for commands that are now retired, `spoolway dispatch` and `spoolway queue`. `bind`
-replaces those two rather than skipping their keys as taken. Both commands reload the running herdr
-afterwards with `herdr server reload-config`.
+removes those two as well rather than skipping their keys as taken, so `prefix+alt+d` gets bare
+`spoolway` and `prefix+alt+q` is left free. Both commands reload the running herdr afterwards with
+`herdr server reload-config`.
 
 ## The rehearsal
 

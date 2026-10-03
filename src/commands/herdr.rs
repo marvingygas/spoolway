@@ -62,7 +62,8 @@ const BINDINGS: &[Binding] = &[
 /// `spoolway queue`, and both became plain commands when the one screen took
 /// over (#443). Left in place, the first opens a printing dispatcher in a
 /// popup and the second prints usage. So `unbind` removes them as its own,
-/// and `bind` replaces them rather than skipping their keys as taken.
+/// and `bind` removes them rather than skipping their keys as taken, which
+/// frees `prefix+alt+d` for bare `spoolway`.
 const RETIRED_VERBS: &[&str] = &["dispatch", "queue"];
 
 /// Every binding opens as a popup, sized the way `herdr --default-config`'s
