@@ -107,19 +107,27 @@ Platform notes and requirements in full: **[Installation and setup](docs/install
 spoolway init
 ```
 
+`init` asks where the project's setup should live. There are two choices.
+
+| Setup | Where it lives | Use it when |
+|---|---|---|
+| `repo` | `.spoolway/` in the checkout, tracked by git | The whole team should share the pipelines and prompts. |
+| `home` | A workspace under `~/.spoolway/` | Work with spoolway without touching repo code. |
+
+Several clones of the same repo can share one workspace. Each clone gets its own queue and worktrees. Run
+`spoolway init` and choose the existing workspace.
+
+Either way, runtime state such as the queue, the archive and the worktrees stays under
+`~/.spoolway/`. Run `spoolway config path` to see every place a project's setup lives.
+
+See **[Home mode](docs/concepts.md#home-mode)**.
+
 ### 2. Create queueable tasks
 
 Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown tasks.
 It assigns each task to a suitable pipeline and writes the tasks to
 `~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
-of work. If you want help shaping the work first, use `/spoolway-plan`.
-
-You can also create tasks with your own skills. This command prints the frontmatter
-each task must carry:
-
-```
-spoolway task contract
-```
+of work. If you want help shaping the work first, you can use `/spoolway-plan`.
 
 ### 3. Queue
 
@@ -127,11 +135,13 @@ spoolway task contract
 spoolway
 ```
 
-Bare `spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
+`spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
 `enter` to queue it. The tab strip runs dispatch, queue, routines, jobs and eval, and `←` and
 `→` move between them.
 
 ### 4. Dispatch
+
+To start dispatching, spoolway must run in herdr.
 
 ```
 herdr
@@ -158,7 +168,8 @@ Every task on the board is in one of a few states:
 
 The `/spoolway-calibrate` skill reads your archived tasks, their step-level evaluation results
 and the spend ledger. It compares them with the prompts, pipelines and settings that produced
-them. The comparison explains review failures, blocked sessions and wasted loops.
+them. The comparison explains review failures, blocked sessions and wasted loops. This is the
+feedback loop that enables improvement of your workflows over time.
 
 ## A task is what travels the line, and you define it
 
@@ -228,6 +239,46 @@ steps:
 ```
 
 The `/spoolway-config` skill can write and edit pipelines for you.
+
+## Try changes without committing them
+
+In a repo-mode project, the tracked `.spoolway/` is shared with everyone. You can still change
+things on your own machine first. There are two ways:
+
+### Overrides: change what is already tracked
+
+An override patches a tracked pipeline, prompt or config value. It lives in
+`~/.spoolway/<project>/overrides/`.
+
+Tip: the `/spoolway-config` skill activates whenever you want to change something in the spoolway config.
+You can use it to create overrides or any other spoolway file.
+
+```
+spoolway pipeline override default --set implement.model=claude-opus-5
+spoolway prompt override reviewer     # copies the prompt so you can edit it
+spoolway config override              # opens your own copy of config.toml
+spoolway override list                # shows everything you have overridden
+```
+
+When an override works, `spoolway override promote <target>` writes it into the tracked
+file, ready to commit. `spoolway override drop <target>` throws it away.
+
+### Private pipelines: add something new
+
+A private pipeline is a whole new pipeline that only your machine sees. It lives in
+`~/.spoolway/<project>/local/` with its own prompts and task skeleton.
+
+```
+spoolway pipeline copy default experiment   # start from an existing pipeline
+spoolway prompt copy implementer my-impl    # start from an existing prompt
+spoolway pipeline promote experiment        # move it into .spoolway/ when it's ready
+```
+
+Home-mode projects don't need either of these. Their whole setup is already private to the
+machine, so you edit it directly.
+
+See **[The overrides layer](docs/configuration.md#the-overrides-layer)** and
+**[Private pipelines](docs/pipelines.md#private-pipelines)**.
 
 ## Jobs
 
