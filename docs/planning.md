@@ -23,6 +23,11 @@ Each task's `base:` is the branch the plan lands in, such as `main` or a release
 `/spoolway-tasks` writes it for you, from `spoolway task contract`'s own `base`: the branch
 your checkout has out. It stops instead of guessing when that checkout is detached.
 
+`/spoolway-tasks` recommends an open, same-repository pull request as a chain's base on the
+split ballot when that chain's work needs the pull request's change. The recommended option's
+`base` line shows the pull request; another option on the same ballot keeps step 1's own
+branch. The person's pick decides it.
+
 A chain's base can also be set with a note on the split ballot's answer, such as `1 from #412`
 or `cart-empty from main`: a branch is taken as written, and a pull request number resolves to
 that pull request's own branch. A task can still name its own `base:` by hand, or the whole
