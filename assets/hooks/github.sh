@@ -223,17 +223,6 @@ strip_title_prefix() {
   printf '%s' "$1" | sed -E 's/^[a-z]+(\([^()]*\))?!?: //'
 }
 
-# `$1`'s rendered contents, printed only when they hold more than blank
-# lines. `epic.md` and `ticket.md` ship empty now, so a project that has not
-# added lines of its own to either gets no trailing empty section — only a
-# project that has written something there sees it appended.
-nonblank_template() {
-  content=$(cat "$1")
-  stripped=$(printf '%s' "$content" | tr -d '[:space:]')
-  [ -n "$stripped" ] && printf '%s' "$content"
-  return 0
-}
-
 # GitHub issues only have open/closed as native states. This label means the
 # task has entered spoolway; blocked and paused are comments instead of state
 # labels because spoolway has no matching event when either condition clears.
@@ -326,16 +315,11 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
     # all the way through (queue.rs:1579 stores it verbatim); command
     # substitution strips that, so the blank line below is always exactly
     # one regardless of whether the author wrote `|`, `|-` or a plain
-    # scalar. The body is the description alone, flat, with the rendered
-    # `epic.md` appended only when a project has put something of its own
-    # in it — the shipped template ships empty.
+    # scalar. The body is the description alone, flat — the whole of what
+    # the hook itself adds to a group issue.
     epic_lead=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION")
     epic_body="$SPOOLWAY_OUT.epic-body.md"
-    {
-      printf '%s\n' "$epic_lead"
-      epic_template=$(nonblank_template "$SPOOLWAY_EPIC_BODY")
-      [ -n "$epic_template" ] && printf '\n%s\n' "$epic_template"
-    } > "$epic_body"
+    printf '%s\n' "$epic_lead" > "$epic_body"
     set -- gh issue create -R "$repo" -t "$epic_title" \
       -F "$epic_body" --label spoolway:group $(label_flags --label)
     if same_repo_issue "$SPOOLWAY_SOURCE"; then
@@ -352,14 +336,11 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
 
   # The task's own words alone: its `## Context` and `## Acceptance
   # criteria`, never `## Intend` — that section is the plan's framing of the
-  # task, not the task itself. The rendered `ticket.md` is appended only
-  # when a project has put something of its own in it.
+  # task, not the task itself.
   body="$SPOOLWAY_OUT.ticket-body.md"
   {
     ticket_section "## Context"
     ticket_section "## Acceptance criteria"
-    ticket_template=$(nonblank_template "$SPOOLWAY_TICKET_BODY")
-    [ -n "$ticket_template" ] && printf '%s\n' "$ticket_template"
   } > "$body"
 
   ticket_title=$(strip_title_prefix "$SPOOLWAY_TITLE")

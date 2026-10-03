@@ -858,17 +858,6 @@ fn place_examples(
         let rel = shown(root, &path);
         wrote |= placer.file(path, &rel, skeleton.as_bytes(), false)?;
     }
-    // The two ticket-body templates a tracker hook renders and hands to its
-    // own `gh`/`acli` call — seeded once, like a task skeleton, and never
-    // looked at again by `sync`. A project with neither file written gets
-    // a single line naming the task instead of this prose; see
-    // `crate::task_template::resolve_tracking`.
-    for (name, body) in assets::TRACKING_TEMPLATES {
-        let path = crate::config::under_setup(state, crate::config::TRACKING_TEMPLATES_DIR)
-            .join(format!("{name}.md"));
-        let rel = shown(root, &path);
-        wrote |= placer.file(path, &rel, body.as_bytes(), false)?;
-    }
     Ok(wrote)
 }
 

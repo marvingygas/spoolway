@@ -493,12 +493,6 @@ impl Repo {
         self.under_setup(crate::config::JOBS_FILE)
     }
 
-    /// Where a project overrides `epic.md` and `ticket.md`, the two bodies
-    /// the `open` hook renders — see [`crate::task_template::resolve_tracking`].
-    pub fn tracking_templates_dir(&self) -> PathBuf {
-        self.under_setup(crate::config::TRACKING_TEMPLATES_DIR)
-    }
-
     /// Every task's lane state, across every dispatcher this machine has run
     /// for this project.
     pub fn lanes_file(&self) -> PathBuf {
@@ -3390,7 +3384,6 @@ mod tests {
             "STATE_DIR",
             "PROMPTS_DIR",
             "TASK_TEMPLATES_DIR",
-            "TRACKING_TEMPLATES_DIR",
             "ROUTINES_DIR",
             "JOBS_FILE",
         ];

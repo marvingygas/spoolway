@@ -1,6 +1,6 @@
 ---
 domain: configuration
-covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/tracking/**", "assets/hooks/**", ".github/workflows/spoolway-issues.yml", ".github/scripts/close-jira.sh"]
+covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "src/local.rs", "assets/hooks/**", ".github/workflows/spoolway-issues.yml", ".github/scripts/close-jira.sh"]
 ---
 
 # Configuration
@@ -307,13 +307,12 @@ the line's floor.
 
 `spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no
 `ticket:` yet, in dependency order, before it writes anything. The script also gets
-`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`), `SPOOLWAY_GROUP_DESCRIPTION`
-(the group's `group_description:`, blank if no task set one), `SPOOLWAY_EPIC_BODY` and
-`SPOOLWAY_TICKET_BODY` (rendered from `.spoolway/templates/tracking/epic.md` and `ticket.md`).
-Both files ship empty. A missing file renders as a single line naming the task. An existing,
-blank file renders as nothing.
+`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`) and
+`SPOOLWAY_GROUP_DESCRIPTION` (the group's `group_description:`, blank if no task set one).
 `SPOOLWAY_TASK_FILE` is the task's own path while this hook runs, blank when the task
-has no file of its own, such as a `queue add --from -` stream entry.
+has no file of its own, such as a `queue add --from -` stream entry. The hook builds the
+whole issue body itself, from `SPOOLWAY_GROUP_DESCRIPTION` and the task file's own
+`## Context` and `## Acceptance criteria` sections; spoolway renders nothing into it.
 
 The submission is refused, naming the group, when no task in a group sets
 `group_description:`.
@@ -325,11 +324,6 @@ every task in the batch: `enter` creates the tickets and queues, `n` queues the 
 Queueing a routine asks the same question. A trial never asks and opens no ticket. See
 [`spoolway queue`](cli-reference.md#spoolway-queue) and
 [`tracking`](tasks.md#the-frontmatter-is-spoolways).
-
-A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
-holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
-empty. A line with no placeholder, or one where at least one placeholder resolves to
-something, renders unchanged.
 
 The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 
@@ -389,8 +383,8 @@ called it. That log is what a paused task's `## Hook error` reads its tail from.
 
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` | `bash` >= 3.2, `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name; its body is `group_description:` as one flat paragraph, followed by the rendered epic template when it is not blank. The ticket is titled with `SPOOLWAY_TITLE` minus a leading commit prefix (a lowercase word, an optional `(scope)` and an optional `!`, such as `fix(hooks)!: `); a title with no such prefix is unchanged. The ticket's body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`, followed by the rendered ticket template when it is not blank. A section the task does not have is left out, heading and all. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it swaps the `spoolway:in-progress` label for `spoolway:review` and comments "Ready for review in `<PR URL>`" on the ticket. It posts nothing on the pull request and closes nothing itself. |
-| `jira.sh` | `bash` >= 3.2, `acli` >= 1.3.39, `gh` >= 2.97.0 and `jq` >= 1.6 | Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. The Story is titled with the group's name; its body is `group_description:` as one flat paragraph, followed by the rendered epic template when it is not blank. The Sub-task is titled with `SPOOLWAY_TITLE` minus the same leading commit prefix `github.sh` strips. Its body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`, followed by the rendered ticket template when it is not blank; a section the task does not have is left out, heading and all. Both bodies are converted from Markdown to Atlassian Document Format by a `jq` filter built into the script, and checked with `jq empty`, before `acli` sends them, so headings, lists, code, bold text and links show as rich text on Jira Cloud instead of one plain paragraph. Returns the lowercased Story key as the slug. Comments the task's own `## Status Log` and `## Handoff`, as ADF, on `blocked` and `paused`, the same content `github.sh` posts; a missing section is skipped. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. On `done` it also comments "Ready for review in `<owner>/<repo>#<n>`" on the Sub-task, the pull request's own URL behind that link, and fails naming the branch when `gh pr view` finds no pull request. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
+| `github.sh` | `bash` >= 3.2, `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name; its body is `group_description:` as one flat paragraph. The ticket is titled with `SPOOLWAY_TITLE` minus a leading commit prefix (a lowercase word, an optional `(scope)` and an optional `!`, such as `fix(hooks)!: `); a title with no such prefix is unchanged. The ticket's body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`. A section the task does not have is left out, heading and all. Before either issue, it creates whichever of `SPOOLWAY_LABELS` `gh label list` does not already show, matched case-insensitively, then puts every one of them on both the epic and the ticket, beside `spoolway:group` and `spoolway:task`; a task queued later onto an already-open epic adds its own labels there too. Labels the ticket `spoolway:in-progress` on `started`. Comments with the task file on `blocked` and `paused`. On `done` it swaps the `spoolway:in-progress` label for `spoolway:review` and comments "Ready for review in `<PR URL>`" on the ticket. It posts nothing on the pull request and closes nothing itself. |
+| `jira.sh` | `bash` >= 3.2, `acli` >= 1.3.39, `gh` >= 2.97.0 and `jq` >= 1.6 | Reads an issue on `fetch`. On `open` creates one Story per group, a group of one included, and one Sub-task per task under it; links a Sub-task `Blocks` the task named in its own `depends_on`, and links the Story `Relates` to a `…/browse/<key>` source. The Story is titled with the group's name; its body is `group_description:` as one flat paragraph. The Sub-task is titled with `SPOOLWAY_TITLE` minus the same leading commit prefix `github.sh` strips. Its body is the task's own `## Context` and `## Acceptance criteria` sections, never `## Intend`; a section the task does not have is left out, heading and all. Both bodies are converted from Markdown to Atlassian Document Format by a `jq` filter built into the script, and checked with `jq empty`, before `acli` sends them, so headings, lists, code, bold text and links show as rich text on Jira Cloud instead of one plain paragraph. Returns the lowercased Story key as the slug. Comments the task's own `## Status Log` and `## Handoff`, as ADF, on `blocked` and `paused`, the same content `github.sh` posts; a missing section is skipped. A Sub-task moves to Draft at `open`, In Progress at `started`, and Review at `done`, and carries the task's own labels. On `done` it also comments "Ready for review in `<owner>/<repo>#<n>`" on the Sub-task, the pull request's own URL behind that link, and fails naming the branch when `gh pr view` finds no pull request. The Story leaves Draft at the first `started` in its group and moves to Review once the group's last task reaches `done`; its own labels are the union of every task's. Nothing in the shipped script ever sets Resolved. Check the link type and status names named in the script's header against your site. |
 
 ### How the sample GitHub workflow works
 

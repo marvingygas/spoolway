@@ -194,7 +194,6 @@ fn scaffold_paths(project: &Project) -> Vec<String> {
         ".spoolway/pipelines",
         ".spoolway/prompts",
         ".spoolway/templates/tasks",
-        ".spoolway/templates/tracking",
         ".spoolway/hooks",
     ] {
         paths.extend(files_under(project, dir));

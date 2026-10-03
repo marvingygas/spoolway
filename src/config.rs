@@ -24,12 +24,6 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// already goes through the accessors on [`crate::repo::Repo`].
 pub const PROMPTS_DIR: &str = ".spoolway/prompts";
 pub const TASK_TEMPLATES_DIR: &str = ".spoolway/templates/tasks";
-/// The two ticket-body templates `queue add`'s open hook renders —
-/// `epic.md` and `ticket.md` — beside the task templates but their own
-/// sibling directory: a task skeleton is the body a lane starts from, these
-/// are the body a tracker's issue starts from, and the two are never
-/// selected the same way (one by pipeline name, these by a fixed pair).
-pub const TRACKING_TEMPLATES_DIR: &str = ".spoolway/templates/tracking";
 /// Repeatable tasks a project keeps to re-run, nested however it
 /// likes and tracked in git alongside the prompts and task templates above.
 /// Unlike those, `spoolway init` never writes this directory and never seeds
@@ -138,7 +132,7 @@ pub(crate) fn is_state_root_checkout(checkout: &Path) -> bool {
 }
 
 /// `full` — one of the constants above ([`PROMPTS_DIR`], [`TASK_TEMPLATES_DIR`],
-/// [`TRACKING_TEMPLATES_DIR`], [`ROUTINES_DIR`], [`JOBS_FILE`]), always
+/// [`ROUTINES_DIR`], [`JOBS_FILE`]), always
 /// spelled whole from the checkout (`.spoolway/prompts`, never bare
 /// `prompts`), because a project's own docs and `commands::init`'s
 /// scaffolding both display it that way — rebased onto `setup_dir`, an

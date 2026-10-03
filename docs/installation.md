@@ -104,8 +104,8 @@ without a terminal or answered at the menu, whose own default is pre-selected to
 a different `--provider` on an established project adds that provider's skills. The project's
 own profile and pipelines stay as they are until `spoolway init --force` rewrites them.
 
-Answering yes to the example setup writes the shipped pipelines, prompts, task templates and
-ticket templates. Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
+Answering yes to the example setup writes the shipped pipelines, prompts and task templates.
+Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
 and `templates/` folders instead, for the `spoolway-config` skill to fill. An established
 project is not asked again: it keeps whatever its own files already show, and a repeat run
 restores any of its example files that went missing. An example pipeline whose name a private
@@ -130,7 +130,6 @@ flowchart LR
 | `.spoolway/prompts/<name>/PROMPT.md` | The five sample prompts, with the example setup. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills, with the example setup. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline, with the example setup. |
-| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders, with the example setup. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`, written only when a tracker is chosen. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |

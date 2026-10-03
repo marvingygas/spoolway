@@ -187,17 +187,6 @@ strip_title_prefix() {
   printf '%s' "$1" | sed -E 's/^[a-z]+(\([^()]*\))?!?: //'
 }
 
-# `$1`'s rendered contents, printed only when they hold more than blank
-# lines. `epic.md` and `ticket.md` ship empty now, so a project that has not
-# added lines of its own to either gets no trailing empty section — only a
-# project that has written something there sees it appended.
-nonblank_template() {
-  content=$(cat "$1")
-  stripped=$(printf '%s' "$content" | tr -d '[:space:]')
-  [ -n "$stripped" ] && printf '%s' "$content"
-  return 0
-}
-
 # One section's own content out of a task file, matching the boundary rule
 # `Task::find_section` uses in src/task.rs: a line equal to `heading` (case
 # folded, trailing space trimmed) starts it, and it ends at the next line
@@ -479,18 +468,11 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   }
 
   if [ -z "$epic" ]; then
-    # The Story's body is the group description alone, flat, with the
-    # rendered `epic.md` appended only when a project has put something of
-    # its own in it — the shipped template ships empty. `to_adf_file` turns
-    # that Markdown into the ADF Jira Cloud actually draws as rich text.
-    epic_lead=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION")
-    epic_template=$(nonblank_template "$SPOOLWAY_EPIC_BODY")
-    if [ -n "$epic_template" ]; then
-      epic_md=$(printf '%s\n\n%s\n' "$epic_lead" "$epic_template")
-    else
-      epic_md=$epic_lead
-    fi
-    epic_adf="$SPOOLWAY_EPIC_BODY.adf.json"
+    # The Story's body is the group description alone, flat — the whole of
+    # what the hook itself adds to a group issue. `to_adf_file` turns that
+    # Markdown into the ADF Jira Cloud actually draws as rich text.
+    epic_md=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION")
+    epic_adf="$SPOOLWAY_OUT.epic-body.adf.json"
     to_adf_file "$epic_md" "$epic_adf"
 
     # A group of one still opens a Story — one shape for every group, not a
@@ -516,19 +498,16 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   if [ -z "$ticket" ]; then
     # The task's own words alone: its `## Context` and `## Acceptance
     # criteria`, never `## Intend` — that section is the plan's framing of
-    # the task, not the task itself. The rendered `ticket.md` is appended
-    # only when a project has put something of its own in it. One command
-    # substitution around all three, not one each concatenated — `$(...)`
-    # strips only its own *trailing* newlines, so capturing `ticket_section`
-    # separately and pasting the results together would weld the end of
-    # Context straight onto the `## Acceptance criteria` heading with
-    # nothing between them.
+    # the task, not the task itself. One command substitution around both,
+    # not one each concatenated — `$(...)` strips only its own *trailing*
+    # newlines, so capturing `ticket_section` separately and pasting the
+    # results together would weld the end of Context straight onto the
+    # `## Acceptance criteria` heading with nothing between them.
     ticket_md=$(
       ticket_section "## Context"
       ticket_section "## Acceptance criteria"
-      nonblank_template "$SPOOLWAY_TICKET_BODY"
     )
-    ticket_adf="$SPOOLWAY_TICKET_BODY.adf.json"
+    ticket_adf="$SPOOLWAY_OUT.ticket-body.adf.json"
     to_adf_file "$ticket_md" "$ticket_adf"
     ticket_title=$(strip_title_prefix "$SPOOLWAY_TITLE")
 
@@ -611,9 +590,9 @@ case "$SPOOLWAY_EVENT" in
       comment_section "## Handoff"
     )
     # `mktemp`, not `$SPOOLWAY_TASK_FILE.snapshot.adf.json`: `open` has its
-    # own `$SPOOLWAY_EPIC_BODY`/`$SPOOLWAY_TICKET_BODY` paths under the
-    # tracking directory to write through, but `blocked`/`paused`/`done` get
-    # no scratch path of their own, and `$SPOOLWAY_TASK_FILE` names the live
+    # own `$SPOOLWAY_OUT`-relative paths under the tracking directory to
+    # write through, but `blocked`/`paused`/`done` get no scratch path of
+    # their own, and `$SPOOLWAY_TASK_FILE` names the live
     # queue file — a path beside it is a stray `<id>.md.*.adf.json` nothing
     # ever reads or removes, left behind in the project's queue directory
     # even once the task archives (review finding, ported). The trap cleans

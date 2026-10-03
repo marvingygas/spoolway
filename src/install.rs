@@ -180,7 +180,9 @@ pub const RETIRED_SKILLS: &[(&str, &str)] = &[
 /// when `spoolway stack` started sending the task file's own body verbatim;
 /// `lane-prompts.md` stopped being read when the seven typed messages a
 /// lane's pane receives became spoolway's own, with no project override left
-/// to resolve against them.
+/// to resolve against them. `tracking/epic.md` and `ticket.md` stopped being
+/// read when the `open` hook started building the whole issue body itself,
+/// from the task file and the group description.
 pub const RETIRED_TEMPLATES: &[(&str, &str)] = &[
     (
         ".spoolway/templates/task-log.md",
@@ -193,6 +195,14 @@ pub const RETIRED_TEMPLATES: &[(&str, &str)] = &[
     (
         ".spoolway/templates/lane-prompts.md",
         "the lane messages are spoolway's own",
+    ),
+    (
+        ".spoolway/templates/tracking/epic.md",
+        "the issue body is the hook's own",
+    ),
+    (
+        ".spoolway/templates/tracking/ticket.md",
+        "the issue body is the hook's own",
     ),
 ];
 
