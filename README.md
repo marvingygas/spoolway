@@ -25,6 +25,8 @@ Supported providers:
 - **`codex`**
 - **`pi`**
 
+<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
+
 ## Why
 
 Running one coding agent is easy. Running five is hard: which one is done, which one is
@@ -98,8 +100,6 @@ herdr plugin install marvingygas/spoolway
 Platform notes and requirements in full: **[Installation and setup](docs/installation.md)**.
 
 ## Quick start
-
-<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
 
 ### 1. Set up inside the project repo
 
