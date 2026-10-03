@@ -168,7 +168,7 @@ pub struct Frontmatter {
     /// can both be set at once: parking a `blocked` row (the board's `p`, or
     /// `spoolway queue pause`) writes `parked_from: blocked` beside whatever
     /// `blocked_from` the block already carried, and leaves that field alone.
-    /// `back_onto_its_step` in `src/commands/report.rs` checks `parked_from`
+    /// `resume_road` in `src/commands/report.rs` checks `parked_from`
     /// first, so it is the one that decides where a resume goes when both are
     /// set. Three gestures set it — a person's own keypress (the
     /// board's `p`), a person's own Escape typed into the pane (see
@@ -493,14 +493,15 @@ pub struct Frontmatter {
     /// made to run again — so it needs its own field rather than a third
     /// value squeezed into that one.
     ///
-    /// `spoolway resume` reads this before anything else in
-    /// `commands::report::back_onto_its_step`: it forgets the failed run
-    /// (see [`crate::tracking::forget`]) so the next pass's `fire` starts it
-    /// over, and — for `"done"` — sends the task straight back to `done`
-    /// rather than through [`crate::commands::resume_target`]'s ordinary
-    /// step-shaped roads, neither of which knows a name that is not a
-    /// pipeline step at all. Cleared the moment it is read, so a later,
-    /// ordinary pause never inherits it.
+    /// `spoolway resume` reads this twice. For `"done"`,
+    /// `commands::report::resume_road` decides the task goes straight back to
+    /// `done` rather than through [`crate::commands::resume_target`]'s
+    /// ordinary step-shaped roads, neither of which knows a name that is not
+    /// a pipeline step at all. Then `commands::report::back_onto_its_step`
+    /// moves it, and takes this field as it forgets the failed run (see
+    /// [`crate::tracking::forget`]), so the next pass's `fire` starts it over
+    /// and a later, ordinary pause never inherits it. `resume_road` and
+    /// `spoolway queue route` only read it, and leave it set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_paused: Option<String>,
 

@@ -889,6 +889,13 @@ has "paused_by names the gate" "paused_by: gate" "$SPOOLWAY_PROJECT_HOME/queue/$
 lacks "blocked_from does not survive the hold — nothing here is a caught block" \
   "blocked_from:" "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
 
+says "queue route names where resuming the held gate sends it" \
+  "Resuming on the board sends it to e2e." \
+  "$SPOOLWAY" queue route "$GATE_TASK"
+says "and tells a person the --stage line to run in their own shell" \
+  "spoolway resume $GATE_TASK --stage" \
+  "$SPOOLWAY" queue route "$GATE_TASK"
+
 must "resuming the held gate" "$SPOOLWAY" resume "$GATE_TASK"
 if [ "$(stage_of "$GATE_TASK")" = e2e ]; then
   ok "resuming takes look's own on_pass — the unblocker's pass still stands in for finished work"

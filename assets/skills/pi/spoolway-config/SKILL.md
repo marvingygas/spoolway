@@ -51,6 +51,9 @@ description: Write, change or repair anything spoolway runs on — a pipeline, a
 - Name a new prompt by role, never by pipeline — `reviewer`, not
   `<pipeline>-reviewer`. Keep it to 40 lines; past that, trim or move the
   shared knowledge into a skill.
+- A prompt never restates or contradicts what `prompt contract` shows every
+  lane is told. Check each prompt you write or change against it, and cut
+  the overlap.
 
 ## Preferences
 

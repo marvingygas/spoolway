@@ -422,6 +422,9 @@ fn run() -> Result<()> {
                     commands::queue_list(&repo, routing(&graph)?, cli.json)
                 }
                 Command::Queue(QueueCommand::Show { task }) => commands::queue_show(&repo, task),
+                Command::Queue(QueueCommand::Route { task }) => {
+                    commands::queue_route(&repo, routing(&graph)?, task, cli.json)
+                }
                 Command::Queue(QueueCommand::Add(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     commands::queue_add(&repo, routing(&graph)?, args, &cwd, in_lane)

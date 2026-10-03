@@ -1005,6 +1005,12 @@ pub enum QueueCommand {
     /// Print one task file.
     Show { task: String },
 
+    /// One task's own pipeline in step order — what each step does and
+    /// where it routes — with the step the task is on marked, and where
+    /// resuming it on the board sends it now. Read-only, so a lane may run
+    /// it too. `--json` prints the same facts as one object.
+    Route { task: String },
+
     /// Queue whole tasks — the only way a task enters the queue.
     Add(QueueAddArgs),
 

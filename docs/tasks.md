@@ -203,6 +203,7 @@ step.
 |---|---|
 | `spoolway queue list` | Whether a dispatcher runs, and where every task is. |
 | `spoolway queue show <task>` | Prints one task file. |
+| `spoolway queue route <task>` | Prints the task's pipeline with its step marked, and where resuming it sends it. |
 | `spoolway queue add --from <path>` | Queues tasks. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
@@ -340,8 +341,10 @@ the cut stays.
 ### The stop is yours to work in
 
 The pane a stop left open is still there. Type into it, and the lane does what you ask,
-including work its own step would otherwise leave to another. Only resuming stays a person's:
-a lane cannot call `spoolway resume` on its own task.
+including work its own step would otherwise leave to another. The lane writes each change you
+ask for into the task, so later steps see it. It tells you where resuming sends the task, the
+same route `spoolway queue route <task>` shows. Only resuming stays a person's: a lane cannot
+call `spoolway resume` on its own task.
 
 `spoolway task edit` rewrites one section of the task while it sits on `paused` or
 `blocked`, under the same task lock `spoolway report` takes.

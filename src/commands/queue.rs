@@ -129,6 +129,242 @@ pub fn queue_show(repo: &Repo, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// `spoolway queue route <task>`: where one task stands in its own pipeline,
+/// and where resuming it sends it.
+///
+/// `pipeline show` answers neither: it prints every pipeline, with agents and
+/// models, and nothing about any task. This prints the one pipeline the task
+/// runs, a step to an entry, and leaves out `blocked` — reached from any step
+/// and routed by whichever step the task stopped on, it has no route of its
+/// own to draw — and every agent, model and prompt name, which a reader asking
+/// what happens next has no use for.
+///
+/// Read-only, and so never refused from inside a lane the way
+/// `spoolway resume` is: a lane reads this before it tells a person where
+/// resuming sends its task.
+pub fn queue_route(repo: &Repo, pipelines: &Pipelines, id: &str, json: bool) -> Result<()> {
+    let task = repo.task(id)?;
+    let route = route_view(&task, pipelines)?;
+    match json {
+        true => println!("{}", serde_json::to_string_pretty(&route)?),
+        false => print!("{}", render_route(&route)),
+    }
+    Ok(())
+}
+
+/// Everything `queue route` says, as facts — what `--json` prints, and what
+/// [`render_route`] draws the text from, so the two cannot say different
+/// things.
+#[derive(Debug, serde::Serialize)]
+struct RouteView {
+    task: String,
+    pipeline: String,
+    stage: String,
+    /// Where the task stands, as the first line says it after the pipeline's
+    /// name: `held at look, waiting for a person`.
+    state: String,
+    /// The step the task is on, or held at — the marked entry. `None` for a
+    /// task on `queued`, on `done`, or held before it ever started.
+    at: Option<String>,
+    steps: Vec<RouteStep>,
+    /// Whether the task is stopped on `paused` or `blocked`, the two stages
+    /// the board offers `r` on. Only then does a resume line apply.
+    held: bool,
+    /// Where resuming it on the board sends it — [`crate::commands::
+    /// resume_road`], the function `spoolway resume` itself acts on. `None`
+    /// when it is not held, or when that function refused.
+    resumes_to: Option<String>,
+    /// Why `resume_road` refused, when it did: the same error a resume
+    /// would stop on.
+    resume_error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RouteStep {
+    id: String,
+    description: Option<String>,
+    /// The step's own `gate: true`: a pass waits for a person.
+    gate: bool,
+    /// The task's own `gate_at` names this step: whatever it reports waits
+    /// for a person.
+    gate_at: bool,
+    on_pass: Option<String>,
+    on_fail: Option<String>,
+    /// A terminal step: the task stops here, with no route onward.
+    ends: bool,
+}
+
+fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
+    let pipeline = pipelines.for_task(task)?;
+    let (state, at) = route_state(task, pipeline);
+    let held = matches!(
+        task.stage(),
+        crate::pipeline::PAUSED | crate::pipeline::BLOCKED
+    );
+    let (resumes_to, resume_error) = match held {
+        false => (None, None),
+        true => match crate::commands::resume_road(task, pipelines) {
+            Ok(road) => (Some(road.destination().to_string()), None),
+            Err(err) => (None, Some(format!("{err:#}"))),
+        },
+    };
+    let steps = pipeline
+        .steps
+        .iter()
+        .filter(|step| step.id != crate::pipeline::BLOCKED)
+        .map(|step| {
+            let ends = step.kind() == StepKind::Terminal;
+            RouteStep {
+                id: step.id.clone(),
+                description: step.description.clone(),
+                gate: step.gate,
+                gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
+                on_pass: (!ends)
+                    .then(|| step.destination(Outcome::Pass).map(str::to_string))
+                    .flatten(),
+                on_fail: (!ends)
+                    .then(|| step.destination(Outcome::Fail).map(str::to_string))
+                    .flatten(),
+                ends,
+            }
+        })
+        .collect();
+    Ok(RouteView {
+        task: task.id().to_string(),
+        pipeline: pipeline.name.clone(),
+        stage: task.stage().to_string(),
+        state,
+        at,
+        steps,
+        held,
+        resumes_to,
+        resume_error,
+    })
+}
+
+/// Where `task` stands, in words, and the step to mark for it.
+///
+/// A held task is marked at the step it stopped on rather than at `paused` or
+/// `blocked`, neither of which is an entry here: `paused_at` for a gate,
+/// `parked_from` for a park, and for a block the step [`crate::commands::
+/// resume_target`] reads back as the one it stopped on. A blocked task parked
+/// by `p` carries `parked_from: blocked`, which names no entry either, so it is
+/// marked at that same step.
+fn route_state(task: &Task, pipeline: &Pipeline) -> (String, Option<String>) {
+    let front = &task.front;
+    // The step a block stopped the task on, or `None` when it never started.
+    let blocked_at = || {
+        let origin = crate::commands::resume_target(task, pipeline);
+        (origin != crate::pipeline::QUEUED).then_some(origin)
+    };
+    match task.stage() {
+        crate::pipeline::QUEUED => ("queued, not started yet".to_string(), None),
+        crate::pipeline::DONE => ("done".to_string(), None),
+        crate::pipeline::PAUSED => {
+            if let Some(gated) = &front.paused_at {
+                (
+                    format!("held at {gated}, waiting for a person"),
+                    Some(gated.clone()),
+                )
+            } else if front.parked_from.as_deref() == Some(crate::pipeline::BLOCKED) {
+                match blocked_at() {
+                    Some(origin) => (format!("paused while blocked at {origin}"), Some(origin)),
+                    None => ("paused while blocked, before it started".to_string(), None),
+                }
+            } else if let Some(step) = &front.parked_from {
+                (format!("paused at {step}"), Some(step.clone()))
+            } else if let Some(stage) = &front.hook_paused {
+                (format!("paused: its `{stage}` hook failed"), None)
+            } else {
+                ("paused before it started".to_string(), None)
+            }
+        }
+        crate::pipeline::BLOCKED => match blocked_at() {
+            Some(origin) => (format!("blocked at {origin}"), Some(origin)),
+            None => ("blocked before it started".to_string(), None),
+        },
+        step => (format!("at {step}"), Some(step.to_string())),
+    }
+}
+
+/// The width [`render_route`] wraps a description to once it needs more than
+/// one line.
+const ROUTE_WRAP: usize = 75;
+
+/// The widest a description may run and still stay on one line. A little
+/// past [`ROUTE_WRAP`], so a description just over it is not split to put a
+/// single word on a line of its own. Both stay under 80 columns, so a
+/// person's terminal never wraps a line a second time.
+const ROUTE_ONE_LINE: usize = 77;
+
+/// The text `queue route` prints: a line saying where the task stands, one
+/// entry per step, and the resume lines.
+fn render_route(route: &RouteView) -> String {
+    let mut out = format!("{} — {}\n\n", route.pipeline, route.state);
+    // Three spaces past the longest id, so every description starts in one
+    // column however long the pipeline's own step names are.
+    let column = route
+        .steps
+        .iter()
+        .map(|step| step.id.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let indent = " ".repeat(column + 2);
+    for step in &route.steps {
+        let marker = match route.at.as_deref() == Some(step.id.as_str()) {
+            true => "▸ ",
+            false => "  ",
+        };
+        let held = match (step.gate_at, step.gate) {
+            (true, _) => Some("Whatever it reports waits for a person."),
+            (false, true) => Some("A pass waits for a person."),
+            (false, false) => None,
+        };
+        let about = [step.description.as_deref(), held]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let prefix = format!("{marker}{:<column$}", step.id);
+        match about.is_empty() {
+            true => out.push_str(prefix.trim_end()),
+            false if prefix.chars().count() + about.chars().count() <= ROUTE_ONE_LINE => {
+                out.push_str(&prefix);
+                out.push_str(&about);
+            }
+            false => out.push_str(&wrapped(&prefix, &about, ROUTE_WRAP).join("\n")),
+        }
+        out.push('\n');
+        let routes = match (step.ends, &step.on_pass, &step.on_fail) {
+            (true, _, _) => "the task ends here".to_string(),
+            (false, pass, fail) => format!(
+                "pass → {} · fail → {}",
+                pass.as_deref().unwrap_or("—"),
+                fail.as_deref().unwrap_or("—")
+            ),
+        };
+        out.push_str(&format!("{indent}{routes}\n"));
+    }
+    out.push('\n');
+    if !route.held {
+        out.push_str("It is not held, so there is nothing to resume.\n");
+        return out;
+    }
+    match (&route.resumes_to, &route.resume_error) {
+        (Some(step), _) => out.push_str(&format!("Resuming on the board sends it to {step}.\n")),
+        (None, error) => out.push_str(&format!(
+            "Resuming on the board fails: {}\n",
+            error.as_deref().unwrap_or("no destination")
+        )),
+    }
+    out.push_str(&format!(
+        "To send it to another step, in your own shell:\n  spoolway resume {} --stage <step>\n",
+        route.task
+    ));
+    out
+}
+
 /// The longest step id that will ever be part of one of this pipeline's lane
 /// names. Only agent steps get a lane, so a long `wait` or `terminal` id costs
 /// a task id nothing.
@@ -17725,5 +17961,356 @@ body\n";
                 "base `{base}` must not have been queued"
             );
         }
+    }
+
+    /// A gate between two plain steps, and a staffed `blocked` that
+    /// `queue route` must leave out — the shapes its tests read.
+    fn route_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+             - id: build\n    agent: pi\n    description: Build it.\n    on_pass: deploy\n  \
+             - id: deploy\n    agent: pi\n    description: Ship it.\n    gate: true\n    loop: 2\n    \
+               on_pass: announce\n    on_fail: build\n  \
+             - id: announce\n    agent: pi\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        pipelines
+    }
+
+    /// What `queue route` says a resume does, then what a real resume did:
+    /// the two must name the same stage. Returns that stage.
+    fn route_then_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> String {
+        let said = route_view(&queued(repo, id), pipelines)
+            .unwrap()
+            .resumes_to
+            .expect("a held task names where resuming sends it");
+        crate::commands::resume(
+            repo,
+            pipelines,
+            &crate::cli::ResumeArgs {
+                task: id.into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(queued(repo, id).stage(), said, "the route named {said}");
+        said
+    }
+
+    #[test]
+    fn route_names_where_a_held_gate_resumes() {
+        let (repo, _root_guard) = fixture("route-gate");
+        let pipelines = route_pipelines();
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.front.paused_at = Some("deploy".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "ship"), &pipelines).unwrap());
+        assert!(
+            text.starts_with("default — held at deploy, waiting for a person\n"),
+            "{text}"
+        );
+        assert!(text.contains("▸ deploy"), "{text}");
+        assert!(
+            text.contains("Ship it. A pass waits for a person."),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "Resuming on the board sends it to announce.\n\
+                 To send it to another step, in your own shell:\n  \
+                 spoolway resume ship --stage <step>\n"
+            ),
+            "{text}"
+        );
+
+        assert_eq!(route_then_resume(&repo, &pipelines, "ship"), "announce");
+    }
+
+    #[test]
+    fn route_names_where_a_block_resumes() {
+        let (repo, _root_guard) = fixture("route-block");
+        let pipelines = route_pipelines();
+        add(&repo, "wall", &[]);
+        let mut task = queued(&repo, "wall");
+        task.set_stage("deploy", None);
+        task.front.blocked_from = Some("deploy".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "wall"), &pipelines).unwrap());
+        assert!(text.starts_with("default — blocked at deploy\n"), "{text}");
+        assert!(text.contains("▸ deploy"), "{text}");
+
+        assert_eq!(route_then_resume(&repo, &pipelines, "wall"), "deploy");
+    }
+
+    #[test]
+    fn route_names_where_a_park_resumes() {
+        let (repo, _root_guard) = fixture("route-park");
+        let pipelines = route_pipelines();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("build", "test setup");
+        task.save().unwrap();
+        queue_pause(&repo, &pipelines, "solo", false).unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "solo"), &pipelines).unwrap());
+        assert!(text.starts_with("default — paused at build\n"), "{text}");
+        assert!(text.contains("▸ build"), "{text}");
+
+        assert_eq!(route_then_resume(&repo, &pipelines, "solo"), "build");
+    }
+
+    #[test]
+    fn route_names_where_a_task_that_never_started_resumes() {
+        let (repo, _root_guard) = fixture("route-never-started");
+        let pipelines = route_pipelines();
+        add(&repo, "fresh", &[]);
+        queue_pause(&repo, &pipelines, "fresh", false).unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "fresh"), &pipelines).unwrap());
+        assert!(
+            text.starts_with("default — paused before it started\n"),
+            "{text}"
+        );
+        assert!(!text.contains('▸'), "nothing to mark: {text}");
+
+        assert_eq!(
+            route_then_resume(&repo, &pipelines, "fresh"),
+            crate::pipeline::QUEUED
+        );
+    }
+
+    /// A task still moving is not held: there is no resume line to give, and
+    /// no `--stage` one either, which would reroute a step a lane is working.
+    #[test]
+    fn route_offers_no_resume_for_a_task_that_is_not_held() {
+        let (repo, _root_guard) = fixture("route-running");
+        let pipelines = route_pipelines();
+        add(&repo, "busy", &[]);
+        let mut task = queued(&repo, "busy");
+        task.set_stage("build", None);
+        task.save().unwrap();
+
+        let route = route_view(&queued(&repo, "busy"), &pipelines).unwrap();
+        assert_eq!(route.resumes_to, None);
+        let text = render_route(&route);
+        assert!(text.starts_with("default — at build\n"), "{text}");
+        assert!(
+            text.ends_with("It is not held, so there is nothing to resume.\n"),
+            "{text}"
+        );
+        assert!(!text.contains("--stage"), "{text}");
+    }
+
+    /// The task's own `gate_at` holds whatever its step reports, not only a
+    /// pass, and the entry says so.
+    #[test]
+    fn route_says_a_scheduled_gate_holds_any_outcome() {
+        let (repo, _root_guard) = fixture("route-gate-at");
+        let pipelines = route_pipelines();
+        add(&repo, "watched", &[]);
+        let mut task = queued(&repo, "watched");
+        task.front.gate_at = Some("build".into());
+        task.set_stage("build", None);
+        task.save().unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "watched"), &pipelines).unwrap());
+        assert!(
+            text.contains("Build it. Whatever it reports waits for a person."),
+            "{text}"
+        );
+    }
+
+    /// A blocked task parked with `p` carries `parked_from: blocked`, which is
+    /// no entry here: it is marked at the step it was blocked on, while the
+    /// resume line still names `blocked`, where unparking really lands it.
+    #[test]
+    fn route_marks_a_parked_block_at_the_step_it_blocked_on() {
+        let (repo, _root_guard) = fixture("route-parked-block");
+        let pipelines = route_pipelines();
+        add(&repo, "wall", &[]);
+        let mut task = queued(&repo, "wall");
+        task.set_stage("deploy", None);
+        task.front.blocked_from = Some("deploy".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+        queue_pause(&repo, &pipelines, "wall", false).unwrap();
+        assert_eq!(
+            queued(&repo, "wall").front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+
+        let route = route_view(&queued(&repo, "wall"), &pipelines).unwrap();
+        assert_eq!(route.at.as_deref(), Some("deploy"));
+        let text = render_route(&route);
+        assert!(
+            text.starts_with("default — paused while blocked at deploy\n"),
+            "{text}"
+        );
+        assert!(text.contains("▸ deploy"), "{text}");
+
+        assert_eq!(
+            route_then_resume(&repo, &pipelines, "wall"),
+            crate::pipeline::BLOCKED
+        );
+    }
+
+    /// `--json` carries the same facts as the text: every step, the marked
+    /// one, and where resuming goes. `blocked` is in neither.
+    #[test]
+    fn route_json_carries_the_same_facts_as_the_text() {
+        let (repo, _root_guard) = fixture("route-json");
+        let pipelines = route_pipelines();
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.front.paused_at = Some("deploy".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let json =
+            serde_json::to_value(route_view(&queued(&repo, "ship"), &pipelines).unwrap()).unwrap();
+        assert_eq!(json["pipeline"], "default");
+        assert_eq!(json["state"], "held at deploy, waiting for a person");
+        assert_eq!(json["at"], "deploy");
+        assert_eq!(json["held"], true);
+        assert_eq!(json["resumes_to"], "announce");
+        let ids: Vec<&str> = json["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["build", "deploy", "announce"]);
+        assert_eq!(json["steps"][1]["gate"], true);
+        assert_eq!(json["steps"][1]["on_fail"], "build");
+    }
+
+    /// `impl_ui`'s steps, descriptions and routes as this command was drawn
+    /// for. Written out here rather than read from `.spoolway/pipelines/`,
+    /// which is the project's own control plane and is reworded far more
+    /// often than this command changes. Every step runs `pi`, and `loop:`
+    /// bounds each cycle, because `Pipeline::parse` refuses an unbounded one.
+    const IMPL_UI: &str = "steps:
+  - id: implement
+    agent: pi
+    description: Write the code to satisfy the task's acceptance criteria.
+    on_pass: review-spec
+  - id: review-spec
+    agent: pi
+    description: Check the change against the task — every acceptance criterion, the mockup, the non-goals.
+    loop: 2
+    on_pass: review-code
+    on_fail: fix-spec-review
+  - id: fix-spec-review
+    agent: pi
+    description: Clear every finding the spec review raised.
+    on_pass: review-spec
+  - id: review-code
+    agent: pi
+    description: \"Review how the change is built: correctness, design, tests and the prose in the source.\"
+    loop: 2
+    on_pass: look
+    on_fail: fix-code-review
+  - id: fix-code-review
+    agent: pi
+    description: Clear every finding the code review raised.
+    on_pass: review-code
+  - id: look
+    agent: pi
+    description: Open the changed screen, drive it, and read back what it actually renders.
+    gate: true
+    on_pass: e2e
+    on_fail: implement
+  - id: e2e
+    agent: pi
+    description: Carry this task's change into the end-to-end suites and leave them green, while the suites are still cheap to read and fix.
+    loop: 2
+    on_pass: test
+  - id: test
+    agent: pi
+    description: The mechanical verdict on this change, as an exit code.
+    on_pass: suite
+    on_fail: e2e
+  - id: suite
+    agent: pi
+    description: The end-to-end suites, on the last task of the chain.
+    on_pass: document
+    on_fail: e2e
+  - id: document
+    agent: pi
+    description: Bring the domain documents in line with what this task changed.
+    on_pass: handover
+  - id: handover
+    agent: pi
+    description: Commit, squash, push and open this task's pull request with git and `gh` — no model, no rebase. Nothing is merged here; a person lands it.
+    on_pass: done
+";
+
+    /// That pipeline held at its `look` gate: under 45 lines, no agent,
+    /// model or prompt anywhere, and `look`'s own entry exactly as drawn.
+    #[test]
+    fn route_for_impl_ui_fits_in_45_lines() {
+        let (repo, _root_guard) = fixture("route-impl-ui");
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "impl_ui".into(),
+            crate::pipeline::Pipeline::parse("impl_ui", IMPL_UI).unwrap(),
+        );
+        add(&repo, "example", &[]);
+        let mut task = queued(&repo, "example");
+        task.front.pipeline = Some("impl_ui".into());
+        task.set_stage("look", None);
+        task.front.paused_at = Some("look".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let text = render_route(&route_view(&queued(&repo, "example"), &pipelines).unwrap());
+        assert!(
+            text.lines().count() <= 45,
+            "{} lines:\n{text}",
+            text.lines().count()
+        );
+        // `handover`'s own description says "no model", so the keys
+        // `pipeline show` prints are what is looked for, not the bare words.
+        for word in ["agent=", "model=", "prompt=", "claude-", "implementer"] {
+            assert!(!text.contains(word), "`{word}` in:\n{text}");
+        }
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.trim_start().starts_with("blocked")),
+            "{text}"
+        );
+        assert!(
+            text.starts_with("impl_ui — held at look, waiting for a person\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "▸ look              Open the changed screen, drive it, and read back what\n\
+                 \x20                   it actually renders. A pass waits for a person.\n\
+                 \x20                   pass → e2e · fail → implement\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "Resuming on the board sends it to e2e.\n\
+                 To send it to another step, in your own shell:\n  \
+                 spoolway resume example --stage <step>\n"
+            ),
+            "{text}"
+        );
     }
 }

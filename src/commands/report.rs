@@ -621,7 +621,7 @@ pub fn route(
     // carrying whatever `apply_loop_budget` and the `blocked` check above made
     // of it. `spoolway resume` is what tells a caught pass from a caught fail
     // or block apart again, from `last_report` and `blocked_from` — see
-    // `past_the_gate`.
+    // `resume_road`.
     let hold = gate_hold(task, step, outcome, &destination);
     let gated = hold.is_some() || gated_at.is_some();
     // What the status log's arrival line says, in place of the lane's own
@@ -1381,6 +1381,122 @@ pub fn resume_at(task: &mut Task, target: &str) {
     task.front.blocked_from = None;
 }
 
+/// Which road a bare `spoolway resume <task>` takes out of a stop, and the
+/// stage it lands the task on — see [`resume_road`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeRoad {
+    /// Waiting at a gate (`paused_at`): let past it, by [`past_the_gate`].
+    Gate {
+        /// The step the task paused at.
+        gated: String,
+        /// What the pause caught — see [`caught_at`].
+        caught: Option<Caught>,
+        /// A pause raised from `blocked` itself rather than a catch at
+        /// `gated`, which resumes through [`cleared_block_target`].
+        cleared_block: bool,
+        destination: String,
+    },
+    /// A `p` park (`parked_from`): back onto the step it never left, by
+    /// [`unpark`].
+    Unpark(String),
+    /// A hook that failed on `done`: straight back to `done`.
+    HookDone,
+    /// A task that never started: back onto `queued`.
+    Queued,
+    /// The ordinary road: back onto the step [`resume_target`] names.
+    Step(String),
+}
+
+impl ResumeRoad {
+    /// The stage the task is on once this road has been taken.
+    pub fn destination(&self) -> &str {
+        match self {
+            ResumeRoad::Gate { destination, .. } => destination,
+            ResumeRoad::Unpark(step) | ResumeRoad::Step(step) => step,
+            ResumeRoad::HookDone => crate::pipeline::DONE,
+            ResumeRoad::Queued => crate::pipeline::QUEUED,
+        }
+    }
+}
+
+/// Where a bare `spoolway resume <task>` — the board's `r` — sends `task`,
+/// read without moving it.
+///
+/// [`resume`] acts on this and `spoolway queue route` prints it, so the two
+/// cannot disagree about where a resume goes: a route that named one step
+/// while the resume landed on another would have a person approve a gate on
+/// the strength of a destination that was never the real one. `--stage` is
+/// not a road here; naming a step by hand is a person overriding all of this.
+///
+/// The roads are tried in the order [`resume`] has always tried them: a gate,
+/// then a park, then a hook pause on `done`, then [`resume_target`], whose
+/// `queued` answer is a task that never started.
+///
+/// Where a gate goes is read out of the pipeline *now*, from the step recorded
+/// in `paused_at`, rather than out of anything the pass wrote down. A pipeline
+/// edited while a task sat on `paused` should route the task the way the file
+/// says today; a destination frozen at report time would send it somewhere the
+/// project has since stopped meaning.
+pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
+    if let Some(gated) = task.front.paused_at.clone() {
+        let pipeline = pipelines.for_task(task)?;
+        let step = pipeline.require_step(&gated).with_context(|| {
+            format!(
+                "task `{}` paused at `{gated}`, which pipeline `{}` no longer defines",
+                task.front.id, pipeline.name
+            )
+        })?;
+        // What this pause actually caught — `None` for a pause raised from
+        // `blocked` itself, which is not a catch of anything.
+        let caught = caught_at(task, &gated);
+        // A pause raised from `blocked` itself, told apart from an intercepted
+        // catch at `gated` by `caught` above: both leave `blocked_from` naming
+        // the very step `paused_at` does, but only `blocked`'s own road leaves
+        // no report filed from `gated` to read. Its own pass never runs
+        // `blocked`'s absent `on_pass` — it takes `blocked_from`'s, through the
+        // same `cleared_block_target` a pass from `blocked` reads — so accepting
+        // it here has to reach exactly there too, rather than the plain
+        // `on_pass` below, which is what an ordinary gate means and is not what
+        // a person clearing this one is answering.
+        let cleared_block =
+            caught.is_none() && task.front.blocked_from.as_deref() == Some(gated.as_str());
+        let destination = if cleared_block {
+            cleared_block_target(task, pipeline, false)
+        } else if caught == Some(Caught::Blocked) {
+            // What `set_blocked_from` already ran for on the way here — a
+            // `--block`, a step's own `on_fail: blocked`, or a spent loop's
+            // own exit — a plain `resume` sends exactly where it would have
+            // landed unheld.
+            crate::pipeline::BLOCKED.to_string()
+        } else {
+            step.destination(Outcome::Pass)
+                .unwrap_or(crate::pipeline::BLOCKED)
+                .to_string()
+        };
+        return Ok(ResumeRoad::Gate {
+            gated,
+            caught,
+            cleared_block,
+            destination,
+        });
+    }
+    // A `p` park is answered differently from a real stop: nothing was ever
+    // in the way, so putting it back is not a lap — see `unpark`.
+    if let Some(step) = &task.front.parked_from {
+        return Ok(ResumeRoad::Unpark(step.clone()));
+    }
+    // `done` has no later step to carry the task past, and is not a stage
+    // `resume_target` can name, so a hook pause there goes straight back.
+    if task.front.hook_paused.as_deref() == Some(crate::pipeline::DONE) {
+        return Ok(ResumeRoad::HookDone);
+    }
+    let target = resume_target(task, pipelines.for_task(task)?);
+    Ok(match target == crate::pipeline::QUEUED {
+        true => ResumeRoad::Queued,
+        false => ResumeRoad::Step(target),
+    })
+}
+
 /// One verb over every road out of a stop, so the person does not have to
 /// know which one a task is on before naming it.
 ///
@@ -1429,33 +1545,44 @@ pub fn resume(
     // A gate is the one road out of `paused` that answers a *question*
     // rather than a stop — `paused_at` is what tells the two apart, not the
     // stage alone: a `p` park and a resumed block both land on `paused` too,
-    // and neither has a gate to answer. Checked ahead of `--stage`, which a
-    // person names to reroute a genuine gate on purpose.
-    match task.front.paused_at.is_some() && args.stage.is_none() {
-        true => past_the_gate(pipelines, task, args),
-        false => back_onto_its_step(repo, pipelines, task, args),
+    // and neither has a gate to answer. `--stage` is checked first: a person
+    // names one to reroute a genuine gate, or a park, on purpose, and it
+    // always takes the ordinary road onto the step it names.
+    let road = match &args.stage {
+        Some(stage) => {
+            pipelines.for_task(&task)?.require_step(stage)?;
+            ResumeRoad::Step(stage.clone())
+        }
+        None => resume_road(&task, pipelines)?,
+    };
+    match road {
+        ResumeRoad::Gate {
+            gated,
+            caught,
+            cleared_block,
+            destination,
+        } => past_the_gate(task, args, &gated, caught, cleared_block, destination),
+        road => back_onto_its_step(repo, pipelines, task, args, road),
     }
 }
 
+/// Every road out of a stop but a gate's, once [`resume`] has chosen it.
 fn back_onto_its_step(
     repo: &Repo,
     pipelines: &Pipelines,
     mut task: Task,
     args: &ResumeArgs,
+    road: ResumeRoad,
 ) -> Result<()> {
     // A stop's mark is spent by any resume, whoever sends it: left set on a
     // task a person resumed by hand, the next start would find it again —
     // see `crate::status::resume_stop_parked`. Every road below saves.
     task.front.parked_by_stop = false;
 
-    // A `p` park is answered differently from a real stop: nothing was ever
-    // in the way, so putting it back is not a lap and runs none of
-    // `resume_at`'s bookkeeping — see `unpark`. Only when nobody has
-    // overridden the route by hand: `--stage` on a parked task is a person
-    // choosing to reroute it, which is exactly what the ordinary path below
-    // is for.
-    if args.stage.is_none() && task.front.parked_from.is_some() {
-        return unpark(repo, pipelines, task);
+    // A `p` park runs none of `resume_at`'s bookkeeping — see `unpark`.
+    // Ahead of the hook pause below, which a park leaves standing.
+    if let ResumeRoad::Unpark(step) = &road {
+        return unpark(repo, pipelines, task, step.clone());
     }
 
     // A pause over a start branch that did not exist is answered by sending
@@ -1472,42 +1599,28 @@ fn back_onto_its_step(
     // the one place a hook pause is ever undone.
     if let Some(stage) = task.front.hook_paused.take() {
         crate::tracking::forget(repo, &task, &stage);
-        // `done` has no later step to carry the task past — every other
-        // road below sends it through a pipeline step or back to `queued`,
-        // and `done` is neither, so a task paused there goes straight back
-        // rather than through `resume_target`, which cannot name a stage no
-        // pipeline declares. A `--stage` override is still honoured: naming
-        // one by hand is a person choosing to reroute it on purpose.
-        if args.stage.is_none() && stage == crate::pipeline::DONE {
-            task.set_stage(
-                crate::pipeline::DONE,
-                Some("hook run forgotten by `spoolway resume`"),
-            );
-            task.save()?;
-            free_stale_lanes(repo, pipelines, &task);
-            println!("{}: -> {stage}", args.task);
-            return Ok(());
-        }
+    }
+    if road == ResumeRoad::HookDone {
+        task.set_stage(
+            crate::pipeline::DONE,
+            Some("hook run forgotten by `spoolway resume`"),
+        );
+        task.save()?;
+        free_stale_lanes(repo, pipelines, &task);
+        println!("{}: -> {}", args.task, crate::pipeline::DONE);
+        return Ok(());
     }
 
-    let pipeline = pipelines.for_task(&task)?;
-
-    let target = match &args.stage {
-        Some(stage) => {
-            pipeline.require_step(stage)?;
-            stage.clone()
-        }
-        None => resume_target(&task, pipeline),
-    };
+    let target = road.destination().to_string();
 
     // A park off `queued` itself lands here too — `park` records no
-    // `parked_from` for it, so the check above never catches it — and it
-    // is the same kind of round trip as `unpark`'s: the task never left
-    // `queued`, so sending it back is not a lap of anything the pipeline
-    // routed. `queued` is also not a step any pipeline declares, so
-    // `resume_at` and `set_stage` below — built for a real step's
-    // `on_pass`/loop bookkeeping — are the wrong road for it regardless.
-    if args.stage.is_none() && target == crate::pipeline::QUEUED {
+    // `parked_from` for it — and it is the same kind of round trip as
+    // `unpark`'s: the task never left `queued`, so sending it back is not a
+    // lap of anything the pipeline routed. `queued` is also not a step any
+    // pipeline declares, so `resume_at` and `set_stage` below — built for a
+    // real step's `on_pass`/loop bookkeeping — are the wrong road for it
+    // regardless.
+    if road == ResumeRoad::Queued {
         task.front.paused_at = None;
         task.front.paused_by = None;
         task.set_stage_unbanked(crate::pipeline::QUEUED, "put back from the board");
@@ -1545,20 +1658,15 @@ fn back_onto_its_step(
 /// failed a check: a person's own keypress or Escape, or a lane
 /// `escalate_clock` gave up on. One code path either way in: the board's
 /// `enter` and `R` call this same `resume` with no `--stage` of their own,
-/// the same as a bare `spoolway resume <task>` does, and `back_onto_its_step`
-/// is what finds `parked_from` and lands here.
+/// the same as a bare `spoolway resume <task>` does, and [`resume_road`] is
+/// what finds `parked_from` and sends it here.
 ///
 /// `parked_from` (and `escalated` beside it) are left in the task file rather
 /// than cleared here — the launch that actually continues this step is what
 /// learns whether a session was there to carry, and `finish_launch_bookkeeping`
 /// in `src/dispatch.rs` is what spends both once that answer is known, the
 /// same moment it spends `resume`.
-fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task) -> Result<()> {
-    let step = task
-        .front
-        .parked_from
-        .clone()
-        .expect("checked by back_onto_its_step before calling unpark");
+fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task, step: String) -> Result<()> {
     // A continuing lane picks up its own session rather than opening a fresh
     // one — the same one-shot flag a real resume sets, so the launch cannot
     // tell a park from a block apart any other way.
@@ -1608,75 +1716,26 @@ fn free_stale_lanes(repo: &Repo, pipelines: &Pipelines, task: &Task) {
 /// is done and committed — a gated lane reports like any other, and its report
 /// went through [`report`] in full — so nothing here runs, rebuilds or checks
 /// anything. All that is left is the routing decision the pass was not allowed
-/// to take on its own.
-///
-/// Where it goes is read out of the pipeline *now*, from the step recorded in
-/// `paused_at`, rather than out of anything the pass wrote down. A pipeline
-/// edited while a task sat on `paused` should route the task the way the file
-/// says today; a destination frozen at report time would send it somewhere the
-/// project has since stopped meaning.
-fn past_the_gate(pipelines: &Pipelines, mut task: Task, args: &ResumeArgs) -> Result<()> {
-    let pipeline = pipelines.for_task(&task)?;
-
-    // The step it paused on, which is the only thing that says where "on" is.
-    // A task file hand-edited onto `paused` has none, and there is nothing to
-    // guess: the pipeline's entry would restart work that is already done.
-    let gated = task.front.paused_at.clone().with_context(|| {
-        format!(
-            "task `{}` is paused but records no step it paused at, so nothing here knows what \
-             it was waiting to be let past. `spoolway resume {} --stage <step>` puts it back \
-             on a step by name.",
-            args.task, args.task
-        )
-    })?;
-    let step = pipeline.require_step(&gated).with_context(|| {
-        format!(
-            "task `{}` paused at `{gated}`, which pipeline `{}` no longer defines",
-            args.task, pipeline.name
-        )
-    })?;
-
-    // What this pause actually caught — `None` for a pause raised from
-    // `blocked` itself, which is not a catch of anything. See [`caught_at`].
-    let caught = caught_at(&task, &gated);
-
-    // A pause raised from `blocked` itself, told apart from an intercepted
-    // catch at `gated` by `caught` above: both leave `blocked_from` naming
-    // the very step `paused_at` does, but only `blocked`'s own road leaves no
-    // report filed from `gated` to read. Its own pass never runs `blocked`'s
-    // absent `on_pass` — it takes `blocked_from`'s, through the same
-    // `cleared_block_target` a pass from `blocked` reads — so accepting it
-    // here has to reach exactly there too, rather than the plain `on_pass`
-    // below, which is what an ordinary gate means and is not what a person
-    // clearing this one is answering.
-    let cleared_block =
-        caught.is_none() && task.front.blocked_from.as_deref() == Some(gated.as_str());
-
-    let destination = if cleared_block {
-        let target = cleared_block_target(&task, pipeline, false);
-        resume_at(&mut task, &target);
-        target
-    } else if caught == Some(Caught::Blocked) {
-        // What `set_blocked_from` already ran for on the way here — a
-        // `--block`, a step's own `on_fail: blocked`, or a spent loop's own
-        // exit — a plain `resume` sends exactly where it would have landed
-        // unheld.
-        crate::pipeline::BLOCKED.to_string()
-    } else {
-        step.destination(Outcome::Pass)
-            .unwrap_or(crate::pipeline::BLOCKED)
-            .to_string()
-    };
+/// to take on its own, which [`resume_road`] has already made.
+fn past_the_gate(
+    mut task: Task,
+    args: &ResumeArgs,
+    gated: &str,
+    caught: Option<Caught>,
+    cleared_block: bool,
+    destination: String,
+) -> Result<()> {
+    if cleared_block {
+        resume_at(&mut task, &destination);
+    }
 
     // `blocked_from` naming `gated` stops describing where this task is
     // stopped the moment it moves anywhere but `blocked` itself — left
     // standing, it would outlive this answer and read as a caught block the
     // next time this same step is gated and passes cleanly (review finding
-    // 4). Only the branch above that actually sends the task to `blocked`
-    // still needs it; `resume_at`, for `cleared_block`, already clears it on
-    // its own road.
-    if destination != crate::pipeline::BLOCKED
-        && task.front.blocked_from.as_deref() == Some(gated.as_str())
+    // 4). Only a destination of `blocked` itself still needs it; `resume_at`,
+    // for `cleared_block`, already clears it on its own road.
+    if destination != crate::pipeline::BLOCKED && task.front.blocked_from.as_deref() == Some(gated)
     {
         task.front.blocked_from = None;
     }
@@ -1705,7 +1764,7 @@ fn past_the_gate(pipelines: &Pipelines, mut task: Task, args: &ResumeArgs) -> Re
         let label = match caught {
             Some(Caught::Blocked) => format!("{gated} {}", crate::pipeline::BLOCKED),
             Some(Caught::Fail) => format!("{gated} failed"),
-            _ => gated.clone(),
+            _ => gated.to_string(),
         };
         println!("{}: {label} --resume--> {destination}", args.task);
     }

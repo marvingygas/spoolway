@@ -1282,7 +1282,7 @@ impl Pipeline {
             // `--block`, or `--pause`) parks the task on `paused` for a
             // person, never back onto `blocked` itself, and a person resuming
             // it hands it back to the step it blocked on rather than past it —
-            // see `commands::report::past_the_gate`. Each of the keys that
+            // see `commands::report::resume_road`. Each of the keys that
             // would otherwise say one of those things is refused by name,
             // pointing at what actually decides it instead of leaving a
             // reader to wonder why the graph disagrees with the file.

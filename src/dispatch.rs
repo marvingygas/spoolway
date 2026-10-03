@@ -1970,9 +1970,10 @@ impl<'a> Dispatcher<'a> {
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
-    /// forget the failed run and, for `done`, send the task straight back
-    /// there rather than through [`crate::commands::resume_target`]'s
-    /// ordinary step-shaped roads. `started` needs no equivalent special
+    /// forget the failed run and, for `done`, move the task straight back
+    /// there — the road `commands::report::resume_road` decides on — rather
+    /// than through [`crate::commands::resume_target`]'s ordinary
+    /// step-shaped roads. `started` needs no equivalent special
     /// case: the task never left `queued` at all, so it has no worktree, no
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
@@ -18080,11 +18081,12 @@ mod tests {
         assert!(!prompt.contains("dispatch.gates"));
     }
 
-    /// Acceptance criterion 5: `blocked`'s own `spoolway resume <task>` line
-    /// is in its toolbox and nowhere else — no other step's system prompt
-    /// should ever mention `READING THE RUN` or offer the command.
+    /// `blocked`'s own bare `spoolway resume <task>` line is in its toolbox
+    /// and nowhere else — no other step's system prompt should ever mention
+    /// `READING THE RUN` or offer that line. Every lane is still handed the
+    /// `--stage` form by `YOUR LANE`, which this test does not forbid.
     #[test]
-    fn only_blocked_names_spoolway_resume() {
+    fn only_blocked_names_the_bare_spoolway_resume_command() {
         let (repo, _root_guard) = fixture("only-blocked-names-resume");
         let pipelines = Pipelines::builtin();
         let pipeline = pipelines.get("default").unwrap();
@@ -18107,10 +18109,54 @@ mod tests {
             !implement_prompt.contains("READING THE RUN"),
             "{implement_prompt}"
         );
+        // `YOUR LANE` hands a person `spoolway resume <task> --stage <step>`
+        // on every step, so the bare command is the one only `blocked` names.
         assert!(
-            !implement_prompt.contains("spoolway resume"),
+            !implement_prompt.contains("`spoolway resume <task>`"),
             "{implement_prompt}"
         );
+    }
+
+    /// `YOUR LANE`'s route and person bullets, word for word: every lane is
+    /// pointed at `queue route`, told to write a person's changes into the
+    /// task file, and handed the one command that moves a resume. `blocked`
+    /// keeps its own first bullet and gets no "another step's" sentence.
+    #[test]
+    fn your_lane_names_the_route_and_where_a_persons_changes_go() {
+        let (repo, _root_guard) = fixture("lane-route-bullets");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let implement = pipeline.step("implement").unwrap();
+        let task = reload(&add_task(&repo, "example", "implement"));
+
+        let lane = crate::compose::situating(pipeline, implement, &task, &repo).unwrap();
+        let bullets = "\
+- One step's worth of the job, and nothing enforces it. Your role, below, is the whole of what is yours. Steps split the work for a reason; do not do another step's on your own.
+- Your output is not read; only what you write to the task file reaches anyone. Ask nothing unless told to.
+- Nothing will wake you. Poll anything you wait on.
+- Reporting is the only exit. A turn ended any other way stalls the task.
+- Commit as you go. Anything uncommitted is committed for you when you report.
+- `spoolway queue route example` shows every step, what each does, and where resuming sends this task. Read it before you tell a person what happens next.
+- If a person talks to you in this pane, do what they ask, whichever step's work it is. Write every change they ask for into the task file, so later steps see it: `spoolway task edit example --section <heading> --from -` while the task is held on `paused` or `blocked`, `--handoff` while it runs.
+- Resuming a held task stays the person's: once their request is done, tell them where resuming sends it, and to resume it on the board.
+- What a person has to do, name on the board, never as a `spoolway` command. The one exception: to send the task to another step than resuming would, give them `spoolway resume example --stage <step>`, to run in their own shell.";
+        let flat = lane.split_whitespace().collect::<Vec<_>>().join(" ");
+        let expected = bullets.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains(&expected), "got: {lane}");
+
+        let blocked = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+        let blocked_task = reload(&add_task(&repo, "stuck", crate::pipeline::BLOCKED));
+        let lane = crate::compose::situating(pipeline, blocked, &blocked_task, &repo).unwrap();
+        assert!(
+            lane.contains("- Your remit is the run, not one task's step."),
+            "{lane}"
+        );
+        assert!(!lane.contains("do not do another step's"), "{lane}");
+        assert!(
+            lane.contains("`spoolway queue route stuck` shows every step"),
+            "{lane}"
+        );
+        assert!(lane.contains("`--handoff` while it runs."), "{lane}");
     }
 
     /// The Mockup this task is built from, word for word: a task blocked at
@@ -18557,7 +18603,8 @@ mod tests {
     /// LANE`'s own closing bullet naming the board, never a `spoolway`
     /// command. Raised again from 360 when that bullet, and `BLOCK`, grew
     /// their own "then resume it on the board" close, so a paused or blocked
-    /// lane always says what happens after a person acts.
+    /// lane always says what happens after a person acts. Raised again from
+    /// 400 for `YOUR LANE`'s route and person-request bullets.
     #[test]
     fn the_composed_prompt_is_under_the_word_budget_for_the_plain_case() {
         let (repo, _root_guard) = fixture("prompt-word-budget");
@@ -18569,7 +18616,7 @@ mod tests {
 
         let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, role).unwrap();
         let words = prompt.replace(role, "").split_whitespace().count();
-        assert!(words < 400, "got {words} words:\n{prompt}");
+        assert!(words < 480, "got {words} words:\n{prompt}");
     }
 
     /// Every heading gap in the Mockup is exactly one blank line — never

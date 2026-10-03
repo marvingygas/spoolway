@@ -1316,7 +1316,7 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // real block — all three waiting to be sent back to where they stopped.
     // `parked_from` and `blocked_from` can both be set at once now: `p` on a
     // `blocked` row writes `parked_from: blocked` beside the `blocked_from`
-    // already there, and `back_onto_its_step` checks `parked_from` first, so
+    // already there, and `resume_road` checks `parked_from` first, so
     // it is the one that decides — see `unpark`, which never touches
     // `blocked_from` and leaves it to route the task again once cleared.
     //
@@ -1341,7 +1341,7 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // Nothing here has to say which of the three, if any, applies:
     // `commands::resume` reads `paused_at.is_some()` itself to route a gate
     // one way and everything else the other, so naming a step here would
-    // only risk disagreeing with it — see `back_onto_its_step`, which finds
+    // only risk disagreeing with it — see `resume_road`, which finds
     // `parked_from` and `blocked_from` on its own, falls back to `queued`
     // when a task that never started leaves every field `resume_target`
     // reads unset, and handles the question-pane case through
@@ -2634,7 +2634,7 @@ fn blocked_next(
 /// guess.
 ///
 /// Two different roads out of `paused`, told apart the same way
-/// `commands::report::past_the_gate` tells them apart, through
+/// `commands::report::resume_road` tells them apart, through
 /// `commands::caught_at`: a pause raised from `blocked` itself resumes to
 /// `cleared_block_target`, a caught block or loop-max (`Caught::Blocked`)
 /// resumes straight to `blocked` — exactly where it would have landed
@@ -2865,8 +2865,8 @@ fn build_rows(
             // step at all: no gate (`paused_at`) and no
             // `p`/`escalate_clock` park (`parked_from`) is exactly the shape
             // `park` leaves on a task still on `queued` — see `park`'s own
-            // docs — and `resume_target` is the same answer `back_onto_its_step`
-            // itself would act on for that shape. Its `queued` means there is
+            // docs — and `resume_target` is the same answer `resume_road`
+            // itself reads for that shape. Its `queued` means there is
             // no step of this task's own to check a dependency or a lane
             // against: `queued` is where that check belongs, and this row
             // goes straight back to it.
@@ -6255,7 +6255,7 @@ mod tests {
     /// step as `paused_at` — reads its NEXT column as the step it blocked on,
     /// not past it: `paused_next`'s cleared-block branch now passes
     /// `takes_over: false` to `cleared_block_target`, the same rule
-    /// `past_the_gate` resumes it by.
+    /// `resume_road` resumes it by.
     #[test]
     fn a_cleared_block_row_names_the_step_it_blocked_on_not_past_it() {
         let (repo, _root_guard) = fixture("paused-cleared-block");
