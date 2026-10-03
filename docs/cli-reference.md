@@ -214,6 +214,37 @@ spoolway queue list --json
 
 Print one task file.
 
+### `spoolway queue route <task>`
+
+Print the task's own pipeline in step order, with the step the task is on marked, and where resuming it on the board sends it. The command only reads, and a lane may run it.
+
+```
+spoolway queue route <task>
+spoolway queue route <task> --json
+```
+
+The first line names the pipeline and says where the task stands. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
+
+```
+impl_ui — held at look, waiting for a person
+
+  implement         Write the code to satisfy the task's acceptance criteria.
+                    pass → review-spec · fail → blocked
+  …
+▸ look              Open the changed screen, drive it, and read back what
+                    it actually renders. A pass waits for a person.
+                    pass → e2e · fail → implement
+  …
+
+Resuming on the board sends it to e2e.
+To send it to another step, in your own shell:
+  spoolway resume example --stage <step>
+```
+
+The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to. A task in any other state ends with `It is not held, so there is nothing to resume.`
+
+`--json` prints the same facts as one object.
+
 ### `spoolway queue pause <task>`
 
 Interrupt the task's live lane and park it on `paused`.

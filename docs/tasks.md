@@ -202,6 +202,7 @@ step.
 |---|---|
 | `spoolway queue list` | Whether a dispatcher runs, and where every task is. |
 | `spoolway queue show <task>` | Prints one task file. |
+| `spoolway queue route <task>` | Prints the task's pipeline with its step marked, and where resuming it sends it. |
 | `spoolway queue add --from <path>` | Queues tasks. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |

@@ -1957,9 +1957,10 @@ impl<'a> Dispatcher<'a> {
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
-    /// forget the failed run and, for `done`, send the task straight back
-    /// there rather than through [`crate::commands::resume_target`]'s
-    /// ordinary step-shaped roads. `started` needs no equivalent special
+    /// forget the failed run and, for `done`, move the task straight back
+    /// there — the road `commands::report::resume_road` decides on — rather
+    /// than through [`crate::commands::resume_target`]'s ordinary
+    /// step-shaped roads. `started` needs no equivalent special
     /// case: the task never left `queued` at all, so it has no worktree, no
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
