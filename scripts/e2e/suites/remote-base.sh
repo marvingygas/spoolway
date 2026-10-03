@@ -13,6 +13,12 @@
 # scaffold of its own: `new_forge` gives a bare repo on disk as `origin`, and
 # a branch made directly in it, never fetched by this project's own checkout,
 # is exactly a base only `origin` has.
+#
+# The last case is the opposite: a start branch that exists nowhere. A
+# dependency's pull request merges, GitHub deletes its branch, and the
+# dependent — queued while the branch was still there — has nothing to be cut
+# from. It pauses with one line saying so, and starts from `main` once the
+# person writes `starts_from: main` into its front matter and resumes it.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -70,9 +76,52 @@ else bad "its worktree is cut and the lane starts (at \`$(stage_of stacked)\`)";
 
 STACKED_WORKTREE=$(worktree_of stacked)
 works "the worktree really exists" test -d "$STACKED_WORKTREE"
-says "the task file records the remote-only branch as cut_from" \
-  "cut_from: $REMOTE_ONLY" cat "$SPOOLWAY_PROJECT_HOME/queue/stacked.md"
+says "the task file records the remote-only branch as starts_from" \
+  "starts_from: $REMOTE_ONLY" cat "$SPOOLWAY_PROJECT_HOME/queue/stacked.md"
 
 works "no local branch was made for the remote-only base by the cut" no_local_copy
+
+# A finished dependency whose branch is gone from here and from `origin`: its
+# task file is archived and still names `task/gh-413-merged`, which nothing
+# has. The dispatcher would have failed the cut three times over it.
+mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
+cat > "$SPOOLWAY_PROJECT_HOME/archive/merged.md" <<'DOC'
+---
+id: merged
+title: merged, its branch deleted
+stage: done
+group: late
+base: plan/live
+branch: task/gh-413-merged
+---
+DOC
+echo hang > "$CTL/late"
+task_doc "$LIVE/late.md" late "$BODY" "group: late" "depends_on: [merged]" \
+  "base: plan/live"
+must "a dependent of a finished task queues" \
+  "$SPOOLWAY" queue add --from "$LIVE/late.md"
+
+if drive late paused 60; then
+  ok "a queued task whose start branch was deleted pauses instead of failing to start"
+else
+  bad "a queued task whose start branch was deleted pauses instead of failing to start (at \`$(stage_of late)\`)"
+fi
+says "and the task file names the branch that is missing" \
+  "missing_start_branch: task/gh-413-merged" cat "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+works "and no worktree was cut for it" test -z "$(worktree_of late)"
+says "and the dispatch log says what to set" \
+  'it starts from `task/gh-413-merged`, which doesn'"'"'t exist. Set `starts_from:` in the task front matter and resume.' \
+  cat "$E2E_DISPATCH_LOG"
+
+# The person's fix: name a branch that exists, then resume.
+sed -i 's/^base: plan\/live$/&\nstarts_from: main/' "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+says "resume puts it back on queued" "late: -> queued" "$SPOOLWAY" resume late
+
+if drive late implement 60; then ok "and it starts, from the branch the person named"
+else bad "and it starts, from the branch the person named (at \`$(stage_of late)\`)"; fi
+says "the task file records \`main\` as starts_from" \
+  "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+lacks "and no longer carries the missing branch" \
+  "missing_start_branch" "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
 finish

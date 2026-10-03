@@ -1165,7 +1165,7 @@ impl<'a> Dispatcher<'a> {
         // One pass, one answer per base — see [`base_problem`]'s own doc for
         // why a chain's still-uncut dependents sharing one `base` must not
         // turn into one `git ls-remote` per task on it.
-        let mut remote_cache: HashMap<String, bool> = HashMap::new();
+        let mut remote_cache: RemoteCache = HashMap::new();
 
         'tasks: for index in 0..tasks.len() {
             // Between each task — see [`Dispatcher::pass`]'s own
@@ -1189,7 +1189,7 @@ impl<'a> Dispatcher<'a> {
 
             // A base disagreement caught here holds only this task — the way
             // a missing `base:` does just above — rather than the whole run:
-            // see [`base_problem`] for what each of the three shapes means.
+            // see [`base_problem`] for what each of its two shapes means.
             if let Some((reason, fix)) = base_problem(self.repo, &tasks[index], &mut remote_cache) {
                 report.problems.push(format!("{reason} — {fix}"));
                 continue;
@@ -1231,6 +1231,7 @@ impl<'a> Dispatcher<'a> {
                     &mut candidates,
                     &mut archived,
                     report,
+                    &mut remote_cache,
                     tick,
                 )? {
                     Routed::NextTask => continue 'tasks,
@@ -1728,6 +1729,7 @@ impl<'a> Dispatcher<'a> {
         candidates: &mut Vec<Candidate>,
         archived: &mut Vec<String>,
         report: &mut Report,
+        remote_cache: &mut RemoteCache,
         tick: &mut dyn FnMut(),
     ) -> Result<Routed> {
         if !crate::pipeline::RESERVED.contains(&stage) {
@@ -1775,6 +1777,17 @@ impl<'a> Dispatcher<'a> {
                 TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             if graph.ready(&id) {
+                // A start branch that vanished after the task was queued —
+                // its dependency's pull request merged and GitHub deleted the
+                // branch — would fail the cut three times and then fail again
+                // on every `blocked` pass. Nobody is at the queue tab by now,
+                // so the task waits on `paused` for a person to name another
+                // start branch. Checked before `started` fires, since a task
+                // that cannot start has not started.
+                if let Some(missing) = self.missing_start_branch(task, remote_cache) {
+                    self.pause_for_missing_start_branch(task, &missing, report)?;
+                    return Ok(Routed::NextTask);
+                }
                 // The task is actually leaving `queued` now — dependencies
                 // are in, and every wait above has already cleared. This is
                 // the one moment `started` fires: not on the first pass over
@@ -1991,6 +2004,58 @@ impl<'a> Dispatcher<'a> {
             Some(&format!("issue_tracking hook exited {code}")),
         );
         self.persist(task)?;
+        Ok(())
+    }
+
+    /// The branch `task` would be cut from, when that branch exists neither
+    /// locally nor on `origin` — `None` for everything else, including a task
+    /// that has nothing to check.
+    ///
+    /// The start branch is the one [`start_branch`] names. A task that sets no
+    /// `starts_from:` and has no dependency starts from `base:`, which
+    /// [`base_problem`] already holds it over every pass, so it is left to
+    /// that. A task that already has a worktree has started, and a borrowed
+    /// checkout never reads its start branch. A dependency that cannot be
+    /// resolved at all is left for the cut to refuse by name, as it always
+    /// was. A branch `origin` could not be asked about is not missing: the
+    /// pause waits for a person, so it needs an answer, and the next pass
+    /// asks again.
+    fn missing_start_branch(&self, task: &Task, remote_cache: &mut RemoteCache) -> Option<String> {
+        if task.front.worktree_path.is_some()
+            || (task.front.starts_from.is_none() && task.front.depends_on.is_empty())
+            || is_borrowed(self.repo, task)
+        {
+            return None;
+        }
+        let start = start_branch(self.repo, task, task.front.base.as_deref()?).ok()?;
+        (branch_known(self.repo, &start, remote_cache) == Some(false)).then_some(start)
+    }
+
+    /// Move `task` from `queued` to `paused` over a start branch that does not
+    /// exist, and say so in one line on the dispatch output.
+    ///
+    /// Records the branch in [`Frontmatter::missing_start_branch`] and nothing else:
+    /// `spoolway resume` clears it and sends the task back to `queued`, where
+    /// the next pass looks again — see
+    /// `commands::report::back_onto_its_step`.
+    fn pause_for_missing_start_branch(
+        &mut self,
+        task: &mut Task,
+        branch: &str,
+        report: &mut Report,
+    ) -> Result<()> {
+        task.front.missing_start_branch = Some(branch.to_string());
+        task.set_stage(
+            crate::pipeline::PAUSED,
+            Some(&format!("start branch `{branch}` does not exist")),
+        );
+        self.persist(task)?;
+        report.moved = true;
+        report.problems.push(format!(
+            "paused `{}`: it starts from `{branch}`, which doesn't exist. Set `starts_from:` in \
+             the task front matter and resume.",
+            task.id()
+        ));
         Ok(())
     }
 
@@ -5029,26 +5094,27 @@ fn persist_task(
 /// `base:` and a base that has drifted are told apart on the problem list.
 ///
 /// `remote_cache` is `origin`'s answer for a base already asked this call,
-/// kept by the caller across every task it checks: a chain's dependents all
-/// still uncut share their root's exact `base` string, so one shared cache
-/// keeps a long chain's still-uncut tasks to one `git ls-remote` per base,
-/// not one per task.
+/// failed asks included, kept by the caller across every task it checks: a
+/// chain's dependents all still uncut share their root's exact `base` string,
+/// so one shared cache keeps a long chain's still-uncut tasks to one
+/// `git ls-remote` per base, not one per task.
 ///
 /// A chain has one base (`src/commands/queue.rs`'s `validate_batch` enforces
 /// it when a batch is sent), so a dependent's `base:` disagreeing with its
 /// dependency's — read from that task's own file, in the queue or the
-/// archive — means one of the two was edited by hand since. A task with no
-/// dependency instead pins its own `base:` at the moment it is cut, in
-/// `cut_from`; the two disagreeing means its worktree was started from
-/// somewhere its task file no longer names, which a worktree cannot undo.
-/// Neither check touches git. A task not yet cut has no such anchor, so what
-/// is checked instead is whether its base still exists anywhere a worktree
-/// could start from — locally first, since that answers with no network at
-/// all, then `origin`.
+/// archive — means one of the two was edited by hand since. That check does
+/// not touch git. A cut task's `starts_from` is not compared with its
+/// `base:`: a person may set `starts_from:` to somewhere other than where the
+/// work lands, so the two differing says nothing about an edit since the cut.
+/// A task is told to have been cut by its recorded worktree, never by
+/// `starts_from`. A task not yet cut has no worktree to anchor it, so what is
+/// checked instead is whether its base still exists anywhere a worktree could
+/// start from — locally first, since that answers with no network at all,
+/// then `origin`.
 pub(crate) fn base_problem(
     repo: &Repo,
     task: &Task,
-    remote_cache: &mut HashMap<String, bool>,
+    remote_cache: &mut RemoteCache,
 ) -> Option<(String, String)> {
     let id = task.id();
     let base = task.front.base.as_deref()?;
@@ -5067,62 +5133,93 @@ pub(crate) fn base_problem(
         ));
     }
 
-    match task.front.cut_from.as_deref() {
-        Some(cut_from) => {
-            if task.front.depends_on.is_empty() && cut_from != base {
-                return Some((
-                    format!("task `{id}` was cut from `{cut_from}` but now says `base: {base}`"),
-                    format!("Its worktree can't move. Set `base:` back to `{cut_from}`."),
-                ));
-            }
-            None
-        }
-        None => {
-            // A branch somebody already has checked out is *borrowed*, never
-            // cut (`ensure_workspace`'s own `repo.worktree_for` branch) — its
-            // base is never read at all, so a base gone missing under a
-            // borrowed task is nothing to hold it over.
-            let branch = task
-                .front
-                .branch
-                .clone()
-                .unwrap_or_else(|| crate::task::default_branch(id));
-            if matches!(repo.worktree_for(&branch), Ok(Some(_))) {
-                return None;
-            }
-            // `origin` is only ever asked once per base per call of this
-            // check, not once per task on it: `base_problem` runs on every
-            // live task, on every dispatcher pass, and a chain's dependents
-            // all still uncut share their root's exact `base` string, so an
-            // unmemoised `git ls-remote` here would repeat the same network
-            // round trip for every task still waiting in a long chain, on
-            // roughly a ten-second clock — and one transient failure would
-            // hold every one of them on the same false line (review
-            // finding 4).
-            let known = repo
-                .git(&[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{base}"),
-                ])
-                .is_ok()
-                || *remote_cache
-                    .entry(base.to_string())
-                    .or_insert_with(|| repo.remote_branch_exists(base));
-            if known {
-                None
-            } else {
-                Some((
-                    format!(
-                        "task `{id}` is based on `{base}`, which exists neither locally nor on \
-                         `origin`"
-                    ),
-                    format!("Set `base:` in {id} to a branch that exists."),
-                ))
-            }
+    if task.front.worktree_path.is_some() || is_borrowed(repo, task) {
+        // Cut already, or a checkout somebody else has out: its base is never
+        // read again, so a base gone missing under it is nothing to hold it
+        // over.
+        return None;
+    }
+    // `origin` is only ever asked once per base per call of this check, not
+    // once per task on it: `base_problem` runs on every live task, on every
+    // dispatcher pass, and a chain's dependents all still uncut share their
+    // root's exact `base` string, so an unmemoised `git ls-remote` here would
+    // repeat the same network round trip for every task still waiting in a
+    // long chain, on roughly a ten-second clock — and one transient failure
+    // would hold every one of them on the same false line (review finding 4).
+    // A failed ask reads as missing here: the hold lifts by itself next pass.
+    if branch_known(repo, base, remote_cache).unwrap_or(false) {
+        None
+    } else {
+        Some((
+            format!(
+                "task `{id}` is based on `{base}`, which exists neither locally nor on \
+                 `origin`"
+            ),
+            format!("Set `base:` in {id} to a branch that exists."),
+        ))
+    }
+}
+
+/// What `origin` said about each branch asked of it this pass: `Some` for a
+/// real answer, `None` for an ask that failed. A failure is kept too, so an
+/// unreachable remote costs one connect timeout per branch per pass rather than
+/// one per task; the next pass starts a fresh cache and asks again.
+pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
+
+/// The branch an uncut `task` is cut from: its own `starts_from:`, else its
+/// first dependency's branch, else `base`.
+///
+/// One answer for the cut in [`ensure_workspace`] and for the pause in
+/// [`Dispatcher::missing_start_branch`], so the pause never checks a different
+/// branch than the cut then uses. A dependency that cannot be resolved fails
+/// by name — see [`Repo::dependency_branch`].
+fn start_branch(repo: &Repo, task: &Task, base: &str) -> Result<String> {
+    match (&task.front.starts_from, task.front.depends_on.first()) {
+        (Some(own), _) => Ok(own.clone()),
+        (None, Some(dep)) => repo.dependency_branch(dep),
+        (None, None) => Ok(base.to_string()),
+    }
+}
+
+/// Whether `branch` exists anywhere a worktree could be cut from, the way
+/// [`crate::mux::resolve_cut_base`] looks: a local branch, then a
+/// remote-tracking ref, then `origin` itself — each answering with less
+/// network than the next.
+///
+/// `None` when nothing local has it and `origin` could not be asked. A caller
+/// that holds a task over a missing branch treats that as "not known yet",
+/// not as "missing". `remote_cache` keeps what `origin` said, a failed ask
+/// included, for the rest of the caller's pass, so a chain's tasks sharing one
+/// branch cost one `git ls-remote` even when the remote does not answer.
+fn branch_known(repo: &Repo, branch: &str, remote_cache: &mut RemoteCache) -> Option<bool> {
+    for prefix in ["refs/heads", "refs/remotes/origin"] {
+        if repo
+            .git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{prefix}/{branch}"),
+            ])
+            .is_ok()
+        {
+            return Some(true);
         }
     }
+    *remote_cache
+        .entry(branch.to_string())
+        .or_insert_with(|| repo.remote_branch_answer(branch))
+}
+
+/// Whether `task`'s branch is already checked out somewhere, which makes it
+/// *borrowed*, never cut (`ensure_workspace`'s own `repo.worktree_for` arm):
+/// no start branch is read for it at all.
+fn is_borrowed(repo: &Repo, task: &Task) -> bool {
+    let branch = task
+        .front
+        .branch
+        .clone()
+        .unwrap_or_else(|| crate::task::default_branch(task.id()));
+    matches!(repo.worktree_for(&branch), Ok(Some(_)))
 }
 
 /// Create the task's worktree if it has none, start its agent in that pane,
@@ -5311,17 +5408,18 @@ fn ensure_workspace(
                 // failed `git worktree add` rather than a wrong
                 // diff. An unresolvable dependency fails by name here rather
                 // than at the cut — see [`Repo::dependency_branch`].
-                let cut_from = match task.front.depends_on.first() {
-                    Some(dep) => repo.dependency_branch(dep)?,
-                    None => base.clone(),
-                };
+                //
+                // A person's own `starts_from:` outranks both, and is what a
+                // re-cut after a worktree deleted by hand reads back too —
+                // the branch it was first cut from.
+                let starts_from = start_branch(repo, task, &base)?;
                 // Resolved just before the cut, so it names the exact commit
                 // the new branch's history starts from — the one thing a
-                // replay of this task can pin to once `cut_from` itself has
+                // replay of this task can pin to once `starts_from` itself has
                 // moved on or been deleted.
                 //
-                // A bare `git rev-parse <cut_from>` only ever resolves a
-                // local ref, and `cut_from` may name a branch nobody here
+                // A bare `git rev-parse <starts_from>` only ever resolves a
+                // local ref, and `starts_from` may name a branch nobody here
                 // has ever fetched — a remote-only base, or a dependency
                 // whose local branch cleanup already deleted once it was
                 // pushed — so the same local-else-origin resolution the cut
@@ -5330,7 +5428,7 @@ fn ensure_workspace(
                 let base_commit = repo
                     .git(&[
                         "rev-parse",
-                        &crate::mux::resolve_cut_base(&repo.root, &cut_from),
+                        &crate::mux::resolve_cut_base(&repo.root, &starts_from),
                     ])
                     .ok()
                     .map(|c| c.trim().to_string());
@@ -5339,7 +5437,7 @@ fn ensure_workspace(
                         let workspace = mux.create_workspace(
                             &repo.root,
                             &branch,
-                            &cut_from,
+                            &starts_from,
                             &format!("spoolway/{}", task.id()),
                         )?;
                         task.front.workspace_id = Some(workspace.workspace_id);
@@ -5355,7 +5453,7 @@ fn ensure_workspace(
                         // see `Mux::remove_checkout`, the removal this pairs
                         // with.
                         let path = crate::mux::worktree_root(&repo.root)?.join(task.id());
-                        crate::mux::cut_worktree(&repo.root, &path, &branch, &cut_from)?;
+                        crate::mux::cut_worktree(&repo.root, &path, &branch, &starts_from)?;
                         // Opened on this exact worktree — the first task
                         // through here gives the project's shared tab a real
                         // home instead of the bare project root, and its pane
@@ -5374,7 +5472,7 @@ fn ensure_workspace(
                 task.front.borrowed = false;
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
-                task.front.cut_from = Some(cut_from);
+                task.front.starts_from = Some(starts_from);
                 task.front.base_commit = base_commit;
                 task.front.run = Some(crate::usage::new_run_id());
                 persist_task(repo, task, file_seen)?;
@@ -7503,7 +7601,7 @@ mod tests {
             // a test about a missing base clears it explicitly with `edit`.
             base: Some("work".into()),
             run: None,
-            cut_from: None,
+            starts_from: None,
             base_commit: None,
             patch: None,
             skip: Vec::new(),
@@ -7518,6 +7616,7 @@ mod tests {
             paused_at: None,
             paused_by: None,
             hook_paused: None,
+            missing_start_branch: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
@@ -7624,41 +7723,26 @@ mod tests {
         assert_eq!(task.front.base, None);
     }
 
-    /// A cut task's `base:` edited by hand since it was cut — its worktree
-    /// cannot move to follow — holds only that task, the same way a missing
-    /// `base:` does: a line on the problem list, and everything else in the
-    /// queue runs exactly as it would have otherwise.
+    /// A cut task whose `starts_from:` differs from its `base:` is not held:
+    /// a person may set where a task starts apart from where it lands, so the
+    /// two differing is no sign of a base edited since the cut.
     #[test]
-    fn a_cut_tasks_base_edited_by_hand_holds_only_that_task() {
-        let (repo, _root_guard) = fixture("base-moved-since-cut");
-        let moved = add_task_with(&repo, "moved", "queued", |f| {
-            f.cut_from = Some("work".into());
+    fn a_cut_task_that_starts_apart_from_its_base_is_not_held() {
+        let (repo, _root_guard) = fixture("starts-apart-since-cut");
+        add_task_with(&repo, "apart", "queued", |f| {
+            f.starts_from = Some("work".into());
             f.base = Some("elsewhere".into());
+            // What makes it a cut task: the recorded worktree, not the field.
+            f.worktree_path = Some(repo.root.clone());
         });
-        add_task(&repo, "other", "queued");
         let mux = FakeMux::new(vec![]);
 
         let report = run_pass(&repo, &mux);
 
         assert!(
-            report.problems.iter().any(|p| p
-                .contains("task `moved` was cut from `work` but now says `base: elsewhere`")
-                && p.contains("Its worktree can't move.")),
+            !report.problems.iter().any(|p| p.contains("apart")),
             "{:?}",
             report.problems
-        );
-        assert_eq!(
-            mux.did("create_workspace"),
-            ["create_workspace on task/other from work"],
-            "the other task in the queue still runs: {:?}",
-            mux.calls()
-        );
-
-        let task = reload(&moved);
-        assert_eq!(
-            task.stage(),
-            "queued",
-            "the held task is left exactly where it was"
         );
     }
 
@@ -7710,13 +7794,32 @@ mod tests {
             },
         ));
         let mut cache = HashMap::new();
-        cache.insert("ghost-branch-nothing-has".to_string(), true);
+        cache.insert("ghost-branch-nothing-has".to_string(), Some(true));
 
         assert!(
             base_problem(&repo, &task, &mut cache).is_none(),
             "the cache already answered `true` for this base, so it must not \
              be asked of git again and found missing"
         );
+    }
+
+    /// An `origin` that cannot be asked is asked once per base per pass: the
+    /// failure is cached, so a chain of tasks sharing a base does not repeat a
+    /// connect timeout, and the cached failure is trusted over a fresh ask.
+    #[test]
+    fn a_failed_ask_of_origin_is_cached_for_the_pass() {
+        let (repo, _root_guard) = fixture("bases-failed-ask-cached");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        let mut cache = RemoteCache::new();
+
+        assert_eq!(branch_known(&repo, "ghost", &mut cache), None);
+        assert_eq!(cache.get("ghost"), Some(&None), "the failure is kept");
+
+        // Were the cached failure not trusted, a repository with no `origin`
+        // would answer `Some(false)` for this ask instead.
+        repo.git(&["remote", "remove", "origin"]).unwrap();
+        assert_eq!(branch_known(&repo, "ghost", &mut cache), None);
     }
 
     /// A run of two plans is still one tab: every lane of one project shares
@@ -14919,6 +15022,9 @@ mod tests {
             "---\nid: first\nstage: done\n---\n",
         )
         .unwrap();
+        // The branch the finished dependency left behind: without it the
+        // dependent would pause over a start branch that does not exist.
+        repo.git(&["branch", "task/first"]).unwrap();
         add_task_with(&repo, "second", "queued", |f| {
             f.depends_on = vec!["first".into()];
         });
@@ -15168,7 +15274,7 @@ mod tests {
     }
 
     /// A base only `origin` has never resolves through a bare `git
-    /// rev-parse <cut_from>` — there is no local `cut_from` ref for it to
+    /// rev-parse <starts_from>` — there is no local `starts_from` ref for it to
     /// find — so `base_commit` must be resolved the same local-else-origin
     /// way the cut itself is, after the same fetch, or a task cut from a
     /// remote-only base (the feature's own headline case) is pinned to
@@ -15505,7 +15611,7 @@ mod tests {
 
         ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
-        assert_eq!(task.front.cut_from.as_deref(), Some("task/first"));
+        assert_eq!(task.front.starts_from.as_deref(), Some("task/first"));
         assert_eq!(
             task.front.base.as_deref(),
             Some("work"),
@@ -15571,8 +15677,189 @@ mod tests {
         std::fs::remove_dir_all(&worktree).ok();
     }
 
+    /// A person's `starts_from:` outranks the dependency's branch: the
+    /// dependent is cut from it, and the plan's `base` is untouched. This is
+    /// the way out for a dependency whose branch was deleted on merge.
+    #[test]
+    fn a_task_that_sets_starts_from_is_cut_from_it_not_its_dependency() {
+        let (repo, _root_guard) = fixture("cut-from-own-starts-from");
+        let worktree = crate::mux::worktree_root(&repo.root)
+            .unwrap()
+            .join("second");
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        repo.git(&["checkout", "-q", "-b", "elsewhere"]).unwrap();
+        std::fs::write(repo.root.join("elsewhere.txt"), "x\n").unwrap();
+        crate::repo::run(&repo.root, "git", &["add", "elsewhere.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "elsewhere"]).unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        // `first` has no branch anywhere: reading it would fail the cut.
+        add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+        });
+        let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
+            f.depends_on = vec!["first".into()];
+            f.starts_from = Some("elsewhere".into());
+        }));
+        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert_eq!(task.front.starts_from.as_deref(), Some("elsewhere"));
+        assert_eq!(task.front.base.as_deref(), Some("work"));
+        assert!(worktree.join("elsewhere.txt").exists());
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// `starts_from:` set by a person before the cut is not a record of a cut:
+    /// the recorded worktree is. So an uncut task that sets one still has its
+    /// base checked, and a cut one is not compared with it at all.
+    #[test]
+    fn base_problem_tells_a_started_task_by_its_worktree_not_by_starts_from() {
+        let (repo, _root_guard) = fixture("base-problem-started-by-worktree");
+        let mut cache = HashMap::new();
+
+        let mut uncut = reload(&add_task_with(&repo, "uncut", "queued", |f| {
+            f.starts_from = Some("work".into());
+            f.base = Some("gone".into());
+        }));
+        assert!(
+            base_problem(&repo, &uncut, &mut cache).is_some(),
+            "a person-set `starts_from:` must not stand in for a cut"
+        );
+
+        uncut.front.worktree_path = Some(repo.root.clone());
+        assert!(
+            base_problem(&repo, &uncut, &mut cache).is_none(),
+            "a cut task whose `starts_from:` differs from `base:` is what a person set, not a \
+             base moved since the cut"
+        );
+    }
+
+    /// A queued task whose own `starts_from:` exists nowhere is not launched:
+    /// it pauses with the branch recorded, no worktree cut, and exactly one
+    /// line on the dispatch output.
+    #[test]
+    fn a_queued_task_whose_starts_from_does_not_exist_pauses() {
+        let (repo, _root_guard) = fixture("pause-missing-starts-from");
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |f| {
+            f.starts_from = Some("task/nowhere".into());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        let report = run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.missing_start_branch.as_deref(),
+            Some("task/nowhere")
+        );
+        assert!(task.front.worktree_path.is_none());
+        assert_eq!(
+            report.problems,
+            vec![
+                "paused `demo`: it starts from `task/nowhere`, which doesn't exist. Set \
+                 `starts_from:` in the task front matter and resume."
+                    .to_string()
+            ]
+        );
+    }
+
+    /// The late merge itself: the dependency is `done`, but its branch is gone.
+    /// The dependent pauses naming that branch, and a second pass leaves it
+    /// paused rather than pausing it again.
+    #[test]
+    fn a_dependent_whose_dependency_branch_was_deleted_pauses_naming_it() {
+        let (repo, _root_guard) = fixture("pause-deleted-dependency-branch");
+        add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+        });
+        let path = add_task_with(&repo, "second", crate::pipeline::QUEUED, |f| {
+            f.depends_on = vec!["first".into()];
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.missing_start_branch.as_deref(),
+            Some("task/first")
+        );
+
+        let report = run_pass(&repo, &mux);
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+        assert!(
+            report
+                .problems
+                .iter()
+                .all(|p| !p.contains("paused `second`")),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    /// A start branch only `origin` has, already seen by a fetch, is a branch
+    /// the cut can use: no pause.
+    #[test]
+    fn a_start_branch_known_only_as_a_remote_tracking_ref_is_not_missing() {
+        let (repo, _root_guard) = fixture("start-branch-tracking-ref");
+        repo.git(&["update-ref", "refs/remotes/origin/only-there", "HEAD"])
+            .unwrap();
+        let task = reload(&add_task_with(&repo, "demo", "queued", |f| {
+            f.starts_from = Some("only-there".into());
+        }));
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+
+        assert_eq!(
+            dispatcher.missing_start_branch(&task, &mut HashMap::new()),
+            None
+        );
+    }
+
+    /// An `origin` that cannot be asked proves nothing about the branch, and
+    /// the pause waits for a person, so it is not taken on a blip.
+    #[test]
+    fn an_origin_that_cannot_be_asked_does_not_pause_a_task() {
+        let (repo, _root_guard) = fixture("start-branch-origin-down");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        let task = reload(&add_task_with(&repo, "demo", "queued", |f| {
+            f.starts_from = Some("task/nowhere".into());
+        }));
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+
+        assert_eq!(
+            dispatcher.missing_start_branch(&task, &mut HashMap::new()),
+            None
+        );
+    }
+
+    /// A start branch that exists is no reason to pause: the task goes on to
+    /// its first step as ever.
+    #[test]
+    fn a_queued_task_whose_starts_from_exists_is_not_paused() {
+        let (repo, _root_guard) = fixture("no-pause-existing-starts-from");
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |f| {
+            f.starts_from = Some("work".into());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::QUEUED);
+
+        assert_ne!(stage, crate::pipeline::PAUSED);
+        assert!(reload(&path).front.missing_start_branch.is_none());
+    }
+
     /// A task with no dependency is cut from `base:` exactly as it was
-    /// before this task — `cut_from` and `base` agree.
+    /// before this task — `starts_from` and `base` agree.
     #[test]
     fn a_task_with_no_dependency_is_still_cut_from_base() {
         let (repo, _root_guard) = fixture("cut-from-base");
@@ -15581,11 +15868,11 @@ mod tests {
 
         ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
-        assert_eq!(task.front.cut_from.as_deref(), Some("work"));
+        assert_eq!(task.front.starts_from.as_deref(), Some("work"));
         assert_eq!(task.front.base.as_deref(), Some("work"));
     }
 
-    /// The whole reason `base_commit` moves to `cut_from`: a queued
+    /// The whole reason `base_commit` moves to `starts_from`: a queued
     /// dependent has not been cut yet, so the dependency's branch is still
     /// what its worktree has to start from. Deleting it here would leave
     /// that dependent with nothing to be cut from.

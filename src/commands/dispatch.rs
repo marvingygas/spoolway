@@ -1264,8 +1264,7 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
 
 /// Refuse the whole start over any live task whose `base:` has drifted out
 /// from under it — a dependent that no longer agrees with its dependency's
-/// base, or a cut task whose worktree was started from a base it no longer
-/// names — and over a task still waiting to be cut whose base has vanished
+/// base — and over a task still waiting to be cut whose base has vanished
 /// from both places a worktree could start from.
 ///
 /// Beside [`check_task_routes`] for the same reason: found and fixed by a
@@ -1278,7 +1277,7 @@ fn check_task_bases(repo: &Repo, tasks: &[Task]) -> Result<()> {
     // Shared across the whole batch, not rebuilt per task — see
     // [`crate::dispatch::base_problem`]'s own doc for why a chain sharing
     // one `base` must cost one `git ls-remote`, not one per task on it.
-    let mut remote_cache = std::collections::HashMap::new();
+    let mut remote_cache = crate::dispatch::RemoteCache::new();
     for task in tasks {
         if let Some((reason, fix)) = crate::dispatch::base_problem(repo, task, &mut remote_cache) {
             bail!("refusing to start: {reason}\n  {fix}\n\nNothing was dispatched.");
@@ -1497,33 +1496,22 @@ mod tests {
         assert!(message.contains("Nothing was dispatched."), "{message}");
     }
 
-    /// A cut task's worktree cannot move. If its `base:` no longer names
-    /// what `cut_from` recorded at cut time, that is an edit nobody can
-    /// honour, and the start refuses rather than silently keep the old
-    /// worktree.
+    /// A cut task with no dependency whose `starts_from:` differs from its
+    /// `base:` starts the dispatcher: a person may set where a task starts
+    /// apart from where it lands, so the two differing is no edit to refuse.
     #[test]
-    fn check_task_bases_refuses_a_cut_task_whose_base_moved() {
-        let (repo, _root_guard) = fixture("bases-cut-moved");
+    fn check_task_bases_passes_a_cut_task_that_starts_apart_from_its_base() {
+        let (repo, _root_guard) = fixture("bases-cut-starts-apart");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         let mut totals = repo.task("cart-totals").unwrap();
-        totals.front.cut_from = Some("plan/demo".to_string());
+        totals.front.starts_from = Some("plan/demo".to_string());
+        // A task is cut when it has a worktree, whatever `starts_from:` says.
+        totals.front.worktree_path = Some(repo.root.clone());
         totals.front.base = Some("main".to_string());
         totals.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let err = check_task_bases(&repo, &tasks).unwrap_err();
-        let message = format!("{err:#}");
-        assert!(
-            message.contains(
-                "refusing to start: task `cart-totals` was cut from `plan/demo` but now says \
-                 `base: main`"
-            ),
-            "{message}"
-        );
-        assert!(
-            message.contains("Its worktree can't move. Set `base:` back to `plan/demo`."),
-            "{message}"
-        );
+        assert!(check_task_bases(&repo, &tasks).is_ok());
     }
 
     /// A task still waiting to be cut whose base has vanished from both
@@ -1561,7 +1549,9 @@ mod tests {
         let (repo, _root_guard) = fixture("bases-cut-not-asked");
         crate::commands::testutil::add(&repo, "cart-totals", &[]);
         let mut totals = repo.task("cart-totals").unwrap();
-        totals.front.cut_from = Some("plan/demo".to_string());
+        totals.front.starts_from = Some("plan/demo".to_string());
+        // A task is cut when it has a worktree, whatever `starts_from:` says.
+        totals.front.worktree_path = Some(repo.root.clone());
         totals.save().unwrap();
 
         let tasks = repo.tasks().unwrap();

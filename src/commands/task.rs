@@ -41,6 +41,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "ticket",
     "tracking",
     "base",
+    "starts_from",
     "group_description",
     "labels",
 ];
@@ -76,6 +77,7 @@ const IGNORED_KEYS: &[&str] = &[
     "paused_at",
     "paused_by",
     "hook_paused",
+    "missing_start_branch",
     "launched_at",
     "steps",
     "rounds",
@@ -183,6 +185,16 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          `base`. Must name a branch the repository has locally or on `origin`. \
          Left unset, the submission's own `queue add --base` applies instead; \
          a submission that sets neither is refused, naming the task.",
+    ),
+    (
+        "starts_from",
+        "The branch this task's worktree is cut from, when it is not the \
+         default — its first dependency's branch for a dependent, `base` \
+         otherwise. Set it when that dependency's branch no longer exists, \
+         for instance because its pull request merged and the branch was \
+         deleted. Must name a branch the repository has locally or on \
+         `origin` by the time the task starts, or the task pauses until a \
+         person sets another and resumes it. Never picked for a task automatically.",
     ),
     (
         "group_description",

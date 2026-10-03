@@ -1081,10 +1081,9 @@ pub struct QueueAddArgs {
     ///
     /// Each task is `---\n<frontmatter>\n---\n<body>`, the same shape a
     /// queued task is kept in. `id`, `depends_on`, `group`,
-    /// `source`, `plan`, `pipeline`, `gate_at` and `base` are a
-    /// task's to set; `stage`, `run`, `attempts`, `base_commit` and
-    /// `cut_from` are spoolway's alone, and a task setting one is
-    /// refused by name. A task's own `base:` wins over `--base`; a
+    /// `source`, `plan`, `pipeline`, `gate_at`, `base` and `starts_from`
+    /// are a task's to set; `stage`, `run`, `attempts` and `base_commit`
+    /// are spoolway's alone, and a task setting one is refused by name. A task's own `base:` wins over `--base`; a
     /// task that sets neither is refused by name, naming the task,
     /// rather than based on whichever branch this checkout happens to have
     /// out. One that sets a base must name a branch this repository has

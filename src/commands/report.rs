@@ -1458,6 +1458,12 @@ fn back_onto_its_step(
         return unpark(repo, pipelines, task);
     }
 
+    // A pause over a start branch that did not exist is answered by sending
+    // the task back to `queued`, which `resume_target` already does for a task
+    // that never started. The marker only says why it paused, so it goes
+    // either way: left set, a later pause would read as this one.
+    task.front.missing_start_branch = None;
+
     // A hook pause is neither a block nor a park: nothing inside the
     // pipeline failed a check, a hook exited non-zero on `queued` or `done`
     // — see `crate::dispatch::Dispatcher::pause_for_hook_failure`. Forgetting
@@ -2179,6 +2185,35 @@ mod tests {
             None,
             "the failed run must be forgotten, or the very next pass pauses it right back"
         );
+    }
+
+    /// A task paused over a start branch that does not exist goes back to
+    /// `queued` with the marker cleared, and prints the usual line.
+    #[test]
+    fn resume_puts_a_missing_start_branch_pause_back_on_queued() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-missing-start-branch");
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.front.missing_start_branch = Some("task/gone".to_string());
+        task.set_stage(crate::pipeline::PAUSED, Some("start branch missing"));
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "demo");
+        assert_eq!(task.stage(), crate::pipeline::QUEUED);
+        assert!(task.front.missing_start_branch.is_none());
     }
 
     /// Acceptance criterion: a task paused on `started` — the task never

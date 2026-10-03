@@ -318,7 +318,7 @@ pub struct Frontmatter {
 
     /// Branch the plan lands in — the base of this task's own pull request,
     /// and every dependent's after it. Never the branch the worktree was
-    /// actually cut from once there is a `depends_on`; see `cut_from` for
+    /// actually cut from once there is a `depends_on`; see `starts_from` for
     /// that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -329,20 +329,27 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
 
-    /// What this task's worktree was actually cut from: the first
-    /// dependency's own branch when `depends_on` names one — read from that
-    /// task's `branch:` field, see [`crate::repo::Repo::dependency_branch`] —
-    /// and `base` otherwise. Recorded separately from
-    /// `base`, which keeps its own meaning — the branch the plan lands in —
-    /// whether or not the two agree. Only set when a worktree is actually
-    /// cut; a borrowed checkout was already there, cut from something at a
-    /// moment nothing here witnessed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cut_from: Option<String>,
-
-    /// The commit `cut_from` pointed at when this task's worktree was cut.
+    /// The branch this task's worktree starts from: its own value when a
+    /// person set one before the cut, else the first dependency's own branch
+    /// when `depends_on` names one — read from that task's `branch:` field,
+    /// see [`crate::repo::Repo::dependency_branch`] — and `base` otherwise.
+    /// Recorded separately from `base`, which keeps its own meaning — the
+    /// branch the plan lands in — whether or not the two agree.
     ///
-    /// `cut_from` is a branch name, and branches move — by the time anyone
+    /// Two writers: a person, before the cut, for a start branch the
+    /// dispatcher cannot work out (a dependency whose branch was deleted when
+    /// its pull request merged), and spoolway at the cut, which stamps the
+    /// branch it used. So a value here does not mean the task has started —
+    /// its recorded `worktree_path` does. A borrowed checkout is never
+    /// stamped: it was already there, cut from something at a moment nothing
+    /// here witnessed. Task files written when the field was called
+    /// `cut_from` still read.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "cut_from")]
+    pub starts_from: Option<String>,
+
+    /// The commit `starts_from` pointed at when this task's worktree was cut.
+    ///
+    /// `starts_from` is a branch name, and branches move — by the time anyone
     /// wants to replay this task, it may be merged and deleted. This is what
     /// a replay pins to instead. Only recorded when a worktree is actually
     /// cut for the task; a borrowed checkout was already there, cut from
@@ -496,6 +503,17 @@ pub struct Frontmatter {
     /// ordinary pause never inherits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_paused: Option<String>,
+
+    /// The start branch that was missing when the dispatcher paused this task
+    /// instead of cutting its worktree — the pause's own reason, which
+    /// `queue show` prints with the rest of the front matter.
+    ///
+    /// Written together with the move to `paused` by
+    /// `Dispatcher::pause_for_missing_start_branch`, and cleared by
+    /// `spoolway resume`, which puts the task back on `queued` for the next
+    /// pass to look again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_start_branch: Option<String>,
 
     /// When the last of those lanes was launched, in epoch seconds.
     ///
@@ -1818,23 +1836,38 @@ mod tests {
         assert!(format!("{err:#}").contains("spoolway owns that field"));
     }
 
-    /// `cut_from` is what `spoolway queue show` prints for what the worktree
+    /// `starts_from` is what `spoolway queue show` prints for what the worktree
     /// was actually cut from — a line of its own, distinct from `base`, which
     /// keeps meaning the branch the plan lands in.
     #[test]
-    fn cut_from_round_trips_and_stays_out_when_unset_and_stands_apart_from_base() {
+    fn starts_from_round_trips_and_stays_out_when_unset_and_stands_apart_from_base() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
-        assert!(!task.render().unwrap().contains("cut_from:"));
+        assert!(!task.render().unwrap().contains("starts_from:"));
 
         task.front.base = Some("main".into());
-        task.front.cut_from = Some("task/dependency".into());
+        task.front.starts_from = Some("task/dependency".into());
         let rendered = task.render().unwrap();
         assert!(rendered.contains("base: main"));
-        assert!(rendered.contains("cut_from: task/dependency"));
+        assert!(rendered.contains("starts_from: task/dependency"));
 
         let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
         assert_eq!(reparsed.front.base.as_deref(), Some("main"));
-        assert_eq!(reparsed.front.cut_from.as_deref(), Some("task/dependency"));
+        assert_eq!(
+            reparsed.front.starts_from.as_deref(),
+            Some("task/dependency")
+        );
+    }
+
+    /// A task file written when the field was called `cut_from` still reads,
+    /// and is written back under the new name.
+    #[test]
+    fn a_task_file_that_says_cut_from_reads_as_starts_from() {
+        let old = "---\nid: demo\nstage: done\ncut_from: task/old\n---\n";
+        let task = Task::parse(PathBuf::from("demo.md"), old).unwrap();
+        assert_eq!(task.front.starts_from.as_deref(), Some("task/old"));
+        let rendered = task.render().unwrap();
+        assert!(rendered.contains("starts_from: task/old"), "{rendered}");
+        assert!(!rendered.contains("cut_from"), "{rendered}");
     }
 
     /// `at` round-trips like any other field, and a task file written before

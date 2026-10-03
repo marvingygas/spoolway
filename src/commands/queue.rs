@@ -164,7 +164,6 @@ pub(crate) const RESERVED_KEYS: &[&str] = &[
     "run",
     "attempts",
     "base_commit",
-    "cut_from",
     "trial",
     "trial_group",
     "branch",
@@ -799,7 +798,6 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         },
     );
     front.run = None;
-    front.cut_from = None;
     front.base_commit = None;
     front.patch = None;
     front.skip = Vec::new();
@@ -9022,7 +9020,6 @@ mod tests {
             "run",
             "attempts",
             "base_commit",
-            "cut_from",
             "trial",
             "trial_group",
             "branch",
@@ -16301,7 +16298,7 @@ my_custom: kept
 branch: task/board-key-map
 base: master
 run: r0c5746afb1ed8aa4
-cut_from: task/cursor-in-gap
+starts_from: task/cursor-in-gap
 base_commit: fe481e57b4c
 worktree_path: /home/x/board-key-map
 workspace_id: w7H
@@ -16352,7 +16349,7 @@ body\n";
                 "branch:",
                 "base:",
                 "run:",
-                "cut_from:",
+                "starts_from:",
                 "base_commit:",
                 "worktree_path:",
                 "workspace_id:",

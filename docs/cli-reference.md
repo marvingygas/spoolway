@@ -306,8 +306,8 @@ Nothing was dispatched.
 ```
 
 It checks every live task's `base:` the same way. A dependent whose `base:` disagrees with its
-dependency's, a cut task whose `base:` no longer names what it was cut from, or a task whose base
-exists neither locally nor on `origin`, each refuses the whole start:
+dependency's, or a task not yet cut whose base exists neither locally nor on `origin`, each
+refuses the whole start:
 
 ```
 refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, which
@@ -530,7 +530,9 @@ on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, 
 it goes to `blocked`. A task an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) paused forgets that
 hook's failed run, so it fires again; a task paused on `queued` or `started` resumes to
-`queued`, and one paused on `done` resumes straight back to `done`.
+`queued`, and one paused on `done` resumes straight back to `done`. A task paused because its
+[start branch does not exist](tasks.md#a-start-branch-that-does-not-exist) resumes to `queued`
+with `missing_start_branch:` cleared.
 
 ```
 spoolway resume <task>

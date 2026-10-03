@@ -4,7 +4,7 @@
 //! This is a command step's whole job — see docs/pipelines.md, "Command
 //! steps" — so it needs no worker slot and no prompt, and its exit code is
 //! already its outcome. The dependent's worktree already sits on its
-//! dependency's branch (`Frontmatter::cut_from`, set when the worktree is
+//! dependency's branch (`Frontmatter::starts_from`, set when the worktree is
 //! cut), so there is no rebase left to run here; that ancestry is the
 //! previous task's whole reason to exist.
 //!
@@ -106,15 +106,15 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // The branch this pull request is opened against: what the worktree was
     // actually cut from — the dependency's branch under a stack, `base`
     // otherwise. `base` alone is kept only for a checkout old enough to
-    // predate `cut_from`.
-    let cut_from = task
+    // predate the field.
+    let starts_from = task
         .front
-        .cut_from
+        .starts_from
         .clone()
         .or_else(|| task.front.base.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "task `{id}` records neither `cut_from` nor `base` — nothing to open a pull \
+                "task `{id}` records neither `starts_from` nor `base` — nothing to open a pull \
                  request against"
             )
         })?;
@@ -124,8 +124,8 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // what this branch sits on. Best-effort: a fetch that fails (no remote,
     // offline) is exactly what the diff below will fail loudly on if it
     // actually matters.
-    let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &cut_from]);
-    // A `cut_from` that no longer resolves anywhere is the ordinary end of a
+    let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &starts_from]);
+    // A `starts_from` that no longer resolves anywhere is the ordinary end of a
     // stack, not a broken task: once the dependency's own pull request lands,
     // its branch is deleted local and remote, and every task still cut from
     // it is left naming a ref nothing can look up. Its commits are in `base`
@@ -134,10 +134,10 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // while it still existed. Without this fall-through, `handover` fails
     // permanently the moment a dependency merges, which is the one thing
     // every stacked task is waiting for.
-    let (cut_from, cut_ref) = match resolved_ref(&worktree, &cut_from) {
-        Some(cut_ref) => (cut_from, cut_ref),
+    let (starts_from, cut_ref) = match resolved_ref(&worktree, &starts_from) {
+        Some(cut_ref) => (starts_from, cut_ref),
         None => {
-            let base = task.front.base.clone().filter(|base| base != &cut_from);
+            let base = task.front.base.clone().filter(|base| base != &starts_from);
             let landed = base.and_then(|base| {
                 let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &base]);
                 resolved_ref(&worktree, &base).map(|cut_ref| (base, cut_ref))
@@ -146,41 +146,41 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
                 Some((base, cut_ref)) => {
                     report_line(
                         "base",
-                        format!("`{cut_from}` has landed — against `{base}`"),
+                        format!("`{starts_from}` has landed — against `{base}`"),
                     );
                     (base, cut_ref)
                 }
                 // `base:` names nothing this worktree can already see — either
-                // it is the same branch as `cut_from` (a chain's first task,
+                // it is the same branch as `starts_from` (a chain's first task,
                 // per the acceptance criterion this exists for) or it has
                 // never resolved either. GitHub still remembers what
-                // `cut_from` was for even after the branch itself is gone, so
+                // `starts_from` was for even after the branch itself is gone, so
                 // the merged-pull-request lookup below is asked next, before
                 // giving up outright.
-                None => match head_pr(&gh_program(), &worktree, &cut_from)? {
+                None => match head_pr(&gh_program(), &worktree, &starts_from)? {
                     Some(HeadPr::Merged { base, number: _ }) => {
                         let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &base]);
                         let cut_ref = resolved_ref(&worktree, &base).ok_or_else(|| {
                             anyhow::anyhow!(
-                                "task `{id}` is cut from `{cut_from}`, whose pull request \
+                                "task `{id}` is cut from `{starts_from}`, whose pull request \
                                  merged into `{base}` — but `{base}` itself resolves to \
                                  nothing, so there is nothing to diff this branch against"
                             )
                         })?;
                         report_line(
                             "base",
-                            format!("`{cut_from}` has landed — against `{base}`"),
+                            format!("`{starts_from}` has landed — against `{base}`"),
                         );
                         (base, cut_ref)
                     }
                     Some(HeadPr::ClosedUnmerged { number }) => bail!(
-                        "task `{id}` is cut from `{cut_from}`, which is gone — its pull \
+                        "task `{id}` is cut from `{starts_from}`, which is gone — its pull \
                          request #{number} was closed without merging. Open this pull \
                          request by hand, against the branch you choose."
                     ),
                     None => bail!(
-                        "task `{id}` is cut from `{cut_from}`, which resolves to nothing — no \
-                         `origin/{cut_from}` and no local branch — and its `base:` does not \
+                        "task `{id}` is cut from `{starts_from}`, which resolves to nothing — no \
+                         `origin/{starts_from}` and no local branch — and its `base:` does not \
                          resolve either, so there is nothing to diff this branch against"
                     ),
                 },
@@ -191,22 +191,25 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // `cut_ref` came back from `remote_ref` — inside `resolved_ref` for the
     // direct case, inside the landed-dependency fall-through otherwise — and
     // that function hands back the bare branch name exactly when no
-    // `origin/<cut_from>` exists yet. `gh pr create --base` can only name a
+    // `origin/<starts_from>` exists yet. `gh pr create --base` can only name a
     // ref GitHub already knows about, so a base that has never reached the
     // remote is published here, before anything else is pushed, and refused
     // here — before this branch's own force-push below — when it cannot be,
     // so a failed run leaves no published branch behind.
-    if cut_ref == cut_from {
+    if cut_ref == starts_from {
         match crate::repo::run(
             &worktree,
             "git",
-            &["push", "origin", &format!("{cut_from}:{cut_from}")],
+            &["push", "origin", &format!("{starts_from}:{starts_from}")],
         ) {
             Ok(_) => {
-                report_line("base", format!("{cut_from} → origin   (no remote had it)"));
+                report_line(
+                    "base",
+                    format!("{starts_from} → origin   (no remote had it)"),
+                );
             }
             Err(_) => {
-                report_line("base", format!("{cut_from} — cannot be published"));
+                report_line("base", format!("{starts_from} — cannot be published"));
                 bail!(
                     "refusing to open a pull request against a base no remote can be given. \
                      Nothing was pushed."
@@ -233,7 +236,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         .collect();
     if changed_files.is_empty() {
         bail!(
-            "`{branch}` has no changes against `{cut_from}` (three-dot diff is empty) — \
+            "`{branch}` has no changes against `{starts_from}` (three-dot diff is empty) — \
              nothing to open a pull request for"
         );
     }
@@ -319,7 +322,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // group's own slug, from `issue_tracking.key_in_names` prefixing
     // `queue add`'s generated `group:`, `branch:` and worktree names with
     // whatever the hook's own `slug=` answer names (`Config::key_in_names`,
-    // `src/config.rs`), not from `cut_from` — so only the title needs the
+    // `src/config.rs`), not from `starts_from` — so only the title needs the
     // ticket key added here. A GitHub `ticket:` is a URL, never a bare key,
     // so this never touches a GitHub-tracked project's title.
     let ticket = task.extra_str("ticket");
@@ -330,7 +333,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     };
     let body = compose_body(&task.body);
 
-    let (own_number, url) = open_or_reuse_pr(&worktree, &branch, &cut_from, &title, &body)?;
+    let (own_number, url) = open_or_reuse_pr(&worktree, &branch, &starts_from, &title, &body)?;
     report_line("pull req", format!("#{own_number} — {url}"));
     let stacked = register_stack(repo, &worktree, &id, &task.front.depends_on, own_number)?;
     report_line("stack", stacked);
@@ -1134,7 +1137,7 @@ mod tests {
         );
     }
 
-    /// The question `handover` asks of its `cut_from` once a dependency has
+    /// The question `handover` asks of its `starts_from` once a dependency has
     /// landed: a branch that exists answers with a ref to diff against, and
     /// one that has been deleted everywhere answers with nothing rather than
     /// with its own name. `remote_ref` hands back the bare name in both
@@ -1198,7 +1201,7 @@ mod tests {
         assert!(!pr.is_open());
     }
 
-    /// A merged pull request found for a deleted `cut_from` names the branch
+    /// A merged pull request found for a deleted `starts_from` names the branch
     /// it went into — the base `stack` should now open the dependent's own
     /// pull request against, in place of the `base:` fallback that needs a
     /// still-resolving branch of its own.
