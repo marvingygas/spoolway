@@ -88,9 +88,18 @@ pub fn line(question: &str, hint: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     println!("{question}");
-    let answer = read(hint)?;
+    let answer = read(&line_prompt(hint))?;
     let answer = answer.trim().to_string();
     Ok(Some(answer).filter(|a| !a.is_empty()))
+}
+
+/// The hint line of a free-text question.
+///
+/// Shown bare, a hint such as `owner/repo` followed by the cursor reads as an
+/// answer that is already filled in. Opening with "Please enter" and closing
+/// with a colon makes it an instruction to type something.
+fn line_prompt(hint: &str) -> String {
+    format!("Please enter {hint}:")
 }
 
 /// A yes/no question, defaulting `default` when there is nobody to answer —
@@ -123,4 +132,17 @@ fn read(hint: &str) -> Result<String> {
     std::io::stdin().lock().read_line(&mut answer)?;
     println!();
     Ok(answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_prompt_asks_the_person_to_enter_the_hint() {
+        assert_eq!(
+            line_prompt("owner/repo for github, project key for jira"),
+            "Please enter owner/repo for github, project key for jira:"
+        );
+    }
 }
