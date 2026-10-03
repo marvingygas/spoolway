@@ -4,6 +4,7 @@
 //! that a skill or a role's prompt can say "run this command" instead of
 //! describing the procedure in prose an LLM has to re-derive every time.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -724,6 +725,48 @@ pub struct InitArgs {
     /// and a listed one stays where it is.
     #[arg(long, value_name = "NAME")]
     pub workspace: Option<String>,
+
+    // Removed flags, kept hidden so a script still passing one is told what
+    // to do instead. Left out, clap's nearest-spelling tip offers
+    // `--tracker` for `--take-over`, which is no fix at all.
+    #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", value_parser = Removed(
+        "`--take-over` is gone. It already did nothing, so drop it from the command."
+    ))]
+    pub take_over: Option<Infallible>,
+
+    #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", value_parser = Removed(
+        "`--adopt` is gone. To re-attach a home-mode clone whose folder moved, run \
+        `spoolway init --workspace <name>` from the checkout that replaces it; otherwise run \
+        `spoolway init` and answer its questions."
+    ))]
+    pub adopt: Option<Infallible>,
+
+    #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", value_parser = Removed(
+        "`--new-id` is gone. To start a fresh home, delete `.git/spoolway-id` and run \
+        `spoolway init` again."
+    ))]
+    pub new_id: Option<Infallible>,
+}
+
+/// The parser of a removed flag: refuses it whatever its value, with a
+/// message naming what replaces it. An unknown-argument error, so the exit
+/// code is the one clap gives any flag it does not know.
+#[derive(Clone)]
+struct Removed(&'static str);
+
+impl clap::builder::TypedValueParser for Removed {
+    type Value = Infallible;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _: Option<&clap::Arg>,
+        _: &std::ffi::OsStr,
+    ) -> Result<Infallible, clap::Error> {
+        Err(cmd
+            .clone()
+            .error(clap::error::ErrorKind::UnknownArgument, self.0))
+    }
 }
 
 /// Where `spoolway init` puts a project's setup — the answer to "Where
@@ -1785,6 +1828,50 @@ mod tests {
         assert!(Cli::try_parse_from(["spoolway", "init", "--new-id"]).is_err());
         assert!(Cli::try_parse_from(["spoolway", "init", "--take-over"]).is_err());
         assert!(Cli::try_parse_from(["spoolway", "workspace", "move", "other"]).is_err());
+    }
+
+    /// Each removed `init` flag says what replaces it, in any spelling a
+    /// script may still pass, rather than leaving clap to suggest the
+    /// nearest flag it knows — `--tracker`, for `--take-over`. None of them
+    /// shows in `--help`.
+    #[test]
+    fn the_removed_init_flags_name_what_replaces_them() {
+        for (argv, says) in [
+            (&["--take-over"][..], "drop it"),
+            (&["--take-over", "--yes"][..], "drop it"),
+            (
+                &["--adopt", "api-8w4r2c"][..],
+                "spoolway init --workspace <name>",
+            ),
+            (&["--adopt=ws/api"][..], "spoolway init --workspace <name>"),
+            (&["--adopt"][..], "spoolway init --workspace <name>"),
+            (&["--new-id"][..], "delete `.git/spoolway-id`"),
+        ] {
+            let mut full = vec!["spoolway", "init"];
+            full.extend_from_slice(argv);
+            let err = Cli::try_parse_from(&full).expect_err("a removed flag is refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{argv:?}"
+            );
+            let text = err.to_string();
+            assert!(
+                text.contains(says),
+                "{argv:?} should say {says:?}, said:\n{text}"
+            );
+            assert!(!text.contains("tip:"), "{argv:?} offers a tip:\n{text}");
+        }
+
+        use clap::CommandFactory;
+        let help = Cli::command()
+            .find_subcommand_mut("init")
+            .expect("init exists")
+            .render_long_help()
+            .to_string();
+        for flag in ["--take-over", "--adopt", "--new-id"] {
+            assert!(!help.contains(flag), "`init --help` shows {flag}");
+        }
     }
 
     #[test]
