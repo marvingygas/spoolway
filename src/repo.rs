@@ -561,6 +561,14 @@ impl Repo {
             .join(format!("{}.lock", crate::usage::LEDGER_FILE))
     }
 
+    /// The advisory lock over every writer of `archive/index.jsonl` — see
+    /// [`crate::lock::ArchiveIndexLock`]. Beside the archive rather than in
+    /// it, because a file created inside `archive/` would move the folder's
+    /// modification time that the index is compared against.
+    pub fn archive_index_lock_file(&self) -> PathBuf {
+        self.home().join("archive-index.lock")
+    }
+
     /// The running dispatcher's own lock, if there is one.
     pub fn lock_file(&self) -> PathBuf {
         self.home().join(crate::lock::LOCK_FILE)

@@ -340,6 +340,91 @@ impl Drop for LedgerLock {
     }
 }
 
+/// An advisory lock over everything that touches `archive/index.jsonl` or
+/// changes what is in `archive/`.
+///
+/// The index says it is current by carrying the folder's modification time,
+/// and a writer can only stamp that time *after* its own write, because its
+/// own temp file or rename moves the folder's clock. Two parties in
+/// different processes — the dispatcher archiving a task, the retention
+/// sweep that starts every `spoolway` command, `spoolway eval --discard` —
+/// would each stamp the other's change as their own, and the index would
+/// read as current while missing a line or listing a deleted task. Holding
+/// this lock from a writer's currency check to its stamp means nobody else's
+/// change can fall in between.
+///
+/// That only works if nobody who changes the folder gives up on the lock, so
+/// the two kinds of caller wait differently. One that changes the folder
+/// anyway — archiving, sweeping, settling or discarding a trial — waits
+/// [`ArchiveIndexLock::MUTATE_WAIT`], far longer than a rebuild of any
+/// realistic archive takes. One that only reads waits
+/// [`ArchiveIndexLock::READ_WAIT`] and then reads the task files without
+/// writing the index, which changes nothing it could be blamed for.
+///
+/// Same `link_into_place` + [`Lock::holder`] machinery as [`LedgerLock`], and
+/// a crashed holder's file is reaped the same way, so a dead holder never
+/// costs anyone the full wait.
+pub struct ArchiveIndexLock {
+    path: PathBuf,
+}
+
+impl ArchiveIndexLock {
+    /// How long a reader waits before reading the task files itself. A
+    /// holder rebuilding a large archive can outlast this, which is why a
+    /// reader falls back rather than failing.
+    pub const READ_WAIT: Duration = Duration::from_secs(3);
+
+    /// How long a caller that changes `archive/` waits. Ten minutes is past
+    /// any rebuild a live holder could be in the middle of; only a holder
+    /// that is alive but wedged reaches it, and then the caller carries on
+    /// without the index rather than hanging a command forever.
+    pub const MUTATE_WAIT: Duration = Duration::from_secs(600);
+
+    pub fn acquire(path: &Path, wait: Duration) -> Result<ArchiveIndexLock> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(ArchiveIndexLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder(path)? {
+                    Some(pid) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "archive index lock at {} is still held by pid {pid} after {wait:?}",
+                                path.display()
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for ArchiveIndexLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// A short-lived advisory lock over one workspace's `project.toml`
 /// read-modify-write.
 ///

@@ -6,6 +6,7 @@
 //! calls for one. Nothing in the control flow is decided by a model.
 
 mod agent;
+mod archive_index;
 mod ask;
 mod assets;
 mod claim;

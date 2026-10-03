@@ -49,7 +49,9 @@
 //! add` resolves a `depends_on` against the queue and the archive, so an old
 //! finished task that has aged out stops being nameable as a dependency —
 //! see [`crate::commands::queue::check_dependencies_set`], which says so
-//! when it refuses one.
+//! when it refuses one. The sweep also removes a swept task's line from
+//! `archive/index.jsonl` in the same pass, and never sweeps that file itself
+//! — see [`crate::archive_index`].
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -110,14 +112,41 @@ fn sweep_now(repo: &Repo) {
     let scratch = repo.scratch_dir();
     let headless = repo.headless_dir();
 
+    let archive = repo.archive_dir();
+
     let mut budget = SWEEP_LIMIT;
     for dir in repo.byproduct_dirs() {
         if budget == 0 {
             break;
         }
         let guard = (dir == scratch || dir == headless).then_some(&queued);
-        budget -= sweep_dir(&dir, max_age, budget, guard);
+        let removed = if dir == archive {
+            sweep_archive(repo, max_age, budget)
+        } else {
+            sweep_dir(&dir, max_age, budget, guard)
+        };
+        budget -= removed;
     }
+}
+
+/// [`sweep_dir`] over `archive/`, with the index kept in step.
+///
+/// A swept task must leave `archive/index.jsonl` in the same pass, or the
+/// index lists tasks whose files are gone. The archive index lock is held
+/// from the currency check, which must see the folder as it was before any
+/// deletion, to the rewrite, so another process archiving a task cannot have
+/// its change stamped as this sweep's. With no lock the files are swept
+/// anyway and the index is left to rebuild.
+fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
+    let guard = crate::archive_index::lock(repo);
+    let was_current = guard.is_some() && crate::archive_index::is_current(repo);
+    let removed = sweep_dir(&repo.archive_dir(), max_age, limit, None);
+    if removed > 0
+        && let Some(guard) = &guard
+    {
+        crate::archive_index::forget_missing(repo, guard, was_current);
+    }
+    removed
 }
 
 /// One pass over one directory: delete a top-level entry whose own
@@ -157,6 +186,12 @@ fn sweep_dir(
                 entry.file_name().to_string_lossy().as_ref(),
             ))
         {
+            continue;
+        }
+        // `archive/index.jsonl` is a map of the folder, not a task in it, and
+        // its own age says nothing about whether it is wanted. Deleting it
+        // would only force a rebuild that re-reads every surviving task.
+        if entry.file_name() == crate::archive_index::FILE_NAME {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -293,6 +328,55 @@ mod tests {
         assert_eq!(sweep_dir(&dir, max_age, 2, None), 0, "nothing left to take");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Sweeping an aged archive file takes its line out of the index in the
+    /// same pass, keeps every other line as it was, and spares the index file
+    /// itself however old it reads.
+    #[test]
+    fn sweeping_an_archive_file_removes_only_its_index_line() {
+        let base = crate::scratch::root("retain-index");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.retention_days = 30;
+        let repo = Repo {
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+        for id in ["old", "new"] {
+            std::fs::write(
+                repo.archive_dir().join(format!("{id}.md")),
+                format!("---\nid: {id}\nstage: done\n---\n"),
+            )
+            .unwrap();
+        }
+        let before = crate::archive_index::read(&repo);
+        assert_eq!(before.len(), 2);
+        assert!(crate::archive_index::is_current(&repo));
+        let kept_line = std::fs::read_to_string(repo.archive_dir().join("index.jsonl"))
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("\"new\""))
+            .unwrap()
+            .to_string();
+        age(&repo.archive_dir().join("old.md"), 31 * SECS_PER_DAY);
+        // A quiet archive is old all the way through: the folder and the
+        // index (which carries the folder's time) both read as ancient, and
+        // the index must still be spared and still count as current.
+        let ancient = SystemTime::now() - Duration::from_secs(400 * SECS_PER_DAY);
+        crate::scratch::set_mtime(&repo.archive_dir(), ancient);
+        crate::scratch::set_mtime(&repo.archive_dir().join("index.jsonl"), ancient);
+        assert!(crate::archive_index::is_current(&repo));
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("old.md").exists());
+        let raw = std::fs::read_to_string(repo.archive_dir().join("index.jsonl")).unwrap();
+        assert_eq!(raw.lines().collect::<Vec<_>>(), [kept_line.as_str()]);
+        assert!(crate::archive_index::is_current(&repo));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A task paused or blocked for longer than `housekeeping.retention_days` keeps its

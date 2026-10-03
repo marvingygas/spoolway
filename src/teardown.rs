@@ -174,6 +174,17 @@ impl<'a> Dispatcher<'a> {
 
         self.tear_down_checkout(task, report);
 
+        // The lock spans the currency check, the rename and the append: the
+        // rename moves the folder's modification time, and without the lock
+        // another process's change could land between and be stamped as this
+        // task's own. Whether the index matched the folder *before* this task
+        // arrived decides whether one appended line keeps it correct. With
+        // no lock the index is left to rebuild on its next read.
+        let index_guard = crate::archive_index::lock(self.repo);
+        let index_was_current = index_guard.as_ref().is_some_and(|guard| {
+            crate::archive_index::ensure_current(self.repo, guard);
+            crate::archive_index::is_current(self.repo)
+        });
         let destination = self.repo.archive_dir().join(format!("{}.md", task.id()));
         std::fs::create_dir_all(self.repo.archive_dir())?;
         std::fs::rename(&task.path, &destination).with_context(|| {
@@ -183,6 +194,25 @@ impl<'a> Dispatcher<'a> {
                 destination.display()
             )
         })?;
+
+        // The folder of files is the record; the index is a copy of it that
+        // rebuilds itself on its next read, so a failed append is a problem
+        // to name and not a reason to stop.
+        if let Some(guard) = &index_guard
+            && let Err(e) = crate::archive_index::record(
+                self.repo,
+                guard,
+                index_was_current,
+                task,
+                crate::dispatch::now_secs(),
+            )
+        {
+            report.problems.push(format!(
+                "{}: archive index not updated, so its next read rebuilds it: {e:#}",
+                task.id()
+            ));
+        }
+        drop(index_guard);
 
         self.close_project_tab_if_empty(task);
 
@@ -259,6 +289,9 @@ impl<'a> Dispatcher<'a> {
             return;
         };
         let mut removed = 0usize;
+        // Held so that no index writer's stamp straddles these deletions and
+        // bless them as its own; the index is left stale and rebuilds.
+        let _index_guard = crate::archive_index::lock(self.repo);
         let mut source_group = trial_source_group(task);
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1012,9 +1045,14 @@ pub fn discard_trial(
             source_group = trial_source_group(&arm);
         }
         dispatcher.discard_arm(&mut arm, &lanes, &mut report);
+        // An archived arm's file leaves `archive/` here, so the archive index
+        // lock is held across the deletion, as the settle path does for the
+        // same files. The index is left stale and rebuilds on its next read.
+        let index_guard = crate::archive_index::lock(repo);
         if std::fs::remove_file(&arm.path).is_ok() {
             removed += 1;
         }
+        drop(index_guard);
         dispatcher.close_project_tab_if_empty(&arm);
     }
 
