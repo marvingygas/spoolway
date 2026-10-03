@@ -17,7 +17,8 @@
 # unattended.blocked_prompt             <name>               unblocker                                               Prompt the lane staffing `blocked` runs.
 # housekeeping.update_check             true, false          true                                                    Whether spoolway tells a person at a keyboard that a newer release is out.
 # housekeeping.calibrate_window         <duration>           14d                                                     How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the ledger entries beside them.
-# housekeeping.retention_days           <days>               30                                                      How long system-prompts/, commands/, tracking/, headless/, scratch/ and archive/ keep an entry before it is deleted; 0 keeps everything forever. queue/, pending/, worktrees/ and plans/ are never swept.
+# housekeeping.retention_days           <days>               30                                                      How long system-prompts/, commands/, tracking/, headless/ (its logs/ included) and scratch/ keep an entry before it is deleted; 0 keeps everything forever. archive/ is governed by housekeeping.archive_retention_days instead. queue/, pending/, worktrees/ and plans/ are never swept.
+# housekeeping.archive_retention_days   <days>               0                                                       How long a finished task keeps its file in archive/ before it is deleted, along with its line in archive/index.jsonl; 0 keeps every finished task forever. Each task is about 25 KB. A deleted task can no longer be named in `depends_on`, and falls out of what `spoolway eval` and `calibrate_window` read.
 # housekeeping.price_max_age_days       <days>               30                                                      How old the active shared price table may be before `spoolway doctor` says so; 0 disables the note.
 # watch.dirs                            <path>, ...          (empty)                                                 Directories whose own sessions are counted beside the lanes. The project root is always watched; these are extra. Absolute, or ~-relative.
 # issue_tracking.hook                   <filename>           (blank)                                                 A bare filename, resolved inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`); blank runs no hook and changes nothing about a task's `queued`, `blocked`, `paused` or `done`.
@@ -59,6 +60,7 @@ blocked_prompt = "unblocker"
 update_check = true
 calibrate_window = "14d"
 retention_days = 30
+archive_retention_days = 0
 price_max_age_days = 30
 
 [watch]
