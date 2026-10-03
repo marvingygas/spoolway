@@ -479,9 +479,12 @@ impl EvalBy {
 #[command(
     long_about = "What each pipeline costs to run, grouped one way at a time.\n\n\
         One row per pipeline by default. `--by` groups the same lanes by group, task, \
-        pipeline, step or version instead; only the columns naming a row change with it, and \
-        a Total line closes the table with only what adds up: distinct RUNS, BLOCKS and USD. \
-        Read RUNS before believing a figure: a row that has only run a couple of times can \
+        pipeline, step or version instead; only the columns naming a row change with it. A \
+        Total line closes the table with what adds up: distinct RUNS, BLOCKS, and the sums of \
+        IN, OUT, CACHE R, CACHE W, USD and TIME. Its TIME is lane time added up, not the \
+        calendar time the lanes took. With --per-run the table ends on an Average line \
+        instead: each sum over the table's distinct RUNS, with USD left blank and USD/RUN \
+        carrying the average. Read RUNS before believing a figure: a row that has only run a couple of times can \
         swing a long way on luck alone, and the column is there to say so.",
     after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
         spoolway eval --by pipeline               every pipeline\n  \
@@ -489,13 +492,21 @@ impl EvalBy {
         spoolway eval --by version                every pipeline version, newest first\n  \
         spoolway eval --by task --since 30d       one row per run of a task\n  \
         spoolway eval --by task --trial <id>      a trial's arms, compared\n\n  \
+        spoolway eval --per-run                   each figure over its RUNS\n  \
         spoolway eval --csv > report.csv          the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
         RUNS counts every run that touched the row. PASS is the share of lanes that \n  \
         reported pass, and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest \n  \
         context reading any lane on the row banked, and CTX PEAK AVG the mean of every \n  \
-        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R and \n  \
-        CACHE W per run, USD/RUN and TIME/RUN are each figure's total over RUNS."
+        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R, \n  \
+        CACHE W, USD and TIME are each the row's total. With --per-run, IN/RUN, OUT/RUN, \n  \
+        CACHE R/RUN, CACHE W/RUN, USD/RUN and TIME/RUN are each that total over RUNS.\n\n\
+        \x1b[1mThe last line:\x1b[0m\n  \
+        Total carries distinct RUNS, BLOCKS and the sums of IN, OUT, CACHE R, CACHE W, \n  \
+        USD and TIME. Its TIME is lane time added up, not the calendar time the lanes \n  \
+        took. With --per-run the line is Average: each sum over the table's distinct \n  \
+        RUNS, with USD blank and USD/RUN carrying the average. PASS and the CTX PEAK \n  \
+        columns stay blank on either."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under
@@ -576,6 +587,14 @@ pub struct EvalArgs {
     /// The same rows this would print, as CSV.
     #[arg(long)]
     pub csv: bool,
+
+    /// Print each token, cost and time figure over the row's RUNS — IN/RUN,
+    /// USD/RUN, TIME/RUN and the rest — instead of the row's totals. Only
+    /// the printed table has two views: `--csv` and `--json` already carry
+    /// both column sets, so this is refused beside either, and beside
+    /// `--discard`.
+    #[arg(long)]
+    pub per_run: bool,
 
     /// Sort the rows by one column: its name as `--csv` spells it in the
     /// header, then `:asc` or `:desc` — descending when left off. Every

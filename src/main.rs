@@ -379,6 +379,7 @@ fn run() -> Result<()> {
                 // lane from a running command step, and a multiplexer to
                 // stop either with.
                 Command::Eval(args) if args.discard.is_some() => {
+                    eval::refuse_per_run_beside_an_export(args, cli.json)?;
                     let mux = mux::backend(&repo)?;
                     let trial = args.discard.clone().expect("checked by the guard");
                     teardown::discard_trial(
