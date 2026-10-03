@@ -489,13 +489,15 @@ impl EvalBy {
         spoolway eval --by version                every pipeline version, newest first\n  \
         spoolway eval --by task --since 30d       one row per run of a task\n  \
         spoolway eval --by task --trial <id>      a trial's arms, compared\n\n  \
+        spoolway eval --per-run                   each figure over its RUNS\n  \
         spoolway eval --csv > report.csv          the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
         RUNS counts every run that touched the row. PASS is the share of lanes that \n  \
         reported pass, and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest \n  \
         context reading any lane on the row banked, and CTX PEAK AVG the mean of every \n  \
-        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R and \n  \
-        CACHE W per run, USD/RUN and TIME/RUN are each figure's total over RUNS."
+        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R, \n  \
+        CACHE W, USD and TIME are each the row's total. With --per-run, IN/RUN, OUT/RUN, \n  \
+        CACHE R/RUN, CACHE W/RUN, USD/RUN and TIME/RUN are each that total over RUNS."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under
@@ -576,6 +578,14 @@ pub struct EvalArgs {
     /// The same rows this would print, as CSV.
     #[arg(long)]
     pub csv: bool,
+
+    /// Print each token, cost and time figure over the row's RUNS — IN/RUN,
+    /// USD/RUN, TIME/RUN and the rest — instead of the row's totals. Only
+    /// the printed table has two views: `--csv` and `--json` already carry
+    /// both column sets, so this is refused beside either, and beside
+    /// `--discard`.
+    #[arg(long)]
+    pub per_run: bool,
 
     /// Sort the rows by one column: its name as `--csv` spells it in the
     /// header, then `:asc` or `:desc` — descending when left off. Every

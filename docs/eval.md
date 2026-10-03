@@ -12,11 +12,14 @@ the ledger described in [Cost accounting](cost.md). There is no second store.
 spoolway eval
 ```
 ```
-PIPELINE    RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK  IN/RUN  OUT/RUN  CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN
-impl          41   82%       3           32%       52%     642   155.8k       41.91M       799.4k    692.90    16.90    1h 12m
-impl_ui       15   79%       2           31%       50%     810   196.7k       52.90M        1.01M    319.95    21.33    2h 04m
-Total         56             5                                                              1012.85
+PIPELINE    RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
+impl          41   82%       3           32%       52%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
+impl_ui       15   79%       2           31%       50%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
+Total         56             5                                                               1012.85
 ```
+
+The token, cost and time columns show each row's totals. `spoolway eval --per-run` prints each of
+them divided by the row's runs. See [Totals and per run](#totals-and-per-run).
 
 ## The screen
 
@@ -41,15 +44,34 @@ work while it shows.
 | `[↑↓]` | Move the cursor |
 | `[a]` | Open the sort popup, ascending |
 | `[d]` | Open the sort popup, descending |
+| `[t]` | Switch the lanes and directory tables between totals and per run |
 | `[tab]` | Cycle to the next table |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the rows on screen to a CSV file |
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
 
+### Totals and per run
+
+The lanes and directory tables open on totals. `[t]` switches both tables to per-run figures,
+and pressing it again switches back. The frame title names the view, and the key line names the
+view `[t]` switches to.
+
+| View | Frame title | Key line |
+|---|---|---|
+| Totals | `eval · by pipeline · totals` | `[d] descending   [t] per run   [tab] dirs` |
+| Per run | `eval · by pipeline · per run` | `[d] descending   [t] totals   [tab] dirs` |
+
+The view survives `[tab]`, `[r]`, a change of `by` and the filter panel. Every new visit to the
+eval tab opens on totals. The trials table has no `[t]`.
+
+The top border's right side names the scope only for `--project` and `--all`. It lists the
+filters in force. With nothing to show, it has no label.
+
 ### The sort popup
 
-`[a]` or `[d]` opens a popup listing `default order`, then every column the table draws.
+`[a]` or `[d]` opens a popup listing `default order`, then every column the table draws in its
+current view.
 `[↑↓]` moves, `[enter]` sorts by the chosen column in that direction, `[esc]` closes the popup
 unchanged. The sorted header shows `▲` (ascending) or `▼` (descending) in the space before its
 name, so no column moves.
@@ -60,7 +82,10 @@ The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts corr
 last.
 
 The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
-own sort. The cursor moves to the first row after a sort. A view that does not draw the sorted
+own sort. Pressing `[t]` moves a sort on a figure column to the matching column of the other
+view, such as `IN` to `IN/RUN` and `TIME` to `TIME/RUN`. A sort on `USD/RUN` moves to `USD`.
+
+The cursor moves to the first row after a sort. A view that does not draw the sorted
 column falls back to the default order until that column comes back.
 
 A sort carries into every export of the rows it orders: `[e]` writes whatever order the
@@ -84,13 +109,13 @@ same under every `by`, so switching how the rows are grouped never moves a figur
 |---|---|
 | `RUNS` | Runs that touched this row |
 | `PASS` | Share of lanes that reported `pass`. Lanes that never reported are left out. |
-| `BLOCKS` | Lanes that ended blocked |
+| `BLOCKS` | Lanes that ended blocked. Per run, `BLOCKS/RUN` is that count divided by `RUNS`, with two decimals. |
 | `CTX PEAK AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window |
 | `CTX PEAK` | The largest context reading any lane on the row banked, as a share of the model's window. A raw token count when the model has no `context_window`. `—` when no lane banked one. |
-| `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN` | Each token class, divided by `RUNS` |
-| `USD` | Total cost |
-| `USD/RUN` | Cost per run |
-| `TIME/RUN` | Wall time per run |
+| `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per run: `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`, each divided by `RUNS`. |
+| `USD` | Total cost. Drawn in both views. |
+| `USD/RUN` | Cost per run. Drawn per run only. |
+| `TIME` | Wall time, summed over the row. Per run: `TIME/RUN`, divided by `RUNS`. |
 
 A `Total` line closes the table, carrying only what adds up across rows: distinct `RUNS`,
 `BLOCKS` and `USD`. A per-run average or a summed peak would not mean anything added together,
@@ -142,11 +167,16 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--force` | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | Print the rows as CSV |
 | `--json` | Print the rows as JSON |
+| `--per-run` | Print the per-run columns. Without it, the totals columns print. |
 | `--sort <column>[:asc\|:desc]` | Sort the rows by one column, descending when the direction is left off |
 
-`--sort` takes a column name the way `--csv`'s header spells it, below. An unknown name is
-refused, naming every column `--by`'s current value accepts. It cannot be combined with
-`--discard`.
+`--sort` takes a column name the way `--csv`'s header spells it, below. It accepts the totals
+names and the per-run names in both views. A name the printed view does not draw still sorts
+the rows and marks no header. An unknown name is refused, naming every column `--by`'s current
+value accepts. It cannot be combined with `--discard`.
+
+`--per-run` changes only the printed table. It is refused beside `--csv`, `--json` and
+`--discard`, because the exports already carry both column sets.
 
 A trial forks one group into one full copy per pipeline it was ticked under, all under one
 trial id. See [Trials](planning.md#trials).
@@ -155,10 +185,10 @@ trial id. See [Trials](planning.md#trials).
 spoolway eval --by task --trial t-8c21e0
 ```
 ```
-TASK                PIPELINE   VER  WHEN        RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK  IN/RUN  OUT/RUN  CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN
-cart-totals-1       impl       1.0  2026-09-26     1   83%       0           19%       31%     433   105.1k       28.27M       539.2k     11.40    11.40   38m 20s
-cart-totals-2       impl_fast  1.0  2026-09-26     1  100%       0           14%       22%     276    67.1k       18.05M       344.3k      7.28     7.28   28m 40s
-Total                                              2             0                                                                        18.68
+TASK                PIPELINE   VER  WHEN        RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
+cart-totals-1       impl       1.0  2026-09-26     1   83%       0           19%       31%       433   105.1k   28.27M   539.2k     11.40   38m 20s
+cart-totals-2       impl_fast  1.0  2026-09-26     1  100%       0           14%       22%       276    67.1k   18.05M   344.3k      7.28   28m 40s
+Total                                              2             0                                                                  18.68
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
@@ -180,14 +210,15 @@ root's own row. A session in a worktree a task owns counts on the lanes table in
 | Column | What it is |
 |---|---|
 | `SESSIONS` | Sessions run in that directory |
-| `IN/SESSION`, `OUT/SESSION`, `CACHE R/SESSION`, `CACHE W/SESSION` | Each token class, divided by `SESSIONS` |
-| `USD` | Total cost |
-| `USD/SESSION` | Cost per session |
+| `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per run: `IN/SESSION`, `OUT/SESSION`, `CACHE R/SESSION`, `CACHE W/SESSION`, each divided by `SESSIONS`. |
+| `USD` | Total cost. Drawn in both views. |
+| `USD/SESSION` | Cost per session. Drawn per run only. |
 | `CTX PEAK AVG` | The mean of its sessions' own peak context reading, each as a share of its model's window |
 | `CTX PEAK` | The largest context reading any session banked |
-| `TIME/SESSION` | Wall time per session |
+| `TIME` | Wall time, summed over the row. Per run: `TIME/SESSION`, divided by `SESSIONS`. |
 
-`by session` lists one row per session instead, newest first.
+`by session` lists one row per session instead, newest first. Its columns are the same in both
+views.
 
 | Column | What it is |
 |---|---|
