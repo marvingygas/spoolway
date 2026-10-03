@@ -42,12 +42,14 @@ overrides layer](configuration.md#the-overrides-layer).
 spoolway never parses a prompt. There is no format and no generated region:
 
 ```markdown
-You review one task's diff and deliver a verdict. You do not fix anything.
+# Reviewer
 
-## What you are looking at
+Review one task's diff against its acceptance criteria. Fix nothing.
+Done: a verdict, with every problem as its own finding.
+
+## Domain knowledge
 ...
-## How to do it here
-...
+
 ## Never
 ...
 ```
@@ -162,13 +164,18 @@ only reference. Use this shape:
 ```markdown
 # auditor
 
-## What you are looking at
-## How to do it here
+<the job and when it is done, 1–3 lines>
+
+## Domain knowledge
+- <a fact the model cannot know: a path, a convention, a trap>
+
 ## Never
+- <a guardrail; none is fine>
 ```
 
-Headings and bullets a small local model can skim. One default per choice. Write only what
-the model does not already know. `spoolway prompt show implementer` shows the house style.
+Bullets, not paragraphs. Facts, not narration. No jargon, and no procedure any capable model
+follows unasked. Knowledge two prompts share belongs in a skill, reached through the step's
+`skills:`. `spoolway prompt show implementer` shows the house style.
 
 Then add the step:
 

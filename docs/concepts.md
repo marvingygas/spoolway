@@ -82,7 +82,10 @@ A workspace's `project.toml` that cannot be read or parsed stops only a checkout
 listed. Every other command prints one note naming the file and carries on. A checkout that
 matches no readable workspace refuses instead, naming the file, because the file might be the
 one that would have listed it. `spoolway init` refuses the same way instead of falling back to
-repo mode for a checkout the file might list.
+repo mode for a checkout the file might list. [`spoolway config
+path`](cli-reference.md#spoolway-config-show--list--path--get-key--set-key-value--edit) answers
+anyway. It prints `mode: null` and the workspace list instead of refusing. That list is what
+`spoolway init --workspace <name>` needs next.
 
 A workspace whose `config/` is missing — deleted, or left behind by a join that failed before
 writing it — refuses a new join, naming the missing path. A clone the workspace already lists

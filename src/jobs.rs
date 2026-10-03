@@ -80,9 +80,51 @@ pub struct JobSpec {
     pub enabled: bool,
 }
 
-fn enabled_default() -> bool {
+pub(crate) fn enabled_default() -> bool {
     true
 }
+
+/// One `[jobs.<name>]` key: its name, whether a store must set it, and one
+/// sentence on how to fill it — `{routines_dir}` a placeholder
+/// `commands::jobs::build_jobs_contract` fills in with this project's own
+/// path, since a job's own store file knows nothing about which project it
+/// is in. Kept right beside [`JobSpec`] so the two cannot drift apart: see
+/// `commands::jobs::tests::job_keys_name_the_same_fields_jobspec_does`,
+/// which checks both directions and fails a test — never the build itself —
+/// when a field is renamed, added or removed on one side and not the other.
+pub(crate) struct JobKey {
+    pub(crate) name: &'static str,
+    pub(crate) required: bool,
+    pub(crate) text: &'static str,
+}
+
+pub(crate) const JOB_KEYS: &[JobKey] = &[
+    JobKey {
+        name: "schedule",
+        required: true,
+        text: "The five-field cron expression — see the grammar below. Parsed on use, not \
+               on write, so a store with one bad expression still lists the rest; `spoolway \
+               doctor` names the bad one.",
+    },
+    JobKey {
+        name: "pipeline",
+        required: true,
+        text: "Which pipeline every task this job queues runs on.",
+    },
+    JobKey {
+        name: "routine",
+        required: true,
+        text: "A path under {routines_dir}, relative: a folder queued as one batch, or a \
+               single `.md` file queued alone.",
+    },
+    JobKey {
+        name: "enabled",
+        required: false,
+        text: "Absent means enabled. Write `enabled = false` to pause a job — it is still \
+               listed but never fires; resuming it removes the key rather than writing the \
+               default back.",
+    },
+];
 
 /// One store file's contents. `[jobs.<name>]` tables, so a name is unique
 /// within a store by construction.
@@ -768,6 +810,46 @@ pub fn until(delta: chrono::TimeDelta) -> String {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// [`JOB_KEYS`] and [`JobSpec`]'s own fields have to name exactly the
+    /// same keys — checked both ways, read off `JobSpec`'s source rather
+    /// than a hand-copied list, so a field renamed, added or removed on
+    /// either side fails this test instead of `spoolway jobs contract`
+    /// silently drifting from what a store actually parses.
+    #[test]
+    fn job_keys_name_the_same_fields_jobspec_does() {
+        const SRC: &str = include_str!("jobs.rs");
+        let struct_start = SRC
+            .find("pub struct JobSpec")
+            .expect("JobSpec moved or renamed");
+        let body_start = SRC[struct_start..].find('{').unwrap() + struct_start;
+        let body_end = SRC[body_start..].find("\n}").unwrap() + body_start;
+        let body = &SRC[body_start..body_end];
+
+        let mut fields = std::collections::BTreeSet::new();
+        for line in body.lines() {
+            let line = line.trim();
+            let Some((field, _)) = line.split_once(':') else {
+                continue;
+            };
+            let field = field.trim().strip_prefix("pub ").unwrap_or(field.trim());
+            if field.is_empty() || !field.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                continue;
+            }
+            fields.insert(field);
+        }
+        assert!(
+            !fields.is_empty(),
+            "found no JobSpec fields to check at all"
+        );
+
+        let keys: std::collections::BTreeSet<&str> = JOB_KEYS.iter().map(|key| key.name).collect();
+        assert_eq!(
+            fields,
+            keys.into_iter().collect(),
+            "JOB_KEYS and JobSpec's own fields must name exactly the same keys"
+        );
+    }
 
     /// A naive local minute, for the timezone-resolution tests.
     fn naive(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {

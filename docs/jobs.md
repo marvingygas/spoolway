@@ -132,6 +132,8 @@ One name in both stores is refused.
 
 ```
 spoolway jobs                      # prints usage
+spoolway jobs contract             # the job format: both stores, every key, the cron grammar
+spoolway jobs contract --json      # the same facts as one object
 spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 spoolway jobs run <name>           # fire one job now
@@ -175,7 +177,7 @@ not parse.
 | --- | --- |
 | `src/jobs.rs` | The stores, firing due jobs, the firing history. |
 | `src/cron.rs` | Parsing and matching the cron expression. |
-| `src/commands/jobs.rs` | `spoolway jobs`, `jobs list` and `jobs run`. |
+| `src/commands/jobs.rs` | `spoolway jobs`, `jobs contract`, `jobs list` and `jobs run`. |
 | `src/commands/dispatch.rs` | The dispatcher that stays up for jobs. |
 | `src/commands/doctor.rs` | The job checks. |
 

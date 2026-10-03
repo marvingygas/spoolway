@@ -430,6 +430,18 @@ Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writ
 
 See [Jobs](jobs.md).
 
+### `spoolway jobs contract`
+
+Print the job format: both store paths, every `[jobs.<name>]` key with its default, the cron
+grammar, and the one-name-in-both-stores refusal, closed with a sample table to copy.
+
+```
+spoolway jobs contract
+spoolway jobs contract --json
+```
+
+`--json` prints the same facts as one object. See [Jobs](jobs.md).
+
 ### `spoolway jobs list`
 
 Print every job as a table: `NAME`, `SCOPE`, `SCHEDULE`, `PIPELINE`, `NEXT`, `LAST`.
@@ -866,6 +878,11 @@ and exits non-zero on a refusal.
 Bare, with no `--from`, the contract also carries a top-level `base`: the branch the checkout
 it ran in has out. A worktree reports its own branch. A detached checkout reports `null`.
 
+Bare, it also carries a `routines` section: the routines directory, the task templates
+directory, and the routine shape itself. That shape is one finished task per file,
+`depends_on` between siblings, folder-versus-single-file queueing, fresh ids on every queue,
+and the fact that a routine is never a task template. See [Routines](planning.md#routines).
+
 ### `spoolway template contract`
 
 Print the prose template a project owns and where it lives.
@@ -909,10 +926,15 @@ spoolway config edit
 |---|---|
 | `show` | Print the whole file |
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
-| `path` | Print the setup folder, the private `local/` folder (repo mode only) and the overrides folder. `--json` prints them as `{"setup","local","overrides"}`, with `local` `null` in home mode |
+| `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
 | `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree |
 | `edit` | Open the file in `$EDITOR` and validate it on save |
+
+`path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
+and the workspace list. That list is what `spoolway init --workspace <name>` needs next. Each
+`workspaces` entry carries a name, a `config/` path and a clone count. An unreadable
+`project.toml` gives that entry an `error` field instead, and the rest of the list still prints.
 
 See [Configuration](configuration.md).
 

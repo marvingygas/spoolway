@@ -665,9 +665,9 @@ mod tests {
 
     /// `spoolway-config` routes among four cases — edit the tracked setup,
     /// make a private copy, tweak one value, or `init` — and its "never
-    /// reach past" rule has to name all three places a project's setup can
-    /// live, in every provider's copy, not only Claude's own. A drift here
-    /// is a person on Codex or pi being routed by a rule the other two
+    /// reach past" rule has to bound every write by `config path --json`'s
+    /// own places, in every provider's copy, not only Claude's own. A drift
+    /// here is a person on Codex or pi being routed by a rule the other two
     /// agents never read.
     #[test]
     fn spoolway_config_routes_the_same_four_cases_in_every_provider_copy() {
@@ -699,9 +699,9 @@ mod tests {
                  --json`"
             );
             assert!(
-                copy.contains("the setup folder, `local/` and `overrides/`"),
-                "spoolway-config's {provider} copy's \"never reach past\" rule does not name \
-                 all three places"
+                copy.contains("Never reach past what `config path --json` prints"),
+                "spoolway-config's {provider} copy's \"never reach past\" rule does not bound \
+                 writes by `config path --json`"
             );
         }
     }
@@ -827,15 +827,22 @@ mod tests {
                 // way — that used to be `spoolway pipeline gen`, now
                 // retired — but the exemption stays alongside it rather than
                 // this test deciding a skill's own reachability policy.
+                //
+                // Checked against the frontmatter block alone (between the
+                // first two `---` lines), not the whole file: spoolway-config
+                // names `disable-model-invocation: true` in its own body
+                // prose, instructing the shared skills it may write, and that
+                // is not this skill's own frontmatter.
+                let frontmatter = skill_md.split("---\n").nth(1).unwrap_or_default();
                 if matches!(name, "spoolway-tasks" | "spoolway-config") {
                     assert!(
-                        !skill_md.contains("disable-model-invocation"),
-                        "{name}'s {provider} copy must stay reachable from another skill's own \
-                         procedure"
+                        !frontmatter.contains("disable-model-invocation"),
+                        "{name}'s {provider} copy's own frontmatter must stay reachable from \
+                         another skill's own procedure"
                     );
                 } else {
                     assert!(
-                        skill_md.contains("disable-model-invocation: true"),
+                        frontmatter.contains("disable-model-invocation: true"),
                         "{name}'s {provider} copy should be human-invoked only"
                     );
                 }

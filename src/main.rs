@@ -244,9 +244,12 @@ fn run() -> Result<()> {
         Command::Config(ConfigCommand::List) => {
             commands::config_list(&Repo::discover(&cwd)?, cli.json)
         }
-        Command::Config(ConfigCommand::Path) => {
-            commands::config_path(&Repo::discover(&cwd)?, cli.json)
-        }
+        // Lenient like `config edit`/`override`, but for a different reason:
+        // a checkout nothing claims yet is exactly what `config path` is for
+        // — the skill reads `mode: null` and the workspace list from it
+        // before proposing `spoolway init --workspace <name>`. See
+        // `commands::config_path_anywhere`.
+        Command::Config(ConfigCommand::Path) => commands::config_path_anywhere(&cwd, cli.json),
         Command::Config(ConfigCommand::Get { key }) => {
             commands::config_get(&Repo::discover(&cwd)?, key, cli.json)
         }
@@ -515,6 +518,7 @@ fn run() -> Result<()> {
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 
+                Command::Jobs(JobsCommand::Contract) => commands::jobs_contract(&repo, cli.json),
                 Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
                 Command::Jobs(JobsCommand::Run(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();

@@ -803,7 +803,8 @@ says "prompt contract prints the shape-to-write section" \
 # dir_in` reads `.spoolway/pipelines/` under there, never under
 # `$SPOOLWAY_PROJECT_HOME` — the same place `restart.sh` and `warmth.sh`
 # already write their own throwaway pipelines. `builder` is the harness's
-# own prompt, written by `own_prompts`: no suite names a shipped one, so
+# own prompt, written by `own_prompts`: this suite names no shipped one
+# (only `flow.sh` does, to prove the shipped pipeline runs on them), so
 # rewording `assets/prompts/` never reaches this check.
 cat > .spoolway/pipelines/gate-check.yml <<'YML'
 steps:

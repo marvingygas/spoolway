@@ -27,6 +27,7 @@ source "$HERE/../lib.sh"
 source "$HERE/../fixture.sh"
 # shellcheck source=../agents.sh
 source "$HERE/../agents.sh"
+command -v jq >/dev/null || { echo "home-mode.sh needs jq" >&2; exit 2; }
 
 LIVE=${WORK:-$(mktemp -d)}
 CTL="$LIVE/ctl"
@@ -61,6 +62,17 @@ publish plan/live
 says "doctor names home mode" "home mode" "$SPOOLWAY" doctor -v
 says "doctor reads the setup from the workspace's config/" "$WS/config" "$SPOOLWAY" doctor -v
 works "pipeline check reads the workspace's pipelines" "$SPOOLWAY" pipeline check
+
+# ------------------------------------------------------ config path
+says "config path names home mode" '"mode": "home"' "$SPOOLWAY" config path --json
+# The workspace's name is also in `setup` and `workspace`, so a plain grep
+# for it would pass with `workspaces` empty; read the entry itself.
+CONFIG_PATH="$LIVE/config-path.json"
+"$SPOOLWAY" config path --json >"$CONFIG_PATH" 2>&1
+works "config path lists the workspace this checkout joined, its config/ and its one clone" \
+  jq -e --arg name "$(basename "$WS")" --arg config "$WS/config" \
+  'any(.workspaces[]; .name == $name and .config == $config and .clones == 1 and (has("error") | not))' \
+  "$CONFIG_PATH"
 
 # ------------------------------------------------------- one real pass
 BODY="$LIVE/body.md"

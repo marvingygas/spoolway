@@ -32,8 +32,25 @@ new_forge "$LIVE/forge"
 install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 new_repo "$LIVE/proj"
+# This suite keeps the actual shipped prompts — implementer, reviewer,
+# archivist — rather than `fixture.sh`'s own stand-in prompts: what it
+# proves is that the shipped pipeline runs end to end on the prompts the
+# product ships, not on a harness-owned substitute. Safe to do here and
+# nowhere else needs it: the stand-in agents below decide what to do from
+# `$SPOOLWAY_STEP` alone, never from a prompt's wording — except the
+# handover role in `agents/pi`, which matches a prompt's own opening line,
+# and no shipped prompt opens with that line (`handover` here runs `spoolway
+# stack`, not an agent), so that exception never reaches this pipeline.
+export SPOOLWAY_E2E_KEEP_SHIPPED_PROMPTS=1
 configure_project plan/live
 publish plan/live
+
+has "the pipeline runs the shipped implementer prompt, not a stand-in" \
+  "prompt: implementer" .spoolway/pipelines/default.yml
+has "and the shipped reviewer prompt" \
+  "prompt: reviewer" .spoolway/pipelines/default.yml
+has "and the shipped archivist prompt" \
+  "prompt: archivist" .spoolway/pipelines/default.yml
 
 BODY="$LIVE/body.md"
 task_body "$BODY"
@@ -208,33 +225,35 @@ present() { if [ -e "$2" ]; then ok "$1"; else bad "$1 (no $2)"; fi; }
 says "pipeline copy in a worktree writes the private pipeline" \
   "default-strict.yml" \
   "$SPOOLWAY" -C "$WT" pipeline copy default default-strict
+# Named off the shipped prompts directly — `implementer` and `reviewer` —
+# since this suite keeps them rather than `own_prompts`'s `builder`/`judge`.
 works "prompt copy in a worktree writes the private prompt" \
-  "$SPOOLWAY" -C "$WT" prompt copy builder builder-strict
+  "$SPOOLWAY" -C "$WT" prompt copy implementer implementer-strict
 has "the copied pipeline lands in the project's home, not the worktree" \
   "steps:" "$LOCAL/pipelines/default-strict.yml"
 present "so does its task skeleton" "$LOCAL/templates/tasks/default-strict.md"
-present "and the copied prompt" "$LOCAL/prompts/builder-strict/PROMPT.md"
+present "and the copied prompt" "$LOCAL/prompts/implementer-strict/PROMPT.md"
 refuses "pipeline copy refuses a name that is already private" "already exists" \
   "$SPOOLWAY" pipeline copy default default-strict
 refuses "prompt copy refuses a name that is already tracked" "already exists" \
-  "$SPOOLWAY" prompt copy builder judge
+  "$SPOOLWAY" prompt copy implementer reviewer
 
-sed -i 's/^\([[:space:]]*prompt:[[:space:]]*\)builder[[:space:]]*$/\1builder-strict/' \
+sed -i 's/^\([[:space:]]*prompt:[[:space:]]*\)implementer[[:space:]]*$/\1implementer-strict/' \
   "$LOCAL/pipelines/default-strict.yml"
 has "the private pipeline now names the private prompt" \
-  "prompt: builder-strict" "$LOCAL/pipelines/default-strict.yml"
+  "prompt: implementer-strict" "$LOCAL/pipelines/default-strict.yml"
 
 refuses "pipeline promote refuses from a linked worktree" "not this worktree's" \
   "$SPOOLWAY" -C "$WT" pipeline promote default-strict
 has "and the refusal left the private pipeline where it was" \
-  "prompt: builder-strict" "$LOCAL/pipelines/default-strict.yml"
+  "prompt: implementer-strict" "$LOCAL/pipelines/default-strict.yml"
 
 says "pipeline promote in the main checkout moves the pipeline" \
   "moved" \
   "$SPOOLWAY" pipeline promote default-strict
 has "the promoted pipeline is tracked" \
-  "prompt: builder-strict" ".spoolway/pipelines/default-strict.yml"
-present "the private prompt it names came with it" ".spoolway/prompts/builder-strict/PROMPT.md"
+  "prompt: implementer-strict" ".spoolway/pipelines/default-strict.yml"
+present "the private prompt it names came with it" ".spoolway/prompts/implementer-strict/PROMPT.md"
 present "so did its skeleton" ".spoolway/templates/tasks/default-strict.md"
 LEFT=$(find "$LOCAL" -type f 2>/dev/null | wc -l)
 if [ "$LEFT" -eq 0 ]; then ok "local/ holds nothing after the promote"
@@ -243,7 +262,7 @@ works "the promoted pipeline checks clean" "$SPOOLWAY" pipeline check
 # Nothing is committed: the promote is the person's change to stage.
 says "the promote is left uncommitted" "default-strict.yml" git status --porcelain --untracked-files=all
 
-rm -rf .spoolway/pipelines/default-strict.yml .spoolway/prompts/builder-strict \
+rm -rf .spoolway/pipelines/default-strict.yml .spoolway/prompts/implementer-strict \
   .spoolway/templates/tasks/default-strict.md "$LOCAL"
 
 must "removing the worktree" git worktree remove --force "$WT"

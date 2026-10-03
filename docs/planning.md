@@ -158,7 +158,9 @@ trial early. See [Trial arms](dispatcher.md#trial-arms).
 
 A routine is one folder directly under `.spoolway/routines/`, tracked in git. A task in a
 subfolder still belongs to the routine above it: it shows and queues with that routine.
-Nothing creates the directory for you.
+Nothing creates the directory for you. `spoolway task contract` prints this shape and this
+project's own routines directory, for a producer writing a routine by hand. A routine is
+never a task template: it holds finished tasks, not a skeleton with a placeholder in it.
 
 Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane lists one
 row per routine, and its right pane lists the highlighted routine's tasks.

@@ -252,6 +252,34 @@ impl Repo {
         )
     }
 
+    /// Whether `err` is one of [`Repo::root`]'s "nothing claims this
+    /// checkout" refusals — the two bails just above that share the "no
+    /// spoolway project found" sentence, plus [`workspace_clone_checked`]'s
+    /// own bail, which reaches here through `workspace_clone_checked(start)?`
+    /// in `Repo::root` when no readable workspace lists `start` and a broken
+    /// workspace file elsewhere on the machine leaves undecided whether it
+    /// would have. That third case is swallowed because the answer is
+    /// unknown, not because it is known to be "no": the broken file might
+    /// be exactly the one naming this checkout. What `config path` owes a
+    /// person then is the list with that file in it, carrying its own
+    /// `error` field, so they can see which workspace to repair.
+    ///
+    /// Every other error `Repo::discover` can return (a `.spoolway/` on
+    /// another branch, a listed clone whose own folder is gone, two
+    /// workspaces both claiming this root, …) is a case where something
+    /// readable does name this checkout, and each needs a person's action
+    /// `config path` has no business papering over — which is why only
+    /// these three are swallowed here.
+    ///
+    /// `commands::config_path_anywhere` is the one caller that treats this
+    /// as an answer — `mode: null` plus the workspace list — rather than a
+    /// hard failure.
+    pub(crate) fn is_unclaimed(err: &anyhow::Error) -> bool {
+        let message = err.to_string();
+        message.starts_with("no spoolway project found at or above")
+            || message.starts_with("this checkout is in no workspace spoolway can read, and ")
+    }
+
     /// Whether work here stops for a person: what the run in progress was
     /// started as, and the project's own setting when there is no run.
     ///
@@ -2137,6 +2165,63 @@ pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// One workspace as `config path --json`'s own `workspaces` list carries it
+/// — see the `config-path-places` task. Unlike [`WorkspaceSummary`], which
+/// is `init`'s menu and only ever shows a workspace whose `project.toml`
+/// parsed, this is the skill's whole map of `~/.spoolway/`, so a workspace
+/// whose file could not be read still gets a row, with `error` naming why
+/// rather than the row — or the rest of the command — disappearing.
+#[derive(Debug, PartialEq, Serialize)]
+pub(crate) struct WorkspacePlace {
+    pub(crate) name: String,
+    pub(crate) config: PathBuf,
+    pub(crate) clones: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+/// Every workspace under `~/.spoolway/`, readable or not, sorted by name —
+/// [`workspaces`]'s own `project.toml`-must-parse twin for `config path`.
+/// Lenient the same way: a workspace folder [`all_workspaces`] itself could
+/// not even list (its `dispatcher` field holding a path instead of a plain
+/// name, say) degrades to an empty list rather than failing the whole
+/// command, since that is a different, rarer corruption than the one
+/// `error` here exists to report.
+pub(crate) fn workspace_places() -> Vec<WorkspacePlace> {
+    let (found, broken) = all_workspaces().unwrap_or_default();
+    let mut places: Vec<WorkspacePlace> = found
+        .into_iter()
+        .filter_map(|(path, toml)| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(WorkspacePlace {
+                config: path.join("config"),
+                clones: toml.clones.len(),
+                name,
+                error: None,
+            })
+        })
+        .collect();
+    for record_path in broken {
+        let Some(dir) = record_path.parent() else {
+            continue;
+        };
+        let Some(name) = dir.file_name() else {
+            continue;
+        };
+        places.push(WorkspacePlace {
+            name: name.to_string_lossy().into_owned(),
+            config: dir.join("config"),
+            clones: 0,
+            error: Some(format!(
+                "{} does not read as a workspace's project.toml",
+                record_path.display()
+            )),
+        });
+    }
+    places.sort_by(|a, b| a.name.cmp(&b.name));
+    places
 }
 
 /// Start a new workspace for `root`: `~/.spoolway/<label>-<id>/` holding an
