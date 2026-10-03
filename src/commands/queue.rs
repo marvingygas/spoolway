@@ -3624,19 +3624,54 @@ fn run_screen_from(
     let (mut groups, mut routines) = lists;
     let routines_dir = repo.routines_dir();
 
+    // The first frame reads the branch synchronously, on this thread — the
+    // same timing the per-key `branch_at` call this replaces always gave
+    // its own first frame. `groups` is already this fresh too: the caller
+    // read it to decide the tab's opening message before this function was
+    // even called. Seeding the reader with both means starting it never
+    // pays for a second read of either right away.
+    state.board_branch = crate::repo::branch_at(cwd).ok();
+    let reader = start_queue_reader(
+        repo.clone(),
+        cwd.to_path_buf(),
+        QueueSnapshot {
+            groups: groups.clone(),
+            branch: state.board_branch.clone(),
+        },
+    );
+    // The seed above lands as generation 0 and is already in `groups`, so
+    // it counts as adopted: the first call below wakes the reader and
+    // adopts the first reading that lands after it, never the seed a
+    // second time — see `refresh_from_reader`.
+    let mut known_reading = 0;
+
     loop {
-        // Read again every key rather than once at open: the board can be
-        // left open while its checkout moves to another branch, and the
-        // `Base:` row must name the branch `enter` would read right now.
-        state.board_branch = crate::repo::branch_at(cwd).ok();
+        // Ask the reader for one more reading rather than reading again on
+        // this thread — see [`QueueReader`]. Every key reaches here once it
+        // has been handled, so this is also what wakes the reader for the
+        // next one, the same cadence the inline `branch_at` call this
+        // replaces always ran at: the board can be left open while its
+        // checkout moves to another branch, and the `Base:` row must
+        // eventually name the branch `enter` would read right now, just
+        // from whatever the reader last landed rather than a read of its
+        // own.
+        refresh_from_reader(&reader, &mut known_reading, &mut groups, &mut state);
         let panes = Panes {
             routines: &routines,
             routines_dir: &routines_dir,
             pipelines,
         };
         draw(&groups, &panes, &state, writer, out);
-        let Some(key) = wait_for_key(repo, &mut groups, &panes, &mut state, writer, input, out)
-        else {
+        let Some(key) = wait_for_key(
+            &reader,
+            &mut known_reading,
+            &mut groups,
+            &panes,
+            &mut state,
+            writer,
+            input,
+            out,
+        ) else {
             // No terminal, a script driving this run has finished handing
             // over keys, or `ctrl-c` was caught: `wait_for_key` returns
             // `None` for all three, and the screen ends the same way for
@@ -3751,6 +3786,11 @@ fn run_screen_from(
                         &mut state,
                         &mut |_| {},
                     );
+                    // `resume` may have just landed a submission straight
+                    // onto `groups` — see `refresh_from_reader`'s own doc
+                    // comment for why a reading already in flight at this
+                    // instant must not be allowed to overwrite that.
+                    known_reading = known_reading.max(reader.started_count());
                 }
                 Key::Esc => state.mode = then.back(),
                 _ => {}
@@ -3781,6 +3821,7 @@ fn run_screen_from(
                         &mut state,
                         &mut redraw,
                     );
+                    known_reading = known_reading.max(reader.started_count());
                     input.discard_typed();
                 }
                 Key::Char('n') => {
@@ -3800,6 +3841,7 @@ fn run_screen_from(
                         &mut state,
                         &mut |_| {},
                     );
+                    known_reading = known_reading.max(reader.started_count());
                 }
                 Key::Esc => state.mode = then.back(),
                 _ => {}
@@ -3960,6 +4002,7 @@ fn run_screen_from(
                         Tracking::Ask,
                         &mut |_| {},
                     );
+                    known_reading = known_reading.max(reader.started_count());
                 }
                 // Gated exactly the way `g` is — see `handle_browse_key`'s
                 // own `g` arm — since a task only exists to open when
@@ -4080,23 +4123,30 @@ fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
 /// edited reaches the screen without a key being typed at all. `None` once
 /// the input is exhausted, exactly what a direct [`read_key`] would report —
 /// and also once `ctrl-c` has been pressed: `stop::asked()` is checked on
-/// every slice the same way the reload and redraw already are, so a caught
-/// interrupt ends the screen exactly the way a drained pipe already did,
-/// rather than needing a signal-unsafe read to short-circuit the loop.
+/// every slice the same way the reader is woken and the redraw already are,
+/// so a caught interrupt ends the screen exactly the way a drained pipe
+/// already did, rather than needing a signal-unsafe read to short-circuit
+/// the loop.
 ///
 /// The same wait `commands::dispatch`'s own board takes over its pass
 /// interval: [`PollableRead::byte_pending`] stands in for a sleep, so a slice
 /// with nothing typed into it costs the loop nothing beyond what a plain
 /// `thread::sleep(POLL)` would have. Every in-memory reader used in tests
 /// reports a byte pending unconditionally (see [`PollableRead`]), so this
-/// falls straight through to `read_key` there — the reload below only ever
-/// runs against a real, currently idle terminal. A cooked stdin — no raw
-/// mode, no `poll` — reports the opposite without waiting, and is read
-/// straight away instead: blocking on the line the terminal will deliver is
-/// the whole of what this loop is for, where spinning on "nothing pending"
-/// would never read a key at all.
+/// falls straight through to `read_key` there — the idle tick's own wake
+/// below only ever runs against a real, currently idle terminal. A cooked
+/// stdin — no raw mode, no `poll` — reports the opposite without waiting,
+/// and is read straight away instead: blocking on the line the terminal
+/// will deliver is the whole of what this loop is for, where spinning on
+/// "nothing pending" would never read a key at all.
+///
+/// `known` pushes this past clippy's default argument count — every
+/// argument here is a distinct piece of the screen's own state, the same
+/// reasoning `status::mod`'s own `too_many_arguments` allow gives.
+#[allow(clippy::too_many_arguments)]
 fn wait_for_key(
-    repo: &Repo,
+    reader: &QueueReader,
+    known: &mut u64,
     groups: &mut Vec<Group>,
     panes: &Panes,
     state: &mut ScreenState,
@@ -4111,25 +4161,22 @@ fn wait_for_key(
         if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
             return read_key(input);
         }
-        reload(repo, groups, state);
+        refresh_from_reader(reader, known, groups, state);
         draw(groups, panes, state, writer, out);
     }
 }
 
-/// Re-read the pending directory into `groups`, keeping `group_cursor` on
-/// whatever group it was pointing at, by name, rather than by index — a
-/// reload can reorder the list out from under it, since `list_groups` sorts
-/// newest first and an edit touches a task's own modified time — and
-/// clamping it back on screen the ordinary way when that group is gone.
+/// Swap `fresh` into `groups`, keeping `group_cursor` on whatever group it
+/// was pointing at, by name, rather than by index — a reload can reorder the
+/// list out from under it, since `list_groups` sorts newest first and an
+/// edit touches a task's own modified time — and clamping it back on screen
+/// the ordinary way when that group is gone.
 ///
-/// A pending directory that fails to read this tick is not a reason to blank
-/// the screen: `groups` is left exactly as it was, and the next poll tries
-/// again — the same tolerance `commands::dispatch`'s own pass loop gives a
-/// queue read that comes back unreadable mid-run.
-fn reload(repo: &Repo, groups: &mut Vec<Group>, state: &mut ScreenState) {
-    let Ok(fresh) = super::pending::list_groups(repo) else {
-        return;
-    };
+/// Shared by [`reload`], which fetches `fresh` synchronously on the calling
+/// thread, and [`refresh_from_reader`], which takes it from whatever
+/// [`QueueReader`] last read on a thread of its own — the cursor-preserving
+/// swap itself does not care which.
+fn adopt_groups(fresh: Vec<Group>, groups: &mut Vec<Group>, state: &mut ScreenState) {
     let cursor = shown(groups, state)
         .get(state.group_cursor)
         .map(|group| group_key(group));
@@ -4142,6 +4189,114 @@ fn reload(repo: &Repo, groups: &mut Vec<Group>, state: &mut ScreenState) {
         state.group_cursor = index;
     }
     clamp_cursors(groups, state);
+}
+
+/// Re-read the pending directory into `groups`, on this thread — see
+/// [`adopt_groups`] for the cursor-preserving swap.
+///
+/// A pending directory that fails to read this tick is not a reason to blank
+/// the screen: `groups` is left exactly as it was, and the next poll tries
+/// again — the same tolerance `commands::dispatch`'s own pass loop gives a
+/// queue read that comes back unreadable mid-run.
+///
+/// No production caller any more — [`run_screen_from`]'s loop reads
+/// through [`QueueReader`] and `refresh_from_reader` instead, so a key
+/// never waits on this itself — but kept, test-only, as the plain
+/// synchronous read it always was: its own test below is what checks the
+/// cursor-preserving swap in [`adopt_groups`] directly, against a real
+/// `list_groups` read, without a reader thread's timing in the way.
+#[cfg(test)]
+fn reload(repo: &Repo, groups: &mut Vec<Group>, state: &mut ScreenState) {
+    let Ok(fresh) = super::pending::list_groups(repo) else {
+        return;
+    };
+    adopt_groups(fresh, groups, state);
+}
+
+/// What [`QueueReader`] hands back: the groups and the board's own branch,
+/// read together off one thread so neither can land half a frame behind the
+/// other. The generation a reading landed on lives on
+/// [`crate::status::Reader`] itself, outside this, since that is what ties
+/// one back to [`QueueReader::started_count`] — see `refresh_from_reader`.
+#[derive(Default)]
+struct QueueSnapshot {
+    groups: Vec<Group>,
+    branch: Option<String>,
+}
+
+/// The read [`run_screen_from`]'s loop used to run on the key thread itself
+/// — `crate::repo::branch_at` for `state.board_branch`, every key, and
+/// `super::pending::list_groups` once a second while idle — kept off that
+/// thread by a thread of its own: [`crate::status`]'s own generic
+/// `Reader<T>`, the same `board-reader-thread` decision the dispatch tab's
+/// board already reuses for its own `Snapshot`, rather than a second copy
+/// of that thread written by hand for this one. Before this, every key here
+/// started a `git` process before its frame was drawn, and a key typed
+/// during a reload waited for every task file to be read.
+type QueueReader = crate::status::Reader<QueueSnapshot>;
+
+/// [`QueueReader::start`], seeded with `initial` — already read by the
+/// caller, on its own thread, before the tab decided its opening message —
+/// so this never pays for a second read of the same files right away.
+/// Unlike the dispatch tab's own reader, nothing here ever blocks waiting
+/// for a reading to land: the queue tab's very first frame is already read
+/// before this is even started, so there is no "first frame" case that
+/// needs one.
+fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapshot) -> QueueReader {
+    // `Reader::start` itself calls `build` once, synchronously, for its own
+    // seed — but `initial` is already that seed, read by the caller before
+    // this ever runs, so the closure hands it straight back the one time it
+    // is asked for a value it does not have to build. The `Option` holding
+    // it guards that: `take` empties it on that first call, so every call
+    // after it really does read.
+    let mut initial = Some(initial);
+    QueueReader::start(move || {
+        if let Some(seed) = initial.take() {
+            return Some(seed);
+        }
+        build_queue_snapshot(&repo, &cwd)
+    })
+}
+
+/// [`super::pending::list_groups`] and [`crate::repo::branch_at`], together
+/// — what [`QueueReader`] reads on its own thread once its seed has been
+/// handed back once. `None` when the pending directory itself cannot be
+/// read; a detached checkout reads as no branch rather than a reason to
+/// fail the whole reading, the same tolerance the inline `branch_at` call
+/// this replaces always gave.
+fn build_queue_snapshot(repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
+    let groups = super::pending::list_groups(repo).ok()?;
+    let branch = crate::repo::branch_at(cwd).ok();
+    Some(QueueSnapshot { groups, branch })
+}
+
+/// Ask [`QueueReader`] for one more reading, and adopt it into `groups` and
+/// `state.board_branch` only if it landed on a generation above `known` —
+/// the ratchet [`run_screen_from`]'s loop keeps across every call, bumped
+/// here to whatever is adopted and bumped separately, by
+/// [`QueueReader::started_count`], the moment a key edits `groups` directly
+/// (`finish_submit`'s own `groups.retain`, once a submission lands) — see
+/// that call site's own comment. Without that second bump a reading already
+/// in flight at the moment of the edit could still land afterward and carry
+/// the submitted group right back, since nothing about the ratchet alone
+/// tells that reading apart from a fresh one: it only ever moves forward
+/// when a call here actually adopts something, never on every call, so a
+/// reading this very call just woke is never rejected for having started
+/// "too recently" — the bug an earlier version of this function had.
+fn refresh_from_reader(
+    reader: &QueueReader,
+    known: &mut u64,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+) {
+    reader.wake();
+    let (snapshot, generation) = reader.latest_with_generation();
+    if generation <= *known {
+        return;
+    }
+    adopt_groups(snapshot.groups.clone(), groups, state);
+    state.board_branch = snapshot.branch.clone();
+    *known = generation;
 }
 
 /// The highlighted group's tasks, or `None` when nothing is under the cursor
@@ -4447,8 +4602,19 @@ fn task_pipeline<'a>(doc: &str, pipelines: &'a Pipelines) -> Result<&'a Pipeline
 
 /// A peek at a task's own `pipeline:` key, without the rest of
 /// `parse_submission`'s validation — the gate picker needs a pipeline's
-/// steps before a task has a `base:` to be validated against at all,
-/// and the tasks pane's own `Pipeline:` row needs nothing more than this.
+/// steps before a task has a `base:` to be validated against at all.
+///
+/// [`tasks_pane_lines`] does not call this any more: a `PendingTask`'s own
+/// `pipeline` field already carries what this would read, parsed once
+/// while `pending::list_groups_in` built it — see that field's own
+/// comment. Three callers still parse here, on every draw that reads it.
+/// The routines pane (`routine_task_lines`) has no choice: a `RoutineTask`
+/// carries none of `PendingTask`'s precomputed fields. The gate picker
+/// ([`task_pipeline`], used by `handle_gate_key` and `gate_panel`) and the
+/// trial picker's tick list (`TrialState::new`) do hold a `PendingTask`
+/// whose `pipeline` field already has this value; they were left on this
+/// path because neither runs on the idle per-second redraw the queue tab
+/// was slow on, only while one of those pickers is open.
 fn doc_pipeline_name(doc: &str) -> Option<String> {
     let (yaml, _) = crate::task::split_fence(doc).ok()?;
     let value: serde_norway::Value = serde_norway::from_str(yaml).ok()?;
@@ -4457,15 +4623,6 @@ fn doc_pipeline_name(doc: &str) -> Option<String> {
         .get("pipeline")?
         .as_str()
         .map(str::to_string)
-}
-
-/// A peek at a task's own `base:` key, the same shallow way
-/// [`doc_pipeline_name`] reads `pipeline:` — `None` for a blank one too,
-/// which `enter` treats exactly as an absent one.
-fn doc_base(doc: &str) -> Option<String> {
-    let (yaml, _) = crate::task::split_fence(doc).ok()?;
-    let value: serde_norway::Value = serde_norway::from_str(yaml).ok()?;
-    super::pending::front_str(&value, "base")
 }
 
 fn handle_gate_key(
@@ -5054,18 +5211,29 @@ fn tasks_pane_lines(
         };
         lines.push(task_row(marker, &task.id, tail, width));
 
+        // `task.pipeline`, `task.depends_on` and `task.base`, not a parse
+        // of `task.doc` apiece: these three rows used to each call their
+        // own `doc_pipeline_name`/`depends_on`/`doc_base`, splitting and
+        // parsing the same doc three times over on every draw of the
+        // highlighted group. `pending::list_groups_in` parses each task's
+        // front matter once, while building it, and fills these three
+        // fields from that one parse — see `PendingTask::depends_on`'s own
+        // comment — so drawing the pane now parses nothing at all.
+
         // There is no project default any more, so a task naming no
         // pipeline of its own reads as unassigned here — the same as
         // `task_pipeline` resolves nothing for it, and `parse_submission`
         // refuses it outright once it is actually submitted.
-        let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
+        let pipeline = task
+            .pipeline
+            .clone()
+            .unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
         lines.extend(labeled_row("Pipeline:", &pipeline, width));
 
-        let depends_on = super::pending::depends_on(&task.doc);
-        let depends_value = if depends_on.is_empty() {
+        let depends_value = if task.depends_on.is_empty() {
             "-".to_string()
         } else {
-            depends_on.join(", ")
+            task.depends_on.join(", ")
         };
         lines.extend(labeled_row("Depends on:", &depends_value, width));
 
@@ -5077,8 +5245,10 @@ fn tasks_pane_lines(
         // sent on the board checkout's branch — see `board_branch` — so
         // that is what it shows, and `-` only when the checkout is
         // detached and `enter` would refuse it.
-        if depends_on.is_empty() {
-            let base = doc_base(&task.doc)
+        if task.depends_on.is_empty() {
+            let base = task
+                .base
+                .clone()
                 .or_else(|| state.board_branch.clone())
                 .unwrap_or_else(|| "-".to_string());
             lines.extend(labeled_row("Base:", &base, width));
@@ -9345,6 +9515,217 @@ mod tests {
         (exit, String::from_utf8(out).unwrap())
     }
 
+    /// How many `git` processes and how many pending/queue files were read
+    /// on this thread, running `input` through `screen_exit` against a
+    /// fresh fixture seeded with one task — the pair the
+    /// `queue-tab-reader-thread` repro compares between a baseline script
+    /// and the same script with one key added, so the difference is that
+    /// one key's own doing and nothing a fixture's own setup already paid
+    /// for.
+    fn process_and_read_counts(name: &str, input: &str) -> (usize, usize) {
+        let (repo, _root) = fixture(name);
+        write_pending(&repo, "wire", &task_text("wire", "group: demo\n", BODY));
+        let groups = listed(&repo);
+        let before_proc = crate::repo::runs_here_under(&repo.root);
+        let before_reads = super::pending::pending_reads_here_under(&repo.pending_dir());
+        screen_exit(&repo, groups, input);
+        let after_proc = crate::repo::runs_here_under(&repo.root);
+        let after_reads = super::pending::pending_reads_here_under(&repo.pending_dir());
+        (after_proc - before_proc, after_reads - before_reads)
+    }
+
+    /// Every key on the queue tab starts `git branch --show-current` before
+    /// its frame is drawn — see `run_screen_from`'s own call to
+    /// `crate::repo::branch_at` at the top of its loop — so one more key
+    /// typed must mean one more process started, a `j` that only moves the
+    /// group cursor included. A reader thread is expected to make this
+    /// difference zero: the key wakes it, but draws from whatever it last
+    /// read rather than waiting for a fresh one itself.
+    #[test]
+    fn a_cursor_key_draws_without_starting_a_process_or_reading_a_file() {
+        let (baseline_proc, baseline_reads) =
+            process_and_read_counts("queue-reader-thread-cursor-baseline", "");
+        let (measured_proc, measured_reads) =
+            process_and_read_counts("queue-reader-thread-cursor-measured", "j");
+
+        assert_eq!(
+            measured_proc, baseline_proc,
+            "a cursor key must start no process of its own"
+        );
+        assert_eq!(
+            measured_reads, baseline_reads,
+            "a cursor key must read no file of its own"
+        );
+    }
+
+    /// The same bug, one key deep in the gate picker instead of on the
+    /// group list: opening the picker with `g` already pays for a process
+    /// per key, and moving inside it with `j` is one more — `handle_gate_key`
+    /// itself reads nothing, so this isolates the cost `run_screen_from`'s
+    /// own loop adds around it.
+    #[test]
+    fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
+        let (baseline_proc, baseline_reads) =
+            process_and_read_counts("queue-reader-thread-gate-baseline", "\tg");
+        let (measured_proc, measured_reads) =
+            process_and_read_counts("queue-reader-thread-gate-measured", "\tgj");
+
+        assert_eq!(
+            measured_proc, baseline_proc,
+            "a key inside the gate picker must start no process of its own"
+        );
+        assert_eq!(
+            measured_reads, baseline_reads,
+            "a key inside the gate picker must read no file of its own"
+        );
+    }
+
+    /// `QueueReader` actually reading a fresh pending task after it starts
+    /// is what the two tests above can never exercise: their scripted input
+    /// reports a byte pending on every slice, so `wait_for_key`'s idle path
+    /// — the one that calls `refresh_from_reader` while there is nothing
+    /// else to do — never runs, and the reader's own thread is the only
+    /// other caller. Drives `start_queue_reader` and `refresh_from_reader`
+    /// directly instead, the same way `status::mod`'s own
+    /// `a_landed_reading_is_noticed_once_and_drawn_from_memory` drives
+    /// `Reader` directly for the dispatch tab.
+    #[test]
+    fn a_landed_reading_updates_groups_and_the_branch() {
+        let (repo, _root_guard) = fixture("queue-reader-thread-landed-reading");
+        let reader = start_queue_reader(
+            repo.clone(),
+            repo.root.clone(),
+            QueueSnapshot {
+                groups: Vec::new(),
+                branch: None,
+            },
+        );
+        let mut known = 0;
+        let mut groups = Vec::new();
+        let mut state = ScreenState::new();
+
+        write_pending(&repo, "wire", &task_text("wire", "group: demo\n", BODY));
+        reader.wake();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while groups.is_empty() && std::time::Instant::now() < deadline {
+            refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            groups.iter().any(|g| g.name == "demo"),
+            "the landed reading should have picked up the task written after the reader started"
+        );
+        assert_eq!(
+            state.board_branch.as_deref(),
+            Some("plan/demo"),
+            "the landed reading should have read the fixture's own branch too"
+        );
+    }
+
+    /// The bug `refresh_from_reader`'s first version had: it compared a
+    /// landed reading's generation against `QueueReader::started_count`
+    /// read fresh on every call, rather than against `known` — the ratchet
+    /// that only moves when a call actually adopts something, or when an
+    /// edit bumps it on purpose. That version rejected every reading
+    /// forever, since the very wake a call just sent had already pushed
+    /// `started_count` past whatever that reading would ever land on. This
+    /// drives the real race the fix (and `known`'s edit-time bump at every
+    /// `resume`/`begin_submission` call site in `run_screen_from`) exists
+    /// for: a reading already in flight when a submission's own
+    /// `groups.retain` lands must not carry the submitted group back once
+    /// it finishes, and a reading that starts after it must still land
+    /// normally.
+    #[test]
+    fn a_reading_already_in_flight_when_an_edit_lands_must_not_put_it_back() {
+        let (repo, _root_guard) = fixture("queue-reader-thread-race");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: demo\n", BODY));
+        let mut groups = listed(&repo);
+        assert!(groups.iter().any(|g| g.name == "demo"));
+
+        // `build` blocks, after doing its real read, on every call past the
+        // first (the seed) whose own index matches `blocked_call` — so the
+        // reading `wake` below starts can be held in flight across the
+        // "edit" that follows it, the way a real one could be.
+        let blocked_call = 1usize;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (thread_repo, thread_cwd) = (repo.clone(), repo.root.clone());
+        let (thread_calls, thread_gate) =
+            (std::sync::Arc::clone(&calls), std::sync::Arc::clone(&gate));
+        let reader = QueueReader::start(move || {
+            let call = thread_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let fresh = build_queue_snapshot(&thread_repo, &thread_cwd);
+            if call == blocked_call {
+                let (lock, cond) = &*thread_gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = cond.wait(released).unwrap();
+                }
+            }
+            fresh
+        });
+        let mut known = 0;
+        let mut state = ScreenState::new();
+
+        reader.wake();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while reader.started_count() < 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            reader.started_count(),
+            1,
+            "the reading this test holds in flight should have started"
+        );
+
+        // The edit: a submission landing removes "demo" from `groups` and
+        // deletes its file, then raises `known` the moment it happens — see
+        // `refresh_from_reader`'s own doc comment and the `resume` /
+        // `begin_submission` call sites in `run_screen_from`.
+        groups.retain(|g| g.name != "demo");
+        std::fs::remove_file(&path).unwrap();
+        known = known.max(reader.started_count());
+
+        // Release the held reading. It lands now, but it read "demo" before
+        // the edit above, so adopting it would carry the submitted group
+        // right back onto the screen.
+        {
+            let (lock, cond) = &*gate;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while reader.latest_with_generation().1 < 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+        assert!(
+            !groups.iter().any(|g| g.name == "demo"),
+            "a reading started before the edit must not put the submitted group back"
+        );
+
+        // A reading that starts after the edit is not held back by it: it
+        // reads the file's own deletion and lands normally. Checked through
+        // `known` rather than `groups` alone — the group is just as absent
+        // whether this reading was actually adopted or rejected forever,
+        // the failure mode an earlier, buggier `refresh_from_reader` had.
+        reader.wake();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while known < 2 {
+            if std::time::Instant::now() > deadline {
+                panic!("a reading started after the edit never landed");
+            }
+            refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !groups.iter().any(|g| g.name == "demo"),
+            "a reading that actually started after the edit should keep agreeing with it"
+        );
+    }
+
     /// The routines tab's screen driven over `input`, opened the way
     /// [`routines_tab`] opens it — straight onto the routine list with
     /// nothing ticked — keeping the exit and everything it drew.
@@ -10724,6 +11105,59 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("touches") || line.contains("src/wire.rs")),
             "the pane never draws a task's touches, got {lines:?}"
+        );
+    }
+
+    /// `queue-tab-reads-changed-only`: one draw of the tasks pane used to
+    /// parse the highlighted task's own front matter three times over —
+    /// once each through `doc_pipeline_name`, `depends_on` and `doc_base` —
+    /// rather than once. `pending::list_groups_in` now parses a task's
+    /// front matter once while building it, filling `PendingTask::pipeline`,
+    /// `depends_on` and `base` from that one parse, and `tasks_pane_lines`
+    /// only reads those three fields: a draw over an unchanged file parses
+    /// nothing at all, not even once.
+    ///
+    /// Counted through `list_groups_in`'s own cache-and-counter arguments,
+    /// not a process-wide counter: ~40 sibling tests in this module call
+    /// `tasks_pane_lines`, `TrialState::new`, `doc_pipeline_name` or
+    /// `depends_on`, and the first version of this test read a shared
+    /// static any of them could bump — seen failing 16 times in 150
+    /// parallel runs (review finding 1). A cache and counter this test
+    /// owns outright cannot be touched by any other test.
+    #[test]
+    fn tasks_pane_lines_reads_a_tasks_front_matter_parsed_once_not_reparsed_per_draw() {
+        let (repo, _root_guard) = fixture("tasks-pane-parse-once");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+
+        let mut cache = std::collections::HashMap::new();
+        let mut parsed = 0usize;
+        let groups = super::pending::list_groups_in(&repo, &mut cache, &mut parsed).unwrap();
+        assert_eq!(
+            parsed, 1,
+            "one task, new to the cache, is parsed exactly once while list_groups builds it"
+        );
+
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new();
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Pipeline:") && line.contains("default")),
+            "tasks_pane_lines must still draw the task's own pipeline off the \
+             field list_groups already filled in, got {lines:?}"
+        );
+
+        // The per-second reload path: a second build over the same,
+        // unchanged file must parse nothing, not once per draw.
+        // `tasks_pane_lines` itself never parses anything any more, so
+        // `list_groups_in`'s own count is the whole of what is left to
+        // check.
+        let mut parsed_again = 0usize;
+        let _ = super::pending::list_groups_in(&repo, &mut cache, &mut parsed_again).unwrap();
+        assert_eq!(
+            parsed_again, 0,
+            "a reload over an unchanged file must parse nothing, not once per draw"
         );
     }
 

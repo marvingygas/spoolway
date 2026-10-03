@@ -4607,6 +4607,52 @@ mod tests {
         assert_eq!(after.iter().filter(|e| e.task == "kept").count(), 1);
     }
 
+    /// `board-reads-changed-only`: `live_session` now resolves a lane through
+    /// `read_cached`'s ledger rather than a fresh `read`, on the strength of
+    /// the two agreeing — proven directly here rather than just assumed from
+    /// both being backed by the same file. Covers the plain-append case and
+    /// the in-place rewrite [`read_cached_re_reads_a_ledger_rewritten_in_place`]
+    /// already covers for `read_cached` alone, this time checked against what
+    /// `read` sees of the same file.
+    #[test]
+    fn read_cached_agrees_with_read_including_after_a_rewrite() {
+        let (repo, _, _root_guard) = fixture("read-cached-agrees-with-read");
+        append(&repo, &minimal_entry("first")).unwrap();
+        append(&repo, &minimal_entry("drop")).unwrap();
+
+        // `Entry` carries no `PartialEq`, so the two are compared by their own
+        // serialised form rather than field by field.
+        let as_json = |entries: &[Entry]| -> Vec<String> {
+            entries
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap())
+                .collect()
+        };
+
+        assert_eq!(
+            as_json(&read_cached(&repo)),
+            as_json(&read(&repo).unwrap()),
+            "a plain append must read the same through either path"
+        );
+
+        // Same byte length, same inode — the in-place rewrite `read_cached`
+        // guards against (review finding 41), kept the same length here on
+        // purpose: see `read_cached`'s own doc comment for the one, longer
+        // shape of in-place rewrite it does not guard against.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let path = ledger_path(&repo);
+        let rewritten = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"drop\"", "\"kept\"");
+        std::fs::write(&path, &rewritten).unwrap();
+
+        assert_eq!(
+            as_json(&read_cached(&repo)),
+            as_json(&read(&repo).unwrap()),
+            "a rewrite in place must still leave the two in agreement"
+        );
+    }
+
     /// A line written before runs existed has none, and must still parse —
     /// the whole point of the fallback key `spoolway eval` derives for it.
     #[test]

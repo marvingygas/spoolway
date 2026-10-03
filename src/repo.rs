@@ -572,9 +572,11 @@ impl Repo {
     }
 
     /// Every active task in id order, together with the queue files that
-    /// would not parse — for the dispatcher pass and the board, which name
-    /// the bad file where a person will see it rather than leaving it only
-    /// in the log.
+    /// would not parse — for the dispatcher pass, which names the bad file
+    /// where a person will see it rather than leaving it only in the log.
+    /// The board reads the queue through `status::cached_queue` instead, a
+    /// per-file cache over the same [`task::load_dir`] that skips reparsing a
+    /// file whose bytes have not moved since the last frame.
     pub fn tasks_and_problems(&self) -> Result<(Vec<Task>, Vec<task::LoadProblem>)> {
         task::load_dir(&self.queue_dir())
     }
@@ -3246,7 +3248,16 @@ pub fn toplevel_raw(cwd: &Path) -> Result<PathBuf> {
 }
 
 /// Run a command in `cwd` and return its stdout, or an error carrying stderr.
+///
+/// Every `git` call and every `herdr` call the multiplexer backend makes runs
+/// through here, so a test can count them — see [`PROCESS_RUNS`]. Other
+/// processes, such as a lane's agent started by `herdr agent start` or a
+/// `kill`, are started elsewhere and are not counted.
 pub fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
+    #[cfg(test)]
+    if let Ok(mut runs) = PROCESS_RUNS.lock() {
+        runs.push((cwd.to_path_buf(), std::thread::current().id()));
+    }
     let output = Command::new(program)
         .args(args)
         .current_dir(cwd)
@@ -3262,6 +3273,40 @@ pub fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Every process [`run`] has started so far in this process, as the `cwd`
+/// it ran in and the thread that started it — test-only. Scoped by `cwd` so
+/// a test under its own scratch directory counts only its own processes,
+/// where a stand-in on the process-global `PATH` raced every other test
+/// running beside it. Scoped by thread so a test can tell the processes its
+/// own thread paid for from the ones the board's reader thread started.
+#[cfg(test)]
+static PROCESS_RUNS: std::sync::Mutex<Vec<(PathBuf, std::thread::ThreadId)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// How many processes [`run`] has started with `cwd` under `dir` so far, on
+/// any thread — see [`PROCESS_RUNS`].
+#[cfg(test)]
+pub(crate) fn runs_under(dir: &Path) -> usize {
+    PROCESS_RUNS
+        .lock()
+        .map(|runs| runs.iter().filter(|(cwd, _)| cwd.starts_with(dir)).count())
+        .unwrap_or(0)
+}
+
+/// [`runs_under`], counting only the processes the calling thread started.
+#[cfg(test)]
+pub(crate) fn runs_here_under(dir: &Path) -> usize {
+    let here = std::thread::current().id();
+    PROCESS_RUNS
+        .lock()
+        .map(|runs| {
+            runs.iter()
+                .filter(|(cwd, thread)| *thread == here && cwd.starts_with(dir))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
