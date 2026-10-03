@@ -207,6 +207,7 @@ fn queue_add_dry_run(
     submitted: &[(String, String)],
 ) -> Result<()> {
     let tasks = validate_batch(repo, pipelines, base, submitted)?;
+    refuse_missing_start(repo, &tasks)?;
     println!("dry run — nothing written");
     println!("  project: {}", repo.root.display());
     println!("  home:    {}", repo.home.display());
@@ -1040,6 +1041,178 @@ fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
     Ok(())
 }
 
+/// A task in a batch that queueing leaves out because it cannot start, and
+/// why. It stays in the pending directory, to be queued again once a person
+/// has set `starts_from:`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NotQueued {
+    pub(crate) id: String,
+    pub(crate) why: NotQueuedWhy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotQueuedWhy {
+    /// The task's own start branch, which does not exist.
+    MissingStart(String),
+    /// A task in the same batch it depends on, itself left out. Queued
+    /// alone, it would wait on a dependency that never reaches the queue.
+    DependsOn(String),
+}
+
+/// The branch `task` starts from, when that branch exists neither locally
+/// nor on `origin` — `None` when it exists, when `origin` could not be asked,
+/// and when there is nothing to check yet.
+///
+/// The start branch and the lookup are the dispatcher's own —
+/// [`crate::dispatch::start_branch`] and [`crate::dispatch::branch_known`] —
+/// so queueing and the dispatcher's pause never judge the same branch
+/// differently. What differs is when there is something to check: a task's
+/// own `starts_from:` always, a first dependency's branch only once that
+/// dependency is `done`. A dependency still queued, or in the same batch,
+/// has a branch the dispatcher cuts when it starts. A task with neither
+/// starts from `base:`, which [`check_task_base`] has already checked. A
+/// blank `starts_from:` names nothing to look up. A dependency whose branch
+/// cannot be resolved is left for [`check_dependencies_set`] and the cut to
+/// refuse by name.
+///
+/// A branch `origin` could not be asked about, offline or over a refused
+/// credential, is not missing: telling the person to set `starts_from:`
+/// would restack the work onto another branch over a network failure. The
+/// task is queued, and the dispatcher's pause asks again before the cut.
+fn missing_start_branch(
+    repo: &Repo,
+    task: &Task,
+    remote_cache: &mut crate::dispatch::RemoteCache,
+) -> Option<String> {
+    let base = task.front.base.as_deref()?;
+    match (&task.front.starts_from, task.front.depends_on.first()) {
+        (Some(own), _) if own.trim().is_empty() => return None,
+        (Some(_), _) => {}
+        (None, Some(dep)) => {
+            let done = repo
+                .task(dep)
+                .is_ok_and(|dep| dep.front.stage == crate::pipeline::DONE);
+            if !done {
+                return None;
+            }
+        }
+        (None, None) => return None,
+    }
+    let start = crate::dispatch::start_branch(repo, task, base).ok()?;
+    (crate::dispatch::branch_known(repo, &start, remote_cache) == Some(false)).then_some(start)
+}
+
+/// Every task in `tasks` that queueing leaves out: each whose start branch
+/// does not exist — see [`missing_start_branch`] — and every task in the
+/// batch that depends on one of those, directly or through another left out.
+/// In batch order, so a chain reads top to bottom.
+pub(crate) fn not_queued(repo: &Repo, tasks: &[Task]) -> Vec<NotQueued> {
+    // One ask of `origin` per branch for the whole batch, a failed one
+    // included, the way a dispatcher pass shares its own.
+    let mut remote_cache = crate::dispatch::RemoteCache::new();
+    let mut out: Vec<NotQueued> = tasks
+        .iter()
+        .filter_map(|task| {
+            missing_start_branch(repo, task, &mut remote_cache).map(|branch| NotQueued {
+                id: task.id().to_string(),
+                why: NotQueuedWhy::MissingStart(branch),
+            })
+        })
+        .collect();
+    // Grown until nothing new joins: a dependent can sit before what it
+    // depends on in the batch, so one pass in batch order would miss it.
+    loop {
+        let before = out.len();
+        for task in tasks {
+            if out.iter().any(|n| n.id == task.id()) {
+                continue;
+            }
+            let left_out_dep = task
+                .front
+                .depends_on
+                .iter()
+                .find(|dep| out.iter().any(|n| &n.id == *dep));
+            if let Some(dep) = left_out_dep {
+                out.push(NotQueued {
+                    id: task.id().to_string(),
+                    why: NotQueuedWhy::DependsOn(dep.clone()),
+                });
+            }
+        }
+        if out.len() == before {
+            break;
+        }
+    }
+    out.sort_by_key(|n| tasks.iter().position(|t| t.id() == n.id));
+    out
+}
+
+/// Move each group's `group_description:` onto a task that is queued when
+/// the only tasks carrying it are ones the batch leaves out.
+///
+/// [`require_group_description`] passed the whole batch before
+/// [`not_queued`] took tasks out of it. Without this, a group whose
+/// description sat on a left-out task would open its issue for the queued
+/// siblings with nothing to say, which is what that check exists to refuse.
+/// The first queued task of the group takes it. Only the task about to be
+/// written changes; the left-out task's own file keeps its description.
+fn carry_group_descriptions(tasks: &mut [Task], not_queued: &[NotQueued]) {
+    let left_out = |task: &Task| not_queued.iter().any(|n| n.id == task.id());
+    let groups: Vec<String> = tasks.iter().filter_map(|t| t.front.group.clone()).collect();
+    for group in groups {
+        let in_group = |t: &Task| t.front.group.as_deref() == Some(group.as_str());
+        if tasks
+            .iter()
+            .any(|t| in_group(t) && !left_out(t) && has_group_description(t))
+        {
+            continue;
+        }
+        let Some(description) = tasks
+            .iter()
+            .find(|t| in_group(t) && left_out(t) && has_group_description(t))
+            .and_then(|t| t.front.group_description.clone())
+        else {
+            continue;
+        };
+        if let Some(kept) = tasks.iter_mut().find(|t| in_group(t) && !left_out(t)) {
+            kept.front.group_description = Some(description);
+        }
+    }
+}
+
+/// What a person reads for a task whose own start branch does not exist:
+/// the queue tab's queued summary and `queue add`'s refusal say the same.
+fn missing_start_sentence(id: &str, branch: &str) -> String {
+    format!(
+        "{id} starts from {branch}, which doesn't exist. Set starts_from: in the task front \
+         matter and requeue."
+    )
+}
+
+/// One [`missing_start_sentence`] per task in `not_queued` whose own start
+/// branch is missing. A task left out only for its dependency gets none:
+/// setting the dependency's `starts_from:` is what lets it through.
+fn missing_start_sentences(not_queued: &[NotQueued]) -> Vec<String> {
+    not_queued
+        .iter()
+        .filter_map(|n| match &n.why {
+            NotQueuedWhy::MissingStart(branch) => Some(missing_start_sentence(&n.id, branch)),
+            NotQueuedWhy::DependsOn(_) => None,
+        })
+        .collect()
+}
+
+/// `queue add`'s refusal of a whole batch over any task whose start branch
+/// does not exist. A command has no summary to list the rest in, so it
+/// queues none of it, the way every other refusal of `queue add` does.
+fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    let sentences = missing_start_sentences(&not_queued(repo, tasks));
+    if !sentences.is_empty() {
+        bail!("{}\n\nNothing was queued.", sentences.join("\n"));
+    }
+    Ok(())
+}
+
 /// The `based on` line every path that queues a batch prints: one line when
 /// the whole batch shares a base — the ordinary case, everything given the
 /// same `--base` — and one line per task when tasks named bases of their
@@ -1072,6 +1245,7 @@ fn queue_add_tasks(
     submitted: &[(String, String)],
 ) -> Result<()> {
     let mut tasks = validate_batch(repo, pipelines, base, submitted)?;
+    refuse_missing_start(repo, &tasks)?;
     // `esc` from an interactive run — a real terminal on both ends of
     // `queue add --from` — is not a refusal: it means the same thing it
     // means on the queue screen, "go back", so it is caught here rather
@@ -3031,18 +3205,26 @@ impl TicketLog for PopupTickets<'_> {
 
 /// [`Mode::Queued`] for a batch that queued `ids`: the tickets the hook
 /// answered with, when it was asked, over the count queued; or, with no
-/// ticket to show, the count over every task it queued. Either ends on
-/// `dispatcher` — [`dispatcher_line`] — a blank row below the list, and
-/// then the [`crate::screen::confirm`] row. `routines` is the routines pane
-/// the batch was queued from, or `None` over the pending screen.
+/// ticket to show, the count over every task it queued. Then the tasks it
+/// left out, `not_queued`, when there are any — see [`not_queued_lines`].
+/// Either ends on `dispatcher` — [`dispatcher_line`] — a blank row below the
+/// list, and then the [`crate::screen::confirm`] row. `routines` is the
+/// routines pane the batch was queued from, or `None` over the pending
+/// screen.
+///
+/// A batch that queued nothing at all, every task left out, draws only what
+/// it left out, under the title `not queued`.
 fn queued_panel(
     ids: &[String],
     tickets: &[String],
+    not_queued: &[NotQueued],
     dispatcher: Option<&str>,
     routines: Option<RoutineNav>,
 ) -> Mode {
     let queued = format!("queued {}", plural(ids.len(), "task"));
-    let mut lines = if tickets.is_empty() {
+    let mut lines = if ids.is_empty() {
+        Vec::new()
+    } else if tickets.is_empty() {
         std::iter::once(queued)
             .chain(ids.iter().map(|id| format!("  {id}")))
             .collect()
@@ -3051,17 +3233,54 @@ fn queued_panel(
         lines.extend([String::new(), queued]);
         lines
     };
+    if !not_queued.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(not_queued_lines(not_queued));
+    }
     if let Some(dispatcher) = dispatcher {
         lines.extend([String::new(), dispatcher.to_string()]);
     }
-    let title = match tickets.is_empty() {
-        true => "queued",
-        false => "issues created",
+    let title = if ids.is_empty() {
+        "not queued"
+    } else if tickets.is_empty() {
+        "queued"
+    } else {
+        "issues created"
     };
     Mode::Queued {
         panel: panel(title, &issue_body(lines), &confirm()),
         routines,
     }
+}
+
+/// The queued popup's account of the tasks a batch left out: one row each,
+/// a dependent annotated with the left-out task it depends on and the
+/// annotations lined up in one column, then one sentence for each task whose
+/// own start branch does not exist, wrapped to the popup's width.
+fn not_queued_lines(not_queued: &[NotQueued]) -> Vec<String> {
+    let widest = not_queued
+        .iter()
+        .map(|n| n.id.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec!["not queued, start branch doesn't exist".to_string()];
+    for n in not_queued {
+        lines.push(match &n.why {
+            NotQueuedWhy::MissingStart(_) => format!("  {}", n.id),
+            NotQueuedWhy::DependsOn(dep) => format!(
+                "  {:<widest$}{}(depends on {dep})",
+                n.id,
+                crate::status::GUTTER
+            ),
+        });
+    }
+    for sentence in missing_start_sentences(not_queued) {
+        lines.push(String::new());
+        lines.extend(crate::screen::wrap(&sentence, crate::screen::NOTICE_WRAP));
+    }
+    lines
 }
 
 /// The queued popup's last line: whether a dispatcher will pick the batch
@@ -3301,7 +3520,7 @@ struct ScreenState {
     gates: std::collections::BTreeMap<TaskKey, String>,
     /// The branch the board's own checkout has out — what `enter` hands a
     /// task that names no `base:` of its own, and so what the tasks pane's
-    /// `Base:` row shows for one. `None` on a detached checkout, where
+    /// `Lands in:` row shows for one. `None` on a detached checkout, where
     /// `enter` refuses rather than guess, and in the tests that open the
     /// screen with no checkout behind it.
     board_branch: Option<String>,
@@ -3649,7 +3868,7 @@ fn run_screen_from(
         // has been handled, so this is also what wakes the reader for the
         // next one, the same cadence the inline `branch_at` call this
         // replaces always ran at: the board can be left open while its
-        // checkout moves to another branch, and the `Base:` row must
+        // checkout moves to another branch, and the `Lands in:` row must
         // eventually name the branch `enter` would read right now, just
         // from whatever the reader last landed rather than a read of its
         // own.
@@ -4366,8 +4585,8 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
             }
         },
         // Selection is on the group, whichever pane the focus is in — a
-        // group is submitted whole or not at all, and the tasks pane is what
-        // it holds rather than a second list to pick from.
+        // group is selected whole, and the tasks pane is what it holds rather
+        // than a second list to pick from.
         Key::Char(' ') => {
             if let Some(group) = shown(groups, state).get(state.group_cursor)
                 && selectable(group)
@@ -4899,10 +5118,11 @@ fn layout_for(width: usize, height: usize) -> Layout {
 }
 
 /// The column every row's value starts at in [`labeled_row`]'s wide layout:
-/// four columns of indent, then the widest label this pane ever draws —
-/// `Description:`, at 13 characters padded — so `Pipeline:`, `Depends on:`,
-/// `Base:`, `Gate:` and `Description:` all line up under each other regardless of
-/// which one owns a given row. A constant rather than something measured off
+/// four columns of indent, then the widest labels this pane ever draws —
+/// `Description:` and `Starts from:`, at 13 characters padded — so
+/// `Pipeline:`, `Depends on:`, `Starts from:`, `Lands in:`, `Gate:` and
+/// `Description:` all line up under each other regardless of which one owns
+/// a given row. A constant rather than something measured off
 /// the label set at draw time — see the non-goal this is: the labels are
 /// fixed, so the column never has anything to measure.
 const LABEL_FIELD: usize = 13;
@@ -5235,22 +5455,27 @@ fn tasks_pane_lines(
         };
         lines.extend(labeled_row("Depends on:", &depends_value, width));
 
-        // A dependent task is cut from its first dependency's branch, not
-        // from its own `base:` — that field only names where the whole
-        // chain lands — so a `Base:` row on a dependent would read as
-        // "cut from here" and mislead. Only a root task, one with no
-        // dependency, draws it. A task naming no `base:` of its own is
-        // sent on the board checkout's branch — see `board_branch` — so
-        // that is what it shows, and `-` only when the checkout is
-        // detached and `enter` would refuse it.
-        if task.depends_on.is_empty() {
-            let base = task
-                .base
-                .clone()
-                .or_else(|| state.board_branch.clone())
-                .unwrap_or_else(|| "-".to_string());
-            lines.extend(labeled_row("Base:", &base, width));
-        }
+        // Where the task starts and where it lands, on every task. `base:`
+        // names only where the work lands, so it is `Lands in:`; a task
+        // naming none is sent on the board checkout's branch — see
+        // `board_branch` — and `-` shows only when the checkout is detached
+        // and `enter` would refuse it. A task starts from its own
+        // `starts_from:` when it sets one, else from its first dependency.
+        // That one is named by id, not by branch: a pending dependency has
+        // no branch yet, and the queued summary names the branch itself
+        // where it matters — see `missing_start_sentence`.
+        let lands_in = task
+            .base
+            .clone()
+            .or_else(|| state.board_branch.clone())
+            .unwrap_or_else(|| "-".to_string());
+        let starts_from = task
+            .starts_from
+            .clone()
+            .or_else(|| task.depends_on.first().cloned())
+            .unwrap_or_else(|| lands_in.clone());
+        lines.extend(labeled_row("Starts from:", &starts_from, width));
+        lines.extend(labeled_row("Lands in:", &lands_in, width));
 
         if let Some(step) = state.gates.get(&task_key(task)) {
             lines.extend(labeled_row("Gate:", step, width));
@@ -5324,7 +5549,8 @@ fn routine_folder_lines(
 /// tasks — every one at or below it, the same set `enter` would queue —
 /// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
 /// pending task, minus the `Gate:` row a routine has no gate picker to set
-/// and the `Base:` row, which this pane has never drawn. Comes back with
+/// and the `Starts from:` and `Lands in:` rows, which this pane has never
+/// drawn. Comes back with
 /// each task's start and the highlighted one's range, the same as
 /// [`tasks_pane_lines`].
 fn routine_task_lines(
@@ -6411,9 +6637,12 @@ fn plural(n: usize, noun: &str) -> String {
 /// opened: a validation failure hands back a [`Mode::Outcome`] titled
 /// `submission refused`, the same refusal `queue_add_tasks` hands back,
 /// and a clean batch goes on to [`finish_submit`] and to the
-/// [`Mode::Queued`] popup saying what it queued. A failure past validation
-/// — the hook's own, most often — is titled `queue refused`, as the
-/// screen's mockup draws a failed hook. Queuing is all `enter` does:
+/// [`Mode::Queued`] popup saying what it queued. A task whose start branch
+/// does not exist, and every task in the batch depending on it, is left out
+/// of a clean batch rather than refusing it — see [`not_queued`] — and the
+/// popup lists it, whether or not anything else was queued. A failure past
+/// validation — the hook's own, most often — is titled `queue refused`, as
+/// the screen's mockup draws a failed hook. Queuing is all `enter` does:
 /// starting a dispatcher is the dispatch tab's own `enter`.
 ///
 /// Takes `state` mutably rather than by reference: `selected_tasks` reads
@@ -6436,6 +6665,21 @@ fn begin_submission(
         Ok(pending) => pending,
         Err(err) => return outcome("submission refused", format!("{err:#}")),
     };
+    // Unlike `queue add`, the screen queues the rest of the batch: the
+    // queued summary lists what it left out and why. `validate_batch` parses
+    // one task per entry of `tasks`, in order, so the two are filtered
+    // together and stay index-aligned for `open_and_prefix`.
+    let not_queued = not_queued(repo, &pending);
+    let mut pending = pending;
+    carry_group_descriptions(&mut pending, &not_queued);
+    let (tasks, pending): (Vec<_>, Vec<_>) = tasks
+        .into_iter()
+        .zip(pending)
+        .filter(|(_, task)| !not_queued.iter().any(|n| n.id == task.id()))
+        .unzip();
+    if pending.is_empty() {
+        return queued_panel(&[], &[], &not_queued, dispatcher_line(repo), None);
+    }
     if let Some(gate) = tool_gate(repo, tracking, Resume::Selection) {
         return gate;
     }
@@ -6445,10 +6689,12 @@ fn begin_submission(
     let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
     let mut tickets = PopupTickets::new(&pending, redraw);
     let selected = state.selected.clone();
+    let left_out: Vec<String> = not_queued.iter().map(|n| n.id.clone()).collect();
     let submit = Submit {
         tasks: &tasks,
         base,
         selected: &selected,
+        left_out: &left_out,
         tracking_off: tracking == Tracking::Off,
     };
     match finish_submit(repo, groups, pending, &submit, &mut tickets) {
@@ -6456,20 +6702,28 @@ fn begin_submission(
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            queued_panel(&ids, &tickets.rows, dispatcher_line(repo), None)
+            queued_panel(
+                &ids,
+                &tickets.rows,
+                &not_queued,
+                dispatcher_line(repo),
+                None,
+            )
         }
         Err(err) => outcome("queue refused", format!("{err:#}")),
     }
 }
 
 /// What [`finish_submit`] writes beside the batch itself: the tasks it
-/// came from, the branch it is based on, the groups it was selected as, and
-/// whether the tool-requirements gate or the issue question switched issue
-/// tracking off for it.
+/// came from, the branch it is based on, the groups it was selected as, the
+/// ids of the selected tasks it left out — see [`not_queued`] — and whether
+/// the tool-requirements gate or the issue question switched issue tracking
+/// off for it.
 struct Submit<'a> {
     tasks: &'a [(String, String)],
     base: &'a str,
     selected: &'a std::collections::BTreeSet<GroupKey>,
+    left_out: &'a [String],
     tracking_off: bool,
 }
 
@@ -6506,6 +6760,7 @@ fn finish_submit(
         tasks,
         base,
         selected,
+        left_out,
         tracking_off,
     } = *submit;
     // `validate_batch` already ran this over the same batch, and nothing
@@ -6530,9 +6785,17 @@ fn finish_submit(
     // not a reason to refuse a submission that has already landed: the
     // task is left where it is, and the group it belongs to drops off
     // the pane anyway, because the queue now holds every task it names.
+    //
+    // A task the batch left out keeps its file, and its group keeps its
+    // place in the pane, so the person can set `starts_from:` and send it
+    // again. Its siblings that did go are marked queued there until the
+    // next reload reads them from the queue.
     let mut left_alone: Vec<(TaskState, String)> = Vec::new();
     for group in selected_groups(groups, selected) {
         for task in &group.tasks {
+            if left_out.contains(&task.id) {
+                continue;
+            }
             if task.state == TaskState::Pending {
                 let _ = std::fs::remove_file(&task.path);
             } else {
@@ -6540,7 +6803,20 @@ fn finish_submit(
             }
         }
     }
-    groups.retain(|group| !selected.contains(&group_key(group)));
+    groups.retain_mut(|group| {
+        if !selected.contains(&group_key(group)) {
+            return true;
+        }
+        if !group.tasks.iter().any(|t| left_out.contains(&t.id)) {
+            return false;
+        }
+        for task in &mut group.tasks {
+            if task.state == TaskState::Pending && !left_out.contains(&task.id) {
+                task.state = TaskState::Queued;
+            }
+        }
+        true
+    });
 
     // The same report `queue add --from` prints for the same batch, so a
     // person reading one has read the other. The branch comes last, because
@@ -7517,7 +7793,7 @@ fn finish_routine_mode(
             // same routine a second time.
             let mut after = nav.clone();
             after.selected.clear();
-            queued_panel(&ids, &tickets.rows, dispatcher_line(repo), Some(after))
+            queued_panel(&ids, &tickets.rows, &[], dispatcher_line(repo), Some(after))
         }
         Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
@@ -7799,6 +8075,13 @@ mod tests {
         format!("---\nid: {id}\ntitle: {id}, done\n{pipeline}{extra}---\n{body}")
     }
 
+    /// Create `branch` at the fixture's `HEAD`: a done dependency's branch
+    /// that has not been deleted, which a dependent queued after it starts
+    /// from — see `missing_start_branch`.
+    fn start_branch_exists(repo: &Repo, branch: &str) {
+        crate::repo::run(&repo.root, "git", &["branch", branch]).unwrap();
+    }
+
     /// Write `text` under `repo.root` and hand back the path a `--from`
     /// entry would name.
     fn write_doc(repo: &Repo, name: &str, text: &str) -> String {
@@ -7953,6 +8236,8 @@ mod tests {
             "---\nid: login\ntitle: login\nstage: done\n---\nbody\n",
         )
         .unwrap();
+        // Its branch is still there, so `sessions` has somewhere to start.
+        start_branch_exists(&repo, "task/login");
 
         let text = task_text("sessions", "group: demo\ndepends_on: [login]\n", BODY);
         let path = write_doc(&repo, "sessions.md", &text);
@@ -8462,6 +8747,8 @@ mod tests {
              depends_on: [auth-login]\nstage: done\n---\nbody\n",
         )
         .unwrap();
+        // Its branch is still there, so `auth-form` has somewhere to start.
+        start_branch_exists(&repo, "task/auth-sessions");
 
         let text = task_text(
             "auth-form",
@@ -10876,6 +11163,311 @@ mod tests {
         }
     }
 
+    /// A done dependency whose branch is gone, archived as the last task
+    /// of its own group — what a merged pull request leaves behind once
+    /// GitHub deletes its branch.
+    fn done_dependency_without_its_branch(repo: &Repo, id: &str) {
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join(format!("{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {id}\ngroup: landed\nstage: done\nbranch: task/{id}\n\
+                 ---\nbody\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Sending from the queue tab queues every task it can and leaves out
+    /// the one whose start branch is gone, with the task that depends on it.
+    /// Both stay in the pending directory and in the pane, and the popup
+    /// lists them.
+    #[test]
+    fn submit_leaves_out_a_task_whose_start_branch_is_gone_and_queues_the_rest() {
+        let (repo, _root_guard) = fixture("screen-submit-missing-start");
+        done_dependency_without_its_branch(&repo, "reader");
+        let first = write_pending(
+            &repo,
+            "index-file",
+            &task_text("index-file", "group: archive\ndepends_on: [reader]\n", BODY),
+        );
+        let second = write_pending(
+            &repo,
+            "index-readers",
+            &task_text(
+                "index-readers",
+                "group: archive\ndepends_on: [index-file]\n",
+                BODY,
+            ),
+        );
+        let other = write_pending(&repo, "totals", &task_text("totals", "group: eval\n", BODY));
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+        handle_browse_key(&groups, &mut state, Key::Char(' '));
+        handle_browse_key(&groups, &mut state, Key::Down);
+        handle_browse_key(&groups, &mut state, Key::Char(' '));
+        assert_eq!(state.selected.len(), 2);
+
+        let outcome = begin_submission(
+            &repo,
+            &Pipelines::builtin(),
+            "plan/demo",
+            &mut groups,
+            &mut state,
+            Tracking::Ask,
+            &mut |_| {},
+        );
+        let Mode::Queued { panel, .. } = outcome else {
+            panic!("expected the queued popup, got {outcome:?}");
+        };
+        let all = panel.join("\n");
+        assert!(all.contains("queued 1 task"), "{all}");
+        assert!(
+            all.contains("not queued, start branch doesn't exist"),
+            "{all}"
+        );
+        assert!(all.contains("(depends on index-file)"), "{all}");
+        assert!(
+            all.contains("index-file starts from task/reader, which"),
+            "{all}"
+        );
+
+        assert!(!other.exists(), "the task that could start was queued");
+        assert!(repo.queue_dir().join("totals.md").exists());
+        assert!(first.exists() && second.exists(), "the left-out tasks stay");
+        assert!(!repo.queue_dir().join("index-file.md").exists());
+        assert!(!repo.queue_dir().join("index-readers.md").exists());
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert!(
+            names.contains(&"archive") && !names.contains(&"eval"),
+            "the left-out tasks' group stays in the pane, the queued one goes: {names:?}"
+        );
+    }
+
+    /// A group selected whole but queued in part stays in the pane, its
+    /// queued task marked queued there before any reload, so selecting the
+    /// group again sends only the task left out rather than resubmitting its
+    /// queued sibling.
+    #[test]
+    fn a_group_queued_in_part_stays_in_the_pane_with_its_queued_task_marked() {
+        let (repo, _root_guard) = fixture("screen-submit-group-in-part");
+        let first = write_pending(
+            &repo,
+            "split-first",
+            &task_text("split-first", "group: split\n", BODY),
+        );
+        let second = write_pending(
+            &repo,
+            "split-second",
+            &task_text(
+                "split-second",
+                "group: split\ndepends_on: [split-first]\nstarts_from: task/nowhere\n",
+                BODY,
+            ),
+        );
+        let mut groups = listed(&repo);
+        let mut state = ScreenState::new();
+        handle_browse_key(&groups, &mut state, Key::Char(' '));
+
+        let outcome = begin_submission(
+            &repo,
+            &Pipelines::builtin(),
+            "plan/demo",
+            &mut groups,
+            &mut state,
+            Tracking::Ask,
+            &mut |_| {},
+        );
+        assert!(matches!(outcome, Mode::Queued { .. }), "{outcome:?}");
+        assert!(!first.exists() && second.exists());
+        assert!(repo.queue_dir().join("split-first.md").exists());
+
+        let group = groups
+            .iter()
+            .find(|g| g.name == "split")
+            .expect("the group still holds a task to send");
+        let state_of = |id: &str| group.tasks.iter().find(|t| t.id == id).unwrap().state;
+        assert_eq!(state_of("split-first"), TaskState::Queued);
+        assert_eq!(state_of("split-second"), TaskState::Pending);
+        let mut again = ScreenState::new();
+        handle_browse_key(&groups, &mut again, Key::Char(' '));
+        let keys: Vec<_> = selected_tasks(&groups, &again)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(keys, [task_key(&group.tasks[1])], "{keys:?}");
+    }
+
+    /// When the only task carrying its group's `group_description:` is left
+    /// out, the first queued task of that group takes it, so the group's
+    /// issue still has something to say. A queued task carrying its own is
+    /// left alone.
+    #[test]
+    fn a_left_out_tasks_group_description_moves_to_a_queued_sibling() {
+        let parse = |id: &str, extra: &str| {
+            parse_submission(id, &task_text(id, extra, BODY), Some("plan/demo")).unwrap()
+        };
+        let mut tasks = [
+            parse("lead", "group: g\ngroup_description: what g is for\n"),
+            parse("kept", "group: g\n"),
+            parse("own", "group: h\ngroup_description: h's own\n"),
+            parse("gone", "group: h\ngroup_description: not this\n"),
+        ];
+        let not_queued = [
+            NotQueued {
+                id: "lead".to_string(),
+                why: NotQueuedWhy::MissingStart("task/x".to_string()),
+            },
+            NotQueued {
+                id: "gone".to_string(),
+                why: NotQueuedWhy::MissingStart("task/x".to_string()),
+            },
+        ];
+        carry_group_descriptions(&mut tasks, &not_queued);
+        assert_eq!(
+            tasks[1].front.group_description.as_deref(),
+            Some("what g is for")
+        );
+        assert_eq!(tasks[2].front.group_description.as_deref(), Some("h's own"));
+    }
+
+    /// A start branch `origin` could not be asked about is not missing:
+    /// telling the person to set `starts_from:` over a network failure would
+    /// move the work onto another branch. The task is queued, and the
+    /// dispatcher asks again before the cut.
+    #[test]
+    fn not_queued_does_not_leave_out_a_task_when_origin_cannot_be_asked() {
+        let (repo, _root_guard) = fixture("not-queued-origin-unreachable");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["remote", "add", "origin", "/nonexistent/origin.git"],
+        )
+        .unwrap();
+        let task = parse_submission(
+            "own",
+            &task_text("own", "group: g\nstarts_from: task/somewhere\n", BODY),
+            Some("plan/demo"),
+        )
+        .unwrap();
+        assert_eq!(not_queued(&repo, &[task]), []);
+    }
+
+    /// `queue add` refuses the whole batch over a dependent whose done
+    /// dependency's branch is gone, naming the branch and what to set — and
+    /// takes it once the task names a start branch that exists.
+    #[test]
+    fn queue_add_refuses_a_task_whose_start_branch_is_gone_until_starts_from_is_set() {
+        let (repo, _root_guard) = fixture("queue-add-missing-start");
+        done_dependency_without_its_branch(&repo, "reader");
+        let gone = task_text("index-file", "group: archive\ndepends_on: [reader]\n", BODY);
+        let free = task_text("totals", "group: eval\n", BODY);
+        let gone_path = write_doc(&repo, "index-file.md", &gone);
+        let free_path = write_doc(&repo, "totals.md", &free);
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&gone_path, &free_path]),
+            &repo.root,
+            false,
+        )
+        .expect_err("a task with nowhere to start is refused");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains(
+                "index-file starts from task/reader, which doesn't exist. Set starts_from: in \
+                 the task front matter and requeue."
+            ),
+            "{said}"
+        );
+        assert!(
+            !repo.queue_dir().join("totals.md").exists(),
+            "the whole batch is refused"
+        );
+
+        let set = task_text(
+            "index-file",
+            "group: archive\ndepends_on: [reader]\nstarts_from: plan/demo\n",
+            BODY,
+        );
+        let set_path = write_doc(&repo, "index-file.md", &set);
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&set_path]),
+            &repo.root,
+            false,
+        )
+        .expect("a task naming a start branch that exists is queued");
+        assert!(repo.queue_dir().join("index-file.md").exists());
+    }
+
+    /// Only a task with something to check is checked: one whose dependency
+    /// is still queued starts from a branch the dispatcher cuts when that
+    /// dependency starts, and one with no dependency starts from `base:`.
+    /// A task's own `starts_from:` is checked whatever it depends on.
+    #[test]
+    fn not_queued_checks_only_a_done_dependency_or_an_own_starts_from() {
+        let (repo, _root_guard) = fixture("not-queued-what-is-checked");
+        already_queued(&repo, "running");
+        let parse = |id: &str, extra: &str| {
+            let extra = format!("group: chain\n{extra}");
+            parse_submission(id, &task_text(id, &extra, BODY), Some("plan/demo")).unwrap()
+        };
+        let batch = [
+            parse("after-running", "depends_on: [running]\n"),
+            parse("root", ""),
+            parse("own-gone", "starts_from: task/nowhere\n"),
+            parse(
+                "own-there",
+                "depends_on: [running]\nstarts_from: plan/demo\n",
+            ),
+        ];
+        assert_eq!(
+            not_queued(&repo, &batch),
+            [NotQueued {
+                id: "own-gone".to_string(),
+                why: NotQueuedWhy::MissingStart("task/nowhere".to_string()),
+            }]
+        );
+    }
+
+    /// A dependent is left out with what it depends on, however far down
+    /// the chain and in whatever order the batch lists it.
+    #[test]
+    fn not_queued_follows_dependents_down_the_chain_in_any_order() {
+        let (repo, _root_guard) = fixture("not-queued-chain");
+        done_dependency_without_its_branch(&repo, "reader");
+        let parse = |id: &str, extra: &str| {
+            let extra = format!("group: chain\n{extra}");
+            parse_submission(id, &task_text(id, &extra, BODY), Some("plan/demo")).unwrap()
+        };
+        let batch = [
+            parse("third", "depends_on: [second]\n"),
+            parse("first", "depends_on: [reader]\n"),
+            parse("second", "depends_on: [first]\n"),
+            parse("apart", ""),
+        ];
+        assert_eq!(
+            not_queued(&repo, &batch),
+            [
+                NotQueued {
+                    id: "third".to_string(),
+                    why: NotQueuedWhy::DependsOn("second".to_string()),
+                },
+                NotQueued {
+                    id: "first".to_string(),
+                    why: NotQueuedWhy::MissingStart("task/reader".to_string()),
+                },
+                NotQueued {
+                    id: "second".to_string(),
+                    why: NotQueuedWhy::DependsOn("first".to_string()),
+                },
+            ]
+        );
+    }
+
     /// A landed submission clears the group out of the pane the same act it
     /// clears it off disk: `list_groups` runs once per screen session, so
     /// nothing else would ever pick up that the tasks are gone, and a
@@ -10980,6 +11572,7 @@ mod tests {
             tasks: &tasks,
             base: "plan/demo",
             selected: &selected,
+            left_out: &[],
             tracking_off: false,
         };
         let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
@@ -11036,6 +11629,7 @@ mod tests {
             tasks: &tasks,
             base: "plan/demo",
             selected: &selected,
+            left_out: &[],
             tracking_off: false,
         };
         let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
@@ -11197,7 +11791,8 @@ mod tests {
 
         let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         // Only the blank separator the loop always opens a task with, the
-        // task row, its Pipeline:, Depends on: and Base: rows — nothing
+        // task row, its Pipeline:, Depends on:, Starts from: and Lands in:
+        // rows — nothing
         // past it, since this task has no title to draw a Description:
         // row from. The task names no `pipeline:` either, and there is
         // no project default to show in its place any more.
@@ -11208,7 +11803,8 @@ mod tests {
                 "  wire".to_string(),
                 format!("    {:<LABEL_FIELD$}{}", "Pipeline:", TRIAL_UNASSIGNED),
                 "    Depends on:  -".to_string(),
-                "    Base:        -".to_string(),
+                "    Starts from: -".to_string(),
+                "    Lands in:    -".to_string(),
             ],
             "{lines:?}"
         );
@@ -11294,13 +11890,12 @@ mod tests {
     }
 
     /// Every fact a wide pane draws about a task — its pipeline, what it
-    /// depends on, its base, its gate and its description — starts its value at the
-    /// same column, in that order, the same as the mockup this task's own
-    /// acceptance criterion is drawn from.
+    /// depends on, where it starts and lands, its gate and its description —
+    /// starts its value at the same column, in that order.
     ///
-    /// This task has no dependency of its own, so it still draws a `Base:`
-    /// row — a dependent draws none at all, see
-    /// `a_dependent_task_draws_no_base_row` below.
+    /// This task has no dependency and no `starts_from:` of its own, so it
+    /// starts from its `base:` — a dependent starts from its dependency, see
+    /// `a_dependent_task_starts_from_its_dependency` below.
     #[test]
     fn every_row_in_a_wide_pane_starts_its_value_at_the_same_column() {
         let (repo, _root_guard) = fixture("screen-labelled-rows");
@@ -11330,7 +11925,8 @@ mod tests {
                 "  tracking-open".to_string(),
                 "    Pipeline:    default".to_string(),
                 "    Depends on:  -".to_string(),
-                "    Base:        task/gh-412-checkout".to_string(),
+                "    Starts from: task/gh-412-checkout".to_string(),
+                "    Lands in:    task/gh-412-checkout".to_string(),
                 "    Gate:        review".to_string(),
                 "    Description: tracking-open, done".to_string(),
             ],
@@ -11338,13 +11934,11 @@ mod tests {
         );
     }
 
-    /// A dependent is cut from its first dependency's branch, not from its
-    /// own `base:` — that field only names where the whole chain lands — so
-    /// a `Base:` row on it would read as "cut from here" and mislead. It
-    /// draws none, whatever its own `base:` says, even one that disagrees
-    /// with its dependency's.
+    /// A dependent starts from its first dependency, named by id since a
+    /// pending dependency has no branch yet, and lands in its own `base:` —
+    /// two rows, so the base never reads as where the task starts.
     #[test]
-    fn a_dependent_task_draws_no_base_row() {
+    fn a_dependent_task_starts_from_its_dependency() {
         let (repo, _root_guard) = fixture("screen-dependent-no-base");
         write_pending(
             &repo,
@@ -11368,15 +11962,46 @@ mod tests {
                 "  cart-discounts".to_string(),
                 "    Pipeline:    default".to_string(),
                 "    Depends on:  cart-totals".to_string(),
+                "    Starts from: cart-totals".to_string(),
+                "    Lands in:    plan/other".to_string(),
                 "    Description: cart-discounts, done".to_string(),
             ],
             "{lines:?}"
         );
     }
 
-    /// A task naming no `base:` shows the branch the board's checkout has
+    /// A task's own `starts_from:` is where it starts, ahead of its
+    /// dependency — the field a person sets when the dependency's branch is
+    /// gone.
+    #[test]
+    fn a_tasks_own_starts_from_wins_over_its_dependency() {
+        let (repo, _root_guard) = fixture("screen-own-starts-from");
+        write_pending(
+            &repo,
+            "cart-discounts",
+            &task_text(
+                "cart-discounts",
+                "group: one\npipeline: default\ndepends_on: [cart-totals]\n\
+                 starts_from: main\nbase: plan/other\n",
+                BODY,
+            ),
+        );
+        let groups = listed(&repo);
+        let pipelines = Pipelines::builtin();
+        let state = ScreenState::new();
+
+        let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
+        assert!(
+            lines.contains(&"    Starts from: main".to_string())
+                && lines.contains(&"    Lands in:    plan/other".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    /// A task naming no `base:` lands in the branch the board's checkout has
     /// out, since that is the branch `enter` would send it on — and a
-    /// blank `base:` reads the same as an absent one, as it does there.
+    /// blank `base:` reads the same as an absent one, as it does there. With
+    /// no dependency either, it starts from that branch too.
     #[test]
     fn a_task_with_no_base_shows_the_boards_branch() {
         let (repo, _root_guard) = fixture("screen-base-fallback");
@@ -11396,13 +12021,20 @@ mod tests {
         state.board_branch = Some("feat/checkout".to_string());
 
         let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
-        let base_rows: Vec<_> = lines
-            .iter()
-            .filter(|line| line.trim_start().starts_with("Base:"))
-            .collect();
+        let rows = |label: &str| -> Vec<&String> {
+            lines
+                .iter()
+                .filter(|line| line.trim_start().starts_with(label))
+                .collect()
+        };
         assert_eq!(
-            base_rows,
-            vec!["    Base:        feat/checkout"; 2],
+            rows("Lands in:"),
+            vec!["    Lands in:    feat/checkout"; 2],
+            "{lines:?}"
+        );
+        assert_eq!(
+            rows("Starts from:"),
+            vec!["    Starts from: feat/checkout"; 2],
             "{lines:?}"
         );
     }
@@ -11432,7 +12064,9 @@ mod tests {
                 "      default".to_string(),
                 "    Depends on:".to_string(),
                 "      -".to_string(),
-                "    Base:".to_string(),
+                "    Starts from:".to_string(),
+                "      -".to_string(),
+                "    Lands in:".to_string(),
                 "      -".to_string(),
                 "    Description:".to_string(),
                 "      wire, done".to_string(),
@@ -13108,6 +13742,7 @@ mod tests {
         let Mode::Queued { panel, .. } = queued_panel(
             &ids,
             &[],
+            &[],
             Some("Start the dispatcher to begin working"),
             None,
         ) else {
@@ -13132,6 +13767,85 @@ mod tests {
         );
     }
 
+    /// The tasks a batch left out, under their own heading below the ones
+    /// it queued: a dependent annotated with what it waits on, the
+    /// annotations in one column, then one sentence for the task whose own
+    /// start branch is missing, wrapped to the popup's width.
+    #[test]
+    fn the_queued_popup_lists_what_it_left_out_and_says_what_to_set() {
+        let ids: Vec<String> = ["eval-totals-toggle", "eval-totals-total-line"]
+            .map(str::to_string)
+            .to_vec();
+        let not_queued = [
+            NotQueued {
+                id: "archive-index-file".to_string(),
+                why: NotQueuedWhy::MissingStart("task/queue-tab-reader-thread".to_string()),
+            },
+            NotQueued {
+                id: "archive-index-readers".to_string(),
+                why: NotQueuedWhy::DependsOn("archive-index-file".to_string()),
+            },
+            NotQueued {
+                id: "retention-and-logs".to_string(),
+                why: NotQueuedWhy::DependsOn("archive-index-readers".to_string()),
+            },
+        ];
+        let Mode::Queued { panel, .. } =
+            queued_panel(&ids, &[], &not_queued, Some("Dispatcher is running"), None)
+        else {
+            panic!("a landed batch is Mode::Queued");
+        };
+        assert!(panel[0].starts_with("┌─ queued "), "{panel:#?}");
+        let body: Vec<&str> = panel[1..panel.len() - 1]
+            .iter()
+            .map(|row| {
+                row.trim_start_matches("│  ")
+                    .trim_end_matches('│')
+                    .trim_end()
+            })
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "",
+                "queued 2 tasks",
+                "  eval-totals-toggle",
+                "  eval-totals-total-line",
+                "",
+                "not queued, start branch doesn't exist",
+                "  archive-index-file",
+                "  archive-index-readers   (depends on archive-index-file)",
+                "  retention-and-logs      (depends on archive-index-readers)",
+                "",
+                "archive-index-file starts from task/queue-tab-reader-thread, which",
+                "doesn't exist. Set starts_from: in the task front matter and",
+                "requeue.",
+                "",
+                "Dispatcher is running",
+                "",
+                "[enter] confirm",
+            ],
+            "{panel:#?}"
+        );
+    }
+
+    /// A batch that left every task out queued nothing, and its popup says
+    /// only that, under its own title.
+    #[test]
+    fn a_batch_that_queued_nothing_draws_only_what_it_left_out() {
+        let not_queued = [NotQueued {
+            id: "wire".to_string(),
+            why: NotQueuedWhy::MissingStart("task/gone".to_string()),
+        }];
+        let Mode::Queued { panel, .. } = queued_panel(&[], &[], &not_queued, None, None) else {
+            panic!("a batch that left everything out is still Mode::Queued");
+        };
+        let all = panel.join("\n");
+        assert!(panel[0].starts_with("┌─ not queued "), "{all}");
+        assert!(!all.contains("queued 0"), "{all}");
+        assert!(all.contains("wire starts from task/gone"), "{all}");
+    }
+
     /// The `issues created` form carries the same line, under the count
     /// rather than a task list.
     #[test]
@@ -13139,7 +13853,7 @@ mod tests {
         let ids = vec!["wire".to_string()];
         let tickets = vec!["ticket   created   #7   wire".to_string()];
         let Mode::Queued { panel, .. } =
-            queued_panel(&ids, &tickets, Some("Dispatcher is running"), None)
+            queued_panel(&ids, &tickets, &[], Some("Dispatcher is running"), None)
         else {
             panic!("a landed batch is Mode::Queued");
         };
@@ -13195,9 +13909,13 @@ mod tests {
         let (repo, _root_guard) = fixture("queued-popup-lock-unreadable");
         std::fs::create_dir_all(repo.lock_file()).unwrap();
         assert_eq!(dispatcher_line(&repo), None);
-        let Mode::Queued { panel, .. } =
-            queued_panel(&["wire".to_string()], &[], dispatcher_line(&repo), None)
-        else {
+        let Mode::Queued { panel, .. } = queued_panel(
+            &["wire".to_string()],
+            &[],
+            &[],
+            dispatcher_line(&repo),
+            None,
+        ) else {
             panic!("a landed batch is Mode::Queued");
         };
         let flat = panel.join("\n");

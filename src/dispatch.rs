@@ -5169,11 +5169,12 @@ pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 /// The branch an uncut `task` is cut from: its own `starts_from:`, else its
 /// first dependency's branch, else `base`.
 ///
-/// One answer for the cut in [`ensure_workspace`] and for the pause in
-/// [`Dispatcher::missing_start_branch`], so the pause never checks a different
-/// branch than the cut then uses. A dependency that cannot be resolved fails
+/// One answer for the cut in [`ensure_workspace`], for the pause in
+/// [`Dispatcher::missing_start_branch`] and for queueing's own check in
+/// `commands::queue::missing_start_branch`, so none of them checks a
+/// different branch than the cut then uses. A dependency that cannot be resolved fails
 /// by name — see [`Repo::dependency_branch`].
-fn start_branch(repo: &Repo, task: &Task, base: &str) -> Result<String> {
+pub(crate) fn start_branch(repo: &Repo, task: &Task, base: &str) -> Result<String> {
     match (&task.front.starts_from, task.front.depends_on.first()) {
         (Some(own), _) => Ok(own.clone()),
         (None, Some(dep)) => repo.dependency_branch(dep),
@@ -5191,7 +5192,11 @@ fn start_branch(repo: &Repo, task: &Task, base: &str) -> Result<String> {
 /// not as "missing". `remote_cache` keeps what `origin` said, a failed ask
 /// included, for the rest of the caller's pass, so a chain's tasks sharing one
 /// branch cost one `git ls-remote` even when the remote does not answer.
-fn branch_known(repo: &Repo, branch: &str, remote_cache: &mut RemoteCache) -> Option<bool> {
+pub(crate) fn branch_known(
+    repo: &Repo,
+    branch: &str,
+    remote_cache: &mut RemoteCache,
+) -> Option<bool> {
     for prefix in ["refs/heads", "refs/remotes/origin"] {
         if repo
             .git(&[

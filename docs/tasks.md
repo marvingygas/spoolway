@@ -178,7 +178,9 @@ a file of its own.
 ### Add it
 
 `spoolway queue add --from` is the only way into the queue. The queue screen uses it too. All
-tasks in one call are checked together and written all or none.
+tasks in one call are checked together and written all or none. The queue screen leaves out a
+task whose start branch does not exist and queues the rest. See [A start branch that does not
+exist](#a-start-branch-that-does-not-exist).
 
 ```
 spoolway queue add --from task.md               # one file
@@ -308,6 +310,18 @@ This applies to a task that sets `starts_from:` or names a `depends_on`. The sta
 own `starts_from:`, else its first dependency's branch once that dependency is `done`. A branch
 counts as existing when it is a local branch, a remote-tracking branch or a branch on `origin`.
 When `origin` cannot be reached, the task is not paused.
+
+Queueing checks the same branch. `spoolway queue add` refuses the whole batch when a task's start
+branch exists neither locally nor on `origin`. It prints, for each such task:
+
+```
+cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+```
+
+The queue screen queues the rest of the selection. It leaves the task and every selected task that
+depends on it in the pending directory, and lists them in its popup. Once `starts_from:` names a
+branch that exists, sending the task again queues it. A dependency that is not yet `done` has no
+branch to check, so a dependent of it is queued.
 
 To carry on, add `starts_from:` to the task file's front matter, naming a branch that exists.
 Then resume the task:

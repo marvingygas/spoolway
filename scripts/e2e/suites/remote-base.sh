@@ -14,11 +14,13 @@
 # a branch made directly in it, never fetched by this project's own checkout,
 # is exactly a base only `origin` has.
 #
-# The last case is the opposite: a start branch that exists nowhere. A
+# The last two cases are the opposite: a start branch that exists nowhere. A
 # dependency's pull request merges, GitHub deletes its branch, and the
 # dependent — queued while the branch was still there — has nothing to be cut
 # from. It pauses with one line saying so, and starts from `main` once the
-# person writes `starts_from: main` into its front matter and resumes it.
+# person writes `starts_from: main` into its front matter and resumes it. A
+# dependent queued after the branch is gone is refused by `queue add` instead,
+# with the same advice, and queues once `starts_from: main` is written.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -81,9 +83,13 @@ says "the task file records the remote-only branch as starts_from" \
 
 works "no local branch was made for the remote-only base by the cut" no_local_copy
 
-# A finished dependency whose branch is gone from here and from `origin`: its
-# task file is archived and still names `task/gh-413-merged`, which nothing
-# has. The dispatcher would have failed the cut three times over it.
+# A finished dependency whose pull request is still open: its task file is
+# archived and names `task/gh-413-merged`, which `origin` still has. The
+# dispatcher is stopped first, so nothing cuts the dependent's worktree
+# between queueing it and the branch going.
+dispatcher_stop
+must "the dependency's branch, on origin while its pull request is open" \
+  git -C "$FORGE/origin.git" branch task/gh-413-merged main
 mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
 cat > "$SPOOLWAY_PROJECT_HOME/archive/merged.md" <<'DOC'
 ---
@@ -101,6 +107,12 @@ task_doc "$LIVE/late.md" late "$BODY" "group: late" "depends_on: [merged]" \
 must "a dependent of a finished task queues" \
   "$SPOOLWAY" queue add --from "$LIVE/late.md"
 
+# The pull request merges and GitHub deletes the branch, before the
+# dependent starts. The dispatcher would have failed the cut three times
+# over it.
+must "the dependency's branch is deleted on origin" \
+  git -C "$FORGE/origin.git" branch -D task/gh-413-merged
+
 if drive late paused 60; then
   ok "a queued task whose start branch was deleted pauses instead of failing to start"
 else
@@ -109,6 +121,9 @@ fi
 says "and the task file names the branch that is missing" \
   "missing_start_branch: task/gh-413-merged" cat "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 works "and no worktree was cut for it" test -z "$(worktree_of late)"
+# The pause is saved before the dispatcher prints its line, so the stage can
+# read `paused` a moment before the log has the sentence. Wait for it.
+poll_until 10 grep -qF 'task/gh-413-merged`, which doesn'"'"'t exist' "$E2E_DISPATCH_LOG"
 says "and the dispatch log says what to set" \
   'it starts from `task/gh-413-merged`, which doesn'"'"'t exist. Set `starts_from:` in the task front matter and resume.' \
   cat "$E2E_DISPATCH_LOG"
@@ -123,5 +138,42 @@ says "the task file records \`main\` as starts_from" \
   "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 lacks "and no longer carries the missing branch" \
   "missing_start_branch" "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+
+# A dependent sent after the branch is gone: `shipped` finished, its pull
+# request merged, and its branch `task/gh-414-shipped` was deleted on
+# `origin` — this checkout never had a copy. `queue add` refuses `after` with
+# one sentence, and nothing is queued. The dispatcher is stopped so the
+# accepted task below is not carried off before the suite ends.
+dispatcher_stop
+must "the finished dependency's branch, on origin while its pull request is open" \
+  git -C "$FORGE/origin.git" branch task/gh-414-shipped main
+must "its pull request merges, and the branch is deleted on origin" \
+  git -C "$FORGE/origin.git" branch -D task/gh-414-shipped
+works "this checkout has no copy of it either" \
+  test -z "$(git branch --list task/gh-414-shipped)"
+cat > "$SPOOLWAY_PROJECT_HOME/archive/shipped.md" <<'DOC'
+---
+id: shipped
+title: shipped, its branch deleted
+stage: done
+group: shipped
+base: plan/live
+branch: task/gh-414-shipped
+---
+DOC
+task_doc "$LIVE/after.md" after "$BODY" "group: after" "depends_on: [shipped]" \
+  "base: plan/live"
+refuses "queue add refuses a dependent whose start branch was deleted" \
+  "after starts from task/gh-414-shipped, which doesn't exist. Set starts_from: in the task front matter and requeue." \
+  "$SPOOLWAY" queue add --from "$LIVE/after.md"
+works "and queues nothing" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/after.md"
+
+# The person's fix: name a branch that exists, then queue it again.
+task_doc "$LIVE/after.md" after "$BODY" "group: after" "depends_on: [shipped]" \
+  "base: plan/live" "starts_from: main"
+says "and queues it once starts_from: main is written" "queued after" \
+  "$SPOOLWAY" queue add --from "$LIVE/after.md"
+says "the queued task starts from main" \
+  "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/after.md"
 
 finish

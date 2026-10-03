@@ -75,9 +75,12 @@ pub(crate) struct PendingTask {
     /// reads as unassigned rather than refusing to draw.
     pub(crate) pipeline: Option<String>,
     /// This task's own `base:` key, read the same way — what
-    /// [`super::queue::tasks_pane_lines`]'s `Base:` row draws for a root
-    /// task (one with no dependency of its own).
+    /// [`super::queue::tasks_pane_lines`]'s `Lands in:` row draws.
     pub(crate) base: Option<String>,
+    /// This task's own `starts_from:` key, read the same way — what
+    /// [`super::queue::tasks_pane_lines`]'s `Starts from:` row draws when
+    /// it is set. See [`front_starts_from`].
+    pub(crate) starts_from: Option<String>,
 }
 
 /// A group's own stage, folded from every task it holds — see
@@ -197,6 +200,14 @@ fn created_time(path: &Path) -> Option<std::time::SystemTime> {
 pub(crate) fn front_str(yaml: &serde_norway::Value, key: &str) -> Option<String> {
     let text = yaml.as_mapping()?.get(key)?.as_str()?.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// A task's `starts_from:`, or the `cut_from:` a task file written before
+/// the field was renamed holds instead — the same alias
+/// [`crate::task::Frontmatter::starts_from`] reads, so a queued or archived
+/// task stamped under the old name still shows where it started.
+fn front_starts_from(yaml: &serde_norway::Value) -> Option<String> {
+    front_str(yaml, "starts_from").or_else(|| front_str(yaml, "cut_from"))
 }
 
 /// Every `.md` file directly inside `dir`, filename order — the listing
@@ -374,6 +385,7 @@ pub(crate) fn list_groups_in(
             depends_on: front_depends_on(&front),
             pipeline: front_pipeline_name(&front),
             base: front_str(&front, "base"),
+            starts_from: front_starts_from(&front),
             path,
             id,
             doc,
@@ -436,6 +448,7 @@ pub(crate) fn list_groups_in(
             depends_on: front_depends_on(&front),
             pipeline: front_pipeline_name(&front),
             base: front_str(&front, "base"),
+            starts_from: front_starts_from(&front),
             path,
             id,
             doc,
@@ -595,7 +608,8 @@ pub(crate) type ListFrontCache = HashMap<PathBuf, (String, Option<serde_norway::
 /// One task file's own front matter, parsed again only when its bytes have
 /// moved since the last call that read this same path — what
 /// [`list_groups_in`]'s pending and queue loops read a task's `group:`,
-/// `id:`, `title:`, `depends_on:`, `pipeline:` and `base:` off, and what
+/// `id:`, `title:`, `depends_on:`, `pipeline:`, `base:` and
+/// `starts_from:` off, and what
 /// [`archive_tasks`]'s own fresh read falls back to as well.
 ///
 /// [`list_front`] is the process-wide wrapper around this, for callers —
@@ -781,6 +795,7 @@ fn archive_tasks(dir: &Path) -> Result<Vec<(String, PendingTask)>> {
                     depends_on: front_depends_on(&front),
                     pipeline: front_pipeline_name(&front),
                     base: front_str(&front, "base"),
+                    starts_from: front_starts_from(&front),
                     path,
                     id,
                     doc,

@@ -126,7 +126,10 @@ With no subcommand, prints its usage and exits, the same as `spoolway queue --he
 
 Bare `spoolway`'s queue tab draws the queue screen. The left pane lists one row per `group:`
 that still has a task to queue or has every task archived. A group with every task already
-queued never appears. The right pane lists the highlighted group's tasks.
+queued never appears. The right pane lists the highlighted group's tasks. Each task shows its `Pipeline:`, `Depends on:`,
+`Starts from:` and `Lands in:`. `Starts from:` is the task's own `starts_from:`, else its first
+dependency's id, else the same branch as `Lands in:`. `Lands in:` is the task's `base:`, else the
+board's branch.
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
@@ -135,8 +138,8 @@ queued never appears. The right pane lists the highlighted group's tasks.
 | `↑` `↓` / `j` `k` | Move the cursor |
 | `tab` | Switch focus between the groups and tasks panes |
 | `esc` | With the tasks pane focused, return focus to the groups pane |
-| `space` | Select a group. A group is queued whole |
-| `enter` | Check the selection, queue it, and show what queued |
+| `space` | Select a group |
+| `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
 | `g` | With the tasks pane focused, set or clear a `gate_at` on the highlighted task |
 | `o` | With the tasks pane focused, open the highlighted task in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
@@ -145,11 +148,24 @@ queued never appears. The right pane lists the highlighted group's tasks.
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
-already in the queue or the archive is left where it is. A group that
-fails validation is refused and nothing is deleted. See [Queueing a
-plan](planning.md#queueing-a-plan). Queueing a group or a routine ends on a popup naming what
-queued. Below the list, a line says whether a dispatcher will pick the work up: `Dispatcher is
-running` or `Start the dispatcher to begin working`. `enter` closes it back to the screen.
+already in the queue or the archive is left where it is. A group that fails validation is
+refused and nothing is deleted. See [Queueing a plan](planning.md#queueing-a-plan).
+
+A task whose start branch does not exist is not queued. Neither is any task in the selection that
+depends on it. These tasks stay in the pending directory and the rest of the selection is queued.
+See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
+
+Queueing a group or a routine ends on a popup naming what queued. A task left out is listed under
+`not queued, start branch doesn't exist`. A task left out only for its dependency has
+`(depends on <id>)` beside it. Under the list, one sentence names each task whose own start branch
+is missing:
+
+```
+cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+```
+
+Below the list, a line says whether a dispatcher will pick the work up: `Dispatcher is running`
+or `Start the dispatcher to begin working`. `enter` closes the popup back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements. A requirement this machine does not meet draws a gate naming what is unmet:
@@ -186,6 +202,15 @@ A task that sets neither its own `base:` nor `--base` is refused by name and not
 written. A `base:` that exists only on `origin` is accepted; the worktree is cut from
 `origin/<base>` later, with no local branch made for it. A base on neither is refused, naming
 both places.
+
+A task whose start branch exists neither locally nor on `origin` refuses the whole batch. The
+command prints one line for each such task and then `Nothing was queued.`:
+
+```
+cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+```
+
+See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
 
 With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row to fill in.
 
