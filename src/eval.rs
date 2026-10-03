@@ -16,9 +16,12 @@
 //! figure columns stay put, so two groupings can be read against each other
 //! without relearning where anything is. Those figure columns come in two
 //! views, every row's totals or each total over the row's runs — see
-//! [`Figures`] — and the exports carry both. A `Total` line closes each table
-//! with only what adds up across its rows — a per-run average or a peak
-//! summed over rows would be a number nobody could use.
+//! [`Figures`] — and the exports carry both. A last line closes each table
+//! with only what adds up across its rows, built from the ledger rather than
+//! from the drawn cells: `Total`, the sums, in the totals view, and
+//! `Average`, those sums over its runs or sessions, in the per-run view. A share
+//! or a peak summed over rows would be a number nobody could use, so those
+//! cells stay blank. The screen pins that line under its scrolled rows.
 //!
 //! The honest limit is worth stating where the code is, not only in the help.
 //! Tasks differ in difficulty, so a pipeline that happens to have drawn easy
@@ -958,13 +961,17 @@ fn ordered_steps(entries: &[&Entry], pipeline: &str, pipelines: Option<&Pipeline
 /// The only figures that add up across the lanes table's rows. `RUNS` is
 /// distinct runs over the whole table, not a sum of the rows' — a run
 /// touches every step it ran, so summing `--by step` would count it once per
-/// step. `BLOCKS` and `USD` do sum: every lane sits on exactly one row.
+/// step. `BLOCKS`, the token classes, `USD` and `TIME` do sum: every ledger
+/// line sits on exactly one row. `TIME` is lane time added up, so lanes that
+/// ran side by side count once each — it is not the calendar time they took.
 struct LaneTotal {
     runs: usize,
     blocked: usize,
+    tokens: Tokens,
     cost: f64,
     lines: usize,
     unpriced: usize,
+    time_s: i64,
 }
 
 impl LaneTotal {
@@ -977,16 +984,36 @@ impl LaneTotal {
             .values()
             .filter(|v| v.as_deref() == Some("block"))
             .count();
+        let mut tokens = Tokens::default();
+        for entry in entries {
+            tokens.add(&entry.tokens);
+        }
         LaneTotal {
             runs: runs.len(),
             blocked,
+            tokens,
             cost: entries.iter().filter_map(|e| e.cost_usd).sum(),
             lines: entries.len(),
             unpriced: entries
                 .iter()
                 .filter(|e| e.cost_usd.is_none() && !e.tokens.is_zero())
                 .count(),
+            time_s: entries.iter().map(|e| e.wall_s).sum(),
         }
+    }
+
+    /// `value` over the table's distinct runs: the average run, the way
+    /// [`Metrics::per_run`] is a row's. `0.0` for an empty table, which no
+    /// screen or print ever draws a `Total` line for.
+    fn per_run(&self, value: f64) -> f64 {
+        match self.runs {
+            0 => 0.0,
+            n => value / n as f64,
+        }
+    }
+
+    fn tokens_per_run(&self, n: u64) -> u64 {
+        self.per_run(n as f64).round() as u64
     }
 }
 
@@ -1067,10 +1094,22 @@ fn spans_more_than_one_project(rows: &[LaneRow]) -> bool {
         > 1
 }
 
+/// What the lanes and directory tables call their last line: `Total` over
+/// the totals view, whose figures are sums, and `Average` over the per-run
+/// view, whose figures are those sums over the table's runs or sessions.
+/// Named apart so a reader never takes an average run for the whole bill.
+fn total_line_label(figures: Figures) -> &'static str {
+    match figures {
+        Figures::Totals => "Total",
+        Figures::PerRun => "Average",
+    }
+}
+
 /// The lanes table over `rows`, in the order they are given, drawing the
 /// figures of `figures`. `sort` only marks its column's header; the rows are
-/// already sorted by then. The `Total` line carries the same three figures
-/// in either view.
+/// already sorted by then. The last line is the table's `Total` in the
+/// totals view and its average run in the per-run view — see
+/// [`total_line_label`].
 fn lanes_table(
     by: EvalBy,
     rows: &[LaneRow],
@@ -1091,7 +1130,7 @@ fn lanes_table(
         }
     }
     let mut total_cells = vec![String::new(); headers.len()];
-    total_cells[0] = "Total".to_string();
+    total_cells[0] = total_line_label(figures).to_string();
 
     let widths: Vec<usize> = (0..headers.len())
         .map(|i| {
@@ -1164,13 +1203,41 @@ fn lanes_table(
             format!("{}{figures}", naming(cells, &widths))
         })
         .collect();
-    let (runs, blocks) = (total.runs.to_string(), total.blocked.to_string());
-    let usd = cost_of(total.cost, total.lines, total.unpriced);
+    // `PASS` and both `CTX PEAK` cells stay blank in either view: a share
+    // or a peak summed over rows, or averaged over rows of different
+    // sizes, is not a figure of the whole table.
+    let runs = total.runs.to_string();
+    let t = &total.tokens;
     let total_figures = match figures {
-        Figures::Totals => {
-            lane_total_figures([&runs, "", &blocks, "", "", "", "", "", "", &usd, ""])
-        }
-        Figures::PerRun => lane_figures([&runs, "", &blocks, "", "", "", "", "", "", &usd, "", ""]),
+        Figures::Totals => lane_total_figures([
+            &runs,
+            "",
+            &total.blocked.to_string(),
+            "",
+            "",
+            &tokens_cell(t.input),
+            &tokens_cell(t.output),
+            &tokens_cell(t.cache_read),
+            &tokens_cell(t.cache_write()),
+            &cost_of(total.cost, total.lines, total.unpriced),
+            &crate::status::human_secs(total.time_s),
+        ]),
+        // `USD` is left blank here: a total has no place on a line of
+        // averages, and `USD/RUN` beside it carries the average.
+        Figures::PerRun => lane_figures([
+            &runs,
+            "",
+            &format!("{:.2}", total.per_run(total.blocked as f64)),
+            "",
+            "",
+            &tokens_cell(total.tokens_per_run(t.input)),
+            &tokens_cell(total.tokens_per_run(t.output)),
+            &tokens_cell(total.tokens_per_run(t.cache_read)),
+            &tokens_cell(total.tokens_per_run(t.cache_write())),
+            "",
+            &cost_of(total.per_run(total.cost), total.lines, total.unpriced),
+            &crate::status::human_secs(total.per_run(total.time_s as f64).round() as i64),
+        ]),
     };
     let total = format!("{}{total_figures}", naming(&total_cells, &widths))
         .trim_end()
@@ -1283,18 +1350,31 @@ fn lanes_csv_row(by: EvalBy, row: &LaneRow) -> String {
 
 /// The `Total` line as an export writes it: `total` where every row names
 /// its `by`, so a filter on that column can never read it as one more row,
-/// and blank in every column that does not add up — the same three figures
-/// the screen's own `Total` line carries, and nothing else.
+/// and blank in every column that does not add up. It carries what the
+/// screen's `Total` line carries in either view: the sums, and each per-run
+/// column as its sum over the table's distinct runs.
 fn lanes_csv_total(by: EvalBy, total: &LaneTotal) -> String {
     let header = lanes_csv_header(by);
     let names: Vec<&str> = header.split(',').collect();
+    let t = &total.tokens;
     names
         .iter()
         .map(|name| match *name {
             "by" => "total".to_string(),
             "runs" => total.runs.to_string(),
             "blocks" => total.blocked.to_string(),
+            "in_tokens" => t.input.to_string(),
+            "out_tokens" => t.output.to_string(),
+            "cache_read_tokens" => t.cache_read.to_string(),
+            "cache_write_tokens" => t.cache_write().to_string(),
+            "in_per_run" => total.tokens_per_run(t.input).to_string(),
+            "out_per_run" => total.tokens_per_run(t.output).to_string(),
+            "cache_read_per_run" => total.tokens_per_run(t.cache_read).to_string(),
+            "cache_write_per_run" => total.tokens_per_run(t.cache_write()).to_string(),
             "cost_usd" => csv_cost(total.cost, total.lines, total.unpriced),
+            "cost_per_run" => csv_cost(total.per_run(total.cost), total.lines, total.unpriced),
+            "time_s" => total.time_s.max(0).to_string(),
+            "time_per_run_s" => (total.per_run(total.time_s as f64).round() as i64).to_string(),
             _ => String::new(),
         })
         .collect::<Vec<_>>()
@@ -1350,13 +1430,25 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
             serde_json::Value::Object(obj)
         })
         .collect();
+    let total_priced = total.lines > total.unpriced;
     serde_json::json!({
         "by": by.label(),
         "rows": rows,
         "total": {
             "runs": total.runs,
             "blocks": total.blocked,
-            "cost_usd": (total.lines > total.unpriced).then_some(total.cost),
+            "in_tokens": total.tokens.input,
+            "out_tokens": total.tokens.output,
+            "cache_read_tokens": total.tokens.cache_read,
+            "cache_write_tokens": total.tokens.cache_write(),
+            "in_per_run": total.tokens_per_run(total.tokens.input),
+            "out_per_run": total.tokens_per_run(total.tokens.output),
+            "cache_read_per_run": total.tokens_per_run(total.tokens.cache_read),
+            "cache_write_per_run": total.tokens_per_run(total.tokens.cache_write()),
+            "cost_usd": total_priced.then_some(total.cost),
+            "cost_per_run": total_priced.then_some(total.per_run(total.cost)),
+            "time_s": total.time_s,
+            "time_per_run_s": total.per_run(total.time_s as f64),
         },
     })
 }
@@ -1852,6 +1944,31 @@ impl DirRow {
     }
 }
 
+/// The `by dir` table's rows added into one, for its `Total` line and its
+/// export's: every figure here adds up across directories, because a
+/// session ran in exactly one of them. `TIME` is the sessions' own time
+/// added up, not the calendar time they spanned. The peaks are left empty —
+/// neither adds up.
+fn dirs_total(rows: &[DirRow]) -> DirRow {
+    let mut tokens = Tokens::default();
+    for row in rows {
+        tokens.add(&row.tokens);
+    }
+    DirRow {
+        dir: String::new(),
+        sessions: rows.iter().map(|r| r.sessions).sum(),
+        tokens,
+        cost: rows.iter().map(|r| r.cost).sum(),
+        lines: rows.iter().map(|r| r.lines).sum(),
+        unpriced: rows.iter().map(|r| r.unpriced).sum(),
+        ctx_peak_tokens: None,
+        ctx_peak_pct: None,
+        ctx_avg: CtxAvg::default(),
+        time_s: rows.iter().map(|r| r.time_s).sum(),
+        latest: None,
+    }
+}
+
 /// Every directory `entries` ran in, plus every one of `roots` that none of
 /// them did — so a watched root reads as a row of zero sessions rather than
 /// being missing, which would look the same as not being watched at all.
@@ -2070,7 +2187,7 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
     let dw = rows
         .iter()
         .map(|r| r.dir.chars().count())
-        .chain(["DIR".len(), "Total".len()])
+        .chain(["DIR".len(), "Average".len()])
         .max()
         .unwrap_or(3);
     let header = match figures {
@@ -2151,18 +2268,55 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
             format!("{:<dw$}{figures}", row.dir)
         })
         .collect();
-    // Sessions and USD are the two figures that add up across directories:
-    // a session ran in exactly one of them.
-    let sessions: usize = rows.iter().map(|r| r.sessions).sum();
-    let cost: f64 = rows.iter().map(|r| r.cost).sum();
-    let line_count: usize = rows.iter().map(|r| r.lines).sum();
-    let unpriced: usize = rows.iter().map(|r| r.unpriced).sum();
-    let (sessions, usd) = (sessions.to_string(), cost_of(cost, line_count, unpriced));
+    // Both `CTX PEAK` cells stay blank, as on the lanes table's own line;
+    // a table whose watched roots have run no session yet draws `—` for its
+    // token and time figures, the same as each of those rows does.
+    let total = dirs_total(rows);
+    let ran = total.sessions > 0;
+    let t = &total.tokens;
+    let sessions = total.sessions.to_string();
     let total_figures = match figures {
-        Figures::Totals => dir_total_figures([&sessions, "", "", "", "", &usd, "", "", ""]),
-        Figures::PerRun => dir_figures([&sessions, "", "", "", "", &usd, "", "", "", ""]),
+        Figures::Totals => {
+            let tok = |n: u64| if ran { tokens_cell(n) } else { dash() };
+            dir_total_figures([
+                &sessions,
+                &tok(t.input),
+                &tok(t.output),
+                &tok(t.cache_read),
+                &tok(t.cache_write()),
+                &cost_of(total.cost, total.lines, total.unpriced),
+                "",
+                "",
+                &if ran {
+                    crate::status::human_secs(total.time_s)
+                } else {
+                    dash()
+                },
+            ])
+        }
+        // `USD` is blank on the average session, for the reason the lanes
+        // table's average run leaves it blank — see `lanes_table`.
+        Figures::PerRun => {
+            let tok = |n: u64| total.tokens_per_session(n).map_or_else(dash, tokens_cell);
+            dir_figures([
+                &sessions,
+                &tok(t.input),
+                &tok(t.output),
+                &tok(t.cache_read),
+                &tok(t.cache_write()),
+                "",
+                &total
+                    .per_session(total.cost)
+                    .map_or_else(dash, |c| cost_of(c, total.lines, total.unpriced)),
+                "",
+                "",
+                &total
+                    .per_session(total.time_s as f64)
+                    .map_or_else(dash, |t| crate::status::human_secs(t.round() as i64)),
+            ])
+        }
     };
-    let total = format!("{:<dw$}{total_figures}", "Total")
+    let total = format!("{:<dw$}{total_figures}", total_line_label(figures))
         .trim_end()
         .to_string();
     Table {
@@ -2385,8 +2539,9 @@ fn csv_session_row(row: &SessionRow) -> String {
 
 /// A directory export's `Total` line: `total` in the `by` column, as the
 /// lanes export marks its own, and only the figures the screen's `Total`
-/// line carries — the session count and USD under `by dir`; every token
-/// class, USD and time under `by session`.
+/// line carries in either view — under `by dir` the sums and each
+/// per-session column as its sum over the table's sessions; under
+/// `by session` every token class, USD and time.
 fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String {
     let header = match by {
         DirBy::Dir => DIRS_CSV_HEADER,
@@ -2396,24 +2551,37 @@ fn csv_dirs_total(by: DirBy, dirs: &[DirRow], sessions: &[SessionRow]) -> String
     for row in sessions {
         tokens.add(&row.tokens);
     }
+    let dir = dirs_total(dirs);
     let (cost, lines, unpriced) = match by {
-        DirBy::Dir => (
-            dirs.iter().map(|r| r.cost).sum::<f64>(),
-            dirs.iter().map(|r| r.lines).sum::<usize>(),
-            dirs.iter().map(|r| r.unpriced).sum::<usize>(),
-        ),
+        DirBy::Dir => (dir.cost, dir.lines, dir.unpriced),
         DirBy::Session => (
             sessions.iter().map(|r| r.cost).sum::<f64>(),
             sessions.iter().map(|r| r.lines).sum::<usize>(),
             sessions.iter().map(|r| r.unpriced).sum::<usize>(),
         ),
     };
+    let per = |n: u64| opt_u64(dir.tokens_per_session(n));
     header
         .split(',')
         .map(|name| match (by, name) {
             (_, "by") => "total".to_string(),
             (_, "cost_usd") => csv_cost(cost, lines, unpriced),
-            (DirBy::Dir, "sessions") => dirs.iter().map(|r| r.sessions).sum::<usize>().to_string(),
+            (DirBy::Dir, "sessions") => dir.sessions.to_string(),
+            (DirBy::Dir, "in_tokens") => dir.tokens.input.to_string(),
+            (DirBy::Dir, "out_tokens") => dir.tokens.output.to_string(),
+            (DirBy::Dir, "cache_read_tokens") => dir.tokens.cache_read.to_string(),
+            (DirBy::Dir, "cache_write_tokens") => dir.tokens.cache_write().to_string(),
+            (DirBy::Dir, "in_per_session") => per(dir.tokens.input),
+            (DirBy::Dir, "out_per_session") => per(dir.tokens.output),
+            (DirBy::Dir, "cache_read_per_session") => per(dir.tokens.cache_read),
+            (DirBy::Dir, "cache_write_per_session") => per(dir.tokens.cache_write()),
+            (DirBy::Dir, "cost_per_session") => dir
+                .per_session(dir.cost)
+                .map_or(String::new(), |c| csv_cost(c, dir.lines, dir.unpriced)),
+            (DirBy::Dir, "time_s") => dir.time_s.max(0).to_string(),
+            (DirBy::Dir, "time_per_session_s") => dir
+                .per_session(dir.time_s as f64)
+                .map_or(String::new(), |t| (t.round() as i64).to_string()),
             (DirBy::Session, "in_tokens") => tokens.input.to_string(),
             (DirBy::Session, "out_tokens") => tokens.output.to_string(),
             (DirBy::Session, "cache_read_tokens") => tokens.cache_read.to_string(),
@@ -3213,6 +3381,11 @@ struct Row {
 /// over.
 enum Line {
     Text(String),
+    /// A table's `Total` line, always its last. Drawn as [`Line::Text`] is,
+    /// but kept out of the scroll: [`eval_frame_rows`] pins it under the
+    /// rows and the scroll indicator, so a long table's total is on screen
+    /// wherever the cursor has scrolled to.
+    Total(String),
     /// A table's header, drawn after `lead` in the column a row's marker
     /// takes — a space, or the sort mark of a sorted first column: see
     /// [`mark_column`].
@@ -3244,7 +3417,7 @@ fn render_lines(lines: &[Line], cursor: usize, width: usize) -> Vec<String> {
             // left. The mockup's own frame carries the marker flush against
             // the border, with nothing between it and the row's first
             // character — `>impl`, not `> impl`.
-            Line::Text(text) => out.push(pad_to(&format!(" {text}"), width)),
+            Line::Text(text) | Line::Total(text) => out.push(pad_to(&format!(" {text}"), width)),
             Line::Head(lead, text) => out.push(pad_to(&format!("{lead}{text}"), width)),
             Line::Row(row) => {
                 let idx = row_n.expect("a Line::Row always has a row number");
@@ -3256,8 +3429,8 @@ fn render_lines(lines: &[Line], cursor: usize, width: usize) -> Vec<String> {
     out
 }
 
-/// Which row number each of `lines` is, `None` for a [`Line::Text`] or a
-/// [`Line::Head`] — a
+/// Which row number each of `lines` is, `None` for a [`Line::Text`], a
+/// [`Line::Total`] or a [`Line::Head`] — a
 /// `Line::Row`'s position among only the other rows, skipping the text lines
 /// in between. What lets [`render_lines`] and [`cursor_line_index`] compare
 /// a line against the cursor without a hand-rolled counter of their own.
@@ -3266,7 +3439,7 @@ fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
     lines
         .iter()
         .map(|line| match line {
-            Line::Text(_) | Line::Head(..) => None,
+            Line::Text(_) | Line::Total(_) | Line::Head(..) => None,
             Line::Row(_) => {
                 let n = next;
                 next += 1;
@@ -3281,7 +3454,7 @@ fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
 fn table_lines(table: Table) -> Vec<Line> {
     let mut out = vec![Line::Head(table.lead, table.header)];
     out.extend(table.rows.into_iter().map(|text| Line::Row(Row { text })));
-    out.push(Line::Text(table.total));
+    out.push(Line::Total(table.total));
     out
 }
 
@@ -3587,15 +3760,15 @@ fn frame_chrome(notes: usize) -> usize {
     4 + notes
 }
 
-/// How many body rows the frame gets once `frame_chrome` is counted — and,
-/// inside bare `spoolway`'s eval tab, once the strip's own rows are too (see
-/// `crate::screen::shell::strip_rows`, zero everywhere else). `None` where
-/// there is no terminal to measure, which is what lets a piped run keep
-/// every row rather than losing the ones past some guessed height.
-fn frame_rows(notes: usize) -> Option<usize> {
-    terminal_size::terminal_size().map(|(_, h)| {
-        (h.0 as usize)
-            .saturating_sub(frame_chrome(notes) + crate::screen::shell::strip_rows())
+/// How many body rows a terminal `height` rows tall gives the frame once
+/// `frame_chrome` is counted — and, inside bare `spoolway`'s eval tab, once
+/// the strip's own rows are too (see `crate::screen::shell::strip_rows`,
+/// zero everywhere else). `None` where there is no terminal to measure,
+/// which is what lets a piped run keep every row rather than losing the ones
+/// past some guessed height.
+fn frame_rows(notes: usize, height: Option<usize>) -> Option<usize> {
+    height.map(|h| {
+        h.saturating_sub(frame_chrome(notes) + crate::screen::shell::strip_rows())
             .max(1)
     })
 }
@@ -3818,6 +3991,20 @@ fn eval_frame_rows(
     loaded: Option<&Loaded>,
     state: &ScreenState,
 ) -> Vec<String> {
+    let height = terminal_size::terminal_size().map(|(_, h)| h.0 as usize);
+    eval_frame_rows_at(pipelines, loaded, state, height)
+}
+
+/// [`eval_frame_rows`] on a terminal `height` rows tall — `None` for none at
+/// all. Split out because `terminal_size` reads `None` under the test
+/// harness, and a test of what scrolls needs a terminal shorter than its
+/// table.
+fn eval_frame_rows_at(
+    pipelines: &Pipelines,
+    loaded: Option<&Loaded>,
+    state: &ScreenState,
+    height: Option<usize>,
+) -> Vec<String> {
     // Bare `spoolway`'s tab strip, when it hosts this screen as its eval tab,
     // and nothing at all otherwise — see `crate::screen::shell::strip`.
     let mut rows_out: Vec<String> = crate::screen::shell::strip();
@@ -3841,7 +4028,7 @@ fn eval_frame_rows(
     let content = lines
         .iter()
         .map(|l| match l {
-            Line::Text(t) | Line::Head(_, t) => t.chars().count(),
+            Line::Text(t) | Line::Total(t) | Line::Head(_, t) => t.chars().count(),
             Line::Row(r) => r.text.chars().count(),
         })
         .max()
@@ -3849,10 +4036,35 @@ fn eval_frame_rows(
         + 1;
     let border = format!("─ eval · {title} ").chars().count() + right.chars().count() + 5;
     let width = frame_width(content.max(border));
-    let rows = frame_rows(notes.len());
-    let body = render_lines(&lines, state.cursor, width);
+    let rows = frame_rows(notes.len(), height);
+    let mut body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
-    let mut body = clip(&body, cursor_line, rows, width);
+    // The `Total` line comes off before `clip` and goes back after it, so a
+    // table taller than the frame scrolls its rows under a total that stays
+    // put — the last body line, under the scroll indicator. The column header
+    // is pinned the same way at the top, but only on a table that pins its
+    // total: the rows scroll between the two. Each pinned line takes one of
+    // `clip`'s rows; a table that fits loses nothing and keeps its total
+    // right under its last row. `clip` needs two rows to draw the cursor's
+    // row beside its indicator, so a line is pinned only while that many
+    // are left — the total from three body rows, the header from four. On a
+    // shorter frame they scroll with the rows, as they did before pinning,
+    // rather than squeezing the cursor's row out of view. With no height
+    // measured `clip` keeps every line, so both are pinned.
+    let room = rows.unwrap_or(usize::MAX);
+    let total = (room >= 3 && matches!(lines.last(), Some(Line::Total(_))))
+        .then(|| body.pop())
+        .flatten();
+    let head = (total.is_some() && room >= 4 && matches!(lines.first(), Some(Line::Head(..))))
+        .then(|| body.remove(0));
+    let pinned = usize::from(total.is_some()) + usize::from(head.is_some());
+    let scrolled = rows.map(|r| r - pinned);
+    let cursor_line = cursor_line.saturating_sub(usize::from(head.is_some()));
+    let mut body: Vec<String> = head
+        .into_iter()
+        .chain(clip(&body, cursor_line, scrolled, width))
+        .collect();
+    body.extend(total);
 
     // A notice or the filter panel sits over the table as an `overlay` —
     // computed here, before the frame, because its own height is now part
@@ -5396,9 +5608,11 @@ mod tests {
         let total = LaneTotal {
             runs: 0,
             blocked: 0,
+            tokens: Tokens::default(),
             cost: 0.0,
             lines: 0,
             unpriced: 0,
+            time_s: 0,
         };
         const FIGURES: &str = "RUNS  PASS  BLOCKS/RUN  CTX PEAK AVG  CTX PEAK  IN/RUN  OUT/RUN  \
                                CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN";
@@ -5469,15 +5683,19 @@ mod tests {
             "impl          2  100%        0.00           32%       52%     642   155.8k       \
              41.91M       799.4k     33.80    16.90    1h 12m"
         );
+        // The average run: `BLOCKS/RUN` to two places, each token class
+        // and `TIME` over the table's two runs, `USD` blank and `USD/RUN`
+        // carrying the average.
         assert_eq!(
             table.total,
-            "Total         2                 0                                                                        33.80"
+            "Average       2              0.00                             642   155.8k       \
+             41.91M       799.4k              16.90    1h 12m"
         );
     }
 
     /// The totals view draws the same row's sums under `IN` … `TIME`, with
     /// no `USD/RUN`, and its header is the one the screen opens on. The
-    /// `Total` line carries what it carries per run.
+    /// `Total` line carries every sum, each under its own column.
     #[test]
     fn a_row_draws_its_totals_under_the_totals_columns() {
         let mut entries = Vec::new();
@@ -5511,8 +5729,9 @@ mod tests {
              1.60M     33.80    2h 24m"
         );
         assert_eq!(
-            table.total.split_whitespace().collect::<Vec<_>>(),
-            ["Total", "2", "0", "33.80"]
+            table.total,
+            "Total         2             0                             1.3k   311.6k   83.82M    \
+             1.60M     33.80    2h 24m"
         );
     }
 
@@ -5583,24 +5802,48 @@ mod tests {
 
     /// `RUNS` on the `Total` line is distinct runs over the whole table: a
     /// run under `--by step` touches every step it ran, and summing the
-    /// rows would count it once per step. `BLOCKS` and `USD` do sum.
+    /// rows would count it once per step. `BLOCKS`, the tokens, `USD` and
+    /// `TIME` do sum, and the average run divides each sum by those two
+    /// distinct runs — not by the three rows.
     #[test]
-    fn the_total_line_carries_distinct_runs_blocks_and_usd_only() {
-        let entries = vec![
+    fn the_total_line_counts_distinct_runs_and_sums_the_rest() {
+        let mut entries = vec![
             lane("login", "implement", 1, Some("block")),
             lane("login", "review", 1, Some("pass")),
             lane("logout", "implement", 1, Some("pass")),
         ];
+        entries[0].tokens.output = 2_000;
+        entries[2].tokens.output = 1_000;
         let rows = rows_by(&entries, EvalBy::Step);
         assert_eq!(rows.iter().map(|r| r.metrics.runs).sum::<usize>(), 3);
         let total = total_of(&entries);
         assert_eq!(total.runs, 2, "two runs, however many steps they touched");
         assert_eq!(total.blocked, 1);
         assert_eq!(total.cost, 3.0);
-        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::PerRun);
-        assert!(table.total.starts_with("Total"), "{:?}", table.total);
+        assert_eq!(total.tokens.output, 3_000);
+        assert_eq!(total.time_s, 180);
+
+        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::Totals);
         let cells: Vec<&str> = table.total.split_whitespace().collect();
-        assert_eq!(cells, ["Total", "2", "1", "3.00"], "{:?}", table.total);
+        assert_eq!(
+            cells,
+            [
+                "Total", "2", "1", "0", "3.0k", "0", "0", "3.00", "3m", "00s"
+            ],
+            "{:?}",
+            table.total
+        );
+
+        let table = lanes_table(EvalBy::Step, &rows, &total, None, Figures::PerRun);
+        let cells: Vec<&str> = table.total.split_whitespace().collect();
+        assert_eq!(
+            cells,
+            [
+                "Average", "2", "0.50", "0", "1.5k", "0", "0", "1.50", "1m", "30s"
+            ],
+            "{:?}",
+            table.total
+        );
     }
 
     #[test]
@@ -5686,7 +5929,12 @@ mod tests {
 
         let total = lanes_csv_total(EvalBy::Step, &total_of(&entries));
         assert_eq!(total.split(',').count(), header_cols, "{total}");
-        assert_eq!(total, ",total,,,,2,,,1,,,,,,,,,,,,,2.00,,,,");
+        // Every sum, and each per-run column over the table's two runs;
+        // `unpriced` and the shares and peaks stay blank.
+        assert_eq!(
+            total,
+            ",total,,,,2,,,1,,,,,300,0,0,0,150,0,0,0,2.00,1.00,,120,60"
+        );
     }
 
     /// `--json` keeps the `Total` line out of `rows`, where a consumer
@@ -5708,8 +5956,19 @@ mod tests {
         assert_eq!(row["unpriced"], 1);
         // A plain number, not `null`: only a *wholly* unpriced row nulls it.
         assert_eq!(row["cost_usd"], 1.0);
-        assert_eq!(json["total"]["runs"], 2);
-        assert_eq!(json["total"]["cost_usd"], 1.0);
+        // The keys the `Total` line always had keep their names and values;
+        // the sums and the average run are added beside them.
+        let total = &json["total"];
+        assert_eq!(total["runs"], 2);
+        assert_eq!(total["blocks"], 0);
+        assert_eq!(total["cost_usd"], 1.0);
+        assert_eq!(total["in_tokens"], 10);
+        assert_eq!(total["in_per_run"], 5);
+        assert_eq!(total["out_tokens"], 0);
+        assert_eq!(total["cache_write_per_run"], 0);
+        assert_eq!(total["cost_per_run"], 0.5);
+        assert_eq!(total["time_s"], 120);
+        assert_eq!(total["time_per_run_s"], 60.0);
     }
 
     // -------------------------------------------------------- directories
@@ -5825,8 +6084,10 @@ mod tests {
         );
     }
 
-    /// The mockup's own `by dir` header and `Total` line: the session count
-    /// and USD, and nothing that does not add up.
+    /// The mockup's own `by dir` header, and its last line in either view:
+    /// the sums on `Total`, and on `Average` each sum over the table's
+    /// sessions with `USD` left blank. Neither `CTX PEAK` adds up, so both
+    /// stay blank on both.
     #[test]
     fn the_dirs_table_is_the_mockup_s_own() {
         let a = dir_line(
@@ -5849,8 +6110,15 @@ mod tests {
              CACHE W/SESSION       USD  USD/SESSION  CTX PEAK AVG  CTX PEAK  TIME/SESSION"
         );
         assert_eq!(
-            table.total.split_whitespace().collect::<Vec<_>>(),
-            ["Total", "2", "0.88"]
+            table.total,
+            "Average                            2           0           10                \
+             0                0                   0.44                                    0s"
+        );
+        let table = dirs_table(&rows, None, Figures::Totals);
+        assert_eq!(
+            table.total,
+            "Total                              2        0       20        0        0      \
+             0.88                                0s"
         );
     }
 
@@ -5911,21 +6179,25 @@ mod tests {
         );
     }
 
+    /// Under `by dir` the export's `Total` line carries what the screen's
+    /// carries in either view: every sum, and each per-session column as its
+    /// sum over the table's two sessions. The peaks stay blank.
     #[test]
     fn a_directory_export_marks_its_total_under_either_by() {
         let a = dir_line("/w/proj", "s1", "2026-09-01T09:00:00+00:00", 0.70);
-        let dirs = dir_rows(&[&a], &[], &no_models(), &HashMap::new());
-        let sessions = list_sessions(&[&a], &no_models(), &HashMap::new(), &HashMap::new());
+        let b = dir_line("/w/proj", "s2", "2026-09-01T10:00:00+00:00", 0.18);
+        let dirs = dir_rows(&[&a, &b], &[], &no_models(), &HashMap::new());
+        let sessions = list_sessions(&[&a, &b], &no_models(), &HashMap::new(), &HashMap::new());
         let cols = DIRS_CSV_HEADER.split(',').count();
         assert_eq!(csv_dir_row(&dirs[0]).split(',').count(), cols);
         let total = csv_dirs_total(DirBy::Dir, &dirs, &sessions);
         assert_eq!(total.split(',').count(), cols);
-        assert!(total.starts_with("total,,1,"), "{total}");
+        assert_eq!(total, "total,,2,0,20,0,0,0,10,0,0,0.88,0.44,,,,,,0,0");
 
         let cols = SESSIONS_CSV_HEADER.split(',').count();
         assert_eq!(csv_session_row(&sessions[0]).split(',').count(), cols);
         let total = csv_dirs_total(DirBy::Session, &[], &sessions);
-        assert_eq!(total, "total,,,,,0,10,0,0,0.70,,,,0");
+        assert_eq!(total, "total,,,,,0,20,0,0,0.88,,,,0");
     }
 
     // -------------------------------------------------------------- sorting
@@ -6667,6 +6939,111 @@ mod screen_tests {
         assert_eq!(frame_chrome(0), 4);
         assert_eq!(frame_chrome(1), 5);
         assert_eq!(frame_chrome(2), 6);
+    }
+
+    /// A table far taller than the terminal — 270 tasks on a 20-row one —
+    /// keeps its `Total` line as the frame's last body line, under the
+    /// scroll indicator, and its header as the first, wherever the cursor
+    /// has scrolled to. The filter panel drawn over it still closes its own
+    /// bottom border.
+    #[test]
+    fn the_total_line_stays_pinned_under_a_scrolled_table() {
+        let entries: Vec<Entry> = (0..270)
+            .map(|n| tests_entry(&format!("task-{n:03}"), "implement"))
+            .collect();
+        let tall = loaded(entries);
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new(&no_args());
+        state.filters.by = EvalBy::Task;
+        let last_body_lines = |frame: &[String]| -> (String, String) {
+            let bottom = frame
+                .iter()
+                .rposition(|l| l.starts_with('└'))
+                .expect("the frame's own bottom border");
+            (frame[bottom - 2].clone(), frame[bottom - 1].clone())
+        };
+
+        for (cursor, indicator) in [(0, "↓ "), (120, "↓ "), (269, "↑ ")] {
+            state.cursor = cursor;
+            let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20));
+            assert!(frame.len() <= 20, "{}", frame.join("\n"));
+            let (above, last) = last_body_lines(&frame);
+            assert!(last.starts_with("│ Total "), "{}", frame.join("\n"));
+            assert!(last.contains(" 270 "), "{last}");
+            assert!(above.starts_with(&format!("│ {indicator}")), "{above}");
+            let top = frame.iter().position(|l| l.starts_with('┌')).unwrap();
+            assert!(
+                frame[top + 1].starts_with("│ TASK "),
+                "the header stays at the top at {cursor}: {}",
+                frame.join("\n")
+            );
+            assert!(
+                frame.iter().any(|l| l.starts_with('│') && l.contains('>')),
+                "the cursor's row is in view at {cursor}: {}",
+                frame.join("\n")
+            );
+        }
+
+        state.cursor = 0;
+        state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
+        let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20));
+        let text = frame.join("\n");
+        assert!(text.contains("[enter] apply   [esc] back"), "{text}");
+        assert_eq!(
+            frame.iter().filter(|l| l.contains('└')).count(),
+            2,
+            "the panel's bottom border and the frame's: {text}"
+        );
+        assert!(last_body_lines(&frame).1.starts_with("│ Total "), "{text}");
+
+        // A table that fits keeps its `Total` line right under its last row.
+        let few = loaded(vec![tests_entry("a", "implement")]);
+        state.mode = Mode::Browsing;
+        let frame = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+        let total = frame
+            .iter()
+            .position(|l| l.starts_with("│ Total "))
+            .unwrap();
+        assert!(frame[total - 1].starts_with("│>a "), "{}", frame.join("\n"));
+    }
+
+    /// A frame too short to pin both lines still draws the cursor's row:
+    /// the total is pinned only from three body rows, the header only from
+    /// four, so `clip` always keeps two — the cursor's row and its
+    /// indicator. Below three, both scroll with the rows as they did before
+    /// pinning, and the frame never grows taller than the terminal.
+    #[test]
+    fn a_short_frame_pins_only_what_leaves_the_cursor_s_row_in_view() {
+        let entries: Vec<Entry> = (0..270)
+            .map(|n| tests_entry(&format!("task-{n:03}"), "implement"))
+            .collect();
+        let tall = loaded(entries);
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new(&no_args());
+        state.filters.by = EvalBy::Task;
+        state.cursor = 120;
+        // `frame_chrome(0)` is four, so a terminal `n + 4` tall gives the
+        // frame `n` body rows.
+        for (height, header, total) in [(6, false, false), (7, false, true), (8, true, true)] {
+            let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(height));
+            let text = frame.join("\n");
+            assert!(frame.len() <= height, "{height}: {text}");
+            let body: Vec<&String> = frame.iter().filter(|l| l.starts_with('│')).collect();
+            assert!(
+                body.iter().any(|l| l.starts_with("│>task-120 ")),
+                "{height}: the cursor's row is drawn: {text}"
+            );
+            assert_eq!(
+                body.last().unwrap().starts_with("│ Total "),
+                total,
+                "{height}: {text}"
+            );
+            assert_eq!(body[0].starts_with("│ TASK "), header, "{height}: {text}");
+        }
+        // One body row has room for the indicator alone, as before pinning;
+        // nothing pinned pushes the frame past the terminal's own height.
+        let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(5));
+        assert!(frame.len() <= 5, "{}", frame.join("\n"));
     }
 
     // ------------------------------------------------------------ cycling
@@ -8492,8 +8869,8 @@ mod screen_tests {
         assert!(header_of(last).contains("      ▼USD"), "{last}");
     }
 
-    /// `spoolway eval` prints the totals columns, and `--per-run` the
-    /// per-run ones, the `Total` line the same under both.
+    /// `spoolway eval` prints the totals columns closed by `Total`, and
+    /// `--per-run` the per-run ones closed by the average run.
     #[test]
     fn the_printed_table_is_totals_unless_per_run() {
         let (repo, _root_guard) = fixture_to_sort("cli-totals");
@@ -8501,6 +8878,10 @@ mod screen_tests {
         let header = table.lines().next().unwrap();
         assert!(
             header.ends_with("       IN      OUT  CACHE R  CACHE W       USD      TIME"),
+            "{table}"
+        );
+        assert!(
+            table.lines().last().unwrap().starts_with("Total "),
             "{table}"
         );
 
@@ -8512,7 +8893,9 @@ mod screen_tests {
             ),
             "{table}"
         );
-        assert!(table.contains("Total"), "{table}");
+        let last = table.lines().last().unwrap();
+        assert!(last.starts_with("Average "), "{table}");
+        assert!(!table.contains("Total"), "{table}");
 
         // Every name `--sort` took before it still takes, in either view;
         // a column the view does not draw sorts the rows and marks nothing.

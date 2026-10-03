@@ -15,7 +15,7 @@ spoolway eval
 PIPELINE    RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
 impl          41   82%       3           32%       52%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
 impl_ui       15   79%       2           31%       50%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
-Total         56             5                                                               1012.85
+Total         56             5                            38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
 ```
 
 The token, cost and time columns show each row's totals. `spoolway eval --per-run` prints each of
@@ -78,8 +78,8 @@ name, so no column moves.
 
 The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts correctly against
 `54m` and `54.2k` against `9.1M`. Ties keep the table's default order. A blank figure, such as
-`—` or an unpriced `USD`, sorts last in both directions, and the `Total` line always stays
-last.
+`—` or an unpriced `USD`, sorts last in both directions, and the `Total` or `Average` line always
+stays last.
 
 The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
 own sort. Pressing `[t]` moves a sort on a figure column to the matching column of the other
@@ -117,9 +117,29 @@ same under every `by`, so switching how the rows are grouped never moves a figur
 | `USD/RUN` | Cost per run. Drawn per run only. |
 | `TIME` | Wall time, summed over the row. Per run: `TIME/RUN`, divided by `RUNS`. |
 
-A `Total` line closes the table, carrying only what adds up across rows: distinct `RUNS`,
-`BLOCKS` and `USD`. A per-run average or a summed peak would not mean anything added together,
-so those cells are blank on `Total`.
+A summary line closes the table. It is drawn under the scroll indicator and stays at the bottom
+of the screen however far the rows have scrolled. The column header stays at the top. When every
+row fits, the line sits right under the last row. A frame with fewer than 3 body rows scrolls the
+line with the rows, and a frame with fewer than 4 scrolls the header too.
+
+The line is called `Total` in the totals view and `Average` in the per-run view. Both are
+computed from the ledger entries on screen.
+
+| Column | `Total` | `Average` |
+|---|---|---|
+| `RUNS` | Distinct runs in the table | The same |
+| `BLOCKS` | Lanes that ended blocked | `BLOCKS/RUN`: blocked lanes divided by distinct runs, with two decimals |
+| `IN`, `OUT`, `CACHE R`, `CACHE W` | The sum of each | `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`: each sum divided by distinct runs |
+| `USD` | The sum | Blank |
+| `USD/RUN` | Not drawn | Total cost divided by distinct runs |
+| `TIME` | Lane time added up | `TIME/RUN`: lane time added up, divided by distinct runs |
+| `PASS`, `CTX PEAK AVG`, `CTX PEAK` | Blank | Blank |
+
+`TIME` on `Total` is the wall time of every lane added together. Lanes that ran at the same time
+each count in full, so it is not the calendar time the work took.
+
+Runs are counted once per table. Under `by step`, one run spans several rows, so `RUNS` on the
+line is less than the sum of the rows' `RUNS`.
 
 With `--all`, a `PROJECT` column appears when the rows span more than one project.
 
@@ -188,7 +208,7 @@ spoolway eval --by task --trial t-8c21e0
 TASK                PIPELINE   VER  WHEN        RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
 cart-totals-1       impl       1.0  2026-09-26     1   83%       0           19%       31%       433   105.1k   28.27M   539.2k     11.40   38m 20s
 cart-totals-2       impl_fast  1.0  2026-09-26     1  100%       0           14%       22%       276    67.1k   18.05M   344.3k      7.28   28m 40s
-Total                                              2             0                                                                  18.68
+Total                                              2             0                              709   172.2k   46.32M   883.5k     18.68     1h 07m
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
@@ -234,8 +254,13 @@ A skill counts whether a session typed its command or ran it through the Skill t
 way names the same skill. A subagent's tokens, cost and skills count on the session that ran
 it, not on a row of its own.
 
-A `Total` line closes the table: the session count and `USD` under `by dir`, and every token
-class, `USD` and `TIME` under `by session`.
+A summary line closes the `by dir` table and is pinned the same way as the lanes table's. In the
+totals view it is `Total`: the session count and the sums of every token class, `USD` and `TIME`.
+In the per-run view it is `Average`: the session count, each token class and `TIME` divided by
+`SESSIONS`, `USD` blank and `USD/SESSION` carrying the cost divided by `SESSIONS`. `CTX PEAK AVG`
+and `CTX PEAK` are blank. A table with no sessions shows a dash in its token, `TIME` and cost cells.
+
+Under `by session`, the `Total` line carries every token class, `USD` and `TIME` in both views.
 
 Its filter panel has five rows: `by`, `dir`, `skill`, `since` and `until`. The `skill` filter
 keeps whole sessions whose transcript names that skill. There is no command-line flag for the
@@ -279,7 +304,12 @@ spoolway,step,impl,implement,,48,106,0.98,2,520000,0.52,322000,0.32,17140,416630
 ```
 
 The CSV and `--json` rows carry the per-run token figures beside the raw totals, the
-`ctx_peak_avg` pair, and `pipeline_version`. `--json` prints an object, `{"by", "rows",
+`ctx_peak_avg` pair, and `pipeline_version`. The `total` row and the `--json` `total` object
+carry the sums and the per-run figures the screen's `Total` and `Average` lines show:
+`in_tokens`, `out_tokens`, `cache_read_tokens`, `cache_write_tokens`, the four `*_per_run`
+columns, `cost_per_run`, `time_s` and `time_per_run_s`. The directory table's export carries the
+`*_per_session` columns instead. The pass and context columns stay blank on the CSV total row, and
+both views export the same row. `--json` prints an object, `{"by", "rows",
 "total"}`, rather than a bare array, so the `Total` line cannot be mistaken for a row. Its own
 `by` column reads `total`. `--csv` and `--json` are not allowed together.
 
