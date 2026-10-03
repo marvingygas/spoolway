@@ -95,6 +95,14 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 | The issue tracker (skipped when joining or moving into an existing workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
+The tracker's project is a free-text question. It prints the question, then a line that asks you to
+type the answer. An empty answer keeps the project's existing key, or leaves it blank on a new project.
+
+```
+Which project does it file into?
+  > Please enter owner/repo for github, project key for jira:
+```
+
 `--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
 and effort are left blank on every step, and you fill them in before dispatching.
 
