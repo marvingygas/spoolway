@@ -57,6 +57,15 @@ const BINDINGS: &[Binding] = &[
     },
 ];
 
+/// Verbs an earlier `bind` wrote that [`BINDINGS`] no longer has: 0.6.0
+/// bound `prefix+alt+d` to `spoolway dispatch` and `prefix+alt+q` to
+/// `spoolway queue`, and both became plain commands when the one screen took
+/// over (#443). Left in place, the first opens a printing dispatcher in a
+/// popup and the second prints usage. So `unbind` removes them as its own,
+/// and `bind` removes them rather than skipping their keys as taken, which
+/// frees `prefix+alt+d` for bare `spoolway`.
+const RETIRED_VERBS: &[&str] = &["dispatch", "queue"];
+
 /// Every binding opens as a popup, sized the way `herdr --default-config`'s
 /// own `[[keys.command]]` example is.
 const WIDTH: &str = "80%";
@@ -65,7 +74,12 @@ const HEIGHT: &str = "80%";
 pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
     let path = config_path()?;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let existing = existing_keys(&text);
+    let retired: Vec<(String, String)> = parse_blocks(&text)
+        .into_iter()
+        .filter_map(|b| Some((b.key?, b.command.filter(|c| retired_binding(c))?)))
+        .collect();
+    let kept = remove_blocks(&text, retired_binding);
+    let existing = existing_keys(&kept);
 
     let program = resolve_program()?;
     let mut to_write: Vec<(&Binding, String)> = Vec::new();
@@ -83,10 +97,15 @@ pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
     }
 
     println!(
-        "  {} — {} binding{} to add{}",
+        "  {} — {} binding{} to add{}{}",
         display_path(&path),
         to_write.len(),
         plural(to_write.len()),
+        if retired.is_empty() {
+            String::new()
+        } else {
+            format!(", {} retired to remove", retired.len())
+        },
         if skipped.is_empty() {
             String::new()
         } else {
@@ -97,8 +116,16 @@ pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
     for (binding, command) in &to_write {
         println!("  {:<14}popup   {command}", binding.key);
     }
-    if !skipped.is_empty() {
+    if !retired.is_empty() {
         if !to_write.is_empty() {
+            println!();
+        }
+        for (key, command) in &retired {
+            println!("  removing {key}: `{command}` is retired");
+        }
+    }
+    if !skipped.is_empty() {
+        if !to_write.is_empty() || !retired.is_empty() {
             println!();
         }
         for (key, command) in &skipped {
@@ -110,7 +137,7 @@ pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
         }
     }
 
-    if to_write.is_empty() {
+    if to_write.is_empty() && retired.is_empty() {
         return Ok(());
     }
 
@@ -120,7 +147,7 @@ pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut out = text.clone();
+    let mut out = kept;
     ensure_trailing_newline(&mut out);
     for (binding, command) in &to_write {
         if !out.is_empty() {
@@ -135,12 +162,22 @@ pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
     std::fs::write(&path, &out).with_context(|| format!("writing {}", path.display()))?;
 
     println!();
-    println!(
-        "  wrote {} binding{} to {}",
-        to_write.len(),
-        plural(to_write.len()),
-        display_path(&path)
-    );
+    if !retired.is_empty() {
+        println!(
+            "  removed {} retired binding{} from {}",
+            retired.len(),
+            plural(retired.len()),
+            display_path(&path)
+        );
+    }
+    if !to_write.is_empty() {
+        println!(
+            "  wrote {} binding{} to {}",
+            to_write.len(),
+            plural(to_write.len()),
+            display_path(&path)
+        );
+    }
     reload()
 }
 
@@ -177,7 +214,7 @@ pub fn herdr_unbind(args: &HerdrKeysArgs) -> Result<()> {
         return Ok(());
     }
 
-    let out = remove_bound_blocks(&text);
+    let out = remove_blocks(&text, written_by_bind);
     std::fs::write(&path, &out).with_context(|| format!("writing {}", path.display()))?;
 
     println!();
@@ -296,22 +333,35 @@ fn render_block(key: &str, command: &str) -> String {
     )
 }
 
-/// Whether `command` is one `bind` would write — a bare `spoolway`, or a
-/// path ending `/bin/spoolway`, on its own or followed by one of
-/// [`BINDINGS`]'s own verbs. Read off the shape alone, not off the currently
-/// resolved program: the plugin directory a binding named may already be
-/// gone by the time `unbind` runs (`herdr plugin uninstall` deletes it
-/// outright), so this must recognise the block without being able to
-/// reproduce it.
+/// Whether `command` is one `bind` writes or once wrote — a bare
+/// `spoolway`, or a path ending `/bin/spoolway`, on its own or followed by
+/// one of [`BINDINGS`]'s own verbs or a [`RETIRED_VERBS`] one. Read off the
+/// shape alone, not off the currently resolved program: the plugin
+/// directory a binding named may already be gone by the time `unbind` runs
+/// (`herdr plugin uninstall` deletes it outright), so this must recognise
+/// the block without being able to reproduce it.
 fn written_by_bind(command: &str) -> bool {
+    retired_binding(command)
+        || spoolway_verb(command).is_some_and(|verb| BINDINGS.iter().any(|b| b.verb == verb))
+}
+
+/// Whether `command` is a binding an earlier `bind` wrote for one of
+/// [`RETIRED_VERBS`].
+fn retired_binding(command: &str) -> bool {
+    matches!(spoolway_verb(command), Some(Some(verb)) if RETIRED_VERBS.contains(&verb))
+}
+
+/// The verb `command` runs spoolway with — `Some(None)` for spoolway on its
+/// own — or `None` when the program is not spoolway.
+fn spoolway_verb(command: &str) -> Option<Option<&str>> {
     let is_spoolway = |prog: &str| prog == "spoolway" || prog.ends_with("/bin/spoolway");
     match command.rsplit_once(' ') {
-        Some((prog, verb)) => BINDINGS.iter().any(|b| b.verb == Some(verb)) && is_spoolway(prog),
-        None => BINDINGS.iter().any(|b| b.verb.is_none()) && is_spoolway(command),
+        Some((prog, verb)) => is_spoolway(prog).then_some(Some(verb)),
+        None => is_spoolway(command).then_some(None),
     }
 }
 
-/// Remove every `[[keys.command]]` block [`written_by_bind`] recognises from
+/// Remove every `[[keys.command]]` block whose command `matches` from
 /// `text`, along with the blank line immediately before it — the one `bind`
 /// itself put there, see the module doc — and leave everything else,
 /// including a blank line that separates a removed block from content
@@ -321,12 +371,12 @@ fn written_by_bind(command: &str) -> bool {
 /// this exists for is a fact this module can check on a string, not only
 /// against a real file — see `unbind_leaves_a_later_hand_written_blocks_own_\
 /// leading_blank_alone` below.
-fn remove_bound_blocks(text: &str) -> String {
+fn remove_blocks(text: &str, matches: fn(&str) -> bool) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let blocks = parse_blocks(text);
     let matched: Vec<&Block> = blocks
         .iter()
-        .filter(|b| b.command.as_deref().is_some_and(written_by_bind))
+        .filter(|b| b.command.as_deref().is_some_and(matches))
         .collect();
     if matched.is_empty() {
         return text.to_string();
@@ -457,6 +507,49 @@ mod tests {
         assert!(!written_by_bind("/usr/bin/spoolway-extra init"));
     }
 
+    /// The two verbs 0.6.0's `bind` wrote that the one screen retired are
+    /// still spoolway's own, so `unbind` takes them and `bind` replaces
+    /// them. Only spoolway running them counts.
+    #[test]
+    fn a_retired_binding_is_still_recognised_as_written_by_bind() {
+        for command in [
+            "spoolway dispatch",
+            "spoolway queue",
+            "/home/x/.config/herdr/plugins/github/spoolway-abc/bin/spoolway queue",
+        ] {
+            assert!(written_by_bind(command), "{command}");
+            assert!(retired_binding(command), "{command}");
+        }
+        for command in [
+            "spoolway",
+            "spoolway init",
+            "spoolway doctor",
+            "lazygit dispatch",
+        ] {
+            assert!(!retired_binding(command), "{command}");
+        }
+        assert!(!written_by_bind("lazygit dispatch"));
+    }
+
+    /// The four blocks a 0.6.0 `bind` wrote, as upgraders still have them:
+    /// `unbind` takes all four, and `bind`'s own pass takes only the two
+    /// retired ones, keeping `init` and `doctor` where they are.
+    #[test]
+    fn the_blocks_a_0_6_0_bind_wrote_are_removed_whole() {
+        let seed = "[theme]\nname = \"catppuccin\"\n";
+        let init = render_block("prefix+alt+s", "spoolway init");
+        let dispatch = render_block("prefix+alt+d", "spoolway dispatch");
+        let queue = render_block("prefix+alt+q", "spoolway queue");
+        let doctor = render_block("prefix+alt+k", "spoolway doctor");
+        let text = format!("{seed}\n{init}\n{dispatch}\n{queue}\n{doctor}");
+
+        assert_eq!(remove_blocks(&text, written_by_bind), seed);
+        assert_eq!(
+            remove_blocks(&text, retired_binding),
+            format!("{seed}\n{init}\n{doctor}")
+        );
+    }
+
     #[test]
     fn parse_blocks_reads_key_and_command_in_any_field_order() {
         let text = "\
@@ -508,14 +601,14 @@ height = \"80%\"
         let htop = render_block("prefix+alt+h", "htop");
 
         let text = format!("{seed}{lazygit}\n{spoolway_block}\n{htop}");
-        let out = remove_bound_blocks(&text);
+        let out = remove_blocks(&text, written_by_bind);
 
         assert_eq!(out, format!("{seed}{lazygit}\n{htop}"));
     }
 
     #[test]
-    fn remove_bound_blocks_is_a_no_op_with_nothing_to_remove() {
+    fn remove_blocks_is_a_no_op_with_nothing_to_remove() {
         let text = "[theme]\nname = \"catppuccin\"\n";
-        assert_eq!(remove_bound_blocks(text), text);
+        assert_eq!(remove_blocks(text, written_by_bind), text);
     }
 }

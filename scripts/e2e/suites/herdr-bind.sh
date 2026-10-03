@@ -160,6 +160,49 @@ cat "$LIVE/seed.toml" "$HANDWRITTEN" > "$LIVE/expected-with-handwritten-block.to
 works "the hand-written block, and the blank line before it, are untouched" \
   diff -u "$LIVE/expected-with-handwritten-block.toml" "$CONFIG"
 
+# Upgrading from 0.6.0: its `bind` wrote four blocks, and two of their verbs
+# are retired — `spoolway dispatch` on prefix+alt+d and `spoolway queue` on
+# prefix+alt+q. `unbind` takes all four back, and `bind` replaces the retired
+# two instead of skipping their keys as taken.
+OLD="$LIVE/bound-by-0.6.0.toml"
+{
+  printf '# bound by 0.6.0\n'
+  for kv in "s init" "d dispatch" "q queue" "k doctor"; do
+    set -- $kv
+    printf '\n[[keys.command]]\nkey = "prefix+alt+%s"\ntype = "popup"\ncommand = "spoolway %s"\nwidth = "80%%"\nheight = "80%%"\n' "$1" "$2"
+  done
+} > "$OLD"
+
+cp "$OLD" "$CONFIG"
+says "unbind takes back all four blocks 0.6.0 bound" "4 bindings to remove" \
+  "$SPOOLWAY" herdr unbind --yes
+works "leaving only what was there before them" \
+  bash -c '[ "$(cat "$1")" = "# bound by 0.6.0" ]' _ "$CONFIG"
+
+cp "$OLD" "$CONFIG"
+OLD_OUT="$LIVE/bind-over-0.6.0.out"
+if "$SPOOLWAY" herdr bind --yes >"$OLD_OUT" 2>&1; then
+  ok "herdr bind writes over a config 0.6.0 bound"
+else
+  bad "herdr bind writes over a config 0.6.0 bound"
+  sed 's/^/        /' "$OLD_OUT"
+fi
+has "bind names both retired bindings it removes" "2 retired to remove" "$OLD_OUT"
+has "including the old dispatch key" \
+  "removing prefix+alt+d: \`spoolway dispatch\` is retired" "$OLD_OUT"
+lacks "and does not skip that key as taken" "skipped prefix+alt+d" "$OLD_OUT"
+lacks "no binding runs spoolway dispatch any more" 'command = "spoolway dispatch"' "$CONFIG"
+lacks "no binding runs spoolway queue any more" 'command = "spoolway queue"' "$CONFIG"
+if awk '/^key = "prefix\+alt\+d"$/ { k = NR } k && NR == k + 2 { print; exit }' "$CONFIG" \
+     | grep -qxF 'command = "spoolway"'; then
+  ok "prefix+alt+d now runs bare spoolway"
+else
+  bad "prefix+alt+d now runs bare spoolway"
+  sed 's/^/        /' "$CONFIG"
+fi
+says "and unbind then finds exactly the three current ones" "3 bindings to remove" \
+  "$SPOOLWAY" herdr unbind --yes
+
 if [ -e "$UNRELATED/.git/spoolway-id" ] || [ -e "$UNRELATED/.git/spoolway-label" ]; then
   bad "herdr commands do not claim the git checkout they are run from"
 else
