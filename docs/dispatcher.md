@@ -212,7 +212,7 @@ stateDiagram-v2
   prompt --> running: the prompt is answered
   running --> paused: gate, p on the board, or the stop popup's i
   running --> blocked: a step reports a block or a budget runs out
-  paused --> running: spoolway resume
+  paused --> running: spoolway resume, or a p/Escape park's lane working again
   blocked --> running: spoolway resume
   running --> done: last step passes
   done --> [*]
@@ -239,7 +239,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Resume a paused or blocked row whose dependencies are done. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Same as `spoolway resume <task>`. |
+| `r` | Resume a paused or blocked row whose dependencies are done. A row parked by `p` or Escape is live even while its own lane reads `Working` or `Blocked`: it puts the task back on its step and leaves that lane running. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |
@@ -299,6 +299,13 @@ A task the stop popup parked also resumes on its own, back onto the step it was 
 time dispatching starts — from the tab or from `spoolway dispatch` — and its NEXT column reads
 `→ <step> — resumes when dispatching starts` until then. A paused task's pane survives a stop of
 the dispatcher.
+
+A `p` or Escape park also goes back onto its step without a key press, once its own lane is seen
+`Working` again — a person typed a follow-up straight into the pane instead of pressing `r`. The
+next pass restores it straight away; nothing is relaunched, since the lane never left. A report
+that lane sends while the task is still parked is applied the same way, as if the task were
+already back on its step. The stop popup's own park does not auto-restore like this: it waits for
+dispatching to start, as above.
 
 A hook pause is the one exception: nothing inside the pipeline failed, so there is no step to
 go back to. `spoolway resume` forgets the hook's failed run, so it fires again. A task paused on
