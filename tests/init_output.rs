@@ -65,8 +65,8 @@ impl Project {
     }
 
     /// `init` with no `--yes` and nothing on stdin — the shape an agent with
-    /// no terminal runs it in, and the one `crate::ask::confirm` cannot ask
-    /// a question through.
+    /// no terminal runs it in, and the one the no-terminal gate in
+    /// `commands::init::init` stops before anything is written.
     fn init_with_no_terminal_and_no_yes(&self) -> Output {
         use std::process::Stdio;
         let home = self.0.join("home");
@@ -1220,12 +1220,10 @@ fn joining_a_workspace_names_the_flags_it_ignored() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// `init` with nobody to answer its confirmation writes nothing — the
-/// declared-default path `crate::ask::confirm` takes when stdin is not a
-/// terminal. An agent has no terminal either, so writing nothing has to
-/// come with a word of explanation rather than pass for success: a line
-/// saying nothing was written and that `--yes` is how to answer the
-/// confirmation.
+/// `init` with no terminal and no `--yes` writes nothing. An agent has no
+/// terminal either, so writing nothing has to come with a word of
+/// explanation rather than pass for success: a line saying nothing was
+/// written and that `--yes` is what lets such a run write.
 #[test]
 fn init_with_no_terminal_and_no_yes_says_nothing_was_written() {
     let project = Project::new("no-terminal-no-yes");

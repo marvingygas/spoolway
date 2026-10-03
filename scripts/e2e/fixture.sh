@@ -149,9 +149,8 @@ publish() {
 configure_project() {
   local branch=${1:-plan/demo}
   shift $(( $# > 1 ? 1 : $# ))
-  # `--yes` answers the confirmation `init` opens with: there is no
-  # terminal here, so without it the question takes its default — no —
-  # and nothing is scaffolded at all.
+  # `--yes` is what lets a run with no terminal write: there is no
+  # terminal here, so without it nothing is scaffolded at all.
   must "spoolway init" "$SPOOLWAY" init --yes "$@"
   project_home_after_init
   # Fresh init deliberately writes only the selected profile and points every

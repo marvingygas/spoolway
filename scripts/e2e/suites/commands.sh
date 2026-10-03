@@ -145,14 +145,14 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # --------------------------------------------------------------- scaffolding
-# `init` asks four questions at a terminal — the `Set up this project?`
-# confirmation it opens with, then the agent, the tracker and the project key
-# — and none anywhere else, which is exactly the distinction a shell suite is
-# the right place to hold: everything below runs with no tty, so an `init`
-# that ever read stdin here would hang the suite rather than fail it. Nobody
-# being there means every one of those four takes its own default, and the
-# confirmation's is no — so every run below that wants a project passes
-# `--yes`, and the one that does not is the declined case asserted with it.
+# `init` asks its questions at a terminal — the agent, the tracker and the
+# project key — and none anywhere else, which is exactly the distinction a
+# shell suite is the right place to hold: everything below runs with no tty,
+# so an `init` that ever read stdin here would hang the suite rather than
+# fail it. Nobody being there means every question takes its own default,
+# and a run with no terminal writes nothing unless `--yes` lets it — so every
+# run below that wants a project passes `--yes`, and the one that does not is
+# the declined case asserted with it.
 # In its own directory — this is a project being created, and the suite's
 # own is already one.
 INITDIR="$LIVE/init"
@@ -201,9 +201,8 @@ works "spoolway-tasks lands beside it" \
 works "and spoolway-calibrate lands too" \
   test -f "$INITDIR/unasked/.claude/skills/spoolway-calibrate/SKILL.md"
 
-# The other side of `--yes`: with nobody to answer, the confirmation `init`
-# opens with takes its own default — no — and the command exits 0 having
-# written nothing at all. Nothing here is a `.spoolway/` tree this suite
+# The other side of `--yes`: with no terminal and no `--yes`, `init` exits 0
+# having written nothing at all. Nothing here is a `.spoolway/` tree this suite
 # has to clean up afterwards, which is the point: a declined `init` leaves
 # the directory exactly as it found it, and claims no home either.
 DECLINED="$INITDIR/declined"

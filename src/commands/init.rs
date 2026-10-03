@@ -934,37 +934,31 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // A key pressed in a herdr pane opens this popup in whatever directory
     // herdr handed it — usually the one you are looking at, but there is no
     // way to be certain of that from in here. So every caller gets told the
-    // root `init_root` resolved before anything below writes to it, and a
-    // real terminal on the other end waits for a yes before going on: a
-    // path you do not recognise is the whole of the check.
+    // root `init_root` resolved before anything below writes to it: a path
+    // you do not recognise is the whole of the check. At a terminal the run
+    // goes straight on to its first menu, if any question is left to ask,
+    // and a person who sees the wrong path stops it there with Ctrl-C —
+    // nothing is written before every question is answered. A run whose
+    // flags answer everything shows no menu and writes right after the path.
     //
-    // The question goes through `crate::ask::confirm` like every other one
-    // in this file, so a run with nobody to answer takes its declared
-    // default rather than hanging — and that default is `false`, decline.
-    // A silent `init` therefore writes nothing unless it was told to: a
-    // script or CI runner that means it passes `--yes`, the same shape
-    // `spoolway herdr bind --yes` already uses. An `init` reached from a
-    // herdr keybinding never passes it, because the whole point of the
-    // popup is that nobody has confirmed which project it opened in.
+    // With nobody at a terminal there is nobody to read that path, so a
+    // silent `init` writes nothing unless it was told to: a script or CI
+    // runner that means it passes `--yes`, the same shape
+    // `spoolway herdr bind --yes` already uses. That is also the one shape
+    // an agent actually hits, since it has no terminal either.
     println!();
     println!("{}", report_row("project", &root.display().to_string()));
-    if !args.yes && !crate::ask::confirm("Set up this project?", false)? {
-        // With no terminal to answer, `confirm` already took its declared
-        // default (decline) in silence — the one shape an agent actually
-        // hits, since it has no terminal either. A real person who typed
-        // "no" at a real prompt just watched themselves decline, so this
-        // line is only for the silent case: it names the flag that skips
-        // asking, the one the `spoolway-config` skill's `init` route must
-        // pass for exactly this reason.
-        if !crate::ask::interactive() {
-            println!(
-                "{}",
-                report_row(
-                    "wrote",
-                    "nothing — pass --yes to confirm with nobody here to answer"
-                )
-            );
-        }
+    if !args.yes && !crate::ask::interactive() {
+        // The row names the flag that lets a silent run write, the one the
+        // `spoolway-config` skill's `init` route must pass for exactly this
+        // reason.
+        println!(
+            "{}",
+            report_row(
+                "wrote",
+                "nothing — pass --yes to confirm with nobody here to answer"
+            )
+        );
         return Ok(());
     }
 
@@ -1321,13 +1315,13 @@ mod tests {
         ))
     }
 
-    /// `InitArgs::default()` with the opening confirmation already
-    /// answered — what a script that means it passes as `--yes`.
+    /// `InitArgs::default()` with `--yes` given — what a script that means
+    /// it passes.
     ///
     /// Every test below that expects a project on disk starts from this
     /// rather than from `InitArgs::default()`, because a default `InitArgs`
-    /// with nobody to answer takes `Set up this project?`'s own default,
-    /// which is no: it writes nothing, which is precisely what
+    /// with nobody at a terminal was not told it may write: it writes
+    /// nothing, which is precisely what
     /// [`init_with_nobody_to_ask_and_no_yes_writes_nothing`] asserts.
     fn confirmed() -> InitArgs {
         InitArgs {
@@ -2098,12 +2092,11 @@ mod tests {
         );
     }
 
-    /// With nobody to answer and no `--yes`, `Set up this project?` takes
-    /// its own declared default — no — and `init` writes nothing at all:
-    /// no `.spoolway/`, no skills, and no home claimed under `$HOME`. It
-    /// does not hang either, which is the other half of the contract
-    /// `init_with_nobody_to_ask_takes_every_default` proves for the two
-    /// questions this one sits in front of: a suite that gave `init` no
+    /// With nobody at a terminal and no `--yes`, `init` writes nothing at
+    /// all: no `.spoolway/`, no skills, and no home claimed under `$HOME`.
+    /// It does not hang either, which is the other half of the contract
+    /// `init_with_nobody_to_ask_takes_every_default` proves for the
+    /// questions this check sits in front of: a suite that gave `init` no
     /// stdin and got a hang would time out somewhere unrelated.
     #[test]
     fn init_with_nobody_to_ask_and_no_yes_writes_nothing() {
@@ -2128,10 +2121,9 @@ mod tests {
         );
     }
 
-    /// The same run with `--yes`: the confirmation is answered without
-    /// asking, and the scaffold lands exactly where it always has. The pair
-    /// is what makes the flag the thing that decides, rather than the
-    /// presence of a terminal.
+    /// The same run with `--yes`: a run with no terminal may write, and the
+    /// scaffold lands exactly where it always has. The pair is what makes
+    /// the flag the thing that decides whether a silent run writes.
     #[test]
     fn init_with_yes_writes_the_scaffold_without_asking() {
         let root = scaffold("confirm-yes", &confirmed());
