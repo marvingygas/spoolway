@@ -8034,8 +8034,9 @@ mod tests {
 
     /// Acceptance criterion: once every task in a trial settles, its archive
     /// tasks are removed — not merely aged out by `retain.rs`'s own
-    /// `retention.days` — and the completion report names what was kept
-    /// (the source group, the usage rows) and what was removed.
+    /// `housekeeping.archive_retention_days` — and the completion report
+    /// names what was kept (the source group, the usage rows) and what was
+    /// removed.
     #[test]
     fn a_trial_removes_every_arms_archive_once_the_last_one_settles() {
         let (repo, _root_guard) = fixture("trial-settle-last");

@@ -259,13 +259,13 @@ impl<'a> Dispatcher<'a> {
 
     /// Once a trial arm reaches `done`, ask whether it was the trial's last
     /// one still active — and if so, remove every arm's archive task
-    /// rather than leave them for `retain.rs`'s own `retention.days` to age
-    /// out eventually. Everything else a settled trial disposes of (its
-    /// worktrees, branches, panes, scratch directories, sessions and run
-    /// files) is already gone by the time this runs: each arm's own
-    /// `clean_up` already reclaimed its own, and
-    /// [`Dispatcher::tear_down_checkout`] already drops a trial arm's branch
-    /// whether or not it was ever pushed. What is left standing only for a
+    /// rather than leave them for `retain.rs`'s own
+    /// `housekeeping.archive_retention_days` to age out eventually.
+    /// Everything else a settled trial disposes of (its worktrees,
+    /// branches, panes, scratch directories, sessions and run files) is
+    /// already gone by the time this runs: each arm's own `clean_up` already
+    /// reclaimed its own, and [`Dispatcher::tear_down_checkout`] already
+    /// drops a trial arm's branch whether or not it was ever pushed. What is left standing only for a
     /// trial is the archive copy itself, since an ordinary task's archive
     /// task is exactly the durable record cleanup means to keep.
     ///
@@ -566,7 +566,8 @@ impl<'a> Dispatcher<'a> {
         for branch in listing.lines() {
             // The task that recorded this exact branch, if any is still on
             // disk. A branch no queue or archive task claims — its task swept
-            // from the archive by `housekeeping.retention_days`, say — is left alone.
+            // from the archive by `housekeeping.archive_retention_days`, say —
+            // is left alone.
             let Some(owner) = task_for_branch(self.repo, branch) else {
                 continue;
             };
@@ -897,7 +898,8 @@ impl<'a> Dispatcher<'a> {
 /// hand-dropped one that never passed `queue add` — matches only the bare
 /// `task/<id>` its id implies, never a prefixed branch. `None` when no task
 /// on disk claims the branch — its task swept from the archive by
-/// `housekeeping.retention_days`, say — which the sweep then leaves alone.
+/// `housekeeping.archive_retention_days`, say — which the sweep then leaves
+/// alone.
 fn task_for_branch(repo: &crate::repo::Repo, branch: &str) -> Option<Task> {
     let mut candidate = branch.strip_prefix("task/")?;
     loop {

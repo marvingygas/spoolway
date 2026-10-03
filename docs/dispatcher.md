@@ -504,7 +504,8 @@ when the folder has changed since the index was written. A file that does not pa
 A rebuilt line uses the file's modification time as `archived_at` and the file's creation time as `created_ns`.
 
 The retention sweep removes the line of every archive file it deletes. It never deletes
-`index.jsonl` itself. See `retention_days` in [Configuration](configuration.md).
+`index.jsonl` itself. It only deletes archive files when `archive_retention_days` is set. See
+[Configuration](configuration.md).
 
 Archiving a task, the retention sweep, a trial settling and `spoolway eval --discard` each take
 the lock at `<home>/archive-index.lock` before they change `archive/`. They wait up to ten minutes

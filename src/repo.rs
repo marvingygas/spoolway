@@ -433,7 +433,10 @@ impl Repo {
     }
 
     /// Every directory [`crate::retain`]'s sweep may delete an old entry
-    /// from. The one place that split is written down as code — see
+    /// from under `housekeeping.retention_days`. [`Repo::archive_dir`] is
+    /// deliberately not here: finished tasks age under their own key,
+    /// `housekeeping.archive_retention_days`, which defaults to keeping them.
+    /// The one place that split is written down as code — see
     /// [`crate::retain`]'s own doc for why `queue_dir`, `pending_dir`,
     /// `crate::mux::worktree_root` and `plans/` are never in this list.
     ///
@@ -452,7 +455,6 @@ impl Repo {
             self.tracking_dir(),
             self.headless_dir(),
             self.scratch_dir(),
-            self.archive_dir(),
         ]
     }
 

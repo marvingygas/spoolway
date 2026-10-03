@@ -51,9 +51,18 @@ use crate::mux::{
     Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree, worktree_root,
 };
 
-/// Where lane records and logs live, under the project's home directory —
-/// see [`crate::repo::Repo::headless_dir`].
+/// Where lane records live, under the project's home directory — see
+/// [`crate::repo::Repo::headless_dir`]. The logs are in [`LOGS_DIR`] inside it.
 pub(crate) const LANE_DIR: &str = "headless";
+
+/// The folder inside [`LANE_DIR`] that holds every lane's log.
+pub(crate) const LOGS_DIR: &str = "logs";
+
+/// The logs folder of the lane folder `lane_dir`. The one spelling shared by
+/// [`Headless`] and the retention sweep.
+pub(crate) fn logs_dir_in(lane_dir: &Path) -> PathBuf {
+    lane_dir.join(LOGS_DIR)
+}
 
 /// The environment variable that has to be set for `spoolway dispatch` to
 /// run this backend at all — see `commands::dispatch::check_dispatcher_visible`.
@@ -80,7 +89,7 @@ pub struct Headless {
     root: PathBuf,
     /// Where task worktrees are cut.
     worktree_root: PathBuf,
-    /// Where lane records and logs live — see
+    /// Where lane records live, with `logs/` inside — see
     /// [`crate::repo::Repo::headless_dir`]. Handed in at construction rather
     /// than resolved from `$HOME` on every call, the same way `worktree_root`
     /// is, so a test fixture points it at a scratch directory and nothing
@@ -123,7 +132,7 @@ struct Record {
 }
 
 impl Headless {
-    /// `lane_dir` is where lane records and logs live —
+    /// `lane_dir` is where lane records live, and holds the `logs/` folder —
     /// [`crate::repo::Repo::headless_dir`] for every real caller.
     pub fn new(root: &Path, lane_dir: PathBuf) -> Result<Headless> {
         Ok(Headless {
@@ -147,8 +156,45 @@ impl Headless {
     /// when a lane is torn down its transcript is the only account of what it
     /// did, and a person looking into a task that went wrong is looking for
     /// exactly that.
+    ///
+    /// Kept under [`LOGS_DIR`] so [`Headless::records`] lists a folder that
+    /// holds only running lanes' records: a log outlives its lane, so beside
+    /// the records the listing would grow with every lane ever run.
     fn log_path(&self, name: &str) -> PathBuf {
-        self.lane_dir().join(format!("{name}.log"))
+        self.logs_dir().join(format!("{name}.log"))
+    }
+
+    /// Where every lane's log lives. [`crate::retain`] reaches it through
+    /// [`logs_dir_in`] and sweeps it file by file.
+    fn logs_dir(&self) -> PathBuf {
+        logs_dir_in(&self.lane_dir())
+    }
+
+    /// Moves logs that an older binary left at the top level of the lane
+    /// folder into [`Headless::logs_dir`]. Run from every listing of the
+    /// folder and a no-op once nothing is left to move. A failed move leaves
+    /// the log where it was and is retried on the next listing.
+    ///
+    /// A log whose name is already taken in `logs/` stays where it is.
+    /// Renaming over it would replace the newer transcript with the older
+    /// one, which happens while a dispatcher still running the old binary
+    /// appends to the top-level file beside a new binary that has started
+    /// writing into `logs/`. [`Headless::read`] falls back to the top-level
+    /// file for a lane nobody has listed yet.
+    fn adopt_old_logs(&self, entries: &[std::fs::DirEntry]) {
+        let old: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "log"))
+            .collect();
+        if old.is_empty() || std::fs::create_dir_all(self.logs_dir()).is_err() {
+            return;
+        }
+        for entry in old {
+            let to = self.logs_dir().join(entry.file_name());
+            if !to.exists() {
+                let _ = std::fs::rename(entry.path(), to);
+            }
+        }
     }
 
     /// The pid and exit files a turn's shell writes — see
@@ -191,8 +237,10 @@ impl Headless {
         let Ok(entries) = std::fs::read_dir(self.lane_dir()) else {
             return Vec::new();
         };
+        let entries: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
+        self.adopt_old_logs(&entries);
         entries
-            .filter_map(|entry| entry.ok())
+            .into_iter()
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
             .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
             .filter_map(|raw| serde_json::from_str::<Record>(&raw).ok())
@@ -244,6 +292,7 @@ impl Headless {
     /// still be alive to have.
     fn spawn(&self, record: &Record, args: &[String], prompt: &str) -> Result<u32> {
         std::fs::create_dir_all(self.lane_dir())?;
+        std::fs::create_dir_all(self.logs_dir())?;
 
         // A stale exit code would make the turn about to start look finished
         // before it has written a line.
@@ -816,7 +865,9 @@ impl Mux for Headless {
     }
 
     fn read(&self, name: &str, lines: usize) -> Result<String> {
-        let log = std::fs::read_to_string(self.log_path(name)).unwrap_or_default();
+        let log = std::fs::read_to_string(self.log_path(name))
+            .or_else(|_| std::fs::read_to_string(self.lane_dir().join(format!("{name}.log"))))
+            .unwrap_or_default();
         let tail: Vec<&str> = log
             .lines()
             .rev()
@@ -858,8 +909,9 @@ impl Mux for Headless {
 
     fn stop_lane(&self, name: &str, _pane_id: &str) -> Result<()> {
         self.kill(name);
-        // The record goes; the log stays. One is bookkeeping the next pass
-        // would trip over, the other is the only account of what this lane did.
+        // The record goes; the log stays, in `logs/`. One is bookkeeping the
+        // next pass would trip over, the other is the only account of what
+        // this lane did.
         let _ = std::fs::remove_file(self.record_path(name));
         self.run_files().clear(name)?;
         Ok(())
@@ -1286,6 +1338,63 @@ mod tests {
         );
 
         f.mux.stop_lane("implement-demo", "").unwrap();
+    }
+
+    /// `spoolway lane <name>` reads without listing the folder first, so a log
+    /// still at the top level, from before the move, must read back anyway.
+    #[test]
+    fn reading_a_lane_finds_a_log_not_yet_moved_into_logs() {
+        let f = Fixture::new("read-old-log");
+        f.agent("pi", "echo hello");
+        std::fs::create_dir_all(f.mux.lane_dir()).unwrap();
+        std::fs::write(f.mux.lane_dir().join("older.log"), "before the move\n").unwrap();
+
+        assert_eq!(f.mux.read("older", 10).unwrap().trim(), "before the move");
+    }
+
+    /// A log at both the old and the new path keeps both: the move never
+    /// replaces a transcript already in `logs/`.
+    #[test]
+    fn adopting_an_old_log_never_replaces_one_already_in_logs() {
+        let f = Fixture::new("adopt-keeps-both");
+        f.agent("pi", "echo hello");
+        f.lane("implement-demo", "pi", &["--session-id", "s1"]);
+        std::fs::create_dir_all(f.mux.logs_dir()).unwrap();
+        std::fs::write(f.mux.log_path("twice"), "newer\n").unwrap();
+        let old = f.mux.lane_dir().join("twice.log");
+        std::fs::write(&old, "older\n").unwrap();
+
+        f.mux.records();
+
+        assert_eq!(
+            std::fs::read_to_string(f.mux.log_path("twice")).unwrap(),
+            "newer\n"
+        );
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "older\n");
+    }
+
+    /// A log an older binary left at the top level of the lane folder is moved
+    /// into `logs/` the first time the folder is read, after which the lane
+    /// listing holds only records and the log is still readable by name.
+    #[test]
+    fn a_log_at_the_top_level_moves_into_logs_on_the_first_read() {
+        let f = Fixture::new("adopt-logs");
+        f.agent("pi", "echo hello");
+        f.lane("implement-demo", "pi", &["--session-id", "s1"]);
+        let old = f.mux.lane_dir().join("implement-old.log");
+        std::fs::write(&old, "from before the move\n").unwrap();
+
+        assert_eq!(f.mux.records().len(), 1);
+
+        assert!(!old.exists(), "the old log stayed at the top level");
+        assert_eq!(
+            std::fs::read_to_string(f.mux.log_path("implement-old")).unwrap(),
+            "from before the move\n"
+        );
+        assert_eq!(
+            f.mux.log_path("implement-old").parent().unwrap(),
+            f.mux.logs_dir()
+        );
     }
 
     /// Tearing a lane down has to take the agent with it, not just the shell

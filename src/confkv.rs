@@ -157,10 +157,21 @@ pub const REFERENCE: &[Reference] = &[
         key: "housekeeping.retention_days",
         values: "<days>",
         default: "30",
-        sentence: "How long system-prompts/, commands/, tracking/, headless/, scratch/ \
-                    and archive/ keep an entry before it is deleted; 0 keeps \
-                    everything forever. queue/, pending/, worktrees/ and plans/ are \
-                    never swept.",
+        sentence: "How long system-prompts/, commands/, tracking/, headless/ (its logs/ \
+                    included) and scratch/ keep an entry before it is deleted; 0 keeps \
+                    everything forever. archive/ is governed by \
+                    housekeeping.archive_retention_days instead. queue/, pending/, \
+                    worktrees/ and plans/ are never swept.",
+    },
+    Reference {
+        key: "housekeeping.archive_retention_days",
+        values: "<days>",
+        default: "0",
+        sentence: "How long a finished task keeps its file in archive/ before it is \
+                    deleted, along with its line in archive/index.jsonl; 0 keeps every \
+                    finished task forever. Each task is about 25 KB. A deleted task \
+                    can no longer be named in `depends_on`, and falls out of what \
+                    `spoolway eval` and `calibrate_window` read.",
     },
     Reference {
         key: "housekeeping.price_max_age_days",
@@ -1346,6 +1357,25 @@ mod tests {
         assert_eq!(ninety.housekeeping.retention_days, 90);
     }
 
+    /// Finished tasks are kept unless a person says otherwise, so the default
+    /// is the off value and only an explicit number turns the archive sweep on.
+    #[test]
+    fn archive_retention_days_defaults_to_off_and_round_trips() {
+        let config = Config::default();
+        assert_eq!(
+            get(&config, "housekeeping.archive_retention_days").unwrap(),
+            "0"
+        );
+
+        let ninety = set(&config, "housekeeping.archive_retention_days", "90").unwrap();
+        assert_eq!(ninety.housekeeping.archive_retention_days, 90);
+        assert_eq!(
+            get(&ninety, "housekeeping.archive_retention_days").unwrap(),
+            "90"
+        );
+        assert_eq!(ninety.housekeeping.retention_days, 30);
+    }
+
     #[test]
     fn price_table_age_round_trips_and_zero_means_quiet() {
         let config = Config::default();
@@ -1363,7 +1393,7 @@ mod tests {
     /// gone by their old names — `config list` (via [`entries`]) must name
     /// none of them, only the housekeeping keys they became.
     #[test]
-    fn the_old_one_key_tables_are_gone_and_housekeeping_names_all_four() {
+    fn the_old_one_key_tables_are_gone_and_housekeeping_names_every_key() {
         let config = Config::default();
         let keys: Vec<String> = entries(&config)
             .unwrap()
@@ -1396,6 +1426,7 @@ mod tests {
             "housekeeping.update_check",
             "housekeeping.calibrate_window",
             "housekeeping.retention_days",
+            "housekeeping.archive_retention_days",
             "housekeeping.price_max_age_days",
         ] {
             assert!(

@@ -274,7 +274,7 @@ at_the_gate() {
   must "a task for $task" "$SPOOLWAY" queue add --from "$LIVE/$task.md"
   if ! drive "$task" paused "$secs"; then
     bad "$task: the first real lane reached the gate (at \`$(stage_of "$task")\`)"
-    tail -20 "$SPOOLWAY_PROJECT_HOME/headless/$task · first.log" 2>/dev/null | sed 's/^/        /'
+    tail -20 "$SPOOLWAY_PROJECT_HOME/headless/logs/$task · first.log" 2>/dev/null | sed 's/^/        /'
     return 1
   fi
   ok "$task: a real lane ran, reported a pass, and the gate held it on \`paused\`"
@@ -376,7 +376,7 @@ if at_the_gate warm 600 check_shape; then
     carried warm 0 "a fresh real session is resumed"
   else
     bad "the second real lane runs and the task lands (at \`$(stage_of warm)\`)"
-    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/warm · second.log" 2>/dev/null | sed 's/^/        /'
+    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/warm · second.log" 2>/dev/null | sed 's/^/        /'
   fi
 fi
 
@@ -402,7 +402,7 @@ if at_the_gate thaw 600 stale; then
     carried thaw 0 "with no session_reuse_idle set, a two-hour-old real store still resumes"
   else
     bad "the second real lane runs and that task lands too (at \`$(stage_of thaw)\`)"
-    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/thaw · second.log" 2>/dev/null | sed 's/^/        /'
+    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/thaw · second.log" 2>/dev/null | sed 's/^/        /'
   fi
 fi
 
@@ -420,7 +420,7 @@ if at_the_gate chill 600 stale; then
       "session_reuse_idle — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/chill.md"
   else
     bad "the second real lane runs and that task lands too (at \`$(stage_of chill)\`)"
-    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/chill · second.log" 2>/dev/null | sed 's/^/        /'
+    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/chill · second.log" 2>/dev/null | sed 's/^/        /'
   fi
 fi
 

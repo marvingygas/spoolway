@@ -2320,16 +2320,18 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                          pending directory — queue `{group}` first."
                     );
                 }
-                let days = repo.config.housekeeping.retention_days;
+                let days = repo.config.housekeeping.archive_retention_days;
                 if days > 0 {
                     // `retain` deletes an `archive/` entry once it is this
-                    // old, and a dependency this refused could just as
-                    // easily be a typo — so this names the age rather than
-                    // claiming it, and still points at fixing the id.
+                    // old and only when a person has set
+                    // `archive_retention_days`, and a dependency this refused
+                    // could just as easily be a typo — so this names the age
+                    // rather than claiming it, and still points at fixing the
+                    // id.
                     bail!(
                         "`{id}` depends on `{dep}`, which is in neither the queue nor the \
                          archive — if `{dep}` finished more than {days} day(s) ago, \
-                         `housekeeping.retention_days` has already swept it out of the \
+                         `housekeeping.archive_retention_days` has already swept it out of the \
                          archive; otherwise check the id, or queue that task first"
                     );
                 }
@@ -8085,7 +8087,10 @@ mod tests {
     /// it, and this is the one caller that knows enough to say so.
     #[test]
     fn a_dependency_swept_out_of_the_archive_says_the_age_is_why() {
-        let (repo, _root_guard) = fixture("swept-dep");
+        let (mut repo, _root_guard) = fixture("swept-dep");
+        // Finished tasks are kept by default; the refusal only blames the
+        // sweep for an install that turned the archive sweep on.
+        repo.config.housekeeping.archive_retention_days = 30;
 
         // `login` finished a while ago: written straight into `archive/`,
         // the same shape a real `done` task lands in, rather than queued and
@@ -8117,14 +8122,15 @@ mod tests {
         let mut sessions = queued(&repo, "sessions");
         let err = check_dependencies_set(&repo, &mut [sessions.clone()]).unwrap_err();
         assert!(
-            err.to_string().contains("housekeeping.retention_days"),
+            err.to_string()
+                .contains("housekeeping.archive_retention_days"),
             "the age was not named: {err:#}"
         );
 
-        // `housekeeping.retention_days = 0` never sweeps, so the same
+        // `housekeeping.archive_retention_days = 0` never sweeps, so the same
         // missing dependency is reported the plain way instead.
         let mut off = crate::config::Config::default();
-        off.housekeeping.retention_days = 0;
+        off.housekeeping.archive_retention_days = 0;
         let repo_off = Repo {
             config: off,
             ..repo.clone()
@@ -8132,7 +8138,8 @@ mod tests {
         sessions.front.depends_on = vec!["login".into()];
         let err = check_dependencies_set(&repo_off, &mut [sessions]).unwrap_err();
         assert!(
-            !err.to_string().contains("housekeeping.retention_days"),
+            !err.to_string()
+                .contains("housekeeping.archive_retention_days"),
             "retention off must not be blamed: {err:#}"
         );
     }
