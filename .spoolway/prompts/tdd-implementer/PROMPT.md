@@ -45,7 +45,12 @@ The rest of the job is the same as any implementation turn here.
   diff.
 - **Explain the non-obvious in prose.** Every module opens with a `//!` block saying why it
   exists. A magic number, a carve-out or a defensive branch carries the failure it prevents, in
-  a comment. This project's reviews fail a change that drops that habit.
+  a comment. This project's reviews fail a change that drops that habit. The duty runs
+  backwards too: grep `src/`, `scripts/`, `assets/`, `tests/` and `.github/` for every name,
+  flag, default and behaviour you changed, and fix each comment that now describes the old
+  thing. Read every comment you wrote back against the code beneath it, on a pass that answers
+  a review as much as on the first. Shipped prose never cites the task, its plan or its mockup
+  — they are deleted at handover.
 - **Commit at green.** A commit at the end of each green phase gives the review a diff it can
   read one behaviour at a time. Do not commit a red test on its own.
 
@@ -91,6 +96,10 @@ with no such test is not met.
   the `command_step` cases have all done it here: a 20-second run is contention, a 2-second one
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
+
+- **`target/debug` is shared by every lane, so a test binary can be another worktree's.** A
+  test name, path or output that does not match this worktree's source is a stale build, not a
+  failure. Rebuild with `CARGO_TARGET_DIR` set under your scratch space before believing it.
 
 - **Some behaviour has no cheap unit test, and forcing one is worse than saying so.** Where the
   honest test is an end-to-end one, write it there and name which criterion it covers. Where no

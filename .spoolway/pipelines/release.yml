@@ -65,7 +65,7 @@ steps:
   - id: await-fix
     description: Wait for a person to merge the readiness repair, then rerun readiness.
     run: scripts/release-await-merge.sh --optional "release-fix/$SPOOLWAY_TASK"
-    timeout: 6h
+    timeout: 24h
     on_pass: ready
 
   - id: version
@@ -119,7 +119,7 @@ steps:
   - id: await-release
     description: Wait for a person to merge the release candidate, then publish it.
     run: scripts/release-await-merge.sh "release/$SPOOLWAY_TASK"
-    timeout: 6h
+    timeout: 24h
     on_pass: publish
 
   # A command step for the same reason `await-fix` and `await-release` are:
@@ -142,6 +142,11 @@ steps:
     on_pass: fixture
     on_fail: recover
 
+  # A pass goes back through `publish`, not straight to `released`, so the tag
+  # is only ever pushed by the script. It is idempotent: with the tag already
+  # on origin it re-checks the tag's own run and hands on; without it, it
+  # rehearses, tags and pushes. Before this, a tag push that failed for a
+  # reason outside the commit could only end in a revert or a person's push.
   - id: recover
     description: Recover a failed rehearsal, tag push or post-publication verification.
     agent: claude
@@ -149,7 +154,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     loop: 3
-    on_pass: released
+    on_pass: publish
     on_fail: version
 
   # The closing step of docs/releasing.md, which was prose nobody was gated on
@@ -180,5 +185,5 @@ steps:
   - id: await-fixture
     description: Wait for a person to merge the upgrade fixture so the release leaves main complete.
     run: scripts/release-await-merge.sh "fixture/$SPOOLWAY_TASK"
-    timeout: 6h
+    timeout: 24h
     on_pass: done

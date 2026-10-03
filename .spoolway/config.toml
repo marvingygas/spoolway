@@ -74,20 +74,20 @@ key_in_names = true
 [agents.claude]
 kind = "claude"
 concurrency = 3
-session_reuse_ctx = 50
+session_reuse_ctx = 40
 session_blocked_ctx = 0
 permission_mode = "auto"
 
 [agents.codex]
 kind = "codex"
 concurrency = 3
-session_reuse_ctx = 50
+session_reuse_ctx = 40
 session_blocked_ctx = 0
 permission_mode = "never"
 
 [agents.pi]
 kind = "pi"
-session_reuse_ctx = 50
+session_reuse_ctx = 40
 session_blocked_ctx = 0
 
 [models."Ornith-1.5-35B-A3B"]

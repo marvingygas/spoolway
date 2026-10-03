@@ -1,13 +1,15 @@
 ---
 name: spoolway-calibrate
-description: Review real spoolway runs to explain review failures, blocked sessions, loops, context pressure and spend. Compare lane-written task records with the prompts, pipelines and settings that produced them, then recommend and apply control-plane improvements. Use when someone wants to learn from finished work and tune how spoolway runs.
+description: Review real spoolway runs to explain review failures, blocked sessions, loops, context pressure and spend. Compare lane-written task records with the prompts, pipelines, settings, skills, scripts and code that produced them, then present every finding in one ranked table and apply the ones the person picks. Use when someone wants to learn from finished work and tune how spoolway runs.
 disable-model-invocation: true
 ---
 
 # spoolway-calibrate
 
-Use real runs to improve spoolway's prompts, pipelines, templates and config. Read both the
-numbers and what lanes wrote in the task files. Counts show scale and cost. The lane-written
+Use real runs to improve how work moves through spoolway: its prompts, pipelines, templates and
+config, and anything else the runs show is costing them — a script a command step runs, a skill,
+a flaky test, the project's own source. Read both the numbers and what lanes wrote in the task
+files. Counts show scale and cost. The lane-written
 record can show causes that numbers miss. A useful finding may be quantitative, qualitative,
 or both.
 
@@ -29,6 +31,9 @@ or both.
 - Read every skill named in `skills:` on a step those runs passed through. A skill lives in the
   project's own skills directory for the step's agent kind (`.claude/skills`, `.agents/skills` or
   `.pi/skills`), in the user's home, or in a plugin.
+- Read the scripts command steps run, and the code, tests and tooling lanes kept tripping over —
+  a gate that fails for reasons outside the diff, a test several tasks fixed separately, a
+  shared resource that hands one lane another's state.
 
 ## Form findings
 
@@ -37,29 +42,23 @@ lane-written record to explain why it happened. Look for repeated waste and for 
 in a single run. Check instructions, step ownership, routing, information passed between steps,
 gates, task shape, model fit, context pressure, timeouts and concurrency.
 
-Trace each finding from the task record to the prompt, the setting, or a skill a step named that
-caused or failed to prevent it. Separate evidence from inference. Cite the task and the relevant
+Trace each finding from the task record to whatever caused or failed to prevent it: a prompt, a
+setting, a skill, a script, a test or the source. Separate evidence from inference. Cite the task and the relevant
 lane-written text.
 Use counts and spend when they add meaning, but do not invent precision or drop a sound finding
 only because it has no useful number.
 
-Keep the report short. Present every grounded finding, ranked by likely value. For each one,
-state the problem, the evidence, the likely cause, and a recommended prompt, pipeline or skill
-fix. Say when the evidence is limited or another cause is still possible.
+Keep the report short. Present every grounded finding, ranked by likely value, wherever its fix
+lands. For each one, state the problem, the evidence, the likely cause, and the fix. Say when the
+evidence is limited or another cause is still possible.
 
-Put the findings in a table, one row each, ranked: the problem, the fix you propose, and the
-files that fix would touch with the size of each edit in lines. A step's skill may be the file
-named there, alongside a prompt, pipeline or template. Whoever reads this is deciding what to
-apply, and the cost of a change belongs beside the case for it. Keep the evidence — the task name
-and the lane's own words — in prose around the table, not inside a cell where it will not fit.
-
-| # | Finding | Proposed fix | Files & edit size |
-|---|---------|--------------|-------------------|
-| 1 | What is wrong, and what it cost | The exact edit, named | `path/to/file` (N lines)<br>**+N / -N** at :LL |
-
-Close with a totals line once the set is big enough that somebody wants one number for applying
-all of it. Where a finding has two honest fixes — a one-line carve-out and a new pipeline — put
-both in the cell with their two sizes, and say which you would take.
+Write the report from `assets/report.md`, beside this skill: copy its shape and fill it, keeping
+its headings and its table's columns. Every finding is one row of that table, with the fix you
+propose, the kind of file it lands in, and the files it touches with the size of each edit in
+lines. Whoever reads it is choosing which rows to apply, and the cost of a change belongs beside
+the case for it. The evidence — the task name and the lane's own words — goes in the prose above
+the table, never inside a cell. Where a finding has two honest fixes, put both in the cell with
+their two sizes, and say which you would take.
 
 Make prompt fixes exact and short. Add only what is needed to stop the issue from happening
 again, without repeating rules already present. Also check existing prompts for stale text.
@@ -69,19 +68,18 @@ the exact step, route or setting to change.
 
 ## Make improvements
 
-Calibration includes updating the control plane. Walk the useful findings with the person. Once
-they choose a change, edit the relevant prompt, pipeline, template or config directly. Use an
-override for a trial and a tracked edit for a change meant to stay. A chosen skill fix is a
-direct, tracked edit to that skill's own file instead: it sits outside the control plane, so it
-carries no override and no binary contract. Do not turn the change into a task or hand it to
-another skill unless the person asks.
+Change nothing until the person has picked rows from the table. Then apply exactly those, each
+with the file kind's own care:
 
-Before writing a control-plane file, read its matching contract from the spoolway binary — a
-skill file has none. After writing, run the relevant check, including `spoolway pipeline check`
-for prompt or pipeline changes. Report what changed, what evidence led to it, and how to undo an
-override.
+- A prompt, pipeline, template or config: read its matching contract from the spoolway binary
+  first. Use an override for a trial and a tracked edit for a change meant to stay. Run
+  `spoolway pipeline check` after a prompt or pipeline change.
+- A skill, script, test or source file: a direct, tracked edit, written the way the surrounding
+  code is written. Run the project's own checks for what you touched — its tests, its formatter,
+  the gate a command step runs.
 
-Stay inside spoolway's control plane. A skill a step named in the runs under review is in scope
-even though it lives outside `.spoolway/`; a skill no step names stays out of scope. Report
-product or source-code problems when the run reveals them, but do not change them as part of
-calibration. Do not edit archived task records.
+A fix too large to make well here — a refactor, a feature — says so in its size, and the person
+chooses between a direct edit now and a task to queue. Do not hand a change to another skill
+unless the person asks. Do not edit archived task records.
+
+Report what changed, what evidence led to it, and how to undo an override.

@@ -77,17 +77,56 @@ steps:
     effort: medium
     session: true
     loop: 2
-    on_pass: review
+    on_pass: review-spec
 
-  - id: review
-    description: Check the diff against the acceptance criteria and project standards.
+  # Two reviews, each with its own fixer. A spec review settles whether the
+  # change does what the task asked before a code review spends a pass on how
+  # it is built. One review with one fixer sent 71 of 88 tasks back in the
+  # 2026-10-02 calibration, and its fixer's `loop` was also spent by the first
+  # arrival, so a second failure already went to `blocked`. Each review takes
+  # four arrivals: its first, one after each of its fixer's two laps, and one
+  # when an unblocker sends its own fix back to be reviewed.
+  - id: review-spec
+    description: Check the change against the task — every acceptance criterion, the mockup, the non-goals.
     agent: claude
-    prompt: reviewer
+    prompt: spec-reviewer
     model: claude-opus-5-5
     effort: high
     session: true
+    loop: 4
+    on_pass: review-code
+    on_fail: fix-spec-review
+
+  - id: fix-spec-review
+    description: Clear every finding the spec review raised.
+    agent: claude
+    prompt: implementer
+    model: claude-sonnet-5-5
+    effort: medium
+    session: true
+    loop: 2
+    on_pass: review-spec
+
+  - id: review-code
+    description: "Review how the change is built: correctness, design, tests and the prose in the source."
+    agent: claude
+    prompt: code-reviewer
+    model: claude-opus-5-5
+    effort: high
+    session: true
+    loop: 4
     on_pass: e2e
-    on_fail: implement
+    on_fail: fix-code-review
+
+  - id: fix-code-review
+    description: Clear every finding the code review raised.
+    agent: claude
+    prompt: implementer
+    model: claude-sonnet-5-5
+    effort: medium
+    session: true
+    loop: 2
+    on_pass: review-code
 
   - id: e2e
     description: >-
