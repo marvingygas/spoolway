@@ -1311,3 +1311,48 @@ fn queue_list_json_in_an_unrelated_project_keeps_the_note_off_stdout() {
     serde_json::from_str::<serde_json::Value>(&out)
         .unwrap_or_else(|err| panic!("--json stdout must parse as JSON, got {err}:\n{out}"));
 }
+
+/// `init --new-id` is gone, and the message refusing it is a recipe: done
+/// exactly as it says, once, it mints a fresh id and a fresh home, and the
+/// old home stays where it was. Deleting the stamp alone is refused, because
+/// the old home's `project.toml` still records this checkout.
+#[test]
+fn the_removed_new_id_flag_names_every_step_to_a_fresh_home() {
+    let project = Project::new("new-id-recipe");
+    project.init("claude");
+    let root = project.as_ref().to_path_buf();
+    let read = |file: &str| {
+        std::fs::read_to_string(root.join(".git").join(file))
+            .expect("read the stamp")
+            .trim()
+            .to_string()
+    };
+    let (old_id, label) = (read("spoolway-id"), read("spoolway-label"));
+    let old_home = root
+        .join("home/.spoolway")
+        .join(format!("{label}-{old_id}"));
+
+    let refused = project.run_allowing_failure(&["init", "--new-id"]);
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    let said = stderr(&refused);
+    assert!(said.contains("delete `.git/spoolway-id`"), "{said}");
+    assert!(
+        said.contains("`~/.spoolway/<label>-<id>/project.toml`"),
+        "{said}"
+    );
+
+    std::fs::remove_file(root.join(".git/spoolway-id")).expect("delete the stamp");
+    std::fs::remove_file(old_home.join("project.toml")).expect("delete the record");
+    project.init("claude");
+
+    let new_id = read("spoolway-id");
+    assert_ne!(new_id, old_id, "a fresh id is minted");
+    assert!(
+        root.join("home/.spoolway")
+            .join(format!("{label}-{new_id}"))
+            .join("project.toml")
+            .is_file(),
+        "a fresh home records it"
+    );
+    assert!(old_home.is_dir(), "the old home stays on disk");
+}

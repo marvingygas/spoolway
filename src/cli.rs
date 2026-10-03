@@ -742,8 +742,9 @@ pub struct InitArgs {
     pub adopt: Option<Infallible>,
 
     #[arg(long, hide = true, num_args = 0..=1, default_missing_value = "", value_parser = Removed(
-        "`--new-id` is gone. To start a fresh home, delete `.git/spoolway-id` and run \
-        `spoolway init` again."
+        "`--new-id` is gone. To start a fresh home, delete `.git/spoolway-id` and the old \
+        home's `~/.spoolway/<label>-<id>/project.toml`, then run `spoolway init` again. The old \
+        home's tasks stay on disk."
     ))]
     pub new_id: Option<Infallible>,
 }
@@ -1846,6 +1847,10 @@ mod tests {
             (&["--adopt=ws/api"][..], "spoolway init --workspace <name>"),
             (&["--adopt"][..], "spoolway init --workspace <name>"),
             (&["--new-id"][..], "delete `.git/spoolway-id`"),
+            (
+                &["--new-id"][..],
+                "`~/.spoolway/<label>-<id>/project.toml`, then",
+            ),
         ] {
             let mut full = vec!["spoolway", "init"];
             full.extend_from_slice(argv);
