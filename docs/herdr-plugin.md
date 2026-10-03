@@ -45,7 +45,9 @@ config file at `~/.config/herdr/config.toml`, one per pane, each running the plu
 directly rather than `herdr plugin action invoke` — bare `spoolway` when that resolves on
 `PATH`, or the absolute `.../bin/spoolway` inside the plugin's own root otherwise.
 `spoolway herdr unbind` finds and removes exactly those blocks, by their `key =`/`command =`
-lines, and leaves everything else in the file untouched. Both commands reload the running herdr
+lines, and leaves everything else in the file untouched. It also removes the two blocks 0.6.0's
+`bind` wrote for commands that are now retired, `spoolway dispatch` and `spoolway queue`. `bind`
+replaces those two rather than skipping their keys as taken. Both commands reload the running herdr
 afterwards with `herdr server reload-config`.
 
 ## The rehearsal
