@@ -364,9 +364,9 @@ git push -q -u origin main
 say "spoolway init"
 # The skills come with it: `init` installs them for the provider it was given,
 # and with no terminal to ask it takes claude — which is what this scaffold
-# wanted anyway and used to ask for on its own line. `--yes` answers the
-# confirmation `init` opens with, which with nobody here would otherwise take
-# its own default — no — and scaffold nothing.
+# wanted anyway and used to ask for on its own line. `--yes` is what lets a
+# run with no terminal write; with nobody here, `init` would otherwise
+# scaffold nothing.
 spoolway init --yes >/dev/null
 # `init` just stamped a fresh id if `$DIR` had none — re-derive `$PROJECT_HOME`
 # and everything under it now that the id is certain to exist.

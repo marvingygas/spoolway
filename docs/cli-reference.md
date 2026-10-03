@@ -1013,12 +1013,14 @@ Scaffold a project's setup: config, pipelines, prompts, templates, hook scripts 
 a terminal it asks where the setup lives, for the agent, whether to install the example setup,
 the tracker and the project key. With no terminal it takes the defaults.
 
-Before any of that, it prints the project directory it resolved and waits for a yes — a path you
-do not recognise is the whole of the check, and it matters most when `init` was reached from a
-keybinding rather than typed in a directory you were looking at. Answering no writes nothing and
-exits 0. With no terminal to answer, that question takes its default, which is no; `init` then
-prints one line saying nothing was written and that `--yes` answers it, so a script, CI runner
-or agent passes `--yes`.
+Before any of that, it prints the project directory it resolved — a path you do not recognise
+is the whole of the check, and it matters most when `init` was reached from a keybinding rather
+than typed in a directory you were looking at. At a terminal the first menu or question that
+the flags leave open follows at once, and nothing is written until every question is answered,
+so Ctrl-C there writes nothing. A run whose flags answer every question writes right after
+printing the path. With no terminal to answer, `init` writes nothing unless `--yes` is given:
+it prints one line saying nothing was written and that `--yes` lets such a run write, so a
+script, CI runner or agent passes `--yes`.
 
 Run from a linked worktree, the directory it resolves to is the main checkout the worktree was
 cut from, never the worktree itself — `init` never writes into a worktree or binds it as its own
@@ -1097,7 +1099,7 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--no-examples` | | Answer `Install the example setup?` no without asking: write `config.toml` and empty `pipelines/`, `prompts/` and `templates/` folders instead |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |
-| `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
+| `--yes` | | Let a run with no terminal write. Without it, a run with nobody to answer writes nothing and exits 0. A run at a terminal does not need it |
 | `--force` | | Overwrite existing config, pipeline and prompt files. In a home-mode clone, names the other clones that share that config before rewriting it |
 
 Run again in a project that already has a config, it installs skills for the project's own

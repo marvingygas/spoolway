@@ -77,17 +77,19 @@ Run this inside a git repository:
 spoolway init
 ```
 
-It opens by printing the project directory it resolved and waiting for a yes — check the path
-is the one you meant, especially when `init` was reached from a keybinding rather than typed
-where you were standing. Answering no writes nothing and exits 0.
+It opens by printing the project directory it resolved — check the path is the one you meant,
+especially when `init` was reached from a keybinding rather than typed where you were standing.
+At a terminal it then goes straight to its first open question. Press Ctrl-C there to stop a
+wrong run: nothing is written until every question is answered. A run whose flags answer every
+question writes right after printing the path. Without a terminal, `init` writes
+nothing and exits 0 unless you pass `--yes`, so a script or CI runner passes `--yes`.
 
-Then, at a terminal, it asks more questions. Each one has a flag, and a given flag skips its
+At a terminal, it asks these questions. Each one has a flag, and a given flag skips its
 question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the checkout,
 `claude`, the example setup, and no tracker.
 
 | Question | Flag | Default |
 |---|---|---|
-| Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | Where should this project's setup live? | `--setup repo\|home` | `repo` |
 | The workspace menu (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
 | The coding agent you plan in | `--provider claude\|codex\|pi` | `claude` |

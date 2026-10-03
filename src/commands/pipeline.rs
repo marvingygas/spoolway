@@ -2123,8 +2123,8 @@ mod tests {
             init(
                 root,
                 &InitArgs {
-                    // The opening confirmation, answered — a default
-                    // `InitArgs` declines it and writes nothing. See
+                    // `--yes` lets this run with no terminal write — a
+                    // default `InitArgs` writes nothing. See
                     // `commands::init`'s own `confirmed` helper.
                     yes: true,
                     ..InitArgs::default()

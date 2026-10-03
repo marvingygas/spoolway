@@ -95,10 +95,9 @@ cd "$SCRATCH/proj"
 git init --quiet .
 printf '# scratch\n' >README.md
 git add -A && git commit --quiet -m scratch
-# `--yes` is load-bearing, not politeness. Without it `init` puts its opening
-# `Set up this project?` question to a terminal nobody is at, takes the
-# default of no, writes nothing at all — and still exits 0. v0.5.0's fixture
-# run got that far and failed on the next line instead, with `config set`
+# `--yes` is load-bearing, not politeness. It is what lets a run with no
+# terminal write: without it `init` writes nothing at all — and still exits
+# 0. v0.5.0's fixture run got that far and failed on the next line instead, with `config set`
 # reporting no project.
 spool init --yes >/dev/null || die "$tag's own binary could not init a scratch project"
 [ -f ".spoolway/config.toml" ] \
