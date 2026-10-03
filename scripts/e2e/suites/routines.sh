@@ -146,7 +146,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/archive/archived-reuse.md" archived-reuse "$BOD
   "run: r00000000000000ar" \
   "branch: task/archived-reuse" \
   "base: master" \
-  "cut_from: master" \
+  "starts_from: master" \
   "base_commit: 0000000000000000000000000000000000000000" \
   "worktree_path: /nonexistent/archived-reuse" \
   "workspace_id: wZZ" \

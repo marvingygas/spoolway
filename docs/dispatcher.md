@@ -103,7 +103,9 @@ profile. A model marked `exclusive` never runs beside a different exclusive mode
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
-from `base:`. A task file that does not parse is skipped and named under the board.
+from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
+exists nowhere, the task pauses instead, as
+[A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist) describes. A task file that does not parse is skipped and named under the board.
 
 ## What runs next
 
@@ -293,6 +295,7 @@ Other things put a task on `paused`:
 | Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
 | A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
 | A failing `[issue_tracking]` hook on `queued`, `started` or `done` | `hook_paused: queued`, `hook_paused: started` or `hook_paused: done` |
+| A queued task whose start branch exists nowhere | `missing_start_branch: <branch>` |
 
 `spoolway resume` on any of these puts the task back on its step, and so does `r` on the board.
 A task the stop popup parked also resumes on its own, back onto the step it was on, the next

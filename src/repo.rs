@@ -309,8 +309,18 @@ impl Repo {
     /// hang a queue submission or a dispatcher start on a password nobody
     /// is there to type.
     pub fn remote_branch_exists(&self, branch: &str) -> bool {
+        self.remote_branch_answer(branch).unwrap_or(false)
+    }
+
+    /// [`Repo::remote_branch_exists`] with the failure kept apart from the
+    /// answer: `Some` when `origin` really answered, `None` when it could not
+    /// be asked — offline, a refused credential, a timeout. A caller that
+    /// acts on "it does not exist" (pausing a task for a person) must not act
+    /// on that. A repository with no `origin` answers `Some(false)`: there is
+    /// nothing to ask.
+    pub fn remote_branch_answer(&self, branch: &str) -> Option<bool> {
         if !self.has_remote() {
-            return false;
+            return Some(false);
         }
         // The full ref, never the bare name: `ls-remote` reads a pattern as
         // a glob matched against the tail of a ref, starting at a `/`
@@ -323,7 +333,10 @@ impl Repo {
             .current_dir(&self.root)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output();
-        matches!(output, Ok(o) if o.status.success() && !o.stdout.is_empty())
+        match output {
+            Ok(o) if o.status.success() => Some(!o.stdout.is_empty()),
+            _ => None,
+        }
     }
 
     /// The checkout that has `branch` out, if any.

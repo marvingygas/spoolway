@@ -77,9 +77,12 @@ pub(crate) struct PendingTask {
     /// reads as unassigned rather than refusing to draw.
     pub(crate) pipeline: Option<String>,
     /// This task's own `base:` key, read the same way — what
-    /// [`super::queue::tasks_pane_lines`]'s `Base:` row draws for a root
-    /// task (one with no dependency of its own).
+    /// [`super::queue::tasks_pane_lines`]'s `Lands in:` row draws.
     pub(crate) base: Option<String>,
+    /// This task's own `starts_from:` key, read the same way — what
+    /// [`super::queue::tasks_pane_lines`]'s `Starts from:` row draws when
+    /// it is set. See [`front_starts_from`].
+    pub(crate) starts_from: Option<String>,
 }
 
 impl PendingTask {
@@ -211,6 +214,14 @@ fn created_time(path: &Path) -> Option<std::time::SystemTime> {
 pub(crate) fn front_str(yaml: &serde_norway::Value, key: &str) -> Option<String> {
     let text = yaml.as_mapping()?.get(key)?.as_str()?.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// A task's `starts_from:`, or the `cut_from:` a task file written before
+/// the field was renamed holds instead — the same alias
+/// [`crate::task::Frontmatter::starts_from`] reads, so a queued or archived
+/// task stamped under the old name still shows where it started.
+fn front_starts_from(yaml: &serde_norway::Value) -> Option<String> {
+    front_str(yaml, "starts_from").or_else(|| front_str(yaml, "cut_from"))
 }
 
 /// Every `.md` file directly inside `dir`, filename order — the listing
@@ -388,6 +399,7 @@ pub(crate) fn list_groups_in(
             depends_on: front_depends_on(&front),
             pipeline: front_pipeline_name(&front),
             base: front_str(&front, "base"),
+            starts_from: front_starts_from(&front),
             path,
             id,
             doc,
@@ -450,6 +462,7 @@ pub(crate) fn list_groups_in(
             depends_on: front_depends_on(&front),
             pipeline: front_pipeline_name(&front),
             base: front_str(&front, "base"),
+            starts_from: front_starts_from(&front),
             path,
             id,
             doc,
@@ -608,7 +621,8 @@ pub(crate) type ListFrontCache = HashMap<PathBuf, (String, Option<serde_norway::
 /// One task file's own front matter, parsed again only when its bytes have
 /// moved since the last call that read this same path — what
 /// [`list_groups_in`]'s pending and queue loops read a task's `group:`,
-/// `id:`, `title:`, `depends_on:`, `pipeline:` and `base:` off.
+/// `id:`, `title:`, `depends_on:`, `pipeline:`, `base:` and
+/// `starts_from:` off.
 ///
 /// [`list_groups_in`] calls this with the cache its own caller handed it,
 /// which is how [`list_groups`] shares one cache across every real reload
@@ -751,6 +765,7 @@ fn archive_tasks(dir: &Path) -> Result<Vec<ArchivedTask>> {
                     depends_on: entry.depends_on.clone(),
                     pipeline: Some(entry.pipeline.clone()).filter(|name| !name.is_empty()),
                     base: entry.base.as_deref().and_then(trimmed),
+                    starts_from: entry.starts_from.as_deref().and_then(trimmed),
                     path: dir.join(format!("{}.md", entry.id)),
                     id: entry.id.clone(),
                     doc: String::new(),
@@ -1492,7 +1507,11 @@ mod tests {
         let (repo, _root_guard) = crate::commands::testutil::fixture("pending-archive-index");
         let front = "group: g\npipeline: impl\nbase: plan/demo\n";
         archive(&repo, "a", front);
-        archive(&repo, "b", &format!("{front}depends_on: [a]\n"));
+        archive(
+            &repo,
+            "b",
+            &format!("{front}depends_on: [a]\ncut_from: task/a\n"),
+        );
         archive(&repo, "bare", "group: other\n");
         // Created a moment apart, the later one's file modified earliest, so
         // an order taken from modification or archiving time would differ.
@@ -1527,6 +1546,7 @@ mod tests {
                     front_depends_on(&front),
                     front_pipeline_name(&front),
                     front_str(&front, "base"),
+                    front_starts_from(&front),
                 ));
             }
             rows
@@ -1567,6 +1587,7 @@ mod tests {
                         t.depends_on,
                         t.pipeline,
                         t.base,
+                        t.starts_from,
                     ));
                 }
             }
@@ -1581,7 +1602,11 @@ mod tests {
         assert_eq!(unreadable.len(), 3);
         assert_eq!(rebuilds(), 0, "a screen read opened task files");
 
-        archive(&repo, "c", &format!("{front}depends_on: [b]\n"));
+        archive(
+            &repo,
+            "c",
+            &format!("{front}depends_on: [b]\nstarts_from: task/b\n"),
+        );
         assert_eq!(from_index(&repo), from_files());
         assert_eq!(rebuilds(), 0, "archiving one task opened another's file");
 

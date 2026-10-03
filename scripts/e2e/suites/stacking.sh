@@ -31,7 +31,7 @@
 #
 # Nothing in spoolway's git plumbing knows about pull requests or targets.
 # The chain is `depends_on`, written by the plan skill; the target is
-# `spoolway stack`'s own, read out of the task file's `cut_from` — the fact
+# `spoolway stack`'s own, read out of the task file's `starts_from` — the fact
 # of the cut `depends_on` produced, not `depends_on` itself. Swapping the
 # mock for one that opens flat pull requests should fail exactly the two
 # `stacked_on`/ancestry checks below and nothing else in the suite.
@@ -273,11 +273,11 @@ else
   ls "$SPOOLWAY_PROJECT_HOME/worktrees/task-top" 2>/dev/null | sed 's/^/        /'
 fi
 
-# `cut_from` is a fact about the cut, `base:` a fact about where the plan
+# `starts_from` is a fact about the cut, `base:` a fact about where the plan
 # lands, and they read differently apart the moment there is a dependency —
 # `queue show` prints both, so nobody has to infer the first from the second.
 says "\`queue show\` prints what it was actually cut from" \
-  "cut_from: task/base" "$SPOOLWAY" queue show top
+  "starts_from: task/base" "$SPOOLWAY" queue show top
 says "distinctly from \`base:\`, which still names the plan branch" \
   "base: plan/live" "$SPOOLWAY" queue show top
 
@@ -405,7 +405,7 @@ sed -i 's/^stage: blocked$/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/top.md"
 if drive_and_hold apex blocked 150; then ok "apex is cut once both its parents are in"
 else bad "apex is cut once both its parents are in (at \`$(stage_of apex)\`)"; fi
 
-says "and it was cut from the deeper parent" "cut_from: task/top" \
+says "and it was cut from the deeper parent" "starts_from: task/top" \
   "$SPOOLWAY" queue show apex
 
 if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-apex/work-base.txt" ] && [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-apex/work-top.txt" ]; then
@@ -538,7 +538,7 @@ must "its worktree" git worktree add -q "$WORKTREES_SIB/siba" task/siba
   git commit -qm "wip(siba): implement"
 )
 sib_task siba "group: sib-a" "depends_on: [dep]" \
-  "base: main" "cut_from: task/dep" "branch: task/siba"
+  "base: main" "starts_from: task/dep" "branch: task/siba"
 siba_out=$(cd "$WORKTREES_SIB/siba" && "$SPOOLWAY" stack siba 2>&1)
 if [ $? -eq 0 ]; then ok "the first sibling takes the slot above it, in a stack of its own"
 else bad "the first sibling takes the slot above it, in a stack of its own"; sed 's/^/        /' <<<"$siba_out"; fi
@@ -558,7 +558,7 @@ must "its worktree" git worktree add -q "$WORKTREES_SIB/sibb" task/sibb
   git commit -qm "wip(sibb): implement"
 )
 sib_task sibb "group: sib-b" "depends_on: [dep]" \
-  "base: main" "cut_from: task/dep" "branch: task/sibb"
+  "base: main" "starts_from: task/dep" "branch: task/sibb"
 sibb_out=$(cd "$WORKTREES_SIB/sibb" && "$SPOOLWAY" stack sibb 2>&1)
 sibb_status=$?
 if [ "$sibb_status" -eq 0 ]; then

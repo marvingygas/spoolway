@@ -159,7 +159,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/archive/old-run.md" old-run "$BODY" \
   "run: r00000000000000af" \
   "branch: task/old-run" \
   "base: master" \
-  "cut_from: master" \
+  "starts_from: master" \
   "base_commit: 0000000000000000000000000000000000000000" \
   "attempts: 2" \
   "pipeline:"

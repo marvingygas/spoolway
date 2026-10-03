@@ -58,14 +58,15 @@ as JSON.
 | `tracking` | the queue screen, or you | `off` is the only value accepted. Fires no `[issue_tracking]` hook event for this task and never holds it waiting on one. See [Issue tracking](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
-| `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. Once that branch is gone, it opens against the branch its own pull request merged into instead. See [`spoolway stack`](pipelines.md#spoolway-stack). A branch only `origin` has is cut from directly, with no local branch made for it. |
-| `base_commit` | the dispatcher | The commit `cut_from` pointed at when the worktree was cut. |
+| `starts_from` | the dispatcher, or you | The branch the worktree is cut from: the first dependency's branch, else `base`. Set it yourself before the task starts to cut from another branch. The pull request opens against it. Once that branch is gone, it opens against the branch its own pull request merged into instead. See [`spoolway stack`](pipelines.md#spoolway-stack). A branch only `origin` has is cut from directly, with no local branch made for it. See [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
+| `base_commit` | the dispatcher | The commit `starts_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the work happens on this machine. |
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
+| `missing_start_branch` | the dispatcher | The start branch that did not exist when the dispatcher paused the task. `spoolway resume` clears it. |
 | `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and paused the task. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. |
 | `parked_by_stop` | the dispatcher | Set when the dispatch tab's stop popup, `i`, is what parked this task. The next start resumes it on its own and clears the flag; `spoolway resume` and `r` clear it too. |
 | `skip`, `trial`, `trial_group` | the queue screen's `t` picker | Steps to pass without a lane, the trial this task is an arm of, and the source group a person tried. See [Trials](planning.md#trials). |
@@ -78,8 +79,7 @@ Keys not in this table are kept as they are, so a project can add its own metada
 `id`, `title` and `group` are required. The other keys marked "you" are optional. A task
 with an empty body is refused.
 
-Six keys are refused in a task: `stage`, `run`, `attempts`, `base_commit`, `cut_from` and
-`branch`.
+Five keys are refused in a task: `stage`, `run`, `attempts`, `base_commit` and `branch`.
 
 ```
 $ spoolway queue add --from mine.md
@@ -117,12 +117,11 @@ one group on another](#stacking-one-group-on-another).
 
 `spoolway dispatch` checks the same base rule again before it starts, since a task file can be
 edited by hand, or a base branch deleted, after the batch was sent. A dependent whose `base:` no
-longer agrees with its dependency's, or a cut task whose `base:` no longer names what `cut_from`
-recorded, refuses the whole start. A task still waiting to be cut whose base exists neither
-locally nor on `origin` refuses it too, checked locally first; a task already cut is not asked.
-See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). While a dispatcher is already
-running, the same three problems hold only the task they are found on, the way a task with no
-`base:` at all is held.
+longer agrees with its dependency's refuses the whole start. A task still waiting to be cut whose
+base exists neither locally nor on `origin` refuses it too, checked locally first; a task already
+cut is not asked. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). While a
+dispatcher is already running, the same two problems hold only the task they are found on, the way
+a task with no `base:` at all is held.
 
 When `depends_on` names more than one id, the first must be the one whose branch already
 contains the others. `queue add` reorders the list to put it first. A list with no such id is
@@ -179,7 +178,9 @@ a file of its own.
 ### Add it
 
 `spoolway queue add --from` is the only way into the queue. The queue screen uses it too. All
-tasks in one call are checked together and written all or none.
+tasks in one call are checked together and written all or none. The queue screen leaves out a
+task whose start branch does not exist and queues the rest. See [A start branch that does not
+exist](#a-start-branch-that-does-not-exist).
 
 ```
 spoolway queue add --from task.md               # one file
@@ -293,6 +294,48 @@ also pauses the task, on `queued`, on `started` or on `done`. `spoolway resume` 
 hook's failed run, so the hook fires again. A task paused on `queued` or `started` resumes back
 to `queued`. A task paused on `done` resumes straight back to `done` instead, since a plain
 resume only knows pipeline steps and `queued`.
+
+### A start branch that does not exist
+
+A dependent is cut from its first dependency's branch. GitHub deletes that branch when the
+dependency's pull request merges. A task not yet cut whose start branch exists nowhere is not
+started. The dispatcher moves it to `paused`, writes `missing_start_branch: <branch>` and prints
+one line:
+
+```
+! paused `cart-totals`: it starts from `task/gh-412-checkout`, which doesn't exist. Set `starts_from:` in the task front matter and resume.
+```
+
+This applies to a task that sets `starts_from:` or names a `depends_on`. The start branch is its
+own `starts_from:`, else its first dependency's branch once that dependency is `done`. A branch
+counts as existing when it is a local branch, a remote-tracking branch or a branch on `origin`.
+When `origin` cannot be reached, the task is not paused.
+
+Queueing checks the same branch. `spoolway queue add` refuses the whole batch when a task's start
+branch exists neither locally nor on `origin`. It prints, for each such task:
+
+```
+cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+```
+
+The queue screen queues the rest of the selection. It leaves the task and every selected task that
+depends on it in the pending directory, and lists them in its popup. Once `starts_from:` names a
+branch that exists, sending the task again queues it. A dependency that is not yet `done` has no
+branch to check, so a dependent of it is queued.
+
+To carry on, add `starts_from:` to the task file's front matter, naming a branch that exists.
+Then resume the task:
+
+```
+spoolway resume cart-totals
+```
+
+`resume`, and `r` on the board, clear `missing_start_branch:` and put the task back on `queued`.
+It prints `cart-totals: -> queued`. A pass that still finds no start branch pauses it again.
+
+Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolway queue unqueue
+--force` removes that value, so a task sent again is cut afresh. A `starts_from:` you set before
+the cut stays.
 
 ### The stop is yours to work in
 

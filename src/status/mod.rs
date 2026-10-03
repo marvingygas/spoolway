@@ -1530,6 +1530,16 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         for key in crate::commands::RESERVED_KEYS {
             map.remove(*key);
         }
+        // `starts_from:` is a person's to set, so it is not reserved, but once
+        // a worktree has been cut spoolway has stamped it with the branch it
+        // used and nothing tells that apart from a person's value. Carried
+        // back, the stamp would outrank a `base:` or `depends_on:` the person
+        // edits in the pending copy, and pause the task over a branch they
+        // never chose. An uncut task has neither `run` nor `base_commit`, so a
+        // value a person set before the cut survives.
+        if task.front.run.is_some() || task.front.base_commit.is_some() {
+            map.remove("starts_from");
+        }
     }
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
@@ -7799,6 +7809,30 @@ mod tests {
                 .contains("the newer draft"),
             "the pending draft is untouched"
         );
+    }
+
+    /// The `starts_from:` spoolway stamped at a cut does not travel back to
+    /// pending, where it would outrank what the person edits there; the one a
+    /// person set before any cut does.
+    #[test]
+    fn unqueue_drops_a_stamped_starts_from_but_keeps_one_set_before_the_cut() {
+        let (repo, _root_guard) = fixture("unqueue-starts-from");
+        add_to(&repo, "cut", &[], None, Some("cut"));
+        let mut cut = repo.task("cut").unwrap();
+        cut.front.starts_from = Some("task/old-run".into());
+        cut.front.base_commit = Some("abc123".into());
+        cut.save().unwrap();
+        add_to(&repo, "uncut", &[], None, Some("uncut"));
+        let mut uncut = repo.task("uncut").unwrap();
+        uncut.front.starts_from = Some("main".into());
+        uncut.save().unwrap();
+
+        unqueue_task(&repo, "cut").unwrap();
+        unqueue_task(&repo, "uncut").unwrap();
+
+        let read = |id: &str| std::fs::read_to_string(repo.pending_dir().join(format!("{id}.md")));
+        assert!(!read("cut").unwrap().contains("starts_from"));
+        assert!(read("uncut").unwrap().contains("starts_from: main"));
     }
 
     /// `R` resumes every paused task, but only after a panel naming the

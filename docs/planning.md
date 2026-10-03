@@ -108,7 +108,9 @@ pending directory. The right pane lists the highlighted group's tasks and what e
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left exactly where it is. A
-group with a validation error is refused and nothing is deleted. If a dispatcher already holds
+group with a validation error is refused and nothing is deleted. A task whose start branch does
+not exist is left in the pending directory with the tasks that depend on it, and the rest is
+queued. See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist). If a dispatcher already holds
 the queue, that dispatcher picks the tasks up on its next pass.
 
 `spoolway queue add --from <dir>` queues every task in a directory without the screen. A

@@ -5,9 +5,9 @@
 //! records that it happened, so every reader that wants the list of archived
 //! tasks has had to parse the whole folder — a cost that grows for as long as
 //! history is kept. The index is a copy of what those readers use: id, group,
-//! title, pipeline, branch, `depends_on`, worktree path, base, whether the
-//! task was a trial arm, issue slug and url, the file's creation time and the
-//! archived time.
+//! title, pipeline, branch, `depends_on`, worktree path, base, the branch it
+//! started from, whether the task was a trial arm, issue slug and url, the
+//! file's creation time and the archived time.
 //! The folder of `<id>.md` files stays exactly as it was and is still the
 //! source of truth; the index can always be rebuilt from it.
 //!
@@ -67,6 +67,11 @@ pub struct Entry {
     /// whose `base:` differs from its dependency's, archived or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// The branch the task started from, which the queue tab's `Starts
+    /// from:` row shows. Read through the `cut_from:` alias as well, so a
+    /// task archived before the rename keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_from: Option<String>,
     /// Whether the task was a trial arm. `queue add` leaves arms out of its
     /// one-chain check, archived ones included.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -100,6 +105,7 @@ impl Entry {
             depends_on: task.front.depends_on.clone(),
             worktree_path: task.front.worktree_path.clone(),
             base: task.front.base.clone(),
+            starts_from: task.front.starts_from.clone(),
             trial: task.front.trial.is_some(),
             slug: Some(task.extra_str("slug"))
                 .filter(|slug| !slug.is_empty())
@@ -140,6 +146,7 @@ impl Entry {
         task.front.depends_on = self.depends_on.clone();
         task.front.worktree_path = self.worktree_path.clone();
         task.front.base = self.base.clone();
+        task.front.starts_from = self.starts_from.clone();
         if self.trial {
             task.front.trial = Some(String::new());
         }

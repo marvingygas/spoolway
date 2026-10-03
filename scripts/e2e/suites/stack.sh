@@ -139,7 +139,7 @@ must "the worktree" git worktree add -q "$WORKTREES/top" task/top
   git commit -qm "wip(top): implement"
 )
 queue_task top "depends_on: [base]" \
-  "base: main" "cut_from: task/base" "branch: task/top"
+  "base: main" "starts_from: task/base" "branch: task/top"
 
 out_top=$(cd "$WORKTREES/top" && "$SPOOLWAY" stack top 2>&1)
 if [ $? -eq 0 ]; then ok "and for the task stacked on top of it"
@@ -298,7 +298,7 @@ must "a third branch, sitting exactly on top's tip" \
   git branch task/same task/top
 must "its worktree" git worktree add -q "$WORKTREES/same" task/same
 queue_task same "depends_on: [top]" \
-  "base: main" "cut_from: task/top" "branch: task/same"
+  "base: main" "starts_from: task/top" "branch: task/same"
 
 same_out=$(cd "$WORKTREES/same" && "$SPOOLWAY" stack same 2>&1)
 same_status=$?
@@ -392,7 +392,7 @@ fi
 
 # --------------------------------- a base that exists locally and nowhere else
 # `task/untracked` is a branch this worktree can see but the remote has never
-# heard of — the shape recorded as `cut_from` when a task is cut from a branch
+# heard of — the shape recorded as `starts_from` when a task is cut from a branch
 # that was never itself published, such as a worktree-cut branch. `remote_ref`
 # hands back the bare local name for it, and nothing publishes that name
 # before `gh pr create` is asked to open a pull request against it — for real
@@ -421,11 +421,11 @@ must "its worktree" git worktree add -q "$WORKTREES/leaf" task/leaf
 )
 # `untracked` is a bare branch, never queued as a task of its own, so it has
 # no pull request for `register_stack` to stack onto — `leaf` names no
-# `depends_on` here, since this case is about `cut_from` resolving a base to
+# `depends_on` here, since this case is about `starts_from` resolving a base to
 # publish, not about the stacking that a real dependency chain exercises
 # elsewhere in this suite.
 queue_task leaf \
-  "base: main" "cut_from: task/untracked" "branch: task/leaf"
+  "base: main" "starts_from: task/untracked" "branch: task/leaf"
 
 leaf_out=$(cd "$WORKTREES/leaf" && "$SPOOLWAY" stack leaf 2>&1)
 leaf_status=$?
@@ -488,7 +488,7 @@ run_with_fake_gh() {
 }
 
 # A pull request recorded for a branch this suite never creates at all — a
-# deleted `cut_from` never resolving is exactly what `gh pr list --head`
+# deleted `starts_from` never resolving is exactly what `gh pr list --head`
 # still has to answer about, so nothing here needs the branch to exist.
 # Numbered well past anything `pr create` will assign on its own below, so a
 # real pull request opened during this section can never collide with one of
@@ -517,18 +517,18 @@ must "its worktree" git worktree add -q "$WORKTREES/landed" task/landed
   git add -A
   git commit -qm "wip(landed): implement"
 )
-# `base:` equal to `cut_from` — the chain's first task, which has nowhere to
-# fall back to on its own once `cut_from` is gone (acceptance criterion 2).
+# `base:` equal to `starts_from` — the chain's first task, which has nowhere to
+# fall back to on its own once `starts_from` is gone (acceptance criterion 2).
 queue_task landed \
-  "base: task/gh412-checkout" "cut_from: task/gh412-checkout" "branch: task/landed"
+  "base: task/gh412-checkout" "starts_from: task/gh412-checkout" "branch: task/landed"
 
 landed_out=$(cd "$WORKTREES/landed" && run_with_fake_gh stack landed 2>&1)
 landed_status=$?
 if [ "$landed_status" -eq 0 ] \
    && grep -qF '`task/gh412-checkout` has landed — against `main`' <<<"$landed_out"; then
-  ok "a merged pull request for a deleted \`cut_from\` is followed to its own base"
+  ok "a merged pull request for a deleted \`starts_from\` is followed to its own base"
 else
-  bad "a merged pull request for a deleted \`cut_from\` is followed to its own base"
+  bad "a merged pull request for a deleted \`starts_from\` is followed to its own base"
   printf '        exit %s: %s\n' "$landed_status" "$landed_out"
 fi
 
@@ -551,7 +551,7 @@ must "its worktree" git worktree add -q "$WORKTREES/orphan" task/orphan
   git commit -qm "wip(orphan): implement"
 )
 queue_task orphan \
-  "base: task/gh413-checkout" "cut_from: task/gh413-checkout" "branch: task/orphan"
+  "base: task/gh413-checkout" "starts_from: task/gh413-checkout" "branch: task/orphan"
 
 orphan_out=$(cd "$WORKTREES/orphan" && run_with_fake_gh stack orphan 2>&1)
 orphan_status=$?
@@ -574,7 +574,7 @@ must "its worktree" git worktree add -q "$WORKTREES/nowhere" task/nowhere
   git commit -qm "wip(nowhere): implement"
 )
 queue_task nowhere \
-  "base: task/gh999-nothing" "cut_from: task/gh999-nothing" "branch: task/nowhere"
+  "base: task/gh999-nothing" "starts_from: task/gh999-nothing" "branch: task/nowhere"
 
 nowhere_out=$(cd "$WORKTREES/nowhere" && run_with_fake_gh stack nowhere 2>&1)
 nowhere_status=$?
@@ -588,7 +588,7 @@ else
 fi
 
 # ---- a distinct `base:` that still resolves: the older fallback, unchanged.
-# No pull request is recorded for this `cut_from`, so landing on `main` here
+# No pull request is recorded for this `starts_from`, so landing on `main` here
 # can only have come from `base:` itself, never from the forge lookup above.
 must "the branch, off main" git branch task/dependent main
 must "its worktree" git worktree add -q "$WORKTREES/dependent" task/dependent
@@ -600,7 +600,7 @@ must "its worktree" git worktree add -q "$WORKTREES/dependent" task/dependent
   git commit -qm "wip(dependent): implement"
 )
 queue_task dependent \
-  "base: main" "cut_from: task/gh414-deleted" "branch: task/dependent"
+  "base: main" "starts_from: task/gh414-deleted" "branch: task/dependent"
 
 dependent_out=$(cd "$WORKTREES/dependent" && run_with_fake_gh stack dependent 2>&1)
 dependent_status=$?
@@ -608,9 +608,9 @@ dependent_pr=$(grep -l '^head=task/dependent$' "$FAKEGH/prs"/[0-9]* 2>/dev/null 
 if [ "$dependent_status" -eq 0 ] \
    && grep -qF '`task/gh414-deleted` has landed — against `main`' <<<"$dependent_out" \
    && [ -n "$dependent_pr" ] && [ "$(sed -n 's/^base=//p' "$dependent_pr")" = main ]; then
-  ok "a deleted \`cut_from\` with its own \`base:\` still lands on that base"
+  ok "a deleted \`starts_from\` with its own \`base:\` still lands on that base"
 else
-  bad "a deleted \`cut_from\` with its own \`base:\` still lands on that base"
+  bad "a deleted \`starts_from\` with its own \`base:\` still lands on that base"
   printf '        exit %s: %s\n' "$dependent_status" "$dependent_out"
 fi
 
