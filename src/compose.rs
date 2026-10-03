@@ -138,20 +138,26 @@ pub(crate) fn system_prompt(
 /// this pane belongs to [`report_contract`], the form it qualifies, not
 /// here.
 ///
-/// The `paused`/`blocked` bullet is fixed for every lane, gated or not,
-/// because composing happens once at launch and this file is all a pane has
-/// once the person in it starts talking: a `p` park from the board, a gate,
-/// or a step landing on `blocked` with nobody staffed to clear it all leave
-/// the same lane sitting in the same pane, and none of the three is knowable
-/// ahead of the turn that might cause it. A stopped task belongs to whoever
-/// is looking at its pane — see `commands::task_edit` — so the one thing
-/// worth fixing in place, for every step, is that the lane's own remit stops
-/// being the ceiling on what it will do there.
+/// The person bullets are fixed for every lane, gated or not, because
+/// composing happens once at launch and this file is all a pane has once the
+/// person in it starts talking: a `p` park from the board, a gate, or a step
+/// landing on `blocked` with nobody staffed to clear it all leave the same
+/// lane sitting in the same pane, and none of the three is knowable ahead of
+/// the turn that might cause it. They hold in a running pane too, so a lane's
+/// remit is never the ceiling on what it does for a person. `task edit`
+/// refuses a task that is still moving (see `commands::task_edit`), which is
+/// why the bullet sends a running lane to `--handoff` instead.
 ///
-/// The bullet after it, closing `YOUR LANE`, is fixed the same way and for
-/// the same reason: what a person does about anything a lane leaves for
-/// them belongs on the board, never quoted here as a `spoolway` command a
-/// prompt could as easily just run and skip the person entirely.
+/// The route is read from `spoolway queue route`, never pasted here: every
+/// lane reads every line on every launch, and the pipeline is already one
+/// command away.
+///
+/// The last bullet is fixed the same way: what a person does about anything
+/// a lane leaves for them belongs on the board, not quoted as a `spoolway`
+/// command a prompt could as easily just run and skip the person entirely.
+/// The one command it does hand over, `resume --stage`, is refused inside a
+/// lane's pane (see `commands::refuse_from_lane`), so the bullet says to run
+/// it in the person's own shell.
 pub(crate) fn situating(
     pipeline: &Pipeline,
     step: &Step,
@@ -165,7 +171,8 @@ pub(crate) fn situating(
             task = task.id(),
         ),
         false => "- One step's worth of the job, and nothing enforces it. Your role, below, is \
-                   the whole of what is yours."
+                   the whole of what is yours. Steps split the work for a reason; do not do \
+                   another step's on your own."
             .to_string(),
     };
 
@@ -180,11 +187,17 @@ pub(crate) fn situating(
          - Nothing will wake you. Poll anything you wait on.\n\
          - Reporting is the only exit. A turn ended any other way stalls the task.\n\
          - Commit as you go. Anything uncommitted is committed for you when you report.\n\
-         - If this task is ever held on `paused` or `blocked` and a person carries on \
-         talking in this pane, do what they ask — including work your step would \
-         otherwise leave to another. Resuming it stays theirs: once their request is \
-         done, end by telling them to resume it on the board.\n\
-         - What a person has to do, name on the board, never as a `spoolway` command.\
+         - `spoolway queue route {task}` shows every step, what each does, and where \
+         resuming sends this task. Read it before you tell a person what happens next.\n\
+         - If a person talks to you in this pane, do what they ask, whichever step's work it \
+         is. Write every change they ask for into the task file, so later steps see it: \
+         `spoolway task edit {task} --section <heading> --from -` while the task is held on \
+         `paused` or `blocked`, `--handoff` while it runs.\n\
+         - Resuming a held task stays the person's: once their request is done, tell them \
+         where resuming sends it, and to resume it on the board.\n\
+         - What a person has to do, name on the board, never as a `spoolway` command. The one \
+         exception: to send the task to another step than resuming would, give them \
+         `spoolway resume {task} --stage <step>`, to run in their own shell.\
          {what_you_have}\
          {what_you_write_down}",
         step = step.id,

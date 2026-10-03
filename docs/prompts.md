@@ -91,24 +91,34 @@ sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to:
 
 ## What every lane is told about spoolway
 
-The system prompt opens with the step and the task, then seven rules:
+The system prompt opens with the step and the task, then nine rules:
 
 - One step's worth of the job, and nothing enforces it. The role below is the whole of what is
-  the lane's.
+  the lane's. Steps split the work for a reason; the lane does not do another step's on its own.
 - The lane's output is not read. Only what it writes to the task file reaches anyone. It asks
   nothing unless told to.
 - Nothing will wake you. Poll anything you wait on.
 - Reporting is the only exit. A turn ended any other way stalls the task.
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
-- If the task is ever held on `paused` or `blocked` and a person carries on talking in the
-  lane's pane, it does what they ask, including work its own step would otherwise leave to
-  another. Resuming it stays theirs: once their request is done, it tells them to resume it
-  on the board.
-- What a person has to do, name on the board, never as a `spoolway` command.
+- `spoolway queue route <task>` shows every step, what each does, and where resuming sends the
+  task. The lane reads it before it tells a person what happens next.
+- If a person talks to the lane in its pane, it does what they ask, whichever step's work it
+  is. It writes every change they ask for into the task file, so later steps see it:
+  `spoolway task edit <task> --section <heading> --from -` while the task is held on `paused`
+  or `blocked`, `--handoff` while it runs.
+- Resuming a held task stays the person's. Once their request is done, the lane tells them
+  where resuming sends it, and to resume it on the board.
+- What a person has to do, name on the board, never as a `spoolway` command. The one exception
+  is sending the task to another step than resuming would: the lane gives them
+  `spoolway resume <task> --stage <step>`, to run in their own shell.
 
-A `blocked` step gets a different first rule — its remit is the run, not one task's step — and a
-`READING THE RUN` block naming `spoolway queue list`, `spoolway queue show`, `spoolway lane`,
-`spoolway prompt show <name>` and `spoolway resume`.
+A `blocked` step gets a different first rule — its remit is the run, not one task's step, and it
+lacks the "another step's" sentence — and a `READING THE RUN` block naming
+`spoolway queue list`, `spoolway queue show`, `spoolway lane`, `spoolway prompt show <name>` and
+`spoolway resume`.
+
+A prompt does not repeat or contradict these rules. Compare a new prompt with
+`spoolway prompt contract` and cut any overlap.
 
 A report can leave a note for the next step with `--handoff "<text>"`. It is written into the
 task file's `## Handoff` and can be repeated.

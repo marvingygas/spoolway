@@ -298,8 +298,10 @@ resume only knows pipeline steps and `queued`.
 ### The stop is yours to work in
 
 The pane a stop left open is still there. Type into it, and the lane does what you ask,
-including work its own step would otherwise leave to another. Only resuming stays a person's:
-a lane cannot call `spoolway resume` on its own task.
+including work its own step would otherwise leave to another. The lane writes each change you
+ask for into the task, so later steps see it. It tells you where resuming sends the task, the
+same route `spoolway queue route <task>` shows. Only resuming stays a person's: a lane cannot
+call `spoolway resume` on its own task.
 
 `spoolway task edit` rewrites one section of the task while it sits on `paused` or
 `blocked`, under the same task lock `spoolway report` takes.
