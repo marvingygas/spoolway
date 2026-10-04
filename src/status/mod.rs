@@ -1295,9 +1295,10 @@ fn park_under_lock(repo: &Repo, id: &str, by_stop: bool) -> Result<()> {
     task.save()
 }
 
-/// Send one task through `spoolway resume`, exactly as a person typing the
-/// command would — this is the same [`crate::commands::report::resume`], not
-/// a second copy of what it does. Shared between `r` on one row and `R`
+/// Send one task through `spoolway resume`'s body, as a person typing the
+/// command would — [`crate::commands::resume_held_row`], not a second copy of
+/// it. It differs in one way: a task on a live step is restarted rather than
+/// refused, because a row holding an unanswered question stands on one. Shared between `r` on one row and `R`
 /// walking every paused row at once, so the two can never resume the same
 /// task two different ways. `pub(crate)`: `spoolway queue resume` is the
 /// third caller, for a person with no board in front of them at all — see
@@ -1338,6 +1339,9 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // going to. Whether the key does anything at all is decided before this
     // is reached, by the row's own `resumable` — see `resume_cursor`.
     //
+    // This goes through `resume_held_row`, not `spoolway resume`'s own entry:
+    // that one refuses a task on a live step, which is exactly this question row.
+    //
     // Nothing here has to say which of the three, if any, applies:
     // `commands::resume` reads `paused_at.is_some()` itself to route a gate
     // one way and everything else the other, so naming a step here would
@@ -1347,7 +1351,7 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // reads unset, and handles the question-pane case through
     // `resume_target`'s `last_report.step`: pressing `r` there restarts the
     // step the pane was never answered on.
-    crate::commands::resume(
+    crate::commands::resume_held_row(
         repo,
         pipelines,
         &crate::cli::ResumeArgs {
@@ -1355,9 +1359,7 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
             stage: None,
             message: None,
         },
-        None,
-    )?;
-    Ok(())
+    )
 }
 
 /// Whether `task` has not started at all — still sitting on the pipeline's

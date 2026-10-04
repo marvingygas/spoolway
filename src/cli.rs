@@ -1089,7 +1089,9 @@ pub enum QueueCommand {
 
     /// What the board's `r` key does to one row, from a script: send it past
     /// a gate it finished, or back onto the step a park or a block pulled it
-    /// off of — exactly `spoolway resume <id>` with no other flags.
+    /// off of — `spoolway resume <id>` with no other flags, except that a row
+    /// standing on a step with nothing running behind it is restarted too,
+    /// which `spoolway resume` refuses.
     Resume { task: String },
 
     /// What the board's `u`/`U` keys do to a row, from a script: carry a

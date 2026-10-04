@@ -284,7 +284,9 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task. Same as `spoolway resume <task>` with no other flags.
+Resume one task, the way the board's `r` key does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
+
+A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
 ### `spoolway queue unqueue <task>`
 
@@ -307,7 +309,7 @@ spoolway queue unqueue <task> --force
 A task that has started is refused, naming its stage, its checkout when it has one, and both
 routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
 checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
-refused too, naming that sibling. A task already sitting in pending under the same id
+refused too, with or without `--force`, naming that sibling. Unqueue the sibling first. A task already sitting in pending under the same id
 refuses the move and leaves the queue file in place.
 
 ### `spoolway group list`
@@ -592,6 +594,18 @@ hook's failed run, so it fires again; a task paused on `queued` or `started` res
 `queued`, and one paused on `done` resumes straight back to `done`. A task paused because its
 [start branch does not exist](tasks.md#a-start-branch-that-does-not-exist) resumes to `queued`
 with `missing_start_branch:` cleared.
+
+These tasks are refused, each with a message that names the reason and what to do:
+
+| Task | Refused | What the message says to do |
+|---|---|---|
+| On `queued` | Always | It starts on its own, so there is nothing to resume |
+| On a step an agent or command is running | Always | Run `spoolway queue pause <task>` to stop it where it is |
+| On `blocked`, resumed by its own lane | Always | Only a person resumes it |
+| Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
+| Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
+
+A task on a step the pipeline no longer defines, or on a step that ends the pipeline, can still be resumed.
 
 ```
 spoolway resume <task>
