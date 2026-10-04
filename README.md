@@ -19,13 +19,13 @@ Create YAML pipelines that mix agents and commands, cloud and local models. Plan
 however you like, then cut spoolway tasks and assign each to a suitable pipeline.
 Measurable, comparable, repeatable.
 
+<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
+
 Supported providers:
 
 - **`claude`**
 - **`codex`**
 - **`pi`**
-
-<img src="docs/assets/spoolway-demo.gif" alt="queueing two groups, starting the dispatcher, and walking the routines and jobs tabs" width="100%">
 
 ## Why
 
@@ -33,7 +33,7 @@ Running one coding agent is easy. Running five is hard: which one is done, which
 stuck, and which one is rewriting a file another one needs. The order lives in your head.
 
 spoolway keeps that order for you. Its dispatcher has no model inside, so scheduling does not
-add model costs or depend on an agent's judgment.
+add model costs or depend on an agent's judgment. 
 
 ## How does it work?
 
