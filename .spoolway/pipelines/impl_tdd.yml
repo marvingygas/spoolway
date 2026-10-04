@@ -60,6 +60,9 @@
 #                     false <default>    Every task runs it on arrival.
 # <<< spoolway <<<
 
+# 1.1: one review split into `review-spec` and `review-code`, each with its own fixer.
+version: 1.1
+
 description: >-
   Test first, one criterion at a time, for work whose criteria are already
   testable.

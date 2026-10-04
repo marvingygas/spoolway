@@ -60,6 +60,9 @@
 #                     false <default>    Every task runs it on arrival.
 # <<< spoolway <<<
 
+# 1.1: one review split into `review-spec` and `review-code`, each with its own fixer.
+version: 1.1
+
 description: >-
   One unit of feature work, start to finish: implement against the acceptance
   criteria, review the diff, carry the change into the end-to-end suites, then
