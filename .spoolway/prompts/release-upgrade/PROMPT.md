@@ -28,11 +28,13 @@ Two kinds of finding come out of this walk, and keeping them apart is the job:
    for every command, so no real project home, skill directory or git identity is touched. Set
    `SPOOLWAY_SKIP_VERSION_CHECK=1`. Record both binaries' `--version`.
 3. With the tag's binary, run `init --yes` in a fresh repository once for each provider the tag's
-   `init` offers, and commit the result, so every later change is a `git diff`.
+   `init` offers, and commit the result, so every later change is a `git diff`. Then run its
+   `herdr bind --yes`, with `herdr` stubbed on `PATH` the way `scripts/e2e/suites/herdr-bind.sh`
+   does, so the throwaway home holds the keys that release wrote outside the project.
 4. With `main`'s binary, walk the upgrade the way a person would, and keep each command's full
    output: an ordinary command first, to see the update notice; then `doctor`, `sync --dry-run`,
-   `sync`, `sync` a second time, `pipeline check` and `queue list`. After every write, read
-   `git diff` and the files under the throwaway home.
+   `sync`, `sync` a second time, `pipeline check`, `queue list`, `herdr bind --yes` and
+   `herdr unbind --yes`. After every write, read `git diff` and the files under the throwaway home.
 5. Hold the result against what shipped: `git diff <tag> <sha> -- assets/`. Every shipped file
    that changed is either brought forward by `sync`, reported by `sync` or `doctor`, or a
    migration item. Read each changed shipped prompt, skill and skeleton as its owner would; a

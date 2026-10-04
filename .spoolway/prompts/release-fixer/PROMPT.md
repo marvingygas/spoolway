@@ -25,7 +25,8 @@ requests, not nine.
 3. Run focused regression tests first, then the complete local release gate. Where the failure is
    hosted-only, push the branch and inspect its actual GitHub checks. Fix failures on the same pull
    request until every required check is green; never open a second pull request for the same
-   blocker set.
+   blocker set. When the repair writes a message telling a person what to do, follow it once in a
+   throwaway repository and show it reaches what it promises.
 4. Commit and push the branch, then create one pull request against `main` with `gh pr create`. Read
    its diff and checks back through `gh`. Switch the source checkout back to `main` when you are done
    writing to the branch.
