@@ -658,12 +658,12 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
                 // checkout is bound to — see the `home-mode-discovery` task's
                 // "doctor says which mode the project is in", which names both
                 // modes, not only home mode.
-                Ok((Some(_), _)) => Ok(Some(format!(
+                Ok((Some(_), ..)) => Ok(Some(format!(
                     "{} — home mode, setup read from {}",
                     repo.home.display(),
                     repo.setup_dir().display()
                 ))),
-                Ok((None, _)) => Ok(Some(match crate::repo::binding_at(&repo.home) {
+                Ok((None, ..)) => Ok(Some(match crate::repo::binding_at(&repo.home) {
                     Some((id, root)) => {
                         format!(
                             "{} — repo mode, id {id}, root {}",
@@ -704,6 +704,14 @@ fn config_checks(
     // takes a distinct path the moment it has one, before `Config::load` (or
     // any other home-backed call) — see `doctor_home_unavailable`.
     let mut findings = vec![registration_check(repo, None)];
+    // Moving the last checkout out of a workspace keeps its folder, so this
+    // is where a person learns what is left to remove by hand.
+    for workspace in crate::repo::workspaces_listing_no_checkout() {
+        findings.push(Finding::Note(format!(
+            "workspace {} lists no checkout — remove it by hand once nothing in it is needed",
+            crate::repo::shorten_home(&workspace),
+        )));
+    }
     findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(

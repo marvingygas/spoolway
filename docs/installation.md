@@ -180,8 +180,8 @@ repo-mode home's own folder does.
 
 With workspaces already there, `init` asks the workspace menu instead: "Select the spoolway
 workspace for this checkout. Pick an existing workspace or create a new one." A checkout no
-workspace lists yet sees every workspace, those of this repository marked `same repository` and
-listed first, and `Create a new workspace` last as the default, so pressing Enter without
+workspace lists yet sees the workspaces it may join, those of this repository marked `same
+repository` and listed first, and `Create a new workspace` last as the default, so pressing Enter without
 reading the menu starts a fresh workspace. A checkout a workspace already lists sees that
 workspace first, marked `current` and still the default, then every other workspace of this
 repository, then `Create a new workspace`.
@@ -214,8 +214,9 @@ the missing path.
 Picking another workspace in the menu, or passing `--workspace <other>`, moves a listed checkout
 there, carrying its queue, archive and worktrees along. The move is refused, with nothing
 written, while any of its tasks holds a worktree, naming each one, and for a workspace of another
-repository, with no flag to force it. A workspace the move leaves with no checkout listed is
-removed, and the move prints that it was removed.
+repository, with no flag to force it. Joining a workspace of another repository is refused the
+same way. A workspace the move leaves with no checkout listed is kept, and the move prints its
+folder and says to remove it by hand.
 
 ```
 $ spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes
@@ -244,7 +245,9 @@ $ spoolway init --workspace other-h4m1xs --provider claude --yes
 ...
 Skills already installed, in ~/.claude/skills.
 Moved to workspace other-h4m1xs.
-Removed workspace api-k7f2q9. It held no other checkout.
+Workspace api-k7f2q9 lists no checkout now. Its folder is kept:
+  ~/.spoolway/api-k7f2q9
+Remove it yourself once nothing in it is needed.
 ```
 
 ### The pipeline skills

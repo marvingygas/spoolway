@@ -1111,8 +1111,8 @@ default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in t
 checkout or its `.git`. With no workspace yet, home mode creates one. With workspaces already
 there, `init` asks the workspace menu instead: `Select the spoolway workspace for this
 checkout. Pick an existing workspace or create a new one.` A checkout no workspace lists yet
-sees every workspace, those of this repository marked `same repository` and listed first, and
-`Create a new workspace` last as the default, so pressing Enter without reading the menu starts
+sees the workspaces it may join, those of this repository marked `same repository` and listed
+first, and `Create a new workspace` last as the default, so pressing Enter without reading the menu starts
 a fresh workspace. A checkout a workspace already lists sees that workspace first, marked
 `current` and still the default, then every other workspace of this repository, then `Create a
 new workspace`. `--workspace <name>` or `--workspace new` answers the menu without asking: a
@@ -1147,9 +1147,16 @@ refusal names the command to run instead.
 Picking another workspace in the menu, or passing `--workspace <other>`, moves a listed
 checkout there, carrying its queue, archive and worktrees along. The move is refused, with
 nothing written, while any of its tasks holds a worktree, naming each one, and for a workspace
-of another repository, with no flag to force it. A workspace the move leaves with no checkout
-listed is removed, together with its entry in the usage registry, and the move prints that it
-was removed.
+of another repository, with no flag to force it. Joining a workspace of another repository is
+refused the same way. A workspace the move leaves with no checkout listed is kept. The move
+prints the folder's path and says to remove it by hand:
+
+```
+Moved to workspace other-h4m1xs.
+Workspace api-k7f2q9 lists no checkout now. Its folder is kept:
+  ~/.spoolway/api-k7f2q9
+Remove it yourself once nothing in it is needed.
+```
 
 Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
 the missing path. `init` on a checkout a workspace already lists refuses the same way when that
@@ -1314,7 +1321,9 @@ $ spoolway doctor
 
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
 `--json` prints the findings as one object. The `bound to its home` check, under `-v`, names
-whether the project runs in repo mode or home mode. See [Home mode](concepts.md#home-mode).
+whether the project runs in repo mode or home mode. A note names each workspace under
+`~/.spoolway/` that lists no checkout, to be removed by hand. See
+[Home mode](concepts.md#home-mode).
 
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it

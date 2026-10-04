@@ -879,7 +879,6 @@ fn recorded_or_parent(common: &Path) -> Option<PathBuf> {
 /// `workspace_clone_checked` is what reports it.
 fn listed_checkout_of(common: &Path) -> Option<PathBuf> {
     all_workspaces()
-        .unwrap_or_default()
         .0
         .into_iter()
         .flat_map(|(_, toml)| toml.clones)
@@ -1296,7 +1295,16 @@ fn read_stamp(root: &Path) -> Result<Stamp> {
 /// Every broken file it reports back is noted, once, before this falls
 /// through to treating `root` as unlisted.
 pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
-    let (clone, broken) = workspace_clone_lenient(root)?;
+    let (clone, broken, skipped) = workspace_clone_lenient(root)?;
+    for record_path in &skipped {
+        let line = format!(
+            "  note  {} names a dispatcher that is not one plain name; skipped",
+            record_path.display(),
+        );
+        if crate::overrides::first_time_this_process(&line) {
+            eprintln!("{line}");
+        }
+    }
     for record_path in &broken {
         // `bind` runs twice on an ordinary command — once through
         // `gate::notify`'s own lenient discovery, once through the command's
@@ -1664,13 +1672,13 @@ type Workspaces = (Vec<(PathBuf, WorkspaceToml)>, Vec<PathBuf>);
 /// anyway, or was never looking for one in the first place, is never
 /// stopped by it.
 ///
-/// A `dispatcher` field that is not one plain name is a different kind of
-/// problem — the file read and parsed fine, it just holds a value nothing
-/// should ever trust (see the bail below) — so that still refuses outright
-/// rather than joining `broken`.
-fn all_workspaces() -> Result<Workspaces> {
+/// A `dispatcher` field that is not one plain name is not `broken`: the file
+/// parsed, so it stays in the list, and [`workspace_clone_lenient`] refuses
+/// exactly the checkouts that file lists. Refusing here instead stopped every
+/// command on the machine, `init` in a brand-new repository included.
+fn all_workspaces() -> Workspaces {
     let Ok(entries) = std::fs::read_dir(crate::mux::state_root()) else {
-        return Ok((Vec::new(), Vec::new()));
+        return (Vec::new(), Vec::new());
     };
     let mut found = Vec::new();
     let mut broken = Vec::new();
@@ -1702,30 +1710,41 @@ fn all_workspaces() -> Result<Workspaces> {
                 // checked when `spoolway init` writes it, because
                 // every writer already mints or validates it, but nothing
                 // has ever stopped a hand edit from putting a path
-                // separator or a `..` there instead. Checked here, once,
-                // where every reader of the file would otherwise trust it.
-                if let Some(bad) = workspace
-                    .clones
-                    .iter()
-                    .find(|clone| !crate::tracking::is_bare_filename(&clone.dispatcher))
-                {
-                    bail!(
-                        "{} names dispatcher {:?} for {} — a dispatcher must be one plain name, \
-                         with no path separator and no `..`, since it is joined straight onto \
-                         the workspace's own folder\n  fix it by hand, keeping whichever of \
-                         `dispatchers/*` actually holds that clone's queue and worktrees",
-                        record_path.display(),
-                        bad.dispatcher,
-                        bad.root.display(),
-                    );
-                }
+                // separator or a `..` there instead. Checked where a
+                // checkout is bound, by `workspace_clone_lenient`, and
+                // before `join_workspace` and `move_clone` write into a
+                // file, through `refuse_bad_dispatcher`.
                 found.push((path, workspace));
             }
             Err(_) if looks_like_workspace || has_clones_key => broken.push(record_path),
             Err(_) => continue,
         }
     }
-    Ok((found, broken))
+    (found, broken)
+}
+
+/// The first entry of `workspace` whose `dispatcher` is not one plain name.
+fn bad_dispatcher(workspace: &WorkspaceToml) -> Option<&CloneEntry> {
+    workspace
+        .clones
+        .iter()
+        .find(|clone| !crate::tracking::is_bare_filename(&clone.dispatcher))
+}
+
+/// The refusal for a workspace file whose entry names a `dispatcher` that is
+/// not one plain name. A dispatcher is joined straight onto the workspace
+/// folder, so nothing in such a file can be trusted: its own checkouts are
+/// refused with this, and nothing may be joined or moved into it.
+fn bad_dispatcher_error(record_path: &Path, bad: &CloneEntry) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} names dispatcher {:?} for {} — a dispatcher must be one plain name, with no path \
+         separator and no `..`, since it is joined straight onto the workspace's own \
+         folder\n  fix it by hand, keeping whichever of `dispatchers/*` actually holds that \
+         clone's queue and worktrees",
+        record_path.display(),
+        bad.dispatcher,
+        bad.root.display(),
+    )
 }
 
 /// [`WorkspaceClone`] for `root`, if some *readable* workspace's
@@ -1733,14 +1752,19 @@ fn all_workspaces() -> Result<Workspaces> {
 /// file [`all_workspaces`] could not read or parse — never a hard failure
 /// on its own, since a checkout settled some other way (its own tracked
 /// `.spoolway/`, or a match found here regardless) has no reason to care
-/// that an unrelated workspace file is broken. Still a hard failure when
-/// `root` itself is listed more than once among the readable workspaces —
-/// in one workspace's `clones`, or across several. That case is collected
-/// across every match rather than stopping at the first, exactly because
-/// the bug it guards against is picking one of several entries at random:
-/// `read_dir`'s order is unspecified, so a silent `find_map` would bind to
-/// whichever the filesystem happened to return first, differently from one
-/// run to the next.
+/// that an unrelated workspace file is broken. The third element lists the
+/// readable files skipped for a `dispatcher` that is not one plain name; a
+/// file that lists `root` itself is refused instead, naming the value and the
+/// entry.
+///
+/// Still a hard failure when `root` itself is listed more than once among the
+/// readable workspaces — in one workspace's `clones`, or across several — or
+/// when its entry names a dispatcher folder that another entry of the same
+/// file names too. The first case is collected across every match rather than
+/// stopping at the first, exactly because the bug it guards against is
+/// picking one of several entries at random: `read_dir`'s order is
+/// unspecified, so a silent `find_map` would bind to whichever the filesystem
+/// happened to return first, differently from one run to the next.
 ///
 /// [`bind`] and `doctor`'s own `registration_check` are the two callers
 /// that need exactly this: a match if there is one, the broken list to note
@@ -1751,12 +1775,44 @@ fn all_workspaces() -> Result<Workspaces> {
 /// [`Repo::root`] settled that question before either of them runs.
 pub(crate) fn workspace_clone_lenient(
     root: &Path,
-) -> Result<(Option<WorkspaceClone>, Vec<PathBuf>)> {
-    let (workspaces, broken) = all_workspaces()?;
+) -> Result<(Option<WorkspaceClone>, Vec<PathBuf>, Vec<PathBuf>)> {
+    let (workspaces, broken) = all_workspaces();
+    let mut skipped = Vec::new();
     let mut matches: Vec<(PathBuf, WorkspaceClone)> = Vec::new();
     for (workspace, toml) in &workspaces {
+        // A dispatcher that is not one plain name is joined straight onto
+        // the workspace folder, so nothing in the file can be trusted. Its
+        // own checkouts are refused, naming the entry. Every other
+        // checkout skips the file and only notes it, so one hand edit does
+        // not stop the machine.
+        if let Some(bad) = bad_dispatcher(toml) {
+            if toml.clones.iter().any(|clone| clone.root == root) {
+                return Err(bad_dispatcher_error(&workspace.join(BINDING_FILE), bad));
+            }
+            skipped.push(workspace.join(BINDING_FILE));
+            continue;
+        }
         for clone in &toml.clones {
             if clone.root == root {
+                // Two entries naming one dispatcher folder would share its
+                // queue, archive and worktrees. Nothing writes that, but a
+                // hand edit can, and `doctor` could not tell. Only the
+                // checkouts of the file that holds it are refused.
+                if let Some(other) = toml
+                    .clones
+                    .iter()
+                    .find(|other| other.root != clone.root && other.dispatcher == clone.dispatcher)
+                {
+                    bail!(
+                        "{} lists dispatcher {} for both {} and {}\n  every entry needs a \
+                         folder of its own — change one by hand, keeping whichever \
+                         `dispatchers/*` folder holds that checkout's queue and worktrees",
+                        workspace.join(BINDING_FILE).display(),
+                        clone.dispatcher,
+                        clone.root.display(),
+                        other.root.display(),
+                    );
+                }
                 matches.push((
                     workspace.join(BINDING_FILE),
                     WorkspaceClone {
@@ -1783,7 +1839,11 @@ pub(crate) fn workspace_clone_lenient(
                 .join("\n"),
         );
     }
-    Ok((matches.into_iter().next().map(|(_, clone)| clone), broken))
+    Ok((
+        matches.into_iter().next().map(|(_, clone)| clone),
+        broken,
+        skipped,
+    ))
 }
 
 /// [`workspace_clone_lenient`], refusing outright when `root` matches no
@@ -1796,7 +1856,7 @@ pub(crate) fn workspace_clone_lenient(
 /// falls through to converting the clone it could not read about to repo
 /// mode instead.
 pub(crate) fn workspace_clone_checked(root: &Path) -> Result<Option<WorkspaceClone>> {
-    let (found, broken) = workspace_clone_lenient(root)?;
+    let (found, broken, _) = workspace_clone_lenient(root)?;
     if found.is_none()
         && let Some(first) = broken.first()
     {
@@ -1882,7 +1942,6 @@ fn stale_workspace_clones(start: &Path) -> Vec<String> {
         return Vec::new();
     };
     all_workspaces()
-        .unwrap_or_default()
         .0
         .into_iter()
         .filter_map(|(workspace, toml)| {
@@ -2139,20 +2198,28 @@ impl WorkspaceSummary {
             None => self.root_commits.is_empty(),
         }
     }
+
+    /// Whether `root` may join this workspace. Only a checkout that can be
+    /// shown to belong to another repository is refused: a workspace
+    /// recording no root commit is open to everyone, so one whose last
+    /// checkout left (folder and setup kept) takes a checkout of its own
+    /// repository back, and a checkout with no root commit of its own — no
+    /// commits yet, or a shallow clone — has nothing to compare, so it is
+    /// not guessed to be a stranger. [`Self::may_move_into`] is stricter
+    /// because a move carries a queue along.
+    pub(crate) fn may_join(&self, root: &Path, mine: Option<&str>) -> bool {
+        self.root_commits.is_empty() || mine.is_none() || self.holds_repository_of(root, mine)
+    }
 }
 
 /// Every workspace under `~/.spoolway/`, sorted by name so the menu reads
 /// the same on every run — [`all_workspaces`] follows `read_dir`'s order,
 /// which is whatever the filesystem happens to hand back.
 ///
-/// Lenient like [`workspace_clone`]: this only ever runs after
-/// `Placement::choose`'s own fallible scan already found nothing broken, so
-/// a failure here would be a race with something else on the machine, not
-/// news — degrading to "no workspaces" is no worse than the menu this feeds
-/// already being empty.
+/// Lists only workspaces whose `project.toml` parsed, so one that cannot be
+/// read is absent from the menu rather than an error in it.
 pub(crate) fn workspaces() -> Vec<WorkspaceSummary> {
     let mut found: Vec<WorkspaceSummary> = all_workspaces()
-        .unwrap_or_default()
         .0
         .into_iter()
         .filter_map(|(path, toml)| {
@@ -2207,13 +2274,11 @@ pub(crate) struct WorkspacePlace {
 
 /// Every workspace under `~/.spoolway/`, readable or not, sorted by name —
 /// [`workspaces`]'s own `project.toml`-must-parse twin for `config path`.
-/// Lenient the same way: a workspace folder [`all_workspaces`] itself could
-/// not even list (its `dispatcher` field holding a path instead of a plain
-/// name, say) degrades to an empty list rather than failing the whole
-/// command, since that is a different, rarer corruption than the one
-/// `error` here exists to report.
+/// A workspace whose file parsed gets an ordinary row even when a
+/// `dispatcher` in it is not one plain name; that is refused where its
+/// checkouts are bound, not here.
 pub(crate) fn workspace_places() -> Vec<WorkspacePlace> {
-    let (found, broken) = all_workspaces().unwrap_or_default();
+    let (found, broken) = all_workspaces();
     let mut places: Vec<WorkspacePlace> = found
         .into_iter()
         .filter_map(|(path, toml)| {
@@ -2360,11 +2425,29 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
             record_path.display()
         )
     })?;
+    // Before anything is written, and before an entry is handed back: this
+    // checkout would otherwise be listed in a file that then refuses every
+    // command in it.
+    if let Some(bad) = bad_dispatcher(&parsed) {
+        return Err(bad_dispatcher_error(&record_path, bad));
+    }
     if let Some(existing) = parsed.clones.iter().find(|clone| clone.root == root) {
         return Ok(WorkspaceClone {
             workspace,
             dispatcher: existing.dispatcher.clone(),
         });
+    }
+    // A workspace of another repository is refused the way a move into it is
+    // (`check_move`): the join would hand this checkout a queue folder beside
+    // that repository's and let it read that repository's setup. One that
+    // lists nobody has no repository to compare against, so it stays open.
+    if let Some(target) = workspaces().into_iter().find(|w| w.name == name)
+        && !target.may_join(root, root_commit(root).as_deref())
+    {
+        bail!(
+            "workspace {name} holds another repository, so this checkout cannot join it.\n  \
+             Pick a workspace of this repository, or start a new one with `--workspace new`."
+        );
     }
     // `create_workspace` writes `config/` before `project.toml`, so a
     // workspace without one has lost it since — deleted by hand, or left by
@@ -2477,10 +2560,11 @@ pub(crate) fn tasks_holding_worktrees(clone: &WorkspaceClone) -> Result<Vec<Stri
 }
 
 /// What [`move_checkout`] did: where the checkout is listed now, and the
-/// folder name of the workspace the move emptied and removed, if it did.
+/// folder of the workspace the move left listing no checkout, if it did. That
+/// folder is kept.
 pub(crate) struct Moved {
     pub(crate) clone: WorkspaceClone,
-    pub(crate) removed: Option<String>,
+    pub(crate) emptied: Option<PathBuf>,
 }
 
 /// Move `root` from the workspace that lists it into the workspace named
@@ -2498,10 +2582,9 @@ pub(crate) struct Moved {
 /// a worktree, nothing records the folder's path, so renaming it is safe.
 /// The live-work checks and the folder rename are [`move_clone`]'s.
 ///
-/// The workspace the move leaves with no clone listed is removed, with its
-/// `config/` and its entry in the usage registry's `projects.json`: nothing
-/// can reach that setup any more, and it would otherwise sit in every later
-/// workspace menu as a workspace with no checkouts.
+/// The workspace the move leaves with no clone listed is kept, and answered
+/// in [`Moved::emptied`]. It may still hold queues, archives and the only
+/// copy of a setup, so removing it is left to the person.
 pub(crate) fn move_checkout(root: &Path, to: Option<&str>) -> Result<Moved> {
     let from = check_move(root, to)?;
     let (to_name, fresh) = match to {
@@ -2555,8 +2638,8 @@ pub(crate) fn move_checkout(root: &Path, to: Option<&str>) -> Result<Moved> {
             return Err(err);
         }
     };
-    let removed = remove_if_empty(&from.workspace)?;
-    Ok(Moved { clone, removed })
+    let emptied = left_empty(&from.workspace)?;
+    Ok(Moved { clone, emptied })
 }
 
 /// Every refusal [`move_checkout`] makes before it writes anything, and the
@@ -2598,6 +2681,14 @@ pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone
              Run `spoolway init` and pick a workspace of this repository, or create a new one."
         );
     }
+    let record = crate::mux::state_root().join(to).join(BINDING_FILE);
+    if let Some(parsed) = std::fs::read_to_string(&record)
+        .ok()
+        .and_then(|raw| toml::from_str::<WorkspaceToml>(&raw).ok())
+        && let Some(bad) = bad_dispatcher(&parsed)
+    {
+        return Err(bad_dispatcher_error(&record, bad));
+    }
     let config = crate::mux::state_root().join(to).join("config");
     if !config.is_dir() {
         bail!(
@@ -2618,35 +2709,40 @@ fn and_list(items: &[String]) -> String {
     }
 }
 
-/// Remove `workspace` when its `project.toml` lists no clone, together with
-/// every usage-registry entry whose home sits inside it, and answer its
-/// folder name. The clone list is read under the workspace's own lock, so a
-/// join that landed first keeps the workspace. The lock is let go before the
-/// folder goes, because it lives inside it and Windows refuses to delete an
-/// open file.
-fn remove_if_empty(workspace: &Path) -> Result<Option<String>> {
-    let empty = {
-        let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(workspace))?;
-        let record = workspace.join(BINDING_FILE);
-        let raw = std::fs::read_to_string(&record)
-            .with_context(|| format!("reading {}", record.display()))?;
-        let parsed: WorkspaceToml = toml::from_str(&raw).with_context(|| {
-            format!(
-                "{} does not read as a workspace's project.toml",
-                record.display()
-            )
-        })?;
-        parsed.clones.is_empty()
-    };
-    if !empty {
-        return Ok(None);
-    }
-    std::fs::remove_dir_all(workspace)
-        .with_context(|| format!("removing {}", workspace.display()))?;
-    crate::usage::registry::forget_under(workspace);
-    Ok(workspace
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned()))
+/// Answer `workspace`'s folder when its `project.toml` lists no clone, and
+/// delete nothing. The folder can hold more than the list says: the queue,
+/// archive and worktrees of an entry someone removed by hand (spoolway's own
+/// errors tell people to), and a customised `config/` that is the only copy
+/// of a home-mode setup. Whether any of it is still needed is the person's
+/// call, so the caller names the folder and says to remove it by hand. The
+/// clone list is read under the workspace's own lock, so a join that landed
+/// first keeps the workspace out of the answer.
+fn left_empty(workspace: &Path) -> Result<Option<PathBuf>> {
+    let _lock = crate::lock::WorkspaceLock::acquire(&workspace_lock_path(workspace))?;
+    let record = workspace.join(BINDING_FILE);
+    let raw = std::fs::read_to_string(&record)
+        .with_context(|| format!("reading {}", record.display()))?;
+    let parsed: WorkspaceToml = toml::from_str(&raw).with_context(|| {
+        format!(
+            "{} does not read as a workspace's project.toml",
+            record.display()
+        )
+    })?;
+    Ok(parsed.clones.is_empty().then(|| workspace.to_path_buf()))
+}
+
+/// Every workspace under `~/.spoolway/` that lists no checkout, for `doctor`
+/// to name: spoolway never removes one, so these are what a person is left
+/// to clean up by hand.
+pub(crate) fn workspaces_listing_no_checkout() -> Vec<PathBuf> {
+    let mut empty: Vec<PathBuf> = all_workspaces()
+        .0
+        .into_iter()
+        .filter(|(_, toml)| toml.clones.is_empty())
+        .map(|(path, _)| path)
+        .collect();
+    empty.sort();
+    empty
 }
 
 /// Move `root`'s home-mode registration from the workspace it is listed in
@@ -2788,6 +2884,10 @@ pub(crate) fn move_clone(
         )
     })?;
 
+    if let Some(bad) = bad_dispatcher(&to_parsed) {
+        return Err(bad_dispatcher_error(&to_record, bad));
+    }
+
     let name = dispatcher.unwrap_or(&from.dispatcher);
     let taken = to_parsed
         .clones
@@ -2863,6 +2963,11 @@ pub(crate) fn move_clone(
         return Err(err);
     }
     write_workspace(&from.workspace, &from_parsed)?;
+    // The rename above took the old folder away, and with it the home the
+    // usage registry recorded for this checkout. Left behind, that entry
+    // would sit beside the one the next command registers, and `eval
+    // --project` would find two projects with one root.
+    crate::usage::registry::forget_home(&from_home);
 
     // `repair`, unlike an ordinary `git` command, only fixes a worktree
     // whose new location it is actually told — run with no arguments from
@@ -4360,7 +4465,18 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            join_workspace(&local, &name).unwrap();
+            // Listed straight into the file: `join_workspace` refuses to
+            // put a clone of one repository into another's workspace, and
+            // this needs exactly that mix.
+            let record = created.workspace.join(BINDING_FILE);
+            let mut parsed: WorkspaceToml =
+                toml::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+            parsed.clones.push(CloneEntry {
+                root: local.clone(),
+                dispatcher: "api-review".into(),
+                root_commit: root_commit(&local),
+            });
+            write_workspace(&created.workspace, &parsed).unwrap();
             let summary = workspaces()
                 .into_iter()
                 .find(|workspace| workspace.name == name)
@@ -5556,11 +5672,12 @@ mod tests {
     }
 
     /// Acceptance criterion 4, the dispatcher half: a hand-edited
-    /// `dispatcher = "../../../ESCAPED"` is refused by every reader rather
-    /// than joined straight onto the workspace folder, which is how a
-    /// command used to end up creating `$HOME/ESCAPED/`.
+    /// `dispatcher = "../../../ESCAPED"` is never joined onto the workspace
+    /// folder, which is how a command used to end up creating
+    /// `$HOME/ESCAPED/`. The file's own checkouts are refused, naming it, and
+    /// a project nowhere near it carries on with one note.
     #[test]
-    fn a_dispatcher_that_is_not_one_plain_name_is_refused() {
+    fn a_dispatcher_that_is_not_one_plain_name_stops_only_its_own_checkouts() {
         let work = bind_fixture("home-mode-dispatcher-escape");
         let canon = work.canonical().unwrap();
         let (home, _home_guard) = workspace_fixture("home-mode-dispatcher-escape", &canon, "api");
@@ -5577,24 +5694,97 @@ mod tests {
             ),
         )
         .unwrap();
+        let (_origin, unrelated, _unrelated_guard) =
+            fixture("home-mode-dispatcher-escape-unrelated");
 
         crate::platform::test_home::with_home(&home, || {
             let err = Repo::discover(&work)
                 .expect_err("a dispatcher carrying a path separator or `..` must be refused")
                 .to_string();
             assert!(
-                err.contains("ESCAPED"),
-                "error must name the bad dispatcher value, got: {err}"
+                err.contains(&record.display().to_string())
+                    && err.contains("ESCAPED")
+                    && err.contains(&canon.display().to_string())
+                    && err.contains("fix it by hand"),
+                "error must name the file, the value and the entry, got: {err}"
             );
+            let (_, broken, skipped) = workspace_clone_lenient(&unrelated).unwrap();
+            assert!(broken.is_empty());
+            assert_eq!(skipped, vec![record.clone()], "one note, for this file");
+            Repo::discover(&unrelated)
+                .expect("an unrelated project is not stopped by another workspace's file");
+            let new_repo = bind_fixture("home-mode-dispatcher-escape-new");
             assert!(
-                err.contains(&record.display().to_string()),
-                "error must name the file, got: {err}"
+                workspace_clone_checked(&new_repo).unwrap().is_none(),
+                "`init` in a repository no file lists must not be stopped either"
             );
         });
         assert!(
             !home.join("ESCAPED").exists(),
             "must never create a folder outside the workspace"
         );
+    }
+
+    /// Two entries naming one dispatcher folder would share one queue. The
+    /// refusal names both entries, and a checkout of another workspace is
+    /// not affected.
+    #[test]
+    fn two_entries_naming_one_dispatcher_are_refused_naming_both() {
+        let work = bind_fixture("home-mode-dup-dispatcher");
+        let other = bind_fixture("home-mode-dup-dispatcher-other");
+        let canon = work.canonical().unwrap();
+        let other_canon = other.canonical().unwrap();
+        let (home, _home_guard) = workspace_fixture("home-mode-dup-dispatcher", &canon, "api");
+        std::fs::write(
+            home.join(".spoolway")
+                .join("home-mode-dup-dispatcher-ws")
+                .join(BINDING_FILE),
+            format!(
+                "id = \"home-mode-dup-dispatcher\"\nclones = [{{ root = {:?}, dispatcher = \
+                 \"api\" }}, {{ root = {:?}, dispatcher = \"api\" }}]\n",
+                canon.display(),
+                other_canon.display(),
+            ),
+        )
+        .unwrap();
+        let (_origin, unrelated, _unrelated_guard) = fixture("home-mode-dup-dispatcher-unrelated");
+
+        crate::platform::test_home::with_home(&home, || {
+            let err = Repo::discover(&work)
+                .expect_err("two entries sharing a dispatcher must refuse")
+                .to_string();
+            assert!(
+                err.contains(&canon.display().to_string())
+                    && err.contains(&other_canon.display().to_string()),
+                "error must name both entries, got: {err}"
+            );
+            Repo::discover(&unrelated).expect("an unrelated project carries on");
+        });
+    }
+
+    /// `doctor` lists a workspace that lists no checkout; spoolway never
+    /// removes one, so this is how a person finds it.
+    #[test]
+    fn a_workspace_listing_no_checkout_is_named() {
+        let (home, _home_guard) = scratch_home("empty-workspace-listed");
+        let workspace = home.join(".spoolway").join("empty-ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(BINDING_FILE),
+            "id = \"empty\"\nclones = []\n",
+        )
+        .unwrap();
+        let full = home.join(".spoolway").join("full-ws");
+        std::fs::create_dir_all(full.join("config")).unwrap();
+        std::fs::write(
+            full.join(BINDING_FILE),
+            "id = \"full\"\nclones = [{ root = \"/x\", dispatcher = \"x\" }]\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            assert_eq!(workspaces_listing_no_checkout(), vec![workspace.clone()]);
+        });
     }
 
     /// Acceptance criterion 4, the UTF-8 half: `create_workspace`,
@@ -5946,6 +6136,46 @@ mod tests {
         assert!(
             !workspace.join("dispatchers").exists(),
             "no dispatcher folder is created for a workspace with no config/"
+        );
+    }
+
+    /// Leaving a workspace never deletes its folder, even when the clone list
+    /// is empty: an unlisted `dispatchers/<name>/` folder (left by hand-editing
+    /// a clone out of `project.toml`) and a customised `config/` stay where
+    /// they are, so nothing a person might still need is lost.
+    #[test]
+    fn a_workspace_left_with_no_checkout_keeps_its_folder_and_everything_in_it() {
+        let (home, _home_guard) = scratch_home("leave-keeps-folder");
+        let workspace = home.join(".spoolway").join("c1-5te017");
+        let archive = workspace
+            .join("dispatchers")
+            .join("old-clone")
+            .join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(archive.join("old-task.md"), "kept\n").unwrap();
+        std::fs::write(
+            workspace.join("config").join("config.toml"),
+            "[agents.claude]\nconcurrency = 9\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(BINDING_FILE),
+            "id = \"c1-5te017\"\nclones = []\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            left_empty(&workspace).unwrap();
+        });
+
+        assert!(
+            archive.join("old-task.md").is_file(),
+            "an unlisted dispatcher folder's archive must survive the last checkout leaving"
+        );
+        assert!(
+            workspace.join("config").join("config.toml").is_file(),
+            "the workspace's customised config/ must survive the last checkout leaving"
         );
     }
 

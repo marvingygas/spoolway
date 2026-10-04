@@ -2061,15 +2061,14 @@ pub mod registry {
         write_at(&path, &known);
     }
 
-    /// Drop every entry whose home sits inside `dir` — a workspace a move
-    /// emptied and removed, whose dispatcher folders are gone with it.
-    /// Best-effort like [`register`].
-    pub fn forget_under(dir: &Path) {
+    /// Drop the entry whose home is `home` — a dispatcher folder a move
+    /// renamed away, which no longer exists. Best-effort like [`register`].
+    pub fn forget_home(home: &Path) {
         let Some(path) = path() else { return };
         let known = list_at(&path);
         let kept: Vec<Entry> = known
             .iter()
-            .filter(|entry| !entry.home.starts_with(dir))
+            .filter(|entry| entry.home != home)
             .cloned()
             .collect();
         if kept.len() != known.len() {

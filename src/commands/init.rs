@@ -613,7 +613,9 @@ const NEW_WORKSPACE_ENTRY: &str = "Create a new workspace";
 /// marked `current`, and is the default, so Enter changes nothing. Only
 /// workspaces it may move into follow it — never one of another repository,
 /// see [`crate::repo::WorkspaceSummary::may_move_into`]. An unlisted checkout
-/// sees every workspace, those of its own repository first, and defaults to
+/// sees the workspaces it may join, those of its own repository first, never
+/// one that is provably another's (see
+/// [`crate::repo::WorkspaceSummary::may_join`]), and defaults to
 /// a new workspace: joining shares one setup with every clone already in the
 /// chosen workspace, so pressing Enter without reading must never land there.
 ///
@@ -629,6 +631,8 @@ fn pick_workspace(root: &Path, current: Option<&str>) -> Result<Option<String>> 
         workspaces.retain(|workspace| {
             workspace.name == current || workspace.may_move_into(root, mine.as_deref())
         });
+    } else {
+        workspaces.retain(|workspace| workspace.may_join(root, mine.as_deref()));
     }
     // A stable sort: `workspaces()` is already sorted by name, and nothing
     // here should reorder two workspaces that agree on where they belong.
@@ -1009,9 +1013,15 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
             placed_lines.push(format!("Moved to workspace {name}."));
-            if let Some(removed) = moved.removed {
+            if let Some(emptied) = moved.emptied {
                 placed_lines.push(format!(
-                    "Removed workspace {removed}. It held no other checkout."
+                    "Workspace {} lists no checkout now. Its folder is kept:\n  {}\n\
+                     Remove it yourself once nothing in it is needed.",
+                    emptied
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    crate::repo::shorten_home(&emptied),
                 ));
             }
         }
@@ -2748,6 +2758,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
     }
 
+    /// Joining is held to the same rule as moving: an unlisted checkout may not
+    /// join a workspace of another repository.
+    #[test]
+    fn joining_a_workspace_of_another_repository_is_refused() {
+        let parent = crate::scratch::root("init-home-join-other-repo");
+        let home = parent.join("home");
+        let other = committed_checkout(&parent, "web");
+        let stranger = committed_checkout(&parent, "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&other, &home_args(NEW_WORKSPACE)).expect("other init");
+            let target = workspace_name_of(&other);
+            let state = home.join(".spoolway");
+            let before = snapshot(&state);
+
+            let err = init(&stranger, &home_args(&target))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("holds another repository"), "{err}");
+            assert_eq!(snapshot(&state), before, "nothing is written");
+            assert!(crate::repo::workspace_clone(&stranger).is_none());
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A workspace whose last checkout left is kept with its setup, and the
+    /// next checkout of the same repository may join it again.
+    #[test]
+    fn a_kept_empty_workspace_takes_a_checkout_of_its_repository_back() {
+        let parent = crate::scratch::root("init-home-rejoin-kept");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let second = clone_of(&first, &parent.join("b"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let kept = workspace_name_of(&first);
+            init(&first, &home_args(NEW_WORKSPACE)).expect("move out, emptying the first");
+            assert_ne!(workspace_name_of(&first), kept);
+
+            init(&second, &home_args(&kept)).expect("a checkout of the same repository joins");
+            assert_eq!(workspace_name_of(&second), kept);
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A checkout with no commit has no root commit to compare, so it is not
+    /// guessed to belong to another repository.
+    #[test]
+    fn a_checkout_with_no_commit_may_join_a_workspace_of_a_repository() {
+        let parent = crate::scratch::root("init-home-join-no-commit");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let fresh = home_mode_checkout(&parent.join("d"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            let target = workspace_name_of(&first);
+            init(&fresh, &home_args(&target)).expect("a checkout with no commit joins");
+            assert_eq!(workspace_name_of(&fresh), target);
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A workspace file with a bad `dispatcher` would refuse every command in
+    /// a checkout listed there, so neither a join nor a move writes into it.
+    #[test]
+    fn nothing_joins_or_moves_into_a_workspace_with_a_bad_dispatcher() {
+        let parent = crate::scratch::root("init-home-bad-dispatcher-target");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        let joiner = clone_of(&first, &parent.join("b"), "api");
+        let mover = clone_of(&first, &parent.join("c"), "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            init(&mover, &home_args(NEW_WORKSPACE)).expect("mover init");
+            let target = workspace_name_of(&first);
+            let record = home.join(".spoolway").join(&target).join("project.toml");
+            let mut raw = std::fs::read_to_string(&record).unwrap();
+            raw.push_str(
+                "\n[[clones]]\nroot = \"/nonexistent/gone\"\ndispatcher = \"../../evil\"\n",
+            );
+            std::fs::write(&record, raw).unwrap();
+            let state = home.join(".spoolway");
+            let before = snapshot(&state);
+
+            for checkout in [&joiner, &mover] {
+                let err = init(checkout, &home_args(&target)).unwrap_err().to_string();
+                assert!(
+                    err.contains("../../evil") && err.contains("fix it by hand"),
+                    "{err}"
+                );
+                assert_eq!(snapshot(&state), before, "nothing is written");
+            }
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A move renames the checkout's dispatcher folder, so the usage
+    /// registry must not keep the old home beside the new one.
+    #[test]
+    fn a_move_leaves_one_registry_entry_for_the_checkout() {
+        let parent = crate::scratch::root("init-home-move-registry");
+        let home = parent.join("home");
+        let first = committed_checkout(&parent, "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&first, &home_args(NEW_WORKSPACE)).expect("first init");
+            crate::usage::registry::register(&first);
+            init(&first, &home_args(NEW_WORKSPACE)).expect("move");
+            crate::usage::registry::register(&first);
+            let raw = std::fs::read_to_string(crate::usage::registry::path().unwrap())
+                .unwrap_or_default();
+            let root = first.display().to_string();
+            assert_eq!(raw.matches(&root).count(), 1, "one entry per root: {raw}");
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
     /// A move never crosses repositories, and there is no flag to force it.
     #[test]
     fn a_move_into_a_workspace_of_another_repository_is_refused() {
@@ -2772,10 +2897,10 @@ mod tests {
     }
 
     /// A move carries the checkout's queue into the workspace it picked,
-    /// leaves that workspace's `config/` byte for byte the same, and removes
-    /// the workspace it emptied together with its registry entry.
+    /// leaves that workspace's `config/` byte for byte the same, and keeps the
+    /// workspace it emptied.
     #[test]
-    fn a_move_carries_the_queue_and_removes_the_workspace_it_emptied() {
+    fn a_move_carries_the_queue_and_keeps_the_workspace_it_emptied() {
         let parent = crate::scratch::root("init-home-move-done");
         let home = parent.join("home");
         let first = committed_checkout(&parent, "api");
@@ -2803,14 +2928,7 @@ mod tests {
                 before,
                 "config/ is byte for byte the same"
             );
-            assert!(!from.exists(), "the emptied workspace is removed");
-            if let Some(registry) = crate::usage::registry::path() {
-                let raw = std::fs::read_to_string(registry).unwrap_or_default();
-                assert!(
-                    !raw.contains(&from.display().to_string()),
-                    "its projects.json entry goes with it: {raw}"
-                );
-            }
+            assert!(from.is_dir(), "the emptied workspace is kept");
         });
         let _ = std::fs::remove_dir_all(&parent);
     }

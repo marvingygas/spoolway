@@ -95,9 +95,12 @@ generic not-found message. `spoolway init` there refuses too, instead of writing
 
 A checkout listed more than once, in one workspace's `clones` or across several, is refused,
 naming every file and entry. A clone's `dispatcher` must be one plain name, with no path
-separator and no `..`; any other value is refused, naming the file and the entry. A clone's
-path must be valid UTF-8; `spoolway init` refuses a checkout path that is not, rather than
-storing a path that can never match it again.
+separator and no `..`. A workspace file holding any other value refuses only the checkouts it
+lists, naming the file, the value and the entry. Every other command prints one note naming the
+file and carries on. Nothing can join or move into such a workspace. Two entries in one file
+may not name the same dispatcher folder. Both entries' checkouts are refused, naming both
+entries. A clone's path must be valid UTF-8; `spoolway init` refuses a checkout path that is
+not, rather than storing a path that can never match it again.
 
 A checkout whose folder moved or was deleted still leaves its old entry in a workspace, pointing
 at a path that no longer exists. Running `spoolway init --workspace <name>` from the checkout
@@ -110,10 +113,15 @@ A clone also moves between workspaces through `spoolway init`'s own menu, or `--
 <other>` on a checkout a workspace already lists: picking another workspace moves the checkout,
 carrying its dispatcher folder — queue, archive and worktrees — along. It refuses, writing
 nothing, while any of the checkout's tasks holds a worktree, naming each one, and for a
-workspace of another repository, with no flag to force it. A workspace the move leaves with no
-checkout listed is removed, together with its usage-registry entry.
+workspace of another repository, with no flag to force it. A checkout no workspace lists may
+not join a workspace of another repository either.
 
-`spoolway doctor` names which mode a project runs in, repo mode or home mode.
+spoolway never deletes a workspace folder. A workspace the move leaves with no checkout listed
+is kept. The move prints the folder's path and says to remove it by hand. A workspace that lists
+no checkout can be joined again.
+
+`spoolway doctor` names which mode a project runs in, repo mode or home mode. It also prints a
+note for each workspace under `~/.spoolway/` that lists no checkout.
 
 ## Task
 

@@ -631,7 +631,8 @@ pub struct EvalArgs {
         Run again in a home-mode checkout, `init` shows the same menu with its current \
         workspace first. Picking another workspace of the same repository, or a new one, \
         moves the checkout and its queue there. A move waits until no task holds a \
-        worktree, and a workspace the move leaves empty is removed.\n\n\
+        worktree. A workspace the move leaves with no checkout is kept, and its folder \
+        is named for you to remove.\n\n\
         Every run prints the project directory it resolved before it writes anything: a \
         path you do not recognise is the whole of the check. At a terminal it goes straight \
         on to its first menu, if any question is left to ask, and Ctrl-C there stops it \
