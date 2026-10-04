@@ -88,7 +88,10 @@ eval` print their usage or their tables instead.
 
 The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
 says, asking the overrides and warnings gates as popups first, each only when it has something
-to say, then spawns a `spoolway dispatch` child. The moment the child starts, a `Starting
+to say, then spawns a `spoolway dispatch` child. The warnings gate reads the pipelines from disk
+when `enter` is pressed, so it never reports a pipeline deleted since the screen opened, and it
+does report one added since. When the pipelines on disk do not load, a popup shows the load
+error and no child starts. The moment the child starts, a `Starting
 dispatcher` popup covers the board, naming no key: `enter`, the arrow keys and every other key
 on this page still reach the board underneath it. It closes once the child's first pass has
 claimed a slot or found nothing to claim, and does not open again on a later pass. `enter`

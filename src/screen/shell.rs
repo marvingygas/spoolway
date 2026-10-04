@@ -500,11 +500,11 @@ impl DispatchTab {
     /// `enter` over it does nothing: there is nothing left to ask. Stopped
     /// before its first pass, the child is gone with nothing starting, and
     /// [`DispatchTab::reap`] clears any `Starting` popup once it has exited.
-    fn enter(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
+    fn enter(&mut self, repo: &Repo, cwd: &Path) {
         match self.child.as_ref() {
             Some(child) if child.stopping() => {}
             Some(_) => self.popup = Some(Popup::Stop(super::dispatcher::stop_panel())),
-            None => self.overrides_then_start(repo, pipelines, cwd),
+            None => self.overrides_then_start(repo, cwd),
         }
     }
 
@@ -517,10 +517,10 @@ impl DispatchTab {
         }
     }
 
-    fn overrides_then_start(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
+    fn overrides_then_start(&mut self, repo: &Repo, cwd: &Path) {
         match crate::commands::overrides_popup(repo) {
             Ok(Some(gate)) => self.popup = Some(Popup::Overrides(gate)),
-            Ok(None) => self.warnings_then_start(repo, pipelines, cwd),
+            Ok(None) => self.warnings_then_start(repo, cwd),
             Err(err) => {
                 self.popup = Some(Popup::Ended(super::dispatcher::popup(
                     false,
@@ -530,8 +530,26 @@ impl DispatchTab {
         }
     }
 
-    fn warnings_then_start(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
-        match crate::commands::warnings_popup(repo, pipelines) {
+    /// The warnings gate, then a start. The gate checks the pipelines as they
+    /// are on disk now, not the copy the screen took at startup: that copy
+    /// would pair a pipeline deleted since with the prompt files it no
+    /// longer has, and report each of them missing. Pipelines that do not
+    /// load stop here with the load error, the way a failed overrides check
+    /// does, since the child started next would refuse them too. The load is
+    /// quiet because an override it skips would be printed onto the screen
+    /// itself, between two frames, and painted over.
+    fn warnings_then_start(&mut self, repo: &Repo, cwd: &Path) {
+        let pipelines = match Pipelines::load_quietly(&repo.root, &repo.config) {
+            Ok(pipelines) => pipelines,
+            Err(err) => {
+                self.popup = Some(Popup::Ended(super::dispatcher::popup(
+                    false,
+                    &format!("{err:#}"),
+                )));
+                return;
+            }
+        };
+        match crate::commands::warnings_popup(repo, &pipelines) {
             Some(gate) => self.popup = Some(Popup::Warnings(gate)),
             None => self.start(cwd),
         }
@@ -584,9 +602,9 @@ impl DispatchTab {
                 // Best-effort: an acknowledgement that could not be written
                 // only means the gate asks again next time.
                 let _ = gate.hide(repo);
-                self.warnings_then_start(repo, pipelines, cwd);
+                self.warnings_then_start(repo, cwd);
             }
-            (Popup::Overrides(_), Key::Enter) => self.warnings_then_start(repo, pipelines, cwd),
+            (Popup::Overrides(_), Key::Enter) => self.warnings_then_start(repo, cwd),
             (Popup::Warnings(gate), Key::Char('x' | 'X')) => {
                 let _ = gate.hide(repo);
                 self.start(cwd);
@@ -706,7 +724,7 @@ fn dispatch_tab(
                 return Ok(leave);
             }
             if key == Key::Enter {
-                tab.enter(repo, pipelines, cwd);
+                tab.enter(repo, cwd);
                 continue;
             }
         }
@@ -1338,6 +1356,15 @@ mod tests {
     /// A project with an override layer nobody has acknowledged.
     fn fixture_with_layer(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let (repo, root_guard) = crate::status::testutil::fixture(name);
+        // The start gates load the pipelines from disk, and a layer patching
+        // `default` needs a `default` there to patch.
+        let dir = Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            include_str!("../../assets/pipelines/default.yml"),
+        )
+        .unwrap();
         std::fs::create_dir_all(repo.overrides_dir().join("pipelines")).unwrap();
         std::fs::write(
             repo.overrides_dir().join("pipelines/default.yml"),
@@ -1392,7 +1419,7 @@ mod tests {
         repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
         let mut tab = DispatchTab::default();
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Overrides(_))));
         tab.answer(&repo, &pipelines, &repo.root, Key::Char('x'));
         assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
@@ -1403,8 +1430,119 @@ mod tests {
         // next `enter` skips the hidden overrides gate.
         tab.answer(&repo, &pipelines, &repo.root, Key::Esc);
         assert!(tab.popup.is_none());
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
+    }
+
+    /// The warnings popup checks the pipelines as they are on disk when
+    /// `enter` is pressed, not the copy the screen took at startup. A
+    /// pipeline deleted since then, with its prompts, is not reported as
+    /// having missing prompts.
+    #[test]
+    fn the_warnings_popup_names_no_prompt_of_a_pipeline_deleted_since_startup() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-warnings-fresh");
+        // Guarantees the warnings gate has something to say, so nothing here
+        // reaches a start.
+        repo.config.unattended.enabled = true;
+        let startup = Pipelines::builtin();
+        let gone = startup
+            .pipelines
+            .values()
+            .flat_map(|p| &p.steps)
+            .find(|s| s.kind() == crate::pipeline::StepKind::Agent)
+            .expect("the built-in pipelines have an agent step")
+            .prompt_name()
+            .to_string();
+
+        // On disk now: one pipeline whose prompt is present, and none of the
+        // startup copy's.
+        let dir = Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("kept.yml"),
+            "steps:\n  - id: build\n    agent: pi\n    prompt: kept-prompt\n    model: m\n    \
+             on_pass: finish\n  - id: finish\n    end: true\n",
+        )
+        .unwrap();
+        let prompt = crate::prompt::directory_form(&repo, "kept-prompt");
+        std::fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+        std::fs::write(&prompt, "do the work\n").unwrap();
+        assert_ne!(gone, "kept-prompt");
+
+        let mut tab = DispatchTab::default();
+        tab.enter(&repo, &repo.root);
+        let Some(Popup::Warnings(gate)) = &tab.popup else {
+            panic!("the warnings popup should be up");
+        };
+        let text = gate.panel.join("\n");
+        assert!(
+            !text.contains(&format!("prompt `{gone}`")),
+            "a prompt of a deleted pipeline was reported: {text}"
+        );
+        assert!(tab.child.is_none());
+    }
+
+    /// A pipeline added since startup, whose prompt file is missing, is
+    /// reported, and `x` hides the popup until that finding changes.
+    #[test]
+    fn the_warnings_popup_names_the_missing_prompt_of_a_pipeline_added_since_startup() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-warnings-added");
+        repo.config.unattended.enabled = true;
+        let dir = Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("added.yml"),
+            "steps:\n  - id: build\n    agent: pi\n    prompt: added-prompt\n    model: m\n    \
+             on_pass: finish\n  - id: finish\n    end: true\n",
+        )
+        .unwrap();
+
+        let mut tab = DispatchTab::default();
+        tab.enter(&repo, &repo.root);
+        let Some(Popup::Warnings(gate)) = &tab.popup else {
+            panic!("the warnings popup should be up");
+        };
+        assert!(gate.panel.join("\n").contains("prompt `added-prompt`"));
+
+        // `x` writes the acknowledgement through the gate itself; it is
+        // called directly because the key would go on to start a child.
+        let pipelines = Pipelines::load_quietly(&repo.root, &repo.config).unwrap();
+        let Some(gate) = crate::commands::warnings_popup(&repo, &pipelines) else {
+            panic!("the gate should still have something to say");
+        };
+        gate.hide(&repo).unwrap();
+        assert!(crate::commands::warnings_popup(&repo, &pipelines).is_none());
+
+        // Hidden findings stay hidden until they change: a second pipeline
+        // with a missing prompt brings the popup back.
+        std::fs::write(
+            dir.join("another.yml"),
+            "steps:\n  - id: build\n    agent: pi\n    prompt: another-prompt\n    model: m\n    \
+             on_pass: finish\n  - id: finish\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines::load_quietly(&repo.root, &repo.config).unwrap();
+        let again = crate::commands::warnings_popup(&repo, &pipelines)
+            .expect("a changed finding is asked again");
+        assert!(again.panel.join("\n").contains("prompt `another-prompt`"));
+    }
+
+    /// Pipelines on disk that do not load stop the start with the load
+    /// error shown, and nothing is started.
+    #[test]
+    fn enter_with_pipelines_that_do_not_load_shows_the_error_and_starts_nothing() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-warnings-broken");
+        let dir = Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.yml"), "steps: [not, a, pipeline\n").unwrap();
+
+        let mut tab = DispatchTab::default();
+        tab.enter(&repo, &repo.root);
+        let Some(Popup::Ended(panel)) = &tab.popup else {
+            panic!("the load error should be up");
+        };
+        assert!(panel.join("\n").contains("broken.yml"), "{panel:?}");
+        assert!(tab.child.is_none());
     }
 
     // A dispatcher that ended on its own leaves its reason up until `enter`
@@ -1518,7 +1656,7 @@ mod tests {
         let mut tab = DispatchTab::default();
         tab.started(Ok(stand_in("exec sleep 30")), std::time::SystemTime::now());
         let pipelines = Pipelines::builtin();
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Stop(_))));
         tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         for _ in 0..500 {
@@ -1555,7 +1693,7 @@ mod tests {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-stop-esc");
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Stop(_))));
         assert!(tab.popup.as_ref().unwrap().panel()[0].starts_with("┌─ stop dispatching "));
         assert!(!stopping(&tab), "nothing is stopped before it is answered");
@@ -1588,14 +1726,14 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         assert!(tab.popup.is_none());
         assert!(stopping(&tab));
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
         assert_eq!(repo.task("login").unwrap().stage(), "handover");
 
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         assert!(tab.popup.is_none(), "a stop under way asks nothing again");
         runs.stop(&key);
     }
@@ -1618,7 +1756,7 @@ mod tests {
         .unwrap();
         let pipelines = Pipelines::builtin();
         let mut tab = running_tab();
-        tab.enter(&repo, &pipelines, &repo.root);
+        tab.enter(&repo, &repo.root);
         tab.answer(&repo, &pipelines, &repo.root, Key::Char('i'));
         assert!(
             tab.popup.is_none(),
