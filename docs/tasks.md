@@ -100,8 +100,9 @@ words with a hyphen instead, for example `needs-triage`.
 
 ### One constraint no key can express
 
-`gate_at` must name a step of the task's pipeline. `spoolway task contract` lists them under
-`.pipelines.<name>.gate_at`.
+`gate_at` must name a step of the task's pipeline. `done` is not a step. `spoolway queue add`
+and `spoolway task contract --from` refuse any other value, naming the task and the steps it
+may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
 digits and hyphens, starting with a letter. No length budget applies. A lane whose name would

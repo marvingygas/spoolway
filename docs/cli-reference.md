@@ -692,7 +692,10 @@ $ spoolway pipeline check
 3 pipeline(s) valid: ["bugfix", "impl", "local"], agents ["claude", "pi"]
 ```
 
-A missing or overlong `description:` is a warning, not a failure.
+A missing or overlong `description:` is a warning, not a failure. So is a step that no route
+from the first step reaches.
+
+A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
 ### `spoolway pipeline contract`
 

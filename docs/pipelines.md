@@ -67,7 +67,7 @@ steps:
 | `version` | `1.0` | The pipeline's own version, in `x.y` form. Yours to raise when the pipeline changed enough to compare. spoolway only records it. |
 | `description` | none | One sentence on what this pipeline is for. Shown when choosing between pipelines. |
 | `task_template` | the pipeline's name, then `default` | Which task skeleton a task queued here is written from. |
-| `steps` | required | The steps, in order. The first one is where a task starts. |
+| `steps` | required | The steps, in order. The first one is where a task starts. It is never `blocked`. |
 
 ## Per-step keys
 
@@ -87,7 +87,7 @@ steps:
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
-| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. |
+| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
@@ -137,6 +137,18 @@ A step never names its own id in `on_pass` or `on_fail` — a lap goes through a
 not at all. `spoolway pipeline check` refuses a file that tries it, naming the step and the
 key. Fix it by hand: send the failure to a step that leaves, or delete the step.
 
+A task starts on the first step, so `blocked` may not be first. `spoolway pipeline check`
+refuses the file and tells you to put a working step first.
+
+A step that no route from the first step reaches is allowed. `spoolway pipeline check` warns
+about it and still passes. A task can reach such a step only through
+`spoolway resume --stage`.
+
+```
+$ spoolway pipeline check
+  warning: pipeline t: step `old` is reached by no route
+```
+
 ### Loops
 
 `loop` counts arrivals at this step, by any route, the first included. Put it on the step
@@ -150,6 +162,8 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 ```
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
+  limit.
 - The map form, keyed by the step a failure is sent back from, is refused at parse. The
   refusal names the step that should carry the limit instead: delete the map and give that
   step a bare `loop:` of its own.

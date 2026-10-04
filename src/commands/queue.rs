@@ -1128,11 +1128,27 @@ pub(crate) fn validate_batch(
             .pipeline
             .as_deref()
             .expect("parse_submission refuses a task with no `pipeline:`");
-        // Only checked for existing here, never read further: a lane's own
-        // wire name no longer has to fit inside anything this pipeline
-        // decides — see gh-359 — so a task id needs no pipeline at all to be
-        // checked against, just the plain path-safety rule below.
-        pipelines.get(pipeline_name)?;
+        // Looked up to check that it exists, and for the `gate_at:` check
+        // below. Nothing else is read from it: a lane's own wire name no
+        // longer has to fit inside anything this pipeline decides — see
+        // gh-359 — so a task id needs no pipeline at all to be checked
+        // against, just the plain path-safety rule below.
+        let pipeline = pipelines.get(pipeline_name)?;
+        // `gate_at:` pauses a task when it reports from the step it names. A
+        // name that is no step of this pipeline — a typo, or `done`, which is
+        // not a step — is never matched, so the checkpoint is dropped and the
+        // task runs straight through. Refused here, where the task can still
+        // be corrected, rather than left to fail silently at run time.
+        if let Some(gate_at) = task.front.gate_at.as_deref()
+            && pipeline.step(gate_at).is_none()
+        {
+            bail!(
+                "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
+                 `{pipeline_name}` — it may name one of: {}",
+                task.front.id,
+                pipeline.step_ids().join(", ")
+            );
+        }
         // A task id becomes a branch and a file name too. Both are checked
         // here rather than only when a task's value happens to differ,
         // the same as `check_task_base` above.
@@ -10024,6 +10040,36 @@ mod tests {
                 .contains(&repo.archive_dir().join("done.md").display().to_string()),
             "{err:#}"
         );
+    }
+
+    /// A `gate_at:` naming no step of the task's pipeline is refused with the
+    /// task and the steps it may name, and `done` is no step.
+    #[test]
+    fn validate_batch_refuses_a_gate_at_that_names_no_step() {
+        let (repo, _root_guard) = fixture("gate-at-no-step");
+        for bad in ["nosuch", "done"] {
+            let text = task_text("demo", &format!("group: demo\ngate_at: {bad}\n"), BODY);
+            let err = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("mine.md".into(), text)],
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("task `demo`"), "{err}");
+            assert!(err.contains(&format!("gate_at: {bad}")), "{err}");
+            assert!(err.contains("implement"), "the steps it may name: {err}");
+        }
+
+        let text = task_text("demo", "group: demo\ngate_at: implement\n", BODY);
+        validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("mine.md".into(), text)],
+        )
+        .expect("a real step is accepted");
     }
 
     /// `--base` is as arbitrary a value as a task's own `base:` — a

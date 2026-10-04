@@ -999,15 +999,17 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
 
     pipelines.validate()?;
 
-    // Redundant-key, gate and description warnings, gathered up front: they
-    // are worth a person's attention but never fail this check on their own
-    // — see `Pipeline::redundant_on_fail_warnings`, `Pipeline::gate_warnings`
-    // and `Pipeline::description_warnings`.
+    // Redundant-key, gate, description and unreachable-step warnings,
+    // gathered up front: they are worth a person's attention but never fail
+    // this check on their own — see `Pipeline::redundant_on_fail_warnings`,
+    // `Pipeline::gate_warnings`, `Pipeline::description_warnings` and
+    // `Pipeline::unreachable_warnings`.
     let mut gate_warnings = Vec::new();
     for pipeline in pipelines.pipelines.values() {
         gate_warnings.extend(pipeline.redundant_on_fail_warnings());
         gate_warnings.extend(pipeline.gate_warnings());
         gate_warnings.extend(pipeline.description_warnings());
+        gate_warnings.extend(pipeline.unreachable_warnings());
     }
 
     let mut problems = step_problems(repo, pipelines, &repo.config);
