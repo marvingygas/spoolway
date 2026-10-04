@@ -907,6 +907,9 @@ impl<'a> Dispatcher<'a> {
             &mut report.problems,
         );
 
+        // Before the queue is read: a killed writer's half-written temp file
+        // is otherwise never cleaned up.
+        crate::task::sweep_stale_tmp(&self.repo.queue_dir());
         let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
 
         // Every task's own stage, before this pass moves anything — compared

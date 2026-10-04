@@ -115,6 +115,10 @@ pub enum State {
     Finished,
     /// At the pipeline's blocked step, carrying its reason.
     Blocked,
+    /// On a stage this task's pipeline does not have, usually a hand edit
+    /// of `stage:`. Not `Blocked`: that word is a stop a person clears with
+    /// `[r]`, and nothing here offers the key.
+    Unknown,
     /// A live lane's pane is holding a permission prompt — herdr's own
     /// read, off the lane list, fresh every redraw. The task's own stage has
     /// not moved and is not `paused`: this is a live turn waiting on a
@@ -851,8 +855,23 @@ impl Board {
                 let mux = crate::mux::backend(repo)?;
                 let runs = crate::command_step::Runs::new(&repo.commands_dir());
                 for abort in &aborts {
-                    carry_out_abort(mux.as_ref(), &runs, abort);
-                    park_under_lock(repo, &abort.task, false)?;
+                    // A command run is stopped after its task is parked: from
+                    // the kill until its files are cleared the run reads as one
+                    // that died without an exit code, and a dispatcher pass
+                    // landing there with the task still on the step would log
+                    // that it is running the command again. An agent turn is
+                    // interrupted first, since its settling is what the park
+                    // answers.
+                    match abort.kind {
+                        AbortKind::Agent => {
+                            carry_out_abort(mux.as_ref(), &runs, abort);
+                            park_under_lock(repo, &abort.task, false)?;
+                        }
+                        AbortKind::Command => {
+                            park_under_lock(repo, &abort.task, false)?;
+                            carry_out_abort(mux.as_ref(), &runs, abort);
+                        }
+                    }
                 }
             }
             // `s`: leave every named abort running and write `gate_at` onto
@@ -1222,7 +1241,8 @@ fn carry_out_abort(mux: &dyn crate::mux::Mux, runs: &crate::command_step::Runs, 
 /// can resume exactly these — see [`resume_stop_parked`]. Nothing else in
 /// the queue is touched. The caller stops the dispatcher afterwards.
 ///
-/// Parks before it aborts, unlike `p`'s panel, because the dispatcher is
+/// Parks before it aborts, for an agent turn as well as a command run —
+/// `p`'s panel does that only for a command run — because the dispatcher is
 /// still running while this does its work. Aborted first, a lane can settle
 /// and be seen by a pass before the park lands — the pass then parks it as a
 /// person's own Escape (`Dispatcher::park_after_interrupt`), and this park,
@@ -2594,7 +2614,10 @@ fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_i
         // now reads the same destination a cleared block would, and nothing
         // else. Not resumable: a lane is already working this step, so there
         // is no `[r]` action to offer here.
-        blocked_next(task, pipeline, false)
+        format!(
+            "→ {}",
+            crate::commands::cleared_block_target(task, pipeline, true)
+        )
     } else {
         match pipeline.next_running_step(step_id) {
             // Plain text, no colour: this string is clipped to the room the
@@ -2608,22 +2631,24 @@ fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_i
     }
 }
 
-/// Where a pass out of `blocked` would carry this task, prefixed for the NEXT
-/// column — `cleared_block_target` itself, so the board can never name a
-/// destination the dispatcher would not actually take it to. Read for both a
-/// parked block and a staffed one: the row differs in state and colour, not
-/// in where the arrow points.
+/// The NEXT column of a blocked row parked for a person, prefixed for the
+/// column. Always `resume_target`, the step `spoolway resume` sends the task
+/// back to, and the only way off a parked block — so the row names one step
+/// whether or not the key is on offer yet.
 ///
 /// Key first, then the command it fires, exactly like a paused row's own
-/// `next` below — but only when `resumable` actually offers it: a staffed
-/// block clears on its own, and a block still waiting on a dependency or a
-/// busy lane of its own has no action here for `[r]` to name.
+/// `next` below — but only when `resumable` actually offers it: a block still
+/// waiting on a dependency or a busy lane of its own has no action here for
+/// `[r]` to name, and gets the bare arrow to the same step.
+///
+/// A staffed block is not this row: an unblocker lane works it, and where its
+/// pass goes is `cleared_block_target`, which [`onward`] draws.
 fn blocked_next(
     task: &crate::task::Task,
     pipeline: &crate::pipeline::Pipeline,
     resumable: bool,
 ) -> String {
-    let target = crate::commands::cleared_block_target(task, pipeline, true);
+    let target = crate::commands::resume_target(task, pipeline);
     match resumable {
         true => format!("[r] → {target} — `spoolway resume {}`", task.id()),
         false => format!("→ {target}"),
@@ -2929,7 +2954,7 @@ fn build_rows(
                 (State::Queued, "finished".to_string(), false)
             }
             None => (
-                State::Blocked,
+                State::Unknown,
                 format!("unknown step `{}` — not in this pipeline", task.stage()),
                 false,
             ),
@@ -4219,8 +4244,8 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
         add(&repo, "sessions", &["login"], None);
 
-        // Blocked, parked for a person: the step a pass out of `blocked`
-        // would actually carry it to — `cleared_block_target`'s own answer —
+        // Blocked, parked for a person: the step `spoolway resume` sends it
+        // back to — `resume_target`'s own answer, the step it stopped on —
         // key first, then the command, since every dependency is met and no
         // lane of its own is busy. Its own group: unrelated to `login`'s
         // chain, and a group is one chain now.
@@ -4260,7 +4285,7 @@ mod tests {
             row("sessions").next
         );
 
-        assert_eq!(row("wall").next, "[r] → review — `spoolway resume wall`");
+        assert_eq!(row("wall").next, "[r] → implement — `spoolway resume wall`");
         assert_eq!(row("ship").next, "[r] → review — `spoolway resume ship`");
         // No counter text on NEXT at all — it moved to the STEP column, read
         // off `Row::arrivals` instead.
@@ -6249,7 +6274,7 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert!(row.resumable, "{}", row.next);
-        assert_eq!(row.next, "[r] → review — `spoolway resume wall`");
+        assert_eq!(row.next, "[r] → implement — `spoolway resume wall`");
     }
 
     /// A task paused by a `--pause`, `--fail` or `--block` from `blocked` —
@@ -6317,6 +6342,72 @@ mod tests {
         let task = repo.task("gate-board").unwrap();
         assert_eq!(task.stage(), "review", "{}", task.stage());
         assert_eq!(task.front.paused_at, None);
+    }
+
+    /// A blocked row's `[r]` hint names the step `spoolway resume` actually
+    /// sends the task to: the step it stopped on, not the one a pass from it
+    /// would reach.
+    #[test]
+    fn a_blocked_rows_resume_hint_names_the_step_resume_goes_to() {
+        let (repo, _root_guard) = fixture("blocked-hint-matches-resume");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "wall", &[], None);
+        let mut task = repo.task("wall").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "wall").unwrap();
+
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let goes_to = crate::commands::resume_target(&task, pipeline);
+        assert_eq!(
+            row.next,
+            format!("[r] → {goes_to} — `spoolway resume wall`"),
+            "the hint and `spoolway resume` must agree"
+        );
+    }
+
+    /// A parked block still waiting on a dependency has no key to offer yet,
+    /// and still names the step `spoolway resume` will send it to.
+    #[test]
+    fn a_parked_block_not_yet_resumable_names_the_same_step_as_when_ready() {
+        let (repo, _root_guard) = fixture("blocked-not-ready");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "base", &[], None);
+        add(&repo, "wall", &["base"], None);
+        let mut task = repo.task("wall").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "wall").unwrap();
+        assert!(!row.resumable, "{}", row.next);
+        assert_eq!(row.next, "→ implement");
+    }
+
+    /// A task on a stage its pipeline lacks reads as an unknown step, not as
+    /// a blocked one: nothing on that row can be resumed.
+    #[test]
+    fn a_row_on_an_unknown_step_is_not_blocked() {
+        let (repo, _root_guard) = fixture("unknown-step-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "lost", &[], None);
+        let mut task = repo.task("lost").unwrap();
+        task.set_stage("nowhere", None);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "lost").unwrap();
+        assert!(matches!(row.state, State::Unknown));
+        assert_eq!(row.state.word(), "● unknown");
+        assert!(!row.resumable);
     }
 
     /// `r` on a blocked row goes through exactly the code `spoolway

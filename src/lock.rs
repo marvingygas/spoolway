@@ -26,6 +26,35 @@ pub const SCREEN_LOCK_FILE: &str = "spoolway.pid";
 const UNATTENDED: &str = "unattended";
 const ATTENDED: &str = "attended";
 
+/// What [`Lock::acquire`] fails with when a live process holds the lock.
+///
+/// A type of its own so `spoolway dispatch` can tell this loss, which is a
+/// second start that raced the first past its up-front check, from a real
+/// error, and answer it with the documented `Dispatcher already running`
+/// line and exit code. Every other caller still reads it as an ordinary
+/// error, through `Display`.
+#[derive(Debug)]
+pub struct HeldBy {
+    pub pid: u32,
+    path: PathBuf,
+}
+
+impl std::fmt::Display for HeldBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a dispatcher is already running for this repo (pid {}). \
+             It re-reads the queue every pass, so anything just queued starts on its own — \
+             stop that one first if you really do want a different run. \
+             If that pid is not a dispatcher, delete {}.",
+            self.pid,
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for HeldBy {}
+
 /// Held for as long as a dispatcher is running; released on drop.
 #[derive(Debug)]
 pub struct Lock {
@@ -81,13 +110,13 @@ impl Lock {
                     });
                 }
                 Ok(false) => match Lock::holder(path)? {
-                    Some(pid) => bail!(
-                        "a dispatcher is already running for this repo (pid {pid}). \
-                         It re-reads the queue every pass, so anything just queued starts on its own — \
-                         stop that one first if you really do want a different run. \
-                         If that pid is not a dispatcher, delete {}.",
-                        path.display()
-                    ),
+                    Some(pid) => {
+                        return Err(HeldBy {
+                            pid,
+                            path: path.to_path_buf(),
+                        }
+                        .into());
+                    }
                     // Stale: nothing alive holds it. Best effort — if the
                     // removal itself loses a race to someone else clearing
                     // the same stale file, the retry below still lands on a
@@ -612,6 +641,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(LOCK_FILE);
         (path, dir)
+    }
+
+    /// Losing the lock to a live holder is a [`HeldBy`] naming that holder,
+    /// which `spoolway dispatch` tells apart from a real error.
+    #[test]
+    fn a_held_lock_is_refused_with_the_holder_named() {
+        let (path, dir) = scratch("held-by");
+        let _held = Lock::acquire(&path, false, None).unwrap();
+        let err = Lock::acquire(&path, false, None).unwrap_err();
+        let held = err.downcast_ref::<HeldBy>().expect("a HeldBy error");
+        assert_eq!(held.pid, std::process::id());
+        assert!(err.to_string().contains("already running for this repo"));
+        drop(dir);
     }
 
     /// The property every other test here rests on: this very process, which

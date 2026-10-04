@@ -116,6 +116,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Starting => "starting",
         Finished => "finished",
         Blocked => "blocked",
+        Unknown => "unknown",
         Prompt => "prompt",
         Queued => "queued",
         Waiting => "waiting",
@@ -283,6 +284,10 @@ fn route_state(task: &Task, pipeline: &Pipeline) -> (String, Option<String>) {
             Some(origin) => (format!("blocked at {origin}"), Some(origin)),
             None => ("blocked before it started".to_string(), None),
         },
+        step if pipeline.step(step).is_none() => (
+            format!("at `{step}`, a step this pipeline does not have"),
+            None,
+        ),
         step => (format!("at {step}"), Some(step.to_string())),
     }
 }
@@ -3078,22 +3083,26 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         .into_iter()
         .filter(|cr| cr.task == id)
         .collect();
-    if !running.is_empty() {
-        if !force {
-            bail!(
-                "`{id}` is running a command step (`{}`) — pass `--force` to stop it and \
-                 pause, or use the board's `p` key to choose interactively",
-                running[0].step
-            );
-        }
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        for cr in &running {
-            runs.stop(&crate::command_step::Runs::key(&cr.step, &cr.task));
-        }
+    if !running.is_empty() && !force {
+        bail!(
+            "`{id}` is running a command step (`{}`) — pass `--force` to stop it and \
+             pause, or use the board's `p` key to choose interactively",
+            running[0].step
+        );
     }
 
     crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`", false);
     tasks[idx].save()?;
+
+    // Stopped only once the task is on disk as paused. Between the kill and
+    // the run's files being cleared the run reads as one that died without an
+    // exit code, and a dispatcher pass landing in that gap with the task still
+    // on the step would log "running it again" and forget the run, for a task
+    // that is about to be paused and will run nothing.
+    let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    for cr in &running {
+        runs.stop(&crate::command_step::Runs::key(&cr.step, &cr.task));
+    }
     println!("paused `{id}`");
     Ok(())
 }
@@ -18334,6 +18343,26 @@ body\n";
             "{text}"
         );
         assert!(!text.contains("--stage"), "{text}");
+    }
+
+    /// A task on a stage its pipeline does not have is marked at no step and
+    /// says so, rather than reading `at <stage>` as if it were one.
+    #[test]
+    fn route_says_a_stage_the_pipeline_lacks_is_not_a_step() {
+        let (repo, _root_guard) = fixture("route-unknown-stage");
+        let pipelines = route_pipelines();
+        add(&repo, "lost", &[]);
+        let mut task = queued(&repo, "lost");
+        task.set_stage("nowhere", None);
+        task.save().unwrap();
+
+        let route = route_view(&queued(&repo, "lost"), &pipelines).unwrap();
+        assert_eq!(route.at, None);
+        let text = render_route(&route);
+        assert!(
+            text.starts_with("default — at `nowhere`, a step this pipeline does not have\n"),
+            "{text}"
+        );
     }
 
     /// The task's own `gate_at` holds whatever its step reports, not only a

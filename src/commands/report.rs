@@ -395,6 +395,24 @@ pub fn route(
     unattended: bool,
     stage: Option<&str>,
 ) -> Result<Routed> {
+    // `queued` and `paused` are held states no lane works at, so a report
+    // filed from one has no step to settle. Said outright: the step lookup
+    // below would answer that "`queued` is not a step", which reads as a typo
+    // in a name the reporter never typed.
+    if current == crate::pipeline::QUEUED || current == crate::pipeline::PAUSED {
+        let instead = match current == crate::pipeline::QUEUED {
+            true => "it starts on its own when the dispatcher reaches it".to_string(),
+            false => format!(
+                "to release it, run `spoolway resume {}` or press `r` on the board",
+                task.id()
+            ),
+        };
+        bail!(
+            "task `{}` is {current}, which no lane works at, so there is no step to report \
+             on — {instead}",
+            task.id()
+        );
+    }
     let step = pipeline.require_step(current).with_context(|| {
         format!(
             "task `{}` is on a step that this pipeline does not define",
@@ -482,14 +500,27 @@ pub fn route(
                             task.id()
                         )
                     };
+                    // Nothing to list when the task has run no step at or before
+                    // the gate: ending on "before it: " with nothing after it
+                    // reads as a message cut off.
+                    let options = match allowed.is_empty() {
+                        true => format!(
+                            "This task has not run `{gate_step}` or any step before it, so \
+                             there is none to name — report a plain `--pass` without \
+                             `--stage` instead"
+                        ),
+                        false => format!(
+                            "Name `{gate_step}` or a step before it: {}",
+                            allowed
+                                .iter()
+                                .map(|s| format!("`{s}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    };
                     bail!(
-                        "{subject} - a pass from `{blocked}` may not name a step past it. Name \
-                         `{gate_step}` or a step before it: {}",
-                        allowed
-                            .iter()
-                            .map(|s| format!("`{s}`"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        "{subject} - a pass from `{blocked}` may not name a step past it. \
+                         {options}",
                         blocked = crate::pipeline::BLOCKED,
                     );
                 }
@@ -3197,6 +3228,59 @@ mod tests {
             err.ends_with("Name `look` or a step before it: `implement`, `review`, `look`"),
             "{err}"
         );
+    }
+
+    /// A task that has run nothing at or before the gate has no step to offer
+    /// back, and the refusal says so rather than ending on its own colon.
+    #[test]
+    fn a_staged_pass_refusal_with_no_step_to_name_does_not_end_on_an_empty_list() {
+        let err = staged_pass_refusal("staged-pass-empty-list", "look", &[], "e2e");
+        assert!(err.contains("stopped at `look`, which is gated"), "{err}");
+        assert!(
+            err.ends_with(
+                "This task has not run `look` or any step before it, so there is none to name — report a plain `--pass` without `--stage` instead"
+            ),
+            "{err}"
+        );
+    }
+
+    /// A report filed from `queued` is refused for what it is, not as a step
+    /// name that is not in the pipeline.
+    #[test]
+    fn a_report_from_queued_says_no_lane_works_there() {
+        let pipelines = gated_middle_staffed_pipelines();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let (repo, _root_guard) = unattended_fixture("report-from-queued");
+        add(&repo, "tab-shell", &[]);
+        let mut task = queued(&repo, "tab-shell");
+        let err = route(
+            &mut task,
+            pipeline,
+            crate::pipeline::QUEUED,
+            Outcome::Pass,
+            false,
+            None,
+        )
+        .err()
+        .expect("a report from queued is refused");
+        let err = format!("{err:#}");
+        assert!(err.contains("which no lane works at"), "{err}");
+        assert!(!err.contains("is not a step"), "{err}");
+        assert!(err.contains("starts on its own"), "{err}");
+
+        task.set_stage(crate::pipeline::PAUSED, None);
+        let err = route(
+            &mut task,
+            pipeline,
+            crate::pipeline::PAUSED,
+            Outcome::Pass,
+            false,
+            None,
+        )
+        .err()
+        .expect("a report from paused is refused");
+        let err = format!("{err:#}");
+        assert!(err.contains("`spoolway resume tab-shell`"), "{err}");
     }
 
     /// A step past the gate that this task never ran is still refused for

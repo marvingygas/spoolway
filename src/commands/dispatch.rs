@@ -197,7 +197,23 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // `check_dispatcher_visible` just passed: `None` here only degrades to
     // the older three-line lock shape, never refuses the start.
     let pane_id = mux.own_pane_id();
-    let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())?;
+
+    // Losing the race for the lock is not an error. `already_running` above looked
+    // first, but two starts can both pass that look before either has
+    // written the file, and the loser must read exactly as one that looked a
+    // moment later.
+    let _lock = match crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())
+    {
+        Ok(lock) => lock,
+        Err(err) if err.downcast_ref::<crate::lock::HeldBy>().is_some() => {
+            match args.screen {
+                true => eprintln!("{ALREADY_RUNNING}"),
+                false => println!("{ALREADY_RUNNING}"),
+            }
+            return Ok(EXIT_ALREADY_RUNNING);
+        }
+        Err(err) => return Err(err),
+    };
 
     // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.

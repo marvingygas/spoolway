@@ -266,7 +266,7 @@ To send it to another step, in your own shell:
   spoolway resume example --stage <step>
 ```
 
-The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to. A task in any other state ends with `It is not held, so there is nothing to resume.`
+The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
 
 `--json` prints the same facts as one object.
 
@@ -1398,6 +1398,8 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |
 | `-m`, `--message <TEXT>` | | One line for the status log |
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
+
+A report from a `queued` or `paused` task is refused, because no lane works at either state. The refusal names the next action: `spoolway resume <task>` for a paused task, and waiting for the dispatcher for a queued one.
 
 See [Gates](pipelines.md#gates).
 
