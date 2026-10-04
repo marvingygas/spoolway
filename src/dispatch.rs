@@ -4687,6 +4687,15 @@ impl<'a> Dispatcher<'a> {
     /// step it is sitting on, which [`Dispatcher::run_command`] watches itself
     /// and can say more about.
     ///
+    /// A reroute is the one time this does touch that run: the task is being
+    /// pulled off its current step, so the command on that step is stopped
+    /// and its run files forgotten before the task moves. Left alone, its
+    /// exit code would sit on disk and the next visit to the step would route
+    /// on it without running anything. Stopping before the move is persisted
+    /// is safe: if the write is dropped, the background step's exit code is
+    /// still on disk and pulls the task off again on the retry, so the
+    /// stopped command would have been abandoned anyway.
+    ///
     /// In practice this is the background ones — the step that started each
     /// one has already walked away from it, so this is the only place left
     /// that ever looks again. Two things can be found: a run that has
@@ -4783,6 +4792,13 @@ impl<'a> Dispatcher<'a> {
                         let stopped_on = task.stage().to_string();
                         crate::commands::set_blocked_from(task, &stopped_on);
                     }
+                    // The task is leaving the step it is on, so whatever
+                    // command that step has running is stopped and its run
+                    // files forgotten. Left alone, its exit code would sit on
+                    // disk and the next visit to the step would route on it
+                    // without running the command. A no-op for a step with no
+                    // run.
+                    runs.stop(&crate::command_step::Runs::key(task.stage(), task.id()));
                     task.set_stage(&destination, None);
                     return Some(key.clone());
                 }
@@ -17440,6 +17456,148 @@ mod tests {
                     && a.contains("moving to `blocked`")),
             "{:?}",
             report.actions
+        );
+    }
+
+    /// A background step that fails late pulls its task off whatever step it
+    /// has reached. If that step is a blocking command still running, the pull
+    /// stops the run and forgets its files, so a later visit runs the command
+    /// again instead of routing on a stale or half-finished run.
+    #[test]
+    fn pulling_a_task_off_a_running_command_stops_it_and_forgets_its_run() {
+        let (repo, _root_guard) = fixture("command-pulled-off");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-bg");
+        let mut pipelines = pipelines_running(&format!("{}; exit 1", run_until(&release)), true);
+        let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+        let review = pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "review")
+            .unwrap();
+        review.run = Some("sleep 60".to_string());
+        review.agent = None;
+        review.prompt = None;
+        review.session = false;
+        review.background = false;
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(
+            reload(&path).stage(),
+            "review",
+            "the task moves on to the blocking command"
+        );
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let review_key = crate::command_step::Runs::key("review", "demo");
+        assert_eq!(
+            runs.state(&review_key),
+            crate::command_step::RunState::Running
+        );
+        let review_pid = runs
+            .read_pid(&review_key)
+            .expect("the blocking run has a pid");
+
+        std::fs::write(&release, "go").unwrap();
+        let started = std::time::Instant::now();
+        while reload(&path).stage() != "blocked" {
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the failure never pulled the task off"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            !crate::headless::alive(review_pid),
+            "the command the task was pulled off is still running"
+        );
+        assert_eq!(
+            runs.state(&review_key),
+            crate::command_step::RunState::Fresh,
+            "the pulled-off step's run files must be forgotten"
+        );
+        runs.stop(&review_key);
+    }
+
+    /// The already-exited half of the pull-off: the blocking step's command
+    /// has finished, and its exit code is still on disk when the background
+    /// failure pulls the task away. The code must be forgotten, or the next
+    /// visit routes on it without running the command.
+    #[test]
+    fn pulling_a_task_off_an_exited_command_forgets_its_run() {
+        let (repo, _root_guard) = fixture("command-pulled-off-exited");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-bg");
+        let mut pipelines = pipelines_running(&format!("{}; exit 1", run_until(&release)), true);
+        let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+        let review = pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "review")
+            .unwrap();
+        review.run = Some("true".to_string());
+        review.agent = None;
+        review.prompt = None;
+        review.session = false;
+        review.background = false;
+
+        for _ in 0..2 {
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+        }
+        assert_eq!(reload(&path).stage(), "review");
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let review_key = crate::command_step::Runs::key("review", "demo");
+        let implement_key = crate::command_step::Runs::key("implement", "demo");
+        std::fs::write(&release, "go").unwrap();
+        let started = std::time::Instant::now();
+        while !matches!(
+            (runs.state(&review_key), runs.state(&implement_key)),
+            (
+                crate::command_step::RunState::Exited(_),
+                crate::command_step::RunState::Exited(_)
+            )
+        ) {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "both runs should have exited"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(reload(&path).stage(), "blocked");
+        assert_eq!(
+            runs.state(&review_key),
+            crate::command_step::RunState::Fresh,
+            "the exited run on the step being left must be forgotten"
         );
     }
 

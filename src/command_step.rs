@@ -285,8 +285,15 @@ impl Runs {
             body.push_str(&crate::platform::env_export(env));
             body.push('\n');
         }
-        body.push_str(run);
-        body.push('\n');
+        // The line runs in a child shell, not in the wrapper itself. A line
+        // that starts with `exec` replaces whatever shell it runs in, and if
+        // that were the wrapper the trap above would go with it: no exit code
+        // would ever be written, and the step would read as interrupted and
+        // run again forever. The child inherits the environment exported
+        // above and the wrapper's process group, so `stop` still reaches it,
+        // and the wrapper's own status — what the trap records — is the
+        // child's.
+        body.push_str(&format!("sh -c {}\n", crate::platform::quote(run)));
         body
     }
 
@@ -780,6 +787,21 @@ mod tests {
         assert_eq!(f.settle("deploy-demo"), RunState::Exited(4));
     }
 
+    /// A `run:` line that replaces its own shell with `exec` still has its
+    /// exit code recorded, because the line runs in a child shell and not in
+    /// the wrapper that writes the code.
+    #[test]
+    fn a_command_that_execs_still_reports_its_code() {
+        let f = Fixture::new("exec-line");
+        let marker = f.root.join("ran");
+        f.start(
+            "exec-demo",
+            &format!("exec sh -c 'echo ran >> {}; exit 3'", marker.display()),
+        );
+        assert_eq!(f.settle("exec-demo"), RunState::Exited(3));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+    }
+
     /// Recorded, read back, and dropped — the whole of what a caller needs to
     /// find a run's pane again, or to say it has none any more.
     #[test]
@@ -1158,7 +1180,7 @@ mod tests {
         let env = BTreeMap::from([("SPOOLWAY_TASK".to_string(), "add-endpoint".to_string())]);
         let body = f.runs.wrapper_body("build-demo", "true", &env);
         assert!(
-            body.contains("export SPOOLWAY_TASK='add-endpoint'\ntrue\n"),
+            body.contains("export SPOOLWAY_TASK='add-endpoint'\nsh -c 'true'\n"),
             "{body}"
         );
     }

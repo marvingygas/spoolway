@@ -1408,6 +1408,76 @@ else
 (never reached blocked; at \`$(stage_of tick-check)\`)"
 fi
 
+# ------------------------------------------------------------- a run line that execs
+# `exec` replaces the shell it runs in. The line used to run in the wrapper
+# itself, so an `exec` took the wrapper's exit trap with it: no exit code was
+# ever written, the step read as interrupted, and the dispatcher ran it again
+# on every pass without the task ever leaving it. The line now runs in a child
+# shell, so what is asserted is the task moving on and the line running once.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+EXEC_RAN="$LIVE/exec-ran.txt"
+rm -f "$EXEC_RAN"
+add_command_step default execed \
+  "exec sh -c 'echo ran >> $EXEC_RAN; exit 0'" review implement
+must "marking it headless: true" \
+  sed -i 's|^    run: exec sh .*$|&\n    headless: true|' .spoolway/pipelines/default.yml
+works "a command step whose line starts with exec checks out" "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/execed.md" execed "$BODY" "group: execed"
+must "a task behind the exec step queues" "$SPOOLWAY" queue add --from "$LIVE/execed.md"
+if drive execed gone 180; then ok "a command line that starts with exec lets its task move on"
+else bad "a command line that starts with exec lets its task move on (stuck at \`$(stage_of execed)\`)"; fi
+if [ "$(wc -l < "$EXEC_RAN" 2>/dev/null || echo 0)" -eq 1 ]; then
+  ok "and the line ran once"
+else
+  bad "and the line ran once ($(wc -l < "$EXEC_RAN" 2>/dev/null || echo 0) line(s) in $EXEC_RAN)"
+fi
+lacks "and the dispatcher never took it for an interrupted run" \
+  "was interrupted without an exit code" "$E2E_DISPATCH_LOG"
+
+# ------------------------------------------------------------- pulled off a running command
+# A background step that fails late sends its task to `on_fail` from wherever
+# the task is. If the task is on a blocking command at that moment, the pull
+# used to leave that command's run files on disk, and the next visit to the
+# step routed on them without running the command at all. Now the pull stops
+# the run and forgets it, so the command runs on every visit. The command
+# sleeps past the background step's one-second failure, which is the
+# still-running half; the file it appends to counts how often it really ran.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+PULL_MARK="$LIVE/pull-bg.mark"
+PULL_RAN="$LIVE/pull-c.txt"
+rm -f "$PULL_MARK" "$PULL_RAN"
+{
+  printf '\n  - id: pull-bg\n'
+  printf '    description: Fails once, a second after it starts, and passes after that.\n'
+  printf '    run: if [ -f %s ]; then exit 0; fi; touch %s; sleep 1; exit 1\n' "$PULL_MARK" "$PULL_MARK"
+  printf '    background: true\n    headless: true\n'
+  printf '    on_pass: pull-c\n    on_fail: implement\n'
+  printf '\n  - id: pull-c\n'
+  printf '    description: Still running when the background step fails behind it.\n'
+  printf '    run: echo ran >> %s; sleep 12\n' "$PULL_RAN"
+  printf '    headless: true\n'
+  printf '    on_pass: review\n    on_fail: implement\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: pull-bg/" .spoolway/pipelines/default.yml
+works "a background step failing back to the agent step checks out" "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/pulled.md" pulled "$BODY" "group: pulled"
+must "a task for the pull-off case queues" "$SPOOLWAY" queue add --from "$LIVE/pulled.md"
+if drive pulled gone 240; then ok "a task pulled off a running command still reaches the end"
+else bad "a task pulled off a running command still reaches the end (at \`$(stage_of pulled)\`)"; fi
+if [ "$(wc -l < "$PULL_RAN" 2>/dev/null || echo 0)" -eq 2 ]; then
+  ok "the command ran again on the second visit rather than routing on the first run's code"
+else
+  bad "the command ran again on the second visit rather than routing on the first run's code \
+($(wc -l < "$PULL_RAN" 2>/dev/null || echo 0) run(s) in $PULL_RAN, wanted 2)"
+fi
+if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c)" -eq 2 ]; then
+  ok "and the task arrived at it twice"
+else
+  bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c) time(s))"
+fi
+
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
 

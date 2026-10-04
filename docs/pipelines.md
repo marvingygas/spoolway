@@ -254,6 +254,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
 
 - `run:` goes to the shell whole, via `sh -c`. Pipes, `&&` and
   globs work. There is no `shell:` key.
+- The line runs in a child shell. A line that starts with `exec` still has its exit code
+  recorded and routed.
 - It runs in the task's worktree with `SPOOLWAY_TASK`, `SPOOLWAY_STEP`, `SPOOLWAY_REPO`,
   `SPOOLWAY_WORKTREE` and `SPOOLWAY_TASK_FILE` set, and with the privileges of whoever started
   the dispatcher.
@@ -264,6 +266,9 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - `prompt`, `model`, `effort`, `session` and `gate` are refused. The step takes no slot.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
+- A late background failure can move a task off a command step. That stops the step's running
+  command and deletes its run files, including an exit code it already wrote. The next visit
+  runs the command again.
 - The exit code stays on disk until the pass that read it has written the task's move to the
   destination step. A pass that cannot place that destination, for want of a free slot, leaves
   the task on the command step and routes on the same code next time, instead of running the
