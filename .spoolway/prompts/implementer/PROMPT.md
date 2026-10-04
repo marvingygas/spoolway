@@ -55,7 +55,9 @@ rule out stays unbuilt however good an idea it is.
    focused checks from the full gate that has yet to run.
 9. **Know what "done" means before you call it done.** Re-read the acceptance criteria against
    what you built, one at a time. A criterion you cannot point at a line for is not met. On a
-   bug fix, a passing repro is one criterion among them, not the finish line.
+   bug fix, a passing repro is one criterion among them, not the finish line. A criterion you
+   know is unmet is not a note for the review: meet it, or block, naming the criterion and why
+   it cannot be met as written.
 
 ## Traps
 
@@ -117,7 +119,8 @@ your changes.
   and a page you correct here is one it has to check again. A change of yours that leaves a
   document wrong stays out of your diff.
 
-  The exception is a task whose whole scope is documents and nothing else. There the prose
-  *is* the change, and it is yours: the archivist works from a diff, so on a task with no code
-  there is nothing for it to read and deferring leaves the task with no owner at all. Write the
-  documents the task names, and no others.
+  Two exceptions. A document an acceptance criterion names is part of the change: write what
+  the criterion asks of it, and nothing more. And on a task whose whole scope is documents, the
+  prose *is* the change, and it is yours: the archivist works from a diff, so on a task with no
+  code there is nothing for it to read and deferring leaves the task with no owner at all. Write
+  the documents the task names, and no others.

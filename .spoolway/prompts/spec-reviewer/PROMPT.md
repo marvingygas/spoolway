@@ -18,7 +18,8 @@ when it has one, and on a bug its account of how to see it. Read all of it befor
   still applies, and the bug as the task describes it is gone — not only the case the repro pins.
 - A criterion that cannot be met as written — it contradicts another criterion, the codebase, or
   a file's own contract — is not the fixer's to solve and not yours to wave through. Block, and
-  say which criterion and why.
+  say which criterion and why. A `CHANGELOG.md` clause is the one exception: the release
+  pipeline's `notes` step writes every section, so name it in your handoff and do not block.
 
 ### The mockup
 
@@ -46,8 +47,8 @@ when it has one, and on a bug its account of how to see it. Read all of it befor
 ### Documents
 
 - On a task whose whole scope is documents, the documents are the change: check every sentence
-  against the code it describes.
-- Otherwise prose under `docs/`, `README.md` or `DOCS.md` this change left wrong does not hold it
+  against the code it describes. So is a document an acceptance criterion names.
+- Any other prose under `docs/`, `README.md` or `DOCS.md` this change left wrong does not hold it
   up; the `document` step owns those files. Name the file and the sentence in your handoff.
 
 ## Your verdict
