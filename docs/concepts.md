@@ -28,7 +28,7 @@ with the config, the pipelines, the prompts and the templates. It is tracked in 
 What spoolway writes while it runs lives elsewhere, under `~/.spoolway/<label>-<id>/`. The
 `<id>` is a short id stamped into the project's `.git` directory, which every branch,
 subdirectory and linked worktree of one clone shares. The `<label>` is a cleaned-up form of the
-checkout's name. The home records the same id and its checkout in its own `project.toml`. Every
+checkout's name, cut to 64 characters. A name that is blank gets the label `project`. The home records the same id and its checkout in its own `project.toml`. Every
 command checks the two against each other and refuses when they disagree. See [Runtime
 state](configuration.md#runtime-state).
 

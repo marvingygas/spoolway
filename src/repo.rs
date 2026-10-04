@@ -2992,9 +2992,20 @@ fn is_valid_label(candidate: &str) -> bool {
     crate::tracking::is_bare_filename(candidate)
 }
 
-/// Turn a checkout basename into a label [`is_valid_label`] accepts,
-/// changing nothing about the ones that already qualify — which is every
-/// ordinary project name, so this is a no-op for almost every caller.
+/// Longest label this ever mints. A label becomes the front of a directory
+/// name, `<label>-<id>`, and a filesystem refuses a name past 255 bytes; a
+/// 252-character checkout name once failed `init` that way after the stamp
+/// was already half written, and every later run failed the same way.
+const MAX_LABEL_CHARS: usize = 64;
+
+/// Longest label this ever mints, in bytes. The 255-byte limit counts bytes,
+/// not characters, so 64 four-byte characters would still overflow. 248 leaves
+/// room for `-` and the 6-character id.
+const MAX_LABEL_BYTES: usize = 248;
+
+/// Turn a checkout basename into a label [`is_valid_label`] accepts.
+/// A name that already qualifies passes through unchanged unless it is blank
+/// or over the length caps below, so this is a no-op for almost every caller.
 ///
 /// A Unix basename can hold any byte but `/` and NUL, which is a wider
 /// alphabet than a path component this project ever joins onto
@@ -3004,16 +3015,27 @@ fn is_valid_label(candidate: &str) -> bool {
 /// empty string) falls back to a fixed name rather than being minted at
 /// all, so [`read_or_mint`] is never handed a value its own `valid` rule
 /// would refuse the moment it was written.
+///
+/// A name that is only whitespace falls back too. Left as it was, it was
+/// trimmed to nothing when read back, and the project lost its id and landed
+/// in a home shared with every other project named the same. A longer name
+/// is cut to [`MAX_LABEL_CHARS`] characters and [`MAX_LABEL_BYTES`] bytes.
+/// This only ever mints: a label already stamped into `.git` is read, never
+/// run through here again.
 fn sanitize_label(raw: &str) -> String {
-    if is_valid_label(raw) {
-        return raw.to_string();
-    }
     let folded: String = raw
         .chars()
         .map(|c| if c == '/' || c == '\\' { '-' } else { c })
         .collect();
-    if is_valid_label(&folded) {
-        folded
+    let mut cut = String::new();
+    for c in folded.chars().take(MAX_LABEL_CHARS) {
+        if cut.len() + c.len_utf8() > MAX_LABEL_BYTES {
+            break;
+        }
+        cut.push(c);
+    }
+    if !cut.trim().is_empty() && is_valid_label(&cut) {
+        cut
     } else {
         "project".to_string()
     }
@@ -5257,6 +5279,25 @@ mod tests {
             );
             assert_ne!(sanitized, unsafe_basename);
         }
+    }
+
+    /// A checkout folder name that is blank once trimmed gets the fixed label
+    /// `project`, and a newly minted label is cut to 64 characters, so no
+    /// folder name leaves two clones sharing one home or a label too long to
+    /// create as a directory.
+    #[test]
+    fn a_blank_folder_name_gets_the_project_label_and_a_long_one_is_cut_to_64() {
+        for blank in [" ", "  ", "\t", " \t "] {
+            assert_eq!(sanitize_label(blank), "project", "{blank:?}");
+        }
+        let long = "a".repeat(252);
+        let label = sanitize_label(&long);
+        assert!(is_valid_label(&label));
+        assert_eq!(label.chars().count(), 64, "{label:?}");
+
+        let wide = sanitize_label(&"\u{1F600}".repeat(63));
+        assert!(is_valid_label(&wide));
+        assert!(wide.len() <= MAX_LABEL_BYTES, "{} bytes", wide.len());
     }
 
     /// A scratch `$HOME` carrying a hand-written workspace — `project.toml`

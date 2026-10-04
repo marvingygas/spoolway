@@ -39,7 +39,10 @@ The checkout holds the tracked files: `config.toml`, `.spoolway/pipelines/` and
 `.spoolway/prompts/`. Everything spoolway writes while it runs lives at
 `~/.spoolway/<label>-<id>/`. The `<id>` is a short id stamped into the project's `.git`
 directory, which every branch and worktree of one clone shares. The `<label>` is a cleaned-up
-form of the checkout's name.
+form of the checkout's name, cut to 64 characters. A name that is blank gets the label `project`.
+
+Every command needs `HOME` to be set. When `HOME` is unset or empty, the command refuses, names
+`HOME` and writes nothing.
 
 The binding is two files that must agree: the stamp at `.git/spoolway-id`, and the record at
 `~/.spoolway/<label>-<id>/project.toml`. Every command checks them before it does anything else.

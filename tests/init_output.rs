@@ -816,6 +816,78 @@ fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
     std::fs::remove_dir_all(&copy).ok();
 }
 
+/// Without a home directory, spoolway used to put its state under the temp
+/// folder. Every command now refuses first, names `HOME`, and writes
+/// nothing — not even under the folder `TMPDIR` points at.
+#[test]
+fn a_command_with_home_unset_or_empty_refuses_and_writes_nothing() {
+    let project = Project::new("home-unset");
+    let tmp = project.as_ref().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("create the scratch temp folder");
+    for empty in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_spoolway"));
+        command
+            .args(["queue", "list"])
+            .current_dir(project.as_ref())
+            .env("TMPDIR", &tmp);
+        if empty {
+            command.env("HOME", "");
+        } else {
+            command.env_remove("HOME");
+        }
+        let output = command.output().expect("run spoolway");
+        assert!(!output.status.success(), "empty={empty}: it ran");
+        let said = stderr(&output);
+        assert!(said.contains("HOME"), "empty={empty}: {said}");
+        assert_eq!(
+            std::fs::read_dir(&tmp).unwrap().count(),
+            0,
+            "empty={empty}: something was written under TMPDIR"
+        );
+    }
+}
+
+/// `sync` reads its config leniently, but a home that cannot be trusted is
+/// not a config problem: from a copied checkout it must refuse like every
+/// other command, and leave the original's `sync-stamp` alone.
+#[test]
+fn sync_in_a_copied_checkout_refuses_and_leaves_the_original_home_alone() {
+    let project = Project::new("sync-copy");
+    project.init("claude");
+    let home = project.as_ref().join("home");
+    let copy = project.as_ref().parent().unwrap().join(format!(
+        "{}-copy",
+        project.as_ref().file_name().unwrap().to_string_lossy()
+    ));
+    copy_dir_all(project.as_ref(), &copy);
+
+    let stamps = || -> Vec<(PathBuf, Option<String>)> {
+        std::fs::read_dir(home.join(".spoolway"))
+            .unwrap()
+            .flatten()
+            .map(|entry| {
+                let stamp = entry.path().join("sync-stamp");
+                let text = std::fs::read_to_string(&stamp).ok();
+                (stamp, text)
+            })
+            .collect()
+    };
+    let before = stamps();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+        .args(["sync"])
+        .current_dir(&copy)
+        .env("HOME", &home)
+        .output()
+        .expect("run spoolway");
+    assert!(!output.status.success(), "sync ran in a copied checkout");
+    let said = stderr(&output);
+    assert!(said.contains("two checkouts carry the id"), "{said}");
+    assert_eq!(stamps(), before, "the original home's sync-stamp changed");
+
+    std::fs::remove_dir_all(&copy).ok();
+}
+
 /// A pipeline edit made only in a linked worktree — never committed, never
 /// synced to the project root — is one `prompt contract` can preview from
 /// inside that worktree, printing the `checkout:` line first the same way

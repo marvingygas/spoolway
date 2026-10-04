@@ -129,6 +129,15 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    // Every other command keeps state under `$HOME/.spoolway/`. Without a
+    // home, that path silently became the temp folder, and a project's
+    // state landed there; refusing here means nothing is read or written.
+    if platform::home_dir().is_none() {
+        anyhow::bail!(
+            "HOME is not set (or is empty); spoolway keeps its state under ~/.spoolway. Set HOME to your home directory and run it again"
+        );
+    }
+
     let cwd = cli.repo.clone().unwrap_or(std::env::current_dir()?);
     // Bare `spoolway` shows the notice as a popup over its screen — see
     // `notify` — so it is held here until the screen is open.
@@ -285,7 +294,14 @@ fn run() -> Result<()> {
             // Every other command reaching this arm still dies on a config
             // it cannot read.
             let repo = if matches!(command, Command::Sync(_)) {
-                let (repo, _, _) = Repo::discover_lenient(&cwd)?;
+                let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
+                // The lenient read is for a config, not a home: a copied
+                // checkout (two carry one id) is refused by every other
+                // command, and `sync` writes into the home it would
+                // otherwise wrongly share with the original.
+                if let Some(err) = home_error {
+                    return Err(err);
+                }
                 repo
             } else {
                 Repo::discover(&cwd)?

@@ -1133,7 +1133,8 @@ a note naming it and the `--workspace` that joins it instead. A listed checkout 
 ask stays where it is. See [Home mode](concepts.md#home-mode). Either mode needs a real git
 repository behind the checkout; a plain folder is refused.
 
-Repo mode refuses outright, before writing anything, when the checkout is your home directory:
+Repo mode refuses outright, before writing anything, when the checkout is your home directory,
+including when `$HOME` is a symlink to it:
 `~/.spoolway` there is already spoolway's own state directory, so it can never also hold a
 project's tracked setup. The refusal says to run `--setup home` instead, or to run `init` in the
 actual project checkout. Home mode is unaffected, since it never writes into the checkout.
@@ -1255,6 +1256,9 @@ straight away with no panel.
 
 See [Keeping a project's files current](installation.md#keeping-a-projects-files-current) for
 the panel itself.
+
+`sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
+other command does.
 
 On success, `sync` writes a stamp under the project's home recording this binary's version and
 a fingerprint of the text it would write, one line per checkout. `spoolway init` writes the

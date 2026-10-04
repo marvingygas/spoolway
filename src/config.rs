@@ -128,7 +128,10 @@ pub(crate) fn tracked_setup_dir_in(checkout: &Path) -> PathBuf {
 /// joins inside the handful of accessors already named for it —
 /// [`tracked_setup_dir_in`] is that one join for this identity check too.
 pub(crate) fn is_state_root_checkout(checkout: &Path) -> bool {
-    crate::platform::home_dir().as_deref() == Some(checkout)
+    // Both sides resolved: `$HOME` may be a symlink to the checkout, and
+    // `checkout` arrives already resolved, so comparing the raw spelling let
+    // a symlinked home pass for an ordinary project.
+    crate::platform::home_dir().map(|home| home.comparable()) == Some(checkout.comparable())
 }
 
 /// `full` — one of the constants above ([`PROMPTS_DIR`], [`TASK_TEMPLATES_DIR`],
@@ -2049,6 +2052,22 @@ pub use human_duration::{format as format_duration, parse as parse_duration};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `$HOME` reached through a symlink is still the home folder, so a
+    /// checkout resolved to its real path must be recognised as it.
+    #[test]
+    fn a_symlinked_home_is_still_the_state_root_checkout() {
+        let base = crate::scratch::root("config-test-symlinked-home");
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        crate::platform::test_home::with_home(&link, || {
+            assert!(is_state_root_checkout(&real.canonicalize().unwrap()));
+            assert!(!is_state_root_checkout(&base));
+        });
+    }
 
     /// The reason the rule exists: an id is joined onto a directory, so
     /// anything that can leave that directory is not a name.
