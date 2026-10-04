@@ -931,9 +931,9 @@ fn read_recorded_root(common: &Path) -> Option<PathBuf> {
 /// repository, or it is a bare one with no checkout to speak of. Anything
 /// else that goes wrong — `git` missing from `PATH`, a permissions problem,
 /// canonicalizing failing — is `Err`, never folded into that same `None`:
-/// [`crate::commands::init::init`] reads `None` as "run `git init` here
-/// first", which would be a lie about a real repository that merely could
-/// not be resolved this time.
+/// [`crate::commands::init::init`] reads `None` as "this is not a checkout"
+/// (see [`no_checkout_error`]), which would be a lie about a real repository
+/// that merely could not be resolved this time.
 fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
     // Checked before ever shelling out: a directory that does not exist at
     // all fails `Command::output`'s own `current_dir` at the OS level, whose
@@ -1179,6 +1179,12 @@ pub(crate) const BINDING_FILE: &str = "project.toml";
 struct Binding {
     id: String,
     root: PathBuf,
+    /// The checkout's first commit when this was written — what lets a later
+    /// run tell a re-clone of the same repository from a different one that
+    /// landed on the same path. Absent in a record an older binary wrote, and
+    /// when the checkout had no commit yet; neither is a reason to refuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_commit: Option<String>,
 }
 
 /// The binding recorded at `home`, if there is one readable. `Ok(None)` only
@@ -1533,6 +1539,7 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
         &Binding {
             id: id.to_string(),
             root: root.to_path_buf(),
+            root_commit: root_commit(root),
         },
     )?;
     println!(
@@ -1861,8 +1868,16 @@ pub(crate) fn workspace_clone_checked(root: &Path) -> Result<Option<WorkspaceClo
         && let Some(first) = broken.first()
     {
         bail!(
-            "this checkout is in no workspace spoolway can read, and {} does not parse.",
+            "this checkout is in no workspace spoolway can read, and {} does not parse, so \
+             spoolway cannot tell whether it lists this checkout\n  repair that file by hand, or \
+             move the whole workspace folder {} out of {} if it is not needed — moving the \
+             file alone leaves the folder reading as a workspace — then run this again",
             first.display(),
+            first
+                .parent()
+                .map(shorten_home)
+                .unwrap_or_else(|| first.display().to_string()),
+            shorten_home(&crate::mux::state_root()),
         );
     }
     Ok(found)
@@ -1977,14 +1992,58 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
         // deleted or never made it into this clone. Refused rather than
         // silently re-stamped: writing a fresh id here would leave that
         // home's record pointing at an id nothing on disk carries any more.
+        //
+        // The advice depends on what this clone is. A path that was deleted
+        // and cloned again may hold the same repository or a different one,
+        // and restoring the old id attaches this checkout to the old queue
+        // either way. So the home's recorded root commit is checked first:
+        // restoring is offered only when this clone has it, and when the
+        // record has none — an older binary wrote it — the safe route comes
+        // first and restoring is named as the one to take only when the person
+        // knows it is the same repository.
+        let record = home.join(BINDING_FILE);
+        let stamp = common_git_dir(root)?
+            .map(|dir| dir.join(ID_FILE).display().to_string())
+            .unwrap_or_else(|| root.display().to_string());
+        let recorded = read_binding(&home)
+            .ok()
+            .flatten()
+            .and_then(|binding| binding.root_commit);
+        // A clone with no root commit of its own — shallow, or no commits yet —
+        // cannot be told apart from the repository the home was made for, the
+        // same rule `join_workspace` applies, so it reads as "cannot tell"
+        // rather than as a different repository.
+        let same_repository = recorded.as_deref().and_then(|commit| {
+            if root_commit(root).is_some_and(|mine| mine == commit) || commit_exists(root, commit) {
+                Some(true)
+            } else {
+                root_commit(root).map(|_| false)
+            }
+        });
+        let fresh = format!(
+            "delete the project.toml entry and run `spoolway init` again to mint this \
+             checkout a fresh id — the old queue stays in {}",
+            home.display()
+        );
+        let advice = match same_repository {
+            Some(true) => format!(
+                "this clone holds the repository that home was made for, so restore the \
+                 stamp from the id in that file by hand, or {fresh}"
+            ),
+            Some(false) => format!(
+                "this clone is a different repository from the one that home was made for, \
+                 so do not restore its stamp — that would attach the old queue to it. \
+                 Instead {fresh}"
+            ),
+            None => format!(
+                "that home recorded no first commit, so this cannot tell whether this clone \
+                 is the repository it was made for. {fresh}; restore the stamp from the id in \
+                 that file by hand only if you know it is the same repository"
+            ),
+        };
         bail!(
-            "{} has no id, but {} already records this checkout\n  \
-             restore the stamp from the id in that file by hand, or delete the project.toml \
-             entry and run `spoolway init` again to mint this checkout a fresh id",
-            common_git_dir(root)?
-                .map(|dir| dir.join(ID_FILE).display().to_string())
-                .unwrap_or_else(|| root.display().to_string()),
-            home.join(BINDING_FILE).display(),
+            "{stamp} has no id, but {} already records this checkout\n  {advice}",
+            record.display(),
         );
     }
 
@@ -1993,12 +2052,7 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
     // the same mint `spoolway init` has always done, just no longer gated
     // on someone having run `init` first.
     let Some((id, _minted)) = stamped_id(root)? else {
-        bail!(
-            "{} has no git repository behind it — spoolway keys a project's home off an id \
-             stamped into its own `.git`, so there is nowhere to write one. Run `git init` \
-             here first.",
-            root.display()
-        );
+        return Err(no_checkout_error(root));
     };
     let home = crate::mux::project_home(root)?;
     write_binding(
@@ -2006,6 +2060,7 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
         &Binding {
             id,
             root: root.to_path_buf(),
+            root_commit: root_commit(root),
         },
     )?;
     Ok(home)
@@ -2389,8 +2444,10 @@ fn new_workspace_folder(root: &Path) -> Result<(PathBuf, String, String)> {
 /// One case takes over an entry instead of adding one: exactly one entry of
 /// this repository, by root commit, whose folder no longer exists. Its
 /// `root` is rewritten to this checkout, and this checkout carries on with
-/// its queue, archive and worktrees — see the comment where it happens.
-pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> {
+/// its queue, archive and worktrees — see the comment where it happens. The
+/// second half of the answer is the `root` of the entry taken over, `None`
+/// for any other join, so the caller can say which one happened.
+pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<(WorkspaceClone, Option<PathBuf>)> {
     require_utf8_root(root)?;
     require_git_repository(root)?;
     if !crate::tracking::is_bare_filename(name) {
@@ -2432,10 +2489,13 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
         return Err(bad_dispatcher_error(&record_path, bad));
     }
     if let Some(existing) = parsed.clones.iter().find(|clone| clone.root == root) {
-        return Ok(WorkspaceClone {
-            workspace,
-            dispatcher: existing.dispatcher.clone(),
-        });
+        return Ok((
+            WorkspaceClone {
+                workspace,
+                dispatcher: existing.dispatcher.clone(),
+            },
+            None,
+        ));
     }
     // A workspace of another repository is refused the way a move into it is
     // (`check_move`): the join would hand this checkout a queue folder beside
@@ -2480,14 +2540,14 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
                     .is_some_and(|commit| commit == mine || commit_exists(root, commit))
         });
         if let (Some(entry), None) = (gone.next(), gone.next()) {
-            entry.root = root.to_path_buf();
+            let old_root = std::mem::replace(&mut entry.root, root.to_path_buf());
             entry.root_commit = Some(mine.clone());
             let clone = WorkspaceClone {
                 workspace: workspace.clone(),
                 dispatcher: entry.dispatcher.clone(),
             };
             write_workspace(&workspace, &parsed)?;
-            return Ok(clone);
+            return Ok((clone, Some(old_root)));
         }
     }
     let base = sanitize_label(&crate::mux::project_label(root));
@@ -2525,7 +2585,7 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<WorkspaceClone> 
         let _ = std::fs::remove_dir_all(&home);
         return Err(err);
     }
-    Ok(clone)
+    Ok((clone, None))
 }
 
 /// The ids of every task queued in `clone`'s dispatcher folder that holds a
@@ -3051,11 +3111,14 @@ fn is_valid_id(candidate: &str) -> bool {
 /// again. Called once by every writer of a `clones` entry —
 /// [`create_workspace`], [`join_workspace`] and the checkout's own move —
 /// rather than relying on `toml`'s own serialization failure to catch it,
-/// which would name the error, not the path.
-fn require_utf8_root(root: &Path) -> Result<()> {
+/// which would name the error, not the path. `init` calls it first of all as
+/// well, because a repo-mode binding records the same path as plain text, and
+/// without that the run got as far as resolving the git directory through a
+/// lossy copy of the path and failing with "No such file or directory".
+pub(crate) fn require_utf8_root(root: &Path) -> Result<()> {
     if root.to_str().is_none() {
         bail!(
-            "{} is not valid UTF-8 — a home-mode clone's path is written into project.toml as \
+            "{} is not valid UTF-8 — a project's path is written into project.toml as \
              plain text, so a path with bytes that are not valid UTF-8 cannot be recorded \
              losslessly and would stop matching this checkout on every later command\n  rename \
              the checkout, or the directory it sits in, to a UTF-8-safe path first",
@@ -3065,26 +3128,46 @@ fn require_utf8_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Refuse `root` for home mode exactly as repo mode already does: with no
+/// Refuse a `root` with no checkout behind it, in every mode: with no
 /// git repository behind it, `common_git_dir` never resolves, and the
 /// ancestor walk in [`Repo::root`] that `.spoolway/`'s discovery relies on to
 /// stop somewhere has no git toplevel to bound it at either — a non-git
 /// folder accepted into a workspace here would read "no spoolway project
 /// found" from any subdirectory walked past the folder itself, exactly the
 /// unbounded walk that check exists to prevent. Called by every write that
-/// lists a checkout in a workspace: [`create_workspace`], [`join_workspace`]
-/// and the checkout's own move — the places `spoolway init`'s own
-/// home-mode menu reaches.
-fn require_git_repository(root: &Path) -> Result<()> {
+/// lists a checkout in a workspace — [`create_workspace`], [`join_workspace`]
+/// and the checkout's own move — and by `init` itself before it does
+/// anything, so a refusal leaves `.git` unstamped.
+pub(crate) fn require_git_repository(root: &Path) -> Result<()> {
     if common_git_dir(root)?.is_none() {
-        bail!(
-            "{} is not a git repository. A home-mode workspace lists a checkout by its git \
-             repository, so it needs one.\n  Run `git init` here first, then `spoolway init` \
-             again.",
-            root.display()
-        );
+        return Err(no_checkout_error(root));
     }
     Ok(())
+}
+
+/// The refusal for a `root` that [`common_git_dir`] found no checkout behind,
+/// naming which of its two causes it is: a bare repository, which is a git
+/// repository with no working tree and so nothing to stamp or list, or
+/// nothing under git at all. `git init` is the fix for the second and would
+/// do nothing for the first.
+fn no_checkout_error(root: &Path) -> anyhow::Error {
+    let bare = run(root, "git", &["rev-parse", "--is-bare-repository"])
+        .is_ok_and(|out| out.trim() == "true");
+    if bare {
+        anyhow::anyhow!(
+            "{} is a bare git repository — it has no working tree, so there is no checkout \
+             here to set up\n  run `git worktree add <path>` or `git clone` it to a normal \
+             checkout, and run `spoolway init` there",
+            root.display()
+        )
+    } else {
+        anyhow::anyhow!(
+            "{} is not a git repository — spoolway keys a project's home off its git \
+             repository, so it needs one\n  run `git init` here first, then `spoolway init` \
+             again",
+            root.display()
+        )
+    }
 }
 
 /// A label safe to `join` onto `state_root()` unchanged: one normal path
@@ -3370,45 +3453,72 @@ fn branch_or_detached(dir: &Path) -> String {
     }
 }
 
-/// `dir`'s best-guess default branch, without switching it off whatever is
-/// actually checked out: `origin`'s own recorded `HEAD` when there is one —
-/// set by an ordinary `git clone`, and by nothing this binary writes — or
-/// else whichever of `main`/`master` exists as a local branch. A guess:
-/// a repo whose default branch is named otherwise, with no `origin/HEAD`,
-/// is not caught.
-/// `None` when neither answers, which callers read as "nothing to check".
+/// Whether `dir` has a local branch called `name`.
+fn has_local_branch(dir: &Path, name: &str) -> bool {
+    run(
+        dir,
+        "git",
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// `dir`'s default branch, without switching it off whatever is checked out:
+/// `origin`'s own recorded `HEAD` when there is one — set by an ordinary
+/// `git clone`, and by nothing this binary writes — then the branch
+/// `init.defaultBranch` names, if it exists locally, then whichever of
+/// `main`/`master` does. `None` when none of the three answers, which
+/// [`default_branch_tracking_spoolway`] then covers by looking at every local
+/// branch instead.
 fn default_branch(dir: &Path) -> Option<String> {
     if let Ok(out) = run(
         dir,
         "git",
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    ) {
-        let name = out.trim();
-        if let Some(branch) = name.strip_prefix("origin/") {
-            return Some(branch.to_string());
-        }
+    ) && let Some(branch) = out.trim().strip_prefix("origin/")
+    {
+        return Some(branch.to_string());
     }
-    ["main", "master"]
-        .into_iter()
-        .find(|candidate| {
-            run(
-                dir,
-                "git",
-                &[
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{candidate}"),
-                ],
-            )
-            .is_ok()
-        })
-        .map(str::to_string)
+    let configured = run(dir, "git", &["config", "--get", "init.defaultBranch"])
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|name| !name.is_empty() && has_local_branch(dir, name));
+    configured.or_else(|| {
+        ["main", "master"]
+            .into_iter()
+            .find(|candidate| has_local_branch(dir, candidate))
+            .map(str::to_string)
+    })
 }
 
-/// `dir`'s default branch, if it tracks `.spoolway/` there — asked with
-/// `git cat-file`, against the branch's own tree, so a checkout sitting on
-/// some other branch right now never has to switch onto it to find out.
+/// Whether `branch`'s own tree holds a `.spoolway/` — asked with
+/// `git cat-file`, so a checkout sitting on another branch never has to
+/// switch onto it to find out.
+fn branch_tracks_spoolway(dir: &Path, branch: &str) -> bool {
+    run(
+        dir,
+        "git",
+        &[
+            "cat-file",
+            "-e",
+            &format!("{branch}:{}", crate::config::STATE_DIR),
+        ],
+    )
+    .is_ok()
+}
+
+/// The branch that makes a home-mode setup in `dir` wrong, if any: the
+/// default branch when it tracks `.spoolway/`, found by
+/// [`default_branch`]. When no default branch can be named at all — a repo
+/// whose trunk is called something else and has no `origin/HEAD` — the
+/// first local branch that tracks `.spoolway/` instead, since refusing on a
+/// branch that might not be the default is better than accepting a setup
+/// that breaks the moment the real one is checked out.
 /// `require_git_repository` has already refused anything with no git
 /// repository behind it by the time [`Placement::choose_any`] calls this, so
 /// `dir` always resolves a toplevel here.
@@ -3419,19 +3529,50 @@ fn default_branch(dir: &Path) -> Option<String> {
 /// branch, with no `.spoolway/` of its own, used to pass the ordinary
 /// [`crate::config::tracked_setup_dir_in`] check and accept `--setup home`,
 /// breaking every command the moment the default branch came back.
-pub(crate) fn default_branch_tracking_spoolway(dir: &Path) -> Option<String> {
-    let branch = default_branch(dir)?;
+///
+/// Answers the branch and whether it is the default: `false` means no
+/// default could be named and this is the first local branch found tracking
+/// `.spoolway/`, which may be a stale branch rather than the project's trunk.
+pub(crate) fn default_branch_tracking_spoolway(dir: &Path) -> Option<(String, bool)> {
+    if let Some(branch) = default_branch(dir) {
+        return branch_tracks_spoolway(dir, &branch).then_some((branch, true));
+    }
     run(
         dir,
         "git",
-        &[
-            "cat-file",
-            "-e",
-            &format!("{branch}:{}", crate::config::STATE_DIR),
-        ],
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     )
-    .ok()
-    .map(|_| branch)
+    .ok()?
+    .lines()
+    .map(str::trim)
+    .find(|branch| !branch.is_empty() && branch_tracks_spoolway(dir, branch))
+    .map(|branch| (branch.to_string(), false))
+}
+
+/// The ids of the tasks still queued in the repo-mode home `root` was stamped
+/// into, sorted — what a switch to home mode would leave behind, because the
+/// workspace it creates starts an empty queue of its own.
+///
+/// Only a checkout carrying its own stamp has such a home. One without a
+/// stamp would resolve to a home named after its basename, which may belong
+/// to another repository altogether, so it answers nothing. A queue file that
+/// does not parse counts under its file name: a refusal over a task that
+/// might be one is cheaper than leaving it behind unseen.
+pub(crate) fn repo_mode_queued_tasks(root: &Path) -> Result<Vec<String>> {
+    let Some((_checkout, label, id)) = project_identity(root)? else {
+        return Ok(Vec::new());
+    };
+    let queue = crate::mux::home_of(&label, &id).join(crate::config::QUEUE_DIR);
+    let (tasks, problems) = crate::task::load_dir(&queue)?;
+    let mut ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
+    ids.extend(
+        problems
+            .iter()
+            .filter_map(|problem| problem.path.file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned()),
+    );
+    ids.sort();
+    Ok(ids)
 }
 
 fn git_toplevel(dir: &Path) -> Result<PathBuf> {
@@ -4712,6 +4853,7 @@ mod tests {
                 &Binding {
                     id: "zzzzzz".to_string(),
                     root: work.canonical().unwrap(),
+                    root_commit: None,
                 },
             )
             .unwrap();
@@ -4789,6 +4931,7 @@ mod tests {
                 &Binding {
                     id: "bbbbbb".to_string(),
                     root: old_checkout.canonical().unwrap(),
+                    root_commit: None,
                 },
             )
             .unwrap();
@@ -4947,6 +5090,45 @@ mod tests {
             "names the record file: {said}"
         );
         assert!(said.contains("restore the stamp"), "{said}");
+    }
+
+    /// The re-clone case of criterion 6: the path was deleted and cloned
+    /// again, so the stamp is gone but the home still records the path. The
+    /// advice depends on the home's recorded first commit — restoring the
+    /// stamp attaches the old queue, so it is offered only to a clone of the
+    /// repository the home was made for.
+    #[test]
+    fn bind_criterion_6_checks_the_root_commit_before_advising_a_restore() {
+        let commit = |dir: &Path, msg: &str| {
+            run(dir, "git", &["commit", "--allow-empty", "-q", "-m", msg]).unwrap();
+        };
+        let (home, _home_guard) = scratch_home("criterion-6-root-commit");
+        let work = bind_fixture("criterion-6-root-commit");
+        commit(&work, "first");
+        let said = crate::platform::test_home::with_home(&home, || {
+            bind(&work).unwrap();
+            std::fs::remove_file(work.join(".git").join("spoolway-id")).unwrap();
+            format!("{:#}", bind(&work).unwrap_err())
+        });
+        assert!(
+            said.contains("restore the stamp"),
+            "same repository: {said}"
+        );
+        assert!(!said.contains("do not restore"), "same repository: {said}");
+
+        // The path is deleted and a different repository lands on it.
+        std::fs::remove_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "plan/demo"]);
+        commit(&work, "unrelated");
+        let said = crate::platform::test_home::with_home(&home, || {
+            format!("{:#}", bind(&work).unwrap_err())
+        });
+        assert!(said.contains("do not restore"), "other repository: {said}");
+        assert!(
+            !said.contains("restore the stamp from the id"),
+            "other repository: {said}"
+        );
     }
 
     /// Criterion 7: no stamp, and nothing records this checkout anywhere —
@@ -6057,7 +6239,7 @@ mod tests {
                 })
             })
             .collect();
-        let results: Vec<Result<WorkspaceClone>> =
+        let results: Vec<Result<(WorkspaceClone, Option<PathBuf>)>> =
             handles.into_iter().map(|h| h.join().unwrap()).collect();
         for result in &results {
             assert!(

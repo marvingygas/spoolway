@@ -112,7 +112,8 @@ An established project keeps its own provider: a repeat `init` run with `--provi
 takes the project's already-chosen provider rather than falling back to `claude`, whether run
 without a terminal or answered at the menu, whose own default is pre-selected to it. Naming
 a different `--provider` on an established project adds that provider's skills. The project's
-own profile and pipelines stay as they are until `spoolway init --force` rewrites them.
+own profile and pipelines stay as they are. `spoolway init --force` rewrites the files and keeps
+the project's provider, tracker and project key, unless you pass `--provider` or `--tracker`.
 
 Answering yes to the example setup writes the shipped pipelines, prompts and task templates.
 Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
@@ -189,8 +190,10 @@ repository, then `Create a new workspace`.
 Joining a workspace, or moving into one that already exists, keeps its `config/` exactly as it
 is, skips the example and tracker questions, and adds this clone to its `project.toml` with a
 dispatcher folder of its own — the clone's directory name, with `-2` added when that name is
-taken. The run ends with one line naming where the checkout went, `Joined workspace <name>.` or
-`Moved to workspace <name>.`, since the workspace's setup is already settled. Moving into a new
+taken. The run ends with one line naming where the checkout went: `Joined workspace <name>.`,
+`Moved to workspace <name>.`, or `Joined workspace <name>, taking over the entry for <old path>`
+and a note that its queue, archive and worktrees carry on here. The workspace's setup is already
+settled. Moving into a new
 workspace scaffolds its `config/` from scratch instead, asking the usual questions, with the
 same closing line added to say where the checkout went.
 
@@ -203,10 +206,17 @@ Skills install into the coding agent's user folder instead of the project's own,
 project skill folder sits inside a checkout that home mode promises to leave untouched. See [The
 pipeline skills](#the-pipeline-skills).
 
-Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
-`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own. Each
-refusal names the command to run instead. See [Home mode](concepts.md#home-mode).
+Moving a project between the two modes is refused in these cases:
+
+- `--setup repo` on a checkout a workspace already lists.
+- `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`.
+- `--setup home` on a repository where a branch tracks a `.spoolway/` of its own. `init` finds
+  the default branch from `origin/HEAD`, then `init.defaultBranch`, then `main` or `master`. When
+  none of these names a branch, any local branch that tracks `.spoolway/` is refused.
+- `--setup home` on a checkout whose repo-mode home still holds queued tasks. The refusal names
+  the tasks.
+
+Each refusal names the steps to take instead. See [Home mode](concepts.md#home-mode).
 
 Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
 the missing path.

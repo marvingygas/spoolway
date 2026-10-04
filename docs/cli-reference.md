@@ -1125,13 +1125,16 @@ is and skips the example and tracker questions; `--tracker`, `--project-key`, `-
 still checked for a valid value even though a join or a move into an existing workspace ignores
 it. Moving into a new workspace scaffolds a `config/` from scratch instead, asking the usual
 questions. Either way the run ends with one line naming where the checkout went: `Joined
-workspace <name>.` or `Moved to workspace <name>.`
+workspace <name>.`, `Moved to workspace <name>.`, or `Joined workspace <name>, taking over the
+entry for <old path>` when the join takes over an entry whose folder is gone.
 
 With nobody to ask and no `--workspace`, an unlisted checkout starts a new workspace, the same
 default the menu takes; when a workspace already holds a clone of this repository, `init` prints
 a note naming it and the `--workspace` that joins it instead. A listed checkout with nobody to
-ask stays where it is. See [Home mode](concepts.md#home-mode). Either mode needs a real git
-repository behind the checkout; a plain folder is refused.
+ask stays where it is. See [Home mode](concepts.md#home-mode). Either mode needs a git
+repository with a working tree behind the checkout. A plain folder, a bare repository, a path
+that is not valid UTF-8, and a `.spoolway` file in repo mode are each refused with the reason,
+before anything is written to `.git`.
 
 Repo mode refuses outright, before writing anything, when the checkout is your home directory,
 including when `$HOME` is a symlink to it:
@@ -1139,10 +1142,17 @@ including when `$HOME` is a symlink to it:
 project's tracked setup. The refusal says to run `--setup home` instead, or to run `init` in the
 actual project checkout. Home mode is unaffected, since it never writes into the checkout.
 
-Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
-`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own. Each
-refusal names the command to run instead.
+Moving a project between the two modes is refused in these cases:
+
+- `--setup repo` on a checkout a workspace already lists.
+- `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`.
+- `--setup home` on a repository where a branch tracks a `.spoolway/` of its own. `init` finds
+  the default branch from `origin/HEAD`, then `init.defaultBranch`, then `main` or `master`. When
+  none of these names a branch, any local branch that tracks `.spoolway/` is refused.
+- `--setup home` on a checkout whose repo-mode home still holds queued tasks. The refusal names
+  the tasks.
+
+Each refusal names the steps to take instead.
 
 Picking another workspace in the menu, or passing `--workspace <other>`, moves a listed
 checkout there, carrying its queue, archive and worktrees along. The move is refused, with
@@ -1186,7 +1196,7 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |
 | `--yes` | | Let a run with no terminal write. Without it, a run with nobody to answer writes nothing and exits 0. A run at a terminal does not need it |
-| `--force` | | Overwrite existing config, pipeline and prompt files. In a home-mode clone, names the other clones that share that config before rewriting it |
+| `--force` | | Overwrite existing config, pipeline and prompt files. Keeps the project's provider, tracker and project key unless `--provider` or `--tracker` is passed. In a home-mode clone, names the other clones that share that config before rewriting it |
 
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes

@@ -220,8 +220,8 @@ must "a fresh clone of the same repository" git clone -q "$FRESH" "$THIRD"
 cd "$THIRD" || exit 2
 config_before=$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)
 out=$("$SPOOLWAY" init --workspace "$NAME2" --provider claude --yes </dev/null 2>&1)
-if grep -qxF "Joined workspace $NAME2." <<<"$out"; then ok "the takeover says only that it joined"
-else bad "the takeover says only that it joined"; sed 's/^/        /' <<<"$out"; fi
+if grep -qF "Joined workspace $NAME2, taking over the entry for" <<<"$out"; then ok "the takeover says it took over an entry"
+else bad "the takeover says it took over an entry"; sed 's/^/        /' <<<"$out"; fi
 has "project.toml now names the fresh clone" "root = \"$(pwd -P)\"" "$WS2/project.toml"
 if [ "$(ls "$WS2/dispatchers" | wc -l)" -eq 2 ]; then ok "no third dispatcher folder is made"
 else bad "no third dispatcher folder is made"; ls -A "$WS2/dispatchers" | sed 's/^/        /'; fi
