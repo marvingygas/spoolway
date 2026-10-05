@@ -9532,6 +9532,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 0,
+            blocked: false,
         });
         task.save().unwrap();
         let before = queued(&repo, "solo");

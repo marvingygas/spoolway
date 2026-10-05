@@ -117,6 +117,7 @@ pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> c
         ctx_peak: None,
         pipeline_version: "1.0".into(),
         outcome: None,
+        blocked: false,
         run: None,
         trial: None,
         trial_group: None,
