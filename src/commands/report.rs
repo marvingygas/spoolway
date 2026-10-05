@@ -259,6 +259,7 @@ pub fn report(
         step: current.clone(),
         outcome: outcome.as_str().to_string(),
         at: chrono::Utc::now().timestamp(),
+        blocked: destination == crate::pipeline::BLOCKED,
     });
 
     task.set_stage(
@@ -2489,6 +2490,7 @@ mod tests {
             step: "work".to_string(),
             outcome: "pass".to_string(),
             at: 0,
+            blocked: false,
         });
         task.set_stage(crate::pipeline::DONE, None);
         crate::tracking::fire(&repo, &task, crate::pipeline::DONE, 1).unwrap();
@@ -3620,6 +3622,7 @@ mod tests {
             step: "work".into(),
             outcome: "block".into(),
             at: 1,
+            blocked: false,
         });
 
         assert_eq!(
@@ -3666,6 +3669,7 @@ mod tests {
             step: crate::pipeline::BLOCKED.into(),
             outcome: "block".into(),
             at: 1,
+            blocked: false,
         });
 
         assert_eq!(
@@ -3975,6 +3979,10 @@ mod tests {
         report_outcome(&repo, &pipelines, "spinner", Outcome::Fail);
         let task = queued(&repo, "spinner");
         assert_eq!(task.stage(), "implement", "the first retry still lands");
+        assert!(
+            !task.front.last_report.as_ref().unwrap().blocked,
+            "a retry that lands is not a block"
+        );
         assert_eq!(task.rounds_at("implement"), 2);
 
         // The budget is spent now, so the second failure is the one over —
@@ -3987,6 +3995,12 @@ mod tests {
             task.stage(),
             crate::pipeline::BLOCKED,
             "a spent budget parks on `blocked`, never back on `implement`"
+        );
+        let left = task.front.last_report.as_ref().unwrap();
+        assert_eq!(left.outcome, "fail", "the lane's own verdict is untouched");
+        assert!(
+            left.blocked,
+            "the fail the spent loop sent to `blocked` is left marked for the ledger"
         );
         let log = task.section("## Status Log").unwrap_or_default();
         assert!(
@@ -4767,6 +4781,7 @@ mod tests {
             step: "build".into(),
             outcome: "pass".into(),
             at: 0,
+            blocked: false,
         });
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();

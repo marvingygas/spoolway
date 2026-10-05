@@ -109,7 +109,7 @@ same under every `by`, so switching how the rows are grouped never moves a figur
 |---|---|
 | `RUNS` | Runs that touched this row |
 | `PASS` | Share of lanes that reported `pass`. Lanes that never reported are left out. |
-| `BLOCKS` | Lanes that ended blocked. Per run, `BLOCKS/RUN` is that count divided by `RUNS`, with two decimals. |
+| `BLOCKS` | Lanes that reported `--block`, and lanes whose pass or fail left the task on `blocked`. A pass or fail does that when the next step's `loop:` is spent, when a failing step has no `on_fail`, or when a passing step's worktree cannot be committed. A lane counts once, and a pass still counts in `PASS`. Per run, `BLOCKS/RUN` is that count divided by `RUNS`, with two decimals. |
 | `CTX PEAK AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window |
 | `CTX PEAK` | The largest context reading any lane on the row banked, as a share of the model's window. A raw token count when the model has no `context_window`. `—` when no lane banked one. |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per run: `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`, each divided by `RUNS`. |
@@ -128,7 +128,7 @@ computed from the ledger entries on screen.
 | Column | `Total` | `Average` |
 |---|---|---|
 | `RUNS` | Distinct runs in the table | The same |
-| `BLOCKS` | Lanes that ended blocked | `BLOCKS/RUN`: blocked lanes divided by distinct runs, with two decimals |
+| `BLOCKS` | The `BLOCKS` lanes counted above | `BLOCKS/RUN`: that count divided by distinct runs, with two decimals |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | The sum of each | `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`: each sum divided by distinct runs |
 | `USD` | The sum | Blank |
 | `USD/RUN` | Not drawn | Total cost divided by distinct runs |

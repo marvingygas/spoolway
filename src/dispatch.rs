@@ -2701,10 +2701,11 @@ impl<'a> Dispatcher<'a> {
         // Only this step's own verdict counts. A report left over from the
         // previous step means this lane never reported one, and an absent
         // outcome says that plainly rather than borrowing a neighbour's.
-        let outcome = task
+        let report = task
             .and_then(|t| t.front.last_report.as_ref())
-            .filter(|report| report.step == step_id)
-            .map(|report| report.outcome.clone());
+            .filter(|report| report.step == step_id);
+        let outcome = report.map(|report| report.outcome.clone());
+        let blocked = report.is_some_and(|report| report.blocked);
 
         let entry = crate::usage::Entry {
             ts: banked_at.to_rfc3339(),
@@ -2735,6 +2736,7 @@ impl<'a> Dispatcher<'a> {
             ctx_peak: Some(harvest.ctx_peak),
             pipeline_version: record.pipeline_version.clone(),
             outcome,
+            blocked,
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
             trial_group: task.and_then(|t| t.front.trial_group.clone()),
@@ -9825,6 +9827,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 5_000,
+            blocked: false,
         });
         reported.set_stage("review", Some("done"));
         reported.save().unwrap();
@@ -12320,6 +12323,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            blocked: false,
         });
         task.save().unwrap();
 
@@ -12398,6 +12402,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: started_at + 5,
+            blocked: false,
         });
         task.save().unwrap();
 
@@ -12784,6 +12789,7 @@ mod tests {
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
+                blocked: false,
                 run: None,
                 trial: None,
                 trial_group: None,
@@ -13499,6 +13505,7 @@ mod tests {
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
+                blocked: false,
                 run: None,
                 trial: None,
                 trial_group: None,
@@ -13536,6 +13543,7 @@ mod tests {
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
+                blocked: false,
                 run: None,
                 trial: None,
                 trial_group: None,
@@ -13614,6 +13622,7 @@ mod tests {
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
+                blocked: false,
                 run: None,
                 trial: None,
                 trial_group: None,
@@ -14813,6 +14822,7 @@ mod tests {
                 step: crate::pipeline::BLOCKED.into(),
                 outcome: "block".into(),
                 at: started_at + 30,
+                blocked: false,
             });
         });
 
@@ -16166,6 +16176,7 @@ mod tests {
                 step: "implement".into(),
                 outcome: "pass".into(),
                 at: 0,
+                blocked: false,
             });
         });
 

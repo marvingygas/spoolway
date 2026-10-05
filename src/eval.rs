@@ -316,21 +316,42 @@ fn lane_key(entry: &Entry) -> LaneKey {
 /// all banked as deltas, so a plain sum over every line already lands on
 /// each lane's real total whether it wrote one line or two — it is only a
 /// *count* of lanes, and their verdicts, that double-counts a line as a
-/// lane. This answers with one verdict per group instead: `None` until a
-/// line in it actually reports one, and the last such line's outcome from
-/// then on — a lane resumed and reported again is judged by what it said
+/// lane. This answers with one verdict per group instead: an outcome of
+/// `None` until a line in it actually reports one, and the last such line's
+/// outcome and blocked flag from then on — a lane resumed and reported again is judged by what it said
 /// last, not by every line it ever banked.
 fn lane_verdicts<'a>(
     entries: impl IntoIterator<Item = &'a Entry>,
-) -> HashMap<LaneKey, Option<String>> {
-    let mut verdicts: HashMap<LaneKey, Option<String>> = HashMap::new();
+) -> HashMap<LaneKey, LaneVerdict> {
+    let mut verdicts: HashMap<LaneKey, LaneVerdict> = HashMap::new();
     for entry in entries {
-        let slot = verdicts.entry(lane_key(entry)).or_insert(None);
+        let slot = verdicts.entry(lane_key(entry)).or_default();
         if entry.outcome.is_some() {
-            *slot = entry.outcome.clone();
+            slot.outcome = entry.outcome.clone();
+            slot.blocked = entry.blocked;
         }
     }
     verdicts
+}
+
+/// What one lane said, and whether its report left the task on `blocked`.
+/// The two differ whenever a `pass` or `fail` ends there anyway: a spent
+/// `loop:`, a `fail` from a step that declares no `on_fail`, or a worktree
+/// that could not be committed. The outcome stays what the lane reported, so
+/// it still counts as that, and `blocked` is what `BLOCKS` counts.
+#[derive(Default)]
+struct LaneVerdict {
+    outcome: Option<String>,
+    blocked: bool,
+}
+
+impl LaneVerdict {
+    /// A lane that reported `--block` ends blocked by definition, so a ledger
+    /// line that never recorded the flag still counts, and one that did
+    /// cannot count the same lane twice: this is one boolean per lane.
+    fn ended_blocked(&self) -> bool {
+        self.blocked || self.outcome.as_deref() == Some("block")
+    }
 }
 
 // ------------------------------------------------------------------ metrics
@@ -349,7 +370,8 @@ struct Metrics {
     /// not a failure, it is a lane nobody heard from.
     passed: usize,
     judged: usize,
-    /// Lanes that ended blocked.
+    /// Lanes whose report left the task on `blocked`, whatever road took it
+    /// there — see [`LaneVerdict`].
     blocked: usize,
     /// Every token class, summed over the row's lines — deltas, like cost.
     tokens: Tokens,
@@ -402,11 +424,11 @@ impl Metrics {
         // One verdict per lane, not per line — see `lane_verdicts`.
         let verdicts = lane_verdicts(matching.iter().copied());
         out.lanes = verdicts.len();
-        for outcome in verdicts.values() {
-            if outcome.as_deref() == Some("block") {
+        for verdict in verdicts.values() {
+            if verdict.ended_blocked() {
                 out.blocked += 1;
             }
-            if let Some(outcome) = outcome {
+            if let Some(outcome) = &verdict.outcome {
                 out.judged += 1;
                 if outcome == "pass" {
                     out.passed += 1;
@@ -982,7 +1004,7 @@ impl LaneTotal {
             .collect();
         let blocked = lane_verdicts(entries.iter().copied())
             .values()
-            .filter(|v| v.as_deref() == Some("block"))
+            .filter(|v| v.ended_blocked())
             .count();
         let mut tokens = Tokens::default();
         for entry in entries {
@@ -5133,6 +5155,7 @@ mod tests {
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: outcome.map(str::to_string),
+            blocked: false,
             run: Some(format!("r-{task}")),
             trial: None,
             trial_group: None,
@@ -5248,6 +5271,51 @@ mod tests {
             Some(100.0),
             "one lane reported, and it passed"
         );
+    }
+
+    /// A `pass` or `fail` that a spent `loop:` sent to `blocked` is a block
+    /// the lane never reported. It counts in `BLOCKS` once, and a pass still
+    /// counts as a pass.
+    #[test]
+    fn a_lane_a_spent_loop_blocked_counts_as_a_block_and_keeps_its_outcome() {
+        let mut looped = lane("login", "review", 1, Some("fail"));
+        looped.blocked = true;
+        let mut passed = lane("logout", "implement", 1, Some("pass"));
+        passed.blocked = true;
+        let mut reported = lane("search", "implement", 1, Some("block"));
+        reported.blocked = true;
+        let plain = lane("tabs", "implement", 1, Some("pass"));
+        let entries = [looped, passed, reported, plain];
+        let m = one_row(&entries);
+        assert_eq!(m.blocked, 3, "each lane once, the `--block` one not twice");
+        assert_eq!(m.judged, 4);
+        assert_eq!(m.passed, 2, "a pass sent to `blocked` is still a pass");
+        assert_eq!(total_of(&entries).blocked, 3);
+    }
+
+    /// A lane's last verdict decides, flag and all: a lane reported again as
+    /// a clean pass is not a block, and a later line with no verdict of its
+    /// own changes nothing.
+    #[test]
+    fn the_blocked_flag_follows_the_lanes_last_verdict() {
+        let mut first = lane("login", "review", 1, Some("pass"));
+        first.blocked = true;
+        let again = lane("login", "review", 1, Some("pass"));
+        assert_eq!(one_row(&[first.clone(), again]).blocked, 0);
+        let mut freed = lane("login", "review", 1, None);
+        freed.wall_s = 5;
+        assert_eq!(one_row(&[first, freed]).blocked, 1);
+    }
+
+    /// A ledger line from before the flag existed carries no `blocked` key.
+    #[test]
+    fn a_ledger_line_without_the_flag_reads_as_not_blocked() {
+        let mut line = serde_json::to_value(lane("login", "implement", 1, Some("pass"))).unwrap();
+        assert!(line.get("blocked").is_none(), "false is left off the line");
+        line.as_object_mut().unwrap().remove("blocked");
+        let back: Entry = serde_json::from_value(line).unwrap();
+        assert!(!back.blocked);
+        assert_eq!(one_row(&[back]).blocked, 0);
     }
 
     /// A lane held for a person and freed later banks two ledger lines under
@@ -5998,6 +6066,7 @@ mod tests {
             ctx_peak: None,
             pipeline_version: String::new(),
             outcome: None,
+            blocked: false,
             run: None,
             trial: None,
             trial_group: None,
@@ -6444,6 +6513,7 @@ mod screen_tests {
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: outcome.map(str::to_string),
+                blocked: false,
                 run: Some(format!("r-{task}")),
                 trial: None,
                 trial_group: None,
@@ -6541,6 +6611,7 @@ mod screen_tests {
                 ctx_peak: None,
                 pipeline_version: String::new(),
                 outcome: None,
+                blocked: false,
                 run: None,
                 trial: None,
                 trial_group: None,
@@ -7120,6 +7191,7 @@ mod screen_tests {
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),
+            blocked: false,
             run: None,
             trial: None,
             trial_group: None,
@@ -7541,6 +7613,7 @@ mod screen_tests {
                 ctx_peak: None,
                 pipeline_version: String::new(),
                 outcome: None,
+                blocked: false,
                 run: None,
                 trial: None,
                 trial_group: None,
@@ -8111,6 +8184,7 @@ mod screen_tests {
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),
+            blocked: false,
             run: Some(format!("r-{task}")),
             trial: None,
             trial_group: None,

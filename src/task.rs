@@ -48,6 +48,17 @@ pub struct LastReport {
     /// one that reported before it ever ran.
     #[serde(default)]
     pub at: i64,
+    /// Whether this report left the task on `blocked`, whatever the lane
+    /// said: a `--block` does, and so does a pass or fail whose next step has
+    /// spent its `loop:`, a `--fail` from a step that declares no `on_fail`,
+    /// or a pass whose worktree could not be committed. The
+    /// outcome alone cannot say so — it stays `pass` or `fail`, which is what
+    /// the pass rate reads — so `spoolway eval` counts blocks from this.
+    ///
+    /// Absent on a task file written by an older spoolway, which reads as
+    /// `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
 }
 
 /// What a task's branch came to against the commit it started from — files,
@@ -1944,6 +1955,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 1_786_900_000,
+            blocked: false,
         });
         let rendered = task.render().unwrap();
         let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
@@ -1976,6 +1988,7 @@ mod tests {
             step: "blocked".into(),
             outcome: "block".into(),
             at: 1_000,
+            blocked: false,
         });
         assert!(
             !task.reported_since(1_000),

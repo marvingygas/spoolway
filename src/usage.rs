@@ -184,6 +184,17 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
 
+    /// Whether the report left the task on `blocked` — see
+    /// [`crate::task::LastReport::blocked`]. Set whenever the report's final
+    /// destination was `blocked`, including a `pass` or `fail` that ended
+    /// there, where `outcome` alone says nothing about it; `spoolway eval`
+    /// counts such a lane in `BLOCKS`.
+    ///
+    /// Absent on every line written before this field existed, which reads as
+    /// `false`: those lines count exactly as they did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+
     /// The run this lane was banked for: minted once, with the task's
     /// worktree, and copied onto every lane banked for that task from then on.
     ///
@@ -2347,6 +2358,7 @@ fn bank_lane_at(
         // was killed without reporting — so nothing judged them. A guessed
         // `pass` would put unjudged work in the pass rate.
         outcome: None,
+        blocked: false,
         run: carry.and_then(|c| c.run.clone()),
         trial: carry.and_then(|c| c.trial.clone()),
         trial_group: carry.and_then(|c| c.trial_group.clone()),
@@ -3049,6 +3061,7 @@ fn bank_dir_session(
         ctx_peak: Some(harvest.ctx_peak),
         pipeline_version: String::new(),
         outcome: None,
+        blocked: false,
         run: None,
         trial: None,
         trial_group: None,
@@ -4472,6 +4485,7 @@ mod tests {
             ctx_peak: None,
             pipeline_version: "1.1".into(),
             outcome: Some("pass".into()),
+            blocked: false,
             run: Some("r00001".into()),
             trial: None,
             trial_group: None,
@@ -4532,6 +4546,7 @@ mod tests {
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: None,
+            blocked: false,
             run: None,
             trial: None,
             trial_group: None,
@@ -5304,6 +5319,7 @@ mod tests {
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: None,
+            blocked: false,
             run: None,
             trial: None,
             trial_group: None,

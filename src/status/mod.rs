@@ -4309,6 +4309,7 @@ mod tests {
             step: "review".into(),
             outcome: "fail".into(),
             at: 0,
+            blocked: false,
         });
         fail.front.paused_at = Some("review".into());
         fail.set_stage(crate::pipeline::PAUSED, None);
@@ -4320,6 +4321,7 @@ mod tests {
             step: "review".into(),
             outcome: "block".into(),
             at: 0,
+            blocked: false,
         });
         blocked.front.blocked_from = Some("review".into());
         blocked.front.paused_at = Some("review".into());
@@ -4332,6 +4334,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 0,
+            blocked: false,
         });
         passed.front.paused_at = Some("implement".into());
         passed.set_stage(crate::pipeline::PAUSED, None);
