@@ -1,11 +1,13 @@
-//! `spoolway jobs`: `jobs list` and `jobs run` for scripts, `jobs contract`
+//! `spoolway jobs`: `jobs list` for scripts, `jobs contract`
 //! for a producer that has never seen the two store files, and bare
 //! `spoolway`'s jobs tab, the screen a person writes a job from. The screens
 //! are the only thing that write a job — the jobs tab walks the routine, the
 //! cron expression and the pipeline, then saves through
 //! [`crate::jobs::write`]; the routines tab's `n` skips the routine and goes
 //! through the same last two and the same save, [`NewJobWalk`]. No `jobs
-//! add`, no config key.
+//! add`, no config key. A job only schedules: nothing here queues its
+//! routine, which fires when the dispatcher's clock crosses the schedule —
+//! running a routine now is the routines tab's `enter`.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +21,6 @@ use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
 use crate::screen::{Key, Notice, PollableRead, key_hint, keys, overlay, pad_to, panel, read_key};
-use crate::task::Task;
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
 /// next and when it last fired. `--json` prints the same rows for a script.
@@ -222,71 +223,6 @@ fn render_jobs_contract(contract: &JobsContractOut) -> String {
     out.push_str("A SAMPLE TABLE\n");
     out.push_str(contract.sample);
     out
-}
-
-/// `spoolway jobs run <name>` — fire one job now, ignoring its schedule.
-pub fn jobs_run(repo: &Repo, pipelines: &Pipelines, name: &str, in_lane: bool) -> Result<()> {
-    refuse_from_lane("the queue is mutated", in_lane)?;
-
-    let jobs = jobs::load(repo)?;
-    let job = jobs.iter().find(|job| job.name == name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no job named `{name}` — run `spoolway jobs list` to see the jobs in both stores"
-        )
-    })?;
-
-    let base = repo.branch()?;
-    let gate = ToolGate::Print {
-        interactive: crate::ask::interactive(),
-    };
-    let tasks = fire_job(repo, pipelines, job, &base, gate)?;
-
-    for task in &tasks {
-        println!("queued {} at `{}`", task.id(), crate::pipeline::QUEUED);
-    }
-    println!(
-        "  {} task{} from routine `{}` queued under pipeline `{}`.",
-        tasks.len(),
-        if tasks.len() == 1 { "" } else { "s" },
-        job.spec.routine,
-        job.spec.pipeline
-    );
-    Ok(())
-}
-
-/// Fire one job now, ignoring its schedule: queue its routine under the job's
-/// own pipeline and record the manual firing so the LAST column updates and
-/// the dispatcher's overlap guard sees this run. Shared by `jobs run` and the
-/// screen's `r`; `gate` is how each reaches the tool-requirements gate —
-/// printed from the CLI, answered already in the screen's own popup.
-fn fire_job(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    job: &Job,
-    base: &str,
-    gate: ToolGate,
-) -> Result<Vec<Task>> {
-    // Parsed only to fail fast on a job whose expression is broken — firing
-    // ignores the schedule itself.
-    crate::cron::Cron::parse(&job.spec.schedule).map_err(|err| {
-        anyhow::anyhow!(
-            "job `{}` will not run — its schedule `{}` in {} does not parse: {err}. Fix it \
-             in that file (or run `spoolway doctor` for the full check).",
-            job.name,
-            job.spec.schedule,
-            store_label(repo, &job.source)
-        )
-    })?;
-
-    let tasks = crate::commands::queue_routine_target_with(
-        repo,
-        pipelines,
-        base,
-        (&job.target(repo)?, &job.spec.pipeline),
-        gate,
-    )?;
-    jobs::record_manual_fire(repo, &job.name, &tasks)?;
-    Ok(tasks)
 }
 
 /// One `--json` row — the same facts the table shows, plus the routine path
@@ -678,13 +614,8 @@ enum JobMode {
     Walk(NewJobWalk),
     /// `x` waiting on `enter` to delete or `esc` to keep.
     ConfirmDelete(String),
-    /// `r` stopped at the tool-requirements gate, asked in a popup over the
-    /// list — `panel` is `queue::tool_gate_popup`'s. `enter` fires the job
-    /// named `job` with issue tracking switched off; `esc` goes back to the
-    /// list having fired nothing.
-    ToolGate { panel: Vec<String>, job: String },
     /// A message in a popup over the list until `enter` closes it — a
-    /// refused save, a fired job — since `draw` clears the screen before
+    /// refused save, a failed delete — since `draw` clears the screen before
     /// every frame. Every other key is the popup's to ignore.
     Outcome(Notice),
 }
@@ -703,14 +634,13 @@ struct JobsState {
 pub(crate) fn jobs_tab(
     repo: &Repo,
     pipelines: &Pipelines,
-    cwd: &Path,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
     let jobs = jobs::load(repo)?;
     let routines = super::routines::list_routines(repo)?;
-    run_jobs_screen(repo, pipelines, cwd, jobs, routines, writer, input, out)
+    run_jobs_screen(repo, pipelines, jobs, routines, writer, input, out)
 }
 
 /// Everything a frame needs beside the job list and the screen state —
@@ -729,15 +659,9 @@ struct Ctx<'a> {
 /// this as its jobs tab.
 ///
 /// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
-///
-/// `writer` pushes this past clippy's default argument count, but every
-/// argument here is a distinct piece of the screen's own state — see
-/// `status::mod`'s own `too_many_arguments` allow for the same reasoning.
-#[allow(clippy::too_many_arguments)]
 fn run_jobs_screen(
     repo: &Repo,
     pipelines: &Pipelines,
-    cwd: &Path,
     mut jobs: Vec<Job>,
     routines: Vec<RoutineFolder>,
     writer: &mut crate::screen::frame_writer::FrameWriter,
@@ -806,21 +730,7 @@ fn run_jobs_screen(
                 _ => {}
             },
 
-            JobMode::List => handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)?,
-
-            JobMode::ToolGate { job, .. } => match key {
-                Key::Enter => {
-                    // The list is re-read while the popup is up only on an
-                    // idle tick over the resting list, which this is not —
-                    // but a job gone by name fires nothing all the same.
-                    state.mode = match jobs.iter().find(|j| &j.name == job) {
-                        Some(job) => fire_now(repo, pipelines, cwd, job, true)?,
-                        None => JobMode::List,
-                    };
-                }
-                Key::Esc => state.mode = JobMode::List,
-                _ => {}
-            },
+            JobMode::List => handle_list_key(repo, pipelines, &mut jobs, &mut state, key),
 
             JobMode::PickRoutine { draft, nav } => match key {
                 Key::Esc => state.mode = JobMode::List,
@@ -892,7 +802,7 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
 /// One key over the resting list.
 ///
 /// The cursor only ever addresses a real job — the `(new)` row belongs to the
-/// walk, not this state — so `e`, `space`, `x` and `r` are gated on the list
+/// walk, not this state — so `e`, `space` and `x` are gated on the list
 /// not being empty and always act on `jobs[cursor]`. `n` starts the walk.
 /// Quitting is not among these keys any more — `ctrl-c` is caught by bare
 /// `spoolway`'s own screen rather than read as a key at all, and `q` over
@@ -901,11 +811,10 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
 fn handle_list_key(
     repo: &Repo,
     pipelines: &Pipelines,
-    cwd: &Path,
     jobs: &mut Vec<Job>,
     state: &mut JobsState,
     key: Key,
-) -> Result<()> {
+) {
     let has_jobs = !jobs.is_empty();
     match key {
         Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
@@ -946,63 +855,8 @@ fn handle_list_key(
         Key::Char('x') if has_jobs => {
             state.mode = JobMode::ConfirmDelete(jobs[state.cursor].name.clone());
         }
-        // Asked first, in a popup over the list, when the hook declares a
-        // tool this machine cannot meet — the jobs screen's own form of the
-        // queue screen's `Mode::ToolGate`. Printed under the frame instead,
-        // it would draw where no frame is, and take a second terminal guard
-        // inside the screen's.
-        Key::Char('r') if has_jobs => {
-            let job = &jobs[state.cursor];
-            state.mode = match crate::commands::tool_gate_popup(repo) {
-                Some(panel) => JobMode::ToolGate {
-                    panel,
-                    job: job.name.clone(),
-                },
-                None => fire_now(repo, pipelines, cwd, job, false)?,
-            };
-        }
         _ => {}
     }
-    Ok(())
-}
-
-/// `r`, once the tool-requirements gate has nothing more to ask: fire `job`
-/// and say how it went, in a popup over the list. `tracking_off` is the
-/// gate's answer — `true` when a requirement was unmet and `enter` fired it
-/// anyway.
-fn fire_now(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    cwd: &Path,
-    job: &Job,
-    tracking_off: bool,
-) -> Result<JobMode> {
-    let base = crate::repo::branch_at(cwd)?;
-    let gate = ToolGate::Answered { tracking_off };
-    Ok(match fire_job(repo, pipelines, job, &base, gate) {
-        Ok(tasks) => {
-            let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
-            JobMode::Outcome(Notice::new(
-                "run now",
-                if ids.is_empty() {
-                    format!(
-                        "Fired `{}` now, but its routine had no tasks to queue.",
-                        job.name
-                    )
-                } else {
-                    format!("Fired `{}` now. Queued {}.", job.name, ids.join(", "))
-                },
-            ))
-        }
-        Err(err) => JobMode::Outcome(Notice::new(
-            "run now",
-            format!(
-                "Could not fire `{}` now: {err:#}. Fix its routine, pipeline or store — \
-                         `spoolway doctor` names the fault — then press r again.",
-                job.name
-            ),
-        )),
-    })
 }
 
 /// `resume`/`pause` for the message the pause toggle prints on failure — the
@@ -1247,7 +1101,6 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
             ],
             &keys(&[("enter", "delete"), ("esc", "keep")]),
         )),
-        JobMode::ToolGate { panel, .. } => Some(panel.clone()),
         // Wrapped no wider than the frame has room for, so a narrow
         // terminal still sees the popup's right border.
         JobMode::Outcome(notice) => Some(
@@ -1327,14 +1180,13 @@ fn jobs_footer(mode: &JobMode) -> String {
         // `q` only inside bare `spoolway`'s jobs tab, the one place it quits.
         // The same line under a notice, which reads only the `enter` its own
         // popup names: this is the line the list reads again once it closes.
-        JobMode::List | JobMode::Outcome(_) | JobMode::ToolGate { .. } => key_hint(
+        JobMode::List | JobMode::Outcome(_) => key_hint(
             &[
                 [
                     ("n", "new"),
                     ("e", "edit"),
                     ("space", "pause"),
                     ("x", "delete"),
-                    ("r", "run now"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -1827,55 +1679,6 @@ mod tests {
     }
 
     #[test]
-    fn jobs_run_queues_the_minted_tasks_and_records_the_firing() {
-        let (repo, _root_guard) = fixture("jobs-run");
-        one_job(&repo);
-
-        jobs_run(&repo, &Pipelines::builtin(), "nightly", false).unwrap();
-
-        let minted: Vec<String> = repo
-            .queued_ids()
-            .into_iter()
-            .filter(|id| id.starts_with("audit-"))
-            .collect();
-        assert_eq!(
-            minted.len(),
-            1,
-            "the routine's one task, minted: {minted:?}"
-        );
-        assert_eq!(
-            repo.task(&minted[0]).unwrap().front.pipeline.as_deref(),
-            Some("bugfix"),
-            "queued on the job's own pipeline"
-        );
-
-        let record = crate::jobs::last_fired(&repo, "nightly");
-        assert!(
-            record.is_some(),
-            "the firing is recorded in jobs.state.json"
-        );
-    }
-
-    #[test]
-    fn jobs_run_names_jobs_list_when_the_job_is_unknown() {
-        let (repo, _root_guard) = fixture("jobs-run-unknown");
-        one_job(&repo);
-        let err = format!(
-            "{:#}",
-            jobs_run(&repo, &Pipelines::builtin(), "ghost", false).unwrap_err()
-        );
-        assert!(err.contains("no job named `ghost`"), "{err}");
-        assert!(err.contains("spoolway jobs list"), "{err}");
-    }
-
-    #[test]
-    fn jobs_run_is_refused_from_inside_a_lane() {
-        let (repo, _root_guard) = fixture("jobs-run-lane");
-        one_job(&repo);
-        assert!(jobs_run(&repo, &Pipelines::builtin(), "nightly", true).is_err());
-    }
-
-    #[test]
     fn a_json_row_carries_schedule_error_only_when_the_expression_will_not_parse() {
         let (repo, _root_guard) = fixture("jobs-json-shape");
         std::fs::create_dir_all(repo.home()).unwrap();
@@ -1943,7 +1746,6 @@ mod tests {
         run_jobs_screen(
             repo,
             &Pipelines::builtin(),
-            &repo.root,
             jobs,
             routines,
             &mut crate::screen::frame_writer::FrameWriter::new(),
@@ -1975,7 +1777,6 @@ mod tests {
             let leave = run_jobs_screen(
                 &repo,
                 &Pipelines::builtin(),
-                &repo.root,
                 Vec::new(),
                 routines,
                 &mut crate::screen::frame_writer::FrameWriter::new(),
@@ -2200,11 +2001,16 @@ mod tests {
         assert!(frame.contains("[n] new"), "{frame}");
     }
 
-    /// A job over `nightly` whose hook declares a floor this machine's
-    /// `cargo` cannot meet, so `r` has the tool-requirements gate to ask.
-    fn job_behind_an_unmet_hook(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
-        let (mut repo, root_guard) = fixture(name);
+    /// `r` over the resting list is no key at all: a job only schedules, and
+    /// running its routine now is the routines tab's. The job is real and
+    /// the checkout a git repository, so a key that still fired would queue
+    /// the routine; the hook declares a floor this machine's `cargo` cannot
+    /// meet, so one that still asked first would draw the tool gate.
+    #[test]
+    fn r_on_the_list_queues_nothing_and_leaves_the_frame_as_it_was() {
+        let (mut repo, _root_guard) = fixture("jobs-screen-r-does-nothing");
         one_job(&repo);
+        crate::repo::run(&repo.root, "git", &["init", "-q", "-b", "main"]).unwrap();
         let dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("versioned.sh");
@@ -2217,64 +2023,17 @@ mod tests {
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         std::fs::set_permissions(&path, perms).unwrap();
         repo.config.issue_tracking.hook = "versioned.sh".to_string();
-        (repo, root_guard)
-    }
 
-    /// `r` asks the tool-requirements gate as a popup over the list, never
-    /// printed under the frame, and `esc` goes back having fired nothing.
-    #[test]
-    fn r_asks_the_tool_gate_in_a_popup_and_esc_fires_nothing() {
-        let (repo, _root_guard) = job_behind_an_unmet_hook("jobs-screen-tool-gate-esc");
-
-        let drawn = drive(&repo, "r");
-        assert!(
-            drawn.starts_with("\x1b[?2026h\x1b[H"),
-            "nothing outside a frame"
-        );
-        let frame = last_frame(&drawn);
-        assert!(frame.contains("┌─ issue tracking "), "{frame}");
-        assert!(frame.contains("cargo >= 999.0.0"), "{frame}");
-        assert!(
-            frame.contains("[enter] queue anyway, without issue tracking   [esc] back"),
-            "{frame}"
-        );
-        assert!(frame.contains("─ jobs"), "the list under it: {frame}");
-
-        let drawn = drive(&repo, "r\x1b");
-        let frame = last_frame(&drawn);
-        assert!(!frame.contains("issue tracking"), "{frame}");
-        assert!(frame.contains("[n] new"), "{frame}");
+        let before = drive(&repo, "");
+        let after = drive(&repo, "r");
+        assert_eq!(last_frame(&after), last_frame(&before));
         assert!(
             std::fs::read_dir(repo.queue_dir())
                 .map(|mut d| d.next().is_none())
                 .unwrap_or(true),
             "nothing was queued"
         );
-    }
-
-    /// `enter` on the gate fires the job with issue tracking switched off:
-    /// the routine is queued and the hook is never called.
-    #[test]
-    fn enter_on_the_tool_gate_fires_the_job_without_tracking() {
-        let (repo, _root_guard) = job_behind_an_unmet_hook("jobs-screen-tool-gate-enter");
-        crate::repo::run(&repo.root, "git", &["init", "-q", "-b", "main"]).unwrap();
-
-        let drawn = drive(&repo, "r\r");
-        let frame = last_frame(&drawn);
-        assert!(frame.contains("┌─ run now "), "{frame}");
-        assert!(frame.contains("Fired `nightly` now."), "{frame}");
-        let queued: Vec<_> = std::fs::read_dir(repo.queue_dir())
-            .unwrap()
-            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
-            .collect();
-        assert_eq!(queued.len(), 1, "{queued:?}");
-        assert!(!queued[0].contains("ticket:"), "{}", queued[0]);
-        assert!(
-            std::fs::read_dir(repo.tracking_dir())
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(true),
-            "the hook must never have been called"
-        );
+        assert_eq!(crate::jobs::last_fired(&repo, "nightly"), None);
     }
 
     /// `n` opens the routine picker as a popup over the list, as step 32 of
@@ -2398,10 +2157,14 @@ mod tests {
         let (repo, _root_guard) = fixture("jobs-screen-footer-list");
         seed_routines(&repo);
 
+        // Hosted, as bare `spoolway`'s jobs tab is, so the line carries the
+        // quit hint the mockup draws after `[x] delete`.
+        let hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Jobs);
         let resting = drive(&repo, "q").to_string();
+        drop(hosting);
         assert!(
             last_frame(&resting)
-                .contains("[n] new   [e] edit   [space] pause   [x] delete   [r] run now"),
+                .contains("[n] new   [e] edit   [space] pause   [x] delete   [q] quit"),
             "{}",
             last_frame(&resting)
         );
@@ -2575,7 +2338,6 @@ mod tests {
         run_jobs_screen(
             &repo,
             &Pipelines::builtin(),
-            &repo.root,
             Vec::new(), // the stale snapshot: empty
             routines,
             &mut crate::screen::frame_writer::FrameWriter::new(),

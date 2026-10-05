@@ -18,6 +18,9 @@ running is all a job needs.
 
 A job only queues routine tasks that already exist. It never changes them.
 
+A job fires only on its schedule. To queue a routine now, tick it on the routines tab and press
+`enter`. See [Routines](planning.md#routines).
+
 ## How it works
 
 ```mermaid
@@ -66,7 +69,6 @@ The routines tab writes a job too, with its own `n`. See [Routines](planning.md#
 | `e` | Edit the highlighted job. |
 | `space` | Pause or resume it. |
 | `x` | Delete it, after `enter`/`esc`. |
-| `r` | Fire it now. |
 | `ctrl-c` | Leave the screen. |
 
 ### The three choices
@@ -136,7 +138,6 @@ spoolway jobs contract             # the job format: both stores, every key, the
 spoolway jobs contract --json      # the same facts as one object
 spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
-spoolway jobs run <name>           # fire one job now
 ```
 
 Bare `spoolway`'s jobs tab is where a job is written, edited, paused or deleted.
@@ -153,8 +154,7 @@ lint-sweep     user     */30 * * * *  impl_fast   paused      -
 ```
 
 `NEXT` reads `paused` for a disabled job, `bad expr` for an expression that will not parse,
-and `never` for one that never comes round. `spoolway jobs run <name>` records the run like a
-scheduled firing and leaves the schedule unchanged.
+and `never` for one that never comes round.
 
 A `--json` row carries `name`, `scope`, `schedule`, `pipeline`, `routine`, `enabled`,
 `source`, `next` and `last_fired`. `schedule_error` appears only when the expression will
@@ -177,7 +177,7 @@ not parse.
 | --- | --- |
 | `src/jobs.rs` | The stores, firing due jobs, the firing history. |
 | `src/cron.rs` | Parsing and matching the cron expression. |
-| `src/commands/jobs.rs` | `spoolway jobs`, `jobs contract`, `jobs list` and `jobs run`. |
+| `src/commands/jobs.rs` | `spoolway jobs`, `jobs contract` and `jobs list`. |
 | `src/commands/dispatch.rs` | The dispatcher that stays up for jobs. |
 | `src/commands/doctor.rs` | The job checks. |
 

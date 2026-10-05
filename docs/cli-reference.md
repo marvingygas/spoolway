@@ -482,7 +482,6 @@ Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writ
 | `e` | Edit the highlighted job through the same three panels |
 | `space` | Pause or resume the highlighted job |
 | `x` | Delete the highlighted job, after confirming |
-| `r` | Fire the highlighted job now |
 
 See [Jobs](jobs.md).
 
@@ -509,10 +508,6 @@ spoolway jobs list --json
 
 `NEXT` reads `paused`, `bad expr`, `never`, or the next firing time. `--json` prints one
 object per job.
-
-### `spoolway jobs run <name>`
-
-Fire one job now. Its schedule is unchanged.
 
 ### `spoolway eval`
 

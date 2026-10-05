@@ -1150,12 +1150,11 @@ impl Task {
     /// Whether this task was queued — or hand-written — with `tracking:
     /// off`. `commands::queue::open_and_prefix` stamps this on every task
     /// in a batch whose issue creation was declined, at the queue screen's
-    /// `n`, the tool-requirements gate's `enter`, or a routine's `jobs run`;
-    /// a person may also write it by hand, since `tracking` is one of
-    /// `OPTIONAL_KEYS`. `dispatch::route_reserved_stage` and `tracking_gate`
-    /// both read this the same way they already read [`Frontmatter::trial`],
-    /// so a task with tracking off starts no hook run and is never held
-    /// waiting on one.
+    /// `n` or the tool-requirements gate's `enter`; a person may also write
+    /// it by hand, since `tracking` is one of `OPTIONAL_KEYS`.
+    /// `dispatch::route_reserved_stage` and `tracking_gate` both read this the
+    /// same way they already read [`Frontmatter::trial`], so a task with
+    /// tracking off starts no hook run and is never held waiting on one.
     pub fn tracking_off(&self) -> bool {
         self.extra_str("tracking") == "off"
     }

@@ -1642,11 +1642,11 @@ fn open_and_prefix(
     };
     if tracking_off {
         // Every route that can switch tracking off for a batch — the queue
-        // screen's `n`, the tool gate's `enter`, and a routine's `jobs run`
-        // — funnels through here, so this is the one place that needs to
-        // stamp it: `dispatch::route_reserved_stage` and `tracking_gate`
-        // read `Task::tracking_off` back to fire no hook for these tasks and
-        // never hold them waiting on one.
+        // screen's `n` and the tool gate's `enter` — funnels through here,
+        // so this is the one place that needs to stamp it:
+        // `dispatch::route_reserved_stage` and `tracking_gate` read
+        // `Task::tracking_off` back to fire no hook for these tasks and never
+        // hold them waiting on one.
         for task in tasks.iter_mut() {
             task.set_extra_str("tracking", "off");
         }
@@ -1687,9 +1687,8 @@ pub(crate) trait TicketLog {
     fn done(&mut self);
 }
 
-/// [`TicketLog`] for a caller with no screen: `queue add --from`, `jobs run`
-/// and a job the dispatcher fires — the same lines those have always
-/// printed.
+/// [`TicketLog`] for a caller with no screen: `queue add --from` and a job
+/// the dispatcher fires — the same lines those have always printed.
 pub(crate) struct PrintedTickets;
 
 impl TicketLog for PrintedTickets {
@@ -1717,15 +1716,14 @@ impl TicketLog for PrintedTickets {
 pub(crate) enum ToolGate {
     /// Nobody has asked yet: [`tool_requirements_gate`] prints it and, when
     /// someone is there, reads the answer — a caller with no screen at all:
-    /// `queue add --from`, `jobs run`, or the dispatcher firing a job on its
-    /// schedule.
+    /// `queue add --from`, or the dispatcher firing a job on its schedule.
     ///
     /// `interactive` is that caller's own `crate::ask::interactive()`, whether
     /// anyone is really there to answer. Such a caller holds no terminal
     /// guard of its own, so the gate takes one before it reads a key.
     Print { interactive: bool },
     /// A screen has asked already, as a popup over its own tab — the queue
-    /// screen's [`Mode::ToolGate`], or the jobs screen's own over `r` — and
+    /// screen's [`Mode::ToolGate`] — and
     /// printing the gate again under the screen would draw it where no frame
     /// is, and take a second terminal guard inside the screen's. See
     /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
@@ -1740,9 +1738,9 @@ pub(crate) enum ToolGate {
 /// refusal: `esc` means "go back", not "here is what went wrong". Only a
 /// caller with no screen at all ever sees it — `queue_add_tasks`, which
 /// catches it and exits clean the way `dispatch::overrides_gate`'s own `esc`
-/// does, and `queue_routine_target` under `jobs run`. The queue and jobs
-/// screens ask the gate in a popup of their own instead, whose `esc` goes
-/// back without an error at all.
+/// does, and `queue_routine_target` under a job the dispatcher fires. The
+/// queue screen asks the gate in a popup of its own instead, whose `esc`
+/// goes back without an error at all.
 #[derive(Debug)]
 struct GateCancelled;
 
@@ -1877,8 +1875,8 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
 
 /// The gate as a popup, for a screen to lay over its tab before it queues —
 /// `None` when every requirement is met and there is nothing to ask. The
-/// queue screen's [`Mode::ToolGate`] and the jobs screen's `r` both draw it,
-/// and answer [`open_and_prefix`] with [`ToolGate::Answered`].
+/// queue screen's [`Mode::ToolGate`] draws it, and answers
+/// [`open_and_prefix`] with [`ToolGate::Answered`].
 pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
     let unmet = unmet_requirements(repo);
     (!unmet.is_empty()).then(|| tool_gate_panel(&unmet))
@@ -1964,9 +1962,9 @@ fn tool_requirements_gate(repo: &Repo, interactive: bool) -> Result<bool> {
 /// `term` takes the terminal only just before the first blocking read, for
 /// the same reason `dispatch::overrides_gate_with`'s own guard waits: every
 /// early return above it constructs nothing, hides nothing and shows
-/// nothing. Neither the queue screen nor the jobs screen calls this — each
-/// holds a guard of its own for as long as it is open, and asks the gate as
-/// a popup instead; see [`ToolGate::Answered`].
+/// nothing. The queue screen never calls this — it holds a guard of its own
+/// for as long as it is open, and asks the gate as a popup instead; see
+/// [`ToolGate::Answered`].
 fn tool_requirements_gate_with(
     repo: &Repo,
     interactive: bool,
@@ -2622,7 +2620,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     // Every task this batch can see, bare-grouped — the set the one-chain
     // and stacking checks below both walk. A trial arm is left out: it
     // forks a whole group for a side-by-side comparison run and has its own
-    // `depends_on` emptied on the way in (`queue_routine_target_with`,
+    // `depends_on` emptied on the way in (`queue_routine_target`,
     // `begin_trial`) precisely so it never waits on the source it was
     // forked from. An arm minted before each copy got a group of its own
     // sat in the very group it forked, so counting it here would read that
@@ -7870,8 +7868,7 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
 /// `.spoolway/routines/` are never touched.
 ///
 /// Asks the tool-requirements gate printed, as a caller with no screen does
-/// — the dispatcher's scheduled firing. A caller that asked it already, in a
-/// popup of its own, uses [`queue_routine_target_with`].
+/// — the dispatcher's scheduled firing is the only one.
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -7879,23 +7876,6 @@ pub(crate) fn queue_routine_target(
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
-    let gate = ToolGate::Print {
-        interactive: crate::ask::interactive(),
-    };
-    queue_routine_target_with(repo, pipelines, base, (target, pipeline), gate)
-}
-
-/// [`queue_routine_target`], reaching the tool-requirements gate the way
-/// `gate` says: `job` is the routine target and the pipeline it is queued
-/// on, paired to keep this inside the argument count the module keeps to.
-pub(crate) fn queue_routine_target_with(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    base: &str,
-    job: (&std::path::Path, &str),
-    gate: ToolGate,
-) -> Result<Vec<Task>> {
-    let (target, pipeline) = job;
     let mut submitted = if target.is_dir() {
         let folder = super::routines::read_folder_at(target)?;
         // `folder.tasks` is already this folder's own tasks plus every
@@ -7921,15 +7901,14 @@ pub(crate) fn queue_routine_target_with(
     }
 
     let mut tasks = validate_batch(repo, pipelines, Some(base), &submitted)?;
-    // No task to write ids back into — see `open_and_prefix`. A caller
-    // with no screen — the dispatcher firing a job, or `jobs run` — passes
+    // No task to write ids back into — see `open_and_prefix`. The
+    // dispatcher firing a job has no screen, so this passes
     // `ToolGate::Print`, which asks `crate::ask` whether anyone is really
     // there and takes its own terminal, the same way `queue_add_tasks`
-    // does; the jobs screen's `r` has asked in its own popup and passes
-    // `ToolGate::Answered`. `esc`'s `GateCancelled` is left to propagate as
-    // an ordinary `Err` rather than caught here: every caller already treats
-    // any `Err` as "did not fire" and neither marks the job fired nor records
-    // queued ids, which is the one honest answer for a run a person actually
+    // does. `esc`'s `GateCancelled` is left to propagate as an ordinary
+    // `Err` rather than caught here: `jobs::fire_due` treats any `Err` as
+    // "did not fire" and neither marks the job fired nor records queued
+    // ids, which is the one honest answer for a run a person actually
     // declined. Turning it into a fake empty success here would let the
     // dispatcher believe this minute's firing already happened.
     //
@@ -7938,6 +7917,9 @@ pub(crate) fn queue_routine_target_with(
     // `.spoolway/routines/`, safe for a hook to read, only never to write
     // to.
     let task_files = readable_task_files(&submitted);
+    let gate = ToolGate::Print {
+        interactive: crate::ask::interactive(),
+    };
     open_and_prefix(
         repo,
         &[],

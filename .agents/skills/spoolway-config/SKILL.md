@@ -181,7 +181,6 @@ whole prompt, or any key `spoolway config contract` lists:
   it part of the repo" for `pipeline promote`, "try this privately" or "set
   this up" for `pipeline copy` or `init`. Ask first only when you are the
   one proposing the move, the copy or the setup.
-- Never run `spoolway jobs run` here.
 - Never write a skill file without the person's yes to that exact proposal.
 - Never teach a model choice to a lane's own prompt.
 - Never hand the person a spoolway command. Run it yourself once they say
