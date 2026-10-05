@@ -12,7 +12,9 @@ A pane you closed is a change nobody outside this turn ever saw.
 ## What to do
 
 1. **Build from your worktree first.** The screen you drive has to be the one this change
-   produced, not whatever is installed on the machine.
+   produced, not whatever is installed on the machine. `target/debug` is shared by every lane,
+   and another lane's build can replace the binary under you, so build with `CARGO_TARGET_DIR`
+   set under your scratch space and run the binary from there.
 2. **Work out which screens the change reaches**, from the diff rather than from the task.
    The task says what somebody intended; the diff says what moved.
 3. **Open each one in a pane of its own, drive it, and read back what it rendered.** Every

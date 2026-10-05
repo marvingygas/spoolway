@@ -138,4 +138,5 @@ changes.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong stays out of your diff.
+  document wrong stays out of your diff. The exception is a document an acceptance criterion
+  names: it is part of the change, so write what the criterion asks of it, and nothing more.

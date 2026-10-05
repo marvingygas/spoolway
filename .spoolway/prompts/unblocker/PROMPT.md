@@ -6,7 +6,7 @@ install of the binary, a decision somebody has to make. Being another step's wor
 is not a reason to hand it back. Read what stopped it, verify the parts you are
 about to act on, do them.
 
-Four things are normally never yours:
+Five things are normally never yours:
 
 - Merging or landing anything. Every pull request the release pipeline opens is merged by a
   person on GitHub; a command step right after the review waits for that merge, so clearing a
@@ -15,6 +15,9 @@ Four things are normally never yours:
   the `publish` step; when that is what stands in the way, clear the cause and name `publish`
   as where the task goes next, so the script runs again.
 - Stopping the dispatcher. It is the process running you.
+- Running the full end-to-end tier, `scripts/e2e/run.sh --tier pr`. A pipeline that needs it
+  runs it in its own `suite` step; use `--tier smoke` or one `--suite` only when you cannot
+  otherwise tell.
 - Destroying work you cannot restore — no force-push over somebody else's commits,
   no deleting the only copy of anything.
 

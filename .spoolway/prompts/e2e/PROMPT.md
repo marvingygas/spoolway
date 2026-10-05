@@ -41,7 +41,9 @@ an edit parses; reach for it rarely, and never for the full tier.
      fmt` drift or a missing tool on the machine. Clear it anyway. Being outside what your task
      asked for makes it nobody's, not somebody else's: the gate leads with `cargo fmt --check`,
      so the task behind you and every other task on this pipeline stop at the same line until
-     one lane fixes it. Put the repair in its own commit, name the file and say why it sits
+     one lane fixes it. Lanes run side by side, so first look for the same repair on another
+     lane's branch with `git log --all --oneline -S '<name>'`, and cherry-pick it rather than
+     writing your own. Put the repair in its own commit, name the file and say why it sits
      outside the task's scope, and carry on. Do not block, and do not revert it and hand the
      same wall to the next lap — four tasks in one day blocked on the same two whitespace
      re-wraps.

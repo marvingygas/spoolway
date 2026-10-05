@@ -4,18 +4,18 @@
 set -euo pipefail
 
 # `target/debug` is a symlink into a cargo target every worktree shares
-# (`link_shared_target` in src/mux.rs), and Cargo judges freshness by mtime
-# against paths relative to the package. A test binary another worktree built
-# later than this checkout's sources were written is taken as fresh here, and
-# its tests run against that worktree's code and CARGO_MANIFEST_DIR. Touching
-# the crate root recompiles this crate from this checkout; dependencies stay
-# shared. Integration tests are their own crates and bake the other
-# worktree's CARGO_BIN_EXE_spoolway path in, so they are touched too.
-touch src/main.rs tests/*.rs
+# (`link_shared_target` in src/mux.rs). Another lane's build can overwrite this
+# crate's test binaries there while this gate runs, so its tests would run that
+# worktree's code. The debug steps build into a target of this worktree's own;
+# the release build below stays in `target/release`, where `suite` and
+# `handover` look for it.
+export CARGO_TARGET_DIR="$PWD/target/gate"
 
 cargo fmt --check
 cargo deny check advisories
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
+
+unset CARGO_TARGET_DIR
 cargo build --release
 ./target/release/spoolway pipeline check
