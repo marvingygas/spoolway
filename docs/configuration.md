@@ -39,7 +39,10 @@ The checkout holds the tracked files: `config.toml`, `.spoolway/pipelines/` and
 `.spoolway/prompts/`. Everything spoolway writes while it runs lives at
 `~/.spoolway/<label>-<id>/`. The `<id>` is a short id stamped into the project's `.git`
 directory, which every branch and worktree of one clone shares. The `<label>` is a cleaned-up
-form of the checkout's name.
+form of the checkout's name, cut to 64 characters. A name that is blank gets the label `project`.
+
+Every command needs `HOME` to be set. When `HOME` is unset or empty, the command refuses, names
+`HOME` and writes nothing.
 
 The binding is two files that must agree: the stamp at `.git/spoolway-id`, and the record at
 `~/.spoolway/<label>-<id>/project.toml`. Every command checks them before it does anything else.
@@ -549,12 +552,12 @@ with no `slots`, and a row no pipeline step uses.
 
 ## Retired keys
 
-A file naming a retired key always loads. None of them refuses to parse any more, even
-`dispatch.interval` and `issue_tracking.on_fail`, which used to fail every command except
-`spoolway sync`. Each key is dropped from the tracked file on the next save. These keys load
-with a note: `dispatch.interval`, `issue_tracking.on_fail`, a non-blank
-`dispatch.worktree_root`, `dispatch.backend` set to `tmux` (which loads as `herdr` instead),
-`dispatch.tear_lanes_on_stop`, an `[agents.<profile>.env]` table, and an `[agents.<profile>]`
+A file naming a retired key always loads, whether the key sits in a plain table or in an
+inline table such as `issue_tracking = { ..., on_fail = "" }`. Commands that write one key,
+such as `spoolway config set`, `spoolway init --tracker` and `spoolway override promote`,
+leave a retired key in the file. `spoolway sync` drops it. These keys load with a note:
+`dispatch.interval`, `issue_tracking.on_fail`, a non-blank `dispatch.worktree_root`,
+`dispatch.backend` set to `tmux` (which loads as `herdr` instead), `dispatch.tear_lanes_on_stop`, an `[agents.<profile>.env]` table, and an `[agents.<profile>]`
 naming a kind spoolway no longer knows how to launch. Only the notes for `dispatch.interval`,
 `issue_tracking.on_fail` and `dispatch.worktree_root` name `spoolway sync` as the command that
 drops the key for good. The others say the key is rewritten or dropped on the next save. The

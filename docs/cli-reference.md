@@ -266,7 +266,7 @@ To send it to another step, in your own shell:
   spoolway resume example --stage <step>
 ```
 
-The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to. A task in any other state ends with `It is not held, so there is nothing to resume.`
+The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
 
 `--json` prints the same facts as one object.
 
@@ -284,7 +284,9 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task. Same as `spoolway resume <task>` with no other flags.
+Resume one task, the way the board's `r` key does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
+
+A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
 ### `spoolway queue unqueue <task>`
 
@@ -307,7 +309,7 @@ spoolway queue unqueue <task> --force
 A task that has started is refused, naming its stage, its checkout when it has one, and both
 routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
 checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
-refused too, naming that sibling. A task already sitting in pending under the same id
+refused too, with or without `--force`, naming that sibling. Unqueue the sibling first. A task already sitting in pending under the same id
 refuses the move and leaves the queue file in place.
 
 ### `spoolway group list`
@@ -593,6 +595,18 @@ hook's failed run, so it fires again; a task paused on `queued` or `started` res
 [start branch does not exist](tasks.md#a-start-branch-that-does-not-exist) resumes to `queued`
 with `missing_start_branch:` cleared.
 
+These tasks are refused, each with a message that names the reason and what to do:
+
+| Task | Refused | What the message says to do |
+|---|---|---|
+| On `queued` | Always | It starts on its own, so there is nothing to resume |
+| On a step an agent or command is running | Always | Run `spoolway queue pause <task>` to stop it where it is |
+| On `blocked`, resumed by its own lane | Always | Only a person resumes it |
+| Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
+| Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
+
+A task on a step the pipeline no longer defines, or on a step that ends the pipeline, can still be resumed.
+
 ```
 spoolway resume <task>
 spoolway resume <task> --stage review -m "send it back round"
@@ -678,7 +692,10 @@ $ spoolway pipeline check
 3 pipeline(s) valid: ["bugfix", "impl", "local"], agents ["claude", "pi"]
 ```
 
-A missing or overlong `description:` is a warning, not a failure.
+A missing or overlong `description:` is a warning, not a failure. So is a step that no route
+from the first step reaches.
+
+A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
 ### `spoolway pipeline contract`
 
@@ -1094,8 +1111,8 @@ default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in t
 checkout or its `.git`. With no workspace yet, home mode creates one. With workspaces already
 there, `init` asks the workspace menu instead: `Select the spoolway workspace for this
 checkout. Pick an existing workspace or create a new one.` A checkout no workspace lists yet
-sees every workspace, those of this repository marked `same repository` and listed first, and
-`Create a new workspace` last as the default, so pressing Enter without reading the menu starts
+sees the workspaces it may join, those of this repository marked `same repository` and listed
+first, and `Create a new workspace` last as the default, so pressing Enter without reading the menu starts
 a fresh workspace. A checkout a workspace already lists sees that workspace first, marked
 `current` and still the default, then every other workspace of this repository, then `Create a
 new workspace`. `--workspace <name>` or `--workspace new` answers the menu without asking: a
@@ -1108,30 +1125,48 @@ is and skips the example and tracker questions; `--tracker`, `--project-key`, `-
 still checked for a valid value even though a join or a move into an existing workspace ignores
 it. Moving into a new workspace scaffolds a `config/` from scratch instead, asking the usual
 questions. Either way the run ends with one line naming where the checkout went: `Joined
-workspace <name>.` or `Moved to workspace <name>.`
+workspace <name>.`, `Moved to workspace <name>.`, or `Joined workspace <name>, taking over the
+entry for <old path>` when the join takes over an entry whose folder is gone.
 
 With nobody to ask and no `--workspace`, an unlisted checkout starts a new workspace, the same
 default the menu takes; when a workspace already holds a clone of this repository, `init` prints
 a note naming it and the `--workspace` that joins it instead. A listed checkout with nobody to
-ask stays where it is. See [Home mode](concepts.md#home-mode). Either mode needs a real git
-repository behind the checkout; a plain folder is refused.
+ask stays where it is. See [Home mode](concepts.md#home-mode). Either mode needs a git
+repository with a working tree behind the checkout. A plain folder, a bare repository, a path
+that is not valid UTF-8, and a `.spoolway` file in repo mode are each refused with the reason,
+before anything is written to `.git`.
 
-Repo mode refuses outright, before writing anything, when the checkout is your home directory:
+Repo mode refuses outright, before writing anything, when the checkout is your home directory,
+including when `$HOME` is a symlink to it:
 `~/.spoolway` there is already spoolway's own state directory, so it can never also hold a
 project's tracked setup. The refusal says to run `--setup home` instead, or to run `init` in the
 actual project checkout. Home mode is unaffected, since it never writes into the checkout.
 
-Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
-`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own. Each
-refusal names the command to run instead.
+Moving a project between the two modes is refused in these cases:
+
+- `--setup repo` on a checkout a workspace already lists.
+- `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`.
+- `--setup home` on a repository where a branch tracks a `.spoolway/` of its own. `init` finds
+  the default branch from `origin/HEAD`, then `init.defaultBranch`, then `main` or `master`. When
+  none of these names a branch, any local branch that tracks `.spoolway/` is refused.
+- `--setup home` on a checkout whose repo-mode home still holds queued tasks. The refusal names
+  the tasks.
+
+Each refusal names the steps to take instead.
 
 Picking another workspace in the menu, or passing `--workspace <other>`, moves a listed
 checkout there, carrying its queue, archive and worktrees along. The move is refused, with
 nothing written, while any of its tasks holds a worktree, naming each one, and for a workspace
-of another repository, with no flag to force it. A workspace the move leaves with no checkout
-listed is removed, together with its entry in the usage registry, and the move prints that it
-was removed.
+of another repository, with no flag to force it. Joining a workspace of another repository is
+refused the same way. A workspace the move leaves with no checkout listed is kept. The move
+prints the folder's path and says to remove it by hand:
+
+```
+Moved to workspace other-h4m1xs.
+Workspace api-k7f2q9 lists no checkout now. Its folder is kept:
+  ~/.spoolway/api-k7f2q9
+Remove it yourself once nothing in it is needed.
+```
 
 Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
 the missing path. `init` on a checkout a workspace already lists refuses the same way when that
@@ -1161,7 +1196,7 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira. With nobody to answer and no existing key to keep, `init` writes it empty and prints a note naming this flag |
 | `--yes` | | Let a run with no terminal write. Without it, a run with nobody to answer writes nothing and exits 0. A run at a terminal does not need it |
-| `--force` | | Overwrite existing config, pipeline and prompt files. In a home-mode clone, names the other clones that share that config before rewriting it |
+| `--force` | | Overwrite existing config, pipeline and prompt files. Keeps the project's provider, tracker and project key unless `--provider` or `--tracker` is passed. In a home-mode clone, names the other clones that share that config before rewriting it |
 
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes
@@ -1228,7 +1263,7 @@ spoolway sync
 | Flag | Default | What it does |
 |---|---|---|
 | `--dry-run` | | Print what would change. Writes nothing |
-| `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`. Repeatable |
+| `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`, or `.bak.<n>` if that name is taken, with the same file mode. Repeatable |
 
 At a terminal, with something to write or remove, `sync` lists it and waits: enter writes the
 files, records the stamp and prints the report; esc, ctrl-c, or the terminal going away
@@ -1239,12 +1274,20 @@ straight away with no panel.
 See [Keeping a project's files current](installation.md#keeping-a-projects-files-current) for
 the panel itself.
 
-On success, `sync` writes a stamp under the project's home recording this binary's version and
-a fingerprint of the text it would write, one line per checkout. `spoolway init` writes the
-same stamp for a freshly scaffolded project.
+`sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
+other command does.
 
-Every other command that needs a project reads that stamp back. When it no longer matches and a
-scan finds files to change, the command prints one line on stderr and then runs:
+On a run that refused no file, `sync` writes a stamp under the project's home recording this
+binary's version and a fingerprint of the text it would write, one line per checkout. A run
+that refused a file removes that checkout's line. `spoolway init` writes the same stamp for a
+freshly scaffolded project, and none when it kept an existing file or joined a workspace.
+
+The report lists refused files first. It then lists each file written or removed, and a line
+for each replaced key block and each value `sync` set on its own.
+
+Every other command that needs a project reads that stamp back. When the stamp is missing or
+unreadable, the command prints one line on stderr and then runs. It does the same when the
+stamp no longer matches and a scan finds a file to write, remove or refuse:
 
 ```
 Run spoolway sync to apply the last update.
@@ -1293,7 +1336,9 @@ $ spoolway doctor
 
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
 `--json` prints the findings as one object. The `bound to its home` check, under `-v`, names
-whether the project runs in repo mode or home mode. See [Home mode](concepts.md#home-mode).
+whether the project runs in repo mode or home mode. A note names each workspace under
+`~/.spoolway/` that lists no checkout, to be removed by hand. See
+[Home mode](concepts.md#home-mode).
 
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it
@@ -1381,6 +1426,8 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |
 | `-m`, `--message <TEXT>` | | One line for the status log |
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
+
+A report from a `queued` or `paused` task is refused, because no lane works at either state. The refusal names the next action: `spoolway resume <task>` for a paused task, and waiting for the dispatcher for a queued one.
 
 See [Gates](pipelines.md#gates).
 

@@ -395,6 +395,24 @@ pub fn route(
     unattended: bool,
     stage: Option<&str>,
 ) -> Result<Routed> {
+    // `queued` and `paused` are held states no lane works at, so a report
+    // filed from one has no step to settle. Said outright: the step lookup
+    // below would answer that "`queued` is not a step", which reads as a typo
+    // in a name the reporter never typed.
+    if current == crate::pipeline::QUEUED || current == crate::pipeline::PAUSED {
+        let instead = match current == crate::pipeline::QUEUED {
+            true => "it starts on its own when the dispatcher reaches it".to_string(),
+            false => format!(
+                "to release it, run `spoolway resume {}` or press `r` on the board",
+                task.id()
+            ),
+        };
+        bail!(
+            "task `{}` is {current}, which no lane works at, so there is no step to report \
+             on — {instead}",
+            task.id()
+        );
+    }
     let step = pipeline.require_step(current).with_context(|| {
         format!(
             "task `{}` is on a step that this pipeline does not define",
@@ -482,14 +500,27 @@ pub fn route(
                             task.id()
                         )
                     };
+                    // Nothing to list when the task has run no step at or before
+                    // the gate: ending on "before it: " with nothing after it
+                    // reads as a message cut off.
+                    let options = match allowed.is_empty() {
+                        true => format!(
+                            "This task has not run `{gate_step}` or any step before it, so \
+                             there is none to name — report a plain `--pass` without \
+                             `--stage` instead"
+                        ),
+                        false => format!(
+                            "Name `{gate_step}` or a step before it: {}",
+                            allowed
+                                .iter()
+                                .map(|s| format!("`{s}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    };
                     bail!(
-                        "{subject} - a pass from `{blocked}` may not name a step past it. Name \
-                         `{gate_step}` or a step before it: {}",
-                        allowed
-                            .iter()
-                            .map(|s| format!("`{s}`"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        "{subject} - a pass from `{blocked}` may not name a step past it. \
+                         {options}",
                         blocked = crate::pipeline::BLOCKED,
                     );
                 }
@@ -1518,12 +1549,39 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
 /// — rerouting a task is a decision about what the work is for, not about
 /// what is in its way — and a task waiting on a gate (`paused_at`) stays
 /// refused whoever asks, so nothing a person was asked to approve can be
-/// approved by a lane.
+/// approved by a lane. A lane on `blocked` also may not resume its own task
+/// — the one `SPOOLWAY_TASK` names — since that would answer its own block.
+///
+/// Whoever asks, a task that is not stopped is refused: one still `queued`, or
+/// one standing on an agent or command step. And `--stage` is refused while a
+/// task in `depends_on` has not finished, so a child cannot run ahead of its
+/// parent. The board's `r` goes through [`resume_held_row`], which skips the
+/// not-stopped refusal; `spoolway queue resume` calls this one first for a task
+/// that is queued or has something running on its step.
 pub fn resume(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &ResumeArgs,
     from_step: Option<&str>,
+) -> Result<()> {
+    resume_checked(repo, pipelines, args, from_step, false)
+}
+
+/// [`resume`] for the board's `r` and `spoolway queue resume`, which may also
+/// restart a row holding a person-answered question: it stands on its own
+/// live step with nothing marking it stopped, so the "not stopped" refusal
+/// that `spoolway resume` makes would turn that restart away. The board only
+/// offers `r` on a row that is resumable, which `spoolway resume` cannot see.
+pub(crate) fn resume_held_row(repo: &Repo, pipelines: &Pipelines, args: &ResumeArgs) -> Result<()> {
+    resume_checked(repo, pipelines, args, None, true)
+}
+
+fn resume_checked(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    args: &ResumeArgs,
+    from_step: Option<&str>,
+    restart_held_row: bool,
 ) -> Result<()> {
     let from_blocked = from_step == Some(crate::pipeline::BLOCKED);
     if !from_blocked {
@@ -1535,6 +1593,21 @@ pub fn resume(
         );
     }
     let task = repo.task(&args.task)?;
+    // The lane on `blocked` is working on its own task's block; clearing it
+    // would answer its own question for it. It may unblock others only.
+    if from_blocked && crate::platform::env_var(TASK_ENV).is_ok_and(|own| own == args.task) {
+        bail!(
+            "task `{}` is this lane's own — a lane on `blocked` may resume other stopped \
+             tasks, never its own.",
+            args.task
+        );
+    }
+    if !restart_held_row {
+        refuse_if_not_stopped(&task, pipelines)?;
+    }
+    if args.stage.is_some() {
+        refuse_while_dependencies_unfinished(repo, &task)?;
+    }
     if from_blocked && task.front.paused_at.is_some() {
         bail!(
             "task `{}` is waiting on a gate — that is a person's to answer, not a lane's.",
@@ -1564,6 +1637,71 @@ pub fn resume(
         } => past_the_gate(task, args, &gated, caught, cleared_block, destination),
         road => back_onto_its_step(repo, pipelines, task, args, road),
     }
+}
+
+/// Refuse a task that is not stopped: one waiting in the queue, or one whose
+/// lane is running a pipeline step.
+///
+/// Resuming a running task rewinds it, and its lane's own later report is then
+/// refused. Resuming a queued task with `--stage` would skip the steps in front
+/// of the one named. A stage no pipeline defines is left resumable: a pipeline
+/// edited while a task sat on a removed step must still be rescued by hand. So
+/// is a task on a terminal step (`end: true`), which has finished and runs
+/// nothing; `--stage` may still revive it.
+fn refuse_if_not_stopped(task: &Task, pipelines: &Pipelines) -> Result<()> {
+    let stage = task.stage();
+    let running = stage != crate::pipeline::BLOCKED
+        && stage != crate::pipeline::PAUSED
+        && pipelines.for_task(task).is_ok_and(|pipeline| {
+            pipeline
+                .step(stage)
+                .is_some_and(|step| step.kind() != crate::pipeline::StepKind::Terminal)
+        });
+    if stage == crate::pipeline::QUEUED {
+        bail!(
+            "task `{}` is {stage}, not stopped — it starts on its own when the dispatcher \
+             reaches it, so there is nothing to resume.",
+            task.front.id
+        );
+    }
+    if running {
+        bail!(
+            "task `{id}` is {stage}, not stopped — there is nothing to resume. To stop it \
+             where it is, run `spoolway queue pause {id}`.",
+            id = task.front.id
+        );
+    }
+    Ok(())
+}
+
+/// Refuse `resume --stage` while a task in `depends_on` is not `done`.
+///
+/// The dispatcher gates a dependency only on `queued`, so a child sent to a
+/// later step by hand would otherwise run and finish ahead of its parent. The
+/// check is [`crate::graph::Graph::waiting_on`], the one the dispatcher uses:
+/// a dependency that left the queue counts as done only if it is in the
+/// archive, so one unqueued back to pending, or misspelled, is refused too.
+fn refuse_while_dependencies_unfinished(repo: &Repo, task: &Task) -> Result<()> {
+    let tasks = repo.tasks()?;
+    let graph = crate::graph::Graph::build(&tasks, &repo.archive_dir());
+    let Some(dep) = graph.waiting_on(&task.front.id).into_iter().next() else {
+        return Ok(());
+    };
+    let id = &task.front.id;
+    let Some(parent) = tasks.iter().find(|t| t.id() == dep) else {
+        bail!(
+            "{id} depends on {dep}, which is not a task in the queue or the archive — \
+             correct or remove {dep} in {id}'s `depends_on`"
+        );
+    };
+    let state = parent.stage();
+    // Only a stopped parent can be resumed; telling a person to resume one
+    // that is running or queued would lead to a second refusal.
+    let advice = match state == crate::pipeline::BLOCKED || state == crate::pipeline::PAUSED {
+        true => format!("resume {dep} first"),
+        false => format!("wait for {dep} to finish"),
+    };
+    bail!("{id} depends on {dep}, which is {state} — {advice}");
 }
 
 /// Every road out of a stop but a gate's, once [`resume`] has chosen it.
@@ -3092,6 +3230,59 @@ mod tests {
         );
     }
 
+    /// A task that has run nothing at or before the gate has no step to offer
+    /// back, and the refusal says so rather than ending on its own colon.
+    #[test]
+    fn a_staged_pass_refusal_with_no_step_to_name_does_not_end_on_an_empty_list() {
+        let err = staged_pass_refusal("staged-pass-empty-list", "look", &[], "e2e");
+        assert!(err.contains("stopped at `look`, which is gated"), "{err}");
+        assert!(
+            err.ends_with(
+                "This task has not run `look` or any step before it, so there is none to name — report a plain `--pass` without `--stage` instead"
+            ),
+            "{err}"
+        );
+    }
+
+    /// A report filed from `queued` is refused for what it is, not as a step
+    /// name that is not in the pipeline.
+    #[test]
+    fn a_report_from_queued_says_no_lane_works_there() {
+        let pipelines = gated_middle_staffed_pipelines();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let (repo, _root_guard) = unattended_fixture("report-from-queued");
+        add(&repo, "tab-shell", &[]);
+        let mut task = queued(&repo, "tab-shell");
+        let err = route(
+            &mut task,
+            pipeline,
+            crate::pipeline::QUEUED,
+            Outcome::Pass,
+            false,
+            None,
+        )
+        .err()
+        .expect("a report from queued is refused");
+        let err = format!("{err:#}");
+        assert!(err.contains("which no lane works at"), "{err}");
+        assert!(!err.contains("is not a step"), "{err}");
+        assert!(err.contains("starts on its own"), "{err}");
+
+        task.set_stage(crate::pipeline::PAUSED, None);
+        let err = route(
+            &mut task,
+            pipeline,
+            crate::pipeline::PAUSED,
+            Outcome::Pass,
+            false,
+            None,
+        )
+        .err()
+        .expect("a report from paused is refused");
+        let err = format!("{err:#}");
+        assert!(err.contains("`spoolway resume tab-shell`"), "{err}");
+    }
+
     /// A step past the gate that this task never ran is still refused for
     /// the gate, not for being unrun — the gate is what is in the way.
     #[test]
@@ -4150,6 +4341,200 @@ mod tests {
 
         let task = queued(&repo, "sibling");
         assert_eq!(task.stage(), "build");
+    }
+
+    fn resume_args(task: &str, stage: Option<&str>) -> crate::cli::ResumeArgs {
+        crate::cli::ResumeArgs {
+            task: task.into(),
+            stage: stage.map(str::to_string),
+            message: None,
+        }
+    }
+
+    /// A task whose lane is running a step is not stopped, so there is
+    /// nothing to resume. Rewinding it would leave the lane's own later
+    /// report refused.
+    #[test]
+    fn a_running_task_is_refused_by_resume_and_stays_where_it_is() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-running");
+        let pipelines = gate_pipelines();
+        add(&repo, "busy", &[]);
+        let mut task = queued(&repo, "busy");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+
+        for stage in [None, Some("build")] {
+            let err = resume(&repo, &pipelines, &resume_args("busy", stage), None)
+                .expect_err("a running task is not resumable");
+            let said = format!("{err:#}");
+            assert!(said.contains("busy") && said.contains("deploy"), "{said}");
+        }
+        assert_eq!(queued(&repo, "busy").stage(), "deploy");
+    }
+
+    /// A task still waiting in the queue has not started, so `--stage` may
+    /// not skip it past the steps in front of the one it names.
+    #[test]
+    fn a_still_queued_task_is_refused_by_resume_stage_and_skips_no_steps() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-queued");
+        let pipelines = gate_pipelines();
+        add(&repo, "waiting", &[]);
+
+        let err = resume(
+            &repo,
+            &pipelines,
+            &resume_args("waiting", Some("announce")),
+            None,
+        )
+        .expect_err("a queued task is not resumable");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("waiting") && said.contains("queued"),
+            "{said}"
+        );
+        assert_eq!(queued(&repo, "waiting").stage(), crate::pipeline::QUEUED);
+    }
+
+    /// A child may not be resumed onto a step while a task it depends on has
+    /// not finished. The refusal names that task and its state.
+    #[test]
+    fn resume_stage_is_refused_while_a_task_it_depends_on_is_not_done() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-unmet-dependency");
+        let pipelines = gate_pipelines();
+        add(&repo, "parent", &[]);
+        let mut parent = queued(&repo, "parent");
+        parent.front.blocked_from = Some("build".into());
+        parent.set_stage(crate::pipeline::BLOCKED, None);
+        parent.save().unwrap();
+        add(&repo, "child", &["parent"]);
+        let mut child = queued(&repo, "child");
+        child.front.blocked_from = Some("build".into());
+        child.set_stage(crate::pipeline::BLOCKED, None);
+        child.save().unwrap();
+
+        let err = resume(
+            &repo,
+            &pipelines,
+            &resume_args("child", Some("deploy")),
+            None,
+        )
+        .expect_err("a child must wait for its parent");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("parent") && said.contains(crate::pipeline::BLOCKED),
+            "{said}"
+        );
+        assert_eq!(queued(&repo, "child").stage(), crate::pipeline::BLOCKED);
+    }
+
+    /// A task on a stage no pipeline defines, or on a terminal step, is not
+    /// running anything: a pipeline edited under it, or a finished task, must
+    /// still be reachable by hand.
+    #[test]
+    fn a_task_on_an_unknown_or_terminal_stage_stays_resumable() {
+        clear_lane_env();
+        let pipelines = looping_pipelines(2);
+        for (id, stage) in [("gone", "removed-step"), ("finished", "ship")] {
+            let (repo, _root_guard) = fixture(&format!("resume-unknown-terminal-{id}"));
+            add(&repo, id, &[]);
+            let mut task = queued(&repo, id);
+            task.set_stage_unbanked(stage, "test setup");
+            task.save().unwrap();
+
+            resume(&repo, &pipelines, &resume_args(id, Some("work")), None)
+                .unwrap_or_else(|e| panic!("`{id}` on `{stage}` must resume: {e:#}"));
+            assert_eq!(queued(&repo, id).stage(), "work");
+        }
+    }
+
+    /// A dependency that is neither queued nor archived is unknown, which
+    /// the dispatcher holds a task for, so `--stage` may not go past it.
+    #[test]
+    fn resume_stage_is_refused_for_a_dependency_that_is_not_a_task() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-unknown-dependency");
+        let pipelines = gate_pipelines();
+        add(&repo, "lgoin", &[]);
+        add(&repo, "child", &["lgoin"]);
+        // Queueing refuses an unknown dependency, so the parent leaves the
+        // queue afterwards without being archived.
+        std::fs::remove_file(repo.queue_dir().join("lgoin.md")).unwrap();
+        let mut child = queued(&repo, "child");
+        child.front.blocked_from = Some("build".into());
+        child.set_stage(crate::pipeline::BLOCKED, None);
+        child.save().unwrap();
+
+        let err = resume(
+            &repo,
+            &pipelines,
+            &resume_args("child", Some("deploy")),
+            None,
+        )
+        .expect_err("an unknown dependency holds the child");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("lgoin") && said.contains("not a task"),
+            "{said}"
+        );
+    }
+
+    /// A parent that is running rather than stopped cannot be resumed, so the
+    /// refusal tells the person to wait instead of to resume it.
+    #[test]
+    fn resume_stage_tells_a_person_to_wait_for_a_running_parent() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-running-parent");
+        let pipelines = gate_pipelines();
+        add(&repo, "parent", &[]);
+        let mut parent = queued(&repo, "parent");
+        parent.set_stage("build", None);
+        parent.save().unwrap();
+        add(&repo, "child", &["parent"]);
+        let mut child = queued(&repo, "child");
+        child.front.blocked_from = Some("build".into());
+        child.set_stage(crate::pipeline::BLOCKED, None);
+        child.save().unwrap();
+
+        let err = resume(
+            &repo,
+            &pipelines,
+            &resume_args("child", Some("deploy")),
+            None,
+        )
+        .expect_err("a running parent holds the child");
+        let said = format!("{err:#}");
+        assert!(said.contains("wait for parent"), "{said}");
+        assert!(!said.contains("resume parent"), "{said}");
+    }
+
+    /// A lane on `blocked` may unblock other stopped tasks but never the task
+    /// it is itself working on.
+    #[test]
+    fn a_lane_on_blocked_may_not_resume_its_own_task() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("blocked-lane-resumes-itself");
+        let pipelines = gate_pipelines();
+        add(&repo, "mine", &[]);
+        let mut task = queued(&repo, "mine");
+        task.front.blocked_from = Some("build".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let err = crate::platform::test_env::with_env(TASK_ENV, "mine", || {
+            resume(
+                &repo,
+                &pipelines,
+                &resume_args("mine", None),
+                Some(crate::pipeline::BLOCKED),
+            )
+        })
+        .expect_err("a lane may not unblock its own task");
+        let said = format!("{err:#}");
+        assert!(said.contains("mine") && said.contains("own"), "{said}");
+        assert_eq!(queued(&repo, "mine").stage(), crate::pipeline::BLOCKED);
     }
 
     /// Bounded even from `blocked`: a task waiting on a gate is a person's to

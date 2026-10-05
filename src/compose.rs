@@ -382,9 +382,9 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// installation as a whole, which is a person's question, not a lane's.
 ///
 /// `spoolway resume` is the exception to the read-only rule above it, bounded
-/// in the two ways `commands::report::resume` itself enforces: never past a
-/// task waiting on a gate, and never with `--stage`, which reroutes rather
-/// than clears a block.
+/// in the three ways `commands::report::resume` itself enforces: never past a
+/// task waiting on a gate, never with `--stage`, which reroutes rather than
+/// clears a block, and never the lane's own task.
 fn toolbox() -> String {
     "READING THE RUN — yours at this step only:\n\n\
      `spoolway queue list` — every task, and where each sits\n\

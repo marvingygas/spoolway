@@ -658,12 +658,12 @@ fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Findin
                 // checkout is bound to — see the `home-mode-discovery` task's
                 // "doctor says which mode the project is in", which names both
                 // modes, not only home mode.
-                Ok((Some(_), _)) => Ok(Some(format!(
+                Ok((Some(_), ..)) => Ok(Some(format!(
                     "{} — home mode, setup read from {}",
                     repo.home.display(),
                     repo.setup_dir().display()
                 ))),
-                Ok((None, _)) => Ok(Some(match crate::repo::binding_at(&repo.home) {
+                Ok((None, ..)) => Ok(Some(match crate::repo::binding_at(&repo.home) {
                     Some((id, root)) => {
                         format!(
                             "{} — repo mode, id {id}, root {}",
@@ -704,6 +704,14 @@ fn config_checks(
     // takes a distinct path the moment it has one, before `Config::load` (or
     // any other home-backed call) — see `doctor_home_unavailable`.
     let mut findings = vec![registration_check(repo, None)];
+    // Moving the last checkout out of a workspace keeps its folder, so this
+    // is where a person learns what is left to remove by hand.
+    for workspace in crate::repo::workspaces_listing_no_checkout() {
+        findings.push(Finding::Note(format!(
+            "workspace {} lists no checkout — remove it by hand once nothing in it is needed",
+            crate::repo::shorten_home(&workspace),
+        )));
+    }
     findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(
@@ -1138,17 +1146,7 @@ fn worktree_root_note(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
     let Some(path) = configured else {
         return Vec::new();
     };
-    let mut still_there: Vec<&str> = tasks
-        .iter()
-        .filter(|t| {
-            t.front
-                .worktree_path
-                .as_deref()
-                .is_some_and(|wt| wt.starts_with(&path))
-        })
-        .map(Task::id)
-        .collect();
-    still_there.sort_unstable();
+    let still_there = crate::config::tasks_under_worktree_root(&path, tasks);
     let note = if still_there.is_empty() {
         format!(
             "dispatch.worktree_root in this checkout's config names {path} — the setting is \
@@ -2665,6 +2663,37 @@ mod tests {
             !text.contains("safe to remove") && !text.contains("yours to remove"),
             "a folder with a task still in it must never be called removable: {text}"
         );
+    }
+
+    /// A `worktree_root` written with a leading `~/` names the same folder as
+    /// the absolute path a task records, so the note must still name it.
+    #[test]
+    fn worktree_root_note_expands_a_leading_tilde_before_matching() {
+        let Some(home) = crate::platform::home_dir() else {
+            return;
+        };
+        let root = crate::scratch::root("doctor-worktree-root-note-tilde");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&root),
+            "[dispatch]\nworktree_root = \"~/p25-wt\"\n",
+        )
+        .unwrap();
+        let z1 = Task::parse(
+            PathBuf::from("z1.md"),
+            &format!(
+                "---\nid: z1\nstage: paused\nworktree_path: {}\n---\n",
+                home.join("p25-wt").join("task-z1").display()
+            ),
+        )
+        .unwrap();
+
+        let notes = worktree_root_note(&root, &[z1]);
+        let Finding::Note(text) = &notes[0] else {
+            panic!("{notes:#?}")
+        };
+        assert!(text.contains("z1"), "{text}");
+        assert!(!text.contains("no queued task"), "{text}");
     }
 
     /// A blank value was never anybody's decision — nothing to clean up, so

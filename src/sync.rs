@@ -64,22 +64,25 @@ use crate::task::write_atomic;
 
 /// What happened to one file, in the order a person wants to read it.
 ///
-/// The path and the reason are separate fields because they have separate
-/// audiences: the report prints paths and nothing else — which files moved is
-/// the only question anybody runs this to answer — while `spoolway doctor`
-/// reads the reasons, since a refusal that is never said is a project that
-/// quietly stays behind.
+/// The path and the reason are separate fields because they read in
+/// different places: the report prints a written file's path alone and puts
+/// the reason under it only for a [`Outcome::Migrated`], while a refusal
+/// always prints with its reason, ahead of everything else — a refusal that
+/// is never said is a project that quietly stays behind. `spoolway doctor`
+/// reads every reason.
 pub enum Outcome {
     Wrote {
         path: String,
         detail: String,
     },
-    /// A file rewritten to drop a retired setting, with what that drop
-    /// means for the project spelled out — see [`config`]'s own
-    /// `issue_tracking.on_fail` and `dispatch.worktree_root` notes. Its own
+    /// A note about a file this run changed, spelled out in the report: what
+    /// dropping a retired setting means for the project — see [`config`]'s own
+    /// `issue_tracking.on_fail` and `dispatch.worktree_root` notes — a value
+    /// `sync` set that the file never named, or a pipeline key block it
+    /// replaced. Its own
     /// variant rather than another [`Outcome::Wrote`], because its detail is
     /// one of the few this
-    /// report actually prints under the file's own `wrote` line, in both the
+    /// report actually prints, after every file line, in both the
     /// long form (`report`) `run`'s own report and `--dry-run` use and the
     /// short one (`panel`) that fits [`run_asking`]'s bounded confirm line —
     /// an ordinary `Wrote`'s `detail` is never shown this way, and giving it
@@ -94,7 +97,8 @@ pub enum Outcome {
     /// one: a file nothing was done to is a file nothing has to say about it,
     /// and naming it was how the old report came to be mostly `kept` lines.
     Kept,
-    /// Ours, and changed by hand. The only outcome that is a refusal.
+    /// Ours, and changed by hand. The only outcome that is a refusal, and the
+    /// one that keeps a sync from stamping the project current.
     Blocked {
         path: String,
         why: String,
@@ -160,15 +164,21 @@ const DRY_RUN: &str = "Dry run: nothing was written. Run without --dry-run to ta
 /// a command that would do the exact same nothing.
 const NOOP: &str = "Nothing updating.";
 
-/// Which of the three closing lines above a run prints, kept as its own
+/// What a sync says when it refused a file and wrote nothing else.
+const REFUSED_ONLY: &str = "Nothing else updating; the refused files above are still behind.";
+
+/// Which of the four closing lines above a run prints, kept as its own
 /// pure function so a test can hold it to its text without capturing
-/// stdout: `nothing_to_do` always wins, dry run or not, since neither
-/// `DRY_RUN` nor `KEPT` is true of a run that touched nothing.
-fn closing_line(dry_run: bool, nothing_to_do: bool) -> &'static str {
-    match (dry_run, nothing_to_do) {
-        (_, true) => NOOP,
-        (true, false) => DRY_RUN,
-        (false, false) => KEPT,
+/// stdout: `nothing_to_do` wins over dry run, since neither `DRY_RUN` nor
+/// `KEPT` is true of a run that touched nothing, and a refusal beats
+/// `NOOP`, since "Nothing updating." under a refusal would read as the
+/// project being current.
+fn closing_line(dry_run: bool, nothing_to_do: bool, refused: bool) -> &'static str {
+    match (dry_run, nothing_to_do, refused) {
+        (_, true, true) => REFUSED_ONLY,
+        (_, true, false) => NOOP,
+        (true, false, _) => DRY_RUN,
+        (false, false, _) => KEPT,
     }
 }
 
@@ -194,33 +204,53 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     let outcomes = scan(repo, args)?;
     let (wrote, removed) = dedup_paths(&outcomes);
     let notes = migration_notes(&outcomes);
+    let refused = refusals(&outcomes);
+    // Refusals print before everything else, so the line that matters is never
+    // below a long list of ordinary writes. A dry run says them too: the file
+    // is refused either way.
+    // Columns as the report is drawn: the word padded so the path starts one
+    // column past the longest of the set. A dry run's words are longer, so it
+    // pads wider.
+    let (refused_word, wrote_word, removed_word) = match args.dry_run {
+        true => ("refused      ", "would write  ", "would remove "),
+        false => ("refused ", "wrote   ", "removed "),
+    };
+    for (path, why) in &refused {
+        println!("{refused_word}{path} — {why}");
+    }
     // A dry run reports the same paths in the conditional: "wrote" over a
     // tree nothing touched reads as a lie the moment `git status` is run.
-    let (wrote_word, removed_word) = match args.dry_run {
-        true => ("would write ", "would remove"),
-        false => ("wrote       ", "removed     "),
-    };
     for path in &wrote {
-        println!("  {wrote_word} {path}");
-        for (report, _) in notes.get(path).into_iter().flatten() {
-            println!("               ({report})");
-        }
+        println!("{wrote_word}{path}");
     }
-    for (path, why) in &removed {
-        println!("  {removed_word} {path}");
-        println!("               ({why})");
+    for (path, _) in &removed {
+        println!("{removed_word}{path}");
+    }
+    // The parenthesised notes come after every file line, so the files read as
+    // one list and the explanations as another.
+    for path in &wrote {
+        for (report, _) in notes.get(path).into_iter().flatten() {
+            println!("({report})");
+        }
     }
 
     println!();
+    let nothing_else = wrote.is_empty() && removed.is_empty();
     println!(
         "{}",
-        closing_line(args.dry_run, wrote.is_empty() && removed.is_empty())
+        closing_line(args.dry_run, nothing_else, !refused.is_empty())
     );
 
     // Only once the write has actually happened: the stamp records what a
     // checkout was last brought to, and a dry run brings it to nothing.
+    // A refused file is one this run did not bring forward, so the project is
+    // not current: the checkout's stamp line is dropped, not just left
+    // unwritten, or an earlier "current" stamp would keep the notice off.
     if !args.dry_run {
-        write_stamp(&repo.home, &repo.checkout)?;
+        match refused.is_empty() {
+            true => write_stamp(&repo.home, &repo.checkout)?,
+            false => forget_stamp(&repo.home, &repo.checkout)?,
+        }
         remove_skill_stamp(&repo.home);
     }
     Ok(())
@@ -249,17 +279,26 @@ fn fit(line: String) -> String {
     format!("{head}…")
 }
 
-/// The rows inside the confirm panel: a blank row under [`TITLE`], then what
-/// `sync` would write — every write, with a retired-shape migration's own
+/// The rows inside the confirm panel: a blank row under [`TITLE`], then every
+/// refused file with its reason, then what `sync` would write — every write, with a retired-shape migration's own
 /// short note under it where `notes` carries one, then every removal with
 /// its reason on the line under it, then the one sentence that answers "did
 /// it eat my config?" before anybody has pressed anything.
 fn panel_body(
+    refused: &[(&str, &str)],
     wrote: &[&str],
     notes: &BTreeMap<&str, Vec<(&str, &str)>>,
     removed: &[(&str, &str)],
 ) -> Vec<String> {
     let mut body = vec![String::new()];
+    for (path, why) in refused {
+        body.push(fit(format!("{:<7} {path}", "refused")));
+        // Wrapped, not cut: the fix a refusal names is at the end of its
+        // reason, and declining the panel is the only other place to read it.
+        for line in crate::screen::wrap(&format!("({why})"), MAX_LINE - 8) {
+            body.push(format!("        {line}"));
+        }
+    }
     for path in wrote {
         body.push(fit(format!("{:<6}  {path}", "write")));
         for (_, panel) in notes.get(path).into_iter().flatten() {
@@ -416,7 +455,7 @@ fn run_asking_with(
     }
     let notes = migration_notes(&outcomes);
     let keys = crate::screen::keys(&[("enter", "apply"), ("esc", "cancel")]);
-    let body = panel_body(&wrote, &notes, &removed);
+    let body = panel_body(&refusals(&outcomes), &wrote, &notes, &removed);
     for line in crate::screen::panel(TITLE, &body, &keys) {
         writeln!(out, "{line}")?;
     }
@@ -477,11 +516,28 @@ pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>
     (wrote, removed)
 }
 
-/// The `(migrated: …)` lines a scan's own [`Outcome::Migrated`] entries
+/// Every refused file in a scan, once each, with the reason: what [`run`]'s
+/// report prints before anything else and what keeps the run from stamping
+/// the project current. Kept apart from [`dedup_paths`], whose two lists are
+/// the files a sync changes — a refused file is one it did not.
+pub(crate) fn refusals(outcomes: &[Outcome]) -> Vec<(&str, &str)> {
+    let mut refused: Vec<(&str, &str)> = Vec::new();
+    for outcome in outcomes {
+        if let Outcome::Blocked { path, why } = outcome
+            && !refused.iter().any(|(p, _)| *p == path)
+        {
+            refused.push((path, why));
+        }
+    }
+    refused
+}
+
+/// The parenthesised notes a scan's own [`Outcome::Migrated`] entries
 /// carry, keyed by path and kept in the order they were recorded — the
-/// extra explanation [`run`]'s own report and [`run_asking`]'s confirm panel
-/// each draw under a pipeline file's `wrote` line, one tuple of `(report,
-/// panel)` per change so each surface reads the length it can afford.
+/// extra explanation [`run`]'s own report draws below the file lines and
+/// [`run_asking`]'s confirm panel under the file's own row, one tuple of
+/// `(report, panel)` per change so each surface reads the length it can
+/// afford.
 pub(crate) fn migration_notes(outcomes: &[Outcome]) -> BTreeMap<&str, Vec<(&str, &str)>> {
     let mut notes: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
     for outcome in outcomes {
@@ -500,16 +556,15 @@ pub(crate) fn migration_notes(outcomes: &[Outcome]) -> BTreeMap<&str, Vec<(&str,
     notes
 }
 
-/// Every file spoolway owns here, and what would happen to it.
-///
-/// Split out from [`run`] so that `spoolway doctor` can ask the same question
-/// without printing anything — which is where a [`Outcome::Blocked`] surfaces,
-/// now that the report itself is only paths.
 /// The `detail` a [`Outcome::Wrote`] carries for a file that was not there
 /// at all — named so `doctor` can tell one apart from a file that was there
 /// and out of date, which is a different thing to advise about.
 pub const MISSING: &str = "was missing";
 
+/// Every file spoolway owns here, and what would happen to it.
+///
+/// Split out from [`run`] so that `spoolway doctor` and the "Run spoolway
+/// sync" notice can ask the same question without printing anything.
 pub fn scan(repo: &Repo, args: &SyncArgs) -> Result<Vec<Outcome>> {
     // Mirrors `commands::init`'s own `home_mode` (see `src/commands/init.rs`,
     // and `Command::Install` in `src/main.rs`, which keys the same question
@@ -574,6 +629,57 @@ fn ignores(
         )),
     }
     Ok(())
+}
+
+/// The non-blank `dispatch.worktree_root` a config document names, read
+/// untyped because the loaded `Config` no longer keeps the retired field.
+fn worktree_root_in(text: &str) -> Option<String> {
+    toml::from_str::<toml::Value>(text)
+        .ok()
+        .and_then(|doc| {
+            doc.get("dispatch")?
+                .get("worktree_root")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|path| !path.trim().is_empty())
+}
+
+/// The migration note for a dropped `dispatch.worktree_root`: where its
+/// worktrees were cut, and which queued tasks still have one there.
+///
+/// A queued task can still have its own worktree sitting under the old
+/// path — this never moves one already cut, only new ones land under the
+/// project home — so the old directory is never called safe to remove
+/// outright: a task still using it is named instead, the same way `doctor`'s
+/// own `worktree_root_note` does (see `commands::doctor`). Shared by the
+/// tracked file and the private override layer, so a key dropped from
+/// either is reported the same way.
+fn worktree_root_outcome(repo: &Repo, shown: &str, old: &str) -> Outcome {
+    let tasks = repo.tasks().unwrap_or_default();
+    let still_there = crate::config::tasks_under_worktree_root(old, &tasks);
+    let (report_detail, panel_detail) = if still_there.is_empty() {
+        (
+            format!(
+                "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                 {old} — no queued task has a worktree there any more",
+            ),
+            format!("migrated: worktree_root removed; worktrees were at {old}"),
+        )
+    } else {
+        (
+            format!(
+                "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                 {old} — still in use by: {}",
+                still_there.join(", "),
+            ),
+            format!(
+                "migrated: worktree_root removed; {old} still used by {}",
+                still_there.join(", "),
+            ),
+        )
+    };
+    Outcome::migrated(shown, report_detail, panel_detail)
 }
 
 /// The config file: rewritten whole, except for what you set it to.
@@ -683,6 +789,18 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
     if let Ok(overrides_dir) = crate::overrides::dir_for(&repo.checkout) {
         let dropped = crate::overrides::retired_config_patch_keys(&overrides_dir, &current)?;
         if !dropped.is_empty() {
+            // Read before the write below removes it. A `worktree_root` set
+            // only here is dropped just the same, and the folder it named
+            // and the tasks still under it are said the same way.
+            let old_worktree_root = dropped
+                .iter()
+                .any(|key| key == "dispatch.worktree_root")
+                .then(|| {
+                    std::fs::read_to_string(crate::overrides::config_patch_path(&overrides_dir))
+                        .ok()
+                        .and_then(|raw| worktree_root_in(&raw))
+                })
+                .flatten();
             if !args.dry_run {
                 crate::overrides::write_dropped_config_patch_keys(&overrides_dir, &dropped)?;
             }
@@ -701,6 +819,9 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                     dropped.join(", ")
                 ),
             ));
+            if let Some(old) = old_worktree_root {
+                outcomes.push(worktree_root_outcome(repo, &shown_override, &old));
+            }
         }
     }
 
@@ -783,57 +904,10 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             .dropped
             .iter()
             .any(|key| key == "dispatch.worktree_root")
-            .then(|| {
-                toml::from_str::<toml::Value>(&text).ok().and_then(|doc| {
-                    doc.get("dispatch")?
-                        .get("worktree_root")?
-                        .as_str()
-                        .map(str::to_string)
-                })
-            })
-            .flatten()
-            .filter(|path| !path.trim().is_empty());
+            .then(|| worktree_root_in(&text))
+            .flatten();
         if let Some(old) = old_worktree_root {
-            // A queued task can still have its own worktree sitting under
-            // the old path — this never moves one already cut, only new
-            // ones land under the project home — so the old directory is
-            // never called safe to remove outright: a task still using it
-            // is named instead, the same way `doctor`'s own
-            // `worktree_root_note` does (see `commands::doctor`).
-            let tasks = repo.tasks().unwrap_or_default();
-            let mut still_there: Vec<&str> = tasks
-                .iter()
-                .filter(|t| {
-                    t.front
-                        .worktree_path
-                        .as_deref()
-                        .is_some_and(|wt| wt.starts_with(&old))
-                })
-                .map(crate::task::Task::id)
-                .collect();
-            still_there.sort_unstable();
-            let (report_detail, panel_detail) = if still_there.is_empty() {
-                (
-                    format!(
-                        "migrated: dispatch.worktree_root removed; its worktrees were cut at \
-                         {old} — no queued task has a worktree there any more",
-                    ),
-                    format!("migrated: worktree_root removed; worktrees were at {old}"),
-                )
-            } else {
-                (
-                    format!(
-                        "migrated: dispatch.worktree_root removed; its worktrees were cut at \
-                         {old} — still in use by: {}",
-                        still_there.join(", "),
-                    ),
-                    format!(
-                        "migrated: worktree_root removed; {old} still used by {}",
-                        still_there.join(", "),
-                    ),
-                )
-            };
-            outcomes.push(Outcome::migrated(&shown, report_detail, panel_detail));
+            outcomes.push(worktree_root_outcome(repo, &shown, &old));
         }
     }
     if !refresh.renoted.is_empty() {
@@ -843,6 +917,27 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                 "the explanation above {} rewritten",
                 listed(&refresh.renoted)
             ),
+        ));
+    }
+    // A value the file never named is written at its default. Said on a line
+    // of its own because `key_in_names` changes the keys `spoolway issues`
+    // creates, and the report closing on "config values were kept" would
+    // otherwise be read as meaning nothing was set. Pushed after the migration
+    // notes, which the report prints first.
+    if refresh
+        .added
+        .iter()
+        .any(|key| key == "issue_tracking.key_in_names")
+    {
+        let value = current.issue_tracking.key_in_names;
+        outcomes.push(Outcome::migrated(
+            &shown,
+            format!(
+                "set issue_tracking.key_in_names = {value} — the 0.7 default; the file did \
+                 not name it. `spoolway config set issue_tracking.key_in_names false` turns \
+                 it off"
+            ),
+            format!("set issue_tracking.key_in_names = {value}, the default"),
         ));
     }
     // Whitespace and key order, and nothing a person would recognise as a
@@ -1009,11 +1104,30 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
         }
 
         if !on_disk.is_empty() {
-            let backup = path.with_extension(format!(
+            // Never over an existing backup: a second `--replace` of the same
+            // file would otherwise destroy the person's own edits that the
+            // first one saved. The first free name is taken instead.
+            let first = path.with_extension(format!(
                 "{}.bak",
                 path.extension().and_then(|e| e.to_str()).unwrap_or("")
             ));
+            let mut backup = first.clone();
+            let mut n = 1;
+            while backup.exists() {
+                let mut name = first.as_os_str().to_owned();
+                name.push(format!(".{n}"));
+                backup = PathBuf::from(name);
+                n += 1;
+            }
             write_atomic(&backup, &on_disk)?;
+            // `write_atomic` creates files at the writer's default mode, so a
+            // hook's backup would lose its execute bit. The backup keeps the
+            // mode of the file it is a copy of.
+            let mode = std::fs::metadata(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+                .permissions();
+            std::fs::set_permissions(&backup, mode)
+                .with_context(|| format!("writing {}", backup.display()))?;
             println!(
                 "  ! your version is saved to {}",
                 crate::platform::relative(&repo.checkout, &backup)
@@ -1555,6 +1669,19 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
                     on_disk = next;
                     changed = true;
                     outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
+                    // The block belongs to spoolway, so an edit inside it is
+                    // gone after this write. Said in the report, because the
+                    // line a person added is otherwise lost without a word.
+                    // Names the file: the notes print after every file line,
+                    // and an upgrade can replace the block in several files.
+                    outcomes.push(Outcome::migrated(
+                        &shown,
+                        format!(
+                            "migrated: the block between spoolway's key markers in {shown} was \
+                             replaced; a hand edit inside it is not kept"
+                        ),
+                        format!("migrated: key block in {shown} replaced; edits are not kept"),
+                    ));
                 }
                 None => {
                     outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
@@ -1571,10 +1698,11 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
 
 // ---------------------------------------------------------------------------
 // The stamp: what a checkout was last brought to. Written here, by `sync` on
-// success, and by `commands::init` once it has finished placing a project's
-// files — a fresh project is, by definition, exactly what this binary would
-// write, so `init` records the same fact `sync` would have recorded had it
-// run instead of `init` doing the writing itself.
+// a run that refused nothing, and by `commands::init` once it has finished
+// placing a project's files and kept none of them — a project `init` wrote
+// whole is, by definition, exactly what this binary would write, so `init`
+// records the same fact `sync` would have recorded had it run instead. A
+// file `init` kept is whatever an older version left, which is for `sync`.
 // ---------------------------------------------------------------------------
 
 /// The stamp file's name, under [`Repo::home`] — never the checkout: a home is
@@ -1606,11 +1734,33 @@ fn write_stamp_line(home: &Path, checkout: &Path, version: &str, fingerprint: &s
     write_atomic(&path, body)
 }
 
+/// Drop `checkout`'s line from the stamp, leaving every other checkout's own.
+///
+/// A sync that refused a file calls this rather than skipping its write: an
+/// earlier current stamp would otherwise stay and say the project is fine.
+fn forget_stamp(home: &Path, checkout: &Path) -> Result<()> {
+    let path = stamp_path(home);
+    let Ok(existing) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let shown = checkout.display().to_string();
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|line| line.splitn(3, ' ').nth(2) != Some(shown.as_str()))
+        .collect();
+    let mut body = kept.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    write_atomic(&path, body)
+}
+
 /// What the stamp says for `checkout`, if anything — `(version, fingerprint)`.
 ///
-/// [`stamp_behind`] is the one caller outside this module's own tests:
-/// comparing what this reads back against what this binary would write now
-/// is exactly what says a checkout is behind.
+/// [`stamp_behind`] compares what this reads back against what this binary
+/// would write now, which is exactly what says a checkout is behind.
+/// `crate::gate` also asks it whether a stamp exists at all, since a missing
+/// one shows the notice without a scan.
 pub fn read_stamp(home: &Path, checkout: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(stamp_path(home)).ok()?;
     let shown = checkout.display().to_string();
@@ -1665,8 +1815,9 @@ fn text_fingerprint(checkout: &Path) -> String {
     crate::skeleton::fingerprint(&material)
 }
 
-/// Write the stamp for `checkout`, under `home` — [`run`]'s own call on
-/// success, and `commands::init`'s once a fresh project's files are down.
+/// Write the stamp for `checkout`, under `home` — [`run`]'s own call when it
+/// refused nothing, and `commands::init`'s once every file it placed was one
+/// it wrote itself.
 pub fn write_stamp(home: &Path, checkout: &Path) -> Result<()> {
     let fingerprint = text_fingerprint(checkout);
     write_stamp_line(home, checkout, crate::release::current(), &fingerprint)
@@ -1678,16 +1829,16 @@ pub fn write_stamp(home: &Path, checkout: &Path) -> Result<()> {
 /// reads this before paying for a full [`scan`], so an up-to-date project
 /// pays nothing beyond one file read and a few hashes per command.
 ///
-/// No stamp at all reads as "not behind": a project this stamp predates, or
-/// a fixture that never ran `init` or `sync`, has nothing recorded to
-/// compare against, and guessing behind would nag a project this stamp has
-/// simply never reached yet.
+/// No stamp, or one that cannot be read, reads as behind: nothing records
+/// that this project was ever brought current, and `init` stamps only the
+/// files it set up itself, so a project it claimed over an older setup has
+/// no stamp until a `sync` has really run.
 pub fn stamp_behind(home: &Path, checkout: &Path) -> bool {
     match read_stamp(home, checkout) {
         Some((version, fingerprint)) => {
             version != crate::release::current() || fingerprint != text_fingerprint(checkout)
         }
-        None => false,
+        None => true,
     }
 }
 
@@ -1838,7 +1989,7 @@ mod tests {
     #[test]
     fn the_confirm_panel_is_at_most_eighty_columns_wide() {
         let long = "a/very/long/path/".repeat(6) + "SKILL.md";
-        let body = panel_body(&[long.as_str()], &BTreeMap::new(), &[]);
+        let body = panel_body(&[], &[long.as_str()], &BTreeMap::new(), &[]);
         for line in crate::screen::panel(TITLE, &body, "[enter] apply") {
             assert!(
                 line.chars().count() <= 80,
@@ -1972,10 +2123,14 @@ mod tests {
     /// and had nothing to take. `nothing_to_do` must win over `dry_run`.
     #[test]
     fn a_dry_run_with_nothing_to_do_says_so_instead_of_offering_to_run_it() {
-        assert_eq!(closing_line(true, true), NOOP);
-        assert_eq!(closing_line(false, true), NOOP);
-        assert_eq!(closing_line(true, false), DRY_RUN);
-        assert_eq!(closing_line(false, false), KEPT);
+        assert_eq!(closing_line(true, true, false), NOOP);
+        assert_eq!(closing_line(false, true, false), NOOP);
+        assert_eq!(closing_line(true, false, false), DRY_RUN);
+        assert_eq!(closing_line(false, false, false), KEPT);
+        // A refusal with nothing else written is not "Nothing updating."
+        assert_eq!(closing_line(true, true, true), REFUSED_ONLY);
+        assert_eq!(closing_line(false, true, true), REFUSED_ONLY);
+        assert_eq!(closing_line(false, false, true), KEPT);
         assert!(!NOOP.contains("--dry-run"), "{NOOP}");
     }
 
@@ -2250,6 +2405,46 @@ mod tests {
         );
     }
 
+    /// The same two retired keys written inside inline tables: `sync` drops
+    /// both and prints the same migrated notes a plain table earns. `sync` rewrites the whole file from the struct, so the
+    /// tables come back in the shape the binary writes; the inline-preserving
+    /// removal is what the load path uses, tested in `confdoc`.
+    #[test]
+    fn retired_keys_inside_inline_tables_are_dropped_with_the_same_notes() {
+        let (repo, _root_guard) = fixture("config-retired-inline-tables");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "dispatch = { lane_quiet = \"25m\", worktree_root = \"/old/worktrees\" }\n\
+             issue_tracking = { hook = \"\", project_key = \"\", on_fail = \"pause\", \
+             key_in_names = false }\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("worktree_root"), "{after}");
+        assert!(!after.contains("on_fail"), "{after}");
+        assert!(after.contains("lane_quiet"), "{after}");
+
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown
+                .iter()
+                .any(|(report, _)| report.contains("issue_tracking.on_fail removed")),
+            "{shown:?}"
+        );
+        assert!(
+            shown.iter().any(|(report, _)| {
+                report.contains("dispatch.worktree_root removed")
+                    && report.contains("/old/worktrees")
+            }),
+            "{shown:?}"
+        );
+    }
+
     /// A queued task still has its own worktree cut under the old path —
     /// `sync` must name that task rather than call the old directory
     /// anybody's to remove, the same promise `doctor`'s own
@@ -2284,6 +2479,43 @@ mod tests {
         );
     }
 
+    /// A `worktree_root` written with a leading `~/` names the same folder as
+    /// the absolute path a task's `worktree_path` records, so `sync` must
+    /// name a queued task whose worktree sits under it.
+    #[test]
+    fn a_worktree_root_written_with_a_tilde_names_a_queued_task_under_it() {
+        let Some(home) = crate::platform::home_dir() else {
+            return;
+        };
+        let (repo, _root_guard) = fixture("config-retired-worktree-root-tilde");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nworktree_root = \"~/p25-wt\"\n").unwrap();
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("z1.md"),
+            format!(
+                "---\nid: z1\nstage: paused\nworktree_path: {}\n---\n",
+                home.join("p25-wt").join("task-z1").display()
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown.iter().any(|(report, panel)| {
+                report.contains("z1")
+                    && panel.contains("z1")
+                    && !report.contains("no queued task has a worktree there")
+            }),
+            "{shown:?}"
+        );
+    }
+
     /// A blank `dispatch.worktree_root` was never anybody's decision — the
     /// ordinary dropped-key line covers it, and there is nothing further
     /// worth a dedicated note.
@@ -2303,8 +2535,13 @@ mod tests {
                 .any(|line| line.starts_with("wrote") && line.contains("dispatch.worktree_root")),
             "{lines:?}"
         );
+        // The config never named `key_in_names` either, which earns its own
+        // note; only a note about the directory is ruled out here.
         assert!(
-            migration_notes(&outcomes).is_empty(),
+            migration_notes(&outcomes)
+                .values()
+                .flatten()
+                .all(|(report, _)| !report.contains("worktree_root")),
             "a blank value must not earn the dedicated directory note"
         );
     }
@@ -2362,6 +2599,53 @@ mod tests {
                     .any(|line| line.contains("retired override key")
                         && line.contains("dispatch.worktree_root")),
                 "{lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A `worktree_root` set only in the private override layer is dropped
+    /// too, and must be reported the way one dropped from `config.toml` is:
+    /// the folder it named, and the queued tasks still under it.
+    #[test]
+    fn an_override_only_worktree_root_names_the_folder_and_its_queued_tasks() {
+        let (repo, _root_guard) = fixture("config-override-worktree-root");
+        let home = crate::scratch::root("sync-config-override-worktree-root-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::write(
+            crate::config::Config::path_in(&repo.root),
+            "[dispatch]\nlane_quiet = \"15m\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("z1.md"),
+            "---\nid: z1\nstage: paused\nworktree_path: /old/worktrees/task-z1\n---\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                crate::overrides::config_patch_path(&overrides),
+                "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+
+            let notes = migration_notes(&outcomes);
+            let shown = notes.values().flatten().collect::<Vec<_>>();
+            assert!(
+                shown.iter().any(|(report, panel)| {
+                    report.contains("/old/worktrees")
+                        && report.contains("z1")
+                        && panel.contains("z1")
+                }),
+                "{shown:?}"
             );
         });
 
@@ -2675,6 +2959,52 @@ mod tests {
         );
     }
 
+    /// A second `--replace` of the same file never overwrites the backup the
+    /// first one made, and every backup keeps the hook's execute bit.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_replace_keeps_the_first_backup_and_every_backup_keeps_the_hooks_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, _root_guard) = fixture("replace-keeps-every-bak");
+        let hook = repo.checkout.join(".spoolway/hooks/github.sh");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        let replace_args = SyncArgs {
+            replace: vec![".spoolway/hooks/github.sh".to_string()],
+            ..args()
+        };
+
+        std::fs::write(&hook, "#!/bin/sh\necho first edit\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        replace(&repo, &replace_args).unwrap();
+
+        std::fs::write(&hook, "#!/bin/sh\necho second edit\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        replace(&repo, &replace_args).unwrap();
+
+        let mut backups = std::fs::read_dir(hook.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("github.sh.bak"))
+            })
+            .map(|p| {
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+                (std::fs::read_to_string(&p).unwrap(), mode)
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        assert_eq!(
+            backups,
+            vec![
+                ("#!/bin/sh\necho first edit\n".to_string(), 0o755),
+                ("#!/bin/sh\necho second edit\n".to_string(), 0o755),
+            ]
+        );
+    }
+
     /// A dry run only ever says what it would do — the hook mode repair added
     /// alongside the content write must stay behind that same gate, or
     /// `--replace --dry-run` would quietly fix a hook's permissions while
@@ -2875,6 +3205,154 @@ mod tests {
                 .any(|line| line.starts_with("blocked") && line.contains("half.yml")),
             "{:?}",
             outcome_lines(&outcomes)
+        );
+    }
+
+    /// A project with no readable stamp has nothing recording that it was
+    /// ever brought current, so the "Run spoolway sync" notice keeps showing.
+    #[test]
+    fn a_missing_or_unreadable_stamp_counts_as_behind() {
+        let (repo, _root_guard) = fixture("stamp-missing");
+        std::fs::create_dir_all(&repo.home).unwrap();
+
+        assert!(stamp_behind(&repo.home, &repo.checkout), "no stamp at all");
+
+        std::fs::write(stamp_path(&repo.home), "garbage\n").unwrap();
+        assert!(stamp_behind(&repo.home, &repo.checkout), "unparsable stamp");
+
+        write_stamp(&repo.home, &repo.checkout).unwrap();
+        assert!(!stamp_behind(&repo.home, &repo.checkout), "a real stamp");
+    }
+
+    /// A sync that refused a file has not brought the project current, so the
+    /// stamp it leaves must still read as behind and the notice keeps showing.
+    #[test]
+    fn a_sync_that_refused_a_file_leaves_the_project_behind() {
+        let (repo, _root_guard) = fixture("stamp-refused");
+        write_stamp(&repo.home, &repo.checkout).unwrap();
+        assert!(!stamp_behind(&repo.home, &repo.checkout), "starts current");
+        let half = format!("{}\n# Top level\n", crate::assets::PIPELINE_KEYS_BEGIN);
+        pipeline_file(&repo, "half", &half);
+
+        run(&repo, &args(), false).unwrap();
+
+        assert!(
+            stamp_behind(&repo.home, &repo.checkout),
+            "a refused pipeline file must leave the project marked as behind"
+        );
+    }
+
+    /// A refused file is listed with its reason once, however many outcomes
+    /// name it, and a file that only changed is not a refusal.
+    #[test]
+    fn refusals_lists_each_refused_file_once_with_its_reason() {
+        let outcomes = vec![
+            Outcome::wrote("a.yml", "key reference refreshed"),
+            Outcome::blocked("b.yml", "never ends"),
+            Outcome::blocked("b.yml", "never ends"),
+            Outcome::Kept,
+        ];
+        assert_eq!(refusals(&outcomes), vec![("b.yml", "never ends")]);
+    }
+
+    /// The confirm panel names a refused file and its reason before any write,
+    /// so declining it still shows what was refused.
+    #[test]
+    fn the_confirm_panel_lists_a_refused_file_first() {
+        let body = panel_body(
+            &[("p.yml", "never ends")],
+            &["config.toml"],
+            &BTreeMap::new(),
+            &[],
+        );
+        assert!(body[1].starts_with("refused"), "{body:?}");
+        assert!(body[2].contains("never ends"), "{body:?}");
+        assert!(body[3].starts_with("write"), "{body:?}");
+    }
+
+    /// A long refusal reason keeps its ending in the panel, where the fix it
+    /// names is.
+    #[test]
+    fn a_long_refusal_reason_wraps_in_the_panel_instead_of_being_cut() {
+        let why = format!(
+            "{}restore the marker, or delete the block",
+            "word ".repeat(20)
+        );
+        let body = panel_body(&[("p.yml", why.as_str())], &[], &BTreeMap::new(), &[]);
+        assert!(
+            body.iter().any(|line| line.ends_with("the block)")),
+            "{body:?}"
+        );
+        assert!(body.iter().all(|line| line.chars().count() <= MAX_LINE));
+    }
+
+    /// One token longer than the panel is broken across rows, so a path in a
+    /// refusal reason cannot widen the panel past [`MAX_LINE`].
+    #[test]
+    fn a_refusal_reason_with_one_very_long_word_stays_inside_the_panel() {
+        let why = format!("could not be read ({})", "x".repeat(150));
+        let body = panel_body(&[("p.yml", why.as_str())], &[], &BTreeMap::new(), &[]);
+        assert!(
+            body.iter().all(|line| line.chars().count() <= MAX_LINE),
+            "{body:?}"
+        );
+    }
+
+    /// Dropping one checkout's stamp keeps a sibling's line.
+    #[test]
+    fn forgetting_a_stamp_leaves_a_siblings_line() {
+        let (repo, _root_guard) = fixture("stamp-forget");
+        let other = repo.checkout.join("other");
+        write_stamp(&repo.home, &other).unwrap();
+        write_stamp(&repo.home, &repo.checkout).unwrap();
+
+        forget_stamp(&repo.home, &repo.checkout).unwrap();
+
+        assert!(read_stamp(&repo.home, &repo.checkout).is_none());
+        assert!(read_stamp(&repo.home, &other).is_some());
+    }
+
+    /// Replacing the key block says so in a note of its own, since the
+    /// replaced lines are otherwise gone without a word.
+    #[test]
+    fn a_replaced_key_block_is_named_in_the_report() {
+        let (repo, _root_guard) = fixture("pipeline-replaced-note");
+        let stale = format!(
+            "{}\n# edited by hand\n{}\nname: p\n",
+            crate::assets::PIPELINE_KEYS_BEGIN,
+            crate::assets::PIPELINE_KEYS_END
+        );
+        pipeline_file(&repo, "p", &stale);
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        let notes = migration_notes(&outcomes);
+        let note = notes
+            .get(".spoolway/pipelines/p.yml")
+            .expect("a note under the replaced file");
+        assert!(note[0].0.contains("replaced"), "{note:?}");
+    }
+
+    /// A config that never named `key_in_names` gains it at the default, and
+    /// the report says so on its own line.
+    #[test]
+    fn a_default_value_sync_sets_is_named_in_the_report() {
+        let (repo, _root_guard) = fixture("set-default-note");
+        std::fs::write(
+            crate::config::Config::path_in(&repo.checkout),
+            "[issue_tracking]\nhook = \"\"\n",
+        )
+        .unwrap();
+
+        let outcomes = scan(&repo, &args()).unwrap();
+
+        let notes = migration_notes(&outcomes);
+        let all: Vec<&str> = notes.values().flatten().map(|(r, _)| *r).collect();
+        assert!(
+            all.iter()
+                .any(|r| r.contains("set issue_tracking.key_in_names = true")),
+            "{all:?}"
         );
     }
 

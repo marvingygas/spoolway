@@ -220,8 +220,8 @@ must "a fresh clone of the same repository" git clone -q "$FRESH" "$THIRD"
 cd "$THIRD" || exit 2
 config_before=$(cd "$WS2/config" && find . -type f -exec cksum {} + | sort)
 out=$("$SPOOLWAY" init --workspace "$NAME2" --provider claude --yes </dev/null 2>&1)
-if grep -qxF "Joined workspace $NAME2." <<<"$out"; then ok "the takeover says only that it joined"
-else bad "the takeover says only that it joined"; sed 's/^/        /' <<<"$out"; fi
+if grep -qF "Joined workspace $NAME2, taking over the entry for" <<<"$out"; then ok "the takeover says it took over an entry"
+else bad "the takeover says it took over an entry"; sed 's/^/        /' <<<"$out"; fi
 has "project.toml now names the fresh clone" "root = \"$(pwd -P)\"" "$WS2/project.toml"
 if [ "$(ls "$WS2/dispatchers" | wc -l)" -eq 2 ]; then ok "no third dispatcher folder is made"
 else bad "no third dispatcher folder is made"; ls -A "$WS2/dispatchers" | sed 's/^/        /'; fi
@@ -233,7 +233,7 @@ else bad "taking over leaves the shared config/ unchanged"; fi
 # ----------------------------------------------------- moving a checkout
 # The first clone moves into a new workspace, then back. The way back is
 # refused while one of its tasks holds a worktree, and once it is clear, the
-# move removes the workspace it emptied.
+# move names the workspace it emptied and keeps its folder.
 cd "$FRESH" || exit 2
 before_ws=$(ls "$HOME/.spoolway")
 says "a move into a new workspace says where it went" "Moved to workspace api-" \
@@ -262,10 +262,10 @@ rm -f "$WS3/dispatchers/api/queue/c1.md"
 
 out=$("$SPOOLWAY" init --workspace "$NAME2" --provider claude --yes </dev/null 2>&1)
 if grep -qxF "Moved to workspace $NAME2." <<<"$out" \
-  && grep -qxF "Removed workspace $(basename "$WS3"). It held no other checkout." <<<"$out"; then
-  ok "the move back says where it went and which workspace it removed"
-else bad "the move back says where it went and which workspace it removed"; sed 's/^/        /' <<<"$out"; fi
-if [ -e "$WS3" ]; then bad "the emptied workspace is removed"; else ok "the emptied workspace is removed"; fi
+  && grep -qxF "Workspace $(basename "$WS3") lists no checkout now. Its folder is kept:" <<<"$out"; then
+  ok "the move back says where it went and which workspace it left empty"
+else bad "the move back says where it went and which workspace it left empty"; sed 's/^/        /' <<<"$out"; fi
+if [ -d "$WS3/config" ]; then ok "the emptied workspace is kept"; else bad "the emptied workspace is kept"; fi
 has "the first clone is listed back in its workspace" "root = \"$(pwd -P)\"" "$WS2/project.toml"
 
 finish

@@ -128,7 +128,10 @@ pub(crate) fn tracked_setup_dir_in(checkout: &Path) -> PathBuf {
 /// joins inside the handful of accessors already named for it —
 /// [`tracked_setup_dir_in`] is that one join for this identity check too.
 pub(crate) fn is_state_root_checkout(checkout: &Path) -> bool {
-    crate::platform::home_dir().as_deref() == Some(checkout)
+    // Both sides resolved: `$HOME` may be a symlink to the checkout, and
+    // `checkout` arrives already resolved, so comparing the raw spelling let
+    // a symlinked home pass for an ordinary project.
+    crate::platform::home_dir().map(|home| home.comparable()) == Some(checkout.comparable())
 }
 
 /// `full` — one of the constants above ([`PROMPTS_DIR`], [`TASK_TEMPLATES_DIR`],
@@ -1786,7 +1789,13 @@ impl Config {
     /// that changes what any of them is *set to* is a bug, and the file it
     /// would have produced is worth more unwritten than written.
     pub(crate) fn agrees_with(&self, text: &str) -> Result<()> {
-        let mut reparsed: Config = toml::from_str(text).context("it no longer parses")?;
+        // Stripped as a load strips it: a file still naming a retired key
+        // loads with a note, so an edit that leaves that key in place must
+        // not be refused for it. Only `spoolway sync` removes the key. The
+        // notes are dropped — the load that produced `self` already printed
+        // them.
+        let (text, _notices) = strip_hard_retired_keys(text, &Config::path_in(Path::new("")))?;
+        let mut reparsed: Config = toml::from_str(&text).context("it no longer parses")?;
         reparsed.migrate();
 
         let before = toml::Value::try_from(self).context("serialising config")?;
@@ -1841,6 +1850,36 @@ impl Config {
 
         roots
     }
+}
+
+/// The ids of the tasks whose worktree sits under `raw`, a `worktree_root`
+/// as a config file spells it, sorted.
+///
+/// A leading `~/` is expanded first: 0.6.0 expanded it when it cut a
+/// worktree, so a project could have written `~/wt` while every task's
+/// `worktree_path` holds the absolute path. Matching the raw text would say
+/// no task is there, and a person trusting that deletes work in progress.
+/// The match is by path component, so `/wt` does not claim `/wt2`.
+pub fn tasks_under_worktree_root<'a>(raw: &str, tasks: &'a [crate::task::Task]) -> Vec<&'a str> {
+    // Trimmed first, as 0.6.0 did before expanding: a padded value cut its
+    // worktrees at the trimmed folder.
+    let root = resolve_watch_dir(
+        raw.trim(),
+        crate::platform::home_dir().as_deref(),
+        Path::new(""),
+    );
+    let mut ids: Vec<&str> = tasks
+        .iter()
+        .filter(|t| {
+            t.front
+                .worktree_path
+                .as_deref()
+                .is_some_and(|wt| Path::new(wt).starts_with(&root))
+        })
+        .map(crate::task::Task::id)
+        .collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// One `watch.dirs` entry, expanded against the home directory and the repo
@@ -2049,6 +2088,47 @@ pub use human_duration::{format as format_duration, parse as parse_duration};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sibling folder sharing the root's name as a prefix is not under it,
+    /// and a padded `~/` value still names the folder 0.6.0 cut worktrees in.
+    #[test]
+    fn tasks_under_a_worktree_root_match_by_component_and_ignore_padding() {
+        let task = |id: &str, wt: &str| {
+            crate::task::Task::parse(
+                PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\nstage: paused\nworktree_path: {wt}\n---\n"),
+            )
+            .unwrap()
+        };
+        let tasks = [
+            task("in", "/old/wt/task-in"),
+            task("sibling", "/old/wt2/task-sibling"),
+        ];
+        assert_eq!(tasks_under_worktree_root("/old/wt", &tasks), ["in"]);
+        assert_eq!(tasks_under_worktree_root(" /old/wt ", &tasks), ["in"]);
+
+        let Some(home) = crate::platform::home_dir() else {
+            return;
+        };
+        let at_home = [task("z1", &format!("{}/p25-wt/task-z1", home.display()))];
+        assert_eq!(tasks_under_worktree_root("~/p25-wt ", &at_home), ["z1"]);
+    }
+
+    /// `$HOME` reached through a symlink is still the home folder, so a
+    /// checkout resolved to its real path must be recognised as it.
+    #[test]
+    fn a_symlinked_home_is_still_the_state_root_checkout() {
+        let base = crate::scratch::root("config-test-symlinked-home");
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        crate::platform::test_home::with_home(&link, || {
+            assert!(is_state_root_checkout(&real.canonicalize().unwrap()));
+            assert!(!is_state_root_checkout(&base));
+        });
+    }
 
     /// The reason the rule exists: an id is joined onto a directory, so
     /// anything that can leave that directory is not a name.
@@ -2796,6 +2876,57 @@ mod tests {
 
         let notices = Config::load_with_notices(&dir, None).unwrap().1;
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    /// A config still holding a key 0.7 retired loads with a note, so saving
+    /// one other key into it must work as well: the one key is written, the
+    /// retired key stays exactly where it was, and nothing else in the file
+    /// moves. Only `spoolway sync` removes the retired key.
+    #[test]
+    fn saving_one_key_into_a_config_with_a_retired_key_writes_only_that_key() {
+        let dir = crate::scratch::root("config-save-key-past-retired");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        let before = "[issue_tracking]\nhook = \"\"\non_fail = \"\"\nkey_in_names = false\n";
+        std::fs::write(Config::path_in(&dir), before).unwrap();
+
+        let config = Config::load(&dir).unwrap();
+        let key = "dispatch.lane_quiet";
+        let config = crate::confkv::set(&config, key, "25m").unwrap();
+        config
+            .save_key(&dir, key)
+            .expect("saving one key must not be refused over a key that loads with a note");
+
+        let after = std::fs::read_to_string(Config::path_in(&dir)).unwrap();
+        assert!(
+            after.contains("on_fail = \"\""),
+            "retired key was removed:\n{after}"
+        );
+        assert!(after.contains("lane_quiet"), "{after}");
+        assert!(
+            after.starts_with(before),
+            "bytes above the edit moved:\n{after}"
+        );
+    }
+
+    /// A retired key written inside an inline table loads the same way as one
+    /// in a plain table: the load succeeds and names the key in its note.
+    #[test]
+    fn a_retired_key_inside_an_inline_table_loads_with_the_same_note() {
+        let dir = crate::scratch::root("config-retired-key-inline-table");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "issue_tracking = { hook = \"\", project_key = \"\", on_fail = \"pause\", \
+             key_in_names = false }\n",
+        )
+        .unwrap();
+
+        let notices = Config::load_with_notices(&dir, None)
+            .expect("an inline table naming a retired key must load")
+            .1;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("issue_tracking.on_fail"), "{notices:?}");
+        assert!(notices[0].contains("spoolway sync"), "{notices:?}");
     }
 
     /// A whole `[pipeline_gen]` table, all six keys it ever carried — the

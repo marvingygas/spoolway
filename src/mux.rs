@@ -2469,9 +2469,17 @@ pub fn project_home(root: &Path) -> Result<PathBuf> {
         return Ok(clone.home_dir());
     }
     match crate::repo::project_identity(root)? {
-        Some((_checkout, label, id)) => Ok(state_root().join(format!("{label}-{id}"))),
+        Some((_checkout, label, id)) => Ok(home_of(&label, &id)),
         None => Ok(state_root().join(project_label(root))),
     }
+}
+
+/// The repo-mode home a stamped checkout's `label` and `id` name under
+/// `~/.spoolway/`. The one place that rule is spelled, shared by
+/// [`project_home`] and anything that must find the same folder without
+/// resolving a checkout.
+pub(crate) fn home_of(label: &str, id: &str) -> PathBuf {
+    state_root().join(format!("{label}-{id}"))
 }
 
 /// [`project_home`], tolerant of a real resolution failure — the one caller

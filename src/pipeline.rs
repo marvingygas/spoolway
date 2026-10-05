@@ -717,28 +717,29 @@ pub struct Step {
 /// enough for [`Pipeline::validate`] to refuse it by name, with the pipeline
 /// and the step it was found on — the same reason [`Step::on_loop_max`] and
 /// [`Step::max_rounds`] still parse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Loop {
-    /// The limit itself. Zero means no limit, which is what a step that says
-    /// nothing gets.
+    /// What a step that never wrote `loop:` gets. A separate case from a
+    /// written zero so [`Pipeline::validate`] can refuse `loop: 0` instead of
+    /// reading it as no limit, which it can only do if the two differ.
+    #[serde(skip_deserializing)]
+    #[default]
+    Unset,
+    /// The limit written in the file. Zero is refused by
+    /// [`Pipeline::validate`]: a loop is 1 or more, and silently reading it as
+    /// no limit would leave a cycle its author thought bounded running forever.
     Bare(u32),
     /// The retired per-route shape, kept only to be refused by name — see
     /// this type's own doc.
     Map(BTreeMap<String, u32>),
 }
 
-impl Default for Loop {
-    fn default() -> Self {
-        Loop::Bare(0)
-    }
-}
-
 impl Loop {
     /// The limit on an arrival here, or `None` for no limit.
     pub fn limit(&self) -> Option<u32> {
         match self {
-            Loop::Bare(0) => None,
+            Loop::Unset | Loop::Bare(0) => None,
             Loop::Bare(n) => Some(*n),
             // Never reaches a caller that acts on it: refused at
             // `Pipeline::validate` before anything downstream asks.
@@ -750,14 +751,15 @@ impl Loop {
     /// rendered pipeline file.
     pub fn is_unbounded(&self) -> bool {
         match self {
-            Loop::Bare(n) => *n == 0,
-            Loop::Map(_) => false,
+            Loop::Unset => true,
+            Loop::Bare(_) | Loop::Map(_) => false,
         }
     }
 
     /// How this reads in `spoolway pipeline show`.
     pub fn describe(&self) -> String {
         match self {
+            Loop::Unset => String::new(),
             Loop::Bare(n) => n.to_string(),
             Loop::Map(_) => String::new(),
         }
@@ -1259,6 +1261,27 @@ impl Pipeline {
             }
         }
 
+        // A task starts on the first step, so a first step of `blocked` parks
+        // every task the moment it is queued: its pass is read from where the
+        // task stopped, and a task that never ran anything stopped nowhere.
+        if self.entry() == BLOCKED {
+            bail!(
+                "`{BLOCKED}` is the first step — a task would start blocked; put a working \
+                 step first"
+            );
+        }
+
+        // `loop: 0` is not "no limit": a step with no `loop:` says that.
+        // Without this refusal the cycle check below would count a written
+        // zero as a bound, while [`Loop::limit`] reads it as no limit at run
+        // time, so a cycle bounded only by `loop: 0` would pass and then run
+        // forever.
+        for step in &self.steps {
+            if step.r#loop == Loop::Bare(0) {
+                bail!("step `{}` has loop: 0 — a loop is 1 or more", step.id);
+            }
+        }
+
         // A transition may name a declared step or either reserved terminal.
         let known = |id: &str| id == DONE || id == BLOCKED || self.steps.iter().any(|s| s.id == id);
 
@@ -1661,6 +1684,37 @@ impl Pipeline {
                 format!(
                     "{}: `{}` declares `on_fail: blocked`, which is where a fail goes with no \
                      `on_fail` at all — delete the key.",
+                    self.name, step.id
+                )
+            })
+            .collect()
+    }
+
+    /// Steps no route from the first step reaches, following `on_pass` and
+    /// `on_fail` (and the implicit route to `blocked`) the way
+    /// [`Pipeline::destinations`] does.
+    ///
+    /// A warning, not a refusal: a task can still be sent to such a step by
+    /// hand with `resume --stage`, and a pipeline mid-edit commonly has one.
+    /// `blocked` is left out because the dispatcher parks a task there on a
+    /// `--block` without any route naming it.
+    pub fn unreachable_warnings(&self) -> Vec<String> {
+        let mut reached: HashSet<&str> = HashSet::new();
+        let mut stack = vec![self.entry()];
+        while let Some(id) = stack.pop() {
+            if !reached.insert(id) {
+                continue;
+            }
+            if let Some(step) = self.step(id) {
+                stack.extend(self.destinations(step));
+            }
+        }
+        self.steps
+            .iter()
+            .filter(|step| step.id != BLOCKED && !reached.contains(step.id.as_str()))
+            .map(|step| {
+                format!(
+                    "pipeline {}: step `{}` is reached by no route",
                     self.name, step.id
                 )
             })
@@ -2643,6 +2697,68 @@ mod tests {
         }
     }
 
+    /// A pipeline whose first step is `blocked` is refused, because a task
+    /// would start parked and nothing could ever run it. The message names
+    /// the step and says to put a working step first.
+    #[test]
+    fn a_pipeline_whose_first_step_is_blocked_is_refused() {
+        let err = Pipeline::parse(
+            "p15",
+            "steps:\n  \
+             - id: blocked\n    agent: claude\n    prompt: p\n    model: x\n  \
+             - id: a\n    agent: claude\n    prompt: p\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`blocked` is the first step"), "{err}");
+        assert!(err.contains("put a working step first"), "{err}");
+    }
+
+    /// `loop: 0` is refused rather than read as no limit, and the message
+    /// says a loop is 1 or more.
+    #[test]
+    fn a_loop_of_zero_is_refused() {
+        let err = Pipeline::parse(
+            "sk",
+            "steps:\n  \
+             - id: a\n    agent: claude\n    prompt: p\n    model: m\n    loop: 0\n    \
+               on_pass: b\n  \
+             - id: b\n    agent: claude\n    prompt: p\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("step `a`"), "{err}");
+        assert!(err.contains("a loop is 1 or more"), "{err}");
+    }
+
+    /// A step no route from the first step reaches is a warning, never a
+    /// refusal, and `blocked` is not counted as one.
+    #[test]
+    fn a_step_no_route_reaches_is_warned_about_not_refused() {
+        let pipeline = Pipeline::parse(
+            "t",
+            "steps:\n  \
+             - id: a\n    agent: claude\n    prompt: p\n    model: m\n    on_pass: done\n  \
+             - id: old\n    agent: claude\n    prompt: p\n    model: m\n    on_pass: done\n",
+        )
+        .expect("an unreachable step still loads");
+        let warnings = pipeline.unreachable_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("step `old` is reached by no route"),
+            "{warnings:?}"
+        );
+
+        let reached = Pipeline::parse(
+            "t",
+            "steps:\n  \
+             - id: a\n    agent: claude\n    prompt: p\n    model: m\n    on_pass: b\n  \
+             - id: b\n    agent: claude\n    prompt: p\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+        assert!(reached.unreachable_warnings().is_empty());
+    }
+
     /// An absent `version:` reads as `1.0` — the built-in `default` pipeline
     /// never sets one, per the task's own non-goal against touching this
     /// project's shipped pipelines.
@@ -3089,7 +3205,8 @@ mod tests {
         ];
         for (key, message) in cases {
             let err = parse(&format!(
-                "steps:\n  - id: blocked\n    agent: pi\n    {key}  \
+                "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
+                 - id: blocked\n    agent: pi\n    {key}  \
                  - id: z\n    end: true\n"
             ))
             .unwrap_err();
@@ -3128,7 +3245,10 @@ mod tests {
     /// declared destinations at all, so it cannot self-edge into one.
     #[test]
     fn blocked_needs_no_on_pass_and_forms_no_loop() {
-        let pipeline = parse("steps:\n  - id: blocked\n    agent: pi\n").unwrap();
+        let pipeline = parse(
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: done\n  - id: blocked\n    agent: pi\n",
+        )
+        .unwrap();
         let blocked = pipeline.step(BLOCKED).unwrap();
         assert!(pipeline.destinations(blocked).is_empty());
     }

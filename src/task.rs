@@ -1254,6 +1254,39 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     Ok(())
 }
 
+/// Remove the `.<name>.<pid>-<n>.tmp` files in `dir` whose writer is gone.
+///
+/// [`write_atomic`] writes through one of these and renames it into place. A
+/// writer killed between the two (`kill -9`, power loss) leaves the temp file
+/// behind, and nothing else ever names it, so without this it stays for good.
+/// One whose pid is still alive may be a write in flight and is kept; a pid
+/// recycled by an unrelated process keeps its file too, which is a leak
+/// rather than a loss. Best effort: a file that cannot be removed is tried
+/// again on the next pass.
+pub fn sweep_stale_tmp(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(writer_pid) else {
+            continue;
+        };
+        if !crate::headless::alive(pid) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The pid in a `.<name>.<pid>-<n>.tmp` file name, `None` for any other name.
+fn writer_pid(file_name: &str) -> Option<u32> {
+    let stem = file_name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (_, tail) = stem.rsplit_once('.')?;
+    let (pid, call) = tail.split_once('-')?;
+    call.parse::<u64>().ok()?;
+    pid.parse().ok()
+}
+
 /// One `*.md` file in a task directory that would not load, with the reason
 /// it did not — a broken frontmatter fence, an `id:` that fails `check_id`,
 /// a stray note that is not a task at all.
@@ -1416,6 +1449,37 @@ mod tests {
         assert!(
             !message.contains(".tmp"),
             "the error must not name the hidden temp file: {message}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A temp file whose writer is gone is swept; one whose writer is alive,
+    /// and anything not shaped like a temp file, stays.
+    #[test]
+    fn sweep_stale_tmp_removes_only_files_whose_writer_is_gone() {
+        let root = crate::scratch::root("sweep-stale-tmp");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A pid above `pid_max` on every platform this runs on, so nothing
+        // is ever alive at it.
+        let gone = root.join(".a.md.4294967290-0.tmp");
+        let alive = root.join(format!(".b.md.{}-3.tmp", std::process::id()));
+        let task = root.join("a.md");
+        let other = root.join(".hidden.tmp");
+        for path in [&gone, &alive, &task, &other] {
+            std::fs::write(path, "x").unwrap();
+        }
+
+        sweep_stale_tmp(&root);
+
+        assert!(!gone.exists(), "a dead writer's temp file must go");
+        assert!(alive.exists(), "a live writer's temp file must stay");
+        assert!(task.exists(), "a task file must stay");
+        assert!(
+            other.exists(),
+            "a file not named like a temp write must stay"
         );
 
         std::fs::remove_dir_all(&root).ok();

@@ -112,7 +112,8 @@ An established project keeps its own provider: a repeat `init` run with `--provi
 takes the project's already-chosen provider rather than falling back to `claude`, whether run
 without a terminal or answered at the menu, whose own default is pre-selected to it. Naming
 a different `--provider` on an established project adds that provider's skills. The project's
-own profile and pipelines stay as they are until `spoolway init --force` rewrites them.
+own profile and pipelines stay as they are. `spoolway init --force` rewrites the files and keeps
+the project's provider, tracker and project key, unless you pass `--provider` or `--tracker`.
 
 Answering yes to the example setup writes the shipped pipelines, prompts and task templates.
 Answering no writes `config.toml` and empty `pipelines/`, `prompts/`
@@ -180,8 +181,8 @@ repo-mode home's own folder does.
 
 With workspaces already there, `init` asks the workspace menu instead: "Select the spoolway
 workspace for this checkout. Pick an existing workspace or create a new one." A checkout no
-workspace lists yet sees every workspace, those of this repository marked `same repository` and
-listed first, and `Create a new workspace` last as the default, so pressing Enter without
+workspace lists yet sees the workspaces it may join, those of this repository marked `same
+repository` and listed first, and `Create a new workspace` last as the default, so pressing Enter without
 reading the menu starts a fresh workspace. A checkout a workspace already lists sees that
 workspace first, marked `current` and still the default, then every other workspace of this
 repository, then `Create a new workspace`.
@@ -189,8 +190,10 @@ repository, then `Create a new workspace`.
 Joining a workspace, or moving into one that already exists, keeps its `config/` exactly as it
 is, skips the example and tracker questions, and adds this clone to its `project.toml` with a
 dispatcher folder of its own — the clone's directory name, with `-2` added when that name is
-taken. The run ends with one line naming where the checkout went, `Joined workspace <name>.` or
-`Moved to workspace <name>.`, since the workspace's setup is already settled. Moving into a new
+taken. The run ends with one line naming where the checkout went: `Joined workspace <name>.`,
+`Moved to workspace <name>.`, or `Joined workspace <name>, taking over the entry for <old path>`
+and a note that its queue, archive and worktrees carry on here. The workspace's setup is already
+settled. Moving into a new
 workspace scaffolds its `config/` from scratch instead, asking the usual questions, with the
 same closing line added to say where the checkout went.
 
@@ -203,10 +206,17 @@ Skills install into the coding agent's user folder instead of the project's own,
 project skill folder sits inside a checkout that home mode promises to leave untouched. See [The
 pipeline skills](#the-pipeline-skills).
 
-Moving a project between the two modes is refused: `--setup repo` on a checkout a workspace
-already lists, `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`, and
-`--setup home` on a repository whose default branch tracks a `.spoolway/` of its own. Each
-refusal names the command to run instead. See [Home mode](concepts.md#home-mode).
+Moving a project between the two modes is refused in these cases:
+
+- `--setup repo` on a checkout a workspace already lists.
+- `--setup home` or `--workspace` on a checkout with a tracked `.spoolway/`.
+- `--setup home` on a repository where a branch tracks a `.spoolway/` of its own. `init` finds
+  the default branch from `origin/HEAD`, then `init.defaultBranch`, then `main` or `master`. When
+  none of these names a branch, any local branch that tracks `.spoolway/` is refused.
+- `--setup home` on a checkout whose repo-mode home still holds queued tasks. The refusal names
+  the tasks.
+
+Each refusal names the steps to take instead. See [Home mode](concepts.md#home-mode).
 
 Joining a workspace, or moving into one, whose `config/` has gone missing is refused too, naming
 the missing path.
@@ -214,8 +224,9 @@ the missing path.
 Picking another workspace in the menu, or passing `--workspace <other>`, moves a listed checkout
 there, carrying its queue, archive and worktrees along. The move is refused, with nothing
 written, while any of its tasks holds a worktree, naming each one, and for a workspace of another
-repository, with no flag to force it. A workspace the move leaves with no checkout listed is
-removed, and the move prints that it was removed.
+repository, with no flag to force it. Joining a workspace of another repository is refused the
+same way. A workspace the move leaves with no checkout listed is kept, and the move prints its
+folder and says to remove it by hand.
 
 ```
 $ spoolway init --setup home --workspace new --provider claude --examples --tracker none --yes
@@ -244,7 +255,9 @@ $ spoolway init --workspace other-h4m1xs --provider claude --yes
 ...
 Skills already installed, in ~/.claude/skills.
 Moved to workspace other-h4m1xs.
-Removed workspace api-k7f2q9. It held no other checkout.
+Workspace api-k7f2q9 lists no checkout now. Its folder is kept:
+  ~/.spoolway/api-k7f2q9
+Remove it yourself once nothing in it is needed.
 ```
 
 ### The pipeline skills
@@ -374,8 +387,8 @@ What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| `config.toml` | The comments and the settings reference. Your values stay. |
-| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
+| `config.toml` | The comments and the settings reference. Your values stay. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, including any edit you made inside it. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
 | Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |
@@ -390,13 +403,14 @@ A `config.toml` that `sync` cannot read fails the whole command, naming the file
 at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
 edit` instead.
 
-`sync` never merges. A marked block you edited by hand stops the sync on that file, and it is
-reported, not overwritten. A skill file has no such block: sync always rewrites it to match the
-shipped copy.
+`sync` never merges. A key block you edited by hand is replaced with the shipped one, and the
+report says so. A skill file has no such block: sync always rewrites it to match the shipped
+copy.
 
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
-beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose. It
-does not cover skill files: `spoolway install <provider> --force` also takes the shipped skills
+beside it as `.bak`, with the same file mode. If that name is taken, it writes `.bak.1`, then
+`.bak.2`, and prints the path it used. That is also how to take a newer default prompt or
+skeleton on purpose. It does not cover skill files: `spoolway install <provider> --force` also takes the shipped skills
 back, overwriting that provider's whole set with no `.bak` saved. Replacing a hook script under
 `.spoolway/hooks/` also leaves it executable on Unix, whether or not its text changed.
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
@@ -418,19 +432,44 @@ anything:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+A file `sync` refuses is listed first in the panel, with the reason and what to do about it.
+
 Enter writes the files, records the version stamp described next, and prints the report `sync`
 always prints. Esc, ctrl-c, or the terminal going away mid-question writes nothing, changes no
 stamp, and prints "Nothing was changed." With no terminal to answer, under `--json`, inside a
 lane, with `--dry-run`, with `--replace`, or with nothing to write, `sync` writes straight away
 and draws no panel.
 
-On success, `sync` records this binary's version and a fingerprint of the text it would write
-in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
-stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
-the same per-checkout stamp for a freshly scaffolded or newly installed project.
+The report lists every refused file first, then every file written or removed, then one line
+for each replaced key block and each value `sync` set on its own:
 
-Every other command that needs a project reads that stamp back first. When it no longer
-matches and a scan finds files to change, the command prints one line on stderr and then runs:
+```
+refused .spoolway/pipelines/bugfix.yml — spoolway's key reference starts with `# >>> spoolway >>>` and never ends — restore the `# <<< spoolway <<<` marker, or delete the block and run this again
+wrote   .spoolway/config.toml
+wrote   .spoolway/pipelines/default.yml
+removed .spoolway/templates/task-log.md
+
+(migrated: key block in .spoolway/pipelines/default.yml replaced; edits are not kept)
+(set issue_tracking.key_in_names = true, the default)
+
+Files were overwritten; your config values, prompts and task skeletons were kept.
+```
+
+With `--dry-run`, the words read `would write` and `would remove`. When only refused files are
+left, the last line says the refused files are still behind.
+
+On a run that refused nothing, `sync` records this binary's version and a fingerprint of the
+text it would write in a stamp under the project's home, one line per checkout. A run that
+refused a file removes that checkout's line, so the project stays behind until the file is
+fixed. `sync` also deletes a leftover per-skill-file stamp, if it finds one.
+
+`spoolway init` and `spoolway install` write the same stamp for a freshly scaffolded or newly
+installed project. `init` writes none when it kept an existing file or joined a workspace,
+because it did not write those files.
+
+Every other command that needs a project reads that stamp back first. When the stamp is
+missing or unreadable, the command prints one line on stderr and then runs. It does the same
+when the stamp no longer matches and a scan finds a file to write, remove or refuse:
 
 ```
 Run spoolway sync to apply the last update.

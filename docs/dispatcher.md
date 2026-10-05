@@ -69,7 +69,8 @@ kills the process at once.
 
 ## What a pass does
 
-A pass reads two things: each task file's stage, and the list of live lanes.
+A pass reads two things: each task file's stage, and the list of live lanes. Before it reads the
+queue, it deletes any half-written task file in `queue/` whose writer has stopped running.
 
 ```mermaid
 flowchart TD
@@ -197,7 +198,7 @@ first task stacks onto another group's own last task reads `▌<group>  after <g
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A blocked task waiting for a person reads `[r] → <step> — \`spoolway resume <task>\``, naming the step `spoolway resume` sends it back to. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -206,6 +207,7 @@ first task stacks onto another group's own last task reads `▌<group>  after <g
 ```mermaid
 stateDiagram-v2
   [*] --> queued
+  [*] --> unknown: stage: names a step the pipeline does not have
   queued --> starting: dependencies done, slot free
   starting --> running: the lane comes up
   starting --> queued: the boot fails
@@ -228,6 +230,7 @@ stateDiagram-v2
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
 | `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
+| `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
@@ -241,7 +244,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Resume a paused or blocked row whose dependencies are done. A row parked by `p` or Escape is live even while its own lane reads `Working` or `Blocked`: it puts the task back on its step and leaves that lane running. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Same as `spoolway resume <task>`. |
+| `r` | Resume a paused or blocked row whose dependencies are done. A row parked by `p` or Escape is live even while its own lane reads `Working` or `Blocked`: it puts the task back on its step and leaves that lane running. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Also restarts a row on a step with nothing running behind it. Otherwise the same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |

@@ -631,7 +631,8 @@ pub struct EvalArgs {
         Run again in a home-mode checkout, `init` shows the same menu with its current \
         workspace first. Picking another workspace of the same repository, or a new one, \
         moves the checkout and its queue there. A move waits until no task holds a \
-        worktree, and a workspace the move leaves empty is removed.\n\n\
+        worktree. A workspace the move leaves with no checkout is kept, and its folder \
+        is named for you to remove.\n\n\
         Every run prints the project directory it resolved before it writes anything: a \
         path you do not recognise is the whole of the check. At a terminal it goes straight \
         on to its first menu, if any question is left to ask, and Ctrl-C there stops it \
@@ -1089,7 +1090,9 @@ pub enum QueueCommand {
 
     /// What the board's `r` key does to one row, from a script: send it past
     /// a gate it finished, or back onto the step a park or a block pulled it
-    /// off of — exactly `spoolway resume <id>` with no other flags.
+    /// off of — `spoolway resume <id>` with no other flags, except that a row
+    /// standing on a step with nothing running behind it is restarted too,
+    /// which `spoolway resume` refuses.
     Resume { task: String },
 
     /// What the board's `u`/`U` keys do to a row, from a script: carry a
@@ -1535,7 +1538,8 @@ pub struct SyncArgs {
     pub dry_run: bool,
 
     /// Replace this whole file with the one spoolway ships. Your version is
-    /// saved beside it as a `.bak` first, so nothing you wrote is lost, only
+    /// saved beside it as a `.bak` first (`.bak.1`, `.bak.2`… if one is there
+    /// already), so nothing you wrote is lost, only
     /// displaced. Repeat for each. The way back for a file so far from the
     /// shape we know that no region can be found in it.
     ///

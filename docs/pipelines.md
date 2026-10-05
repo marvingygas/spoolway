@@ -67,7 +67,7 @@ steps:
 | `version` | `1.0` | The pipeline's own version, in `x.y` form. Yours to raise when the pipeline changed enough to compare. spoolway only records it. |
 | `description` | none | One sentence on what this pipeline is for. Shown when choosing between pipelines. |
 | `task_template` | the pipeline's name, then `default` | Which task skeleton a task queued here is written from. |
-| `steps` | required | The steps, in order. The first one is where a task starts. |
+| `steps` | required | The steps, in order. The first one is where a task starts. It is never `blocked`. |
 
 ## Per-step keys
 
@@ -87,7 +87,7 @@ steps:
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
-| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. |
+| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. A written value is 1 or more. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
@@ -137,6 +137,18 @@ A step never names its own id in `on_pass` or `on_fail` — a lap goes through a
 not at all. `spoolway pipeline check` refuses a file that tries it, naming the step and the
 key. Fix it by hand: send the failure to a step that leaves, or delete the step.
 
+A task starts on the first step, so `blocked` may not be first. `spoolway pipeline check`
+refuses the file and tells you to put a working step first.
+
+A step that no route from the first step reaches is allowed. `spoolway pipeline check` warns
+about it and still passes. A task can reach such a step only through
+`spoolway resume --stage`.
+
+```
+$ spoolway pipeline check
+  warning: pipeline t: step `old` is reached by no route
+```
+
 ### Loops
 
 `loop` counts arrivals at this step, by any route, the first included. Put it on the step
@@ -150,6 +162,8 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 ```
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
+  limit.
 - The map form, keyed by the step a failure is sent back from, is refused at parse. The
   refusal names the step that should carry the limit instead: delete the map and give that
   step a bare `loop:` of its own.
@@ -254,6 +268,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
 
 - `run:` goes to the shell whole, via `sh -c`. Pipes, `&&` and
   globs work. There is no `shell:` key.
+- The line runs in a child shell. A line that starts with `exec` still has its exit code
+  recorded and routed.
 - It runs in the task's worktree with `SPOOLWAY_TASK`, `SPOOLWAY_STEP`, `SPOOLWAY_REPO`,
   `SPOOLWAY_WORKTREE` and `SPOOLWAY_TASK_FILE` set, and with the privileges of whoever started
   the dispatcher.
@@ -264,6 +280,9 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - `prompt`, `model`, `effort`, `session` and `gate` are refused. The step takes no slot.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
+- A late background failure can move a task off a command step. That stops the step's running
+  command and deletes its run files, including an exit code it already wrote. The next visit
+  runs the command again.
 - The exit code stays on disk until the pass that read it has written the task's move to the
   destination step. A pass that cannot place that destination, for want of a free slot, leaves
   the task on the command step and routes on the same code next time, instead of running the

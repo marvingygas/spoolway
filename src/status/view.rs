@@ -118,8 +118,9 @@ pub(super) const AMBER: &str = "\x1b[33m";
 
 const RED: &str = "\x1b[31m";
 
-// Blocked's own colour, apart from `RED`: a block is a task waiting on a
-// person, the same *kind* of stop `Paused` is, and red stays for a verdict
+// The colour of a stop that is not a verdict: `Blocked`, and `Unknown`, a
+// task on a step its pipeline does not have. Apart from `RED`: a block is a
+// task waiting on a person, the same *kind* of stop `Paused` is, and red stays for a verdict
 // that came back bad — `Verdict::Fail` and `Verdict::Blocked` in the
 // ticker, which no state on this board shares. Orange rather than amber
 // too, so a block and a `Paused` row never read as the same colour from
@@ -143,6 +144,7 @@ impl State {
             State::Starting => "◌ starting",
             State::Finished => "✓ finished",
             State::Blocked => "● blocked",
+            State::Unknown => "● unknown",
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
             State::Waiting => "○ waiting",
@@ -166,6 +168,9 @@ impl State {
             // more, and the board's green means something is.
             State::Finished => format!("{DIM}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
+            // Orange like `Blocked`: the task is stopped until a person
+            // looks at it, and nothing about it came back as a bad verdict.
+            State::Unknown => format!("{ORANGE}{word}{RESET}"),
             // Amber, and bold, like `Paused`: a prompt is a pane holding a
             // permission question, and nothing moves until a person answers
             // it there — the same stop that `Paused` is.
@@ -1780,6 +1785,7 @@ mod tests {
             State::Starting,
             State::Finished,
             State::Blocked,
+            State::Unknown,
             State::Prompt,
             State::Queued,
             State::Waiting,

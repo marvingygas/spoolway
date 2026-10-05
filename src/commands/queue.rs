@@ -116,6 +116,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Starting => "starting",
         Finished => "finished",
         Blocked => "blocked",
+        Unknown => "unknown",
         Prompt => "prompt",
         Queued => "queued",
         Waiting => "waiting",
@@ -283,6 +284,10 @@ fn route_state(task: &Task, pipeline: &Pipeline) -> (String, Option<String>) {
             Some(origin) => (format!("blocked at {origin}"), Some(origin)),
             None => ("blocked before it started".to_string(), None),
         },
+        step if pipeline.step(step).is_none() => (
+            format!("at `{step}`, a step this pipeline does not have"),
+            None,
+        ),
         step => (format!("at {step}"), Some(step.to_string())),
     }
 }
@@ -520,7 +525,7 @@ fn queue_unqueue_all(repo: &Repo) -> Result<()> {
 /// list a chain on, unlike the board's own `u`, which carries that
 /// dependent back to pending alongside it instead. Anything further along
 /// is refused unless `force` says to tear its checkout down first — see
-/// [`queue_unqueue_forced`].
+/// [`queue_unqueue_forced`] — and even then while a queued task depends on it.
 fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
     let tasks = repo.tasks()?;
     let task = tasks.iter().find(|t| t.id() == id).with_context(|| {
@@ -555,11 +560,39 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
             );
         }
         message += &format!(
-            "\n  To stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n\
-             \n  To tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n\
-             \nNothing was changed."
+            "\n  To stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n"
         );
+        // `--force` is refused while a queued task depends on this one, so
+        // offering it here would send the person into a second refusal.
+        match crate::status::depended_on_by_queued(&tasks, id) {
+            Some(sibling) => {
+                message += &format!(
+                    "\n  `{}` depends on `{id}` and has not started, which stops `--force` too.\n  \
+                     Unqueue `{}` first.\n",
+                    sibling.id(),
+                    sibling.id()
+                );
+            }
+            None => {
+                message += &format!(
+                    "\n  To tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n"
+                );
+            }
+        }
+        message += "\nNothing was changed.";
         bail!(message);
+    }
+
+    // The not-started branch above refuses this for a parent that has not
+    // started; a started parent needs the same refusal, or `--force` removes
+    // it and the dependent waits forever on a task that is no longer one.
+    if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
+        bail!(
+            "`{}` depends on `{id}` and has not started — unqueuing `{id}` would leave it \
+             waiting on a task that no longer exists. Unqueue `{}` first.",
+            sibling.id(),
+            sibling.id(),
+        );
     }
 
     queue_unqueue_forced(repo, pipelines, id, &stage, checkout.as_deref())
@@ -1100,11 +1133,27 @@ pub(crate) fn validate_batch(
             .pipeline
             .as_deref()
             .expect("parse_submission refuses a task with no `pipeline:`");
-        // Only checked for existing here, never read further: a lane's own
-        // wire name no longer has to fit inside anything this pipeline
-        // decides — see gh-359 — so a task id needs no pipeline at all to be
-        // checked against, just the plain path-safety rule below.
-        pipelines.get(pipeline_name)?;
+        // Looked up to check that it exists, and for the `gate_at:` check
+        // below. Nothing else is read from it: a lane's own wire name no
+        // longer has to fit inside anything this pipeline decides — see
+        // gh-359 — so a task id needs no pipeline at all to be checked
+        // against, just the plain path-safety rule below.
+        let pipeline = pipelines.get(pipeline_name)?;
+        // `gate_at:` pauses a task when it reports from the step it names. A
+        // name that is no step of this pipeline — a typo, or `done`, which is
+        // not a step — is never matched, so the checkpoint is dropped and the
+        // task runs straight through. Refused here, where the task can still
+        // be corrected, rather than left to fail silently at run time.
+        if let Some(gate_at) = task.front.gate_at.as_deref()
+            && pipeline.step(gate_at).is_none()
+        {
+            bail!(
+                "task `{}` has `gate_at: {gate_at}`, which is no step of pipeline \
+                 `{pipeline_name}` — it may name one of: {}",
+                task.front.id,
+                pipeline.step_ids().join(", ")
+            );
+        }
         // A task id becomes a branch and a file name too. Both are checked
         // here rather than only when a task's value happens to differ,
         // the same as `check_task_base` above.
@@ -3034,36 +3083,76 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         .into_iter()
         .filter(|cr| cr.task == id)
         .collect();
-    if !running.is_empty() {
-        if !force {
-            bail!(
-                "`{id}` is running a command step (`{}`) — pass `--force` to stop it and \
-                 pause, or use the board's `p` key to choose interactively",
-                running[0].step
-            );
-        }
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        for cr in &running {
-            runs.stop(&crate::command_step::Runs::key(&cr.step, &cr.task));
-        }
+    if !running.is_empty() && !force {
+        bail!(
+            "`{id}` is running a command step (`{}`) — pass `--force` to stop it and \
+             pause, or use the board's `p` key to choose interactively",
+            running[0].step
+        );
     }
 
     crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`", false);
     tasks[idx].save()?;
+
+    // Stopped only once the task is on disk as paused. Between the kill and
+    // the run's files being cleared the run reads as one that died without an
+    // exit code, and a dispatcher pass landing in that gap with the task still
+    // on the step would log "running it again" and forget the run, for a task
+    // that is about to be paused and will run nothing.
+    let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    for cr in &running {
+        runs.stop(&crate::command_step::Runs::key(&cr.step, &cr.task));
+    }
     println!("paused `{id}`");
     Ok(())
 }
 
+/// Whether `id` is still queued, or has a live agent lane or running command
+/// step. That is a superset of what `spoolway resume` refuses: a blocked task
+/// whose unblocker lane is live qualifies and is accepted — see `queue_resume`.
+fn queued_or_running(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<bool> {
+    let tasks = repo.tasks()?;
+    let Some(idx) = tasks.iter().position(|t| t.id() == id) else {
+        return Ok(false);
+    };
+    if crate::status::not_started(&tasks[idx]) {
+        return Ok(true);
+    }
+    let lanes = crate::mux::backend(repo)?.list_lanes().unwrap_or_default();
+    Ok(
+        crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx)
+            || crate::status::running_command_steps(repo, &tasks, pipelines)
+                .iter()
+                .any(|run| run.task == id),
+    )
+}
+
 /// `spoolway queue resume <id>`: what the board's `r` key does to the row for
-/// `id` — exactly [`crate::status::resume_task`], the body a keypress and
-/// `spoolway resume <id>` already share.
+/// `id` — [`crate::status::resume_task`], with `spoolway resume`'s own refusal
+/// put first for a task that is queued or has something running on its step.
 pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
     // `resume_task` is silent about a task the queue no longer has — right
     // for a keypress racing a second process, wrong for a script that named
     // one by hand, so that case is named here instead.
     repo.task(id)
         .with_context(|| format!("no queued task `{id}`"))?;
-    crate::status::resume_task(repo, pipelines, id)?;
+    // A task waiting in the queue or with a lane or command run live on its
+    // step is not stopped, and goes through `spoolway resume`'s own refusal.
+    // Only a row standing on a step with nothing running behind it — a
+    // question nobody answered — is restarted from here.
+    if queued_or_running(repo, pipelines, id)? {
+        let args = crate::cli::ResumeArgs {
+            task: id.to_string(),
+            stage: None,
+            message: None,
+        };
+        // This is the whole resume, not only a check: a task on `blocked` with
+        // its unblocker lane live counts as running here, passes the guard, and
+        // is moved by it. Resuming it again below would send it to `queued`.
+        crate::commands::resume(repo, pipelines, &args, None)?;
+    } else {
+        crate::status::resume_task(repo, pipelines, id)?;
+    }
     println!("resumed `{id}`");
     Ok(())
 }
@@ -9550,6 +9639,99 @@ mod tests {
         );
     }
 
+    /// `queue resume` on a task still waiting in the queue is refused, the
+    /// same as `spoolway resume`, and says it starts on its own.
+    #[test]
+    fn queue_resume_refuses_a_task_still_queued() {
+        let (repo, _root_guard) = fixture("queue-resume-queued");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+
+        let err = queue_resume(&repo, &pipelines, "solo").unwrap_err();
+        let said = format!("{err:#}");
+        assert!(said.contains("solo") && said.contains("queued"), "{said}");
+        assert_eq!(queued(&repo, "solo").stage(), crate::pipeline::QUEUED);
+    }
+
+    /// A live lane on the step makes the task running, so `queue resume`
+    /// refuses it with `spoolway resume`'s message and leaves it alone.
+    #[test]
+    fn queue_resume_refuses_a_task_with_a_live_lane() {
+        let (mut repo, _root_guard) = fixture("queue-resume-live-lane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("implement", "test setup");
+        task.save().unwrap();
+        let (mux, name) = crate::status::testutil::live_headless_lane_at(
+            &repo,
+            "solo",
+            "implement",
+            "implementer",
+        );
+
+        let err = queue_resume(&repo, &pipelines, "solo").unwrap_err();
+        let _ = mux.interrupt_lane(&name);
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("solo") && said.contains("implement"),
+            "{said}"
+        );
+        assert!(said.contains("queue pause solo"), "{said}");
+        assert_eq!(queued(&repo, "solo").stage(), "implement");
+    }
+
+    /// A blocked task whose unblocker lane is live counts as running here, but
+    /// is still resumable: it must be moved onto its step once, not again onto
+    /// `queued` by a second resume.
+    #[test]
+    fn queue_resume_moves_a_blocked_task_with_a_live_unblocker_once() {
+        let (mut repo, _root_guard) = fixture("queue-resume-blocked-live");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.front.blocked_from = Some("implement".into());
+        task.set_stage_unbanked(crate::pipeline::BLOCKED, "test setup");
+        task.save().unwrap();
+        let (mux, name) = crate::status::testutil::live_headless_lane_at(
+            &repo,
+            "stuck",
+            crate::pipeline::BLOCKED,
+            "unblocker",
+        );
+
+        queue_resume(&repo, &pipelines, "stuck").unwrap();
+        let _ = mux.interrupt_lane(&name);
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), "implement");
+        assert!(
+            !task.body.contains("put back from the board"),
+            "resumed a second time: {}",
+            task.body
+        );
+    }
+
+    /// Without `--force`, a started task a queued task depends on is not told
+    /// to use `--force`, which would be refused; it is told what to do instead.
+    #[test]
+    fn unqueue_without_force_leaves_out_the_force_hint_when_a_dependent_waits() {
+        let (repo, _root_guard) = fixture("unqueue-no-force-dependent");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "parent", &[]);
+        add(&repo, "child", &["parent"]);
+        let mut task = queued(&repo, "parent");
+        task.front.stage = "implement".to_string();
+        task.save().unwrap();
+
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("parent")).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(!said.contains("--force\n"), "{said}");
+        assert!(said.contains("Unqueue `child` first"), "{said}");
+    }
+
     #[test]
     fn queue_resume_refuses_an_unknown_task() {
         let (repo, _root_guard) = fixture("queue-resume-unknown");
@@ -9867,6 +10049,36 @@ mod tests {
                 .contains(&repo.archive_dir().join("done.md").display().to_string()),
             "{err:#}"
         );
+    }
+
+    /// A `gate_at:` naming no step of the task's pipeline is refused with the
+    /// task and the steps it may name, and `done` is no step.
+    #[test]
+    fn validate_batch_refuses_a_gate_at_that_names_no_step() {
+        let (repo, _root_guard) = fixture("gate-at-no-step");
+        for bad in ["nosuch", "done"] {
+            let text = task_text("demo", &format!("group: demo\ngate_at: {bad}\n"), BODY);
+            let err = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("mine.md".into(), text)],
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("task `demo`"), "{err}");
+            assert!(err.contains(&format!("gate_at: {bad}")), "{err}");
+            assert!(err.contains("implement"), "the steps it may name: {err}");
+        }
+
+        let text = task_text("demo", "group: demo\ngate_at: implement\n", BODY);
+        validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &[("mine.md".into(), text)],
+        )
+        .expect("a real step is accepted");
     }
 
     /// `--base` is as arbitrary a value as a task's own `base:` — a
@@ -17524,6 +17736,27 @@ body\n";
         }
     }
 
+    /// `--force` may not remove a started task while a queued task depends
+    /// on it, since that dependent would wait on a task that no longer
+    /// exists. The refusal names the dependent and leaves both in the queue.
+    #[test]
+    fn unqueue_force_refuses_a_started_task_a_queued_task_depends_on() {
+        let (repo, _root_guard) = fixture("queue-unqueue-force-dependent");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "parent", &[]);
+        add(&repo, "child", &["parent"]);
+        let mut task = queued(&repo, "parent");
+        task.front.stage = "implement".to_string();
+        task.save().unwrap();
+
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_forced_args("parent"))
+            .expect_err("a started parent with a queued child is not removable");
+        let said = format!("{err:#}");
+        assert!(said.contains("child"), "{said}");
+        assert!(repo.queue_dir().join("parent.md").exists());
+        assert!(repo.queue_dir().join("child.md").exists());
+    }
+
     /// `queue unqueue` on a task that has not started: the task goes
     /// back to pending with the stamped keys dropped — the board's own
     /// unqueue, from a script — and the queue file is gone.
@@ -18110,6 +18343,26 @@ body\n";
             "{text}"
         );
         assert!(!text.contains("--stage"), "{text}");
+    }
+
+    /// A task on a stage its pipeline does not have is marked at no step and
+    /// says so, rather than reading `at <stage>` as if it were one.
+    #[test]
+    fn route_says_a_stage_the_pipeline_lacks_is_not_a_step() {
+        let (repo, _root_guard) = fixture("route-unknown-stage");
+        let pipelines = route_pipelines();
+        add(&repo, "lost", &[]);
+        let mut task = queued(&repo, "lost");
+        task.set_stage("nowhere", None);
+        task.save().unwrap();
+
+        let route = route_view(&queued(&repo, "lost"), &pipelines).unwrap();
+        assert_eq!(route.at, None);
+        let text = render_route(&route);
+        assert!(
+            text.starts_with("default — at `nowhere`, a step this pipeline does not have\n"),
+            "{text}"
+        );
     }
 
     /// The task's own `gate_at` holds whatever its step reports, not only a

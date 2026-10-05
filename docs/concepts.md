@@ -28,8 +28,12 @@ with the config, the pipelines, the prompts and the templates. It is tracked in 
 What spoolway writes while it runs lives elsewhere, under `~/.spoolway/<label>-<id>/`. The
 `<id>` is a short id stamped into the project's `.git` directory, which every branch,
 subdirectory and linked worktree of one clone shares. The `<label>` is a cleaned-up form of the
-checkout's name. The home records the same id and its checkout in its own `project.toml`. Every
-command checks the two against each other and refuses when they disagree. See [Runtime
+checkout's name, cut to 64 characters. A name that is blank gets the label `project`. The home records the same id and its checkout in its own `project.toml`. Every
+command checks the two against each other and refuses when they disagree. When a checkout has
+lost its stamp and the home still records it, the refusal compares this clone's first commit
+with the one the home recorded. It then says whether to restore the stamp by hand or to delete
+the `project.toml` entry and run `spoolway init` for a fresh id. A clone or home with no
+recorded first commit gets the fresh id first. See [Runtime
 state](configuration.md#runtime-state).
 
 Commands find the project through git. A command run inside a task worktree reaches the
@@ -62,10 +66,15 @@ with no root commit of its own, such as a shallow clone, never takes over an ent
 written into the checkout or its `.git` either way, and skills install into the coding agent's
 user folder instead of the project's own.
 
-`--setup home` is refused when the repository's default branch tracks a `.spoolway/` of its
-own, even from a checkout on some other branch that carries none: switching back to the default
-branch would find a tracked setup in conflict with the home-mode one. The refusal names that
-branch.
+`--setup home` is refused when a branch of the repository tracks a `.spoolway/` of its own,
+even from a checkout on some other branch that carries none: switching to that branch would find
+a tracked setup in conflict with the home-mode one. The default branch comes from `origin/HEAD`,
+then `init.defaultBranch`, then `main` or `master`. When none of these names a branch, any local
+branch that tracks `.spoolway/` is refused. The refusal names that branch.
+
+`--setup home` is also refused on a checkout whose repo-mode home still holds queued tasks,
+because home mode starts an empty queue. The refusal names the tasks and the steps that clear
+them.
 
 A home-mode checkout reads its config, pipelines and prompts from the workspace's `config/`.
 Its runtime state lives in the workspace's `dispatchers/<dispatcher>/`, in place of the
@@ -82,7 +91,8 @@ A workspace's `project.toml` that cannot be read or parsed stops only a checkout
 listed. Every other command prints one note naming the file and carries on. A checkout that
 matches no readable workspace refuses instead, naming the file, because the file might be the
 one that would have listed it. `spoolway init` refuses the same way instead of falling back to
-repo mode for a checkout the file might list. [`spoolway config
+repo mode for a checkout the file might list. The refusal says to repair the file, or to move the
+whole workspace folder out of `~/.spoolway/`. [`spoolway config
 path`](cli-reference.md#spoolway-config-show--list--path--get-key--set-key-value--edit) answers
 anyway. It prints `mode: null` and the workspace list instead of refusing. That list is what
 `spoolway init --workspace <name>` needs next.
@@ -95,9 +105,12 @@ generic not-found message. `spoolway init` there refuses too, instead of writing
 
 A checkout listed more than once, in one workspace's `clones` or across several, is refused,
 naming every file and entry. A clone's `dispatcher` must be one plain name, with no path
-separator and no `..`; any other value is refused, naming the file and the entry. A clone's
-path must be valid UTF-8; `spoolway init` refuses a checkout path that is not, rather than
-storing a path that can never match it again.
+separator and no `..`. A workspace file holding any other value refuses only the checkouts it
+lists, naming the file, the value and the entry. Every other command prints one note naming the
+file and carries on. Nothing can join or move into such a workspace. Two entries in one file
+may not name the same dispatcher folder. Both entries' checkouts are refused, naming both
+entries. A clone's path must be valid UTF-8; `spoolway init` refuses a checkout path that is
+not, rather than storing a path that can never match it again.
 
 A checkout whose folder moved or was deleted still leaves its old entry in a workspace, pointing
 at a path that no longer exists. Running `spoolway init --workspace <name>` from the checkout
@@ -110,10 +123,15 @@ A clone also moves between workspaces through `spoolway init`'s own menu, or `--
 <other>` on a checkout a workspace already lists: picking another workspace moves the checkout,
 carrying its dispatcher folder — queue, archive and worktrees — along. It refuses, writing
 nothing, while any of the checkout's tasks holds a worktree, naming each one, and for a
-workspace of another repository, with no flag to force it. A workspace the move leaves with no
-checkout listed is removed, together with its usage-registry entry.
+workspace of another repository, with no flag to force it. A checkout no workspace lists may
+not join a workspace of another repository either.
 
-`spoolway doctor` names which mode a project runs in, repo mode or home mode.
+spoolway never deletes a workspace folder. A workspace the move leaves with no checkout listed
+is kept. The move prints the folder's path and says to remove it by hand. A workspace that lists
+no checkout can be joined again.
+
+`spoolway doctor` names which mode a project runs in, repo mode or home mode. It also prints a
+note for each workspace under `~/.spoolway/` that lists no checkout.
 
 ## Task
 
