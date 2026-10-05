@@ -155,6 +155,11 @@ pub struct Frontmatter {
     /// step's verdict, and a silent death recorded as a pass is worse than no
     /// record at all.
     ///
+    /// The dispatcher also writes it for a command step whose exit a gate
+    /// held, so `caught_at` can tell a held pass from a held fail on resume.
+    /// That is safe for the banking, which only reads a report whose step
+    /// matches the lane's own step, and a command step has no lane.
+    ///
     /// One slot is enough because of the order a pass runs in: finished lanes
     /// are freed and banked *before* any new lane is started, so the next step
     /// cannot report until this one has been read. Reversing those two would
@@ -308,8 +313,9 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
 
-    /// A step this task pauses after, whatever it reports — see
-    /// `spoolway report`, where the pause is decided. Set by whoever wrote
+    /// A step this task pauses after, whatever it reports or exits with —
+    /// see `spoolway report`, where an agent step's pause is decided, and the
+    /// dispatcher's command arm, where a command step's is. Set by whoever wrote
     /// the task, so a producer can hold work for a person without
     /// giving the task a pipeline of its own; a step's own `gate: true`
     /// still gates every task that reaches it, this or not, but on
@@ -481,13 +487,15 @@ pub struct Frontmatter {
     /// The step rather than the destination, because the destination is the
     /// pipeline's to say and the pipeline may have been edited since. Released,
     /// the task goes wherever that step's `on_pass` points *now*; rejected, its
-    /// `on_fail`. Cleared by the release.
+    /// `on_fail`. A command step's held failure is the exception: its release
+    /// takes the `on_fail` its exit code chose. Cleared by the release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<String>,
 
     /// Which road caught this pause — `"gate"` for a step's own
     /// `gate: true`, `"schedule"` for a task's own `gate_at`. `gate_at`
-    /// clears itself the moment it fires (see `commands::report`), so this
+    /// clears itself the moment it fires (see `commands::report` and the
+    /// dispatcher's command arm), so this
     /// is the one thing left to say which of the two ever held the task;
     /// `paused_at` alone cannot, since both roads set it the same way.
     /// Absent for a pause raised from `blocked` itself, which is not a catch

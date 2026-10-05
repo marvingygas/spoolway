@@ -876,9 +876,10 @@ impl Board {
             }
             // `s`: leave every named abort running and write `gate_at` onto
             // its task instead — whatever that step reports, whenever it
-            // reports it, is what parks it now, on its own road through
-            // `commands::report` rather than the pass-only one a pipeline's
-            // own `gate: true` reads. Toggled per task
+            // reports it, is what parks it now. An agent step's report parks
+            // it through `commands::report`, and a command step's exit
+            // through the dispatcher's command arm; neither is limited to
+            // the pass a pipeline's own `gate: true` catches. Toggled per task
             // rather than only ever set, so pressing `s` again on a row that
             // already carries a schedule for the step it is on clears it —
             // the mockup's "pressing `s` again... clears it".
@@ -2602,9 +2603,10 @@ fn logo_turns(rows: &[Row]) -> bool {
 ///
 /// A `gate_at` naming this step is `s`'s own schedule, still live: the step
 /// it names is where it is headed regardless of what the pipeline's own
-/// `on_pass` would otherwise carry it to, since `commands::report` is about
-/// to park it there the moment this step reports at all — whatever it
-/// reports, not only a pass.
+/// `on_pass` would otherwise carry it to, since the task is about to be
+/// parked there the moment this step finishes — `commands::report` for an
+/// agent step's report, the dispatcher for a command step's exit — whatever
+/// the outcome, not only a pass.
 fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_id: &str) -> String {
     if task.front.gate_at.as_deref() == Some(step_id) {
         format!("→ paused after {step_id}")
@@ -2665,8 +2667,9 @@ fn blocked_next(
 /// `commands::caught_at`: a pause raised from `blocked` itself resumes to
 /// `cleared_block_target`, a caught block or loop-max (`Caught::Blocked`)
 /// resumes straight to `blocked` — exactly where it would have landed
-/// unheld — and everything else, a plain gated pass or a schedule's caught
-/// fail alike, resumes by the step's own `on_pass`. A `parked_from` with no
+/// unheld — a command step's caught fail resumes by its own `on_fail`, and
+/// everything else, a plain gated pass or a schedule's caught fail at an
+/// agent step, resumes by the step's own `on_pass`. A `parked_from` with no
 /// gate — a person's own keypress, or a lane `escalate_clock` gave up on —
 /// names nothing to pass: `unpark` sends the task straight back onto that
 /// exact step, so this names the step itself rather than whatever comes
@@ -2680,6 +2683,14 @@ fn paused_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -
                 crate::commands::cleared_block_target(task, pipeline, false)
             }
             Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
+            // A command step's held failure resumes down the `on_fail` its
+            // exit code chose — see `resume_road`.
+            Some(crate::commands::Caught::Fail)
+                if step.kind() == crate::pipeline::StepKind::Command =>
+            {
+                step.destination(crate::pipeline::Outcome::Fail)
+                    .map(str::to_string)?
+            }
             _ => step
                 .destination(crate::pipeline::Outcome::Pass)
                 .map(str::to_string)?,
@@ -7202,6 +7213,51 @@ mod tests {
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert_eq!(row.next, "→ paused after implement");
+    }
+
+    /// A command step's held failure resumes down its `on_fail`, so the NEXT
+    /// column names that step, not `on_pass`; an agent step's still names
+    /// `on_pass`.
+    #[test]
+    fn the_next_column_names_on_fail_for_a_held_command_failure() {
+        let (repo, _root_guard) = fixture("held-command-failure-next-column");
+        let mut pipelines = Pipelines::builtin();
+        let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+        let step = pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap();
+        step.run = Some("exit 2".into());
+        step.agent = None;
+        step.prompt = None;
+        step.session = false;
+        step.on_fail = Some("rebase".into());
+        let on_pass = step.on_pass.clone().unwrap();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.paused_at = Some("implement".into());
+        task.front.paused_by = Some("schedule".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "implement".into(),
+            outcome: "fail".into(),
+            at: 1,
+            blocked: false,
+        });
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+
+        assert_eq!(paused_next(&task, pipeline).as_deref(), Some("rebase"));
+
+        let mut agent_pipelines = Pipelines::builtin();
+        let agent = agent_pipelines.pipelines.get_mut("default").unwrap();
+        agent
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some("rebase".into());
+        let agent = agent_pipelines.pipelines.get("default").unwrap();
+        assert_eq!(paused_next(&task, agent).as_deref(), Some(on_pass.as_str()));
     }
 
     /// `o` on a headless run has no pane to open an editor in — headless
