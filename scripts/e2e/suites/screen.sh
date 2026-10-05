@@ -143,6 +143,18 @@ child_gone() {
 if poll_until 10 child_gone; then ok "the child is gone once the screen has ended"
 else bad "the child is gone once the screen has ended"; fi
 
+# The warnings gate checks the pipelines on disk when `enter` is pressed, not
+# the copy the screen opened with. A pipeline written while the screen is up,
+# whose prompt does not exist, is named by the popup; the earlier `x` hid only
+# the findings that were there then, so the new one is not hidden by it.
+LATE=".spoolway/pipelines/late-pipeline.yml"
+RUN="$LIVE/late.txt"
+works "a pipeline added after the screen opened is checked on enter" \
+  script -qec "{ printf '\\033[D'; sleep 1; printf 'steps:\\n  - id: build\\n    agent: pi\\n    prompt: late-prompt\\n    model: m\\n    on_pass: finish\\n  - id: finish\\n    end: true\\n' >'$LATE'; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$RUN"
+sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
+rm -f "$LATE"
+has "the popup names the prompt of the pipeline added since" "late-prompt" "$RUN.plain"
+
 # One `spoolway` per project. A screen held open by a pipe that stays open
 # for a few seconds takes `spoolway.pid`; while it is up, a second bare
 # `spoolway` and a typed `spoolway dispatch` both refuse with the one line.

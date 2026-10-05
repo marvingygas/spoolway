@@ -2150,7 +2150,16 @@ impl Pipelines {
     /// should have to know a second source exists.
     pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
         let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), true)
+        Pipelines::load_impl(root, config, Some(&overrides), true, true)
+    }
+
+    /// [`Pipelines::load`], but an override that no longer fits is not
+    /// announced on stderr. For the screen, which holds the terminal in its
+    /// alternate screen: a line written there lands between two frames and is
+    /// painted over before anyone can read it.
+    pub fn load_quietly(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
+        let overrides = crate::overrides::dir_for(root)?;
+        Pipelines::load_impl(root, config, Some(&overrides), true, false)
     }
 
     /// [`Pipelines::load`], with no patch layer applied — for a caller that
@@ -2158,7 +2167,7 @@ impl Pipelines {
     /// check a step id and a key against what the tracked file actually
     /// has, and `commands::override_promote`'s own read of it.
     pub fn load_tracked(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        Pipelines::load_impl(root, config, None, true)
+        Pipelines::load_impl(root, config, None, true, true)
     }
 
     /// One private pipeline, by name, read straight off `local/pipelines/`
@@ -2200,7 +2209,7 @@ impl Pipelines {
     /// fails to parse is still a real problem and still fails here.
     pub fn load_or_empty(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
         let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), false)
+        Pipelines::load_impl(root, config, Some(&overrides), false, true)
     }
 
     /// One source: the directory. A missing directory and an empty one now
@@ -2223,11 +2232,16 @@ impl Pipelines {
     /// materialise a `blocked` step that a pipeline declaring none of its
     /// own never had in the file, letting a patch reach a step that, from
     /// the file's own perspective, does not exist.
+    ///
+    /// `print_notices` says whether an override that was skipped is printed
+    /// to stderr once per process; see [`Pipelines::load_quietly`] for why a
+    /// caller turns it off.
     fn load_impl(
         root: &Path,
         config: &crate::config::Config,
         overrides: Option<&Path>,
         require_nonempty: bool,
+        print_notices: bool,
     ) -> Result<Pipelines> {
         let dir = Pipelines::dir_in(root);
         let files = match read_pipeline_dir(&dir)? {
@@ -2333,7 +2347,7 @@ impl Pipelines {
             )?;
         }
 
-        if overrides.is_some() {
+        if overrides.is_some() && print_notices {
             crate::overrides::print_ignored_notices(&set.ignored_overrides);
         }
         Ok(set)
