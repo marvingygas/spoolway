@@ -97,10 +97,6 @@ with no such test is not met.
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
 
-- **`target/debug` is shared by every lane, so a test binary can be another worktree's.** A
-  test name, path or output that does not match this worktree's source is a stale build, not a
-  failure. Rebuild with `CARGO_TARGET_DIR` set under your scratch space before believing it.
-
 - **Some behaviour has no cheap unit test, and forcing one is worse than saying so.** Where the
   honest test is an end-to-end one, write it there and name which criterion it covers. Where no
   test can reach it at all, that is a finding, not a reason to write code with no red phase

@@ -42,9 +42,6 @@ exactly what you tried and where it diverged from the task's account.
   `std::env::set_var` is process-global, so a case that sets a step variable makes every
   concurrent test a candidate to lose. Re-run it on its own; if it fails alone, it is real.
   Re-run before you believe a failure that has nothing to do with the bug.
-- **`target/debug` is shared by every lane, so a test binary can be another worktree's.** A
-  repro that is missing, or prints paths from another worktree, is a stale build. Rebuild with
-  `CARGO_TARGET_DIR` set under your scratch space before you judge the visit.
 
 ## Never
 

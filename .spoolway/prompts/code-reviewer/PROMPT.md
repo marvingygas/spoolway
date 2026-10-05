@@ -90,10 +90,6 @@ readable on its own. A failing verdict with no findings leaves the fixer nothing
 On a later visit, confirm each earlier finding is fixed, then review what the fix changed as
 closely as the first diff: a fix pass writes new code and new comments too.
 
-`target/debug` is shared by every lane. Before you report a measurement or a test result, make
-sure it came from this worktree's build — rebuild with `CARGO_TARGET_DIR` under your scratch space
-when a name, path or output does not match this worktree's source.
-
 ## Never
 
 - Never run `scripts/e2e/run.sh`. A `pr` tier costs a 45-minute slot to reach a verdict the
