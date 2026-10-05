@@ -1852,6 +1852,36 @@ impl Config {
     }
 }
 
+/// The ids of the tasks whose worktree sits under `raw`, a `worktree_root`
+/// as a config file spells it, sorted.
+///
+/// A leading `~/` is expanded first: 0.6.0 expanded it when it cut a
+/// worktree, so a project could have written `~/wt` while every task's
+/// `worktree_path` holds the absolute path. Matching the raw text would say
+/// no task is there, and a person trusting that deletes work in progress.
+/// The match is by path component, so `/wt` does not claim `/wt2`.
+pub fn tasks_under_worktree_root<'a>(raw: &str, tasks: &'a [crate::task::Task]) -> Vec<&'a str> {
+    // Trimmed first, as 0.6.0 did before expanding: a padded value cut its
+    // worktrees at the trimmed folder.
+    let root = resolve_watch_dir(
+        raw.trim(),
+        crate::platform::home_dir().as_deref(),
+        Path::new(""),
+    );
+    let mut ids: Vec<&str> = tasks
+        .iter()
+        .filter(|t| {
+            t.front
+                .worktree_path
+                .as_deref()
+                .is_some_and(|wt| Path::new(wt).starts_with(&root))
+        })
+        .map(crate::task::Task::id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// One `watch.dirs` entry, expanded against the home directory and the repo
 /// root — not yet checked for existence, which [`Config::watch_roots`] does
 /// once, after every entry has been resolved the same way.
@@ -2058,6 +2088,31 @@ pub use human_duration::{format as format_duration, parse as parse_duration};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sibling folder sharing the root's name as a prefix is not under it,
+    /// and a padded `~/` value still names the folder 0.6.0 cut worktrees in.
+    #[test]
+    fn tasks_under_a_worktree_root_match_by_component_and_ignore_padding() {
+        let task = |id: &str, wt: &str| {
+            crate::task::Task::parse(
+                PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\nstage: paused\nworktree_path: {wt}\n---\n"),
+            )
+            .unwrap()
+        };
+        let tasks = [
+            task("in", "/old/wt/task-in"),
+            task("sibling", "/old/wt2/task-sibling"),
+        ];
+        assert_eq!(tasks_under_worktree_root("/old/wt", &tasks), ["in"]);
+        assert_eq!(tasks_under_worktree_root(" /old/wt ", &tasks), ["in"]);
+
+        let Some(home) = crate::platform::home_dir() else {
+            return;
+        };
+        let at_home = [task("z1", &format!("{}/p25-wt/task-z1", home.display()))];
+        assert_eq!(tasks_under_worktree_root("~/p25-wt ", &at_home), ["z1"]);
+    }
 
     /// `$HOME` reached through a symlink is still the home folder, so a
     /// checkout resolved to its real path must be recognised as it.

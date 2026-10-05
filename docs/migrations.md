@@ -63,7 +63,8 @@ prints `Run spoolway sync to apply the last update.` and carries on.
   `acli` to 1.3.39 or newer; the new hook also needs `gh` 2.97.0 or newer, `jq` and bash.
 - GitHub-tracked projects: replace the hook with
   `spoolway sync --replace .spoolway/hooks/github.sh`, then re-apply local edits from the `.bak`
-  it saves. The 0.6.0 hook still opens issues but logs `cat: '': No such file or directory` and
+  it saves. A second replace of the same file saves to `.bak.1`, then `.bak.2`, and never
+  overwrites an earlier backup. The 0.6.0 hook still opens issues but logs `cat: '': No such file or directory` and
   drops the `Mirrors task …` lines. The new one marks an issue in progress on the new `started`
   event, applies `labels:`, and on `done` comments `Ready for review in <PR URL>` on the issue.
 - Delete `.github/workflows/spoolway-issues.yml` if 0.6.0 wrote it. `init` no longer writes it and
@@ -82,7 +83,9 @@ prints `Run spoolway sync to apply the last update.` and carries on.
   home, with no setting to move it. Delete any `dispatch.worktree_root = ...` line from
   `.spoolway/config.toml`; a config that still sets it loads, with a note naming `spoolway
   sync`, and `spoolway sync` drops the key on the next save. The report names the old
-  directory, and, when a queued task still has a worktree there, names that task too.
+  directory, and, when a queued task still has a worktree there, names that task too. This holds
+  for a `~/` path and for a key set only in the private overrides layer. `spoolway doctor` names
+  the same tasks for a key in `config.toml`.
 - `issue_tracking.on_fail` is retired the same way: a failing `queued`, `started` or `done`
   hook always pauses its task now, with nothing left to configure. Delete any
   `issue_tracking.on_fail = ...` line; a config that still sets it loads with a note, and

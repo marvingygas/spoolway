@@ -408,8 +408,9 @@ report says so. A skill file has no such block: sync always rewrites it to match
 copy.
 
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
-beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose. It
-does not cover skill files: `spoolway install <provider> --force` also takes the shipped skills
+beside it as `.bak`, with the same file mode. If that name is taken, it writes `.bak.1`, then
+`.bak.2`, and prints the path it used. That is also how to take a newer default prompt or
+skeleton on purpose. It does not cover skill files: `spoolway install <provider> --force` also takes the shipped skills
 back, overwriting that provider's whole set with no `.bak` saved. Replacing a hook script under
 `.spoolway/hooks/` also leaves it executable on Unix, whether or not its text changed.
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that

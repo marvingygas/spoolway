@@ -1538,7 +1538,8 @@ pub struct SyncArgs {
     pub dry_run: bool,
 
     /// Replace this whole file with the one spoolway ships. Your version is
-    /// saved beside it as a `.bak` first, so nothing you wrote is lost, only
+    /// saved beside it as a `.bak` first (`.bak.1`, `.bak.2`… if one is there
+    /// already), so nothing you wrote is lost, only
     /// displaced. Repeat for each. The way back for a file so far from the
     /// shape we know that no region can be found in it.
     ///

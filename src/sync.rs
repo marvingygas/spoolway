@@ -631,6 +631,57 @@ fn ignores(
     Ok(())
 }
 
+/// The non-blank `dispatch.worktree_root` a config document names, read
+/// untyped because the loaded `Config` no longer keeps the retired field.
+fn worktree_root_in(text: &str) -> Option<String> {
+    toml::from_str::<toml::Value>(text)
+        .ok()
+        .and_then(|doc| {
+            doc.get("dispatch")?
+                .get("worktree_root")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|path| !path.trim().is_empty())
+}
+
+/// The migration note for a dropped `dispatch.worktree_root`: where its
+/// worktrees were cut, and which queued tasks still have one there.
+///
+/// A queued task can still have its own worktree sitting under the old
+/// path — this never moves one already cut, only new ones land under the
+/// project home — so the old directory is never called safe to remove
+/// outright: a task still using it is named instead, the same way `doctor`'s
+/// own `worktree_root_note` does (see `commands::doctor`). Shared by the
+/// tracked file and the private override layer, so a key dropped from
+/// either is reported the same way.
+fn worktree_root_outcome(repo: &Repo, shown: &str, old: &str) -> Outcome {
+    let tasks = repo.tasks().unwrap_or_default();
+    let still_there = crate::config::tasks_under_worktree_root(old, &tasks);
+    let (report_detail, panel_detail) = if still_there.is_empty() {
+        (
+            format!(
+                "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                 {old} — no queued task has a worktree there any more",
+            ),
+            format!("migrated: worktree_root removed; worktrees were at {old}"),
+        )
+    } else {
+        (
+            format!(
+                "migrated: dispatch.worktree_root removed; its worktrees were cut at \
+                 {old} — still in use by: {}",
+                still_there.join(", "),
+            ),
+            format!(
+                "migrated: worktree_root removed; {old} still used by {}",
+                still_there.join(", "),
+            ),
+        )
+    };
+    Outcome::migrated(shown, report_detail, panel_detail)
+}
+
 /// The config file: rewritten whole, except for what you set it to.
 ///
 /// The one file spoolway owns outright and a person reads constantly, so the
@@ -738,6 +789,18 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
     if let Ok(overrides_dir) = crate::overrides::dir_for(&repo.checkout) {
         let dropped = crate::overrides::retired_config_patch_keys(&overrides_dir, &current)?;
         if !dropped.is_empty() {
+            // Read before the write below removes it. A `worktree_root` set
+            // only here is dropped just the same, and the folder it named
+            // and the tasks still under it are said the same way.
+            let old_worktree_root = dropped
+                .iter()
+                .any(|key| key == "dispatch.worktree_root")
+                .then(|| {
+                    std::fs::read_to_string(crate::overrides::config_patch_path(&overrides_dir))
+                        .ok()
+                        .and_then(|raw| worktree_root_in(&raw))
+                })
+                .flatten();
             if !args.dry_run {
                 crate::overrides::write_dropped_config_patch_keys(&overrides_dir, &dropped)?;
             }
@@ -756,6 +819,9 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                     dropped.join(", ")
                 ),
             ));
+            if let Some(old) = old_worktree_root {
+                outcomes.push(worktree_root_outcome(repo, &shown_override, &old));
+            }
         }
     }
 
@@ -838,57 +904,10 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             .dropped
             .iter()
             .any(|key| key == "dispatch.worktree_root")
-            .then(|| {
-                toml::from_str::<toml::Value>(&text).ok().and_then(|doc| {
-                    doc.get("dispatch")?
-                        .get("worktree_root")?
-                        .as_str()
-                        .map(str::to_string)
-                })
-            })
-            .flatten()
-            .filter(|path| !path.trim().is_empty());
+            .then(|| worktree_root_in(&text))
+            .flatten();
         if let Some(old) = old_worktree_root {
-            // A queued task can still have its own worktree sitting under
-            // the old path — this never moves one already cut, only new
-            // ones land under the project home — so the old directory is
-            // never called safe to remove outright: a task still using it
-            // is named instead, the same way `doctor`'s own
-            // `worktree_root_note` does (see `commands::doctor`).
-            let tasks = repo.tasks().unwrap_or_default();
-            let mut still_there: Vec<&str> = tasks
-                .iter()
-                .filter(|t| {
-                    t.front
-                        .worktree_path
-                        .as_deref()
-                        .is_some_and(|wt| wt.starts_with(&old))
-                })
-                .map(crate::task::Task::id)
-                .collect();
-            still_there.sort_unstable();
-            let (report_detail, panel_detail) = if still_there.is_empty() {
-                (
-                    format!(
-                        "migrated: dispatch.worktree_root removed; its worktrees were cut at \
-                         {old} — no queued task has a worktree there any more",
-                    ),
-                    format!("migrated: worktree_root removed; worktrees were at {old}"),
-                )
-            } else {
-                (
-                    format!(
-                        "migrated: dispatch.worktree_root removed; its worktrees were cut at \
-                         {old} — still in use by: {}",
-                        still_there.join(", "),
-                    ),
-                    format!(
-                        "migrated: worktree_root removed; {old} still used by {}",
-                        still_there.join(", "),
-                    ),
-                )
-            };
-            outcomes.push(Outcome::migrated(&shown, report_detail, panel_detail));
+            outcomes.push(worktree_root_outcome(repo, &shown, &old));
         }
     }
     if !refresh.renoted.is_empty() {
@@ -1085,11 +1104,30 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
         }
 
         if !on_disk.is_empty() {
-            let backup = path.with_extension(format!(
+            // Never over an existing backup: a second `--replace` of the same
+            // file would otherwise destroy the person's own edits that the
+            // first one saved. The first free name is taken instead.
+            let first = path.with_extension(format!(
                 "{}.bak",
                 path.extension().and_then(|e| e.to_str()).unwrap_or("")
             ));
+            let mut backup = first.clone();
+            let mut n = 1;
+            while backup.exists() {
+                let mut name = first.as_os_str().to_owned();
+                name.push(format!(".{n}"));
+                backup = PathBuf::from(name);
+                n += 1;
+            }
             write_atomic(&backup, &on_disk)?;
+            // `write_atomic` creates files at the writer's default mode, so a
+            // hook's backup would lose its execute bit. The backup keeps the
+            // mode of the file it is a copy of.
+            let mode = std::fs::metadata(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+                .permissions();
+            std::fs::set_permissions(&backup, mode)
+                .with_context(|| format!("writing {}", backup.display()))?;
             println!(
                 "  ! your version is saved to {}",
                 crate::platform::relative(&repo.checkout, &backup)
@@ -2441,6 +2479,43 @@ mod tests {
         );
     }
 
+    /// A `worktree_root` written with a leading `~/` names the same folder as
+    /// the absolute path a task's `worktree_path` records, so `sync` must
+    /// name a queued task whose worktree sits under it.
+    #[test]
+    fn a_worktree_root_written_with_a_tilde_names_a_queued_task_under_it() {
+        let Some(home) = crate::platform::home_dir() else {
+            return;
+        };
+        let (repo, _root_guard) = fixture("config-retired-worktree-root-tilde");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(&path, "[dispatch]\nworktree_root = \"~/p25-wt\"\n").unwrap();
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("z1.md"),
+            format!(
+                "---\nid: z1\nstage: paused\nworktree_path: {}\n---\n",
+                home.join("p25-wt").join("task-z1").display()
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown.iter().any(|(report, panel)| {
+                report.contains("z1")
+                    && panel.contains("z1")
+                    && !report.contains("no queued task has a worktree there")
+            }),
+            "{shown:?}"
+        );
+    }
+
     /// A blank `dispatch.worktree_root` was never anybody's decision — the
     /// ordinary dropped-key line covers it, and there is nothing further
     /// worth a dedicated note.
@@ -2524,6 +2599,53 @@ mod tests {
                     .any(|line| line.contains("retired override key")
                         && line.contains("dispatch.worktree_root")),
                 "{lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A `worktree_root` set only in the private override layer is dropped
+    /// too, and must be reported the way one dropped from `config.toml` is:
+    /// the folder it named, and the queued tasks still under it.
+    #[test]
+    fn an_override_only_worktree_root_names_the_folder_and_its_queued_tasks() {
+        let (repo, _root_guard) = fixture("config-override-worktree-root");
+        let home = crate::scratch::root("sync-config-override-worktree-root-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::write(
+            crate::config::Config::path_in(&repo.root),
+            "[dispatch]\nlane_quiet = \"15m\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("z1.md"),
+            "---\nid: z1\nstage: paused\nworktree_path: /old/worktrees/task-z1\n---\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                crate::overrides::config_patch_path(&overrides),
+                "[dispatch]\nworktree_root = \"/old/worktrees\"\n",
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+
+            let notes = migration_notes(&outcomes);
+            let shown = notes.values().flatten().collect::<Vec<_>>();
+            assert!(
+                shown.iter().any(|(report, panel)| {
+                    report.contains("/old/worktrees")
+                        && report.contains("z1")
+                        && panel.contains("z1")
+                }),
+                "{shown:?}"
             );
         });
 
@@ -2834,6 +2956,52 @@ mod tests {
         assert_eq!(
             mode, 0o755,
             "a hook already at the shipped text must still have its execute bit repaired"
+        );
+    }
+
+    /// A second `--replace` of the same file never overwrites the backup the
+    /// first one made, and every backup keeps the hook's execute bit.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_replace_keeps_the_first_backup_and_every_backup_keeps_the_hooks_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (repo, _root_guard) = fixture("replace-keeps-every-bak");
+        let hook = repo.checkout.join(".spoolway/hooks/github.sh");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        let replace_args = SyncArgs {
+            replace: vec![".spoolway/hooks/github.sh".to_string()],
+            ..args()
+        };
+
+        std::fs::write(&hook, "#!/bin/sh\necho first edit\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        replace(&repo, &replace_args).unwrap();
+
+        std::fs::write(&hook, "#!/bin/sh\necho second edit\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        replace(&repo, &replace_args).unwrap();
+
+        let mut backups = std::fs::read_dir(hook.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("github.sh.bak"))
+            })
+            .map(|p| {
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+                (std::fs::read_to_string(&p).unwrap(), mode)
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        assert_eq!(
+            backups,
+            vec![
+                ("#!/bin/sh\necho first edit\n".to_string(), 0o755),
+                ("#!/bin/sh\necho second edit\n".to_string(), 0o755),
+            ]
         );
     }
 
