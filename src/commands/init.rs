@@ -813,6 +813,10 @@ struct Placer {
     force: bool,
     /// One `wrote`/`kept`/`made`/`set` row per thing considered.
     rows: Vec<String>,
+    /// Whether any file already there was left as it was. Such a file is
+    /// whatever an older version wrote, so `init` cannot vouch that the
+    /// project is current and leaves the update stamp to `sync`.
+    kept_a_file: bool,
 }
 
 impl Placer {
@@ -827,6 +831,7 @@ impl Placer {
     ) -> Result<bool> {
         if path.exists() && !self.force {
             self.rows.push(report_row("kept", rel));
+            self.kept_a_file = true;
             return Ok(false);
         }
         write_atomic(&path, contents)?;
@@ -1202,6 +1207,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     let mut placer = Placer {
         force: args.force,
         rows: Vec::new(),
+        kept_a_file: false,
     };
     let mut wrote_any = false;
 
@@ -1349,8 +1355,15 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // what this binary would write — so it is stamped the same fact
     // `spoolway sync` would have recorded had it run here instead: this
     // checkout, at this binary's version, matching what it would still
-    // write today.
-    if let Some(home) = &home {
+    // write today. Not when a file was kept: a project claimed over an older
+    // setup still holds that setup's files, and a stamp saying "current"
+    // would switch off the notice telling it to run `sync`. Nor when joining
+    // a workspace: that places no file of its own, so the setup it shares is
+    // whatever the workspace already held, which `init` did not write.
+    if !placer.kept_a_file
+        && !joined
+        && let Some(home) = &home
+    {
         let _ = crate::sync::write_stamp(home, root);
     }
     // The mockup above ends its transcript at `crate::install::report`'s
@@ -1449,6 +1462,31 @@ mod tests {
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
         run_init(&root, args).expect("init");
         root
+    }
+
+    /// A fresh `init` stamps the checkout current. A second one that kept
+    /// every file leaves it alone, so a project claimed over an older setup
+    /// is never stamped current by `init`.
+    #[test]
+    fn init_stamps_only_when_it_kept_no_file() {
+        let root = scaffold("stamp-fresh", &confirmed());
+        let stamp = |root: &Path| {
+            crate::platform::test_home::with_home(&home_for(root), || {
+                let home = crate::mux::project_home(root).unwrap();
+                crate::sync::read_stamp(&home, root)
+            })
+        };
+        assert!(stamp(&root).is_some(), "a fresh init stamps");
+
+        let home = crate::platform::test_home::with_home(&home_for(&root), || {
+            crate::mux::project_home(&root).unwrap()
+        });
+        std::fs::remove_file(crate::sync::stamp_path(&home)).unwrap();
+        run_init(&root, &confirmed()).expect("a repeat init");
+        assert!(
+            stamp(&root).is_none(),
+            "a repeat init kept files, so no stamp"
+        );
     }
 
     /// Acceptance criterion 5: `init` restoring an example pipeline whose

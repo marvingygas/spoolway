@@ -1277,12 +1277,17 @@ the panel itself.
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
 
-On success, `sync` writes a stamp under the project's home recording this binary's version and
-a fingerprint of the text it would write, one line per checkout. `spoolway init` writes the
-same stamp for a freshly scaffolded project.
+On a run that refused no file, `sync` writes a stamp under the project's home recording this
+binary's version and a fingerprint of the text it would write, one line per checkout. A run
+that refused a file removes that checkout's line. `spoolway init` writes the same stamp for a
+freshly scaffolded project, and none when it kept an existing file or joined a workspace.
 
-Every other command that needs a project reads that stamp back. When it no longer matches and a
-scan finds files to change, the command prints one line on stderr and then runs:
+The report lists refused files first. It then lists each file written or removed, and a line
+for each replaced key block and each value `sync` set on its own.
+
+Every other command that needs a project reads that stamp back. When the stamp is missing or
+unreadable, the command prints one line on stderr and then runs. It does the same when the
+stamp no longer matches and a scan finds a file to write, remove or refuse:
 
 ```
 Run spoolway sync to apply the last update.

@@ -70,8 +70,10 @@ prints `Run spoolway sync to apply the last update.` and carries on.
   the new `github.sh` no longer posts the marker it reads. Close issues on merge as
   `docs/configuration.md` describes under "Closing tickets on merge".
 - `issue_tracking.key_in_names` now defaults to `true`. A project 0.6.0 set up keeps the
-  `key_in_names = false` it wrote. Run `spoolway config set issue_tracking.key_in_names true` to put
-  the tracker key on group, branch and worktree names (`task/gh-123-…`).
+  `key_in_names = false` it wrote. A config that never names it gets `key_in_names = true` from
+  `spoolway sync`, and the report says so. Run `spoolway config set issue_tracking.key_in_names
+  false` to turn it off, or `true` to put the tracker key on group, branch and worktree names
+  (`task/gh-123-…`).
 - `.spoolway/templates/tracking/epic.md` and `ticket.md` are retired, and `sync` deletes both
   whatever they hold. Copy any wording you kept there into your `open` hook first; the hook no
   longer receives `SPOOLWAY_EPIC_BODY` or `SPOOLWAY_TICKET_BODY`. The empty `templates/tracking/`
@@ -89,7 +91,8 @@ prints `Run spoolway sync to apply the last update.` and carries on.
   that paused its task.
 - Finished tasks in `archive/` are no longer pruned by `housekeeping.retention_days`. They are kept
   forever until `housekeeping.archive_retention_days` is set; `sync` adds it as `0`. To prune as
-  0.6.0 did, run `spoolway config set housekeeping.archive_retention_days 30`.
+  0.6.0 did, set `housekeeping.archive_retention_days` to the `housekeeping.retention_days` your
+  project had, for example `spoolway config set housekeeping.archive_retention_days 14`.
 - `dispatch --plain` and `dispatch --force` are removed, and so is exit code 5. Drop both flags
   from any script that calls `spoolway dispatch`, and match exit 4 (`Dispatcher already running`),
   which now also means a bare `spoolway` screen holds the project.

@@ -387,8 +387,8 @@ What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| `config.toml` | The comments and the settings reference. Your values stay. |
-| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
+| `config.toml` | The comments and the settings reference. Your values stay. A setting the file never names, `issue_tracking.key_in_names`, is added at its default and reported. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, including any edit you made inside it. A file without the markers is left alone. A file with the opening marker and no closing marker is refused. |
 | `.gitignore` | Only the old marked block, removed once. Left alone in home mode. |
 | Skills | Every installed provider's skill file that differs from the shipped copy, in a project's own folder and in any user folder holding one of the four shipped skills. The project's own folder is skipped in home mode; only the user folder is refreshed there. |
 | Prompts | Nothing. |
@@ -403,9 +403,9 @@ A `config.toml` that `sync` cannot read fails the whole command, naming the file
 at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
 edit` instead.
 
-`sync` never merges. A marked block you edited by hand stops the sync on that file, and it is
-reported, not overwritten. A skill file has no such block: sync always rewrites it to match the
-shipped copy.
+`sync` never merges. A key block you edited by hand is replaced with the shipped one, and the
+report says so. A skill file has no such block: sync always rewrites it to match the shipped
+copy.
 
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
 beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose. It
@@ -431,19 +431,44 @@ anything:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+A file `sync` refuses is listed first in the panel, with the reason and what to do about it.
+
 Enter writes the files, records the version stamp described next, and prints the report `sync`
 always prints. Esc, ctrl-c, or the terminal going away mid-question writes nothing, changes no
 stamp, and prints "Nothing was changed." With no terminal to answer, under `--json`, inside a
 lane, with `--dry-run`, with `--replace`, or with nothing to write, `sync` writes straight away
 and draws no panel.
 
-On success, `sync` records this binary's version and a fingerprint of the text it would write
-in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
-stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
-the same per-checkout stamp for a freshly scaffolded or newly installed project.
+The report lists every refused file first, then every file written or removed, then one line
+for each replaced key block and each value `sync` set on its own:
 
-Every other command that needs a project reads that stamp back first. When it no longer
-matches and a scan finds files to change, the command prints one line on stderr and then runs:
+```
+refused .spoolway/pipelines/bugfix.yml — spoolway's key reference starts with `# >>> spoolway >>>` and never ends — restore the `# <<< spoolway <<<` marker, or delete the block and run this again
+wrote   .spoolway/config.toml
+wrote   .spoolway/pipelines/default.yml
+removed .spoolway/templates/task-log.md
+
+(migrated: key block in .spoolway/pipelines/default.yml replaced; edits are not kept)
+(set issue_tracking.key_in_names = true, the default)
+
+Files were overwritten; your config values, prompts and task skeletons were kept.
+```
+
+With `--dry-run`, the words read `would write` and `would remove`. When only refused files are
+left, the last line says the refused files are still behind.
+
+On a run that refused nothing, `sync` records this binary's version and a fingerprint of the
+text it would write in a stamp under the project's home, one line per checkout. A run that
+refused a file removes that checkout's line, so the project stays behind until the file is
+fixed. `sync` also deletes a leftover per-skill-file stamp, if it finds one.
+
+`spoolway init` and `spoolway install` write the same stamp for a freshly scaffolded or newly
+installed project. `init` writes none when it kept an existing file or joined a workspace,
+because it did not write those files.
+
+Every other command that needs a project reads that stamp back first. When the stamp is
+missing or unreadable, the command prints one line on stderr and then runs. It does the same
+when the stamp no longer matches and a scan finds a file to write, remove or refuse:
 
 ```
 Run spoolway sync to apply the last update.

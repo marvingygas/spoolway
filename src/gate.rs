@@ -12,9 +12,12 @@
 //! few hashes — asked before anything else here runs, so a project already
 //! current pays nothing extra on every single command. Only once that says
 //! yes does this pay for a real, dry [`crate::sync::scan`], and only once
-//! *that* finds something does anybody see the notice: a stamp that has moved
-//! but a scan that finds nothing to do (every file already hand-matches what
-//! the new release would write) has nothing worth mentioning.
+//! *that* finds something to write, remove or refuse does anybody see the
+//! notice: a stamp that has moved but a scan that finds nothing to do (every
+//! file already hand-matches what the new release would write) has nothing
+//! worth mentioning. A stamp that is missing or unreadable skips the scan and
+//! shows the notice outright, since nothing says the project was ever brought
+//! current.
 //!
 //! Every other command prints [`LINE`] on stderr and runs — see [`notify`].
 //! Bare `spoolway` would wipe a printed line with its screen's first frame,
@@ -36,11 +39,19 @@ pub(crate) const LINE: &str = "Run spoolway sync to apply the last update.";
 const TITLE: &str = "update installed";
 
 /// Whether this checkout is behind what this binary would write: the stamp
-/// has moved, and a dry scan finds something to write or remove — see the
+/// is missing or unreadable, or it has moved and a dry scan finds something
+/// to write, remove or refuse — see the
 /// module doc for why the two questions are asked in that order.
 fn behind(repo: &Repo) -> Result<bool> {
     if !crate::sync::stamp_behind(&repo.home, &repo.checkout) {
         return Ok(false);
+    }
+    // No stamp to compare against is not "a version moved with nothing to
+    // write": nothing says this project was ever brought current, and a scan
+    // with nothing to do would hide that. The notice stays until a `sync`
+    // has really run and written one.
+    if crate::sync::read_stamp(&repo.home, &repo.checkout).is_none() {
+        return Ok(true);
     }
     let dry = SyncArgs {
         dry_run: true,
@@ -57,7 +68,8 @@ fn behind(repo: &Repo) -> Result<bool> {
         return Ok(false);
     };
     let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
-    Ok(!wrote.is_empty() || !removed.is_empty())
+    let refused = crate::sync::refusals(&outcomes);
+    Ok(!wrote.is_empty() || !removed.is_empty() || !refused.is_empty())
 }
 
 /// Print [`LINE`] on stderr when this checkout is behind and a person is
@@ -209,14 +221,17 @@ mod tests {
         }
     }
 
-    /// A project whose stamp was never written at all — a fixture that never
-    /// ran `init` or `sync` — is not nagged: [`crate::sync::stamp_behind`]
-    /// has nothing to compare against.
+    /// A project whose stamp was never written, or cannot be read, is told to
+    /// run `sync` even with nothing for a scan to do: nothing records that it
+    /// was ever brought current, and one `sync` writes the stamp.
     #[test]
-    fn no_stamp_at_all_prints_nothing() {
+    fn no_stamp_at_all_shows_the_notice() {
         let (repo, _root_guard) = fixture("no-stamp");
-        assert_eq!(notified(&repo, false, false, true), "");
-        assert!(sync_popup(&repo).unwrap().is_none());
+        assert_eq!(notified(&repo, false, false, true), format!("{LINE}\n"));
+        assert!(sync_popup(&repo).unwrap().is_some());
+
+        std::fs::write(crate::sync::stamp_path(&repo.home), "garbage\n").unwrap();
+        assert_eq!(notified(&repo, false, false, true), format!("{LINE}\n"));
     }
 
     /// A stale stamp with nothing for a scan to do — every tracked file
@@ -233,6 +248,24 @@ mod tests {
         std::fs::write(Config::path_in(&repo.checkout), rendered).unwrap();
         assert_eq!(notified(&repo, false, false, true), "");
         assert!(sync_popup(&repo).unwrap().is_none());
+    }
+
+    /// A moved stamp over a scan that finds only a refused file still shows
+    /// the notice: a refusal is something `sync` has left to fix.
+    #[test]
+    fn a_stale_stamp_with_only_a_refusal_shows_the_notice() {
+        let (repo, _root_guard) = fixture("stale-refusal-only");
+        make_stale(&repo);
+        let rendered = Config::default().render().unwrap();
+        std::fs::write(Config::path_in(&repo.checkout), rendered).unwrap();
+        let dir = repo.checkout.join(".spoolway/pipelines");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("half.yml"),
+            format!("{}\n# Top level\n", crate::assets::PIPELINE_KEYS_BEGIN),
+        )
+        .unwrap();
+        assert_eq!(notified(&repo, false, false, true), format!("{LINE}\n"));
     }
 
     /// A stale stamp over a `config.toml` this binary cannot even parse
