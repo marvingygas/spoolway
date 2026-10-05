@@ -85,10 +85,6 @@ rule out stays unbuilt however good an idea it is.
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
 
-- **`target/debug` is shared by every lane, so a test binary can be another worktree's.** A
-  test name, path or output that does not match this worktree's source is a stale build, not a
-  failure. Rebuild with `CARGO_TARGET_DIR` set under your scratch space before believing it.
-
 ## When you get stuck
 
 Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
