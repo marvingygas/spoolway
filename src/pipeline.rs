@@ -357,12 +357,13 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 
-    /// Skills invoked at the top of this step's opening prompt, one `/name`
-    /// invocation per skill, in declaration order, all on the prompt's one
-    /// line — see [`crate::compose::opening_prompt`]. A newline between
-    /// invocations would make herdr send the message as a paste instead of
-    /// typed text, and Claude Code never expands a slash command inside a
-    /// paste.
+    /// Skills invoked at the top of this step's opening, one `/name` message
+    /// per skill, in declaration order, each sent on its own ahead of the
+    /// briefing — see [`crate::compose::opening_messages`]. A skill gets no
+    /// argument, because whatever follows a `/name` on its line is passed to
+    /// it, and the briefing is sent once, after them. Each message stays one
+    /// line: herdr sends a multi-line message as a paste, and Claude Code
+    /// never expands a slash command inside a paste.
     ///
     /// Written as one comma-separated line rather than a YAML list, because
     /// that is how it reads once turned into slash invocations: `skills:

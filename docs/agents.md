@@ -193,8 +193,11 @@ listed in the kinds table above. `spoolway install` writes a project's skills th
 `pipeline check` refuses `skills:` on a command step and on a kind that loads none. Skill
 names are not checked on disk; the agent resolves them at launch.
 
-Every listed skill receives the briefing sentence, `Read <task> before anything else.`, as
-its argument.
+Each listed skill is invoked on its own, in the order listed, with no argument. The briefing
+sentence, `Read <task> before anything else.`, is sent once, after the last skill.
+Each skill runs as a turn of its own. The dispatcher sends the next message only on a pass
+that finds the lane's turn ended, so a step with several skills takes a pass per skill to
+open, and nothing is typed into a lane that is working or waiting on a permission prompt.
 
 ## Concurrency and the model server
 
