@@ -1568,10 +1568,9 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 ///   project to have meant, because every sentence is a claim about what the
 ///   binary does. A hand-edited one is a claim that has stopped being true.
 /// - A file with no markers is never written, and is reported only by the
-///   check below. Writing
-///   a block into a pipeline somebody wrote themselves would be this command
-///   helping, which is the one thing it must never do. Pasting the two markers
-///   in is how a pipeline opts in.
+///   check below. Writing a block into a pipeline somebody wrote themselves
+///   would be this command helping, which is the one thing it must never do.
+///   Pasting the two markers in is how a pipeline opts in.
 ///
 /// One check reads every file, markers or not: a step shape this release
 /// refuses to load — see [`crate::pipeline::Pipeline::retired_shape_problems`]
@@ -1655,10 +1654,10 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
             // Half a fence is the one shape worth saying something about: the
             // lines under a start marker with no end could be anyone's, so
             // nothing is written and the missing marker is named. No markers
-            // at all means the file never opted in, and the retired shapes
-            // below are left alone right along with the key reference — see
-            // this function's own doc on why an unfenced file is never ours
-            // to touch.
+            // at all means the file never opted in, so it is kept as it is —
+            // a retired shape in it was already refused above, never rewritten
+            // — see this function's own doc on why an unfenced file is never
+            // ours to touch.
             let opened = on_disk
                 .lines()
                 .any(|line| line.trim() == crate::assets::PIPELINE_KEYS_BEGIN);
