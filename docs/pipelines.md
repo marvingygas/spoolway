@@ -150,6 +150,8 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 ```
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- A task leaving `blocked` starts every step's count again from zero. This holds for every
+  outcome the unblocker reports and for a person's `spoolway resume`.
 - The map form, keyed by the step a failure is sent back from, is refused at parse. The
   refusal names the step that should carry the limit instead: delete the map and give that
   step a bare `loop:` of its own.

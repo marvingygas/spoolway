@@ -4801,8 +4801,8 @@ impl<'a> Dispatcher<'a> {
     /// an ordinary lane there on the next pass — see
     /// [`Pipeline::blocked_is_staffed`]. The old resume is what a pipeline with
     /// no such step still gets, unchanged: through the same `commands::
-    /// resume_at` a hand `spoolway resume` calls, which refunds nothing on any
-    /// road now — the lane that stopped is continued rather than replaced, but
+    /// resume_at` a hand `spoolway resume` calls, which refunds nothing itself
+    /// — the lane that stopped is continued rather than replaced, but
     /// the step it is going back to keeps whatever it had already spent. What
     /// this does *not* do is announce anything. A notification is a request
     /// for attention, and an unattended run has already been told there is
@@ -4830,8 +4830,10 @@ impl<'a> Dispatcher<'a> {
         // `--fail` or `--block` reported from `blocked`: parked on `paused`,
         // with `blocked_from` (just set, or already there, by the guard
         // above) surviving so a resume can still reach the destination a
-        // pass would have.
+        // pass would have. Leaving `blocked` resets every `loop:` count, as it
+        // does on that road, so the resume does not meet the spent limit again.
         if step.id == crate::pipeline::BLOCKED {
+            task.reset_loop_counts();
             let origin = task
                 .front
                 .blocked_from
@@ -4845,9 +4847,9 @@ impl<'a> Dispatcher<'a> {
 
         if self.unattended && !pipeline.blocked_is_staffed(self.unattended) {
             let target = crate::commands::resume_target(task, pipeline);
-            // The run resuming itself, not a person: `commands::resume_at`
-            // refunds nothing on any road now, so the budgets out of the step
-            // it stopped on stay spent here too.
+            // The run resuming itself, not a person: the task never sits on
+            // `blocked` here, so no road out of it resets the counts and the
+            // budgets of the step it stopped on stay spent.
             crate::commands::resume_at(task, &target);
             task.set_stage(&target, Some(reason));
             self.persist(task)?;
@@ -10947,6 +10949,10 @@ mod tests {
         let pipeline = pipelines.get("default").unwrap();
         let path = add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
             f.blocked_from = Some("implement".into());
+            // Spent counts in both maps, so the reset is what clears them
+            // rather than an empty file's backfill.
+            f.arrivals.insert("implement".into(), 3);
+            f.rounds.insert("review->implement".into(), 3);
         });
 
         let mux = FakeMux::new(vec![]);
@@ -10975,6 +10981,9 @@ mod tests {
             Some("implement"),
             "blocked_from survives, for a resume to know which step to hand the task back to"
         );
+        assert_eq!(task.rounds_at("implement"), 0, "leaving `blocked` resets");
+        assert_eq!(task.front.rounds.len(), 1, "{:?}", task.front.rounds);
+        assert_eq!(task.rounds_via("review", "implement"), 0);
     }
 
     /// A repo whose runs stop for nobody.

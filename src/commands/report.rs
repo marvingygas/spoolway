@@ -381,7 +381,8 @@ pub struct Routed {
 /// bounded can run entirely in `cargo test`.
 ///
 /// `task` is mutated in place: routing is not only a lookup, it is also
-/// where a cleared block gives a lane back its budgets (`resume_at`), where
+/// where leaving `blocked` starts every loop count again
+/// ([`Task::reset_loop_counts`]), where
 /// a spent loop logs why it gave up (`apply_loop_budget`), and where a gate
 /// stamps `paused_at`/`paused_by`. All of that belongs to the routing
 /// decision and moves with it — only the parts of [`report`] that need a
@@ -430,9 +431,10 @@ pub fn route(
         // to itself.
         //
         // Either way this goes through the same `resume_at` that
-        // `spoolway resume` performs by hand — which refunds nothing on
-        // either road now, so there is no longer a distinction to draw here.
-        // What the two share is the mark: the lane that originally hit the
+        // `spoolway resume` performs by hand, and both start every `loop:`
+        // count again before anything is checked (`resume_at` itself refunds
+        // nothing; leaving `blocked` is what does). What the two share is the
+        // mark: the lane that originally hit the
         // block — which had often already read the tree and done most of the
         // work — is continued rather than replaced by a cold one.
         //
@@ -523,17 +525,12 @@ pub fn route(
             }
             None => cleared_block_target(task, pipeline, true),
         };
-        // Checked before `resume_at` runs, not after: `target` may be spent —
-        // `loop:` now counts arrivals at the step it names, and an
-        // unblocker's pass is a lane's own move like any other, so it is
-        // refused the same way a fail into a spent step is. There is no
-        // third destination to reach for here, though — `apply_loop_budget`
-        // reads `current == blocked` and parks this on `paused` instead of
-        // `blocked`, the same exit `paused_from_blocked` below takes for
-        // every other outcome reported from `blocked` itself. A no-op on
-        // `target == paused`: nothing this pipeline declares is named
-        // `paused`, so `apply_loop_budget` finds no step to bound and hands
-        // the gate hold above straight back.
+        // Leaving `blocked` starts every `loop:` count again, ahead of the
+        // budget check below: a spent limit is what sent the task here, and
+        // the unblocker's pass is its answer, so the step it lands on must
+        // not be refused for the arrivals that got it stopped. Spoolway's own
+        // counters never park a task — only the unblocker's judgement does.
+        task.reset_loop_counts();
         let routed_target = apply_loop_budget(pipeline, task, current, target.clone(), unattended);
         if gated_at.is_none() && routed_target == target {
             resume_at(task, &target);
@@ -556,6 +553,11 @@ pub fn route(
         // work was done; clearing `blocked_from` here would leave that
         // resume nothing to read and no better fallback than the pipeline's
         // entry.
+        //
+        // Parking is still leaving `blocked`, so every `loop:` count starts
+        // again here too: the person's resume from `paused` must not walk the
+        // task straight back into the limit that sent it to `blocked`.
+        task.reset_loop_counts();
         let origin = task
             .front
             .blocked_from
@@ -687,8 +689,8 @@ pub fn route(
         && !pipeline.blocked_is_staffed(unattended)
     {
         let target = resume_target(task, pipeline);
-        // `resume_at` refunds nothing on any road now, so the budgets stay
-        // spent here exactly as they would anywhere else. A spent budget
+        // The task never sits on `blocked` in this configuration, so nothing
+        // resets the counts here and the budgets stay spent. A spent budget
         // never arrives here in the first place: `apply_loop_budget` skips a
         // limit whose exit is `blocked` in exactly this configuration, rather
         // than handing the task a wall it can only walk into again.
@@ -733,11 +735,10 @@ pub fn route(
 /// bound — `session_reuse_ctx` on the agent profile.
 ///
 /// The exit is `blocked`, almost always — a loop that will not converge is a
-/// request for a person, and a pipeline no longer gets to say otherwise. The
-/// one exception is a report already made *from* `blocked` itself: a spent
-/// step there has no third destination to reach for, so this parks on
-/// `paused` instead, the same exit every other outcome reported from
-/// `blocked` already takes — see [`route`]'s own `paused_from_blocked`.
+/// request for a person, and a pipeline no longer gets to say otherwise. A
+/// report made from `blocked` itself never arrives with a spent count: every
+/// road out of it resets them first (see [`Task::reset_loop_counts`]), so this
+/// never has to park a task on `paused` for a counter's sake.
 ///
 /// And an unattended run with nobody staffing `blocked` has nothing to park
 /// the task in front of: the run answers that exit itself, sending the task
@@ -746,8 +747,8 @@ pub fn route(
 /// nobody to clear it — the same loop, one lane more expensive per lap. The
 /// bound is skipped outright in that one configuration, so the task file does
 /// not fill with arrivals bought by a wall the run can only walk into.
-/// [`resume_at`] refunds nothing on any road any more, so this is the whole of
-/// the carve-out.
+/// [`resume_at`] refunds nothing itself, but a task leaving `blocked` has its
+/// counts reset before this is asked, so this is the whole of the carve-out.
 pub fn apply_loop_budget(
     pipeline: &Pipeline,
     task: &mut Task,
@@ -771,27 +772,12 @@ pub fn apply_loop_budget(
 
     // The move it is not making, counted the way a reader counts: the budget
     // is spent, so the one being refused is the next arrival after it.
-    let exit = if current == crate::pipeline::BLOCKED {
-        crate::pipeline::PAUSED
-    } else {
-        dest_step.loop_exit()
-    };
+    let exit = dest_step.loop_exit();
     task.log_status(&format!(
         "`{current}` may not send this to `{destination}` a {} time — `{destination}` has \
          `loop: {limit}`; carrying on to `{exit}`",
         ordinal(count + 1)
     ));
-    if current == crate::pipeline::BLOCKED {
-        // Mirrors `paused_from_blocked`: nothing here cleared the task, so
-        // `blocked_from` stays as it was, and `spoolway resume` still finds
-        // its way back to the step this task actually stopped on.
-        let origin = task
-            .front
-            .blocked_from
-            .clone()
-            .unwrap_or_else(|| resume_target(task, pipeline));
-        task.front.paused_at = Some(origin);
-    }
     exit.to_string()
 }
 
@@ -1359,12 +1345,14 @@ pub fn caught_at(task: &Task, gated: &str) -> Option<Caught> {
 /// transition, or one whose second lane starts cold on work the first had
 /// already finished.
 ///
-/// Refunds nothing, on any of the four roads. A `loop:` limit is now the
+/// Refunds nothing itself, on any of the four roads. A `loop:` limit is the
 /// step's own count of every arrival it has taken — the same `↻` the board
-/// draws — and there is no lap to hand back that would not also erase an
-/// arrival a lane genuinely made: past the limit, every further one is a
-/// person's call, made with open eyes rather than bought back by a resume that
-/// looks like it cost nothing.
+/// draws — and a resume from a step that is not `blocked` has no lap to hand
+/// back that would not also erase an arrival a lane genuinely made. The one
+/// reset there is belongs to leaving `blocked` ([`Task::reset_loop_counts`]),
+/// which the callers that leave it make before they get here: a spent limit's
+/// exit is `blocked`, and once the unblocker or a person has answered it the
+/// counts start again rather than walking the task into the same wall.
 ///
 /// The lane that stopped is marked to be *continued* rather than replaced,
 /// when the task is going back to where it actually stopped. Whatever was in
@@ -1634,6 +1622,12 @@ fn back_onto_its_step(
         .message
         .clone()
         .unwrap_or_else(|| "unblocked by hand".to_string());
+    // A person's resume of a task held on `blocked` is a road out of it like
+    // the unblocker's pass: the counts that stopped it start again, so the
+    // step it goes back to is not walked straight into a spent limit.
+    if task.front.stage == crate::pipeline::BLOCKED {
+        task.reset_loop_counts();
+    }
     resume_at(&mut task, &target);
     // Whatever gate it was waiting on, it is not waiting on it here any more.
     task.front.paused_at = None;
@@ -2821,14 +2815,11 @@ mod tests {
         assert_eq!(queued(&repo, "confirm-dialog").stage(), "implement");
     }
 
-    /// The other decision the plan draws: an unblocker's own `--pass --stage`
-    /// into a step that has already spent its `loop:` is refused exactly like
-    /// a fail would be, and — since this report is already at `blocked`, with
-    /// no third destination to reach for — it parks on `paused` rather than
-    /// on `blocked` a second time, the same exit every other outcome reported
-    /// from `blocked` already takes.
+    /// An unblocker's own `--pass --stage` into a step that had spent its
+    /// `loop:` lands there: leaving `blocked` starts every count again, so the
+    /// step is not refused for the arrivals that got the task stopped.
     #[test]
-    fn a_staged_pass_from_blocked_into_a_spent_step_parks_on_paused() {
+    fn a_staged_pass_from_blocked_into_a_spent_step_lands_there() {
         let (repo, _root_guard) = unattended_fixture("staged-pass-spent");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2875,24 +2866,11 @@ mod tests {
         .unwrap();
 
         let task = queued(&repo, "confirm-dialog");
-        assert_eq!(
-            task.stage(),
-            crate::pipeline::PAUSED,
-            "a spent step is not a destination this report can reach — it has no third \
-             place to send the task, so it parks"
-        );
+        assert_eq!(task.stage(), "implement");
         assert_eq!(
             task.rounds_at("implement"),
             1,
-            "the move was refused, so it banks no second arrival"
-        );
-        let log = task.section("## Status Log").unwrap_or_default();
-        assert!(
-            log.contains(
-                "`blocked` may not send this to `implement` a 2nd time — `implement` has \
-                 `loop: 1`; carrying on to `paused`"
-            ),
-            "{log}"
+            "the counts were reset on the way out, so this is the first arrival again"
         );
     }
 
@@ -3695,6 +3673,101 @@ mod tests {
         );
     }
 
+    /// A spent `loop:` escalates to `blocked`, and the lane staffing `blocked`
+    /// clearing the task is the end of that escalation: its pass lands on the
+    /// step it was cleared for, not on `paused`, and every arrival count
+    /// starts again from the one that pass makes.
+    #[test]
+    fn an_unblockers_pass_lands_on_the_step_whose_loop_was_spent() {
+        let (repo, _root_guard) = unattended_fixture("unblocker-pass-spent-loop");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "spent", &[]);
+
+        let yaml = "steps:\n  \
+                    - id: review\n    agent: pi\n    on_pass: e2e\n  \
+                    - id: e2e\n    agent: pi\n    loop: 2\n    on_pass: done\n  \
+                    - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+
+        let mut task = queued(&repo, "spent");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("review".into());
+        task.front.arrivals.insert("e2e".into(), 2);
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "spent", Outcome::Pass);
+
+        let task = queued(&repo, "spent");
+        assert_eq!(
+            task.stage(),
+            "e2e",
+            "the unblocker cleared this task; spoolway's own counter must not park it"
+        );
+        assert_eq!(
+            task.rounds_at("e2e"),
+            1,
+            "the count starts again at the arrival"
+        );
+    }
+
+    /// The unblocker's own `--block` parks the task on `paused`, but that is
+    /// still leaving `blocked`: every count starts again there, so the
+    /// person's resume goes back to `review` and the pass on to the
+    /// once-spent `e2e` lands instead of being refused.
+    #[test]
+    fn an_unblockers_block_resets_the_counts_before_a_person_resumes() {
+        let (repo, _root_guard) = unattended_fixture("unblocker-block-spent-loop");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "spent", &[]);
+
+        let yaml = "steps:\n  \
+                    - id: review\n    agent: pi\n    on_pass: e2e\n  \
+                    - id: e2e\n    agent: pi\n    loop: 2\n    on_pass: done\n  \
+                    - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+
+        let mut task = queued(&repo, "spent");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("review".into());
+        task.front.arrivals.insert("e2e".into(), 2);
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "spent", Outcome::Block);
+        let task = queued(&repo, "spent");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.rounds_at("e2e"), 0, "parking is leaving `blocked`");
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "spent".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(queued(&repo, "spent").stage(), "review");
+
+        report_outcome(&repo, &pipelines, "spent", Outcome::Pass);
+        assert_eq!(queued(&repo, "spent").stage(), "e2e");
+    }
+
     /// The same spent budget, on the shipped pipeline as it actually ships —
     /// staffing `blocked` with its own sample prompt. The exit is a real
     /// destination again, staffed by a lane rather than a person, and the
@@ -3807,15 +3880,13 @@ mod tests {
         );
     }
 
-    /// A pass reported from `blocked` is the run clearing its own block, and
-    /// it hands no budget back — `resume_at` refunds nothing on any road now.
-    /// A counter refunded every time the run stops itself is a counter that
-    /// never runs out, which is the unbounded loop `loop:` exists to close —
-    /// extending the licence is a person's call, and
-    /// `a_hand_resume_refunds_no_arrivals_so_the_next_failure_blocks_again` is
-    /// where that half is pinned.
+    /// A pass reported from `blocked` starts every step's `loop:` count again:
+    /// the spent limit is what sent the task there, and carrying on past it
+    /// into the same wall would only park it. The reset reaches the saved file
+    /// too — `Task::parse` backfills `arrivals` from `rounds`, so the old
+    /// counts must not come back on the re-read `queued` does.
     #[test]
-    fn a_pass_reported_from_blocked_leaves_the_arrivals_spent() {
+    fn a_pass_reported_from_blocked_resets_the_arrivals() {
         let (repo, _root_guard) = fixture("blocked-pass-keeps-arrivals");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -3842,9 +3913,11 @@ mod tests {
         );
         assert_eq!(
             task.rounds_at("implement"),
-            spent,
-            "the run cleared its own block, so the budget it spent stays spent"
+            0,
+            "leaving `blocked` starts every count again"
         );
+        // Only the one lap this move itself banked: the history before it is gone.
+        assert_eq!(task.front.rounds.len(), 1, "{:?}", task.front.rounds);
     }
 
     /// And the same for the other self-resume: an unattended run with nobody
@@ -4872,13 +4945,11 @@ mod tests {
         assert_eq!(task.front.paused_at, None);
     }
 
-    /// A loop that ran out of arrivals is not given anything back by resuming
-    /// at the step it stopped on — see `resume_at`'s own doc — so the counter
-    /// that stopped it is still spent, and the very next failure walks
-    /// straight back into the same wall. Past the limit, every further
-    /// arrival is a person's call, made one at a time.
+    /// A person's resume of a task held on `blocked` starts every count
+    /// again, like the unblocker's pass: the step it goes back to is not
+    /// walked straight into the limit that sent the task there.
     #[test]
-    fn a_hand_resume_refunds_no_arrivals_so_the_next_failure_blocks_again() {
+    fn a_hand_resume_from_blocked_resets_every_arrival_count() {
         let (repo, _root_guard) = fixture("unblock-keeps-arrivals-spent");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -4916,31 +4987,33 @@ mod tests {
         assert_eq!(task.stage(), "review");
         assert_eq!(
             task.rounds_at("implement"),
-            implement_limit(&pipelines),
-            "resuming by hand gives nothing back — `implement`'s own budget stays spent"
+            0,
+            "the spent budget starts again"
         );
         assert_eq!(
             task.rounds_at("refresh"),
-            1,
-            "and a step nobody looked at keeps what it has too"
+            0,
+            "and so does every other step's"
         );
+        // Only the one lap this move itself banked: the history before it is gone.
+        assert_eq!(task.front.rounds.len(), 1, "{:?}", task.front.rounds);
 
         report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
         assert_eq!(
             queued(&repo, "stuck").stage(),
-            crate::pipeline::BLOCKED,
-            "the very next failure walks straight back into the same, still-spent wall"
+            "implement",
+            "the next failure is the first arrival at `implement` again, not a refusal"
         );
     }
 
     /// The board's STEP column reads `Task::rounds_at`, which answers off
     /// `Frontmatter::arrivals` — a map of its own, banked beside `rounds` in
-    /// `Task::set_stage` and never touched by `resume_at`, which refunds
-    /// nothing at all now. A task that has genuinely stood at `implement`
-    /// twice — once from `queued`, once sent back by `review` — keeps
-    /// showing `↻2` after a person resumes it past a blocked `review`.
+    /// `Task::set_stage`. `resume_at` refunds nothing, so a resume from a step
+    /// that is not `blocked` keeps what a task has genuinely stood at: here a
+    /// task held on `paused` after standing at `implement` twice keeps showing
+    /// `↻2` when a person resumes it.
     #[test]
-    fn a_hand_resume_does_not_erase_a_steps_arrival_count() {
+    fn a_hand_resume_not_from_blocked_does_not_erase_a_steps_arrival_count() {
         let (repo, _root_guard) = fixture("unblock-keeps-arrivals");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -4964,7 +5037,7 @@ mod tests {
 
         let mut task = before;
         task.front.blocked_from = Some("review".into());
-        task.set_stage("blocked", None);
+        task.set_stage("paused", None);
         task.save().unwrap();
 
         resume(

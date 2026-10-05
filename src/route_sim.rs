@@ -244,8 +244,10 @@ mod tests {
 
     /// Property 2 and 3 together: a keyed count map that only ever grows —
     /// `rounds` and `arrivals` both, this walk's one check for each. `route`
-    /// never removes an entry of either, on any road — `resume_at` refunds
-    /// nothing now, on the hand resume or either self-resume — so the one
+    /// never removes an entry of either, except the reset a task makes on the
+    /// way out of `blocked` ([`Task::reset_loop_counts`]). The walk does take
+    /// that road, but it only ever enters `blocked` from a blank task whose
+    /// maps are empty, so the reset has nothing to lower — so the one
     /// shape a bug could produce here is a route that failed to bank a lap or
     /// an arrival it should have, or banked the wrong one. Either reads as a
     /// count that should have risen and did not, exactly what this compares
@@ -489,12 +491,10 @@ mod tests {
                 branch.front.rounds
             ));
         }
-        // `arrivals` has no exception at all — unlike `rounds`, nothing on
-        // any road, by-hand `resume` included, ever removes or lowers an
-        // entry in it (see `Frontmatter::arrivals`'s own doc). Checked the
-        // same way as `rounds` above, so a change that gave `arrivals` an
-        // exception of its own would fail this walk exactly as one would
-        // for `rounds`.
+        // `arrivals` is checked the same way as `rounds` above. The one thing
+        // that lowers either is the reset on leaving `blocked` (see
+        // `Frontmatter::arrivals`'s own doc), and this walk only reaches
+        // `blocked` from a blank task, so any other loss is a bug.
         if !rounds_only_rise(&arrivals_before, &branch.front.arrivals) {
             return Err(format!(
                 "`arrivals` lost a count on the last hop of {}: {arrivals_before:?} -> {:?}",
