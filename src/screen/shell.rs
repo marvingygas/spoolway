@@ -364,9 +364,7 @@ fn host(
                 Tab::Routines => {
                     crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
-                Tab::Jobs => {
-                    crate::commands::jobs_tab(repo, pipelines, cwd, &mut writer, input, out)?
-                }
+                Tab::Jobs => crate::commands::jobs_tab(repo, pipelines, &mut writer, input, out)?,
                 Tab::Eval => crate::eval::tab(repo, pipelines, &mut writer, input, out)?,
             }
         };

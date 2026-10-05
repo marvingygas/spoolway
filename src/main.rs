@@ -542,9 +542,10 @@ fn run() -> Result<()> {
 
                 Command::Jobs(JobsCommand::Contract) => commands::jobs_contract(&repo, cli.json),
                 Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
-                Command::Jobs(JobsCommand::Run(args)) => {
-                    let in_lane = std::env::var(commands::TASK_ENV).is_ok();
-                    commands::jobs_run(&repo, routing(&graph)?, &args.name, in_lane)
+                // Refused while parsing, so it never gets this far — see
+                // `JobsRunArgs`.
+                Command::Jobs(JobsCommand::Run(_)) => {
+                    unreachable!("`jobs run` is refused by its argument parser")
                 }
 
                 // Not built yet. Each of these is a slice of work in its own

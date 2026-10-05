@@ -181,7 +181,7 @@ pub enum Command {
     #[command(subcommand)]
     Group(GroupCommand),
 
-    /// Read and fire cron jobs — routines the dispatcher runs on a schedule.
+    /// Read cron jobs — routines the dispatcher runs on a schedule.
     /// Bare `spoolway`'s jobs tab is the screen a person writes a job from;
     /// this prints its usage with no subcommand.
     #[command(subcommand)]
@@ -771,6 +771,29 @@ impl clap::builder::TypedValueParser for Removed {
     }
 }
 
+/// [`Removed`] for a removed subcommand's arguments: the same refusal, left
+/// unformatted, so it prints as the one sentence alone. Formatted against the
+/// subcommand, as `Removed` is, it gains a `Usage:` line naming a command
+/// that no longer does anything.
+#[derive(Clone)]
+struct RemovedCommand(&'static str);
+
+impl clap::builder::TypedValueParser for RemovedCommand {
+    type Value = Infallible;
+
+    fn parse_ref(
+        &self,
+        _: &clap::Command,
+        _: Option<&clap::Arg>,
+        _: &std::ffi::OsStr,
+    ) -> Result<Infallible, clap::Error> {
+        Err(clap::Error::raw(
+            clap::error::ErrorKind::UnknownArgument,
+            format!("{}\n", self.0),
+        ))
+    }
+}
+
 /// Where `spoolway init` puts a project's setup — the answer to "Where
 /// should this project's setup live?".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -1301,15 +1324,30 @@ pub enum JobsCommand {
     /// rows for a script.
     List,
 
-    /// Fire one job now, ignoring its schedule — the way to test a job you
-    /// have just written. Its next scheduled firing is unaffected.
+    // A removed command, kept hidden so a script still calling it is told
+    // where running a routine now went. Left out, clap answers a bare
+    // "unrecognized subcommand", which names no way forward.
+    // `help_template` is the refusal too, so `jobs help run` and `help jobs
+    // run`, which clap answers before any value is parsed, print it rather
+    // than a usage for a command that no longer does anything.
+    #[command(hide = true, disable_help_flag = true, help_template = JOBS_RUN_GONE)]
     Run(JobsRunArgs),
 }
 
+/// What `spoolway jobs run` answers, however it is called.
+const JOBS_RUN_GONE: &str = "`spoolway jobs run` is gone. A job only fires on its schedule; to \
+    queue its routine now, open bare `spoolway`'s routines tab, tick the routine and press enter.";
+
+// `jobs run`'s arguments, whatever they are, all refused. [`RemovedCommand`]
+// is a value parser, so it only runs on a value: `default_value` hands it
+// one when nothing follows `run`, and `allow_hyphen_values` with the help
+// flag switched off hands it `--help` too. A `//` comment, not `///`: a doc
+// comment here becomes the command's about.
 #[derive(Debug, Args)]
 pub struct JobsRunArgs {
-    /// The job's name, as `spoolway jobs list` prints it.
-    pub name: String,
+    #[arg(hide = true, num_args = 0.., default_value = "", allow_hyphen_values = true,
+        value_parser = RemovedCommand(JOBS_RUN_GONE))]
+    pub removed: Vec<Infallible>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1881,6 +1919,65 @@ mod tests {
         for flag in ["--take-over", "--adopt", "--new-id"] {
             assert!(!help.contains(flag), "`init --help` shows {flag}");
         }
+    }
+
+    /// `jobs run` is refused with where running a routine now went, in any
+    /// shape a script may still call it — no name, a name, extra words, a
+    /// flag — and `jobs --help` no longer lists it.
+    #[test]
+    fn jobs_run_is_refused_with_the_routines_tab() {
+        for argv in [
+            &[][..],
+            &["nightly-audit"][..],
+            &["nightly-audit", "extra"][..],
+            &["--help"][..],
+            &["--json", "nightly-audit"][..],
+        ] {
+            let mut full = vec!["spoolway", "jobs", "run"];
+            full.extend_from_slice(argv);
+            let err = Cli::try_parse_from(&full).expect_err("`jobs run` is refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{argv:?}"
+            );
+            let text = err.to_string();
+            for says in [
+                "`spoolway jobs run` is gone",
+                "A job only fires on its schedule",
+                "routines tab",
+            ] {
+                assert!(
+                    text.contains(says),
+                    "{argv:?} should say {says:?}, said:\n{text}"
+                );
+            }
+            assert!(!text.contains("Usage:"), "{argv:?} prints a usage:\n{text}");
+        }
+
+        // clap's help subcommand answers before any value is parsed, so it
+        // prints the refusal as the help itself.
+        for argv in [&["jobs", "help", "run"][..], &["help", "jobs", "run"][..]] {
+            let mut full = vec!["spoolway"];
+            full.extend_from_slice(argv);
+            let err = Cli::try_parse_from(&full).expect_err("help prints and exits");
+            let text = err.to_string();
+            assert_eq!(text.trim_end(), JOBS_RUN_GONE, "{argv:?}");
+        }
+
+        use clap::CommandFactory;
+        let help = Cli::command()
+            .find_subcommand_mut("jobs")
+            .expect("jobs exists")
+            .render_long_help()
+            .to_string();
+        let listed: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.strip_prefix("  ")?.split_whitespace().next())
+            .collect();
+        assert!(listed.contains(&"contract"), "{help}");
+        assert!(listed.contains(&"list"), "{help}");
+        assert!(!listed.contains(&"run"), "`jobs --help` lists run:\n{help}");
     }
 
     #[test]

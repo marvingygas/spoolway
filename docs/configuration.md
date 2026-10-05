@@ -375,12 +375,11 @@ comment line, one per tool. `spoolway doctor` reads these lines and checks each 
 `--version` output against the floor. Only `<tool> >= <version>` is understood; any other
 shape in the line is reported as unreadable rather than interpreted.
 
-Every submit route — the queue screen's `enter`, the jobs screen's `r`, `spoolway queue add
---from`, `spoolway jobs run` and a job the dispatcher fires — checks the same lines before it
-opens any ticket. A tool below its floor, or missing from PATH, gates the submission. On a
-screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written onto
-every task, `esc` backs out. From the CLI or the dispatcher, where there is no key to wait on,
-it prints the same notice and proceeds the same way. See
+Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a job the
+dispatcher fires — checks the same lines before it opens any ticket. A tool below its floor,
+or missing from PATH, gates the submission. On a screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written
+onto every task, `esc` backs out. From the CLI or the dispatcher, where there is no key to wait
+on, it prints the same notice and proceeds the same way. See
 [`spoolway queue`](cli-reference.md#spoolway-queue).
 
 Both shipped scripts run under `bash`, with `set -eE` and an ERR trap. A command that fails

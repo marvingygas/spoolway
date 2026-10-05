@@ -32,7 +32,6 @@ use toml_edit::{DocumentMut, Item, Table};
 use crate::cron::Cron;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-use crate::task::Task;
 
 /// Machine-home file recording when each job last fired, beside `lanes.json`
 /// and `usage.jsonl`.
@@ -511,19 +510,6 @@ pub fn fire_due(
     if dirty && let Err(err) = write_state(repo, &state) {
         problems.push(format!("jobs: could not write {}: {err:#}", STATE_FILE));
     }
-}
-
-/// Record a firing that `spoolway jobs run` drove by hand, so LAST updates
-/// and the overlap guard sees this run. The schedule is untouched.
-pub fn record_manual_fire(repo: &Repo, name: &str, tasks: &[Task]) -> Result<()> {
-    let mut state = read_state(repo);
-    let now = Local::now();
-    let record = state.entry(name.to_string()).or_default();
-    record.fired_minute = Some(now.naive_local().format(MINUTE_FMT).to_string());
-    record.fired_at = Some(now.timestamp());
-    record.queued_ids = tasks.iter().map(|task| task.id().to_string()).collect();
-    record.skipped_minute = None;
-    write_state(repo, &state)
 }
 
 /// One job's last-fired time, for `jobs list`'s LAST column.
