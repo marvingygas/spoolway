@@ -162,6 +162,8 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 ```
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- A task leaving `blocked` starts every step's count again from zero. This holds for every
+  outcome the unblocker reports and for a person's `spoolway resume`.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
   limit.
 - The map form, keyed by the step a failure is sent back from, is refused at parse. The

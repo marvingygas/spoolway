@@ -640,11 +640,15 @@ pub struct UnattendedConfig {
     ///
     /// Off, a task that cannot go on parks on `blocked`, its pane is kept, you
     /// are told, and `spoolway resume` resumes it. On, there is nobody to park
-    /// in front of: every road to `blocked` instead resumes the lane that hit
+    /// in front of. Where a lane staffs `blocked` — the normal case, since
+    /// every loaded pipeline gets one — the task goes there and the unblocker
+    /// answers it; leaving `blocked` by any road starts every step's `loop:`
+    /// count again, so a spent limit never stops the run. Only where nothing
+    /// staffs `blocked` does every road to it instead resume the lane that hit
     /// it — the same session, the blocker in its prompt, continued rather than
     /// replaced — which is exactly what `spoolway resume` does by hand, minus
-    /// the person: nothing this resumes hands any budget back, on this road or
-    /// that one. Nothing waits, and no task ever sits on `blocked`.
+    /// the person. A task never sits on `blocked` in that case, so no count is
+    /// reset and nothing this resumes hands any budget back.
     ///
     /// Two things stop meaning anything with it on, because both exist only to
     /// hand a decision to somebody who is not there: a `loop` whose exit

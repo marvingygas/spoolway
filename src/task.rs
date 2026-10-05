@@ -580,7 +580,8 @@ pub struct Frontmatter {
     /// lap of the loop per move, whatever a lane at either end went on to do.
     /// Kept as history now that a step's `loop:` reads [`Frontmatter::
     /// arrivals`] instead: nothing routes on a single route's own count any
-    /// more. Not dead weight, though — [`Task::parse`]'s own backfill still
+    /// more. [`Task::reset_loop_counts`] wipes it, with `arrivals`, whenever a
+    /// task leaves `blocked`. Not dead weight, though — [`Task::parse`]'s own backfill still
     /// sums this map, in production, to give a task file written before
     /// `arrivals:` existed its own arrival count the first time it is read
     /// under this shipped version; [`Task::rounds_via`] is the one *test*
@@ -602,11 +603,11 @@ pub struct Frontmatter {
     /// [`Task::rounds_at`] used to compute: a step's `loop:` now reads this
     /// map directly, as the whole of its own budget, and `rounds` is kept
     /// only as per-route history — see its own doc. Keeping the two apart
-    /// survives a change to either: `resume_at` refunds nothing at all now,
-    /// but even if some later road ever removed a `rounds` entry again, this
-    /// map would still answer for a step actually visited, never becoming
-    /// false again. Banked separately, in [`Task::set_stage`], and nothing
-    /// ever removes or lowers an entry in it.
+    /// survives a change to either: even if some later road removed a
+    /// `rounds` entry on its own, this map would still answer for a step
+    /// actually visited. Banked separately, in [`Task::set_stage`], and only
+    /// [`Task::reset_loop_counts`] — a task leaving `blocked` — ever removes
+    /// or lowers an entry in it.
     ///
     /// Empty on a task file written before this field existed, which
     /// [`Task::parse`] backfills from `rounds` the moment such a file is
@@ -743,6 +744,18 @@ impl Task {
     /// rounds_via`]'s test-only answer about one route into it.
     pub fn rounds_at(&self, step: &str) -> u32 {
         self.front.arrivals.get(step).copied().unwrap_or(0)
+    }
+
+    /// Start every step's `loop:` count again from zero.
+    ///
+    /// Both maps are emptied, not just [`Frontmatter::arrivals`]: [`Task::parse`]
+    /// backfills an empty `arrivals` from `rounds`, so a reset that left
+    /// `rounds` behind would bring the old counts back the next time the file
+    /// is read. `steps` (launch counts) and `launch_failures` are a different
+    /// ledger and stay.
+    pub fn reset_loop_counts(&mut self) {
+        self.front.rounds.clear();
+        self.front.arrivals.clear();
     }
 
     /// Bank one launch at `to`, arriving from `from` — an agent lane's own
