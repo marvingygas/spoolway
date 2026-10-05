@@ -452,11 +452,7 @@ mode](concepts.md#home-mode). If somebody already has the task's branch checked 
 borrows that checkout and cleanup leaves it alone. See
 [Whose worktree](pipelines.md#whose-worktree).
 
-When the worktree root holds a `Cargo.toml`, its `target/debug` is a symlink into
-`.cargo-target/debug`, a directory beside the worktree root that every lane shares.
-`target/release` stays a real, private directory in each worktree. Tearing a worktree down
-removes the symlink, not the shared directory. A worktree with no root `Cargo.toml` gets no
-`target/` and no shared `.cargo-target` at all.
+Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
 When a task reaches `done`:
 
