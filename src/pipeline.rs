@@ -1083,7 +1083,7 @@ impl Pipeline {
 }
 
 // ---------------------------------------------------------------------------
-// The three retired shapes' own messages, each written once: `validate` and
+// The four retired shapes' own messages, each written once: `validate` and
 // `refuse_retired_step_keys` bail on the first with these, and
 // `Pipeline::retired_shape_problems` collects every one — the same wording
 // either way, since `scripts/e2e/suites/upgrade.sh` greps these exact
@@ -1109,6 +1109,12 @@ fn loop_map_message(step_id: &str, by_route: &BTreeMap<String, u32>) -> String {
         "step `{step_id}` declares `loop:` as a map — a limit now counts arrivals at the step \
          that carries it. Delete it here and {give}."
     )
+}
+
+/// A step's `loop: 0`, which 0.7 ran as no limit. The fix that keeps that
+/// meaning is deleting the line, not `loop: 1`, so the message says so.
+fn loop_zero_message(step_id: &str) -> String {
+    format!("step `{step_id}` has loop: 0 — a loop is 1 or more; delete `loop:` for no limit")
 }
 
 /// A step still declaring the retired `on_loop_max:`.
@@ -1278,7 +1284,7 @@ impl Pipeline {
         // forever.
         for step in &self.steps {
             if step.r#loop == Loop::Bare(0) {
-                bail!("step `{}` has loop: 0 — a loop is 1 or more", step.id);
+                bail!(loop_zero_message(&step.id));
             }
         }
 
@@ -1609,15 +1615,18 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Every occurrence of the three retired step shapes this pipeline's own
-    /// steps carry — `on_loop_max:`, an `on_fail:` naming its own step, and
-    /// `loop:` written as the old per-route map — each named by its step,
+    /// Every occurrence of the four retired step shapes this pipeline's own
+    /// steps carry — `on_loop_max:`, an `on_fail:` naming its own step,
+    /// `loop:` written as the old per-route map, and `loop: 0`, which 0.7 ran
+    /// as no limit — each named by its step,
     /// collected without stopping at the first the way [`Self::validate`]
     /// must.
     ///
     /// For `pipeline check` and `doctor`'s `pipelines load` row, which want
-    /// the whole list in one pass rather than one refusal per run. Scoped to
-    /// exactly these three shapes rather than
+    /// the whole list in one pass rather than one refusal per run, and for
+    /// `crate::sync`, which refuses a file carrying one rather than report an
+    /// upgrade done over a pipeline that no longer loads. Scoped to
+    /// exactly these four shapes rather than
     /// every way `validate` can refuse a pipeline: the rest of `validate`'s
     /// checks stay bail-at-the-first, which is what every other caller
     /// wants from a pipeline that genuinely cannot run.
@@ -1637,6 +1646,9 @@ impl Pipeline {
             }
             if let Loop::Map(by_route) = &step.r#loop {
                 problems.push(loop_map_message(&step.id, by_route));
+            }
+            if step.r#loop == Loop::Bare(0) {
+                problems.push(loop_zero_message(&step.id));
             }
         }
         problems
@@ -2117,9 +2129,9 @@ impl Pipelines {
     ///
     /// Empty only when nothing here found anything to say at all — no
     /// pipeline directory, or every file both parsed and carried none of the
-    /// three shapes — which means the original load failed for a reason
+    /// four shapes — which means the original load failed for a reason
     /// outside this function's own scope (a `validate` refusal none of the
-    /// three shapes explains), and a caller falls back to that error, the
+    /// four shapes explains), and a caller falls back to that error, the
     /// same one it always printed.
     pub fn refusals(root: &Path) -> Vec<String> {
         let dir = Pipelines::dir_in(root);
@@ -2729,7 +2741,8 @@ mod tests {
     }
 
     /// `loop: 0` is refused rather than read as no limit, and the message
-    /// says a loop is 1 or more.
+    /// says a loop is 1 or more and names the edit that keeps 0.7's meaning:
+    /// deleting the line, since `loop: 1` would block after one arrival.
     #[test]
     fn a_loop_of_zero_is_refused() {
         let err = Pipeline::parse(
@@ -2743,6 +2756,7 @@ mod tests {
         .to_string();
         assert!(err.contains("step `a`"), "{err}");
         assert!(err.contains("a loop is 1 or more"), "{err}");
+        assert!(err.contains("delete `loop:` for no limit"), "{err}");
     }
 
     /// A step no route from the first step reaches is a warning, never a
@@ -4024,7 +4038,8 @@ mod tests {
         let raw = "steps:\n  \
                     - id: a\n    agent: pi\n    on_pass: b\n    on_fail: a\n  \
                     - id: b\n    agent: pi\n    loop:\n      a: 1\n    on_pass: z\n    on_fail: a\n  \
-                    - id: z\n    end: true\n    on_loop_max: blocked\n";
+                    - id: z\n    end: true\n    on_loop_max: blocked\n  \
+                    - id: w\n    agent: pi\n    loop: 0\n    on_pass: done\n";
         let pipeline: Pipeline = serde_norway::from_str(raw).unwrap();
         let problems = pipeline.retired_shape_problems();
         assert!(
@@ -4045,7 +4060,13 @@ mod tests {
                 .any(|p| p.contains("step `z`") && p.contains("on_loop_max:")),
             "{problems:?}"
         );
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("step `w`") && p.contains("delete `loop:` for no limit")),
+            "{problems:?}"
+        );
+        assert_eq!(problems.len(), 4, "{problems:?}");
     }
 
     /// `Pipelines::refusals` across a whole directory, not one pipeline: two

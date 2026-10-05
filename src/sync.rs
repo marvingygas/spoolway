@@ -1567,10 +1567,15 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 ///   `config.toml`'s bargain, not a skeleton's: there is nothing in here for a
 ///   project to have meant, because every sentence is a claim about what the
 ///   binary does. A hand-edited one is a claim that has stopped being true.
-/// - A file with no markers is left completely alone and not reported. Writing
+/// - A file with no markers is never written, and is reported only by the
+///   check below. Writing
 ///   a block into a pipeline somebody wrote themselves would be this command
 ///   helping, which is the one thing it must never do. Pasting the two markers
 ///   in is how a pipeline opts in.
+///
+/// One check reads every file, markers or not: a step shape this release
+/// refuses to load — see [`crate::pipeline::Pipeline::retired_shape_problems`]
+/// — refuses the file, naming the step and the edit. Nothing is written to it.
 fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
@@ -1628,6 +1633,22 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
                 continue;
             }
         };
+
+        // A shape this release stopped loading — `loop: 0` is the one an
+        // earlier release still ran — is refused by name, fenced or not, and
+        // the file is left as it is. `sync` never edits a step, but without
+        // this it would report the upgrade done and stamp the project current
+        // over a pipeline the next command refuses to load.
+        if let Ok(pipeline) = serde_norway::from_str::<crate::pipeline::Pipeline>(&on_disk) {
+            let problems = pipeline.retired_shape_problems();
+            if !problems.is_empty() {
+                outcomes.push(Outcome::blocked(
+                    &shown,
+                    format!("will not load: {}", problems.join("; ")),
+                ));
+                continue;
+            }
+        }
 
         let region = crate::pipeline::KEY_BLOCK;
         if region.read(&on_disk).is_none() {
@@ -3184,6 +3205,49 @@ mod tests {
             "{:?}",
             outcome_lines(&outcomes)
         );
+    }
+
+    /// `loop: 0`, which 0.7 ran as no limit, no longer loads. A sync refuses
+    /// the file by name and step, says the edit that keeps its meaning, and
+    /// writes nothing to it — not even a stale key reference — rather than
+    /// report an upgrade done over a pipeline the next command refuses.
+    #[test]
+    fn a_pipeline_with_loop_zero_is_refused_naming_the_edit_and_left_as_it_is() {
+        let (repo, _root_guard) = fixture("pipeline-loop-zero");
+        let stale = format!(
+            "{}\n# Top level\n#   template    What this used to say.\n{}",
+            crate::assets::PIPELINE_KEYS_BEGIN,
+            crate::assets::PIPELINE_KEYS_END
+        );
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.yml");
+        let before = format!(
+            "{stale}\n\nsteps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: document\n  \
+             - id: document\n    agent: pi\n    loop: 0\n    on_pass: done\n"
+        );
+        std::fs::write(&path, &before).unwrap();
+        // An unfenced file of the project's own is read for it too.
+        let mine = dir.join("mine.yml");
+        std::fs::write(&mine, "steps:\n  - id: work\n    loop: 0\n    end: true\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 2, "{:?}", outcome_lines(&outcomes));
+        let (shown, why) = refused[0];
+        assert!(shown.ends_with("default.yml"), "{shown}");
+        assert_eq!(
+            why,
+            "will not load: step `document` has loop: 0 — a loop is 1 or more; delete `loop:` \
+             for no limit"
+        );
+        assert!(refused[1].0.ends_with("mine.yml"), "{refused:?}");
+        let (wrote, _) = dedup_paths(&outcomes);
+        assert!(wrote.is_empty(), "{wrote:?}");
     }
 
     /// Half a fence is the one shape worth a refusal: the lines under a start
