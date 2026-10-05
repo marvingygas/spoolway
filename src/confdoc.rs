@@ -95,9 +95,13 @@ pub fn remove(text: &str, parts: &[&str]) -> Result<String> {
     let mut doc: DocumentMut = text.parse().context("this file is not valid TOML")?;
     let (leaf, path) = parts.split_last().context("a config key cannot be empty")?;
 
-    let mut table = doc.as_table_mut();
+    // Table-like, not `as_table_mut`: that is `None` for an inline table
+    // (`issue_tracking = { …, on_fail = "" }`), so a retired key written
+    // there was never removed and the file kept failing to load. Removing
+    // from an inline table keeps it inline.
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
     for part in path {
-        let Some(next) = table.get_mut(part).and_then(Item::as_table_mut) else {
+        let Some(next) = table.get_mut(part).and_then(Item::as_table_like_mut) else {
             return Ok(doc.to_string());
         };
         table = next;
@@ -167,12 +171,36 @@ pub fn compare(before: &str, after: &str) -> Result<Refresh> {
     Ok(refresh)
 }
 
+/// [`leaves_of_doc`] for the inline tables met on the way.
+fn leaves_of_inline(
+    table: &toml_edit::InlineTable,
+    path: &mut Vec<String>,
+    out: &mut Vec<Vec<String>>,
+) {
+    for (key, value) in table.iter() {
+        path.push(key.to_string());
+        match value {
+            toml_edit::Value::InlineTable(child) if !child.is_empty() => {
+                leaves_of_inline(child, path, out);
+            }
+            _ => out.push(path.clone()),
+        }
+        path.pop();
+    }
+}
+
 /// The same walk over the document, so the two lists compare directly.
 fn leaves_of_doc(table: &Table, path: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
     for (key, item) in table.iter() {
         path.push(key.to_string());
         match item {
             Item::Table(child) if !child.is_empty() => leaves_of_doc(child, path, out),
+            // An inline table is walked like a plain one: left as a leaf, a
+            // retired key inside it would never show up as dropped, and
+            // `sync` would remove it without saying so.
+            Item::Value(toml_edit::Value::InlineTable(child)) if !child.is_empty() => {
+                leaves_of_inline(child, path, out);
+            }
             _ => out.push(path.clone()),
         }
         path.pop();
@@ -246,6 +274,19 @@ fn scalar_item(value: &Value) -> Result<toml_edit::Value> {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    /// A key inside an inline table is removed from inside it, and the table
+    /// stays inline, with everything beside the key untouched.
+    #[test]
+    fn removing_a_key_from_an_inline_table_keeps_the_table_inline() {
+        let text =
+            "a = 1\nissue_tracking = { hook = \"\", on_fail = \"pause\", key_in_names = false }\n";
+        let out = remove(text, &["issue_tracking", "on_fail"]).unwrap();
+        assert_eq!(
+            out,
+            "a = 1\nissue_tracking = { hook = \"\", key_in_names = false }\n"
+        );
+    }
 
     /// Setting a key back to the value whose spelling is its absence takes the
     /// line out, comment and all, and leaves the rest of the document alone.

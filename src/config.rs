@@ -1789,7 +1789,13 @@ impl Config {
     /// that changes what any of them is *set to* is a bug, and the file it
     /// would have produced is worth more unwritten than written.
     pub(crate) fn agrees_with(&self, text: &str) -> Result<()> {
-        let mut reparsed: Config = toml::from_str(text).context("it no longer parses")?;
+        // Stripped as a load strips it: a file still naming a retired key
+        // loads with a note, so an edit that leaves that key in place must
+        // not be refused for it. Only `spoolway sync` removes the key. The
+        // notes are dropped — the load that produced `self` already printed
+        // them.
+        let (text, _notices) = strip_hard_retired_keys(text, &Config::path_in(Path::new("")))?;
+        let mut reparsed: Config = toml::from_str(&text).context("it no longer parses")?;
         reparsed.migrate();
 
         let before = toml::Value::try_from(self).context("serialising config")?;
@@ -2815,6 +2821,57 @@ mod tests {
 
         let notices = Config::load_with_notices(&dir, None).unwrap().1;
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    /// A config still holding a key 0.7 retired loads with a note, so saving
+    /// one other key into it must work as well: the one key is written, the
+    /// retired key stays exactly where it was, and nothing else in the file
+    /// moves. Only `spoolway sync` removes the retired key.
+    #[test]
+    fn saving_one_key_into_a_config_with_a_retired_key_writes_only_that_key() {
+        let dir = crate::scratch::root("config-save-key-past-retired");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        let before = "[issue_tracking]\nhook = \"\"\non_fail = \"\"\nkey_in_names = false\n";
+        std::fs::write(Config::path_in(&dir), before).unwrap();
+
+        let config = Config::load(&dir).unwrap();
+        let key = "dispatch.lane_quiet";
+        let config = crate::confkv::set(&config, key, "25m").unwrap();
+        config
+            .save_key(&dir, key)
+            .expect("saving one key must not be refused over a key that loads with a note");
+
+        let after = std::fs::read_to_string(Config::path_in(&dir)).unwrap();
+        assert!(
+            after.contains("on_fail = \"\""),
+            "retired key was removed:\n{after}"
+        );
+        assert!(after.contains("lane_quiet"), "{after}");
+        assert!(
+            after.starts_with(before),
+            "bytes above the edit moved:\n{after}"
+        );
+    }
+
+    /// A retired key written inside an inline table loads the same way as one
+    /// in a plain table: the load succeeds and names the key in its note.
+    #[test]
+    fn a_retired_key_inside_an_inline_table_loads_with_the_same_note() {
+        let dir = crate::scratch::root("config-retired-key-inline-table");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "issue_tracking = { hook = \"\", project_key = \"\", on_fail = \"pause\", \
+             key_in_names = false }\n",
+        )
+        .unwrap();
+
+        let notices = Config::load_with_notices(&dir, None)
+            .expect("an inline table naming a retired key must load")
+            .1;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("issue_tracking.on_fail"), "{notices:?}");
+        assert!(notices[0].contains("spoolway sync"), "{notices:?}");
     }
 
     /// A whole `[pipeline_gen]` table, all six keys it ever carried — the

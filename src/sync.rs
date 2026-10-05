@@ -2250,6 +2250,46 @@ mod tests {
         );
     }
 
+    /// The same two retired keys written inside inline tables: `sync` drops
+    /// both and prints the same migrated notes a plain table earns. `sync` rewrites the whole file from the struct, so the
+    /// tables come back in the shape the binary writes; the inline-preserving
+    /// removal is what the load path uses, tested in `confdoc`.
+    #[test]
+    fn retired_keys_inside_inline_tables_are_dropped_with_the_same_notes() {
+        let (repo, _root_guard) = fixture("config-retired-inline-tables");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "dispatch = { lane_quiet = \"25m\", worktree_root = \"/old/worktrees\" }\n\
+             issue_tracking = { hook = \"\", project_key = \"\", on_fail = \"pause\", \
+             key_in_names = false }\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("worktree_root"), "{after}");
+        assert!(!after.contains("on_fail"), "{after}");
+        assert!(after.contains("lane_quiet"), "{after}");
+
+        let notes = migration_notes(&outcomes);
+        let shown = notes.values().flatten().collect::<Vec<_>>();
+        assert!(
+            shown
+                .iter()
+                .any(|(report, _)| report.contains("issue_tracking.on_fail removed")),
+            "{shown:?}"
+        );
+        assert!(
+            shown.iter().any(|(report, _)| {
+                report.contains("dispatch.worktree_root removed")
+                    && report.contains("/old/worktrees")
+            }),
+            "{shown:?}"
+        );
+    }
+
     /// A queued task still has its own worktree cut under the old path —
     /// `sync` must name that task rather than call the old directory
     /// anybody's to remove, the same promise `doctor`'s own
