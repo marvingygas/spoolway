@@ -977,7 +977,7 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
     // reported, and nothing else is derived: there is no loaded set left to
     // check a step, a skip, or a prompt against, and the embedded samples
     // are release-time proof, not this project's own. A project carrying
-    // one of the three retired step shapes — refused by name, never
+    // one of the four retired step shapes — refused by name, never
     // rewritten for it — hears about every occurrence at once, across
     // every pipeline file, rather than the one `Pipelines::load` itself
     // stopped at — see `crate::pipeline::Pipelines::refusals`.
@@ -3625,7 +3625,7 @@ mod tests {
         );
     }
 
-    /// A project carrying one of the three retired step shapes — refused by
+    /// A project carrying one of the four retired step shapes — refused by
     /// name, never rewritten for it — hears about every occurrence at once
     /// — across every pipeline file — rather than only the first one
     /// `Pipelines::load` itself stopped at.

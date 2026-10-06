@@ -165,7 +165,9 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
-  limit.
+  limit, so delete the line to keep the meaning 0.7 gave `loop: 0`. `loop: 1` is not the same:
+  it blocks the task on its second arrival. `spoolway sync` refuses a file carrying it, and
+  writes nothing to that file until it is fixed.
 - The map form, keyed by the step a failure is sent back from, is refused at parse. The
   refusal names the step that should carry the limit instead: delete the map and give that
   step a bare `loop:` of its own.

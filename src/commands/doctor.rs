@@ -3619,7 +3619,7 @@ mod tests {
         assert!(!message.contains("stale error"), "{message}");
     }
 
-    /// A load failure outside the three retired shapes — nothing for
+    /// A load failure outside the four retired shapes — nothing for
     /// `Pipelines::refusals` to say — falls back to the original error
     /// unchanged, exactly what `doctor` always printed here.
     #[test]
