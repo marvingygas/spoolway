@@ -48,7 +48,7 @@ as JSON.
 | `group` | you | The group of work this task belongs to. Tasks of one group run in one shared tab. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
 | `depends_on` | you | Task ids that must reach `done` before this one starts. See [Expressing order](#expressing-order). |
-| `gate_at` | you | A step id. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
+| `gate_at` | you | A step id. The task pauses after that step reports, or after a command step exits, once, whatever it reports or exits with. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | `spoolway-tasks`, or you | The branch the group lands in. `spoolway-tasks` writes it from `spoolway task contract`'s own `base`, the branch your checkout has out. Otherwise required, here or with `spoolway queue add --base`. Must exist locally or on `origin`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
@@ -279,7 +279,8 @@ step's [`loop:`](pipelines.md#loops) count again from zero.
 ### Paused is the other one, and it is not a block
 
 A task that passes a step with [`gate: true`](pipelines.md#gates) stops on `paused`. So does a
-task whose own `gate_at:` names the step it is reporting from, whatever that step reports.
+task whose own `gate_at:` names the step it is reporting from, whatever that step reports. The
+same holds for a command step: `gate: true` holds a passing exit, and `gate_at:` holds any exit.
 Nothing went wrong. You decide whether it goes on.
 
 ```
@@ -291,6 +292,9 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 `blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT
 column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
 not a plain pass.
+
+A `gate_at` that caught a command step's failing exit sends a plain resume down that step's
+`on_fail`, the route the exit code chose.
 
 A failing [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events)
 also pauses the task, on `queued`, on `started` or on `done`. `spoolway resume` forgets that

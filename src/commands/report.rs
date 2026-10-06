@@ -1156,7 +1156,8 @@ impl Gate {
 }
 
 /// Whether `step` holds this task for `outcome`/`destination` — the two
-/// roads [`report`] itself parks a pass in front of a person for, carrying
+/// roads [`report`] parks a pass in front of a person for, and the
+/// dispatcher parks a command step's exit for, carrying
 /// both clauses a hand copy of this once dropped: a step's own `gate: true`
 /// only ever catches a pass whose destination is not already `blocked`,
 /// where a task's own `gate_at` catches whatever is reported. `Schedule`
@@ -1316,8 +1317,9 @@ pub enum Caught {
     /// ordinary gate always has.
     Pass,
     /// A fail a schedule caught before it could go round the loop the
-    /// pipeline drew. Resuming still takes `on_pass`: taking that verdict is
-    /// why the pause was scheduled.
+    /// pipeline drew. Resuming an agent step's still takes `on_pass`: taking
+    /// that verdict is why the pause was scheduled. A command step's takes
+    /// its `on_fail`, the route its exit code chose.
     Fail,
     /// A destination that was already `blocked` before the gate stepped in —
     /// a `--block`, a step's own `on_fail: blocked`, or a spent loop's own
@@ -1488,6 +1490,15 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
             // own exit — a plain `resume` sends exactly where it would have
             // landed unheld.
             crate::pipeline::BLOCKED.to_string()
+        } else if caught == Some(Caught::Fail) && step.kind() == crate::pipeline::StepKind::Command
+        {
+            // A command step never reported: its exit code chose a route and
+            // the dispatcher held the task before taking it, so letting it
+            // past means taking that route. Sending a held failure down
+            // `on_pass` would skip a red test or suite.
+            step.destination(Outcome::Fail)
+                .unwrap_or(crate::pipeline::BLOCKED)
+                .to_string()
         } else {
             step.destination(Outcome::Pass)
                 .unwrap_or(crate::pipeline::BLOCKED)

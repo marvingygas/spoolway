@@ -396,7 +396,8 @@ The queue screen's `t` trial picker writes it, so a trial arm never opens a pull
 `gate: true` on a step holds its pass for a person. Do not name a step `gate`. A task's own `gate_at:` field gates one step for that task alone. See [Tasks](tasks.md).
 
 The lane runs and reports as usual. On its pass the task lands on `paused` and its pane stays
-open.
+open. A command step has no lane to report: `gate: true` holds its passing exit the same way,
+and a task's `gate_at:` holds a command step's exit whatever it was.
 
 ```
 spoolway resume <task>                            # let it past: the on_pass route
@@ -404,7 +405,8 @@ spoolway resume <task> --stage implement -m "why"  # send it back to a step you 
 ```
 
 - `on_pass` is the only road a plain resume ever takes past a gate, whatever `on_fail` a step
-  declares or does not.
+  declares or does not. The one exception is a command step whose failing exit a task's
+  `gate_at:` held: resuming that takes the step's `on_fail`, the route the exit code chose.
 - `--stage <step>` reroutes the task to that step, whatever the gate would otherwise have done.
 - A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about
   `spoolway report --fail` at the step itself, not about resuming it. `spoolway pipeline check`

@@ -210,6 +210,9 @@ pass, fail, block, or a loop-max bound for `blocked`. A `gate_at` is spent when 
 task pauses once, and a later report from the same step runs straight through unless something
 writes a fresh `gate_at`. `spoolway resume` sends a caught pass or fail on by `on_pass`, and
 sends a caught block or loop-max to `blocked`, the same place it would have reached unheld.
+A command step has no lane to report, so its exit is the report: `gate: true` holds a passing
+exit, and `gate_at` holds any exit. `spoolway resume` sends a held failing command exit down the
+step's `on_fail`.
 `spoolway resume <task> --stage <step>` sends it to a step you name instead.
 
 A gate holds in unattended runs too. Use it for a step no pull request shows first, such as a

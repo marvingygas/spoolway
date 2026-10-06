@@ -1379,7 +1379,7 @@ impl<'a> Dispatcher<'a> {
                             .collect(),
                         false => Vec::new(),
                     };
-                    let Some(destination) =
+                    let Some((destination, outcome)) =
                         self.run_command(&mut tasks[index], &step, &serial_peers, report)?
                     else {
                         continue;
@@ -1440,6 +1440,45 @@ impl<'a> Dispatcher<'a> {
                         crate::commands::set_blocked_from(&mut tasks[index], &step.id);
                     }
 
+                    // A gate holds a command step's exit the way it holds an
+                    // agent's report: a task's own `gate_at` (the board's `s`)
+                    // catches either outcome, and the step's own `gate: true`
+                    // a pass. Only `report` ever asked, so a command that
+                    // finished simply moved on. The `last_report` filed here
+                    // is what `spoolway resume` reads to send a held fail
+                    // down `on_fail` rather than `on_pass`.
+                    let mut pause_note = None;
+                    let destination = match crate::commands::gate_hold(
+                        &tasks[index],
+                        &step,
+                        outcome,
+                        &destination,
+                    ) {
+                        Some(kind) => {
+                            let task = &mut tasks[index];
+                            task.front.last_report = Some(crate::task::LastReport {
+                                step: step.id.clone(),
+                                outcome: outcome.as_str().to_string(),
+                                at: chrono::Utc::now().timestamp(),
+                                blocked: destination == crate::pipeline::BLOCKED,
+                            });
+                            task.front.paused_at = Some(step.id.clone());
+                            task.front.paused_by = Some(kind.as_str().to_string());
+                            // Spent when it fires, as in `report`.
+                            if kind == crate::commands::Gate::Schedule {
+                                task.front.gate_at = None;
+                            }
+                            pause_note = Some(match kind {
+                                crate::commands::Gate::Schedule => {
+                                    "held by this task's own schedule"
+                                }
+                                crate::commands::Gate::Step => "held by this step's own gate",
+                            });
+                            crate::pipeline::PAUSED.to_string()
+                        }
+                        None => destination,
+                    };
+
                     // Same two shapes a watch step routes into, for the same
                     // reason: a step that runs an agent has to queue for a slot
                     // like any other work, and everything else is a stage
@@ -1460,7 +1499,7 @@ impl<'a> Dispatcher<'a> {
                             command_forget,
                         }),
                         false => {
-                            tasks[index].set_stage(&destination, None);
+                            tasks[index].set_stage(&destination, pause_note);
                             // `persist` answers `false` when something —
                             // a `spoolway report`, a `p`/`r`/`u` on the
                             // board — landed mid-pass and dropped this
@@ -4361,13 +4400,17 @@ impl<'a> Dispatcher<'a> {
 
     /// `serial_peers` are the other tasks on this step's pipeline, and empty
     /// unless the step is `serial: true` — see the `Fresh` arm.
+    ///
+    /// The destination comes with the outcome that chose it, because a gate
+    /// needs to tell a pass from a fail and two routes may name one step.
     fn run_command(
         &mut self,
         task: &mut Task,
         step: &Step,
         serial_peers: &[String],
         report: &mut Report,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<(String, crate::pipeline::Outcome)>> {
+        use crate::pipeline::Outcome;
         // Only the `Exited` arm below ever sets this — see the field's own
         // doc. Cleared on every call so a stale value from a task this
         // dispatcher visited earlier in the same pass can never leak onto
@@ -4398,7 +4441,7 @@ impl<'a> Dispatcher<'a> {
                 // for six hours over a placement that failed once. Re-answer
                 // `on_pass` instead, every pass, until the destination lands.
                 if step.background {
-                    return Ok(step.on_pass.clone());
+                    return Ok(step.on_pass.clone().map(|to| (to, Outcome::Pass)));
                 }
                 // The one bound a command step has. A hung command is
                 // indistinguishable from a slow one by looking, so what tells
@@ -4418,11 +4461,12 @@ impl<'a> Dispatcher<'a> {
                 // A timeout is a failure of the step and routes like one — never
                 // silently a pass, because a build that never finished did not
                 // succeed.
-                Ok(Some(
+                Ok(Some((
                     step.on_fail
                         .clone()
                         .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string()),
-                ))
+                    Outcome::Fail,
+                )))
             }
 
             crate::command_step::RunState::Exited(code) => {
@@ -4454,12 +4498,15 @@ impl<'a> Dispatcher<'a> {
                     let _ = self.mux.close_pane(&pane);
                     runs.forget_pane(&key);
                 }
-                let destination = match code {
-                    0 => step.on_pass.clone(),
-                    _ => Some(
-                        step.on_fail
-                            .clone()
-                            .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string()),
+                let (destination, outcome) = match code {
+                    0 => (step.on_pass.clone(), Outcome::Pass),
+                    _ => (
+                        Some(
+                            step.on_fail
+                                .clone()
+                                .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string()),
+                        ),
+                        Outcome::Fail,
                     ),
                 };
                 // Named on the task, not only in this pass's own report: a
@@ -4484,7 +4531,7 @@ impl<'a> Dispatcher<'a> {
                         None => "staying put".to_string(),
                     }
                 ));
-                Ok(destination)
+                Ok(destination.map(|to| (to, outcome)))
             }
 
             crate::command_step::RunState::Interrupted => {
@@ -4600,7 +4647,7 @@ impl<'a> Dispatcher<'a> {
                         // `blocked_from`, which that routing already sets.
                         let destination = self.note_launch_failure(task, step, "run", &err, report);
                         self.persist(task)?;
-                        return Ok(destination);
+                        return Ok(destination.map(|to| (to, Outcome::Fail)));
                     }
                 }
 
@@ -4616,7 +4663,7 @@ impl<'a> Dispatcher<'a> {
                         step.id,
                         runs.log_path(&key).display()
                     ));
-                    return Ok(step.on_pass.clone());
+                    return Ok(step.on_pass.clone().map(|to| (to, Outcome::Pass)));
                 }
                 report.actions.push(match runs.pane(&key) {
                     // A pane of its own, split off the task's own tab: a
@@ -17257,6 +17304,161 @@ mod tests {
             !log.contains("exited 0"),
             "a pass is not a failure to record: {log}"
         );
+    }
+
+    /// A task whose `gate_at` names a command step is held at `paused` when
+    /// that command exits clean, and the gate is spent doing it, the same as
+    /// for an agent step's report.
+    #[test]
+    fn a_gate_at_naming_a_command_step_holds_the_task_when_it_exits_clean() {
+        let (repo, _root_guard) = fixture("command-gate-at-pass");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.gate_at = Some("implement".into());
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 0", false);
+
+        drive(&repo, &pipelines, &mux, &path, "paused");
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "paused", "the gate names this step");
+        assert_eq!(task.front.gate_at, None, "a gate is spent when it fires");
+    }
+
+    /// `gate_at` holds a step's whole outcome, so a failing command is held
+    /// at `paused` too, rather than moving on to its `on_fail`.
+    #[test]
+    fn a_gate_at_naming_a_command_step_holds_the_task_when_it_exits_failing() {
+        let (repo, _root_guard) = fixture("command-gate-at-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.gate_at = Some("implement".into());
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 2", false);
+
+        drive(&repo, &pipelines, &mux, &path, "paused");
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "paused", "the gate names this step");
+        assert_eq!(task.front.gate_at, None, "a gate is spent when it fires");
+    }
+
+    /// A step's own `gate: true` holds a command's passing exit, and `resume`
+    /// then sends the task where the exit code routed it.
+    #[test]
+    fn a_gated_command_step_holds_a_clean_exit_and_resume_takes_its_on_pass() {
+        let (repo, _root_guard) = fixture("command-gate-step-pass");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 0", false);
+        let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+        let step = pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap();
+        step.gate = true;
+        let on_pass = step.on_pass.clone().unwrap();
+
+        drive(&repo, &pipelines, &mux, &path, "paused");
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "paused");
+        assert_eq!(task.front.paused_at.as_deref(), Some("implement"));
+        assert_eq!(task.front.paused_by.as_deref(), Some("gate"));
+        let road = crate::commands::resume_road(&task, &pipelines).unwrap();
+        assert_eq!(road.destination(), on_pass);
+    }
+
+    /// `gate: true` catches a pass and only a pass, so a failing command
+    /// moves on to its `on_fail` as before.
+    #[test]
+    fn a_gated_command_step_does_not_hold_a_failing_exit() {
+        let (repo, _root_guard) = fixture("command-gate-step-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 2", false);
+        let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .gate = true;
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "blocked");
+        assert_eq!(task.front.paused_at, None);
+    }
+
+    /// Two routes naming one step must not turn a failing exit into a pass:
+    /// `gate: true` still lets it through.
+    #[test]
+    fn a_gated_command_step_with_one_route_for_both_outcomes_does_not_hold_a_failure() {
+        let (repo, _root_guard) = fixture("command-gate-step-one-route");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 2", false);
+        let step = pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap();
+        step.gate = true;
+        step.on_fail = step.on_pass.clone();
+        let onward = step.on_pass.clone().unwrap();
+
+        drive(&repo, &pipelines, &mux, &path, &onward);
+
+        let task = reload(&path);
+        assert_eq!(task.front.paused_at, None);
+        assert_eq!(task.front.last_report, None);
+    }
+
+    /// A failing exit held by `gate_at` resumes down the route the exit
+    /// chose, not `on_pass`.
+    #[test]
+    fn resuming_a_held_failing_command_takes_its_on_fail() {
+        let (repo, _root_guard) = fixture("command-gate-at-resume");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.gate_at = Some("implement".into());
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 2", false);
+        // Not `blocked`: that route would reach `blocked` by `blocked_from`
+        // alone and prove nothing about `on_fail`.
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some("rebase".into());
+
+        drive(&repo, &pipelines, &mux, &path, "paused");
+
+        let task = reload(&path);
+        let on_fail = pipelines
+            .for_task(&task)
+            .unwrap()
+            .step("implement")
+            .unwrap()
+            .destination(crate::pipeline::Outcome::Fail)
+            .unwrap()
+            .to_string();
+        assert_eq!(on_fail, "rebase");
+        let road = crate::commands::resume_road(&task, &pipelines).unwrap();
+        assert_eq!(road.destination(), on_fail);
     }
 
     /// A pipeline whose command step fails straight to `blocked`, which is what

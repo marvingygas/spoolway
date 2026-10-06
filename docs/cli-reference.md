@@ -586,7 +586,7 @@ spoolway lane "<task> · <step>" --attach
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
-it goes to `blocked`. A task an [issue-tracking
+it goes to `blocked`. A failing exit of a command step goes to that step's `on_fail`. A task an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) paused forgets that
 hook's failed run, so it fires again; a task paused on `queued` or `started` resumes to
 `queued`, and one paused on `done` resumes straight back to `done`. A task paused because its

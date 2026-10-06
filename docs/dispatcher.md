@@ -264,7 +264,8 @@ Pausing an agent turn sends Escape to the pane, so a resume picks the session ba
 a command step kills the run, and the command runs again in full on resume.
 
 `s` on a pause panel interrupts nothing. It writes a `gate_at` for the step the panel named, so
-the named task pauses itself once that step reports, whatever it reports. Press `s` again on a
+the named task pauses itself once that step reports, whatever it reports. For a command step,
+the task pauses once the command exits, whatever the exit code. Press `s` again on a
 row that already has a scheduled pause to clear it.
 
 ### Footer
@@ -287,7 +288,8 @@ shows what one lane is doing.
 ## Gates: when the pipeline waits for you
 
 A step with `gate: true` stops the task on `paused` after the step reports. The pane stays open
-for you to read.
+for you to read. A command step has no pane. The dispatcher stops the task on `paused` when the
+command exits with a pass.
 
 ```
 spoolway resume deploy-login                            # let it past
