@@ -17372,6 +17372,37 @@ mod tests {
         assert_eq!(road.destination(), on_pass);
     }
 
+    /// The same hold, from a pipeline file a project could write: `gate: true`
+    /// on a command step loads through `validate`, and the dispatcher holds
+    /// its passing exit. The tests either side set the key on a pipeline
+    /// already loaded, so they never asked whether a file could carry it.
+    #[test]
+    fn a_command_step_gate_written_in_a_pipeline_file_loads_and_holds_the_pass() {
+        let (repo, _root_guard) = fixture("command-gate-from-file");
+        let dir = Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    run: exit 0\n    headless: true\n    gate: true\n    \
+               on_pass: finish\n  \
+             - id: finish\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines =
+            Pipelines::load_tracked(&repo.root, &repo.config).expect("a gated command step loads");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+
+        drive(&repo, &pipelines, &mux, &path, "paused");
+
+        let task = reload(&path);
+        assert_eq!(task.front.paused_at.as_deref(), Some("implement"));
+        assert_eq!(task.front.paused_by.as_deref(), Some("gate"));
+        let road = crate::commands::resume_road(&task, &pipelines).unwrap();
+        assert_eq!(road.destination(), "finish");
+    }
+
     /// `gate: true` catches a pass and only a pass, so a failing command
     /// moves on to its `on_fail` as before.
     #[test]

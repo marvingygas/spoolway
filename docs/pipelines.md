@@ -281,7 +281,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
   failure, and the whole process group is killed. `timeout: 0s` is refused.
 - A `run:` means one thing by each exit code. A command that answers the same code for two
   different outcomes cannot be routed on, and fixing that is the command's job, not spoolway's.
-- `prompt`, `model`, `effort`, `session` and `gate` are refused. The step takes no slot.
+- `prompt`, `model`, `effort` and `session` are refused. The step takes no slot.
+- `gate: true` holds a passing exit on `paused`. See [Gates](#gates).
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
 - A late background failure can move a task off a command step. That stops the step's running

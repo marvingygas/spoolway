@@ -1443,6 +1443,17 @@ impl Pipeline {
                 }
             }
 
+            // `gate` is not a lane's key: a command step's exit is its
+            // report, and the dispatcher holds a passing one the same way an
+            // agent's. Only an ending has nothing left to hold.
+            if kind == StepKind::Terminal && step.gate {
+                bail!(
+                    "step `{}` ends the task but declares `gate` — nothing comes after it to \
+                     hold; delete `gate:`",
+                    step.id
+                );
+            }
+
             // Everything below is a lane's, and neither a command step nor an
             // ending starts one.
             if kind != StepKind::Agent {
@@ -1451,7 +1462,6 @@ impl Pipeline {
                     ("model", step.model.is_some()),
                     ("effort", step.effort.is_some()),
                     ("session", step.session),
-                    ("gate", step.gate),
                 ] {
                     if set {
                         bail!(
@@ -1656,7 +1666,8 @@ impl Pipeline {
     }
 
     /// Steps that gate but declare no `on_fail`, so a `spoolway report
-    /// --fail` at that step has nowhere named to go but `blocked`.
+    /// --fail` at that step, or a command step's failing exit, has nowhere
+    /// named to go but `blocked`.
     ///
     /// Not one of `validate`'s own refusals: a gated step with no `on_fail`
     /// is a legal shape — [`Step::destination`] already falls back to
@@ -1669,9 +1680,14 @@ impl Pipeline {
             .iter()
             .filter(|step| step.gate && step.on_fail.is_none())
             .map(|step| {
+                // A command step reports nothing; its exit code is the outcome.
+                let failure = match step.kind() {
+                    StepKind::Command => "a failing exit",
+                    _ => "`spoolway report --fail`",
+                };
                 format!(
-                    "{}: `{}` gates but declares no `on_fail`, so `spoolway report --fail` \
-                     there parks the task on `{BLOCKED}`.",
+                    "{}: `{}` gates but declares no `on_fail`, so {failure} there parks the \
+                     task on `{BLOCKED}`.",
                     self.name, step.id
                 )
             })
@@ -3556,7 +3572,6 @@ mod tests {
             ("model", "    model: some-model\n"),
             ("effort", "    effort: high\n"),
             ("session", "    session: true\n"),
-            ("gate", "    gate: true\n"),
             ("allow", "    allow: [push]\n"),
         ] {
             let yaml = format!(
@@ -3569,6 +3584,38 @@ mod tests {
                 "`{key}` on a command step went unnoticed: {err}"
             );
         }
+    }
+
+    /// `gate:` is not a lane's key: a command step's exit is its report, so
+    /// `gate: true` loads there and the dispatcher holds a passing exit. An
+    /// ending has nothing to hold, so it is still refused there.
+    #[test]
+    fn gate_loads_on_a_command_step_and_is_refused_on_an_ending() {
+        let pipeline = parse(
+            "steps:\n  - id: a\n    run: make\n    gate: true\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .expect("a gated command step loads");
+        assert!(pipeline.step("a").unwrap().gate);
+
+        let err = parse(
+            "steps:\n  - id: a\n    run: make\n    on_pass: z\n  \
+             - id: z\n    end: true\n    gate: true\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("step `z` ends the task"), "{err}");
+        assert!(err.contains("delete `gate:`"), "{err}");
+        assert!(!err.contains("lane's"), "{err}");
+
+        // With no `on_fail`, the warning names what parks it: the exit, since
+        // a command step has no report to send.
+        let warnings = pipeline.gate_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("a failing exit there parks"),
+            "{warnings:?}"
+        );
     }
 
     /// `last:` walks every task but one past the step, and a lane nobody
