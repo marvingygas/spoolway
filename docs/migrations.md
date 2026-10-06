@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.7.0 to 0.7.1 | Pipelines that could never run are refused when they load: `loop: 0`, which 0.7.0 read as no limit, a first step of `blocked`, and a `gate_at:` that names no step; `spoolway jobs run` is removed; an unset or empty `HOME` is refused; `resume` refuses queued and running tasks; `gate: true` and `gate_at:` now work on a command step; leaving `blocked` resets every `loop:` count; each worktree builds into its own `target/`; workspace folders are never deleted; `init --force` keeps the provider and tracker; `sync --replace` writes `.bak.N`. | Delete every `loop: 0` line, drop `spoolway jobs run` from scripts, set `HOME` in CI, check queued tasks' `gate_at:`, remove the old `.cargo-target` folder once older tasks finish, and run `spoolway sync`. |
 | 0.6.x to 0.7.x | Bare `spoolway` is the one screen, and `dispatch`, `queue`, `jobs` and `eval` are plain commands; `dispatch.worktree_root` and `issue_tracking.on_fail` are gone; finished tasks are kept forever until `housekeeping.archive_retention_days` says otherwise; `issue_tracking.key_in_names` defaults to `true`; the tracker hooks are rewritten and the closing workflow and tracking templates are retired; `queue conflicts`, `touches:`, `parallel:`, `dispatch --plain`/`--force` and `init --adopt`/`--new-id`/`--take-over` are removed; `config path`, `eval` and `doctor` print differently; `sync` migrates only from 0.6.0 and applies nothing implicitly. | Run `spoolway sync`, replace your tracker hook, delete the closing workflow, drop the removed flags and keys from scripts, and run `spoolway herdr bind` once. |
 | 0.5.x to 0.6.x | Retired pipeline shapes are migrated on update; `loop:` counts arrivals; installed skills are always rewritten; `/spoolway-doctor` and `spoolway spend` are gone; `spoolway eval` flags change. | Open spoolway, apply the update, read what it migrated, and update scripts that call `spend` or the removed `eval` flags. |
 | 0.4.x to 0.5.x | `sync` takes over from `update`; `dispatch.interval`, `dispatch.default_pipeline` and the tmux backend are gone; tasks name their own `pipeline:` and `base:`. | Delete the retired keys, set `pipeline:` and `base:` on every task, and apply the update. |
@@ -22,7 +23,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 Install the target version, then read its embedded notes:
 
 ```
-npm install -g spoolway@0.7.0
+npm install -g spoolway@0.7.1
 spoolway whats-new --since <your-current-version>
 ```
 
@@ -38,6 +39,82 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.7.0 to 0.7.1
+
+Run `spoolway sync` (or `spoolway sync --dry-run` to read what it would do), then work through the
+list. Nothing here changes a config default, and a project exactly as 0.7.0 shipped it needs no
+edit. `spoolway pipeline check` names any pipeline that no longer loads.
+
+- Delete every `loop: 0` line from your pipelines. 0.7.0 read it as no limit; 0.7.1 refuses the
+  pipeline with ``step `X` has loop: 0 — a loop is 1 or more; delete `loop:` for no limit``. A step
+  with no `loop:` has no limit, and `loop: 1` is not the same because it blocks on the second
+  arrival. `spoolway sync` refuses a tracked pipeline file that carries `loop: 0` and keeps the
+  project behind until you fix it. A private pipeline under
+  `~/.spoolway/<label>-<id>/local/pipelines/` is outside sync's reach, so look there yourself.
+- Drop `spoolway jobs run` from scripts. It exits 2, and a job now only fires on its schedule. To
+  queue a routine now, open bare `spoolway`, tick the routine on the routines tab and press enter.
+  `spoolway sync` removes the matching line from each installed `spoolway-config` skill.
+- Put a working step first in any pipeline whose first step is `blocked`. 0.7.1 refuses it with
+  the message ``pipeline `default`: `blocked` is the first step — a task would start blocked``.
+- Route or delete any step `spoolway pipeline check` reports as ``reached by no route``. It is a
+  warning, and the command still exits 0.
+- Check the `gate_at:` of every task already queued. `queue add` and `task contract` now refuse a
+  `gate_at:` that names no step, but a task queued by 0.7.0 is not flagged and runs with its
+  checkpoint dropped. Compare each `gate_at:` in `~/.spoolway/<label>-<id>/queue/*.md` with
+  `spoolway queue route <id>`, then run `spoolway queue unqueue <id>` and add the task again with
+  the right step.
+- Set `HOME` in every CI job and wrapper script that runs spoolway. An unset or empty `HOME` now
+  exits 1 with `spoolway: HOME is not set (or is empty)`, where 0.7.0 looked under
+  `/tmp/.spoolway`. New project labels are cut to 64 characters; existing labels are kept.
+- Handle exit 1 in any script that runs `spoolway resume <id>`, with or without `--stage`, on a
+  queued or running task. Use `spoolway queue pause <task>` to stop a running task first.
+  `--stage` also refuses while a `depends_on` task is not done, and
+  `spoolway queue unqueue <id> --force` refuses a started task that a queued task depends on.
+- Rust projects: once every task cut before the upgrade has finished, run
+  `rm -rf ~/.spoolway/<label>-<id>/.cargo-target`. Each worktree now builds into its own
+  `target/`, and spoolway never removes the old folder. Deleting it earlier makes cargo fail with
+  `File exists (os error 17)` in an older worktree until you also remove that worktree's
+  `target/debug` link.
+- A task whose `gate_at:` names a command step, such as `handover`, now pauses when that command
+  exits, where 0.7.0 ignored it. After the upgrade, run `spoolway resume <id>` for each such task
+  that pauses; a held pass goes down `on_pass` and a held failing exit goes down `on_fail`.
+- `gate: true` on a foreground command step now loads and holds a passing exit; 0.7.0 refused it.
+  Nothing a 0.7.0 project can contain needs an edit. If a new pipeline puts `gate: true` on a
+  `background: true` step or on a step that ends the task, delete that `gate:` line, as the
+  message says.
+- Re-check any `loop:` you set to stop a task that kept returning from `blocked`. Every way out of
+  `blocked` now resets every step's arrival count, so the same `loop: n` allows more arrivals.
+  Lower `n` if you relied on the old stop.
+- Do not compare `BLOCKS` in `spoolway eval` across the upgrade. A lane whose `--pass` or `--fail`
+  a spent loop sent to `blocked` is now counted, in every `--by`, `--csv` and `--json`, and
+  ledger lines already written are unchanged.
+- Remove a workspace folder yourself once nothing in it is needed: run
+  `rm -rf ~/.spoolway/<name>` for the folder that `spoolway doctor` reports as ``lists no
+  checkout``. No command deletes it for you any more, and the last checkout leaving prints its
+  path.
+- `spoolway init --force` now keeps the project's provider, tracker and project key. It still
+  resets models and config values, so run `spoolway models set` and `spoolway config set` again
+  for anything you changed. `spoolway init --setup home` refuses while the repo-mode home holds
+  queued tasks; finish or unqueue them first.
+- Expect `.bak.1`, `.bak.2` and so on from `spoolway sync --replace <file>`. It never overwrites
+  an earlier `.bak`, prints the path it wrote and keeps the file's mode.
+- Update any script that parses the `spoolway sync` report. Refused files are listed first, and
+  the report adds `(migrated: … replaced; edits are not kept)` and
+  `(set issue_tracking.key_in_names = true, the default)` lines. A missing or unreadable stamp now
+  counts as behind, so the `Run spoolway sync to apply the last update.` notice shows until you
+  run `spoolway sync`.
+- No edit is needed for `spoolway config set`, `spoolway init --tracker` and
+  `spoolway override promote`; they now work on a 0.6.0 config that has not been synced, including
+  retired keys inside inline tables.
+- Check any step whose `run:` line relied on `exec` hiding its exit code. A `run:` line now runs in
+  a child `sh -c`, so `exec` records its exit code, and a command that a late background failure
+  pulls its task off is stopped.
+- Read the step name from `spoolway queue list --json` again in any tooling that parses it. A
+  blocked row's `[r]` and the JSON now name the step `spoolway resume` really goes to, and a task
+  on a stage its pipeline lacks reads as `unknown` rather than `blocked`.
+- No edit is needed for a step with `skills:`. Each skill is now sent as its own message, then the
+  briefing once.
 
 ## 0.6.x to 0.7.x
 
