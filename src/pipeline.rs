@@ -1440,6 +1440,18 @@ impl Pipeline {
                             step.id
                         );
                     }
+                    // A background step passes the moment it starts, so a
+                    // gate there would hold the start, not the exit the docs
+                    // promise — and a late failure would pull the task off
+                    // `paused` from under whoever is looking at it.
+                    if step.background && step.gate {
+                        bail!(
+                            "step `{}` runs in the background but declares `gate` — its pass \
+                             comes when the command starts, so there is no exit to hold; delete \
+                             `gate:` or `background:`",
+                            step.id
+                        );
+                    }
                 }
             }
 
@@ -3588,7 +3600,8 @@ mod tests {
 
     /// `gate:` is not a lane's key: a command step's exit is its report, so
     /// `gate: true` loads there and the dispatcher holds a passing exit. An
-    /// ending has nothing to hold, so it is still refused there.
+    /// ending has nothing to hold, and a background step has no exit to wait
+    /// for, so both still refuse it.
     #[test]
     fn gate_loads_on_a_command_step_and_is_refused_on_an_ending() {
         let pipeline = parse(
@@ -3607,6 +3620,17 @@ mod tests {
         assert!(err.contains("step `z` ends the task"), "{err}");
         assert!(err.contains("delete `gate:`"), "{err}");
         assert!(!err.contains("lane's"), "{err}");
+
+        // A background step passes when it starts, so there is no exit for
+        // the gate to hold.
+        let err = parse(
+            "steps:\n  - id: a\n    run: make\n    background: true\n    gate: true\n    \
+             on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("step `a` runs in the background"), "{err}");
+        assert!(err.contains("delete `gate:` or `background:`"), "{err}");
 
         // With no `on_fail`, the warning names what parks it: the exit, since
         // a command step has no report to send.

@@ -282,7 +282,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - A `run:` means one thing by each exit code. A command that answers the same code for two
   different outcomes cannot be routed on, and fixing that is the command's job, not spoolway's.
 - `prompt`, `model`, `effort` and `session` are refused. The step takes no slot.
-- `gate: true` holds a passing exit on `paused`. See [Gates](#gates).
+- `gate: true` holds a passing exit on `paused`. See [Gates](#gates). A `background: true` step
+  passes when it starts, so it has no exit to hold, and `gate` is refused there.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
 - A late background failure can move a task off a command step. That stops the step's running
@@ -398,7 +399,8 @@ The queue screen's `t` trial picker writes it, so a trial arm never opens a pull
 
 The lane runs and reports as usual. On its pass the task lands on `paused` and its pane stays
 open. A command step has no lane to report: `gate: true` holds its passing exit the same way,
-and a task's `gate_at:` holds a command step's exit whatever it was.
+and a task's `gate_at:` holds a command step's exit whatever it was. A `background: true` step
+passes as soon as it starts, so `gate: true` is refused there.
 
 ```
 spoolway resume <task>                            # let it past: the on_pass route
