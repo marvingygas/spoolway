@@ -139,7 +139,7 @@ It prints seven sections:
 |---|---|---|
 | 1 | Where the prompt goes | The file path and the flag it reaches the agent through |
 | 2 | The system prompt | The whole composed prompt |
-| 3 | The message typed into its pane | One sentence naming the task file, after any `skills:` invocations |
+| 3 | The message typed into its pane | One sentence naming the task file. A step with `skills:` shows one message per skill first, then that sentence, each labelled `message N of M` |
 | 4 | The environment every lane has | The table below |
 | 5 | What a lane may reach | Whatever the person running the dispatcher can |
 | 6 | How a lane finishes | The forms this step may use, each with a sentence saying what reporting it claims. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass`, `--pass --stage <step>` and `--pause`. Off `blocked`, a step that leaves out `--fail` prints no refusal for it — `commands::report` already refuses `--stage` by name on every other step, so `blocked`'s own forms are what teach a lane the flag exists. A step with nothing left to withhold prints no "not available to you" block at all. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is. On `blocked`, that line and the `--stage` form's own "never one past `<step>`" clause both ask the step this pass stands in for, never `blocked` itself, which no pipeline may gate |

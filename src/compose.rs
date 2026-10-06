@@ -765,31 +765,49 @@ pub(crate) const STATES: &[&str] = &[
     "reminder",
 ];
 
-/// The message typed into a lane's pane once it is up: a pointer to the task
-/// file, and nothing else.
+/// The briefing a lane is opened with: a pointer to the task file, and
+/// nothing else, whatever the step lists.
 ///
 /// Everything else — the report forms, `--handoff`, the reasoning behind
 /// them — is in [`system_prompt`], the half a model reads
 /// as *the rules* rather than as *a request*; repeating it here would be a
 /// second copy in the half most likely to be treated as optional.
 /// The unused half of the signature is kept on purpose: this and
-/// [`system_prompt`] are the two things a lane is sent, they are called from
-/// the same three places, and a caller should not have to remember which one
-/// needs less. The day a fact about the step belongs in the typed message
-/// again, it is already here.
+/// [`system_prompt`] are the two things a lane is sent, and a caller should
+/// not have to remember which one needs less. The day a fact about the step
+/// belongs in the typed message again, it is already here.
 ///
-/// A step naming `skills:` gets one `/name` invocation per skill first, in
-/// declaration order, then the task file's own sentence — all on the one
-/// line herdr types as a single message. It has to lead, and it has to stay
-/// one line: Claude Code only expands a slash command where it opens a
-/// message, and only when that message arrives as typed text rather than a
-/// paste. A message spanning more than one line is sent as a paste — wrapped
-/// in `<pasted_content>` — where no slash command is ever expanded, so a
-/// newline anywhere in this string would silently turn every invocation back
-/// into inert text.
-pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, step: &Step) -> String {
-    let skills: String = step.skills.iter().map(|name| format!("/{name} ")).collect();
-    format!("{skills}Read {} before anything else.", task.path.display())
+/// What a step's `skills:` add is sent ahead of it as messages of their own —
+/// see [`opening_messages`].
+pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, _step: &Step) -> String {
+    format!("Read {} before anything else.", task.path.display())
+}
+
+/// Every message typed into a lane's pane to open it, in the order they are
+/// sent: one `/name` invocation per skill the step lists, in declaration
+/// order, then [`opening_prompt`]'s briefing — once.
+///
+/// Each skill is its own single-line message, and the briefing is not on any
+/// of those lines, for two reasons that pull against each other. Claude Code
+/// only expands a slash command that opens a message and arrives as typed
+/// text. A message spanning more than one line is sent as a paste, wrapped in
+/// `<pasted_content>`, where no slash command is ever expanded, so the skills
+/// cannot share one multi-line message with the briefing. And whatever
+/// follows a `/name` on the same line is that skill's argument, so putting
+/// the briefing after the skills on one line hands the whole sentence to
+/// every skill and shows it once per skill. One message each avoids both.
+///
+/// A skill's message is a whole turn, so [`crate::dispatch`] sends only the
+/// first at launch and each next one on a later pass that finds the lane
+/// settled — never while the turn before it runs, and without holding the pass.
+///
+/// A step without `skills:` gets exactly one message, the briefing.
+pub(crate) fn opening_messages(task: &Task, pipeline: &Pipeline, step: &Step) -> Vec<String> {
+    step.skills
+        .iter()
+        .map(|name| format!("/{name}"))
+        .chain(std::iter::once(opening_prompt(task, pipeline, step)))
+        .collect()
 }
 
 /// What a resumed lane is told, instead of the opening briefing.
@@ -884,25 +902,27 @@ pub(crate) fn reminder_prompt(task: &Task, pipeline: &Pipeline, step: &Step) -> 
     )
 }
 
-/// Every one of the seven typed messages, rendered for `state` against a real
-/// or sample task — what `spoolway prompt contract`'s section 3 shows, one
-/// state at a time. `state` outside [`STATES`] renders empty rather than
-/// panicking: the contract's own loop is the only caller, and it never asks
-/// for anything else.
+/// The messages a lane's pane is sent in `state`, rendered against a real or
+/// sample task — what `spoolway prompt contract`'s section 3 shows, one state
+/// at a time. Every state is one message but `opening` on a step that lists
+/// `skills:`, which is one per skill and then the briefing, kept apart here
+/// because the lane receives them apart. `state` outside [`STATES`] renders
+/// none rather than panicking: the contract's own loop is the only caller,
+/// and it never asks for anything else.
 pub(crate) fn lane_prompt_for_state(
     task: &Task,
     pipeline: &Pipeline,
     step: &Step,
     state: &str,
-) -> String {
+) -> Vec<String> {
     match state {
-        "opening" => opening_prompt(task, pipeline, step),
-        "resume" => resume_prompt(task, pipeline, false),
-        "resume-unattended" => resume_prompt(task, pipeline, true),
-        "carry" => carry_prompt(task, pipeline),
-        "park" => park_prompt(task, pipeline, false),
-        "park-escalated" => park_prompt(task, pipeline, true),
-        "reminder" => reminder_prompt(task, pipeline, step),
-        _ => String::new(),
+        "opening" => opening_messages(task, pipeline, step),
+        "resume" => vec![resume_prompt(task, pipeline, false)],
+        "resume-unattended" => vec![resume_prompt(task, pipeline, true)],
+        "carry" => vec![carry_prompt(task, pipeline)],
+        "park" => vec![park_prompt(task, pipeline, false)],
+        "park-escalated" => vec![park_prompt(task, pipeline, true)],
+        "reminder" => vec![reminder_prompt(task, pipeline, step)],
+        _ => Vec::new(),
     }
 }

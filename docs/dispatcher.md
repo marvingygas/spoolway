@@ -126,10 +126,18 @@ after that run exits, alongside whichever other ready task the sort picks first.
 
 ## What a lane is sent
 
-A lane starts with a system prompt and one typed message. The system prompt holds the step's
+A lane starts with a system prompt and a typed opening. The system prompt holds the step's
 prompt file and the report contract: the exact `spoolway report` calls and what they do. It is
-written to `~/.spoolway/<project>/system-prompts/<lane>.md`. The typed message is the task
-file's path. `spoolway prompt contract` prints the system prompt for a sample task.
+written to `~/.spoolway/<project>/system-prompts/<lane>.md`. `spoolway prompt contract` prints
+the system prompt for a sample task.
+
+The opening is one message naming the task file's path. A step that lists `skills:` opens with
+one message per skill, in the order listed, and then that message. The first message is typed
+when the lane starts. The unsent ones are saved with the lane in `lanes.json`.
+
+A later pass types the next message when the lane's turn has ended. It types nothing into a
+lane that is working or waiting on a permission prompt. A step with several skills therefore
+takes one pass per skill to open.
 
 ## Reading the state
 
@@ -320,7 +328,8 @@ go back to. `spoolway resume` forgets the hook's failed run, so it fires again. 
 
 ## A lane that settles without reporting
 
-A lane can end its turn without calling `spoolway report`. Then:
+A lane can end its turn without calling `spoolway report`. If the lane still has opening
+messages to receive, the pass types the next one instead. Otherwise:
 
 1. The next pass sends the report contract into the pane again.
 2. Each later pass where the transcript has grown sends another reminder, up to three.

@@ -226,12 +226,27 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
 
     println!();
     println!("3  THE MESSAGE TYPED INTO ITS PANE, ONCE IT IS UP");
-    println!("   Seven of these, one per state, spoolway's own words — see `compose::STATES`.");
+    println!(
+        "   Seven states, in spoolway's own words. See `compose::STATES`. Each is one message,"
+    );
+    println!(
+        "   except an opening on a step with `skills:`: one message per skill, then the briefing."
+    );
     for state in crate::compose::STATES {
         println!();
         println!("   This is `{state}`:");
-        for line in crate::compose::lane_prompt_for_state(&task, pipeline, step, state).lines() {
-            println!("   | {line}");
+        let messages = crate::compose::lane_prompt_for_state(&task, pipeline, step, state);
+        for (i, message) in messages.iter().enumerate() {
+            if messages.len() > 1 {
+                let when = match i {
+                    0 => "typed at launch".to_string(),
+                    _ => "typed once the lane has settled from the one before".to_string(),
+                };
+                println!("   message {} of {}, {when}:", i + 1, messages.len());
+            }
+            for line in message.lines() {
+                println!("   | {line}");
+            }
         }
     }
 
