@@ -400,6 +400,19 @@ pub(crate) struct LaneRecord {
     /// that takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch_grace_since: Option<i64>,
+    /// The opening messages not yet typed into the pane, in order. Empty for
+    /// every lane but one whose step lists `skills:`.
+    ///
+    /// Each skill is a message, and each message is a whole turn: a `/name`
+    /// typed while the turn before it runs is queued input that never expands
+    /// as a slash command. So the launch sends only the first, and each pass
+    /// that finds the lane settled sends the next one, until the briefing has
+    /// gone. Waiting here rather than inside the launch is what keeps a long
+    /// skill from holding the whole pass, and puts no bound on how long it
+    /// may run. A lane on a permission prompt is `Blocked`, not settled, so
+    /// nothing is ever typed into the dialog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    opening: Vec<String>,
 }
 
 /// A pane [`Dispatcher::retire`] left behind for its own lane name to inherit,
@@ -450,6 +463,7 @@ impl LaneRecord {
             retired_pane: None,
             child_since: None,
             launch_grace_since: None,
+            opening: Vec::new(),
         }
     }
 
@@ -834,6 +848,18 @@ impl<'a> Dispatcher<'a> {
         self.usage_banked.as_mut().expect("just set")
     }
 
+    /// Writes `lanes.json` now, logging rather than failing: a lane record
+    /// that did not reach disk is a problem for the next pass to correct, not
+    /// a reason to stop this one. `when` names the moment in the problem log.
+    fn save_lanes(&self, when: &str) {
+        if let Err(err) = save_lane_records(self.repo, &self.lanes) {
+            crate::problem_log::append(
+                self.repo,
+                &format!("could not write lanes.json {when}: {err}"),
+            );
+        }
+    }
+
     /// One full reconciliation: read the queue and the multiplexer, decide
     /// what each task's stage means for it this pass, and spend whatever
     /// budget is left starting the work that leaves ready.
@@ -877,12 +903,7 @@ impl<'a> Dispatcher<'a> {
         // same pass: the next pass re-adopted those lanes with a stale or
         // blank session, and their spend was never banked. See review
         // finding 8.
-        if let Err(err) = save_lane_records(self.repo, &self.lanes) {
-            crate::problem_log::append(
-                self.repo,
-                &format!("could not write lanes.json after this pass: {err}"),
-            );
-        }
+        self.save_lanes("after this pass");
         outcome
     }
 
@@ -1662,6 +1683,33 @@ impl<'a> Dispatcher<'a> {
                             // it. See `Dispatcher::lane_ended_on_abort`.
                             if self.lane_ended_on_abort(lane) {
                                 self.park_after_interrupt(&mut tasks[index], &step, report)?;
+                                continue;
+                            }
+
+                            // A lane still being opened has not forgotten to
+                            // report: the skill it was just sent has ended its
+                            // turn, so the next opening message goes now —
+                            // see `LaneRecord::opening`.
+                            let next = self
+                                .lanes
+                                .get(&lane.name)
+                                .and_then(|r| r.opening.first().cloned());
+                            if let Some(next) = next {
+                                self.mux.prompt(&lane.name, &next)?;
+                                if let Some(record) = self.lanes.get_mut(&lane.name) {
+                                    record.opening.remove(0);
+                                }
+                                // Written after the send, not before: a kill between
+                                // the two repeats one skill, where the other order
+                                // would drop the message and, for the last one, the
+                                // briefing the lane cannot work without.
+                                self.save_lanes("after an opening message");
+                                self.note_progress(lane, now_secs());
+                                report.actions.push(format!(
+                                    "{}: sent `{}` its next opening message",
+                                    tasks[index].id(),
+                                    step.id
+                                ));
                                 continue;
                             }
 
@@ -4192,8 +4240,15 @@ impl<'a> Dispatcher<'a> {
                             retired_pane: None,
                             child_since: None,
                             launch_grace_since: None,
+                            opening: started.opening,
                         },
                     );
+                    // Written now, not left for the end of the pass: the unsent
+                    // opening messages exist only on this record, and a
+                    // dispatcher killed before the pass ends would be
+                    // restarted with a lane that had its first skill and
+                    // nothing else — see `LaneRecord::opening`.
+                    self.save_lanes("after starting a lane");
                     report.actions.push(action);
                     // `Ok(Started)` alone does not say the stage move
                     // landed — `finish_launch_bookkeeping`'s own
@@ -5675,7 +5730,9 @@ struct Boot {
     pane_id: String,
     args: Vec<String>,
     env: BTreeMap<String, String>,
-    prompt: String,
+    /// The messages typed into the pane, in order. Only an opening can be
+    /// more than one: a step's skills each go first as their own message.
+    prompts: Vec<String>,
     session: String,
     model: String,
     /// Where the lane's branch stood when it started — see [`Started::head`].
@@ -5878,7 +5935,12 @@ fn boot_prompt(mux: &dyn Mux, boot: &Boot, persisted: bool) -> Result<Started> {
     // `relaunch_backoff` and stops it at `MAX_LAUNCHES` — a prompt that fails
     // every time still ends up in front of a person, just not an hour late
     // and not disguised as a lane that was working.
-    if let Err(err) = mux.prompt(&boot.name, &boot.prompt) {
+    //
+    // Only the first message goes now. A skill's message is a whole turn, and
+    // one typed while it runs is queued input that never expands as a slash
+    // command, so the rest wait on the lane record for a later pass to find
+    // the lane settled — see [`LaneRecord::opening`].
+    if let Err(err) = mux.prompt(&boot.name, &boot.prompts[0]) {
         let _ = mux.stop_lane(&boot.name, &boot.pane_id);
         // The one boot failure that can happen after its own stage move
         // already landed — see [`StageMovedBeforeFailure`]'s own doc. Every
@@ -5893,6 +5955,7 @@ fn boot_prompt(mux: &dyn Mux, boot: &Boot, persisted: bool) -> Result<Started> {
         head: boot.head.clone(),
         note: boot.note.clone(),
         persisted,
+        opening: boot.prompts[1..].to_vec(),
     })
 }
 
@@ -6202,11 +6265,17 @@ fn prepare_boot(
     // whether the boot that follows succeeds, so there is nothing here a
     // deferred stage move or a deferred `resume`/`parked_from` spend could
     // change the answer to.
-    let prompt = match (previous.is_some(), via_session, parked) {
-        (true, _, true) => crate::compose::park_prompt(task, pipeline, escalated),
-        (true, true, false) => crate::compose::carry_prompt(task, pipeline),
-        (true, false, false) => crate::compose::resume_prompt(task, pipeline, repo.unattended()),
-        (false, _, _) => crate::compose::opening_prompt(task, pipeline, step),
+    let prompts = match (previous.is_some(), via_session, parked) {
+        (true, _, true) => vec![crate::compose::park_prompt(task, pipeline, escalated)],
+        (true, true, false) => vec![crate::compose::carry_prompt(task, pipeline)],
+        (true, false, false) => {
+            vec![crate::compose::resume_prompt(
+                task,
+                pipeline,
+                repo.unattended(),
+            )]
+        }
+        (false, _, _) => crate::compose::opening_messages(task, pipeline, step),
     };
 
     Ok(Boot {
@@ -6216,7 +6285,7 @@ fn prepare_boot(
         pane_id,
         args,
         env,
-        prompt,
+        prompts,
         session,
         model,
         head,
@@ -6275,6 +6344,8 @@ struct Started {
     /// apart from a dropped write any other way, since `persist_task`
     /// answering `false` is not an error.
     persisted: bool,
+    /// The opening messages still to send — see [`LaneRecord::opening`].
+    opening: Vec<String>,
 }
 
 /// A step's model: exactly what it names, and nothing else.
@@ -18804,18 +18875,25 @@ mod tests {
         );
     }
 
-    /// A step naming `skills:` gets one `/name` invocation per skill, in
-    /// declaration order, leading the briefing on the prompt's one line — a
-    /// leading slash invocation only expands where it opens the message, so
-    /// it cannot go after the briefing. The sentence behind it is unchanged.
-    // covers: step.skills — opening_prompt emits one leading `/name` per skill, in order
+    /// A step naming `skills:` gets one `/name` message per skill, in
+    /// declaration order, ahead of the briefing. The briefing sentence is the
+    /// same one a step without skills is sent.
+    // covers: step.skills — opening_messages emits one leading `/name` per skill, in order
     #[test]
-    fn the_opening_prompt_leads_with_one_slash_invocation_per_skill() {
+    fn the_opening_messages_lead_with_one_slash_invocation_per_skill() {
         let (repo, _root_guard) = fixture("prompt-skills");
         let plain_pipeline = Pipelines::builtin().get("default").unwrap().clone();
         let plain_step = plain_pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
-        let plain_prompt = crate::compose::opening_prompt(&task, &plain_pipeline, plain_step);
+        assert_eq!(
+            crate::compose::opening_messages(&task, &plain_pipeline, plain_step),
+            [crate::compose::opening_prompt(
+                &task,
+                &plain_pipeline,
+                plain_step
+            )],
+            "a step without skills is opened by the briefing alone"
+        );
 
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         pipeline
@@ -18826,28 +18904,23 @@ mod tests {
             .skills = vec!["code-review".to_string(), "spoolway-doctor".to_string()];
         let step = pipeline.step("implement").unwrap();
 
-        let prompt = crate::compose::opening_prompt(&task, &pipeline, step);
-        assert!(
-            prompt.starts_with("/code-review /spoolway-doctor "),
-            "got: {prompt}"
-        );
         assert_eq!(
-            prompt
-                .strip_prefix("/code-review /spoolway-doctor ")
-                .unwrap(),
-            plain_prompt,
-            "the sentence after the skills should be untouched: {prompt}"
+            crate::compose::opening_messages(&task, &pipeline, step),
+            [
+                "/code-review".to_string(),
+                "/spoolway-doctor".to_string(),
+                crate::compose::opening_prompt(&task, &plain_pipeline, plain_step),
+            ]
         );
     }
 
     /// herdr types a multi-line message into Claude Code as one paste, and a
     /// harness never expands a slash command inside a paste — only one that
-    /// opens a typed message. A step's skills must therefore lead the
-    /// briefing on its own line, with no newline anywhere in the prompt, or
-    /// the skill never loads as a real command.
-    // covers: step.skills — opening_prompt puts every skill and the briefing on one line
+    /// opens a typed message. Every message of the opening must therefore be
+    /// a single line.
+    // covers: step.skills — every opening message is one line with no newline
     #[test]
-    fn a_step_with_skills_produces_one_line_with_no_newline() {
+    fn every_opening_message_of_a_step_with_skills_is_one_line() {
         let (repo, _root_guard) = fixture("prompt-skills");
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         pipeline
@@ -18859,19 +18932,173 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::opening_prompt(&task, &pipeline, step);
+        for message in crate::compose::opening_messages(&task, &pipeline, step) {
+            assert!(
+                !message.contains('\n'),
+                "the message must arrive as typed text, not a multi-line paste: {message}"
+            );
+        }
+    }
+
+    /// A skill is invoked on its own: whatever follows a `/name` on the same
+    /// line is passed to that skill as its argument, so the briefing sentence
+    /// must never share a message with one. Every skill still leads, in
+    /// declaration order, and the briefing sentence is delivered exactly once.
+    // covers: step.skills — no skill receives the briefing as its argument, and the briefing is sent once
+    #[test]
+    fn a_step_with_skills_delivers_the_briefing_once_and_to_no_skill() {
+        let (repo, _root_guard) = fixture("prompt-skills-once");
+        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .skills = vec!["code-review".to_string(), "spoolway-doctor".to_string()];
+        let step = pipeline.step("implement").unwrap();
+        let task = reload(&add_task(&repo, "demo", "implement"));
+
+        let messages = crate::compose::opening_messages(&task, &pipeline, step);
+        let briefing = format!("Read {} before anything else.", task.path.display());
         assert_eq!(
-            prompt,
-            format!(
-                "/code-review /spoolway-doctor Read {} before anything else.",
-                task.path.display()
-            ),
-            "got: {prompt}"
+            messages.iter().filter(|m| m.contains(&briefing)).count(),
+            1,
+            "the briefing sentence should appear exactly once: {messages:?}"
         );
-        assert!(
-            !prompt.contains('\n'),
-            "the briefing must arrive as typed text, not a multi-line paste: {prompt}"
+        assert_eq!(
+            messages.last(),
+            Some(&briefing),
+            "the briefing comes after every skill, on its own: {messages:?}"
         );
+        let invocations: Vec<&str> = messages
+            .iter()
+            .map(String::as_str)
+            .filter(|m| m.starts_with('/'))
+            .collect();
+        assert_eq!(
+            invocations,
+            ["/code-review", "/spoolway-doctor"],
+            "skills should lead in declaration order: {messages:?}"
+        );
+    }
+
+    /// A skill's message is a whole turn, and a message typed while it runs
+    /// is queued input that never expands as a slash command. So the launch
+    /// sends only the first skill, and each later pass that finds the lane
+    /// settled sends the next message — never one while the lane is busy, and
+    /// without the launch itself waiting on any turn to end.
+    // covers: step.skills — the opening sends one message per settled pass, never mid-turn
+    #[test]
+    fn a_lane_is_sent_its_next_opening_message_only_once_it_settles() {
+        let (repo, _root_guard) = fixture("prompt-skills-settle");
+        let path = add_task(&repo, "demo", "queued");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .skills = vec!["code-review".to_string(), "spoolway-doctor".to_string()];
+        let name = "demo · implement";
+        let sent = |mux: &FakeMux| (mux.did("prompt").len(), mux.read(name, 0).unwrap());
+
+        let mux = FakeMux::new(vec![]);
+        run_pass_with(&repo, &mux, &pipelines);
+        assert_eq!(
+            sent(&mux),
+            (1, "/code-review".to_string()),
+            "the launch sends the first skill alone"
+        );
+
+        // Still in the first skill's turn: nothing more is typed.
+        let mux = FakeMux::new(vec![lane(&repo, name, LaneStatus::Working)]);
+        run_pass_with(&repo, &mux, &pipelines);
+        assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+
+        let mux = FakeMux::new(vec![lane(&repo, name, LaneStatus::Done)]);
+        run_pass_with(&repo, &mux, &pipelines);
+        assert_eq!(sent(&mux), (1, "/spoolway-doctor".to_string()));
+
+        // A permission prompt is not the end of a turn.
+        let mux = FakeMux::new(vec![lane(&repo, name, LaneStatus::Blocked)]);
+        run_pass_with(&repo, &mux, &pipelines);
+        assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+
+        let mux = FakeMux::new(vec![lane(&repo, name, LaneStatus::Idle)]);
+        run_pass_with(&repo, &mux, &pipelines);
+        let briefing = format!(
+            "Read {} before anything else.",
+            reload(&path).path.display()
+        );
+        assert_eq!(sent(&mux), (1, briefing));
+
+        // The opening is spent: a settled lane from here on is an ordinary
+        // one, and freshly settled it is not yet reminded.
+        let mux = FakeMux::new(vec![lane(&repo, name, LaneStatus::Done)]);
+        run_pass_with(&repo, &mux, &pipelines);
+        assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+        assert_eq!(reload(&path).stage(), "implement");
+    }
+
+    /// The unsent opening messages live only on the lane record, so they must
+    /// survive in `lanes.json`: after the launch pass the file holds the
+    /// briefing the first skill's launch left unsent. This checks the
+    /// record's field round-trips through the file; it cannot tell the
+    /// mid-pass saves from the one `pass` makes at its end, because a
+    /// dispatcher killed mid-pass cannot be staged in this harness.
+    #[test]
+    fn the_unsent_opening_messages_are_in_lanes_json_after_the_launch_pass() {
+        let (repo, _root_guard) = fixture("prompt-skills-saved");
+        let path = add_task(&repo, "demo", "queued");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .skills = vec!["code-review".to_string()];
+        let mux = FakeMux::new(vec![]);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let records = load_lane_records(&repo);
+        let briefing = format!(
+            "Read {} before anything else.",
+            reload(&path).path.display()
+        );
+        assert_eq!(records["demo · implement"].opening, [briefing]);
+    }
+
+    /// `spoolway prompt contract` shows what a lane is typed. A step with
+    /// skills is typed one message per skill and then the briefing, so the
+    /// preview must keep them apart rather than show one multi-line message,
+    /// which is the paste shape no slash command expands in.
+    #[test]
+    fn the_prompt_preview_keeps_each_opening_message_apart() {
+        let (repo, _root_guard) = fixture("prompt-skills-preview");
+        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .skills = vec!["code-review".to_string(), "spoolway-doctor".to_string()];
+        let step = pipeline.step("implement").unwrap();
+        let task = reload(&add_task(&repo, "demo", "implement"));
+
+        let opening = crate::compose::lane_prompt_for_state(&task, &pipeline, step, "opening");
+        assert_eq!(opening.len(), 3, "{opening:?}");
+        assert_eq!(opening[..2], ["/code-review", "/spoolway-doctor"]);
+        for state in crate::compose::STATES.iter().filter(|s| **s != "opening") {
+            let messages = crate::compose::lane_prompt_for_state(&task, &pipeline, step, state);
+            assert_eq!(messages.len(), 1, "{state}: {messages:?}");
+        }
     }
 
     /// The report contract moved to the end of the system prompt, after
