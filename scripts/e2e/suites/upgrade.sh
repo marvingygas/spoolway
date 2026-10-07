@@ -322,6 +322,20 @@ says "the 0.6.0 project's pipelines load clean after the sync" \
   "names no model" \
   "$SPOOLWAY" pipeline check
 
+# A project whose own pipeline still ends a step with `end: true` — a shape this
+# release stopped loading — is named by `sync`, by file and step, with the line
+# that replaces it. `sync` never edits a step, so the file is left as written
+# and removed here, before the queue below needs every pipeline to load.
+printf 'steps:\n  - id: a\n    run: "true"\n    on_pass: halt\n  - id: halt\n    end: true\n' \
+  > .spoolway/pipelines/retired.yml
+says "sync names a pipeline file that still uses end:" \
+  "retired.yml" \
+  "$SPOOLWAY" sync
+says "and the step in it, with on_pass: done as the replacement" \
+  "step \`halt\` sets end: true, which is gone — use on_pass: done" \
+  "$SPOOLWAY" sync
+must "the retired pipeline is removed again" rm .spoolway/pipelines/retired.yml
+
 # And the queue itself still runs: a task queues against the upgraded
 # project's own `default` pipeline, and the queue screen finds it there —
 # the one piece of this suite that is not about `sync` or `config.toml` at

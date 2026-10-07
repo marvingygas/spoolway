@@ -551,7 +551,7 @@ pub struct DispatchConfig {
     /// Whether spoolway commits a lane's leftover work when its step settles.
     ///
     /// The one guarantee spoolway makes about git, and the only reason it runs
-    /// a git verb of its own: a terminal step with `cleanup: true` removes the
+    /// a git verb of its own: reaching `done` removes the
     /// worktree and deletes the branch, so work that is uncommitted at that
     /// moment has nowhere left to exist. Everything else about git — rebasing,
     /// pushing, opening a pull request — is the `handover` step's, running

@@ -157,8 +157,7 @@ samples. Edit them, or replace them with the flow your team runs. See
 ## Step
 
 A step is one node of a pipeline. Its keys say what it is: `agent:` runs a prompt on a model,
-`run:` runs a command, `end: true` finishes the task. The step id is written into the task's
-`stage:` field.
+`run:` runs a command. The step id is written into the task's `stage:` field.
 
 Four stages belong to the dispatcher. No step may be named `queued`, `done` or `paused`.
 Every pipeline gets a `blocked` step from `[unattended]` unless it declares its own. See
@@ -186,7 +185,7 @@ without reporting is usually asking a question. See [The dispatcher](dispatcher.
 ## Worker slot
 
 Each agent profile declares a `concurrency`: how many of its lanes run at once. A step with
-`slot: false` takes no slot. Command steps and terminal steps take none.
+`slot: false` takes no slot. Command steps take none.
 
 ## Prompt
 

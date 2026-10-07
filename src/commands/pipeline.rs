@@ -236,14 +236,13 @@ const STEP_KEYS: &[&str] = &[
     "last",
     "first",
     "serial",
-    "end",
 ];
 
 /// Keys a file may still name and be refused by name for: two retired
 /// spellings of `loop:`, the retired `cleanup:` and the retired
-/// `on_loop_max:`, kept on [`Step`] only so a file still naming them gets a
-/// message pointing at the replacement — or, for `cleanup:` and
-/// `on_loop_max:`, saying why there is none — rather than serde's own
+/// `on_loop_max:`, and the retired `end:`, kept on [`Step`] only so a file
+/// still naming them gets a message pointing at the replacement — or, for
+/// `cleanup:` and `on_loop_max:`, saying why there is none — rather than serde's own
 /// "unknown field", and three struct fields that answer a fact about where a
 /// `Pipeline` came from rather than something a file could ever set —
 /// [`Pipeline::name`], because the file name is the name;
@@ -260,6 +259,7 @@ const REFUSED_KEYS: &[&str] = &[
     "max_rounds",
     "cleanup",
     "on_loop_max",
+    "end",
 ];
 
 /// One sentence per key a pipeline file may actually set — [`PIPELINE_KEYS`]
@@ -400,11 +400,6 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          it exits, wherever its task has moved on to. The same step id in \
          another pipeline does not hold it.",
     ),
-    (
-        "end",
-        "The task stops here — nothing is scheduled for it again. May name no \
-         agent, no command and no transition.",
-    ),
 ];
 
 /// The things refused when a pipeline file is loaded — [`Pipeline::validate`]'s
@@ -415,7 +410,7 @@ fn rules() -> Vec<&'static str> {
         "every cycle carries a `loop`, wherever along it the bound sits — a spent budget \
          parks on `blocked`",
         "`blocked` may be declared to staff it; `queued`, `done`, `paused` never",
-        "a step is what it carries — `agent:`, `run:` or `end: true`",
+        "a step is what it carries — `agent:` or `run:`",
         "prefer a script the repo already holds over a multi-command `run:` — a chain more \
          than one pipeline runs belongs in a file, named by relative path from the worktree \
          root",
@@ -624,12 +619,7 @@ fn template() -> String {
          \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
          \x20\x20\x20\x20# serial: true              one task runs it at a time; the rest wait on the step\n\
          \x20\x20\x20\x20on_pass: done\n\
-         \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n\
-         \n\
-         \x20\x20# A terminal step: the task stops here. `end: true` is declared rather\n\
-         \x20\x20# than inferred, so a mistyped `agnet:` is an error instead of a silent stop.\n\
-         \x20\x20# - id: shipped\n\
-         \x20\x20#   end: true\n",
+         \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n",
         local_model = crate::models::PLACEHOLDER,
         hosted_model = "claude-opus-5",
     )
@@ -747,10 +737,6 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
             println!("             run: {run}");
         }
         match step.kind() {
-            // Nothing to say on arrival: a declared terminal simply stops the
-            // task there. Only the reserved `done` stage tears a checkout
-            // down, and `pipeline show` never lists that stage as a step.
-            StepKind::Terminal => {}
             // `blocked` declares neither: where its pass goes is read from the
             // step the task stopped on rather than from here, and anything
             // else — a fail, a block, or a pause — parks the task on `paused`
@@ -3501,7 +3487,7 @@ mod tests {
     fn chain_marker_names_first_or_last_or_neither() {
         let neither = Pipeline::parse(
             "p",
-            "steps:\n  - id: a\n    run: make\n    on_pass: z\n  - id: z\n    end: true\n",
+            "steps:\n  - id: a\n    run: make\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(chain_marker(neither.step("a").unwrap()), "");
@@ -3509,7 +3495,7 @@ mod tests {
         let last = Pipeline::parse(
             "p",
             "steps:\n  - id: a\n    run: make\n    last: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(chain_marker(last.step("a").unwrap()), " last-of-chain");
@@ -3517,7 +3503,7 @@ mod tests {
         let first = Pipeline::parse(
             "p",
             "steps:\n  - id: a\n    run: make\n    first: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(chain_marker(first.step("a").unwrap()), " first-of-chain");
@@ -3552,7 +3538,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: flaky\n    prompt: implementer\n    \
-             model: m\n    session: true\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    session: true\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3584,7 +3570,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: pi\n    prompt: implementer\n    \
-             model: m\n    session: true\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    session: true\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3718,7 +3704,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3750,7 +3736,7 @@ mod tests {
             "solo",
             "task_template: myskel\n\
              steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3779,7 +3765,7 @@ mod tests {
             Pipelines::dir_in(&repo.checkout).join("impl.yml"),
             "task_template: foo\n\
              steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
 
@@ -3795,7 +3781,7 @@ mod tests {
             "impl",
             "task_template: foo\n\
              steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3829,7 +3815,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: verify\n    agent: pi\n    prompt: implementer\n    \
-             model: m\n    gate: true\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    gate: true\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3869,7 +3855,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3904,7 +3890,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    run: make\n    skills: code-review\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3943,7 +3929,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: flaky\n    prompt: implementer\n    \
-             model: m\n    skills: code-review\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    skills: code-review\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -3980,7 +3966,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: pi\n    prompt: implementer\n    \
-             model: m\n    skills: code-reveiw\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    skills: code-reveiw\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {
@@ -4021,7 +4007,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: pi\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines {

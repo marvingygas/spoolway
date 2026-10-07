@@ -2858,7 +2858,7 @@ fn build_rows(
                 let dependency = crate::commands::dependency_note(graph, task.id());
                 // Every task on `queued` reads `queued`, whatever it is
                 // waiting for. A dependency that can never arrive — one
-                // that is blocked, one that ended at a terminal step, or a
+                // that is blocked, one that is paused, or a
                 // cycle — used to be drawn apart, but the dispatcher has
                 // never treated it apart: `graph.ready()` passes over any
                 // task whose dependencies are not all `done`, so a dead

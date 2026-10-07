@@ -903,7 +903,7 @@ impl AutoCommit {
 }
 
 /// The one git verb spoolway runs of its own accord: commit the lane's worktree
-/// when its step settles, so that a cleanup terminal cannot delete work
+/// when its step settles, so that reaching `done` cannot delete work
 /// that was never recorded anywhere.
 ///
 /// Called from both ends of a step — `spoolway report`, which is how a lane that
@@ -1648,18 +1648,14 @@ fn resume_checked(
 /// Resuming a running task rewinds it, and its lane's own later report is then
 /// refused. Resuming a queued task with `--stage` would skip the steps in front
 /// of the one named. A stage no pipeline defines is left resumable: a pipeline
-/// edited while a task sat on a removed step must still be rescued by hand. So
-/// is a task on a terminal step (`end: true`), which has finished and runs
-/// nothing; `--stage` may still revive it.
+/// edited while a task sat on a removed step must still be rescued by hand.
 fn refuse_if_not_stopped(task: &Task, pipelines: &Pipelines) -> Result<()> {
     let stage = task.stage();
     let running = stage != crate::pipeline::BLOCKED
         && stage != crate::pipeline::PAUSED
-        && pipelines.for_task(task).is_ok_and(|pipeline| {
-            pipeline
-                .step(stage)
-                .is_some_and(|step| step.kind() != crate::pipeline::StepKind::Terminal)
-        });
+        && pipelines
+            .for_task(task)
+            .is_ok_and(|pipeline| pipeline.step(stage).is_some());
     if stage == crate::pipeline::QUEUED {
         bail!(
             "task `{}` is {stage}, not stopped — it starts on its own when the dispatcher \
@@ -4248,7 +4244,7 @@ mod tests {
              - id: work\n    agent: pi\n    \
              on_pass: ship\n    on_fail: retry\n  \
              - id: retry\n    agent: pi\n    loop: {limit}\n    on_pass: work\n  \
-             - id: ship\n    end: true\n"
+             - id: ship\n    run: x\n    on_pass: done\n"
         );
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
@@ -4531,24 +4527,22 @@ mod tests {
         assert_eq!(queued(&repo, "child").stage(), crate::pipeline::BLOCKED);
     }
 
-    /// A task on a stage no pipeline defines, or on a terminal step, is not
-    /// running anything: a pipeline edited under it, or a finished task, must
-    /// still be reachable by hand.
+    /// A task on a stage no pipeline defines is not running anything: a
+    /// pipeline edited under it must still be reachable by hand.
     #[test]
-    fn a_task_on_an_unknown_or_terminal_stage_stays_resumable() {
+    fn a_task_on_an_unknown_stage_stays_resumable() {
         clear_lane_env();
         let pipelines = looping_pipelines(2);
-        for (id, stage) in [("gone", "removed-step"), ("finished", "ship")] {
-            let (repo, _root_guard) = fixture(&format!("resume-unknown-terminal-{id}"));
-            add(&repo, id, &[]);
-            let mut task = queued(&repo, id);
-            task.set_stage_unbanked(stage, "test setup");
-            task.save().unwrap();
+        let (id, stage) = ("gone", "removed-step");
+        let (repo, _root_guard) = fixture(&format!("resume-unknown-stage-{id}"));
+        add(&repo, id, &[]);
+        let mut task = queued(&repo, id);
+        task.set_stage_unbanked(stage, "test setup");
+        task.save().unwrap();
 
-            resume(&repo, &pipelines, &resume_args(id, Some("work")), None)
-                .unwrap_or_else(|e| panic!("`{id}` on `{stage}` must resume: {e:#}"));
-            assert_eq!(queued(&repo, id).stage(), "work");
-        }
+        resume(&repo, &pipelines, &resume_args(id, Some("work")), None)
+            .unwrap_or_else(|e| panic!("`{id}` on `{stage}` must resume: {e:#}"));
+        assert_eq!(queued(&repo, id).stage(), "work");
     }
 
     /// A dependency that is neither queued nor archived is unknown, which

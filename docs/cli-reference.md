@@ -603,7 +603,7 @@ These tasks are refused, each with a message that names the reason and what to d
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
 | Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
 
-A task on a step the pipeline no longer defines, or on a step that ends the pipeline, can still be resumed.
+A task on a step the pipeline no longer defines can still be resumed.
 
 ```
 spoolway resume <task>
@@ -675,7 +675,7 @@ $ spoolway pipeline show --json
 ```
 
 `source` and `file` read the same as [`pipeline list
---json`](#spoolway-pipeline-list---json). `kind` is `"agent"`, `"command"` or `"terminal"`.
+--json`](#spoolway-pipeline-list---json). `kind` is `"agent"` or `"command"`.
 `loop` is `null` for a step with no `loop:` limit; `timeout_seconds` is `null` for an agent
 step.
 

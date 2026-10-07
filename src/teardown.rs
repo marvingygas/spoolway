@@ -41,7 +41,7 @@ use crate::platform::PathExt;
 use crate::task::Task;
 
 impl<'a> Dispatcher<'a> {
-    /// A task reached a terminal step that cleans up: bank whatever its lanes
+    /// A task reached `done`: bank whatever its lanes
     /// spent, tear down its worktree and branch, and move its file out of the
     /// active queue.
     pub(crate) fn clean_up(
@@ -58,7 +58,7 @@ impl<'a> Dispatcher<'a> {
         //
         // The step banked is the lane's own — `owned`'s first tuple element —
         // not `task.stage()`. By the time `clean_up` runs the task has
-        // already been moved onto its terminal step, so `task.stage()` would
+        // already been moved onto `done`, so `task.stage()` would
         // stamp the line `done` for tokens the previous agent step spent, and
         // `lane_name(&entry.step, &entry.task)` — which `LaneRecord::readopted`
         // and `dispatch::lane_session` both reconstruct — would name a lane

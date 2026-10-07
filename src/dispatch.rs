@@ -1167,7 +1167,7 @@ impl<'a> Dispatcher<'a> {
     /// the dispatcher's own reserved ones, handled entirely by
     /// [`Dispatcher::route_reserved_stage`]; its step may fall through to
     /// `on_pass` without starting a lane, decided by [`fall_through`]; or
-    /// what is left settles on the spot (a terminal or command step) or
+    /// what is left settles on the spot (a command step) or
     /// becomes a raw [`Candidate`] (an agent step with nothing already
     /// running in its pane). Neither of the first two is sorted or gated
     /// yet — see [`Dispatcher::rank_candidates`] for that.
@@ -1372,12 +1372,6 @@ impl<'a> Dispatcher<'a> {
                 .map(|(_, _, lane)| *lane);
 
             match step.kind() {
-                // A declared terminal step (`end: true`) that is not the
-                // reserved `done` stage does nothing on arrival — reaching
-                // `done` is the only thing that tears a checkout down, at
-                // `route_reserved_stage` below. The task simply stops here.
-                StepKind::Terminal => {}
-
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
                     // Every other task on this same pipeline, for a `serial:`
@@ -2000,7 +1994,7 @@ impl<'a> Dispatcher<'a> {
                 TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             // Reaching `done` is what tears the worktree down. It used
-            // to be a `cleanup: true` on a declared terminal, which
+            // to be a `cleanup: true` on an `end: true` step, which
             // every shipped pipeline wrote identically — a key whose
             // only correct value was the one it always had.
             if self.clean_up(task, owned, report)? {
@@ -9034,7 +9028,7 @@ mod tests {
         let yaml = "steps:\n  \
              - id: a\n    run: true\n    loop: 2\n    on_pass: b\n  \
              - id: b\n    run: true\n    on_pass: a\n    on_fail: z\n  \
-             - id: z\n    end: true\n";
+             - id: z\n    run: x\n    on_pass: done\n";
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
             "default".into(),
@@ -9082,7 +9076,7 @@ mod tests {
              on_pass: z\n    on_fail: b\n  \
              - id: b\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
              loop: 1\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         );
         let path = add_task_with(&repo, "demo", "a", |f| {
             f.arrivals.insert("b".into(), 1);
@@ -9119,7 +9113,7 @@ mod tests {
              on_pass: z\n  \
              - id: f\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
              loop: 1\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         );
         let worktree = repo.root.join("wt-demo");
         std::fs::create_dir_all(&worktree).unwrap();
@@ -9180,7 +9174,7 @@ mod tests {
     fn last_pipelines() -> Pipelines {
         let yaml = "steps:\n  \
              - id: suite\n    run: true\n    last: true\n    on_pass: closeout\n  \
-             - id: closeout\n    end: true\n";
+             - id: closeout\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert("default".into(), pipeline);
@@ -9202,7 +9196,7 @@ mod tests {
              \x20   on_pass: document\n  \
              - id: document\n    agent: pi\n    prompt: implementer\n    model: test-model\n\
              \x20   on_pass: handover\n  \
-             - id: handover\n    end: true\n",
+             - id: handover\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let long = crate::pipeline::Pipeline::parse(
@@ -9218,7 +9212,7 @@ mod tests {
              \x20   on_pass: e\n  \
              - id: e\n    agent: pi\n    prompt: implementer\n    model: test-model\n\
              \x20   on_pass: f\n  \
-             - id: f\n    end: true\n",
+             - id: f\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let mut pipelines = Pipelines::builtin();
@@ -9394,7 +9388,7 @@ mod tests {
     fn first_pipelines() -> Pipelines {
         let yaml = "steps:\n  \
              - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
-             - id: work\n    end: true\n";
+             - id: work\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert("default".into(), pipeline);
@@ -14280,7 +14274,7 @@ mod tests {
                model: test-model\n    on_pass: fix\n  \
              - id: fix\n    agent: pi\n    prompt: implementer\n    \
                model: test-model\n    session: true\n    on_pass: closeout\n  \
-             - id: closeout\n    end: true\n";
+             - id: closeout\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert("default".into(), pipeline);
@@ -17745,7 +17739,7 @@ mod tests {
             "steps:\n  \
              - id: implement\n    run: exit 0\n    headless: true\n    gate: true\n    \
                on_pass: finish\n  \
-             - id: finish\n    end: true\n",
+             - id: finish\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines =

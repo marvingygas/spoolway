@@ -95,7 +95,7 @@ fi
 WT="$LIVE/worktrees/manual-wt"
 must "cutting a worktree for the pipeline set" \
   git worktree add -q -b task/pipeline-set "$WT" plan/live
-printf 'description: A pipeline only this branch has.\nsteps:\n  - id: solo\n    end: true\n' \
+printf 'description: A pipeline only this branch has.\nsteps:\n  - id: solo\n    run: x\n    on_pass: done\n' \
   > "$WT/.spoolway/pipelines/extra.yml"
 must "committing the branch's own pipeline" \
   git -C "$WT" add .spoolway/pipelines/extra.yml
@@ -160,7 +160,7 @@ fi
 # this, a key spelled the way it was before `task_template:`. A command that
 # does route still refuses on it, as it has to.
 BROKEN="$LIVE/proj/.spoolway/pipelines/broken.yml"
-printf 'template: default\nsteps:\n  - id: solo\n    end: true\n' > "$BROKEN"
+printf 'template: default\nsteps:\n  - id: solo\n    run: x\n    on_pass: done\n' > "$BROKEN"
 
 works "pipeline check in the worktree survives a project file that does not parse" \
   "$SPOOLWAY" -C "$WT" pipeline check

@@ -2529,7 +2529,7 @@ mod tests {
     fn an_unrouted_model_row_is_noted_and_a_routed_one_is_silent() {
         let pipelines = single_step_pipelines(
             "  - id: build\n    agent: pi\n    model: ornith/Ornith-1.5-35B-A3B\n    \
-             on_pass: finish\n  - id: finish\n    end: true\n",
+             on_pass: finish\n  - id: finish\n    run: x\n    on_pass: done\n",
         );
         let mut config = Config::default();
         config.models.insert(
@@ -2567,7 +2567,7 @@ mod tests {
         }
         let pipelines = single_step_pipelines(
             "  - id: build\n    agent: pi\n    prompt: worker\n    model: m\n    \
-             on_pass: finish\n  - id: finish\n    end: true\n",
+             on_pass: finish\n  - id: finish\n    run: x\n    on_pass: done\n",
         );
 
         let notes: Vec<String> = prompt_checks(&repo, &pipelines)
@@ -3150,7 +3150,7 @@ mod tests {
     /// stack`, and issue tracking names no hook at all.
     #[test]
     fn reaches_forge_is_false_with_neither_caller() {
-        let pipelines = single_step_pipelines("  - id: a\n    end: true\n");
+        let pipelines = single_step_pipelines("  - id: a\n    run: x\n    on_pass: done\n");
         assert!(!reaches_forge(&pipelines, &tracking("")));
     }
 
@@ -3159,7 +3159,7 @@ mod tests {
     #[test]
     fn reaches_forge_is_true_with_a_stack_step() {
         let pipelines = single_step_pipelines(
-            "  - id: a\n    run: spoolway stack\n    on_pass: b\n  - id: b\n    end: true\n",
+            "  - id: a\n    run: spoolway stack\n    on_pass: b\n  - id: b\n    run: x\n    on_pass: done\n",
         );
         assert!(reaches_forge(&pipelines, &tracking("")));
     }
@@ -3168,7 +3168,7 @@ mod tests {
     /// no step reaching for `gh` itself.
     #[test]
     fn reaches_forge_is_true_with_the_github_hook() {
-        let pipelines = single_step_pipelines("  - id: a\n    end: true\n");
+        let pipelines = single_step_pipelines("  - id: a\n    run: x\n    on_pass: done\n");
         assert!(reaches_forge(
             &pipelines,
             &tracking(&crate::cli::Tracker::Github.hook_name())
@@ -3605,7 +3605,7 @@ mod tests {
             dir.join("default.yml"),
             "steps:\n  \
              - id: implement\n    agent: pi\n    on_pass: implement\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
 

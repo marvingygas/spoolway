@@ -150,7 +150,7 @@ else bad "the child is gone once the screen has ended"; fi
 LATE=".spoolway/pipelines/late-pipeline.yml"
 RUN="$LIVE/late.txt"
 works "a pipeline added after the screen opened is checked on enter" \
-  script -qec "{ printf '\\033[D'; sleep 1; printf 'steps:\\n  - id: build\\n    agent: pi\\n    prompt: late-prompt\\n    model: m\\n    on_pass: finish\\n  - id: finish\\n    end: true\\n' >'$LATE'; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$RUN"
+  script -qec "{ printf '\\033[D'; sleep 1; printf 'steps:\\n  - id: build\\n    agent: pi\\n    prompt: late-prompt\\n    model: m\\n    on_pass: finish\\n  - id: finish\\n    run: x\\n    on_pass: done\\n' >'$LATE'; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
 rm -f "$LATE"
 has "the popup names the prompt of the pipeline added since" "late-prompt" "$RUN.plain"

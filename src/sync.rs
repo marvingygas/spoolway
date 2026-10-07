@@ -3117,7 +3117,7 @@ mod tests {
             &path,
             format!(
                 "# {name} — mine, and nothing here is spoolway's.\n\n{block}\n\nsteps:\n  \
-                 - id: work\n    end: true\n"
+                 - id: work\n    run: x\n    on_pass: done\n"
             ),
         )
         .unwrap();
@@ -3190,7 +3190,7 @@ mod tests {
         let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mine.yml");
-        let mine = "# mine, whole.\nsteps:\n  - id: work\n    end: true\n";
+        let mine = "# mine, whole.\nsteps:\n  - id: work\n    run: x\n    on_pass: done\n";
         std::fs::write(&path, mine).unwrap();
 
         let mut outcomes = Vec::new();
@@ -3229,7 +3229,11 @@ mod tests {
         std::fs::write(&path, &before).unwrap();
         // An unfenced file of the project's own is read for it too.
         let mine = dir.join("mine.yml");
-        std::fs::write(&mine, "steps:\n  - id: work\n    loop: 0\n    end: true\n").unwrap();
+        std::fs::write(
+            &mine,
+            "steps:\n  - id: work\n    loop: 0\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap();
 
         let mut outcomes = Vec::new();
         pipelines(&repo, &args(), &mut outcomes).unwrap();
@@ -3247,6 +3251,55 @@ mod tests {
         assert!(refused[1].0.ends_with("mine.yml"), "{refused:?}");
         let (wrote, _) = dedup_paths(&outcomes);
         assert!(wrote.is_empty(), "{wrote:?}");
+    }
+
+    /// `end: true` and `on_pass: blocked` no longer load. A sync names each
+    /// file and step that still uses one, with the line that replaces it, and
+    /// writes nothing to either file.
+    #[test]
+    fn a_pipeline_with_end_or_a_pass_to_blocked_is_refused_naming_each_step() {
+        let (repo, _root_guard) = fixture("pipeline-end-and-blocked");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ends = dir.join("ends.yml");
+        std::fs::write(
+            &ends,
+            "steps:\n  - id: a\n    run: x\n    on_pass: halt\n  - id: halt\n    end: true\n",
+        )
+        .unwrap();
+        let parks = dir.join("parks.yml");
+        std::fs::write(
+            &parks,
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: blocked\n",
+        )
+        .unwrap();
+        let before = [
+            std::fs::read_to_string(&ends).unwrap(),
+            std::fs::read_to_string(&parks).unwrap(),
+        ];
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&ends).unwrap(), before[0]);
+        assert_eq!(std::fs::read_to_string(&parks).unwrap(), before[1]);
+        let refused = refusals(&outcomes);
+        assert_eq!(refused.len(), 2, "{:?}", outcome_lines(&outcomes));
+        let said = |file: &str| {
+            refused
+                .iter()
+                .find(|(shown, _)| shown.ends_with(file))
+                .map(|(_, why)| *why)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            said("ends.yml"),
+            "will not load: step `halt` sets end: true, which is gone — use on_pass: done"
+        );
+        assert_eq!(
+            said("parks.yml"),
+            "will not load: step `a` has on_pass: blocked — use gate: true to stop for a person"
+        );
     }
 
     /// Half a fence is the one shape worth a refusal: the lines under a start

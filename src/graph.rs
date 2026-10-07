@@ -30,9 +30,8 @@ pub enum DepState {
     /// that branch will contain them.
     Done,
     /// Still moving through the pipeline — including a task parked on
-    /// `blocked`, or sitting on a project's own declared ending such as
-    /// `superseded` or `rejected`. Neither of those will ever become `Done`
-    /// on its own, but nothing here has to say so: a dependent only ever
+    /// `blocked`, or sitting on a stage no pipeline declares any more. Neither
+    /// of those will ever become `Done` on its own, but nothing here has to say so: a dependent only ever
     /// asks whether this is `Done`, so anything short of it is treated the
     /// same. See [`Graph::ready`].
     Pending,
@@ -184,7 +183,7 @@ impl Graph {
     /// Every dependency has finished, so this task may start.
     ///
     /// Asks for [`DepState::Done`] specifically, not merely "not moving" —
-    /// the guarantee that keeps a project's own declared ending safe to add.
+    /// the guarantee that keeps any stage short of `done` from releasing work.
     /// A third terminal name — `superseded`, `rejected`, `abandoned` — would
     /// release every dependent the moment a task reached it, silently, if
     /// this accepted anything short of the one reserved name that actually
@@ -335,10 +334,10 @@ pub fn render_cycle(cycle: &[String]) -> String {
 /// Where a task stands, from the dispatcher's point of view.
 ///
 /// One stage means finished, and it is a reserved one: `done`. Everything
-/// else — still moving, parked on `blocked`, or sitting on a project's own
-/// declared ending such as `superseded` or `rejected` — is `Pending`.
+/// else — still moving, parked on `blocked`, or sitting on a stage no
+/// pipeline declares — is `Pending`.
 /// [`Graph::ready`] is where that flattening is made safe: it releases a
-/// dependent only once every dependency is `Done`, so a declared ending that
+/// dependent only once every dependency is `Done`, so a stage that
 /// will never reach `done` on its own holds its dependents exactly as a
 /// `blocked` task does, without this needing to tell the two apart.
 fn classify(task: &Task) -> DepState {

@@ -1373,8 +1373,8 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
   printf '    on_pass: tick-check-landed\n'
   printf '    on_fail: blocked\n'
   printf '\n  - id: tick-check-landed\n'
-  printf '    description: A dead end, so nothing drifts on its own while the reap has its say.\n'
-  printf '    end: true\n'
+  printf '    description: Holds the task, so nothing finishes it while the reap has its say.\n'
+  printf '    run: sleep 600\n    on_pass: done\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: tick-check/" .spoolway/pipelines/default.yml
 works "a background step for the tick check checks out" "$SPOOLWAY" pipeline check
@@ -1389,9 +1389,9 @@ must "a task behind the tick-check step queues" \
 # background command, the reap that reads its exit) has to happen inside
 # that one span. The worst-case alignment against the ten-second probe still
 # needs two of its passes to get `tick-check` started at all — settling
-# `implement`, then starting the background run and moving on to the dead
-# end — so this cannot be timed against zero. What it is timed against is
-# the *third* pass a run with no wake would need, to notice the
+# `implement`, then starting the background run and moving on to the step
+# that holds the task — so this cannot be timed against zero. What it is
+# timed against is the *third* pass a run with no wake would need, to notice the
 # meanwhile-finished exit code on its own: thirty seconds, worst case,
 # against this cap's twenty-five.
 if drive tick-check blocked 150; then

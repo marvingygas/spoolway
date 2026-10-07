@@ -191,8 +191,6 @@ struct RouteStep {
     gate_at: bool,
     on_pass: Option<String>,
     on_fail: Option<String>,
-    /// A terminal step: the task stops here, with no route onward.
-    ends: bool,
 }
 
 fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
@@ -213,21 +211,13 @@ fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
         .steps
         .iter()
         .filter(|step| step.id != crate::pipeline::BLOCKED)
-        .map(|step| {
-            let ends = step.kind() == StepKind::Terminal;
-            RouteStep {
-                id: step.id.clone(),
-                description: step.description.clone(),
-                gate: step.gate,
-                gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
-                on_pass: (!ends)
-                    .then(|| step.destination(Outcome::Pass).map(str::to_string))
-                    .flatten(),
-                on_fail: (!ends)
-                    .then(|| step.destination(Outcome::Fail).map(str::to_string))
-                    .flatten(),
-                ends,
-            }
+        .map(|step| RouteStep {
+            id: step.id.clone(),
+            description: step.description.clone(),
+            gate: step.gate,
+            gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
+            on_pass: step.destination(Outcome::Pass).map(str::to_string),
+            on_fail: step.destination(Outcome::Fail).map(str::to_string),
         })
         .collect();
     Ok(RouteView {
@@ -341,14 +331,11 @@ fn render_route(route: &RouteView) -> String {
             false => out.push_str(&wrapped(&prefix, &about, ROUTE_WRAP).join("\n")),
         }
         out.push('\n');
-        let routes = match (step.ends, &step.on_pass, &step.on_fail) {
-            (true, _, _) => "the task ends here".to_string(),
-            (false, pass, fail) => format!(
-                "pass → {} · fail → {}",
-                pass.as_deref().unwrap_or("—"),
-                fail.as_deref().unwrap_or("—")
-            ),
-        };
+        let routes = format!(
+            "pass → {} · fail → {}",
+            step.on_pass.as_deref().unwrap_or("—"),
+            step.on_fail.as_deref().unwrap_or("—")
+        );
         out.push_str(&format!("{indent}{routes}\n"));
     }
     out.push('\n');

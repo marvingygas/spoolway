@@ -77,7 +77,6 @@ steps:
 | `description` | none | One line, shown by `spoolway pipeline show`. |
 | `agent` | none | A profile from `config.toml`. Makes this an agent step. |
 | `run` | none | A shell command line. Makes this a command step. |
-| `end` | `false` | `true` makes this a terminal step. The task stops here. |
 | `prompt` | the step id | The prompt file the step runs. |
 | `model` | none | The model. Required on every agent step. |
 | `effort` | none | Passed to the agent kind's effort flag. Blank sends no flag. See [Effort](agents.md#effort). |
@@ -100,7 +99,7 @@ The same table is at the top of every pipeline file, between `# >>> spoolway >>>
 never written to.
 
 There is no `kind:` key. A step with `agent:` runs a prompt on a model. A step with `run:` runs
-a command, and its exit code is the outcome. A step with `end: true` stops the task.
+a command, and its exit code is the outcome. A step finishes the task with `on_pass: done`. A step stops the task for a person with `gate: true`.
 
 Steps further down the file are scheduled first. A task on `document` gets a slot before a
 task on `implement`.
@@ -187,7 +186,7 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 outcome at every step, and the walk-past and the failed launch or busy pane, to a bounded
 depth. It runs over the shipped pipelines, the tracked `.spoolway/pipelines` files, and
 pipelines it generates that pass `spoolway pipeline check`.
-Each path it walks must reach a terminal step, keep every `loop` count rising, and start no
+Each path it walks must reach `done` or `blocked`, keep every `loop` count rising, and start no
 more lanes than a stated bound.
 
 ## Unattended runs

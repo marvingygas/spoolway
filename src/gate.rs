@@ -316,14 +316,14 @@ mod tests {
                        - id: a\n    agent: pi\n    on_pass: b\n  \
                        - id: b\n    agent: pi\n    loop:\n      a: 1\n    on_pass: z\n    \
                        on_fail: a\n  \
-                       - id: z\n    end: true\n";
+                       - id: z\n    run: x\n    on_pass: done\n";
         std::fs::write(dir.join("default.yml"), retired).unwrap();
         assert!(!asks_as_popup(&repo));
 
         let fixed = "steps:\n  \
                      - id: a\n    agent: pi\n    on_pass: b\n  \
                      - id: b\n    agent: pi\n    loop: 2\n    on_pass: z\n    on_fail: a\n  \
-                     - id: z\n    end: true\n";
+                     - id: z\n    run: x\n    on_pass: done\n";
         std::fs::write(dir.join("default.yml"), fixed).unwrap();
         assert!(asks_as_popup(&repo));
     }

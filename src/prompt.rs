@@ -413,7 +413,7 @@ fn subject<'a>(
     Ok((pipeline, step, sample, true))
 }
 
-/// Refuse a step no agent runs. `wait` and `terminal` steps have no lane, no
+/// Refuse a step no agent runs. A command step has no lane, no
 /// prompt and no prompt — a contract for one would be a page of blanks.
 fn agent_step(pipeline: &Pipeline, step: &Step) -> Result<()> {
     if step.kind() != StepKind::Agent {
@@ -1456,7 +1456,7 @@ mod tests {
         let pipeline = crate::pipeline::Pipeline::parse(
             "solo",
             "steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
-             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = crate::pipeline::Pipelines {

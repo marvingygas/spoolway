@@ -352,7 +352,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             return Ok(0);
         }
 
-        // A task file leaves the queue only when its terminal step archives it,
+        // A task file leaves the queue only when its task reaches `done`,
         // so an empty queue means every task is finished — including any queued
         // from another plan's worktree while this loop was running, since they
         // all arrive in this one queue. A blocked or paused task stays in the
@@ -1642,7 +1642,7 @@ mod tests {
     /// project whose pipeline never reaches `spoolway stack`.
     fn single_step_pipelines() -> Pipelines {
         let pipeline: Pipeline =
-            serde_norway::from_str("steps:\n  - id: a\n    end: true\n").unwrap();
+            serde_norway::from_str("steps:\n  - id: a\n    run: x\n    on_pass: done\n").unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
         Pipelines {

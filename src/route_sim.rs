@@ -38,7 +38,7 @@
 #[cfg(test)]
 mod tests {
     use crate::commands::route;
-    use crate::pipeline::{Outcome, Pipeline, Pipelines, StepKind};
+    use crate::pipeline::{Outcome, Pipeline, Pipelines};
     use crate::task::Task;
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -74,7 +74,7 @@ mod tests {
 
     /// A pipeline shape built to already satisfy [`Pipeline::validate`]'s
     /// rules — a forward chain of 2 to 5 steps, with the occasional bounded
-    /// back edge, gate, terminal step and declared `blocked` step folded in —
+    /// back edge, gate and declared `blocked` step folded in —
     /// rather than a purely random document filtered down to the rare one
     /// that parses. The rules that keep it valid by construction:
     ///
@@ -149,7 +149,7 @@ mod tests {
         }
 
         if out.contains("on_pass: term") {
-            out += "  - id: term\n    end: true\n";
+            out += "  - id: term\n    run: \"true\"\n    on_pass: done\n";
         }
 
         // Always declared, never left to a coin flip: every real project's
@@ -213,8 +213,7 @@ mod tests {
     }
 
     /// Whether a task arriving at `stage` stops there for this walk's own
-    /// purposes: `done`, `paused`, `blocked`, or any declared
-    /// [`StepKind::Terminal`] step — exactly the reserved and declared
+    /// purposes: `done`, `paused` or `blocked` — exactly the reserved
     /// resting states this project's own routing recognises, and nothing
     /// wider. A stage that is none of these and not a step this pipeline
     /// declares either is not "resting" — see [`walk`]'s own check for what
@@ -240,16 +239,10 @@ mod tests {
     /// it would any other arrival — without this walk also having to prove
     /// that a lane bouncing off `blocked` forever eventually gives up, which
     /// routing alone was never the thing bounding.
-    fn is_resting(pipeline: &Pipeline, stage: &str) -> bool {
-        if stage == crate::pipeline::DONE
+    fn is_resting(stage: &str) -> bool {
+        stage == crate::pipeline::DONE
             || stage == crate::pipeline::PAUSED
             || stage == crate::pipeline::BLOCKED
-        {
-            return true;
-        }
-        pipeline
-            .step(stage)
-            .is_some_and(|step| step.kind() == StepKind::Terminal)
     }
 
     /// Property 2 and 3 together: a keyed count map that only ever grows —
@@ -342,7 +335,7 @@ mod tests {
                     {
                         keys.insert(destination.to_string());
                     }
-                    if !is_resting(pipeline, destination) {
+                    if !is_resting(destination) {
                         pending.push(destination);
                     }
                 }
@@ -415,7 +408,7 @@ mod tests {
         for &outcome in outcomes_at(current) {
             let (branch, destination) = step_once(ctx, task, current, outcome, path)?;
 
-            if is_resting(ctx.pipeline, &destination) {
+            if is_resting(&destination) {
                 path.pop();
                 continue;
             }
@@ -436,7 +429,7 @@ mod tests {
             let (branch, destination) =
                 step_dispatched(ctx, task, current, label, destination, path)?;
 
-            if is_resting(ctx.pipeline, &destination) {
+            if is_resting(&destination) {
                 path.pop();
                 continue;
             }
@@ -535,7 +528,7 @@ mod tests {
         }
 
         let destination = routed.destination;
-        if !is_resting(ctx.pipeline, &destination) && ctx.pipeline.step(&destination).is_none() {
+        if !is_resting(&destination) && ctx.pipeline.step(&destination).is_none() {
             // Neither a resting stage nor a step this pipeline declares —
             // `route` (or this walk's own fixtures) sent the task somewhere
             // nothing can run it further from and nothing recognises as a
@@ -604,7 +597,7 @@ mod tests {
                 branch.front.arrivals
             ));
         }
-        if !is_resting(ctx.pipeline, &destination) && ctx.pipeline.step(&destination).is_none() {
+        if !is_resting(&destination) && ctx.pipeline.step(&destination).is_none() {
             return Err(format!(
                 "the last hop of {} lands on `{destination}`, neither a resting stage nor a \
                  step this pipeline declares",
@@ -657,7 +650,7 @@ mod tests {
                     step_once(ctx, &task, crate::pipeline::BLOCKED, outcome, &mut path)
                         .map_err(|e| format!("blocked_from `{origin}`: {e}"))?;
 
-                if is_resting(ctx.pipeline, &destination) {
+                if is_resting(&destination) {
                     continue;
                 }
 
