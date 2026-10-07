@@ -56,26 +56,6 @@ pub struct Adapter {
     /// guessing a flag at a real binary.
     pub headless: Option<Headless>,
 
-    /// What makes this kind leave its pane without closing it.
-    ///
-    /// The same shape as [`Adapter::headless`], and filled in the same way: a
-    /// row only where somebody sat down with the real binary and watched it
-    /// leave. `None` on every kind nobody has checked, whose panes keep being
-    /// closed and re-split exactly as they are today — see
-    /// [`crate::mux::Mux::vacate_lane`], which degrades to
-    /// [`crate::mux::Mux::stop_lane`] rather than guessing.
-    ///
-    /// There is no universal way to end an agent, which is why this cannot be
-    /// one constant: two Ctrl+C do not end Claude Code and neither does
-    /// Ctrl+D at an empty prompt, while `ctrl+d` ends a `pi` outright. A
-    /// gesture guessed at the wrong kind is a lane killed mid-turn, or a
-    /// stray keystroke typed into somebody's conversation.
-    ///
-    /// Read by [`crate::mux::Mux::vacate_lane`], which is how a task's pane
-    /// carries from one step to the next instead of being closed and split
-    /// again.
-    pub quit: Option<Quit>,
-
     /// The argv template a lane of this kind is started with. Placeholders —
     /// `{model}`, `{prompt_file}`, `{task_file}`, `{worktree}`, `{repo}`,
     /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{session_id}` — are
@@ -248,22 +228,6 @@ pub struct Trust {
 
     /// What that key is set to.
     pub value: &'static str,
-}
-
-/// How a kind is asked to end its session and hand its pane back.
-///
-/// One line typed at the agent's own prompt and submitted, which is the only
-/// form any kind has needed so far. A kind whose gesture is a keystroke
-/// rather than a line is what turns this into an enum, not before — the same
-/// reasoning [`Print`] carries about not growing a shape ahead of a second
-/// row that needs it.
-pub struct Quit {
-    /// Typed at the agent's own prompt, then submitted.
-    ///
-    /// For `claude` this is `/exit`, established by probe against the real
-    /// binary: submitted at a settled prompt the agent leaves `herdr agent
-    /// list` and the pane it was in survives, at its shell.
-    pub line: &'static str,
 }
 
 /// How one agent kind runs a turn without a pane.
@@ -466,10 +430,6 @@ pub const ADAPTERS: &[Adapter] = &[
             // it if it is not, so a second turn needs no rewriting at all.
             resume: Resume::SameArgs,
         }),
-        // `ctrl+d` is known to end a `pi`, but a keystroke is not what this
-        // row describes and nobody has driven a pi lane through a handover.
-        // Its panes keep being closed and re-split.
-        quit: None,
         // `--model` is not optional: pi's default provider is a cloud one, so
         // omitting it silently sends local work to an API. `--no-approve`
         // skips the project-trust dialog a lane would otherwise hang on with
@@ -541,17 +501,6 @@ pub const ADAPTERS: &[Adapter] = &[
                 to: "--resume",
             },
         }),
-        // Established by probe against the real binary, not read off any
-        // documentation: two Ctrl+C in quick succession do not end Claude
-        // Code, and neither does Ctrl+D at an empty prompt. `/exit` submitted
-        // at a settled prompt does — the agent leaves `herdr agent list` and
-        // its pane is still there, back at its shell.
-        //
-        // At a *settled* prompt: the same probe sent the gesture to a working
-        // Claude Code and got a modal asking what to do about the running
-        // task, with the agent sitting in front of it. Waiting for the lane
-        // to settle before vacating is the caller's job.
-        quit: Some(Quit { line: "/exit" }),
         // `--append-system-prompt-file`, not `--append-system-prompt`: claude
         // takes literal prompt text there, so handing it the path would append
         // the path string and quietly drop the prompt.
@@ -672,9 +621,6 @@ pub const ADAPTERS: &[Adapter] = &[
             print: Print(&["exec"]),
             resume: Resume::Tail(&["resume", "--last"]),
         }),
-        // Not driven through a handover. Its panes keep being closed and
-        // re-split.
-        quit: None,
         // Every flag here is a global one, exercised in real turns against the
         // local endpoint on both forms of the binary: the interactive one a
         // multiplexer lane runs, and `exec` for the headless backend.
@@ -1148,31 +1094,6 @@ mod tests {
                 "`{}` is in the table but not findable by the name a profile declares",
                 row.kind
             );
-        }
-    }
-
-    /// A pane can only be handed back at a shell prompt for a kind whose quit
-    /// gesture has actually been checked against the real binary — every other
-    /// kind has to keep today's close-and-resplit teardown rather than have
-    /// one guessed at it. `claude` is the only kind the probe covered: two
-    /// Ctrl+C do not end it, Ctrl+D at an empty prompt does nothing, and
-    /// `/exit` submitted at a settled prompt does — see the plan this task
-    /// comes from.
-    #[test]
-    fn only_claude_carries_a_quit_gesture() {
-        for row in ADAPTERS {
-            if row.kind == "claude" {
-                let quit = row.quit.as_ref().unwrap_or_else(|| {
-                    panic!("`claude` must carry the quit gesture the probe found")
-                });
-                assert_eq!(quit.line, "/exit");
-            } else {
-                assert!(
-                    row.quit.is_none(),
-                    "`{}` claims a quit gesture nobody has checked against its binary",
-                    row.kind
-                );
-            }
         }
     }
 

@@ -4175,19 +4175,16 @@ mod tests {
         assert_eq!(used.agents.get("claude").copied(), Some(1), "{used:#?}");
     }
 
-    /// A settled lane whose task has moved off the step that lane belongs to,
-    /// and whose pane the multiplexer has not yet reported closed, is exactly
-    /// the pane `Dispatcher::free_finished_lanes` closes on this very pass.
-    /// `start_lanes` has already stopped counting it before the footer is ever
-    /// drawn. Counting it here too would read as a full profile for a pass
-    /// where the dispatcher starts another lane in its place.
+    /// A settled lane whose task has moved off the step that lane belongs to
+    /// stays open, idle, until the task is done. `start_lanes` does not count
+    /// it, and counting it here would read as a full profile while the
+    /// dispatcher has a slot free for the next lane.
     ///
-    /// A `Working` lane off its step is left open by `free_finished_lanes` but
-    /// counts for nothing either. `only_the_lane_on_the_tasks_current_step_counts`
-    /// covers that one.
+    /// A `Working` lane off its step counts for nothing either.
+    /// `only_the_lane_on_the_tasks_current_step_counts` covers that one.
     #[test]
-    fn a_finished_lane_not_yet_closed_gives_its_slot_back() {
-        let (repo, _root_guard) = fixture("slots-finished-not-closed");
+    fn a_finished_lane_still_open_gives_its_slot_back() {
+        let (repo, _root_guard) = fixture("slots-finished-still-open");
         let pipelines = Pipelines::builtin();
         add(&repo, "moved-on", &[], Some("review"));
 

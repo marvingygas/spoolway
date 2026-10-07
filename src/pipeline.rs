@@ -1925,7 +1925,7 @@ impl Pipeline {
     ///
     /// One predicate for every place that used to read a task's stage as a
     /// proxy for "parked, waiting on a person": the scheduler's own skip, the
-    /// pane-holding arm of `free_finished_lanes`, the concurrency tally in
+    /// pane-holding arm of `finish_lanes`, the concurrency tally in
     /// `start_lanes`, `sweep_on_stop`, and `slots_used` on the board. The
     /// proxy and the reality agreed until `blocked` could carry a lane —
     /// and now that `Pipelines::assemble` materialises it from `[unattended]`

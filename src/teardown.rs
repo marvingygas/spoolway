@@ -40,7 +40,32 @@ use crate::mux::{Lane, lane_name};
 use crate::platform::PathExt;
 use crate::task::Task;
 
+/// How long a task reaching `done` waits for a lane still mid-turn to make
+/// progress before it stops the lane anyway. Two minutes is long enough for a
+/// final report's last turn to finish and short enough that a hung agent does
+/// not hold a worktree and branch for ever.
+const CLEANUP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl<'a> Dispatcher<'a> {
+    /// Stop a lane, drop its record and bank what it spent, returning the
+    /// record so its session home can be reclaimed once the task is archived.
+    fn stop_and_bank(
+        &mut self,
+        task: &Task,
+        step_id: &str,
+        lane: &Lane,
+        pipeline: &str,
+    ) -> LaneRecord {
+        let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
+        let ledger = self.ledger();
+        let record = self
+            .lanes
+            .remove(&lane.name)
+            .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+        self.record_usage(&record, task.id(), step_id, Some(task), pipeline);
+        record
+    }
+
     /// A task reached a terminal step that cleans up: bank whatever its lanes
     /// spent, tear down its worktree and branch, and move its file out of the
     /// active queue.
@@ -50,42 +75,54 @@ impl<'a> Dispatcher<'a> {
         owned: &[(String, String, &Lane)],
         report: &mut Report,
     ) -> Result<bool> {
-        // Bank each owned lane's spend before its record goes, the way
-        // `sweep_on_stop` does. A pipeline whose last agent step routes
-        // `on_pass: done` has its lane still writing when the task reaches
-        // here; `free_finished_lanes` skipped it as busy, and without this
-        // its tokens were killed unbanked (review finding 14).
-        //
-        // The step banked is the lane's own — `owned`'s first tuple element —
-        // not `task.stage()`. By the time `clean_up` runs the task has
-        // already been moved onto its terminal step, so `task.stage()` would
-        // stamp the line `done` for tokens the previous agent step spent, and
-        // `lane_name(&entry.step, &entry.task)` — which `LaneRecord::readopted`
-        // and `dispatch::lane_session` both reconstruct — would name a lane
-        // that never existed. `sweep_on_stop` derives its lane name from the
-        // stage too, so stage and lane always agree there; here they do not.
         let pipeline = self
             .pipelines
             .for_task(task)
             .map(|p| p.name.clone())
             .unwrap_or_default();
 
-        // The banked records are kept in hand rather than dropped: their
-        // per-session agent homes are reclaimed further down, but only once
-        // the task is actually archived. `clean_up` can still turn back below
-        // and hold the task at `blocked` (uncommitted work), and a `session:`
-        // step resuming it then would want that transcript.
+        // A lane mid-turn would go on writing through the commit below, and
+        // what it wrote after it is lost with the worktree. It could also hold
+        // git's index lock, which fails the commit and holds the task at
+        // `blocked` for nothing. So a lane that is still making progress is
+        // waited for: the task stays on its terminal step and the next pass
+        // tries again once it has stopped talking.
+        //
+        // The wait is bounded by [`CLEANUP_WAIT`], because a lane can stop
+        // reporting progress and never settle, and nothing else escalates a
+        // task on a terminal step. A lane that is busy past it is stopped and
+        // banked now, before the commit, as every busy lane was before panes
+        // were kept. So is any busy lane on a backend whose lanes are not
+        // panes: its process is the lane, so there is nothing for a person to
+        // look at and nothing to wait for.
+        let now = now_secs();
+        let resident = self.mux.resident_while_waiting();
         let mut banked: Vec<LaneRecord> = Vec::new();
+        let mut stopped: Vec<String> = Vec::new();
+        for (_, task_id, lane) in owned {
+            if task_id != task.id() || !lane.status.is_busy() {
+                continue;
+            }
+            // Nothing refreshes a busy lane's clock between passes, so it is
+            // read fresh here from the transcript. A lane with no record is
+            // one this dispatcher cannot judge, and is stopped as before.
+            if !resident || !self.lanes.contains_key(&lane.name) {
+                continue;
+            }
+            if self.note_progress(lane, now) < CLEANUP_WAIT {
+                report.actions.push(format!(
+                    "{}: waiting for `{}` to finish its turn before cleaning up; \
+                     close its pane to stop waiting",
+                    task.id(),
+                    lane.name
+                ));
+                return Ok(false);
+            }
+        }
         for (step_id, task_id, lane) in owned {
-            if task_id == task.id() {
-                let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
-                let ledger = self.ledger();
-                let record = self
-                    .lanes
-                    .remove(&lane.name)
-                    .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
-                self.record_usage(&record, task.id(), step_id, Some(task), &pipeline);
-                banked.push(record);
+            if task_id == task.id() && lane.status.is_busy() {
+                banked.push(self.stop_and_bank(task, step_id, lane, &pipeline));
+                stopped.push(lane.name.clone());
             }
         }
 
@@ -156,6 +193,31 @@ impl<'a> Dispatcher<'a> {
                     task.id()
                 ));
                 return Ok(false);
+            }
+        }
+
+        // Past the turn-back, the task is going for good: every lane it has run
+        // stops, its pane closes, and its spend is banked once, after it stops.
+        // Nothing is banked earlier. A task held at `blocked` above stays live
+        // with every pane open and every record held, and the `clean_up` that
+        // finally archives it banks then; banking on both paths would append a
+        // second row repeating the lane's wall time. `record_usage` banks the
+        // difference from what the ledger already holds, so a person's rounds
+        // typed into a kept pane since its step moved on are counted too
+        // (review finding 14).
+        //
+        // The step banked is the lane's own — `owned`'s first tuple element —
+        // not `task.stage()`. By the time `clean_up` runs the task has
+        // already been moved onto its terminal step, so `task.stage()` would
+        // stamp the line `done` for tokens the previous agent step spent, and
+        // `lane_name(&entry.step, &entry.task)` — which `LaneRecord::readopted`
+        // and `dispatch::lane_session` both reconstruct — would name a lane
+        // that never existed. The records are kept in hand rather than
+        // dropped, because their per-session agent homes are reclaimed further
+        // down, only once the task is actually archived.
+        for (step_id, task_id, lane) in owned {
+            if task_id == task.id() && !stopped.contains(&lane.name) {
+                banked.push(self.stop_and_bank(task, step_id, lane, &pipeline));
             }
         }
 
@@ -808,20 +870,26 @@ impl<'a> Dispatcher<'a> {
             .map(|p| p.name.clone())
             .unwrap_or_default();
 
-        // The arm's live lane, named off the stage it is sitting on — the
-        // same derivation `sweep_on_stop` makes, and right for the same
-        // reason: a discarded arm is stopped mid-step, so its stage and its
-        // lane still agree.
-        let step_id = task.stage().to_string();
-        let name = lane_name(&step_id, task.id());
-        if let Some(lane) = lanes.iter().find(|l| l.name == name) {
+        // Every lane the arm has run, the finished ones kept open beside the
+        // one on its current step. Each is banked under its own step, not the
+        // stage the arm is sitting on, and its pane is stopped.
+        let step_ids = self.pipelines.all_step_ids();
+        for lane in lanes {
+            let Some((step_id, task_id)) = crate::mux::parse_lane_name(&lane.name, &step_ids)
+            else {
+                continue;
+            };
+            if task_id != task.id() {
+                continue;
+            }
+            let name = lane.name.clone();
             let ledger = self.ledger();
             let record = self
                 .lanes
                 .get(&name)
                 .cloned()
                 .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
-            let banked = self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
+            let banked = self.record_usage(&record, task.id(), step_id, Some(task), &pipeline);
             // Same reset `sweep_on_stop` makes on its own kept record — the
             // stale-record sweep below removes this one before the function
             // returns, so nothing persists it either way today, but the

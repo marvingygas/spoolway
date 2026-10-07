@@ -874,8 +874,8 @@ if [ "$STATUS" -ne 0 ] \
 else bad "and an ordinary dispatch is refused the same way, not exempted"; sed 's/^/        /' <<<"$OUT"; fi
 
 # Taken back out rather than left to be picked up for real: its pipeline is
-# an ordinary agent-starting one, and this suite has no live agent to answer
-# `herdr-stub.sh`'s own missing `agent start` — the resident dispatcher the
+# an ordinary agent-starting one, and this suite has nothing to report for
+# its lane, which `herdr-stub.sh` only registers — the resident dispatcher the
 # next scenario starts would just find it stuck.
 must "the pane-gate task is taken back out" "$SPOOLWAY" queue unqueue paneless
 
@@ -904,8 +904,8 @@ export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 # A second step, `resume`, follows `visible` before either routes to `done` —
 # not the `default` pipeline's `implement` → this step chain the tmux-backed
 # version of this case used, because that starts on an agent lane, and
-# `herdr-stub.sh` answers no `agent start` verb at all: it is here for the
-# handover, not for a full agent lifecycle (see its own header), and `resume`
+# `herdr-stub.sh` only registers one: it is here for the handover, not for a
+# full agent lifecycle (see its own header), and `resume`
 # is the cheap stand-in for one: a later pass finding this task already
 # sitting on its own tab, the same as a resumed dispatcher would.
 VISIBLE_RELEASE="$LIVE/visible.release"
@@ -980,12 +980,11 @@ fi
 # `prepare_boot`, and hands it to the same `rename_pane` this case just proved
 # carries a label through to herdr — but it is never asserted here, and that
 # is deliberate rather than forgotten. `Herdr::start_lane` only reaches
-# `rename_pane` once `agent start` has succeeded, and this double answers no
-# `agent start` at all: hosting one means a believable `pane process-info`,
-# an `agent list` schema and a whole lane lifecycle grafted onto a double
-# every herdr case here shares. See `herdr-stub.sh`'s own header, and
-# `run.sh`'s, which records the same boundary. The agent half of this branch
-# is decided instead where a unit test can reach it, in
+# `rename_pane` once `agent start` has succeeded, and this double's `agent
+# start` only registers a session: it takes no turn and sends no label back.
+# See `herdr-stub.sh`'s own header, and `run.sh`'s, which records the same
+# boundary. The agent half of this branch is decided instead where a unit test
+# can reach it, in
 # `src/dispatch.rs::tests::a_split_agent_panes_label_is_only_its_step_not_the_task`.
 PANED_TAB=$(awk -F'\t' -v p="$RECORDED" '$1==p {print $2}' "$HSTATE/panes")
 TAB_LABEL=$(awk -F'\t' -v t="$PANED_TAB" '$1==t {print $3}' "$HSTATE/tabs")

@@ -136,9 +136,11 @@ organisations disable it.
 
 ### Leaving a pane without closing it
 
-`claude` ends its session with `/exit` typed at its prompt. This lets a task's pane carry from
-one step to the next. See [Vacating a pane](dispatcher.md#vacating-a-pane). Every other kind
-has its panes closed and split again, one per step.
+No kind is asked to leave its pane. When a step finishes, its agent stays running, idle, in its
+own pane until the task is done, whichever kind it is. The next step splits a new pane. See
+[Finished lanes keep their pane](dispatcher.md#finished-lanes-keep-their-pane). Each kept
+session holds the memory an idle agent holds, so a task keeps one idle process for every agent
+step it has run.
 
 ## The argument template
 

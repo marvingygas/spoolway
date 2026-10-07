@@ -28,14 +28,23 @@
 # transcript it keeps is the other half of that: every string spoolway typed
 # into a pane, so a case can assert nothing long was ever typed at all.
 #
+# An agent is a registration, not a process. `agent start` records that a
+# named session sits in a pane, and `agent list` reports it idle for as long
+# as the pane stands — which is what a finished agent that herdr has not been
+# asked to close looks like. Nothing runs: a suite that wants a lane to report
+# runs `spoolway report` itself, with the lane's `SPOOLWAY_TASK` and
+# `SPOOLWAY_STEP`. That is enough to tell whether a pane outlives its step.
+#
 # State lives under $HERDR_STUB_STATE:
 #
 #   seq            the id counter
 #   workspaces     workspace_id \t label \t checkout_path (empty for none)
 #   tabs           tab_id \t workspace_id \t label
 #   panes          pane_id \t tab_id \t workspace_id \t label
+#   agents         name \t pane_id \t kind, one line per `agent start`
 #   typed/<n>      one file per `pane run`, holding exactly what was typed
 #   typed.index    pane_id \t bytes \t typed/<n>, one line per `pane run`
+#   p<n>.cwd       the directory that pane's shell was started in
 #   p<n>.in        the fifo that pane's shell reads its lines from
 #   p<n>.out       everything that pane's shell has printed
 set -uo pipefail
@@ -43,6 +52,7 @@ set -uo pipefail
 STATE=${HERDR_STUB_STATE:?HERDR_STUB_STATE must name where this double keeps its state}
 mkdir -p "$STATE" "$STATE/typed"
 : >>"$STATE/workspaces"; : >>"$STATE/tabs"; : >>"$STATE/panes"; : >>"$STATE/typed.index"
+: >>"$STATE/agents"
 
 # The environment a pane's shell starts with — a stand-in for the herdr
 # server's own, and deliberately nothing like the dispatcher's. Overridable so
@@ -78,12 +88,15 @@ next_id() {
 
 # Flags off the argv, in whatever order they came. `--no-focus` and `--force`
 # take no value and are simply ignored: this double has one focus and nothing
-# to force.
+# to force. A bare `--` ends the flags, and what follows is the agent's own
+# argv, kept in REST and read by nothing here.
 declare -A FLAG=()
 POS=()
+REST=()
 parse_flags() {
   while [ $# -gt 0 ]; do
     case "$1" in
+      --) shift; REST=("$@"); return ;;
       --no-focus|--force) shift ;;
       --*) FLAG[${1#--}]=${2:-}; shift 2 ;;
       *) POS+=("$1"); shift ;;
@@ -102,6 +115,7 @@ open_pane() { # pane_id cwd
   local fifo="$STATE/p$n.in"
   rm -f "$fifo"
   mkfifo "$fifo"
+  printf '%s' "$cwd" >"$STATE/p$n.cwd"
   : >"$STATE/p$n.out"
 
   # The holder ends when the fifo does, so a pane nobody closed cannot outlive
@@ -127,9 +141,12 @@ close_pane() { # pane_id
     [ -n "$pid" ] && kill -- "-$pid" 2>/dev/null
     rm -f "$STATE/p$n.$role"
   done
-  rm -f "$STATE/p$n.in"
+  rm -f "$STATE/p$n.in" "$STATE/p$n.cwd"
   grep -v "^$1	" "$STATE/panes" >"$STATE/panes.tmp" 2>/dev/null || true
   mv "$STATE/panes.tmp" "$STATE/panes"
+  # The agent in the pane goes with it, as it does in herdr.
+  awk -F'\t' -v p="$1" '$2!=p' "$STATE/agents" >"$STATE/agents.tmp"
+  mv "$STATE/agents.tmp" "$STATE/agents"
 }
 
 # workspace_id tab_id label cwd -> pane_id, recorded and running
@@ -163,12 +180,50 @@ parse_flags "$@"
 case "$DOMAIN $VERB" in
 
   "agent list")
-    # No agent is ever started through this double, and nothing here needs
-    # one: a command step's pane runs a shell script, which herdr itself
-    # reports as agentless. An empty list is the honest answer — `choose_split`
-    # no longer asks this at all, having moved to picking by geometry alone,
-    # but other callers (idle detection, `agent verify`) still do.
-    echo '{"result":{"agents":[]}}'
+    # Every agent `agent start` registered whose pane still stands, idle: a
+    # session that has finished its step and has not been closed. A pane that
+    # holds a command step's shell script is reported as agentless, as herdr
+    # does, because only `agent start` ever writes a row here.
+    { printf '{"result":{"agents":['
+      first=1
+      while IFS=$'\t' read -r name pane kind; do
+        [ -n "$name" ] || continue
+        tab=$(field "$pane" 2 "$STATE/panes")
+        ws=$(field "$pane" 3 "$STATE/panes")
+        [ -n "$tab" ] || continue
+        cwd=$(cat "$STATE/p${pane##*:p}.cwd" 2>/dev/null || true)
+        [ $first -eq 1 ] || printf ','
+        first=0
+        printf '{"name":%s,"agent":%s,"agent_status":"idle","pane_id":%s,"tab_id":%s,"workspace_id":%s,"cwd":%s}' \
+          "$(jstr "$name")" "$(jstr "$kind")" "$(jstr "$pane")" "$(jstr "$tab")" \
+          "$(jstr "$ws")" "$(jstr "$cwd")"
+      done <"$STATE/agents"
+      printf ']}}\n'; }
+    ;;
+
+  "agent start")
+    name=${POS[0]:?}
+    pane=${FLAG[pane]:?}
+    [ -n "$(field "$pane" 2 "$STATE/panes")" ] || fail no_such_pane "no pane $pane"
+    printf '%s\t%s\t%s\n' "$name" "$pane" "${FLAG[kind]:-}" >>"$STATE/agents"
+    echo '{"result":{}}'
+    ;;
+
+  "agent prompt"|"agent wait"|"agent send-keys"|"agent focus")
+    # Nothing here has a turn to wait for or a keystroke to land: an agent is
+    # a registration. Each answers as herdr does for a session that exists.
+    [ -n "$(field "${POS[0]:-}" 1 "$STATE/agents")" ] || fail no_such_agent "no agent ${POS[0]:-}"
+    echo '{"result":{}}'
+    ;;
+
+  "agent read")
+    echo ""
+    ;;
+
+  "pane process-info")
+    # The pane's shell is always in the foreground: no command step or agent
+    # here ever holds it, so `wait_for_pane_shell` returns at once.
+    echo '{"result":{"foreground":{"is_shell":true}}}'
     ;;
 
   "pane current")

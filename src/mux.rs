@@ -104,28 +104,6 @@ pub struct Lane {
     pub interactive_ready: Option<bool>,
 }
 
-/// What [`Mux::vacate_lane`] found when it was done: the state the lane's pane
-/// was actually left in.
-///
-/// Three states rather than a yes/no, because "the pane is not reusable"
-/// covers two situations a caller has to handle differently — one where the
-/// pane is gone and one where it is still there with an agent in it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Vacated {
-    /// The session left and the pane is standing at its shell prompt, ready
-    /// to be started in again.
-    Shell,
-    /// No gesture was tried — this backend has none, or this kind has no row
-    /// — so the session was ended the only other way there is and the pane
-    /// went with it. What every lane has always done.
-    PaneClosed,
-    /// The gesture was sent and the agent was still in the pane when the
-    /// bound ran out. The pane is untouched and still occupied; closing it is
-    /// the caller's decision, and one it must take *after* splitting whatever
-    /// replaces it.
-    StillOccupied,
-}
-
 /// A workspace created for one task: its checkout and its root pane.
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -396,6 +374,22 @@ pub trait Mux: Sync {
     /// time.
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String>;
 
+    /// A fresh pane in `tab_id`, split off `pane_id` rather than off the
+    /// smallest pane — the pane a step that comes back replaces.
+    ///
+    /// The caller closes `pane_id` once this answers. Herdr gives a closed
+    /// pane's area to its sibling in the split, and the new pane is the only
+    /// sibling `pane_id` has just been given, so the new pane takes the whole
+    /// of the old one's area and the tab's layout is unchanged.
+    ///
+    /// A backend with no layout to preserve splits as [`Mux::split_pane`]
+    /// does, which is what the default does. A `pane_id` the multiplexer no
+    /// longer has is not an error either: the old pane is gone, so there is
+    /// nothing to take the place of and the smallest pane is split.
+    fn split_beside(&self, tab_id: &str, _pane_id: &str, cwd: &Path) -> Result<String> {
+        self.split_pane(tab_id, cwd)
+    }
+
     /// Run a shell script in a fresh pane of `tab_id`, labelled for a person,
     /// and answer the pane it landed in. `None` from a backend with no pane
     /// to run it in — headless — which is the caller's signal to fall back to
@@ -491,43 +485,6 @@ pub trait Mux: Sync {
     /// keystroke to guess at and no exit to wait for.
     fn stop_lane(&self, name: &str, pane_id: &str) -> Result<()>;
 
-    /// End the agent session in a pane and hand the pane itself back, empty,
-    /// at its shell prompt — the weaker thing [`Mux::stop_lane`] has never
-    /// offered.
-    ///
-    /// This exists so a task's steps can share one pane instead of each
-    /// splitting a new one and closing it again — see
-    /// `Dispatcher::free_finished_lanes`, which is what calls it.
-    ///
-    /// What actually makes a session leave is per *kind*, not per backend —
-    /// see [`crate::agent::Quit`] — so a backend answering for real reads the
-    /// kind's row and does nothing at all when there is none.
-    ///
-    /// The answer says which of three things happened, because a caller
-    /// cannot tell them apart afterwards and all three need different
-    /// handling:
-    ///
-    /// - [`Vacated::Shell`] — the pane is standing, empty, and can be started
-    ///   in again.
-    /// - [`Vacated::PaneClosed`] — nothing was tried, the session was ended
-    ///   the old way, and the pane is gone. Exactly today's behaviour.
-    /// - [`Vacated::StillOccupied`] — the gesture was sent and the agent was
-    ///   still in the pane when the bound ran out. The pane is left alone,
-    ///   agent and all, rather than closed: a caller that wants it gone has
-    ///   to split its replacement *first*, or a tab whose last pane this was
-    ///   goes with it.
-    ///
-    /// Never assumed to have worked. A pane reported as empty that is not is
-    /// the one failure that costs a task its pane: the next step's `agent
-    /// start` would be typed into whatever is still sitting there.
-    ///
-    /// The default closes the pane, by deferring to [`Mux::stop_lane`], which
-    /// is the right answer for a backend that has nothing to type at —
-    /// headless, which has no panes at all.
-    fn vacate_lane(&self, name: &str, _kind: &str, pane_id: &str) -> Result<Vacated> {
-        self.stop_lane(name, pane_id)?;
-        Ok(Vacated::PaneClosed)
-    }
     /// Bring a lane's pane back in front of the person sitting there.
     ///
     /// Called for exactly one thing: a task that has landed on `blocked`. What
@@ -582,35 +539,25 @@ pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
 /// same as its own `agent_prompt_stalled`.
 const PROMPT_SUBMIT_TIMEOUT_MS: &str = "5000";
 
-/// How long [`Mux::vacate_lane`] gives a session to actually leave its pane
-/// after the gesture has been typed and submitted.
+/// How long [`Herdr::wait_for_pane_shell`] waits for a pane's shell to settle
+/// before `agent start`, and how it is bounded rather than open-ended: a shell
+/// that never settles is answered for by [`PaneBusy`], not waited on for ever.
 ///
-/// Bounded rather than open-ended because an agent can simply refuse to go —
-/// the probe reproduced it, with a modal sitting in the pane waiting for an
-/// answer nobody was there to give. A task whose one pane is waited on for
-/// ever would never run another step, which is worse than the pane churn this
-/// is meant to remove.
-///
-/// Ten seconds, which is generous for what it is measuring. Driven against a
-/// real Claude Code in a real herdr pane: `/exit` submitted at a settled
-/// prompt took it out of `herdr agent list` in about 750ms, the pane was
-/// still standing at its shell, and `herdr agent start` on that same pane id
-/// launched the next session in it. Everything past a second here is a
-/// machine under load rather than an agent thinking it over, and the bound is
-/// paid in full only by a session that was never going to leave.
-const VACATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Ten seconds, which is generous for sourcing one environment file. Anything
+/// past a second is a machine under load rather than a shell thinking it over.
+const PANE_SHELL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How often the pane is checked while [`VACATE_TIMEOUT`] runs down. One
-/// `herdr agent list` per tick, so short enough to hand a settled pane back
-/// promptly and long enough not to spin on the socket.
+/// How often a spawned herdr call, or a pane waiting for its shell, is
+/// checked: short enough to answer promptly and long enough not to spin on the
+/// socket.
 ///
-/// Also the poll interval [`spawn_and_wait`] and [`poll_wait`] step a
+/// The poll interval [`spawn_and_wait`] and [`poll_wait`] step a
 /// spawned herdr child on — the one wait [`Herdr::start_agent`],
 /// [`Herdr::call_watching_for_stall`] and [`Herdr::wait_for_pane_shell`] now
 /// all share, in place of each making its own.
-pub(crate) const VACATE_POLL: Duration = Duration::from_millis(250);
+pub(crate) const HERDR_POLL: Duration = Duration::from_millis(250);
 
-/// Sleep for [`VACATE_POLL`], having called `tick` first — the wait
+/// Sleep for [`HERDR_POLL`], having called `tick` first — the wait
 /// [`Herdr::wait_for_pane_shell`] steps on directly, and the one
 /// [`spawn_and_wait`] steps on itself while also polling a spawned child's
 /// pipes.
@@ -623,12 +570,12 @@ pub(crate) const VACATE_POLL: Duration = Duration::from_millis(250);
 /// answers `POLLIN` on that byte again immediately, so the "poll instead of
 /// sleep" became a 100% CPU spin for the rest of the wait rather than the
 /// early wake it was meant to be (review finding 2). `tick` still runs once
-/// every [`VACATE_POLL`] here — a bound this launch never had at all
+/// every [`HERDR_POLL`] here — a bound this launch never had at all
 /// before, when it was dead for the whole of herdr's two-minute
 /// `agent start`.
 fn poll_wait(tick: &mut dyn FnMut()) {
     tick();
-    std::thread::sleep(VACATE_POLL);
+    std::thread::sleep(HERDR_POLL);
 }
 
 /// Spawn `program` with `args` and wait for it to exit by polling, rather
@@ -691,7 +638,7 @@ fn spawn_and_wait(
         {
             break status;
         }
-        let ready = crate::screen::poll_ready(&[out_fd, err_fd], VACATE_POLL);
+        let ready = crate::screen::poll_ready(&[out_fd, err_fd], HERDR_POLL);
         if ready.first().copied().unwrap_or(false) {
             drain_ready(&mut out_pipe, &mut stdout);
         }
@@ -921,11 +868,8 @@ impl Herdr {
         ))
     }
 
-    /// Wait for `pane_id`'s foreground process group to become its own shell
-    /// again, bounded by [`VACATE_TIMEOUT`] and polled at [`VACATE_POLL`] —
-    /// the same constants [`Mux::vacate_lane`] already waits on, since both
-    /// are waiting for exactly the same thing: a pane settling back to its
-    /// prompt.
+    /// Wait for `pane_id`'s foreground process group to be its own shell,
+    /// bounded by [`PANE_SHELL_TIMEOUT`] and polled at [`HERDR_POLL`].
     ///
     /// Called between handing the pane its environment and `agent start`, to
     /// close the race [`Herdr::start_lane`]'s own doc comment describes: the
@@ -943,7 +887,7 @@ impl Herdr {
     /// own (each check is its own short-lived `herdr pane process-info`)
     /// and so cannot share that function directly.
     fn wait_for_pane_shell(&self, pane_id: &str, tick: &mut dyn FnMut()) {
-        let deadline = Instant::now() + VACATE_TIMEOUT;
+        let deadline = Instant::now() + PANE_SHELL_TIMEOUT;
         loop {
             let ready = self
                 .call::<ProcessInfo>(&["pane", "process-info", "--pane", pane_id])
@@ -1125,6 +1069,84 @@ impl Herdr {
         Ok((target, before))
     }
 
+    /// Split `target` along its direction and answer the pane that appeared,
+    /// confirmed against `before` — the tab's panes as `pane list` named them
+    /// just ahead of the split. Shared by [`Mux::split_pane`] and
+    /// [`Mux::split_beside`], which differ only in which pane they pick.
+    fn split_at(
+        &self,
+        tab_id: &str,
+        cwd: &Path,
+        target: SplitTarget,
+        before: HashSet<String>,
+    ) -> Result<String> {
+        let path = cwd.display().to_string();
+        // `--pane`, never the positional `pane split <id>`: the positional form
+        // splits the *focused* pane and ignores the one it was given, which
+        // silently splits a pane in whatever workspace a person is looking at.
+        let created: PaneSplit = self.call(&[
+            "pane",
+            "split",
+            "--pane",
+            &target.pane_id,
+            "--direction",
+            target.direction,
+            "--cwd",
+            &path,
+            "--no-focus",
+        ])?;
+        let reported = created.pane.pane_id;
+        // Read back from `pane list` rather than trusted outright: a `.pane`
+        // file once held `w8:p4` while herdr had `w8:p5`, because the split's
+        // own JSON reply had already drifted from the multiplexer's own
+        // bookkeeping by the time this ran. `confirm_split` takes it from
+        // there — see its own doc for what it checks and why it is a
+        // function of its own rather than living inline here.
+        let list: PaneList = self.call(&["pane", "list"])?;
+        let after = pane_ids_in_tab(&list, tab_id);
+        match confirm_split(&before, &after, &reported) {
+            Ok(pane) => Ok(pane),
+            Err(err) => {
+                // The split itself already happened by the time a refusal
+                // is reached, and nothing upstream gets a pane id to close.
+                // Exactly one new pane is provably this split's own, so it
+                // is closed here rather than left as a bare shell in the
+                // task's tab on every pass — three such passes park the
+                // task, each with an orphan behind it. With more than one,
+                // ownership is ambiguous and `confirm_split`'s own message
+                // says none was touched.
+                let mut appeared = after.difference(&before);
+                if let (Some(only), None) = (appeared.next(), appeared.next()) {
+                    let _ = self.close_pane(only);
+                    bail!("{err} — closed `{only}`, the pane this split left behind");
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// [`Herdr::pane_to_split`] for a split that has to land on `pane_id`: the
+    /// pane a returning step replaces, halved along its own longer side.
+    ///
+    /// Falls back to the smallest-pane rule when herdr no longer has
+    /// `pane_id`, because a person closed it or it never survived a restart of
+    /// the multiplexer.
+    fn pane_to_split_beside(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+    ) -> Result<(SplitTarget, HashSet<String>)> {
+        let list: PaneList = self.call(&["pane", "list"])?;
+        let before = pane_ids_in_tab(&list, tab_id);
+        if before.contains(pane_id)
+            && let Ok(layout) = self.call::<PaneLayout>(&["pane", "layout", "--pane", pane_id])
+            && let Some(target) = split_of(layout.layout, pane_id)
+        {
+            return Ok((target, before));
+        }
+        self.pane_to_split(tab_id)
+    }
+
     /// Open a workspace on a checkout this project owns, bound to the project
     /// it was cut from.
     ///
@@ -1164,25 +1186,6 @@ impl Herdr {
     fn existing_tab(&self, workspace: &str) -> Result<Option<String>> {
         let tabs: TabList = self.call(&["tab", "list", "--workspace", workspace])?;
         Ok(tab_in(tabs))
-    }
-
-    /// Is there still an agent session in this pane?
-    ///
-    /// Asked of `agent list` rather than of the pane, because leaving is
-    /// exactly what herdr records there: a session that has ended stops being
-    /// listed against its pane, and the pane itself carries on. Established
-    /// alongside the `/exit` gesture, against a real Claude Code in a real
-    /// pane.
-    ///
-    /// Unlike [`Mux::list_lanes`] this counts *any* agent, named or not. The
-    /// question here is not "is this one of ours" but "is this pane free to
-    /// start in", and a session herdr did not name is just as much in the way.
-    fn pane_has_agent(&self, pane_id: &str) -> Result<bool> {
-        let list: AgentList = self.call(&["agent", "list"])?;
-        Ok(list
-            .agents
-            .iter()
-            .any(|raw| raw.pane_id == pane_id && raw.agent.is_some()))
     }
 
     /// Write `env` to `<project home>/<dir_name>/<key>.<ext>` and answer the
@@ -1263,16 +1266,40 @@ fn choose_split(layout: RawLayout) -> Option<SplitTarget> {
                 Some(s) if s.rect.width * s.rect.height < p.rect.width * p.rect.height => smallest,
                 _ => Some(p),
             })?;
-    // A terminal cell is roughly twice as tall as it is wide, so height is
-    // counted double before the two are compared — an exact tie, both sides
-    // equally square, resolves to `down`.
-    let direction = match chosen.rect.width > chosen.rect.height * 2 {
+    Some(SplitTarget {
+        direction: split_direction(&chosen.rect),
+        pane_id: chosen.pane_id,
+    })
+}
+
+/// The side a pane of this size is halved along: its longer one.
+///
+/// A terminal cell is roughly twice as tall as it is wide, so height is
+/// counted double before the two are compared — an exact tie, both sides
+/// equally square, resolves to `down`.
+fn split_direction(rect: &RawRect) -> &'static str {
+    match rect.width > rect.height * 2 {
         true => "right",
         false => "down",
-    };
+    }
+}
+
+/// The split that lands on `pane_id` itself, halved along its own longer
+/// side, or `None` when the layout has no such pane.
+///
+/// For a step that comes back: its new pane is split off the old pane rather
+/// than off the smallest, so that closing the old pane afterwards hands the
+/// new one the old one's whole area. Herdr gives a closed pane's area to its
+/// sibling in the split it closes out of, and splitting `pane_id` makes the
+/// new pane its only sibling. Splitting any other pane would leave the old
+/// pane's area to a neighbour, and the tab would no longer look the way the
+/// step left it. Its own function, like [`choose_split`], so the rule can be
+/// read against a captured `pane layout` payload.
+fn split_of(layout: RawLayout, pane_id: &str) -> Option<SplitTarget> {
+    let pane = layout.panes.into_iter().find(|p| p.pane_id == pane_id)?;
     Some(SplitTarget {
-        pane_id: chosen.pane_id,
-        direction,
+        direction: split_direction(&pane.rect),
+        pane_id: pane.pane_id,
     })
 }
 
@@ -1831,50 +1858,13 @@ impl Mux for Herdr {
     // multiplexer for the binding instead.
 
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String> {
-        let path = cwd.display().to_string();
         let (target, before) = self.pane_to_split(tab_id)?;
-        // `--pane`, never the positional `pane split <id>`: the positional form
-        // splits the *focused* pane and ignores the one it was given, which
-        // silently splits a pane in whatever workspace a person is looking at.
-        let created: PaneSplit = self.call(&[
-            "pane",
-            "split",
-            "--pane",
-            &target.pane_id,
-            "--direction",
-            target.direction,
-            "--cwd",
-            &path,
-            "--no-focus",
-        ])?;
-        let reported = created.pane.pane_id;
-        // Read back from `pane list` rather than trusted outright: a `.pane`
-        // file once held `w8:p4` while herdr had `w8:p5`, because the split's
-        // own JSON reply had already drifted from the multiplexer's own
-        // bookkeeping by the time this ran. `confirm_split` takes it from
-        // there — see its own doc for what it checks and why it is a
-        // function of its own rather than living inline here.
-        let list: PaneList = self.call(&["pane", "list"])?;
-        let after = pane_ids_in_tab(&list, tab_id);
-        match confirm_split(&before, &after, &reported) {
-            Ok(pane) => Ok(pane),
-            Err(err) => {
-                // The split itself already happened by the time a refusal
-                // is reached, and nothing upstream gets a pane id to close.
-                // Exactly one new pane is provably this split's own, so it
-                // is closed here rather than left as a bare shell in the
-                // task's tab on every pass — three such passes park the
-                // task, each with an orphan behind it. With more than one,
-                // ownership is ambiguous and `confirm_split`'s own message
-                // says none was touched.
-                let mut appeared = after.difference(&before);
-                if let (Some(only), None) = (appeared.next(), appeared.next()) {
-                    let _ = self.close_pane(only);
-                    bail!("{err} — closed `{only}`, the pane this split left behind");
-                }
-                Err(err)
-            }
-        }
+        self.split_at(tab_id, cwd, target, before)
+    }
+
+    fn split_beside(&self, tab_id: &str, pane_id: &str, cwd: &Path) -> Result<String> {
+        let (target, before) = self.pane_to_split_beside(tab_id, pane_id)?;
+        self.split_at(tab_id, cwd, target, before)
     }
 
     fn run_in_pane(
@@ -1918,11 +1908,8 @@ impl Mux for Herdr {
     fn start_lane(&self, spec: &LaneSpec<'_>, tick: &mut dyn FnMut()) -> Result<()> {
         // Everything below is typed at a shell prompt, and lands in an agent's
         // chat input instead if anything is running in the pane. Nothing checks
-        // for that here, because both panes the dispatcher ever hands in are
-        // already known to be bare shells: one it has just split, with no
-        // previous occupant to leave, and one it inherited from the step
-        // before — offered only after `Mux::vacate_lane` confirmed that
-        // session left and the pane came back to its prompt.
+        // for that here, because every pane the dispatcher hands in is one it
+        // has just split, with no previous occupant.
         //
         // A PATH prefix goes on first, because everything after it — including
         // the agent `agent start` is about to launch — is resolved through this
@@ -2097,45 +2084,6 @@ impl Mux for Herdr {
         // Closing the pane needs to know neither. The pane is this lane's own,
         // so nothing of the task's is in it.
         self.close_pane(pane_id)
-    }
-
-    fn vacate_lane(&self, lane: &str, kind: &str, pane_id: &str) -> Result<Vacated> {
-        // No row for this kind means nobody has watched this binary leave a
-        // pane, and a guessed gesture is worse than the churn it would save:
-        // it either does nothing, or it lands as text in somebody's
-        // conversation. Fall back to what every lane has always done.
-        let Some(quit) = crate::agent::adapter(kind).and_then(|a| a.quit.as_ref()) else {
-            self.stop_lane(lane, pane_id)?;
-            return Ok(Vacated::PaneClosed);
-        };
-
-        // Typed at the *pane*, not through `agent prompt`: the gesture is a
-        // slash command the agent acts on itself, not a turn to wait on, and
-        // `agent prompt --wait --until working` would sit out its whole bound
-        // waiting for a turn that is never going to start. Text first, then
-        // Enter as its own call — the same two-step `Herdr::start_lane`
-        // already uses to type at a pane.
-        self.call_ignoring_result(&["pane", "send-text", pane_id, quit.line])?;
-        self.call_ignoring_result(&["pane", "send-keys", pane_id, "enter"])?;
-
-        // Then watch for the agent to actually go, rather than sleeping once
-        // and assuming. A pane reported as empty that still has an agent in
-        // it is the expensive failure here: the next step's `agent start`
-        // would be typed straight into the conversation still sitting there.
-        let deadline = Instant::now() + VACATE_TIMEOUT;
-        loop {
-            if !self.pane_has_agent(pane_id)? {
-                return Ok(Vacated::Shell);
-            }
-            if Instant::now() >= deadline {
-                // Left exactly as it was found. Closing it here would be the
-                // one thing a caller cannot undo, and a tab's last pane
-                // closed without a replacement beside it takes the tab with
-                // it.
-                return Ok(Vacated::StillOccupied);
-            }
-            std::thread::sleep(VACATE_POLL);
-        }
     }
 
     fn focus_lane(&self, lane: &str) -> Result<()> {
@@ -2627,6 +2575,60 @@ mod tests {
         assert_eq!(chosen.direction, "right");
     }
 
+    /// Captured from `herdr pane layout --pane w7C:p1` against herdr 0.9.1: a
+    /// tab of two panes side by side, which is the layout a task's tab has
+    /// after its first two steps. Closing either one hands the other the whole
+    /// 173×50 area, which is what a returning step relies on.
+    const TWO_PANE_LAYOUT: &str = r#"{
+      "layout": {
+        "area": {"height": 50, "width": 173, "x": 0, "y": 0},
+        "focused_pane_id": "w7C:p1",
+        "panes": [
+          {"focused": true, "pane_id": "w7C:p1",
+           "rect": {"height": 50, "width": 87, "x": 0, "y": 0}},
+          {"focused": false, "pane_id": "w7C:p2",
+           "rect": {"height": 50, "width": 86, "x": 87, "y": 0}}
+        ],
+        "splits": [
+          {"direction": "right", "id": "split_0_root", "ratio": 0.5,
+           "rect": {"height": 50, "width": 173, "x": 0, "y": 0}}
+        ],
+        "tab_id": "w7C:t1",
+        "workspace_id": "w7C",
+        "zoomed": true
+      },
+      "type": "pane_layout"
+    }"#;
+
+    /// A returning step splits its own old pane, even though it is not the
+    /// smallest: `w7C:p1` is one cell wider than `w7C:p2`, so the spiral rule
+    /// would pick `w7C:p2`, and closing `w7C:p1` afterwards would hand its
+    /// area to `w7C:p2` instead of the new pane.
+    #[test]
+    fn a_returning_step_splits_its_own_pane_rather_than_the_smallest() {
+        let layout = |json: &str| -> RawLayout {
+            serde_json::from_str::<PaneLayout>(json)
+                .expect("a live pane layout parses")
+                .layout
+        };
+        let smallest = choose_split(layout(TWO_PANE_LAYOUT)).expect("a tab with panes");
+        assert_eq!(smallest.pane_id, "w7C:p2", "the spiral rule's own pick");
+
+        let own = split_of(layout(TWO_PANE_LAYOUT), "w7C:p1").expect("the pane is in the tab");
+        assert_eq!(own.pane_id, "w7C:p1");
+        // 87 wide against 50 tall: not wider than twice its height, so it is
+        // halved top and bottom.
+        assert_eq!(own.direction, "down");
+    }
+
+    /// A pane that is not in the layout is not split: the caller falls back to
+    /// the spiral rule instead of addressing a pane herdr has lost.
+    #[test]
+    fn a_pane_missing_from_the_layout_is_not_split() {
+        let layout: PaneLayout = serde_json::from_str(TWO_PANE_LAYOUT).unwrap();
+        assert!(split_of(layout.layout, "w7C:p9").is_none());
+    }
+
     /// A row `agent list` carries while it is settling a launch, and while
     /// it is ready for interactive input — both booleans, and both absent on
     /// a row that never says, which `#[serde(default)]` reads as `None`
@@ -2813,7 +2815,7 @@ mod tests {
     /// The case the task exists for: a child slower than one poll interval.
     /// `tick` is what a busy dispatch pass hangs its own keyboard-reading
     /// callback off — see [`Mux::start_lane`] — so a child that outlives
-    /// [`VACATE_POLL`] must be ticked more than the one time any call, fast
+    /// [`HERDR_POLL`] must be ticked more than the one time any call, fast
     /// or slow, already gets.
     #[test]
     fn spawn_and_wait_ticks_repeatedly_while_a_slow_child_runs() {
@@ -2827,7 +2829,7 @@ mod tests {
         .unwrap();
         assert!(
             ticks >= 2,
-            "a child slower than one VACATE_POLL must be ticked more than once, got {ticks}"
+            "a child slower than one HERDR_POLL must be ticked more than once, got {ticks}"
         );
         assert!(output.status.success());
     }
@@ -3737,127 +3739,6 @@ mod tests {
                 "an unreadable stamp must not resolve to a basename-keyed home: {result:?}"
             );
         }
-    }
-
-    /// A backend that overrides nothing has no gesture to try, so
-    /// `Mux::vacate_lane`'s own default is the only thing under test here: it
-    /// has to fall back to exactly what `Mux::stop_lane` already does — close
-    /// the pane — and say so truthfully, rather than claim the pane came back
-    /// to a shell when nothing made that happen.
-    struct BareMux {
-        closed: Mutex<Vec<String>>,
-    }
-
-    impl Mux for BareMux {
-        fn name(&self) -> &'static str {
-            "bare"
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn unavailable(&self) -> String {
-            String::new()
-        }
-        fn resident_while_waiting(&self) -> bool {
-            true
-        }
-        fn list_lanes(&self) -> Result<Vec<Lane>> {
-            Ok(Vec::new())
-        }
-        fn create_workspace(
-            &self,
-            _cwd: &Path,
-            _branch: &str,
-            _base: &str,
-            _label: &str,
-        ) -> Result<Workspace> {
-            unimplemented!()
-        }
-        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
-            Ok(())
-        }
-        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
-            Ok(())
-        }
-        fn close_tab(&self, _tab_id: &str) -> Result<()> {
-            Ok(())
-        }
-        fn create_pane(&self, _cwd: &Path, _label: &str) -> Result<Workspace> {
-            unimplemented!()
-        }
-        fn split_pane(&self, _tab_id: &str, _cwd: &Path) -> Result<String> {
-            unimplemented!()
-        }
-        fn close_pane(&self, pane_id: &str) -> Result<()> {
-            self.closed.lock().unwrap().push(pane_id.to_string());
-            Ok(())
-        }
-        fn start_lane(&self, _spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
-            unimplemented!()
-        }
-        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
-            unimplemented!()
-        }
-        fn interrupt_lane(&self, _name: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn stop_lane(&self, _name: &str, pane_id: &str) -> Result<()> {
-            self.close_pane(pane_id)
-        }
-        fn focus_lane(&self, _name: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
-    }
-
-    #[test]
-    fn a_backend_with_no_gesture_still_closes_the_pane_when_asked_to_vacate() {
-        let mux = BareMux {
-            closed: Mutex::new(Vec::new()),
-        };
-
-        let left = mux
-            .vacate_lane("demo · implement", "no-such-kind", "pane-1")
-            .expect("the default falls back to closing the pane, which never fails here");
-
-        assert_eq!(
-            left,
-            Vacated::PaneClosed,
-            "nothing typed a gesture into the pane, so it cannot have come back to a shell"
-        );
-        assert_eq!(
-            mux.closed.lock().unwrap().as_slice(),
-            ["pane-1"],
-            "the default has to close the pane exactly as `stop_lane` does"
-        );
-    }
-
-    /// The gesture lives on the *kind*, but sending it is the backend's job,
-    /// so a backend that overrides nothing must ignore the kind's row
-    /// entirely rather than half-honour it. `claude` is the one kind that
-    /// carries a gesture, and here it has to end up in exactly the same place
-    /// a kind with no row does: pane closed, and said so.
-    #[test]
-    fn a_kind_with_a_gesture_gains_nothing_from_a_backend_that_cannot_send_it() {
-        let mux = BareMux {
-            closed: Mutex::new(Vec::new()),
-        };
-
-        let left = mux
-            .vacate_lane("demo · implement", "claude", "pane-1")
-            .expect("the default falls back to closing the pane, which never fails here");
-
-        assert_eq!(
-            left,
-            Vacated::PaneClosed,
-            "a backend with nothing to type at cannot use a gesture, whatever kind carries one"
-        );
-        assert_eq!(mux.closed.lock().unwrap().as_slice(), ["pane-1"]);
     }
 
     /// The label an earlier release gave its shared workspace. A workspace

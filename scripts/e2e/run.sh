@@ -102,17 +102,18 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               herdr-stub cases are the exception, because they can be asked
 #               of nothing but a real pane: the paned-command-step case,
 #               which needs to watch a real pane open, carry an environment,
-#               and close, and the environment-handover case, which needs to
-#               watch an 8KB value actually reach one. Both run against
-#               `scripts/e2e/herdr-stub.sh` — herdr, the one backend left,
-#               chosen over a real server because it has no isolated
-#               instance a suite can spin up of its own; the double's own
-#               header says why. `disaster.sh` used to carry a third case
-#               here, killing a real tmux server under a live agent lane to
-#               prove the heal path that follows; it had no herdr equivalent
-#               — the double answers no `agent start` at all, so it can host
-#               a pane's own lifecycle but never a real lane — and is gone
-#               with the backend it needed.
+#               and close, the environment-handover case, which needs to
+#               watch an 8KB value actually reach one, and `kept-panes`, which
+#               needs to see a finished step's pane still standing beside the
+#               next step's. All run against `scripts/e2e/herdr-stub.sh` —
+#               herdr, the one backend left, chosen over a real server because
+#               it has no isolated instance a suite can spin up of its own;
+#               the double's own header says why. `disaster.sh` used to carry
+#               a case here, killing a real tmux server under a live agent
+#               lane to prove the heal path that follows; the double's agents
+#               are registrations rather than processes, so it can host a
+#               pane's own lifecycle but never a lane that dies — and the case
+#               is gone with the backend it needed.
 #   status      the board's *rendering* — every column, every row state:
 #               unit tests cover it through a real pass, and an e2e version
 #               would re-assert the same branches through a slower path.
@@ -142,8 +143,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides herdr-bind remote-base home-mode)
-nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode)
+pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides herdr-bind remote-base home-mode kept-panes)
+nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind remote-base home-mode kept-panes)
 cloud_suites=(warmth)
 live_suites=(live)
 
