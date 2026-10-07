@@ -1748,7 +1748,7 @@ impl TicketLog for PrintedTickets {
     fn waiting(&mut self, _id: &str) {}
 
     fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
-        println!("  {kind:<8} {status:<9} {ticket:<13} {name}");
+        println!("  {kind:<12} {status:<9} {ticket:<13} {name}");
     }
 
     fn note(&mut self, line: &str) {
@@ -2240,7 +2240,7 @@ fn open_tickets(
             if !epic.is_empty() {
                 group_epic.entry(group.clone()).or_insert(epic);
             }
-            log.row("ticket", "kept", &already, tasks[i].id());
+            log.row("task issue", "kept", &already, tasks[i].id());
             continue;
         }
 
@@ -2279,7 +2279,7 @@ fn open_tickets(
             } => {
                 if !epic.is_empty() && !group_epic.contains_key(&group) {
                     group_epic.insert(group.clone(), epic.clone());
-                    log.row("epic", "created", &epic, &group);
+                    log.row("group issue", "created", &epic, &group);
                     opened.push(format!("epic {epic} (`{group}`)"));
                 }
                 if !epic.is_empty() {
@@ -2297,10 +2297,10 @@ fn open_tickets(
                     &group,
                     &mut group_slug,
                 );
-                log.row("ticket", "created", &ticket, tasks[i].id());
+                log.row("task issue", "created", &ticket, tasks[i].id());
             }
             crate::tracking::OpenResult::Failed { exit_code } => {
-                log.row("ticket", "FAILED", "—", tasks[i].id());
+                log.row("task issue", "FAILED", "—", tasks[i].id());
                 // The group's winning slug onto every task first, so the
                 // ids written back carry the dependency-order decision — not
                 // a later task's own raw answer, which task order would
@@ -3446,7 +3446,7 @@ fn issue_question(repo: &Repo, tracking: Tracking, tasks: &[Task], then: Resume)
 /// id column, which leaves room for a jira key the popup's width has no
 /// room to spare for.
 fn ticket_row(kind: &str, status: &str, ticket: &str, name: &str) -> String {
-    format!("{kind:<8} {status:<9} {ticket:<6} {name}")
+    format!("{kind:<12} {status:<9} {ticket:<6} {name}")
 }
 
 /// [`TicketLog`] for the queue screen: each row goes into the `opening
@@ -3485,7 +3485,7 @@ impl<'a> PopupTickets<'a> {
         rows.extend(
             self.waiting
                 .as_deref()
-                .map(|id| ticket_row("ticket", "…", "", id)),
+                .map(|id| ticket_row("task issue", "…", "", id)),
         );
         while rows.len() < self.room {
             rows.push(String::new());
@@ -3513,10 +3513,10 @@ impl TicketLog for PopupTickets<'_> {
     }
 
     fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
-        // An epic is answered in the same call as the first ticket of its
+        // A group issue is answered in the same call as the first task issue of its
         // group, and drawn above it — the task stays at the hook until its
         // own row comes in.
-        if kind != "epic" {
+        if kind != "group issue" {
             self.waiting = None;
         }
         self.rows.push(ticket_row(kind, status, ticket, name));
@@ -14430,7 +14430,7 @@ mod tests {
     #[test]
     fn the_issues_created_popup_ends_on_the_dispatcher_line_too() {
         let ids = vec!["wire".to_string()];
-        let tickets = vec!["ticket   created   #7   wire".to_string()];
+        let tickets = vec!["task issue   created   #7   wire".to_string()];
         let Mode::Queued { panel, .. } =
             queued_panel(&ids, &tickets, &[], Some("Dispatcher is running"), None)
         else {
@@ -14445,7 +14445,7 @@ mod tests {
             body[1..panel.len() - 1],
             [
                 "",
-                "ticket   created   #7   wire",
+                "task issue   created   #7   wire",
                 "",
                 "queued 1 task",
                 "",
@@ -17086,9 +17086,9 @@ depends_on: [cart-empty-state]
                 // The second task at the hook, under the first one's answer.
                 assert!(
                     opening.iter().any(|frame| {
-                        frame.contains("epic     created   #410   cart")
-                            && frame.contains("ticket   created   #411   cart-empty-state")
-                            && frame.contains("ticket   …                cart-totals")
+                        frame.contains("group issue  created   #410   cart")
+                            && frame.contains("task issue   created   #411   cart-empty-state")
+                            && frame.contains("task issue   …                cart-totals")
                     }),
                     "{opening:?}"
                 );
@@ -17102,7 +17102,7 @@ depends_on: [cart-empty-state]
                 let frame = last_frame(&drawn);
                 assert!(frame.contains("┌─ issues created "), "{frame}");
                 assert!(
-                    frame.contains("ticket   created   #412   cart-totals"),
+                    frame.contains("task issue   created   #412   cart-totals"),
                     "{frame}"
                 );
                 assert!(frame.contains("queued 2 tasks"), "{frame}");
@@ -17168,9 +17168,9 @@ depends_on: [cart-empty-state]
                     body[..7],
                     [
                         "",
-                        "epic     created   #410   cart",
-                        "ticket   created   #411   cart-empty-state",
-                        "ticket   created   #412   cart-totals",
+                        "group issue  created   #410   cart",
+                        "task issue   created   #411   cart-empty-state",
+                        "task issue   created   #412   cart-totals",
                         "",
                         "queued 2 tasks",
                         "",

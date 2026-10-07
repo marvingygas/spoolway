@@ -226,6 +226,18 @@ unmet one prints the same gate the queue screen draws and proceeds without a tic
 ticket per task. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
+The command prints one row for each issue the hook answers. A group's issue reads `group issue`
+and a task's issue reads `task issue`. The status is `created`, `kept` or `FAILED`. The queue
+screen's `opening issues` and `issues created` popups use the same words.
+
+```
+issue_tracking: opening tickets for group `cart`
+
+  group issue  created   KAN-60        cart
+  task issue   created   KAN-61        cart-empty-state
+  task issue   created   KAN-62        cart-totals
+```
+
 ### `spoolway queue list`
 
 Print whether a dispatcher is running, then one row per task: TASK, PIPELINE, STEP, STATE,
