@@ -534,7 +534,7 @@ model. An unpriced model is reported as unpriced, not counted as free. See
 | `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
 | `session_reuse_idle` | unset | How long a carried session may sit idle before it is not resumed. Unset never refuses on age. Do not set it on a local model. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
-| `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. |
+| `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. A lane off its task's current step counts for nothing, so typing into one on a local model may make the server swap weights. |
 | `local` | `false` | The model runs on your own hardware. Only `spoolway doctor` reads it. |
 
 The window here is what spoolway believes, not what the server reports. Keep it in step with

@@ -103,6 +103,11 @@ A model's `slots` caps lanes on that model, and a profile's `concurrency` caps l
 profile. A model marked `exclusive` never runs beside a different exclusive model. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
+Only the lane on a task's current step counts against those caps, from the pass that starts it.
+A lane whose task has moved to another step counts for nothing, even while it is `Working`, the
+same as a session you started by hand. Typing into one on a local model may make the server swap
+weights. The footer counts lanes by the same rule.
+
 A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
 from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as

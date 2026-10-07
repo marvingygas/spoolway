@@ -3663,8 +3663,9 @@ impl<'a> Dispatcher<'a> {
     /// different axes: one is how much of the machine a set of weights takes,
     /// the other is how many lanes of a harness it is polite to run.
     ///
-    /// Every lane that exists is counted, not only the ones the multiplexer
-    /// calls busy this second — see the counting loop for what that cost.
+    /// Every lane on its task's current step is counted, not only the ones the
+    /// multiplexer calls busy this second — see [`lane_counts`] for what that
+    /// cost, and for why a lane the task has left counts for nothing.
     #[allow(clippy::too_many_arguments)]
     fn start_lanes(
         &mut self,
@@ -3688,35 +3689,9 @@ impl<'a> Dispatcher<'a> {
             let Ok(pipeline) = self.pipelines.for_task(task) else {
                 continue;
             };
-            // A parked task's pane is kept for a person to read, and a pane
-            // being read is not work in flight. Both stages, for the same
-            // reason: two forgotten panes are two of `[agents.pi]
-            // concurrency = 2` — the whole pipeline, held by nothing that is
-            // running. A staffed `blocked` lane is not one of them: it is a
-            // running lane like any other, and does count against its cap.
-            let parked = task.stage() == crate::pipeline::PAUSED
-                || (task.stage() == crate::pipeline::BLOCKED
-                    && !pipeline.blocked_is_staffed(self.unattended));
-            if parked {
+            if !lane_counts(task, pipeline, step_id, self.unattended) {
                 continue;
             }
-            // Every surviving lane counts, whatever the multiplexer says it is
-            // doing this second. It used to count only the lanes the
-            // multiplexer called `working` or `blocked`, and that is the bug
-            // that put five lanes on a
-            // three-slot model: a lane spends its first seconds `idle`
-            // ("started but never prompted", and `unknown` while the backend
-            // is still labelling its pane), so the pass ten seconds after the
-            // one that started three of them counted none of the three and
-            // filled the model up again. A settled lane mid-conversation is
-            // the same story more slowly: it holds a session, its weights and
-            // its pane until something frees it.
-            //
-            // What "surviving" means is already decided, above this call:
-            // `free_finished_lanes` has closed the panes that are finished and
-            // `owned` has had them retained out of it, so anything still here
-            // is a session that exists. Status is how a lane *is*, not whether
-            // it *is* — and a cap is about occupancy.
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
@@ -6410,6 +6385,34 @@ fn carried_session(
 /// transcript and no repo to be worth checking.
 fn exceeds_percent(window: usize, pct: u8, size: u64) -> bool {
     size > (window as u64) * (pct as u64) / 100
+}
+
+/// Whether a lane holds a slot: the one rule behind a profile's `concurrency`,
+/// a model's `slots` and a model's `exclusive`, called by both
+/// `Dispatcher::start_lanes` and the board's footer so the two cannot disagree.
+///
+/// A lane counts only while its task's stage is the lane's own step, from the
+/// pass that starts it. Its first seconds are `idle` or `unknown` in the
+/// multiplexer, and skipping those is what once put five lanes on a
+/// three-slot model, so the lane's reported status plays no part.
+///
+/// A lane the task has left counts for nothing, even `Working`. It is a
+/// finished session that someone may still type into, the same as one started
+/// by hand, and counting it would let finished panes fill a profile with
+/// nothing running.
+///
+/// A parked task counts for nothing either. A `paused` task, or a `blocked` one
+/// whose pipeline does not staff that step, keeps its pane for a person to
+/// read. A staffed `blocked` lane is on its own step (`blocked`) and counts.
+pub(crate) fn lane_counts(
+    task: &Task,
+    pipeline: &crate::pipeline::Pipeline,
+    step_id: &str,
+    unattended: bool,
+) -> bool {
+    let parked = task.stage() == crate::pipeline::PAUSED
+        || (task.stage() == crate::pipeline::BLOCKED && !pipeline.blocked_is_staffed(unattended));
+    !parked && task.stage() == step_id
 }
 
 /// Where this project's lanes work: the checkout itself, and the worktree each
@@ -9704,6 +9707,53 @@ mod tests {
 
         // One of two slots is taken, so exactly one new lane starts.
         assert_eq!(mux.did("start").len(), 1);
+    }
+
+    /// A lane whose task has moved on to another step holds nothing, even
+    /// while a person is typing into it and the multiplexer calls it
+    /// `working`. The task sits on `document` of `bugfix` with one lane there
+    /// and three on steps it has left, one of them `Working`. `review` sits on
+    /// `claude`, so the other two (`reproduce` and `fix`) are `pi` lanes.
+    /// Counted, they would join `document` for three `pi` lanes against a cap
+    /// of 2, and the queued task behind them would wait on sessions that are
+    /// not any task's current work.
+    ///
+    /// The dispatcher must count exactly one: a cap of 1 refuses the queued
+    /// task, and a cap of 2 lets it through. The footer is held to the same
+    /// task by `only_the_lane_on_the_tasks_current_step_counts`.
+    #[test]
+    fn only_the_lane_on_the_current_step_takes_a_slot() {
+        let (mut repo, _root_guard) = fixture("cap-off-step");
+        add_task_with(&repo, "moved-on", "document", |f| {
+            f.pipeline = Some("bugfix".into());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        add_task(&repo, "next", "queued");
+        let lanes = vec![
+            lane(&repo, "moved-on · document", LaneStatus::Idle),
+            lane(&repo, "moved-on · reproduce", LaneStatus::Idle),
+            lane(&repo, "moved-on · fix", LaneStatus::Working),
+            lane(&repo, "moved-on · review", LaneStatus::Idle),
+        ];
+
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 1;
+        let mux = FakeMux::new(lanes.clone());
+        run_pass(&repo, &mux);
+        assert!(
+            mux.did("start").is_empty(),
+            "the one lane on its step fills a cap of 1: {:?}",
+            mux.did("start")
+        );
+
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let mux = FakeMux::new(lanes.clone());
+        run_pass(&repo, &mux);
+        assert_eq!(
+            mux.did("start"),
+            ["start next · implement"],
+            "the three lanes off its step leave a cap of 2 one slot free"
+        );
     }
 
     #[test]
