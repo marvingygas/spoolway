@@ -11,10 +11,10 @@
 #
 # So it is off by default and switched on by a file. `$E2E_CTL/transcript` holds
 # the input tokens of the turn to write, and an optional second line backdates
-# the file's own mtime by that many seconds — which is the only way to make a
-# session read stale, and so the only way to reach `prompt_cache_ttl`
-# headlessly. `touched_at` reads the store's mtime, not any record inside it,
-# so backdating means moving the file's clock and nothing about its content.
+# the file's own mtime by that many seconds — which is how to make a session
+# read stale, and so how to reach `prompt_cache_ttl` headlessly. A claude
+# line carries its own `timestamp`, which is what the age check reads, so it
+# is backdated too; pi's line has none and the age falls back to the mtime.
 
 # write_transcript <kind> <argv...>
 write_transcript() {
@@ -66,14 +66,15 @@ write_transcript() {
         "$turn" "$tokens" >> "$file"
       ;;
     claude)
-      stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      stamp=$(date -u -d "-$age seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u +%Y-%m-%dT%H:%M:%SZ)
       printf '{"type":"assistant","requestId":"r%s","timestamp":"%s","message":{"model":"fake-cloud","usage":{"input_tokens":%s,"output_tokens":16,"cache_creation":{"ephemeral_5m_input_tokens":1}}}}\n' \
         "$turn" "$stamp" "$tokens" >> "$file"
       ;;
   esac
 
-  # `touched_at` is the store's mtime, so a stale store is a file whose clock
-  # has been moved back — not anything written inside it.
+  # A pi store has no timestamp inside it, so its stale form is a file whose
+  # clock has been moved back; a claude line was backdated above.
   if [ "$age" -gt 0 ] 2>/dev/null; then
     then=$(date -u -d "-$age seconds" +%Y%m%d%H%M.%S 2>/dev/null)
     [ -n "$then" ] && touch -t "$then" "$file"

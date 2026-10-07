@@ -74,8 +74,16 @@ and its transcript is read from the agent's own home.
 
 ### Cache warmth is a model's fact
 
-A carried session is reused only while its transcript file is young enough. The limit is
-`models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model. It is
+A session is continued only while its last reply is recent enough. The check applies to a
+`session: true` carry and to the one-shot resume after `blocked` or a park. A resume past the
+limit opens a fresh session at the same step.
+
+Age is the time since the last line in the transcript that carries model usage, read as UTC.
+Lines that never reach the model do not count. A transcript with no such timestamp uses the
+file's modified time instead.
+`spoolway agent verify <kind> --live` prints which of the two the kind gave.
+
+The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model. It is
 five minutes unless you set it, on every model that is not marked `local = true`. That
 includes a model with no `[models]` entry at all.
 
@@ -99,7 +107,7 @@ flowchart TD
   B -- no --> F[start fresh]
   B -- yes --> C{session_reuse_ctx set and last turn over it?}
   C -- yes --> F
-  C -- no --> D{transcript older than prompt_cache_ttl?}
+  C -- no --> D{last reply older than prompt_cache_ttl?}
   D -- yes --> F
   D -- no --> R[resume the session]
   R --> E{session_blocked_ctx set and a running turn over it?}
