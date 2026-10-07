@@ -394,7 +394,8 @@ The step carries the session on if two bounds hold:
 | Age | `models.<glob>.session_reuse_idle` | The session store's modification time. |
 
 Otherwise the step opens a fresh session, and `RECENT` says why. The lookup goes by prompt,
-so two steps running the same prompt share one conversation. A blocked task's resume is
+so two steps running the same prompt share one conversation. A task carrying `restart: <step>`
+opens a fresh session on that step whatever `session:` says. A blocked task's resume is
 separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-a-person).
 
 ## Restarts, laps and escalation

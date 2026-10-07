@@ -227,11 +227,10 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     println!();
     println!("3  THE MESSAGE TYPED INTO ITS PANE, ONCE IT IS UP");
     println!(
-        "   Seven states, in spoolway's own words. See `compose::STATES`. Each is one message,"
+        "   Eight states, in spoolway's own words. See `compose::STATES`. Each is one message,"
     );
-    println!(
-        "   except an opening on a step with `skills:`: one message per skill, then the briefing."
-    );
+    println!("   except an opening or restart on a step with `skills:`:");
+    println!("   one message per skill, then the briefing.");
     for state in crate::compose::STATES {
         println!();
         println!("   This is `{state}`:");

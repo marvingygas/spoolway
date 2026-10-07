@@ -356,7 +356,7 @@ must "--replace takes the shipped hook back" \
 works "the replaced hook is executable again" test -x "$HOOK"
 
 # ------------------------------------------------------------ lane-prompts.md
-# The seven typed pane messages are spoolway's own now, with no project
+# The eight typed pane messages are spoolway's own now, with no project
 # override left to resolve against them — `init` no longer seeds one, and a
 # checkout carrying one from an older release is swept by `sync` rather
 # than preserved. The sweep itself, against a real released tree, is
@@ -788,6 +788,12 @@ works "and nothing escaped above home" test ! -e "$(dirname "$HOME")/evilp"
 # name one explicitly.
 says "prompt contract prints the shape-to-write section" \
   "THE SHAPE TO WRITE" "$SPOOLWAY" prompt contract --pipeline default
+
+# Section 3 renders the `restart` state from the same list as every other.
+says "prompt contract renders the restart state" \
+  "This is \`restart\`:" "$SPOOLWAY" prompt contract --pipeline default
+says "and its briefing says the worktree is not clean" \
+  "its changes are" "$SPOOLWAY" prompt contract --pipeline default
 
 # A gated step's report contract carries no "not available to you" block at
 # all: `--stage` is refused by `spoolway report` itself off every step but

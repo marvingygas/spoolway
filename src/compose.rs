@@ -11,7 +11,7 @@
 //! (see [`Repo::dependency_branch`]) — why [`system_prompt`] and
 //! [`situating`] take a [`Repo`] and return a `Result`: a dependency that
 //! cannot be resolved is an error, not a guessed branch name in the prompt.
-//! The seven typed messages a lane's pane receives need nothing from disk —
+//! The eight typed messages a lane's pane receives need nothing from disk —
 //! they are spoolway's own fixed wording, with no project override left to
 //! resolve against them — so their own functions take no [`Repo`] at all.
 //! Writing the system prompt to disk (`write_system_prompt`) and everything
@@ -756,6 +756,7 @@ pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> 
 /// sent to a lane that has gone quiet.
 pub(crate) const STATES: &[&str] = &[
     "opening",
+    "restart",
     "resume",
     "resume-unattended",
     "carry",
@@ -801,11 +802,35 @@ pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, _step: &Step) ->
 /// settled — never while the turn before it runs, and without holding the pass.
 ///
 /// A step without `skills:` gets exactly one message, the briefing.
-pub(crate) fn opening_messages(task: &Task, pipeline: &Pipeline, step: &Step) -> Vec<String> {
+///
+/// `restarting` is a launch that begins a new conversation on a step that has
+/// already run, so its worktree is not clean. The briefing then gains one
+/// paragraph saying so. It joins the briefing message rather than arriving as
+/// one of its own, because a message of its own would be a second turn, and
+/// the skill messages ahead of the briefing are untouched. The briefing is
+/// then more than one line, so herdr delivers it as one paste, wrapped in
+/// `<pasted_content>`. That costs nothing a slash command needs: the briefing
+/// is never a `/name` message, and the lane's actual rules are in its system
+/// prompt, not in this message. The paragraph stays on its own line, apart
+/// from the pointer to the task file, so the two read as two things.
+pub(crate) fn opening_messages(
+    task: &Task,
+    pipeline: &Pipeline,
+    step: &Step,
+    restarting: bool,
+) -> Vec<String> {
+    let mut briefing = opening_prompt(task, pipeline, step);
+    if restarting {
+        briefing.push_str(
+            "\n\nAn earlier attempt on this step ran in this worktree, and its changes are \
+             still here — some of them committed. Read what it did in the `## Status Log` \
+             before you add to it.",
+        );
+    }
     step.skills
         .iter()
         .map(|name| format!("/{name}"))
-        .chain(std::iter::once(opening_prompt(task, pipeline, step)))
+        .chain(std::iter::once(briefing))
         .collect()
 }
 
@@ -889,7 +914,7 @@ pub(crate) fn park_prompt(task: &Task, _pipeline: &Pipeline, escalated: bool) ->
     }
 }
 
-/// The seventh typed message: what a lane that has gone quiet is nudged with,
+/// The eighth typed message: what a lane that has gone quiet is nudged with,
 /// repeating the report contract it was launched with. Its own function
 /// rather than inlined at the one call site, so `spoolway prompt contract`
 /// can render it too, against the same wording a real nudge would use.
@@ -903,8 +928,8 @@ pub(crate) fn reminder_prompt(task: &Task, pipeline: &Pipeline, step: &Step) -> 
 
 /// The messages a lane's pane is sent in `state`, rendered against a real or
 /// sample task — what `spoolway prompt contract`'s section 3 shows, one state
-/// at a time. Every state is one message but `opening` on a step that lists
-/// `skills:`, which is one per skill and then the briefing, kept apart here
+/// at a time. Every state is one message but `opening` and `restart` on a
+/// step that lists `skills:`, which are one per skill and then the briefing, kept apart here
 /// because the lane receives them apart. `state` outside [`STATES`] renders
 /// none rather than panicking: the contract's own loop is the only caller,
 /// and it never asks for anything else.
@@ -915,7 +940,8 @@ pub(crate) fn lane_prompt_for_state(
     state: &str,
 ) -> Vec<String> {
     match state {
-        "opening" => opening_messages(task, pipeline, step),
+        "opening" => opening_messages(task, pipeline, step, false),
+        "restart" => opening_messages(task, pipeline, step, true),
         "resume" => vec![resume_prompt(task, pipeline, false)],
         "resume-unattended" => vec![resume_prompt(task, pipeline, true)],
         "carry" => vec![carry_prompt(task, pipeline)],

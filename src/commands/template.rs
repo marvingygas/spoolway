@@ -5,7 +5,7 @@
 //! read back whole or substituted by name, never validated against a
 //! schema. This command exists so an agent asked to reshape it reaches for
 //! what actually reads it — [`crate::task_template`] — rather than guessing
-//! at a placeholder's spelling. The seven typed messages a lane's pane
+//! at a placeholder's spelling. The eight typed messages a lane's pane
 //! receives used to be a second such shape, project-overridable through
 //! `.spoolway/templates/lane-prompts.md`; they are spoolway's own now, fixed
 //! wording with no template behind them, so this contract no longer names
@@ -56,7 +56,7 @@ mod tests {
 
     /// The mockup's own promise: the task shape and no format copied in —
     /// only the path this project's own template lives at. No `LANE-PROMPT —`
-    /// section any more: the seven typed messages are spoolway's own, with no
+    /// section any more: the eight typed messages are spoolway's own, with no
     /// project template behind them. No `PR —` section either: nothing reads
     /// the pull request template any more, so it is not one of the shapes
     /// this contract names.

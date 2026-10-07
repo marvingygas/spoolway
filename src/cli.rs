@@ -1540,7 +1540,7 @@ pub struct PromptCopyArgs {
 }
 
 /// Printing the shapes that are prose, not a pipeline: a task's own body, a
-/// lane's seven typed messages, and the pull request body.
+/// lane's eight typed messages, and the pull request body.
 #[derive(Debug, Subcommand)]
 pub enum TemplateCommand {
     /// Print the task, lane-prompt and PR shapes: where each project file
