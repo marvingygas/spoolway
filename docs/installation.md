@@ -416,6 +416,17 @@ back, overwriting that provider's whole set with no `.bak` saved. Replacing a ho
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
 names a command or flag this binary does not have.
 
+A relative path that starts with `.spoolway/` names the project's setup folder. In home mode that
+folder is the workspace's `config/`, so the file is written there and its `.bak` sits beside it.
+The report names the file by its `~` path, and `sync` does not print the line that points at
+`git diff`, because workspace files are not in the project's git repository.
+
+```
+$ spoolway sync --replace .spoolway/prompts/implementer/PROMPT.md
+  wrote   ~/.spoolway/api/config/prompts/implementer/PROMPT.md
+          (whole file, discarding your changes)
+```
+
 At a terminal, with something to write or remove, `sync` lists it and waits before writing
 anything:
 

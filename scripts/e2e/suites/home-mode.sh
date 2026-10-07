@@ -142,6 +142,35 @@ has "the .gitignore still carries spoolway's old block" "# >>> spoolway >>>" .gi
 has "the stale skill file is unchanged" "stale, from before this checkout moved into the workspace" \
   .claude/skills/spoolway-config/SKILL.md
 
+# `--replace` takes a path spelled under `.spoolway/`, which in home mode is
+# the workspace's `config/` and not a folder of the checkout. The checkout has
+# no such file, so before this resolved through the setup folder the command
+# refused with "not a file spoolway ships".
+REPLACED="$WS/config/prompts/implementer/PROMPT.md"
+mkdir -p "$(dirname "$REPLACED")"
+echo "my own implementer prompt" > "$REPLACED"
+before_replace=$(git rev-parse HEAD)
+if "$SPOOLWAY" sync --replace .spoolway/prompts/implementer/PROMPT.md >"$LIVE/replace.out" 2>&1; then
+  ok "a home-mode replace of a path under .spoolway/ runs cleanly"
+else
+  bad "a home-mode replace of a path under .spoolway/ runs cleanly"
+  sed 's/^/        /' "$LIVE/replace.out" | head -30
+fi
+has "a home-mode replace names the workspace file it wrote, in its ~ form" \
+  "wrote   ~/${REPLACED#"$HOME"/}" "$LIVE/replace.out"
+has "a home-mode replace puts the note on its own line" \
+  "          (whole file, discarding your changes)" "$LIVE/replace.out"
+lacks "a home-mode replace does not point at git diff" "git diff" "$LIVE/replace.out"
+lacks "the workspace prompt no longer holds the old text" "my own implementer prompt" "$REPLACED"
+has "the old text is saved beside it" "my own implementer prompt" "$REPLACED.bak"
+if [ "$(git rev-parse HEAD)" = "$before_replace" ] && [ ! -e .spoolway ] && [ -z "$(git status --porcelain --ignored)" ]; then
+  ok "a home-mode replace leaves the checkout clean"
+else
+  bad "a home-mode replace leaves the checkout clean"
+  ls -d .spoolway 2>/dev/null | sed 's/^/        /'
+  git status --porcelain --ignored | sed 's/^/        /'
+fi
+
 # ------------------------------------------- init writes the workspace
 # A git repository spoolway has never seen, set up in home mode by `init`
 # itself with every question answered by a flag and no terminal attached.

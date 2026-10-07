@@ -576,9 +576,11 @@ pub fn scan(repo: &Repo, args: &SyncArgs) -> Result<Vec<Outcome>> {
     // with the workspace's own `config/` — `Repo::discover` refuses a
     // checkout that carries both a tracked `.spoolway/` and a workspace
     // entry, so that indirection can never land back on the checkout here.
-    // `ignores` and the project-level half of `skills` join `repo.checkout`
-    // directly instead, with no such indirection, so they are the two steps
-    // that need telling.
+    // `templates` does the same for a skeleton spelled under `.spoolway/`
+    // (see `skeleton_path`) and skips one spelled anywhere else, which
+    // would land in the checkout. `ignores` and the project-level half of
+    // `skills` join `repo.checkout` directly instead, with no such
+    // indirection, so they are the two steps that need telling.
     let home_mode = crate::repo::workspace_clone(&repo.root).is_some();
     let mut outcomes = Vec::new();
     ignores(repo, args, home_mode, &mut outcomes)?;
@@ -963,8 +965,39 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
 /// change writes pages that are quietly short of a field. So the block is kept
 /// current and the styling around it is never read. See [`crate::skeleton`].
 fn templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
-    for skeleton in crate::skeleton::skeletons() {
-        let path = repo.checkout.join(skeleton.path);
+    templates_of(repo, &crate::skeleton::skeletons(), args, outcomes)
+}
+
+/// Where `skeleton_path` — spelled relative to the repo root, as
+/// [`crate::skeleton::Skeleton::path`] is — lives for this project.
+///
+/// A path under `.spoolway/` is the project's setup folder, which is the
+/// workspace's `config/` in home mode, so it goes through
+/// [`Repo::setup_dir`]. Any other path is a file in the checkout, and home
+/// mode promises nothing is written there, so it has no place and is `None`.
+/// In repo mode both spellings land in the checkout, as they always did.
+fn skeleton_path(repo: &Repo, skeleton_path: &str) -> Option<PathBuf> {
+    if Path::new(skeleton_path).starts_with(crate::config::STATE_DIR) {
+        return Some(repo.under_setup(skeleton_path));
+    }
+    match crate::repo::workspace_clone(&repo.root) {
+        Some(_) => None,
+        None => Some(repo.checkout.join(skeleton_path)),
+    }
+}
+
+/// [`templates`] over an explicit list, so a test can stand a skeleton in for
+/// the shipped list, which is empty today.
+fn templates_of(
+    repo: &Repo,
+    skeletons: &[crate::skeleton::Skeleton],
+    args: &SyncArgs,
+    outcomes: &mut Vec<Outcome>,
+) -> Result<()> {
+    for skeleton in skeletons {
+        let Some(path) = skeleton_path(repo, skeleton.path) else {
+            continue;
+        };
         let shown = crate::platform::relative(&repo.checkout, &path);
 
         let on_disk = match std::fs::read_to_string(&path) {
@@ -990,7 +1023,7 @@ fn templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
             BlockState::Current => outcomes.push(Outcome::Kept),
 
             BlockState::Stale => {
-                write_block(&path, &shown, &on_disk, &skeleton, args, outcomes, "block")?;
+                write_block(&path, &shown, &on_disk, skeleton, args, outcomes, "block")?;
             }
 
             // The project changed the part a machine reads. Their styling is
@@ -1047,12 +1080,19 @@ fn write_block(
 /// of what is being discarded.
 fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
     let mut failed = 0;
+    let home_mode = crate::repo::workspace_clone(&repo.root).is_some();
     for name in &args.replace {
-        let path = match std::path::Path::new(name).is_absolute() {
-            true => PathBuf::from(name),
-            false => repo.checkout.join(name),
+        // A path spelled under `.spoolway/` names the project's setup folder,
+        // which in home mode is the workspace's `config/` and not a folder
+        // of the checkout. Anything else relative joins the checkout.
+        let path = if Path::new(name).is_absolute() {
+            PathBuf::from(name)
+        } else if Path::new(name).starts_with(crate::config::STATE_DIR) {
+            repo.under_setup(name)
+        } else {
+            repo.checkout.join(name)
         };
-        let shown = crate::platform::relative(&repo.checkout, &path);
+        let shown = shown_path(repo, &path);
 
         // A flat `<name>.md` whose directory-shaped `<name>/PROMPT.md` exists is
         // a file this project no longer reads — `prompt::path_for` prefers the
@@ -1065,7 +1105,7 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             if nested.is_file() {
                 println!(
                     "  ! {shown}: this project keeps its prompts as `<name>/PROMPT.md` — replace {} instead",
-                    crate::platform::relative(&repo.checkout, &nested)
+                    shown_path(repo, &nested)
                 );
                 failed += 1;
                 continue;
@@ -1128,10 +1168,7 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
                 .permissions();
             std::fs::set_permissions(&backup, mode)
                 .with_context(|| format!("writing {}", backup.display()))?;
-            println!(
-                "  ! your version is saved to {}",
-                crate::platform::relative(&repo.checkout, &backup)
-            );
+            println!("  ! your version is saved to {}", shown_path(repo, &backup));
         }
         write_atomic(&path, &shipped)?;
         if is_hook {
@@ -1141,7 +1178,12 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             // `init` ships hooks at `0755`; match that here too.
             repair_hook_mode(&path)?;
         }
-        println!("  wrote   {shown} (whole file, discarding your changes)");
+        match home_mode {
+            // A workspace path is long, so the note goes on its own line,
+            // under the path.
+            true => println!("  wrote   {shown}\n          (whole file, discarding your changes)"),
+            false => println!("  wrote   {shown} (whole file, discarding your changes)"),
+        }
     }
 
     println!();
@@ -1151,11 +1193,34 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             args.replace.len()
         );
     }
-    match args.dry_run {
-        true => println!("{DRY_RUN}"),
-        false => println!("`git diff` shows exactly what changed."),
+    if let Some(line) = replace_footer(repo, args.dry_run) {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// How `--replace` names `path`: relative to the checkout, as ever, except
+/// that in home mode a file in the workspace's `config/` is named by its `~`
+/// form, since the long absolute path is not one the person typed.
+fn shown_path(repo: &Repo, path: &Path) -> String {
+    let in_workspace =
+        crate::repo::workspace_clone(&repo.root).is_some() && path.starts_with(repo.setup_dir());
+    match in_workspace {
+        true => crate::repo::shorten_home(path),
+        false => crate::platform::relative(&repo.checkout, path),
+    }
+}
+
+/// The closing line of a successful `--replace`, if it has one.
+///
+/// Workspace files are not in the project's git repository, so in home mode
+/// there is no `git diff` to point at and the line is left out.
+fn replace_footer(repo: &Repo, dry_run: bool) -> Option<&'static str> {
+    match (dry_run, crate::repo::workspace_clone(&repo.root)) {
+        (true, _) => Some(DRY_RUN),
+        (false, Some(_)) => None,
+        (false, None) => Some("`git diff` shows exactly what changed."),
+    }
 }
 
 /// Set a replaced hook back to the executable mode `init` ships it with.
@@ -1180,6 +1245,16 @@ fn repair_hook_mode(_path: &Path) -> Result<bool> {
 
 /// The text spoolway would write at `path`, if it writes anything there at all.
 fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
+    shipped_for_among(repo, path, &crate::skeleton::skeletons())
+}
+
+/// [`shipped_for`] against an explicit skeleton list, for the same reason as
+/// [`templates_of`].
+fn shipped_for_among(
+    repo: &Repo,
+    path: &Path,
+    skeletons: &[crate::skeleton::Skeleton],
+) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
 
     // Prompts are outside the sync cycle, but not outside `--replace`. This
@@ -1239,8 +1314,8 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
     // `ignores` above refreshes the block, on every run, and that is the only way
     // back to ours.
 
-    for skeleton in crate::skeleton::skeletons() {
-        if *path == repo.checkout.join(skeleton.path) {
+    for skeleton in skeletons {
+        if skeleton_path(repo, skeleton.path).is_some_and(|known| known == path) {
             return Some(skeleton.shipped.to_string());
         }
     }
@@ -2036,6 +2111,104 @@ mod tests {
             config_dir,
             home.join(".spoolway").join("home-mode-ws").join("config")
         );
+        assert!(!repo.checkout.join(".spoolway").exists());
+    }
+
+    /// A `Skeleton` for the home-mode tests below; `skeletons()` ships none.
+    fn test_skeleton(path: &'static str) -> crate::skeleton::Skeleton {
+        crate::skeleton::Skeleton {
+            path,
+            shipped: "<h1>hi</h1>\n<script type=\"application/json\" id=\"fixture\">\n{ \"a\": 1 }\n</script>\n",
+            region: crate::skeleton::Region::Script("fixture"),
+            history: &[],
+        }
+    }
+
+    /// In home mode `--replace .spoolway/...` lands in the workspace's
+    /// `config/`, with its backup beside it, and the checkout gains nothing.
+    #[test]
+    fn a_home_mode_replace_resolves_a_setup_path_into_the_workspace() {
+        let (repo, _root_guard, home) = home_mode_fixture("home-replace");
+        let config_dir = workspace_config_dir(&repo, &home);
+        let prompt = config_dir.join("prompts/implementer/PROMPT.md");
+        std::fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+        std::fs::write(&prompt, "mine\n").unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            replace(
+                &repo,
+                &SyncArgs {
+                    replace: vec![".spoolway/prompts/implementer/PROMPT.md".to_string()],
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                shown_path(&repo, &prompt),
+                "~/.spoolway/home-mode-ws/config/prompts/implementer/PROMPT.md"
+            );
+            assert_eq!(
+                shown_path(&repo, &repo.checkout.join("src/main.rs")),
+                "src/main.rs"
+            );
+            assert_eq!(replace_footer(&repo, false), None);
+            assert_eq!(replace_footer(&repo, true), Some(DRY_RUN));
+        });
+
+        assert_eq!(
+            std::fs::read_to_string(&prompt).unwrap(),
+            crate::assets::prompt("implementer").unwrap().body
+        );
+        assert_eq!(
+            std::fs::read_to_string(prompt.with_extension("md.bak")).unwrap(),
+            "mine\n"
+        );
+        assert!(!repo.checkout.join(".spoolway").exists());
+    }
+
+    /// Repo mode still joins onto the checkout and still points at `git diff`.
+    #[test]
+    fn a_repo_mode_replace_keeps_the_git_diff_line() {
+        let (repo, _root_guard) = fixture("repo-replace-footer");
+        assert_eq!(
+            replace_footer(&repo, false),
+            Some("`git diff` shows exactly what changed.")
+        );
+        assert_eq!(
+            skeleton_path(&repo, "docs/page.html"),
+            Some(repo.checkout.join("docs/page.html"))
+        );
+        assert_eq!(
+            skeleton_path(&repo, ".spoolway/page.html"),
+            Some(repo.checkout.join(".spoolway/page.html"))
+        );
+    }
+
+    /// In home mode a skeleton under `.spoolway/` is written, and matched by
+    /// `shipped_for`, in the workspace; one anywhere else is skipped and
+    /// nothing is written into the checkout.
+    #[test]
+    fn a_home_mode_skeleton_resolves_through_the_setup_folder() {
+        let (repo, _root_guard, home) = home_mode_fixture("home-skeleton");
+        let config_dir = workspace_config_dir(&repo, &home);
+        let skeletons = [
+            test_skeleton(".spoolway/page.html"),
+            test_skeleton("outside.html"),
+        ];
+
+        crate::platform::test_home::with_home(&home, || {
+            let mut outcomes = Vec::new();
+            templates_of(&repo, &skeletons, &args(), &mut outcomes).unwrap();
+            assert_eq!(outcomes.len(), 1, "the outside skeleton is skipped");
+
+            assert!(shipped_for_among(&repo, &config_dir.join("page.html"), &skeletons).is_some());
+            assert!(
+                shipped_for_among(&repo, &repo.checkout.join("outside.html"), &skeletons).is_none()
+            );
+        });
+
+        assert!(config_dir.join("page.html").is_file());
+        assert!(!repo.checkout.join("outside.html").exists());
         assert!(!repo.checkout.join(".spoolway").exists());
     }
 
