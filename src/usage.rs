@@ -335,9 +335,11 @@ pub struct ModelPrice {
     #[serde(skip_serializing_if = "unset_rate")]
     pub cache_write_1h: f64,
 
-    /// How long a carried session may sit before `dispatch::carried_session`
-    /// refuses to resume it — measured against this model's own store,
-    /// `usage::touched_at`.
+    /// How long a session's prompt cache is trusted to stay warm: a carried
+    /// session whose store has sat longer is refused by
+    /// `dispatch::carried_session` and opens fresh. Measured against this
+    /// model's own store, `usage::touched_at`. Read it through
+    /// [`Self::cache_ttl_limit`], which applies the default.
     ///
     /// **Why this is a model's fact and not an agent kind's.** A cache belongs
     /// to whoever serves the model, and pi and codex are *harnesses*
@@ -347,19 +349,20 @@ pub struct ModelPrice {
     /// the model is where its lifetime is declared — beside the prices, which
     /// are the same kind of fact and are already matched by the same glob.
     ///
-    /// `None` means nobody has said, and a carried session under this model
-    /// is never refused for its age — the honest answer, not a guess that it
-    /// has gone cold. Renamed from `cache_ttl`: the alias keeps an existing
-    /// config parsing, and this is consulted on every carried session now
-    /// rather than only on a turn that happened to touch a cache, which is
-    /// what the old name overstated.
+    /// `None` means nobody has said, and the default applies: five minutes,
+    /// or no limit on a model marked `local`. An explicit zero (`"0"`) is a
+    /// statement, not an absence, and turns the limit off on any model — which
+    /// is why this is an `Option` and not a bare duration. Renamed from
+    /// `session_reuse_idle`, itself renamed from `cache_ttl`; both old
+    /// spellings stay as aliases so an existing config keeps parsing.
     #[serde(
+        alias = "session_reuse_idle",
         alias = "cache_ttl",
         default,
         skip_serializing_if = "Option::is_none",
         with = "crate::config::human_duration::optional"
     )]
-    pub session_reuse_idle: Option<std::time::Duration>,
+    pub prompt_cache_ttl: Option<std::time::Duration>,
 
     /// How many lanes may run this model at once, in place of its profile's
     /// `agents.<profile>.concurrency` when set.
@@ -388,10 +391,11 @@ pub struct ModelPrice {
 
     /// This model runs on hardware you own rather than a metered API.
     ///
-    /// Purely informational: it sizes nothing, caps nothing and never reaches
-    /// the scheduler — a run takes exactly the same decisions whether this is
-    /// `true` or absent. Its one effect is a standing line on the dispatcher's
-    /// board when a queued task routes through a step naming this model,
+    /// It sizes nothing, caps nothing and never reaches the scheduler. It has
+    /// two effects. A model marked `local` has no `prompt_cache_ttl` default,
+    /// so a carried session under it is never refused for its age unless the
+    /// project sets one; see [`ModelPrice::cache_ttl_limit`]. And it puts a
+    /// standing line on the dispatcher's board when a queued task routes through a step naming this model,
     /// asking a person not to open their own sessions against the same server
     /// while the run lasts. spoolway never infers it: a model carrying
     /// `slots` or `exclusive` is describing the same kind of hardware, but so
@@ -428,7 +432,25 @@ fn not_local(local: &bool) -> bool {
     !*local
 }
 
+/// How long a session's prompt cache is trusted when a model sets no
+/// `prompt_cache_ttl`. Five minutes is the shortest cache lifetime Anthropic
+/// uses, so a resume inside it is warm on Anthropic's models. Other providers
+/// are held to the same figure for consistency, and a project can change it.
+pub const DEFAULT_PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 impl ModelPrice {
+    /// The age past which a carried session under this model is refused, or
+    /// `None` for no limit. `price` is `None` for a model with no entry at all,
+    /// which still gets the default: it is hosted until someone says `local`.
+    pub fn cache_ttl_limit(price: Option<&Self>) -> Option<std::time::Duration> {
+        let limit = match price.and_then(|price| price.prompt_cache_ttl) {
+            Some(set) => set,
+            None if price.is_some_and(|price| price.local) => return None,
+            None => DEFAULT_PROMPT_CACHE_TTL,
+        };
+        (!limit.is_zero()).then_some(limit)
+    }
+
     /// A value with every field present when serialised — nothing zero,
     /// nothing `None`.
     ///
@@ -448,7 +470,7 @@ impl ModelPrice {
             cache_read: 1.0,
             cache_write_5m: 1.0,
             cache_write_1h: 1.0,
-            session_reuse_idle: Some(std::time::Duration::from_secs(1)),
+            prompt_cache_ttl: Some(std::time::Duration::from_secs(1)),
             slots: 1,
             exclusive: true,
             local: true,
@@ -876,7 +898,7 @@ pub fn live_of(kind: &str, path: &Path) -> Option<Live> {
 ///
 /// Consulted by `dispatch::carried_session`, which checks this against an
 /// enabled `agents.<profile>.session_reuse_ctx` and the session's own age against
-/// `models.<glob>.session_reuse_idle` — the second reading is [`touched_at`]'s,
+/// `models.<glob>.prompt_cache_ttl` — the second reading is [`touched_at`]'s,
 /// not this function's, since it is a fact about the store rather than about
 /// any one turn.
 pub fn last_turn(kind: &str, session: &str) -> Option<u64> {
@@ -3517,7 +3539,7 @@ mod tests {
                     cache_read: 0.3,
                     cache_write_5m: 3.75,
                     cache_write_1h: 6.0,
-                    session_reuse_idle: None,
+                    prompt_cache_ttl: None,
                     slots: 0,
                     exclusive: false,
                     local: false,
@@ -3532,7 +3554,7 @@ mod tests {
                     cache_read: 0.5,
                     cache_write_5m: 6.25,
                     cache_write_1h: 10.0,
-                    session_reuse_idle: None,
+                    prompt_cache_ttl: None,
                     slots: 0,
                     exclusive: false,
                     local: false,
@@ -3641,7 +3663,7 @@ mod tests {
                 cache_read: 0.5,
                 cache_write_5m: 6.25,
                 cache_write_1h: 0.0,
-                session_reuse_idle: None,
+                prompt_cache_ttl: None,
                 slots: 0,
                 exclusive: false,
                 local: false,

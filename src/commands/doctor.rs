@@ -1677,14 +1677,12 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     }
 
     // `slots` and `exclusive` both describe one card's worth of hardware, so a
-    // model carrying either is almost certainly local — and this note is the
-    // whole of what `local` still does for it: nothing here changes what the
-    // run decides, or what the board draws, whether or not the flag is set;
-    // setting it only says the fact plainly and quiets this note about it.
+    // model carrying either is almost certainly local. Setting `local` lifts
+    // the 5m `prompt_cache_ttl` default from it, so a carried session is not
+    // refused for age, and it quiets this note.
     // Read straight off `config.models` rather than the `named` map: the flag
     // is worth setting on a sized model whether or not a pipeline here points
-    // at it yet. `local` itself is never a failure — a run takes the same
-    // decisions with it set or absent — so this is a note.
+    // at it yet. `local` itself is never a failure, so this is a note.
     for (glob, price) in &config.models {
         if price.local || (price.slots == 0 && !price.exclusive) {
             continue;
@@ -2071,8 +2069,9 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
 /// `agents.<profile>.session_reuse_uncached` is reported against the models
 /// that profile's steps actually run, so a project sees whether it was ever
 /// load-bearing rather than a generic "this is gone". `models.<glob>.cache_ttl`
-/// is reported per glob: it still parses, under its new name, and is rewritten
-/// on the next save either way.
+/// and `models.<glob>.session_reuse_idle` are reported per glob: both still
+/// parse, under their new name `prompt_cache_ttl`, and are rewritten on the
+/// next save either way.
 ///
 /// `config` is the checkout's own loaded copy — the same one `doctor` checks
 /// everything else against — so `[models]`'s rates are resolved from the same
@@ -2091,7 +2090,9 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
             if entry.get("session_reuse_uncached").is_none() {
                 continue;
             }
-            let idle = pipelines
+            // The age limit that applies, not the raw field: a model that sets
+            // nothing is held to the 5m default, and `"0"` lifts the limit.
+            let limited = pipelines
                 .pipelines
                 .values()
                 .flat_map(|p| &p.steps)
@@ -2099,19 +2100,20 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
                 .filter_map(|step| step.model.as_deref())
                 .filter(|model| !model.trim().is_empty())
                 .find_map(|model| {
-                    let idle = crate::models::resolve(&config.models, model)
-                        .price?
-                        .session_reuse_idle?;
-                    Some((model, idle))
+                    let price = crate::models::resolve(&config.models, model).price;
+                    let limit = crate::usage::ModelPrice::cache_ttl_limit(price.as_ref())?;
+                    Some((model, limit))
                 });
-            match idle {
-                Some((model, _idle)) => report.note(format!(
+            match limited {
+                Some((model, limit)) => report.note(format!(
                     "agents.{name}.session_reuse_uncached is retired in this checkout's \
-                     config, and models.'{model}'.session_reuse_idle is set"
+                     config, and a carried session under '{model}' is now refused after {}; \
+                     set models.'{model}'.prompt_cache_ttl = \"0\" to resume however old",
+                    crate::config::human_duration::format(limit)
                 )),
                 None => report.note(format!(
                     "agents.{name}.session_reuse_uncached is retired in this checkout's \
-                     config, and no model this profile runs sets session_reuse_idle"
+                     config, and no model this profile runs has a prompt_cache_ttl limit"
                 )),
             }
         }
@@ -2119,11 +2121,13 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
 
     if let Some(models) = doc.get("models").and_then(toml::Value::as_table) {
         for (glob, entry) in models {
-            if entry.get("cache_ttl").is_some() {
-                report.note(format!(
-                    "models.'{glob}'.cache_ttl is retired in this checkout's config, renamed \
-                     session_reuse_idle"
-                ));
+            for old in ["cache_ttl", "session_reuse_idle"] {
+                if entry.get(old).is_some() {
+                    report.note(format!(
+                        "models.'{glob}'.{old} is retired in this checkout's config, renamed \
+                         prompt_cache_ttl"
+                    ));
+                }
             }
         }
     }

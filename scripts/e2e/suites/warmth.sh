@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `models.<glob>.session_reuse_idle`, against a real cloud model. The one
+# `models.<glob>.prompt_cache_ttl`, against a real cloud model. The one
 # suite that spends money.
 #
 # Everything else in this harness runs stand-ins, and everything else should:
@@ -37,12 +37,12 @@
 # is its own new sessions, in a project directory named after this suite's
 # scratch tree — the same thing running `claude` in a new directory does. It
 # edits nothing of yours. The one transcript it *does* edit is one of its own,
-# and only its mtime: a store sitting past `session_reuse_idle` is not a wait a
+# and only its mtime: a store sitting past `prompt_cache_ttl` is not a wait a
 # test can perform, so the stale scenarios move the file's clock back instead.
 # Every field inside it stays exactly as Claude Code wrote it, which is the
 # whole point.
 #
-# covers: models.<glob>.session_reuse_idle — against a real claude session: unset, a store of any age still resumes; set, one whose store has sat past it is refused
+# covers: models.<glob>.prompt_cache_ttl — against a real claude session: unset, a store past the 5m default is refused; "0", one of any age still resumes
 # covers: agent.verify.live — every transcript reading, off a real turn and a resumed one, named one by one
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -292,7 +292,7 @@ at_the_gate() {
 # `resume` is one verb over both roads out of a stop, and the scenarios below
 # only ever exercise the `paused` half of it, through a real gated lane. The
 # `blocked` half needs no real lane to prove — clearing a block is a file edit
-# and a routing decision, nothing `session_reuse_idle` touches — so this task
+# and a routing decision, nothing `prompt_cache_ttl` touches — so this task
 # is written onto `blocked` by hand rather than spending a turn to reach it.
 {
   echo "---"
@@ -364,12 +364,11 @@ PY
 
 # ------------------------------------------------------------- warm, resumed
 #
-# No horizon is set on this model yet — every model ships that way — and the
-# store is untouched, so the conversation is carried regardless. On its own
-# this proves little — an unset horizon resumes anything, however old — and
-# that is exactly why it is here: it is the control the two scenarios below
-# are measured against. Same lane, same transcript, one thing different each
-# time.
+# No `prompt_cache_ttl` is set on this model — every model ships that way, so
+# the five-minute default applies — and the store is untouched, well inside it,
+# so the conversation is carried. On its own this proves little, and that is
+# exactly why it is here: it is the control the two scenarios below are
+# measured against. Same lane, same transcript, one thing different each time.
 if at_the_gate warm 600 check_shape; then
   if drive warm gone 600; then
     ok "the second real lane runs and the task lands"
@@ -380,13 +379,13 @@ if at_the_gate warm 600 check_shape; then
   fi
 fi
 
-# ---------------------------------------------- old, and no horizon set yet
+# ------------------------------------------ old, past the default horizon
 #
-# Still no `session_reuse_idle` on this model — the store is just old now, two
-# hours backdated. Unset already says what `session_reuse_uncached = true`
-# used to: carry it regardless of age. This is the acceptance criterion in as
-# many words — the store's age refuses nothing until a horizon exists to
-# refuse against.
+# Still no `prompt_cache_ttl` on this model — the store is just old now, two
+# hours backdated. A hosted model with nothing set is limited to five minutes
+# by default, so a store that has sat this long is refused rather than
+# resumed, whatever it is made of. Nothing in the project names the limit:
+# this is the default doing its job against a real session.
 stale() {
   local task=$1 sid file
   sid=$(session_of "$task") || return 1
@@ -399,25 +398,26 @@ stale() {
 if at_the_gate thaw 600 stale; then
   if drive thaw gone 600; then
     ok "the second real lane runs and that task lands too"
-    carried thaw 0 "with no session_reuse_idle set, a two-hour-old real store still resumes"
+    carried thaw 1 "with no prompt_cache_ttl set, a two-hour-old real store is refused and a fresh one opened"
+    has "and the task file says which bound refused it" \
+      "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/thaw.md"
   else
     bad "the second real lane runs and that task lands too (at \`$(stage_of thaw)\`)"
     tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/thaw · second.log" 2>/dev/null | sed 's/^/        /'
   fi
 fi
 
-# --------------------------------------------------------- old, past a horizon
+# ------------------------------------------------------ old, and no horizon
 #
-# The discriminating case: the same two hours of age, and now a horizon on the
-# model that it is well past. A store that has sat longer than
-# `session_reuse_idle` is refused rather than resumed, whatever it is made of.
-must "an idle horizon" "$SPOOLWAY" config set "models.$MODEL.session_reuse_idle" 5m
+# The discriminating case: the same two hours of age, and now the model says
+# `prompt_cache_ttl = "0"`, which lifts the limit. The store's age refuses
+# nothing, and the conversation is carried regardless — which is what the
+# retired `session_reuse_uncached = true` used to mean.
+must "no horizon" "$SPOOLWAY" config set "models.$MODEL.prompt_cache_ttl" 0
 if at_the_gate chill 600 stale; then
   if drive chill gone 600; then
     ok "the second real lane runs and that task lands too"
-    carried chill 1 "a real session past the horizon is refused and a fresh one opened"
-    has "and the task file says which bound refused it" \
-      "session_reuse_idle — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/chill.md"
+    carried chill 0 "with prompt_cache_ttl = \"0\", a two-hour-old real store still resumes"
   else
     bad "the second real lane runs and that task lands too (at \`$(stage_of chill)\`)"
     tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/chill · second.log" 2>/dev/null | sed 's/^/        /'

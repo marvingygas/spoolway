@@ -6,13 +6,13 @@
 # answer: a mock turn spends nothing, and every suite but one is better off with
 # `carried_session` finding nothing to size. The exception is the suite about
 # the context-window settings, which cannot reach `session_reuse_ctx`,
-# `models.<model>.context_window` or `session_reuse_idle` at all unless
+# `models.<model>.context_window` or `prompt_cache_ttl` at all unless
 # something has written a transcript for the lookup to find, size and date.
 #
 # So it is off by default and switched on by a file. `$E2E_CTL/transcript` holds
 # the input tokens of the turn to write, and an optional second line backdates
 # the file's own mtime by that many seconds — which is the only way to make a
-# session read stale, and so the only way to reach `session_reuse_idle`
+# session read stale, and so the only way to reach `prompt_cache_ttl`
 # headlessly. `touched_at` reads the store's mtime, not any record inside it,
 # so backdating means moving the file's clock and nothing about its content.
 

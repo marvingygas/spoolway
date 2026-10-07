@@ -6434,7 +6434,7 @@ enum SessionMiss {
     /// so the session cannot be measured against that ceiling.
     WindowUnset,
     /// Found and under size, but its store has sat longer than the model's
-    /// `session_reuse_idle`.
+    /// `prompt_cache_ttl`.
     Stale,
 }
 
@@ -6452,7 +6452,7 @@ impl SessionMiss {
             }
             SessionMiss::Stale => {
                 format!(
-                    "its earlier session's store has sat past `{model}`'s session_reuse_idle — \
+                    "its earlier session's store has sat past `{model}`'s prompt_cache_ttl — \
                      opened fresh"
                 )
             }
@@ -6478,8 +6478,10 @@ impl SessionMiss {
 ///
 /// Age is checked after size, and only refuses a session that is otherwise
 /// carried: a session whose store's `touched_at` cannot be read, or whose
-/// model sets no `session_reuse_idle` at all, refuses nothing — there is no
-/// per-profile override left, only the model's own horizon.
+/// model has no limit (`local = true` with none set, or `"0"`), refuses
+/// nothing. A model that sets no `prompt_cache_ttl`, with or without a
+/// `[models]` entry, is limited to five minutes. There is no per-profile
+/// override left, only the model's own horizon.
 fn carried_session(
     repo: &Repo,
     pipeline: &Pipeline,
@@ -6515,7 +6517,7 @@ fn carried_session(
         }
     }
 
-    if let Some(idle) = price.and_then(|price| price.session_reuse_idle) {
+    if let Some(idle) = crate::usage::ModelPrice::cache_ttl_limit(price.as_ref()) {
         let stale = crate::usage::session_path(&entry.kind, &entry.session)
             .and_then(|path| crate::usage::touched_at(&path))
             .and_then(|touched| std::time::SystemTime::now().duration_since(touched).ok())
@@ -14657,7 +14659,7 @@ mod tests {
     /// real pass would reach it: no entry at all, an entry whose model prices
     /// nowhere, an entry whose model is priced but whose transcript is too
     /// big, and one that is well under size but whose store has sat past the
-    /// model's `session_reuse_idle`.
+    /// model's `prompt_cache_ttl`.
     #[test]
     fn carried_session_reports_which_of_the_four_misses_it_was() {
         let (mut repo, _root_guard) = fixture("session-misses");
@@ -14745,13 +14747,13 @@ mod tests {
         );
 
         // A newer entry still, well under size, but its store has sat 400
-        // seconds without moving — past the five-minute `session_reuse_idle`
+        // seconds without moving — past the five-minute `prompt_cache_ttl`
         // this model declares.
         repo.config
             .models
             .get_mut("priced-model")
             .unwrap()
-            .session_reuse_idle = Some(Duration::from_secs(300));
+            .prompt_cache_ttl = Some(Duration::from_secs(300));
         write_entry(
             &repo,
             "demo",
@@ -14774,13 +14776,13 @@ mod tests {
         });
         assert_eq!(result, Err(SessionMiss::Stale));
 
-        // Unset the horizon, and the same stale store resumes — the only way
-        // left to say "carry this regardless of age."
+        // Zero the horizon, and the same stale store resumes — the way left
+        // to say "carry this regardless of age" on a hosted model.
         repo.config
             .models
             .get_mut("priced-model")
             .unwrap()
-            .session_reuse_idle = None;
+            .prompt_cache_ttl = Some(Duration::ZERO);
         let resumed = with_home(&home, || {
             carried_session(
                 &repo,
@@ -14792,9 +14794,61 @@ mod tests {
                 &crate::usage::read(&repo).unwrap(),
             )
         })
-        .expect("a session with no idle horizon should resume however old its store");
+        .expect("a session with a zero horizon should resume however old its store");
         std::fs::remove_dir_all(&home).ok();
         assert_eq!(resumed.1, "stale-session");
+    }
+
+    /// The default horizon, reached the three ways it can be: a hosted model
+    /// with a `[models]` entry that sets none, a hosted model with no entry at
+    /// all, and a `local = true` model that sets none. The same 400-second-old
+    /// store is refused by the first two and resumed by the third.
+    #[test]
+    fn carried_session_defaults_to_five_minutes_unless_the_model_is_local() {
+        let (mut repo, _root_guard) = fixture("session-default-ttl");
+        repo.config.models.insert(
+            "hosted-model".into(),
+            crate::usage::ModelPrice {
+                context_window: 1000,
+                ..Default::default()
+            },
+        );
+        repo.config.models.insert(
+            "local-model".into(),
+            crate::usage::ModelPrice {
+                context_window: 1000,
+                local: true,
+                ..Default::default()
+            },
+        );
+        let task = reload(&add_task(&repo, "demo", "fix"));
+        let pipelines = session_pipelines();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("fix").unwrap();
+        let profile = repo.config.agent("pi").unwrap().clone();
+        assert_eq!(profile.session_reuse_ctx, 0, "size is not what this checks");
+
+        for (model, expected) in [
+            ("hosted-model", Err(SessionMiss::Stale)),
+            ("unlisted-model", Err(SessionMiss::Stale)),
+            ("local-model", Ok(())),
+        ] {
+            write_entry(&repo, "demo", "implement", "claude", model, "old-session");
+            let home = claude_home_with("old-session", 400, 10);
+            let result = with_home(&home, || {
+                carried_session(
+                    &repo,
+                    pipeline,
+                    &task,
+                    step,
+                    &profile,
+                    model,
+                    &crate::usage::read(&repo).unwrap(),
+                )
+            });
+            std::fs::remove_dir_all(&home).ok();
+            assert_eq!(result.map(|_| ()), expected, "{model}");
+        }
     }
 
     /// The end-to-end shape `session_blocked_ctx` exists for: a lane still

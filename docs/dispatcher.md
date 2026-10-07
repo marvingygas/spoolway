@@ -362,7 +362,7 @@ The step carries the session on if two bounds hold:
 | Bound | Setting | Checked against |
 |---|---|---|
 | Size | `agents.<profile>.session_reuse_ctx`, a percentage | The input, cache-read and cache-write tokens of the session's last turn, over the model's `context_window`. |
-| Age | `models.<glob>.session_reuse_idle` | The session store's modification time. |
+| Age | `models.<glob>.prompt_cache_ttl`, `5m` unless set, none for a `local` model | The session store's modification time. |
 
 Otherwise the step opens a fresh session, and `RECENT` says why. The lookup goes by prompt,
 so two steps running the same prompt share one conversation. A blocked task's resume is

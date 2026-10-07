@@ -1041,8 +1041,9 @@ pub struct AgentProfile {
     /// Retired: whether a carried session was still worth resuming once its
     /// prompt cache had gone cold. Two settings governed one decision, and
     /// the second was inert unless some model declared a lifetime — that
-    /// lifetime is now the whole of it, as `models.<glob>.session_reuse_idle`:
-    /// unset already says what this saying `true` used to. Kept only so an
+    /// lifetime is now the whole of it, as `models.<glob>.prompt_cache_ttl`.
+    /// That key now defaults to five minutes on a hosted model, so what this
+    /// saying `true` used to do (resume however cold) is `"0"` there. Kept only so an
     /// existing config still parses; dropped unconditionally on the next
     /// save.
     #[allow(dead_code)]
@@ -1989,12 +1990,11 @@ pub(crate) mod human_duration {
 
     /// The same spelling where the setting may simply be absent.
     ///
-    /// For a fact a project states about a model rather than one spoolway has a
-    /// default for — [`crate::usage::ModelPrice::session_reuse_idle`] is the
-    /// one. Absent and zero have to stay distinct there: unset means "nobody
-    /// has said", and a carried session under that model is never refused for
-    /// its age, rather than being refused as though its store had just gone
-    /// stale.
+    /// For a fact a project may leave unstated —
+    /// [`crate::usage::ModelPrice::prompt_cache_ttl`] is the one. Absent and
+    /// zero have to stay distinct there: absent means "nobody has said", so
+    /// the default limit applies, and zero means "no limit", which a bare `"0"`
+    /// spells.
     pub mod optional {
         use super::*;
 
@@ -3278,8 +3278,8 @@ mod tests {
     /// `session_reuse_uncached` retires the way `model`/`context_window` did:
     /// an existing config still parses, and it is gone on the next save
     /// because nothing reads it any more — the horizon it argued about is
-    /// `models.<glob>.session_reuse_idle` now, and an unset one already says
-    /// what this saying `true` used to.
+    /// `models.<glob>.prompt_cache_ttl` now, where `"0"` says what this
+    /// saying `true` used to.
     #[test]
     fn a_profiles_retired_session_reuse_uncached_parses_and_drops() {
         let raw = "[agents.claude]\n\
@@ -3309,22 +3309,42 @@ mod tests {
         assert!(!toml::to_string(&config).unwrap().contains("quota_ceiling"));
     }
 
-    /// `models.<glob>.cache_ttl` is the field's old name, kept as a serde
-    /// alias so a project's `[models]` table does not stop parsing the day
-    /// this ships — and rewritten under its new name, `session_reuse_idle`,
-    /// on the next save.
+    /// `models.<glob>.cache_ttl` and `session_reuse_idle` are the field's old
+    /// names, kept as serde aliases so a project's `[models]` table does not
+    /// stop parsing the day this ships — and rewritten under its new name,
+    /// `prompt_cache_ttl`, on the next save.
     #[test]
-    fn a_models_cache_ttl_parses_as_session_reuse_idle_and_is_renamed_on_save() {
-        let raw = "[models.\"claude-*\"]\ncache_ttl = \"5m\"\n";
-        let config: Config = toml::from_str(raw).expect("the old cache_ttl spelling must parse");
-        assert_eq!(
-            config.models["claude-*"].session_reuse_idle,
-            Some(Duration::from_secs(300))
-        );
+    fn a_models_retired_ttl_names_parse_as_prompt_cache_ttl_and_are_renamed_on_save() {
+        for old in ["cache_ttl", "session_reuse_idle"] {
+            let raw = format!("[models.\"claude-*\"]\n{old} = \"5m\"\n");
+            let config: Config = toml::from_str(&raw)
+                .unwrap_or_else(|err| panic!("the old {old} spelling must parse: {err}"));
+            assert_eq!(
+                config.models["claude-*"].prompt_cache_ttl,
+                Some(Duration::from_secs(300))
+            );
 
-        let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("cache_ttl"));
-        assert!(rendered.contains("session_reuse_idle"));
+            let rendered = toml::to_string(&config).unwrap();
+            assert!(!rendered.contains(&format!("\n{old} =")), "{rendered}");
+            assert!(rendered.contains("prompt_cache_ttl"), "{rendered}");
+        }
+    }
+
+    /// A bare `"0"` is a statement that there is no limit, so it parses as a
+    /// zero duration rather than as an absent key, and survives a save.
+    #[test]
+    fn a_zero_prompt_cache_ttl_parses_and_round_trips() {
+        let raw = "[models.\"claude-*\"]\nprompt_cache_ttl = \"0\"\n";
+        let config: Config = toml::from_str(raw).expect("\"0\" must parse");
+        assert_eq!(
+            config.models["claude-*"].prompt_cache_ttl,
+            Some(Duration::ZERO)
+        );
+        let again: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            again.models["claude-*"].prompt_cache_ttl,
+            Some(Duration::ZERO)
+        );
     }
 
     /// A project configured back when the format was still called `artifact`

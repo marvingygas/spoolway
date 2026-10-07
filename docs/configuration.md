@@ -515,7 +515,7 @@ output = 25.0
 cache_read = 0.5
 cache_write_5m = 6.25
 cache_write_1h = 10.0
-session_reuse_idle = "5m"
+prompt_cache_ttl = "1h"
 
 [models."Qwen3.6-35B-A3B"]
 context_window = 100096
@@ -538,16 +538,17 @@ model. An unpriced model is reported as unpriced, not counted as free. See
 | `cache_read` | `0` | USD per million cached input tokens read. |
 | `cache_write_5m` | `0` | USD per million tokens written to a five-minute cache. |
 | `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
-| `session_reuse_idle` | unset | How long a carried session may sit idle before it is not resumed. Unset never refuses on age. Do not set it on a local model. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
+| `prompt_cache_ttl` | `5m`, none if `local` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. `"0"` turns it off. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. |
-| `local` | `false` | The model runs on your own hardware. Only `spoolway doctor` reads it. |
+| `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
 
 The window here is what spoolway believes, not what the server reports. Keep it in step with
 the server yourself.
 
 `spoolway doctor` notes a row with `slots` or `exclusive` but no `local`, an `exclusive` row
-with no `slots`, and a row no pipeline step uses.
+with no `slots`, a row no pipeline step uses, and a row that still names `cache_ttl` or
+`session_reuse_idle`.
 
 ## Retired keys
 
@@ -574,7 +575,7 @@ rest of the table below are dropped with nothing printed.
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode`, `worktree_root` | Nothing |
 | `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always pauses its task. |
 | `[pipeline_gen]` | Nothing |
-| `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |
+| `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.prompt_cache_ttl` |
 
 ## When the config will not parse
 
