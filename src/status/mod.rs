@@ -2900,10 +2900,11 @@ fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_i
 /// back to, and the only way off a parked block — so the row names one step
 /// whether or not the key is on offer yet.
 ///
-/// Key first, then the command it fires, exactly like a paused row's own
-/// `next` below — but only when `resumable` actually offers it: a block still
-/// waiting on a dependency or a busy lane of its own has no action here for
-/// `[r]` to name, and gets the bare arrow to the same step.
+/// The key, then the arrow, exactly like a paused row's own `next` below.
+/// No command follows, because the key opens the step picker. The key shows
+/// only when `resumable` actually offers it: a block still waiting on a
+/// dependency or a busy lane of its own has no action here for `[r]` to
+/// name, and gets the bare arrow to the same step.
 ///
 /// A staffed block is not this row: an unblocker lane works it, and where its
 /// pass goes is `cleared_block_target`, which [`onward`] draws.
@@ -2914,7 +2915,7 @@ fn blocked_next(
 ) -> String {
     let target = crate::commands::resume_target(task, pipeline);
     match resumable {
-        true => format!("[r] → {target} — `spoolway resume {}`", task.id()),
+        true => format!("[r] → {target}"),
         false => format!("→ {target}"),
     }
 }
@@ -3211,14 +3212,16 @@ fn build_rows(
                         (Some(step), _) if task.front.parked_by_stop => {
                             format!("{arrow} {step} — resumes when dispatching starts")
                         }
-                        (Some(step), true) => {
-                            format!("[r] {arrow} {step} — `spoolway resume {}`", task.id())
-                        }
-                        (Some(step), false) => {
-                            format!("{arrow} {step} — `spoolway resume {}`", task.id())
-                        }
-                        (None, true) => format!("[r] `spoolway resume {}`", task.id()),
-                        (None, false) => format!("`spoolway resume {}`", task.id()),
+                        (Some(step), true) => format!("[r] {arrow} {step}"),
+                        (Some(step), false) => format!("{arrow} {step}"),
+                        // Nothing to name: `paused_at` names a step the
+                        // pipeline no longer has, a gated step has no pass
+                        // destination, or neither `paused_at` nor
+                        // `parked_from` is set, as on a task an issue-tracking
+                        // hook paused on `done`. The row must still say
+                        // something, and `r` may resume at once with no picker.
+                        (None, true) => "[r] resume".to_string(),
+                        (None, false) => "no step named".to_string(),
                     };
                     (State::Paused, next, resumable)
                 }
@@ -4519,9 +4522,9 @@ mod tests {
 
         // Blocked, parked for a person: the step `spoolway resume` sends it
         // back to — `resume_target`'s own answer, the step it stopped on —
-        // key first, then the command, since every dependency is met and no
-        // lane of its own is busy. Its own group: unrelated to `login`'s
-        // chain, and a group is one chain now.
+        // the key is offered, since every dependency is met and no lane of
+        // its own is busy. Its own group: unrelated to `login`'s chain, and
+        // a group is one chain now.
         add_to(&repo, "wall", &[], None, Some("wall"));
         let mut wall = repo.task("wall").unwrap();
         wall.front.blocked_from = Some("implement".into());
@@ -4558,8 +4561,8 @@ mod tests {
             row("sessions").next
         );
 
-        assert_eq!(row("wall").next, "[r] → implement — `spoolway resume wall`");
-        assert_eq!(row("ship").next, "[r] → review — `spoolway resume ship`");
+        assert_eq!(row("wall").next, "[r] → implement");
+        assert_eq!(row("ship").next, "[r] → review");
         // No counter text on NEXT at all — it moved to the STEP column, read
         // off `Row::arrivals` instead.
         assert_eq!(row("spinner").next, "→ document");
@@ -4616,17 +4619,11 @@ mod tests {
         let rows = rows(&repo, &pipelines).unwrap();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
 
-        assert_eq!(
-            row("pause-reach").next,
-            "[r] review failed → document — `spoolway resume pause-reach`"
-        );
-        assert_eq!(
-            row("look-holds").next,
-            "[r] review blocked → blocked — `spoolway resume look-holds`"
-        );
+        assert_eq!(row("pause-reach").next, "[r] review failed → document");
+        assert_eq!(row("look-holds").next, "[r] review blocked → blocked");
         assert_eq!(
             row("sweep-own-tabs").next,
-            "[r] → review — `spoolway resume sweep-own-tabs`",
+            "[r] → review",
             "a caught pass reads exactly as an ordinary gate always has"
         );
     }
@@ -4634,7 +4631,7 @@ mod tests {
     /// The mockup `escalate_clock` draws: `parked_from` naming the step a
     /// lane stopped reporting at, with no `paused_at` beside it — there is no
     /// gate here, so `paused_next` must not read `None` and fall back to a
-    /// bare `[r] \`spoolway resume <id>\``. `unpark` sends the task straight
+    /// bare `[r]`. `unpark` sends the task straight
     /// back onto `parked_from` itself, and the NEXT column has to name that
     /// same step.
     #[test]
@@ -4650,10 +4647,7 @@ mod tests {
         let rows = rows(&repo, &pipelines).unwrap();
         let row = rows.iter().find(|r| r.id == "release-publishing").unwrap();
         assert!(matches!(row.state, State::Paused));
-        assert_eq!(
-            row.next,
-            "[r] → review — `spoolway resume release-publishing`"
-        );
+        assert_eq!(row.next, "[r] → review");
     }
 
     /// A task the gate has ranked behind another group is not held by the
@@ -6038,11 +6032,11 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "ship").unwrap();
         assert!(matches!(row.state, State::Paused));
         // Nothing holds this task back — no dependency, no lane of its own —
-        // so the resume key is offered, key first, then the command that
-        // does the same thing, and the step passing the gate would carry it
-        // to, `done` — `handover` is the last step in the pipeline now.
+        // so the resume key is offered, then the arrow and the step passing
+        // the gate would carry it to, `done` — `handover` is the last step
+        // in the pipeline now.
         assert!(row.resumable);
-        assert_eq!(row.next, "[r] → done — `spoolway resume ship`");
+        assert_eq!(row.next, "[r] → done");
     }
 
     /// Keeps only [`RECENT`] of them, oldest first out — each its own task, so
@@ -6448,8 +6442,35 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
 
         assert!(!row.resumable, "{}", row.next);
-        assert!(row.next.contains("spoolway resume"), "{}", row.next);
-        assert!(!row.next.contains("[r]"), "{}", row.next);
+        assert_eq!(row.next, "→ review");
+    }
+
+    /// A paused task whose `paused_at` names a step the pipeline does not
+    /// have has nowhere to name. The row still says so rather than going
+    /// blank, with the key when it is on offer and without it when not.
+    #[test]
+    fn a_paused_row_with_no_named_step_still_says_something() {
+        let (repo, _root_guard) = fixture("paused-no-step");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "blocker", &[], Some("implement"));
+        add_to(&repo, "free", &[], None, Some("free"));
+        add(&repo, "held", &["blocker"], None);
+        for id in ["free", "held"] {
+            let mut task = repo.task(id).unwrap();
+            task.front.paused_at = Some("no-such-step".into());
+            task.set_stage(crate::pipeline::PAUSED, None);
+            task.save().unwrap();
+        }
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let free = rows.iter().find(|r| r.id == "free").unwrap();
+        assert!(free.resumable);
+        assert_eq!(free.next, "[r] resume");
+        let held = rows.iter().find(|r| r.id == "held").unwrap();
+        assert!(!held.resumable);
+        assert_eq!(held.next, "no step named");
     }
 
     /// A paused task offers the resume key only once no lane of its own is
@@ -6476,7 +6497,7 @@ mod tests {
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[busy], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(!row.resumable, "{}", row.next);
-        assert!(row.next.contains("spoolway resume"), "{}", row.next);
+        assert_eq!(row.next, "→ review");
 
         // Same pane, settled: the round is over and the key comes back.
         let mut settled = lane("gate-board · implement", &repo.root);
@@ -6484,8 +6505,7 @@ mod tests {
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[settled], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(row.resumable, "{}", row.next);
-        assert!(row.next.starts_with("[r] "), "{}", row.next);
-        assert!(row.next.contains("spoolway resume"), "{}", row.next);
+        assert_eq!(row.next, "[r] → review");
     }
 
     /// A row parked by a person's own Escape or the board's `p`
@@ -6529,7 +6549,7 @@ mod tests {
     /// A blocked row that is actually parked for a person — nobody staffs
     /// that step — follows the same dependency and busy-lane rule as a
     /// paused one for whether the key does anything, and now says so the
-    /// same way a paused row does: key first, then the command.
+    /// same way a paused row does: the key, then the arrow.
     #[test]
     fn a_parked_blocked_row_is_resumable_by_the_same_rule_as_a_paused_one() {
         let (repo, _root_guard) = fixture("resume-blocked");
@@ -6546,7 +6566,7 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert!(row.resumable, "{}", row.next);
-        assert_eq!(row.next, "[r] → implement — `spoolway resume wall`");
+        assert_eq!(row.next, "[r] → implement");
     }
 
     /// A task paused by a `--pause`, `--fail` or `--block` from `blocked` —
@@ -6572,7 +6592,7 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert_eq!(
-            row.next, "[r] → implement — `spoolway resume wall`",
+            row.next, "[r] → implement",
             "never past `implement`, unlike an ordinary gate's own `on_pass`"
         );
     }
@@ -6642,7 +6662,7 @@ mod tests {
         let goes_to = crate::commands::resume_target(&task, pipeline);
         assert_eq!(
             row.next,
-            format!("[r] → {goes_to} — `spoolway resume wall`"),
+            format!("[r] → {goes_to}"),
             "the hint and `spoolway resume` must agree"
         );
     }

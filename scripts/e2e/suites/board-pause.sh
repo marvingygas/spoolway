@@ -663,10 +663,9 @@ stage_reaches "and it lands there" pause-fail-catch blocked 25
 # --------------------------- a gated stop offers a key before every command
 # The mockup this task built: a report that lands a task on `paused` names
 # what it offers key first, then the command — never a bare key with nothing
-# to run, and never a command with no key in front of it. Proven here
-# against the board's own row for the same stop, which is what a person
-# still watching the board sees for as long as the pane above stays up: the
-# row and the pane always name the same thing. Then `spoolway task edit`,
+# to run, and never a command with no key in front of it. The board's own
+# row for the same stop names the key and the step it resumes to, and no
+# command: on the board, `r` is the way out. Then `spoolway task edit`,
 # run the way a person — or the lane in that pane, once it is stopped —
 # would run it: from outside the lane entirely, against a task already
 # parked.
@@ -675,11 +674,8 @@ task_doc "$LIVE/gate-edit.md" gate-edit "$BODY" "group: gate-edit" \
 must "gate-edit queues" "$SPOOLWAY" queue add --from "$LIVE/gate-edit.md"
 
 stage_reaches "a gated pass parks on paused" gate-edit paused 30
-# The row's own NEXT text clips to the pane's width like any other cell, so
-# this checks the key-first shape rather than the full, possibly-clipped
-# command text.
-draws "the board's row offers the key before the command it fires" \
-  "[r] → review — \`spoolway resume gate" 30
+draws "the board's row offers the key and the step it resumes to" \
+  "[r] → review" 30
 
 MOCKUP="$LIVE/mockup-section.txt"
 printf 'held here for a person, edited from outside the lane\n' > "$MOCKUP"

@@ -18568,8 +18568,7 @@ mod tests {
 
     /// `blocked`'s own bare `spoolway resume <task>` line is in its toolbox
     /// and nowhere else — no other step's system prompt should ever mention
-    /// `READING THE RUN` or offer that line. Every lane is still handed the
-    /// `--stage` form by `YOUR LANE`, which this test does not forbid.
+    /// `READING THE RUN` or offer that line.
     #[test]
     fn only_blocked_names_the_bare_spoolway_resume_command() {
         let (repo, _root_guard) = fixture("only-blocked-names-resume");
@@ -18594,8 +18593,7 @@ mod tests {
             !implement_prompt.contains("READING THE RUN"),
             "{implement_prompt}"
         );
-        // `YOUR LANE` hands a person `spoolway resume <task> --stage <step>`
-        // on every step, so the bare command is the one only `blocked` names.
+        // Only `blocked` names the bare command, in its toolbox.
         assert!(
             !implement_prompt.contains("`spoolway resume <task>`"),
             "{implement_prompt}"
@@ -18624,10 +18622,11 @@ mod tests {
 - `spoolway queue route example` shows every step, what each does, and where resuming sends this task. Read it before you tell a person what happens next.
 - If a person talks to you in this pane, do what they ask, whichever step's work it is. Write every change they ask for into the task file, so later steps see it: `spoolway task edit example --section <heading> --from -` while the task is held on `paused` or `blocked`, `--handoff` while it runs.
 - Resuming a held task stays the person's: once their request is done, tell them where resuming sends it, and to resume it on the board.
-- What a person has to do, name on the board, never as a `spoolway` command. The one exception: to send the task to another step than resuming would, give them `spoolway resume example --stage <step>`, to run in their own shell.";
+- What a person has to do, name on the board, never as a `spoolway` command. To send the task to another step than resuming would, tell them to press `r` on its row and pick the step.";
         let flat = lane.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected = bullets.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(flat.contains(&expected), "got: {lane}");
+        assert!(!lane.contains("--stage"), "{lane}");
 
         let blocked = pipeline.step(crate::pipeline::BLOCKED).unwrap();
         let blocked_task = reload(&add_task(&repo, "stuck", crate::pipeline::BLOCKED));

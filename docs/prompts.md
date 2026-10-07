@@ -108,9 +108,9 @@ The system prompt opens with the step and the task, then nine rules:
   or `blocked`, `--handoff` while it runs.
 - Resuming a held task stays the person's. Once their request is done, the lane tells them
   where resuming sends it, and to resume it on the board.
-- What a person has to do, name on the board, never as a `spoolway` command. The one exception
-  is sending the task to another step than resuming would: the lane gives them
-  `spoolway resume <task> --stage <step>`, to run in their own shell.
+- What a person has to do, name on the board, never as a `spoolway` command. To send the task
+  to another step than resuming would, the lane tells them to press `r` on its row and pick the
+  step.
 
 A `blocked` step gets a different first rule — its remit is the run, not one task's step, and it
 lacks the "another step's" sentence — and a `READING THE RUN` block naming

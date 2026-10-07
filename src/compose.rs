@@ -155,9 +155,8 @@ pub(crate) fn system_prompt(
 /// The last bullet is fixed the same way: what a person does about anything
 /// a lane leaves for them belongs on the board, not quoted as a `spoolway`
 /// command a prompt could as easily just run and skip the person entirely.
-/// The one command it does hand over, `resume --stage`, is refused inside a
-/// lane's pane (see `commands::refuse_from_lane`), so the bullet says to run
-/// it in the person's own shell.
+/// It hands over no command at all: to reroute a task, the person presses `r`
+/// on its row and picks the step in the board's picker.
 pub(crate) fn situating(
     pipeline: &Pipeline,
     step: &Step,
@@ -195,9 +194,9 @@ pub(crate) fn situating(
          `paused` or `blocked`, `--handoff` while it runs.\n\
          - Resuming a held task stays the person's: once their request is done, tell them \
          where resuming sends it, and to resume it on the board.\n\
-         - What a person has to do, name on the board, never as a `spoolway` command. The one \
-         exception: to send the task to another step than resuming would, give them \
-         `spoolway resume {task} --stage <step>`, to run in their own shell.\
+         - What a person has to do, name on the board, never as a `spoolway` command. To send \
+         the task to another step than resuming would, tell them to press `r` on its row and \
+         pick the step.\
          {what_you_have}\
          {what_you_write_down}",
         step = step.id,

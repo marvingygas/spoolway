@@ -141,8 +141,8 @@ A task starts on the first step, so `blocked` may not be first. `spoolway pipeli
 refuses the file and tells you to put a working step first.
 
 A step that no route from the first step reaches is allowed. `spoolway pipeline check` warns
-about it and still passes. A task can reach such a step only through
-`spoolway resume --stage`.
+about it and still passes. A task can reach such a step only by being
+resumed onto it, from the board's picker or with `spoolway resume --stage`.
 
 ```
 $ spoolway pipeline check
@@ -402,15 +402,14 @@ open. A command step has no lane to report: `gate: true` holds its passing exit 
 and a task's `gate_at:` holds a command step's exit whatever it was. A `background: true` step
 passes as soon as it starts, so `gate: true` is refused there.
 
-```
-spoolway resume <task>                            # let it past: the on_pass route
-spoolway resume <task> --stage implement -m "why"  # send it back to a step you name
-```
+On the board, press `r` on the paused row. The picker preselects the `on_pass` route, so `enter`
+lets the task past. Pick another step to send the task there instead.
 
 - `on_pass` is the only road a plain resume ever takes past a gate, whatever `on_fail` a step
   declares or does not. The one exception is a command step whose failing exit a task's
   `gate_at:` held: resuming that takes the step's `on_fail`, the route the exit code chose.
-- `--stage <step>` reroutes the task to that step, whatever the gate would otherwise have done.
+- Picking another step in the picker reroutes the task to that step, whatever the gate would
+  otherwise have done.
 - A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about
   `spoolway report --fail` at the step itself, not about resuming it. `spoolway pipeline check`
   warns about it. Writing `on_fail: blocked` outright silences that warning without changing

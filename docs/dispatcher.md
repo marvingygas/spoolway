@@ -206,7 +206,7 @@ first task stacks onto another group's own last task reads `▌<group>  after <g
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A blocked task waiting for a person reads `[r] → <step> — \`spoolway resume <task>\``, naming the step `spoolway resume` sends it back to. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -252,7 +252,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whol
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Open the resume picker for a paused or blocked row whose dependencies are done. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
+| `r` | Open the resume picker for a paused or blocked row whose dependencies are done. The picker lists every step, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
@@ -321,10 +321,9 @@ A step with `gate: true` stops the task on `paused` after the step reports. The 
 for you to read. A command step has no pane. The dispatcher stops the task on `paused` when the
 command exits with a pass.
 
-```
-spoolway resume deploy-login                            # let it past
-spoolway resume deploy-login --stage implement -m "not tonight"  # send it back round
-```
+Press `r` on the paused row to open the [resume picker](#resume-picker). The natural next step
+is preselected, so `enter` lets the task past the gate. Move the cursor to another step and press
+`enter` to send the task back round to it instead.
 
 A paused task holds no slot. You can type into its pane. When that turn ends, the dispatcher
 commits the worktree with a `## Status Log` line saying a person drove the round.
