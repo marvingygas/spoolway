@@ -789,6 +789,10 @@ works "and nothing escaped above home" test ! -e "$(dirname "$HOME")/evilp"
 says "prompt contract prints the shape-to-write section" \
   "THE SHAPE TO WRITE" "$SPOOLWAY" prompt contract --pipeline default
 
+# Section 4 tells a prompt author these variables are never read by prose.
+says "prompt contract titles the environment as never read" \
+  "THE ENVIRONMENT EVERY LANE HAS, AND NEVER READS" "$SPOOLWAY" prompt contract --pipeline default
+
 # A gated step's report contract carries no "not available to you" block at
 # all: `--stage` is refused by `spoolway report` itself off every step but
 # `blocked`, and `compose::report_contract` no longer names it under refusal
