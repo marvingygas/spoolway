@@ -5148,7 +5148,7 @@ pub const ENV_SESSION: &str = "SPOOLWAY_SESSION";
 /// byte hash: two loads of the very same content always render identically,
 /// however the file on disk happens to be formatted, so this never flags a
 /// write as stale over whitespace or field order it never actually changed.
-fn file_fingerprint(task: &Task) -> u64 {
+pub(crate) fn file_fingerprint(task: &Task) -> u64 {
     hash_of(&task.render().unwrap_or_default())
 }
 
@@ -5164,7 +5164,7 @@ fn file_fingerprint(task: &Task) -> u64 {
 /// `file_seen` updated to match so a second persist of the same task later
 /// in the same pass is compared against what this call just wrote, not the
 /// pass's original read.
-fn persist_task(
+pub(crate) fn persist_task(
     repo: &Repo,
     task: &mut Task,
     file_seen: &mut HashMap<String, u64>,

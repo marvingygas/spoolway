@@ -632,6 +632,39 @@ else
 fi
 stage_reaches "the task lands back on \`blocked\`, not \`resume_target\`'s entry" stuck blocked 25
 
+# --------------------------------------- restart ends the lane it finds
+# The unblocker the resume above put back is genuinely mid-turn on `blocked`
+# again, which is the live lane a restart has to end. `spoolway restart`
+# writes the restart to the task, then tears down every lane the task owns.
+# The step it starts over is the one the block stopped, `implement`, and the
+# new lane the dispatcher starts there has a name of its own, so the old
+# process is what shows the teardown.
+STUCK_PID=$(lane_pid "stuck · blocked" 30)
+if [ -n "$STUCK_PID" ]; then ok "the unblocker is mid-turn again before the restart"
+else bad "the unblocker is mid-turn again before the restart"; fi
+# The pid lands before the launching pass writes the task file, and a restart
+# that read the task in that gap is refused as a report that landed first —
+# rightly, since the file changed under it. `lanes.json` is written at the end
+# of that same pass, so once the lane is on record the task file is settled.
+poll_until 15 lane_on_record "stuck · blocked"
+
+RESTART_OUT=$("$SPOOLWAY" restart stuck -m "e2e restart" 2>&1)
+if [ $? -eq 0 ]; then ok "restarting the blocked task"
+else bad "restarting the blocked task"; sed 's/^/        /' <<<"$RESTART_OUT"; fi
+for want in "tore down lane \`stuck · blocked\`" "stuck: -> implement (fresh session)"; do
+  if grep -qF "$want" <<<"$RESTART_OUT"; then ok "it prints: $want"
+  else bad "it prints: $want"; sed 's/^/        /' <<<"$RESTART_OUT"; fi
+done
+if [ -n "$STUCK_PID" ] && poll_while 15 kill -0 "$STUCK_PID"; then
+  ok "and the lane's process is gone"
+else bad "and the lane's process is gone"; fi
+has "the status log records the note" "e2e restart" \
+  "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+stage_reaches "the task is sent back to the step the block stopped" stuck implement 25
+# The restarted `implement` lane hangs too, as `stuck` is still set to. Parked
+# here so it does not hold a slot for the sections below.
+must "the restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause stuck
+
 # ------------------------- a schedule catches a failing step, not only a pass
 # `s` above already proved it writes and clears `gate_at`; what a schedule
 # does once the step it names actually fails, rather than passes, is

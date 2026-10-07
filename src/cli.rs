@@ -129,6 +129,20 @@ pub enum Command {
     /// naming a step is you choosing where it goes, gate or no gate.
     Resume(ResumeArgs),
 
+    /// Start the step a task is on over, with a conversation of its own.
+    ///
+    /// Ends every lane the task owns, running or stopped, and sends
+    /// the task back to that same step. The step's conversation is discarded:
+    /// the new lane is briefed from scratch, whatever `session:` the step
+    /// declares, and is told the worktree is not clean. Nothing in the
+    /// worktree is touched. Use it when a conversation cannot do the work —
+    /// `resume` would walk back into it.
+    ///
+    /// Accepts a task that is running, paused or blocked. A task that is
+    /// still queued, finished, or standing on a step that runs a command is
+    /// refused, with what to do instead.
+    Restart(RestartArgs),
+
     /// Read what a lane has been doing, answer it, or open its session.
     ///
     /// Bare, or given only a lane name, this reads it — the model-free answer
@@ -289,7 +303,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
         "Your work:",
         &["queue", "group", "issue", "dispatch", "jobs", "eval"],
     ),
-    ("When something needs you:", &["lane", "resume"]),
+    ("When something needs you:", &["lane", "resume", "restart"]),
     (
         "Shaping the project:",
         &[
@@ -1078,6 +1092,16 @@ pub struct ResumeArgs {
     /// gate entirely, to a step of your choosing.
     #[arg(long, value_name = "STEP")]
     pub stage: Option<String>,
+
+    /// Note recorded in the task's status log.
+    #[arg(long, short = 'm')]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RestartArgs {
+    /// Task id whose current step to start over.
+    pub task: String,
 
     /// Note recorded in the task's status log.
     #[arg(long, short = 'm')]

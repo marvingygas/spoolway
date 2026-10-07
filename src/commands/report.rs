@@ -1839,18 +1839,233 @@ fn free_stale_lanes(repo: &Repo, pipelines: &Pipelines, task: &Task) {
         return;
     };
     if let Ok(lanes) = mux.list_lanes() {
-        let step_ids = pipelines.all_step_ids();
-        for lane in lanes {
-            let ours =
-                lane.cwd == repo.root || Some(&lane.cwd) == task.front.worktree_path.as_ref();
-            let this_task = crate::mux::parse_lane_name(&lane.name, &step_ids)
-                .is_some_and(|(_, task_id)| task_id == task.front.id);
-            if ours && this_task && lane.status.is_settled() {
+        for lane in task_lanes(repo, pipelines, task, lanes) {
+            if lane.status.is_settled() {
                 let _ = mux.stop_lane(&lane.name, &lane.pane_id);
                 println!("  freed stale lane `{}`", lane.name);
             }
         }
     }
+}
+
+/// The lanes in `lanes` that belong to `task`: named for it, and working in
+/// this project's directories. The one ownership rule `free_stale_lanes` and
+/// `spoolway restart` share, so a lane one of them would end is a lane the
+/// other would too.
+fn task_lanes(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    task: &Task,
+    lanes: Vec<crate::mux::Lane>,
+) -> Vec<crate::mux::Lane> {
+    let step_ids = pipelines.all_step_ids();
+    lanes
+        .into_iter()
+        .filter(|lane| {
+            let ours =
+                lane.cwd == repo.root || Some(&lane.cwd) == task.front.worktree_path.as_ref();
+            let this_task = crate::mux::parse_lane_name(&lane.name, &step_ids)
+                .is_some_and(|(_, task_id)| task_id == task.front.id);
+            ours && this_task
+        })
+        .collect()
+}
+
+/// The step `spoolway restart` starts over for `task`, or the reason there is
+/// none.
+///
+/// A running task is on its step. A task on `blocked` or `paused` is held
+/// *off* the step it stopped on, and the step is read the way a resume reads
+/// it: a park's `parked_from`, a gate's `paused_at`, otherwise
+/// [`resume_target`]. A task that never started has no step to start over,
+/// and neither has one held by a hook, whose pause is on `queued` or `done`.
+fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
+    let id = &task.front.id;
+    let stage = task.stage();
+    if stage == crate::pipeline::QUEUED {
+        bail!(
+            "task `{id}` is {stage}, so no step has started — it starts on its own when the \
+             dispatcher reaches it. To hold it back, run `spoolway queue pause {id}`."
+        );
+    }
+    if task.front.hook_paused.is_some() {
+        bail!(
+            "task `{id}` is held by a hook, not on a step — run `spoolway resume {id}` to \
+             forget the hook run."
+        );
+    }
+    let step = match stage {
+        crate::pipeline::PAUSED => task
+            .front
+            .parked_from
+            .clone()
+            .or_else(|| task.front.paused_at.clone())
+            .unwrap_or_else(|| resume_target(task, pipeline)),
+        crate::pipeline::BLOCKED => resume_target(task, pipeline),
+        running => running.to_string(),
+    };
+    if step == crate::pipeline::QUEUED {
+        bail!(
+            "task `{id}` is {stage} but never started a step, so there is no conversation to \
+             start over — run `spoolway resume {id}` to put it back."
+        );
+    }
+    // `done` is a reserved stage no pipeline declares, so it must be told apart
+    // from a step that was removed from the pipeline before the lookup below
+    // calls a finished task undefined.
+    if step == crate::pipeline::DONE {
+        bail!(
+            "task `{id}` is {step}, which has finished — there is no step left to start \
+             over. To run a step again, use `spoolway resume {id} --stage <step>`."
+        );
+    }
+    let Some(declared) = pipeline.step(&step) else {
+        bail!(
+            "task `{id}` is on `{step}`, which pipeline `{}` does not define — run \
+             `spoolway resume {id} --stage <step>` to send it to one that exists.",
+            pipeline.name
+        );
+    };
+    match declared.kind() {
+        crate::pipeline::StepKind::Terminal => bail!(
+            "task `{id}` is on `{step}`, which has finished — there is no step left to start \
+             over. To run a step again, use `spoolway resume {id} --stage <step>`."
+        ),
+        crate::pipeline::StepKind::Command => bail!(
+            "task `{id}` is on `{step}`, which runs a command and holds no conversation — \
+             run `spoolway resume {id}` to run it again."
+        ),
+        _ => Ok(step),
+    }
+}
+
+/// Start the step a task is on over with a fresh conversation: the road onto a
+/// step that ends the step's session rather than continuing it.
+///
+/// Every other road back onto a step continues the conversation the step
+/// already has, so a conversation that is itself the problem is walked back
+/// into by a resume and by the next retry alike. This writes `restart:` for
+/// the dispatcher's next launch of the step to read, and sends the task back
+/// to the step it was already on.
+///
+/// Whatever lane the task owns is ended first, [`restart_with`] explains how.
+/// The worktree is left exactly as it is.
+pub fn restart(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    args: &RestartArgs,
+    from_step: Option<&str>,
+) -> Result<()> {
+    refuse_from_lane("a step is restarted", from_step.is_some())?;
+    let mux = crate::mux::backend(repo)?;
+    restart_with(repo, pipelines, args, mux.as_ref())
+}
+
+/// [`restart`] over the backend it is handed.
+///
+/// The task file is written before any lane is touched. A dispatcher pass
+/// lists lanes and reads tasks, and one that landed between a teardown and a
+/// later write would see the task on its step with no lane and relaunch it
+/// from a snapshot that has no `restart:`, carrying the very conversation
+/// being abandoned. Written first, a pass that still sees the old lane working
+/// leaves it alone, and one that sees it gone reads `restart:` and opens
+/// fresh. The same order is `status::interrupt_for_stop`'s: park, then abort.
+///
+/// The write goes through [`crate::dispatch::persist_task`], which refuses it
+/// when the task file changed since it was read. A lane's `spoolway report`
+/// landing in that gap is the newer fact, and overwriting it would put the
+/// task back on a step the report has already moved it off. So this refuses and
+/// says so, with every lane still as it was, instead of printing a restart that
+/// did not happen.
+///
+/// Then every lane the task owns is ended: one that is mid-turn or waiting on
+/// a prompt is interrupted first, and all are stopped. Stopping is not
+/// conditioned on `resident_while_waiting()`, the way an escalation's teardown
+/// is: under a backend that keeps a stopped pane, the pane holds the very
+/// conversation being discarded, and keeping it would leave a second session
+/// running on the same task.
+pub(crate) fn restart_with(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    args: &RestartArgs,
+    mux: &dyn crate::mux::Mux,
+) -> Result<()> {
+    let mut task = repo.task(&args.task)?;
+    let pipeline = pipelines.for_task(&task)?;
+    let step = restart_step(&task, pipeline)?;
+    let mut seen = std::collections::HashMap::from([(
+        task.front.id.clone(),
+        crate::dispatch::file_fingerprint(&task),
+    )]);
+
+    let lane_name = crate::mux::lane_name(&step, &task.front.id);
+    let ledger = crate::usage::read(repo).unwrap_or_default();
+    // Read before the lane goes: the dispatcher's own record of it is dropped
+    // once the lane is gone, and the ledger is what outlives that.
+    let session = crate::dispatch::lane_session_in(repo, &ledger, &lane_name).map(|(_, s)| s);
+    let lanes = task_lanes(repo, pipelines, &task, mux.list_lanes()?);
+
+    // A stop's marks are spent by a restart as by a resume: left set, they
+    // would describe a stop the task is no longer in.
+    task.front.parked_by_stop = false;
+    task.front.missing_start_branch = None;
+    task.front.paused_at = None;
+    task.front.paused_by = None;
+    task.front.parked_from = None;
+    task.front.blocked_from = None;
+    task.front.escalated = false;
+    // `restart` supersedes `resume`: both set would name a continuation and an
+    // abandonment for the same launch.
+    task.front.resume = None;
+    // Leaving `blocked` starts the loop counts again, as a resume does, so the
+    // step is not walked straight into the limit that stopped it.
+    if task.front.stage == crate::pipeline::BLOCKED {
+        task.reset_loop_counts();
+    }
+    task.front.restart = Some(step.clone());
+    let message = args
+        .message
+        .clone()
+        .unwrap_or_else(|| "restarted by hand — fresh session".to_string());
+    task.set_stage_unbanked(&step, &message);
+    if !crate::dispatch::persist_task(repo, &mut task, &mut seen)? {
+        bail!(
+            "task `{}` changed while the restart was being written — a report landed first, so \
+             the restart was not written and no lane was touched. Check `spoolway queue show {}` \
+             and run it again if it still applies.",
+            args.task,
+            args.task
+        );
+    }
+
+    for lane in lanes {
+        // Spelled out rather than `is_busy()`, as in the dispatcher's own
+        // teardown: a lane parked on a permission prompt is still spending.
+        if matches!(
+            lane.status,
+            crate::mux::LaneStatus::Working | crate::mux::LaneStatus::Blocked
+        ) {
+            let _ = mux.interrupt_lane(&lane.name);
+        }
+        mux.stop_lane(&lane.name, &lane.pane_id).with_context(|| {
+            format!(
+                "the restart is written, but lane `{}` could not be stopped — run \
+                 `spoolway restart {}` again to stop it",
+                lane.name, args.task
+            )
+        })?;
+        println!("  tore down lane `{}`", lane.name);
+    }
+    if let Some(session) = &session {
+        let banked = ledger.iter().any(|entry| &entry.session == session);
+        println!(
+            "  session {} — abandoned{}",
+            session.chars().take(8).collect::<String>(),
+            if banked { ", already banked" } else { "" }
+        );
+    }
+    println!("{}: -> {step} (fresh session)", args.task);
+    Ok(())
 }
 
 /// The person's half of a gate: let a paused task past its gated step, or send
@@ -5785,5 +6000,404 @@ mod tests {
             headless.list_lanes().unwrap().is_empty(),
             "the stale lane must be freed, or the next pass waits on it forever"
         );
+    }
+
+    /// A pane-keeping backend (`resident_while_waiting()` is true) with one
+    /// scripted lane, recording what `restart` does to it. `on_list` runs when
+    /// lanes are listed, standing in for a report that lands before the
+    /// restart is written; `on_stop` runs when a lane is stopped.
+    struct RestartMux {
+        lanes: Vec<crate::mux::Lane>,
+        calls: std::sync::Mutex<Vec<String>>,
+        on_list: Box<dyn Fn() + Send + Sync>,
+        on_stop: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl RestartMux {
+        fn with_lane(repo: &Repo, task: &str, status: crate::mux::LaneStatus) -> Self {
+            Self {
+                lanes: vec![crate::mux::Lane {
+                    name: crate::mux::lane_name("implement", task),
+                    kind: "pi".into(),
+                    status,
+                    pane_id: "p1".into(),
+                    tab_id: "t1".into(),
+                    workspace_id: "w1".into(),
+                    cwd: repo.root.clone(),
+                    launch_pending: None,
+                    interactive_ready: None,
+                }],
+                calls: std::sync::Mutex::new(Vec::new()),
+                on_list: Box::new(|| {}),
+                on_stop: Box::new(|| {}),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::mux::Mux for RestartMux {
+        fn name(&self) -> &'static str {
+            "restart-fake"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable(&self) -> String {
+            String::new()
+        }
+        fn resident_while_waiting(&self) -> bool {
+            true
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            (self.on_list)();
+            Ok(self.lanes.clone())
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(&self, _cwd: &Path, _label: &str) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, name: &str) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("interrupt {name}"));
+            Ok(())
+        }
+        fn stop_lane(&self, name: &str, _pane_id: &str) -> Result<()> {
+            self.calls.lock().unwrap().push(format!("stop {name}"));
+            (self.on_stop)();
+            Ok(())
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn restart_args(task: &str) -> crate::cli::RestartArgs {
+        crate::cli::RestartArgs {
+            task: task.into(),
+            message: None,
+        }
+    }
+
+    /// The teardown the dispatcher's escalation skips on a pane-keeping
+    /// backend: a working lane is interrupted and then stopped anyway, because
+    /// the pane holds the conversation being discarded. The task lands on the
+    /// step it was already on, asking for a fresh session.
+    #[test]
+    fn restarting_stops_a_working_lane_even_on_a_pane_keeping_backend() {
+        let (repo, _root_guard) = fixture("restart-working");
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("implement", None);
+        task.front.attempts = 2;
+        task.front.resume = Some("implement".into());
+        task.save().unwrap();
+        let mux = RestartMux::with_lane(&repo, "stuck", crate::mux::LaneStatus::Working);
+        assert!(crate::mux::Mux::resident_while_waiting(&mux));
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
+
+        let lane = crate::mux::lane_name("implement", "stuck");
+        assert_eq!(
+            mux.calls(),
+            [format!("interrupt {lane}"), format!("stop {lane}")]
+        );
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), "implement");
+        assert_eq!(task.front.restart.as_deref(), Some("implement"));
+        assert_eq!(task.front.resume, None, "a restart continues nothing");
+        assert_eq!(task.front.attempts, 0);
+        assert!(
+            task.section("## Status Log")
+                .unwrap()
+                .contains("→ `implement`: restarted by hand")
+        );
+    }
+
+    /// A settled lane has no turn to interrupt, but is still stopped.
+    #[test]
+    fn restarting_stops_a_settled_lane_without_interrupting_it() {
+        let (repo, _root_guard) = fixture("restart-settled");
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        let mux = RestartMux::with_lane(&repo, "stuck", crate::mux::LaneStatus::Done);
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
+
+        assert_eq!(
+            mux.calls(),
+            [format!(
+                "stop {}",
+                crate::mux::lane_name("implement", "stuck")
+            )]
+        );
+    }
+
+    /// A blocked task is restarted on the step that blocked, with its loop
+    /// counts reset and the block's marks cleared; `-m` is what the status
+    /// log records.
+    #[test]
+    fn restarting_a_blocked_task_resets_its_loop_counts() {
+        let (repo, _root_guard) = fixture("restart-blocked");
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("review", None);
+        task.front.blocked_from = Some("review".into());
+        task.set_stage("blocked", None);
+        task.save().unwrap();
+        assert!(!task.front.rounds.is_empty());
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        let args = crate::cli::RestartArgs {
+            task: "stuck".into(),
+            message: Some("the conversation looped".into()),
+        };
+        restart_with(&repo, &Pipelines::builtin(), &args, &mux).unwrap();
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), "review");
+        assert_eq!(task.front.restart.as_deref(), Some("review"));
+        assert_eq!(task.front.blocked_from, None);
+        assert!(task.front.rounds.is_empty() && task.front.arrivals.is_empty());
+        assert!(
+            task.section("## Status Log")
+                .unwrap()
+                .contains("→ `review`: the conversation looped")
+        );
+    }
+
+    /// A task that is not on a step has nothing to start over, and the refusal
+    /// says what to do instead; nothing is written.
+    #[test]
+    fn restarting_refuses_a_queued_or_finished_task() {
+        let (repo, _root_guard) = fixture("restart-refuses");
+        add(&repo, "waiting", &[]);
+        add(&repo, "finished", &["waiting"]);
+        let mut finished = queued(&repo, "finished");
+        finished.set_stage("done", None);
+        finished.save().unwrap();
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("waiting"), &mux)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("queued") && err.contains("queue pause waiting"),
+            "{err}"
+        );
+        let err = restart_with(
+            &repo,
+            &Pipelines::builtin(),
+            &restart_args("finished"),
+            &mux,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("is done, which has finished") && err.contains("--stage"),
+            "{err}"
+        );
+        assert_eq!(queued(&repo, "waiting").front.restart, None);
+        assert!(mux.calls().is_empty());
+    }
+
+    /// A report that lands before the restart is written is the newer fact. The
+    /// restart refuses rather than overwrite it, touches no lane, and does not
+    /// claim success.
+    #[test]
+    fn restarting_refuses_when_a_report_lands_first() {
+        let (repo, _root_guard) = fixture("restart-dropped");
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        let path = task.path.clone();
+        let mut mux = RestartMux::with_lane(&repo, "stuck", crate::mux::LaneStatus::Working);
+        mux.on_list = Box::new(move || {
+            let mut reported = Task::load(&path).unwrap();
+            reported.set_stage("review", Some("reported"));
+            reported.save().unwrap();
+        });
+
+        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("a report landed first"), "{err}");
+        assert!(
+            mux.calls().is_empty(),
+            "no lane is touched: {:?}",
+            mux.calls()
+        );
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), "review", "the report stands");
+        assert_eq!(task.front.restart, None);
+    }
+
+    /// The restart is on disk before any lane is touched, so a dispatcher pass
+    /// that finds the lane gone reads `restart:` instead of relaunching the
+    /// abandoned conversation.
+    #[test]
+    fn restarting_writes_the_task_before_it_stops_a_lane() {
+        let (repo, _root_guard) = fixture("restart-order");
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        let path = task.path.clone();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let record = seen.clone();
+        let mut mux = RestartMux::with_lane(&repo, "stuck", crate::mux::LaneStatus::Working);
+        mux.on_stop = Box::new(move || {
+            *record.lock().unwrap() = Some(Task::load(&path).unwrap().front.restart);
+        });
+
+        restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(Some("implement".to_string())),
+            "`restart:` was already written when the lane was stopped"
+        );
+    }
+
+    /// A park and a gate pause each land back on the step they hold, with the
+    /// marks that described the stop cleared and `restart:` set.
+    #[test]
+    fn restarting_a_paused_task_lands_on_the_step_it_holds() {
+        let (repo, _root_guard) = fixture("restart-paused");
+        add(&repo, "parked", &[]);
+        add(&repo, "gated", &["parked"]);
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        let mut parked = queued(&repo, "parked");
+        parked.set_stage("review", None);
+        parked.front.parked_from = Some("review".into());
+        parked.front.escalated = true;
+        parked.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
+        parked.save().unwrap();
+        let mut gated = queued(&repo, "gated");
+        gated.set_stage("implement", None);
+        gated.front.paused_at = Some("implement".into());
+        gated.set_stage_unbanked(crate::pipeline::PAUSED, "gate");
+        gated.save().unwrap();
+
+        for (id, step) in [("parked", "review"), ("gated", "implement")] {
+            restart_with(&repo, &Pipelines::builtin(), &restart_args(id), &mux).unwrap();
+            let task = queued(&repo, id);
+            assert_eq!(task.stage(), step, "{id}");
+            assert_eq!(task.front.restart.as_deref(), Some(step), "{id}");
+            assert_eq!(task.front.parked_from, None, "{id}");
+            assert_eq!(task.front.paused_at, None, "{id}");
+            assert!(!task.front.escalated, "{id}");
+        }
+    }
+
+    /// A hook-held task and a task on a command step have no conversation to
+    /// start over. Each is refused, and nothing is written.
+    #[test]
+    fn restarting_refuses_a_hook_held_or_command_step_task() {
+        let (repo, _root_guard) = fixture("restart-no-conversation");
+        add(&repo, "hooked", &[]);
+        add(&repo, "command", &["hooked"]);
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+        let mut hooked = queued(&repo, "hooked");
+        hooked.set_stage("implement", None);
+        hooked.front.hook_paused = Some("done".into());
+        hooked.set_stage_unbanked(crate::pipeline::PAUSED, "held by a hook");
+        hooked.save().unwrap();
+        let mut command = queued(&repo, "command");
+        command.set_stage("handover", None);
+        command.save().unwrap();
+
+        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("hooked"), &mux)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("held by a hook"), "{err}");
+        let err = restart_with(&repo, &Pipelines::builtin(), &restart_args("command"), &mux)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("runs a command"), "{err}");
+        assert_eq!(queued(&repo, "hooked").stage(), crate::pipeline::PAUSED);
+        assert_eq!(queued(&repo, "hooked").front.restart, None);
+        assert_eq!(queued(&repo, "command").front.restart, None);
+        assert!(mux.calls().is_empty());
+    }
+
+    /// A lane's own environment never restarts a step.
+    #[test]
+    fn a_lane_cannot_restart_a_step() {
+        let (repo, _root_guard) = fixture("restart-from-lane");
+        let err = restart(
+            &repo,
+            &Pipelines::builtin(),
+            &restart_args("stuck"),
+            Some("implement"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("lane's own environment"), "{err}");
     }
 }
