@@ -430,13 +430,11 @@ pub struct Frontmatter {
     pub workspace_id: Option<String>,
 
     /// The pane the task's very first lane actually ran in — the one
-    /// `Mux::create_workspace`, `Mux::create_pane` or `Mux::reopen_owned_pane`
-    /// handed back when `ensure_workspace` set the task up, or, under
-    /// `grouped`, the pane a project tab opened with if this task is the one
-    /// that opened it. Most later steps keep running in that same pane —
-    /// handed on from step to step rather than split fresh each time — so
-    /// this is usually left as it was set rather than rewritten on every step
-    /// change.
+    /// `Mux::create_workspace`, `Mux::create_pane` or
+    /// `Mux::reopen_owned_pane` handed back when `ensure_workspace` set the
+    /// task up. Most later steps keep running in that same pane — handed on
+    /// from step to step rather than split fresh each time — so this is
+    /// usually left as it was set rather than rewritten on every step change.
     ///
     /// Two things break that, and neither updates this field when they do: a
     /// kind with no quit gesture ends its session by closing the pane
@@ -445,13 +443,8 @@ pub struct Frontmatter {
     /// forever. Either way `prepare_boot` splits a fresh pane for the next step,
     /// so from that point on this field names a pane that is gone.
     ///
-    /// `None` under `grouped` for a task that joined a project tab an earlier
-    /// task already opened: that tab's one existing pane belongs to somebody
-    /// else's lane, so this task splits its own instead, and there is no
-    /// pane of its own to record here yet.
-    ///
     /// If the first launch out of this pane fails, it is closed — which,
-    /// with nothing else yet in a task's own `split`-mode workspace, takes
+    /// with nothing else yet in a task's own workspace, takes
     /// the multiplexer's workspace and tab down too, though the worktree on
     /// disk survives: `Mux::close_workspace`, what a workspace with no pane
     /// left closes to, leaves what it pointed at untouched.

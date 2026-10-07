@@ -763,8 +763,8 @@ impl Board {
     /// while it is open, exactly as if nothing had happened.
     ///
     /// A backend with no pane to open one in — headless, which refuses the
-    /// way `open_tab` already does — is best-effort like every other key
-    /// here: the refusal is swallowed, exactly as an `Err` out of `on_key`
+    /// way `Mux::open_command`'s default does — is best-effort like every
+    /// other key here: the refusal is swallowed, exactly as an `Err` out of `on_key`
     /// already is by the dispatch loop that calls it, and the task file it
     /// would have opened is left exactly as it was.
     fn open_cursor(&mut self, repo: &Repo) -> Result<()> {
@@ -7261,7 +7261,7 @@ mod tests {
     }
 
     /// `o` on a headless run has no pane to open an editor in — headless
-    /// refuses it the way `open_tab` already does — so the key is a no-op:
+    /// refuses it the way `Mux::open_command`'s default does — so the key is a no-op:
     /// best-effort, like every other key here, and the task file it would
     /// have opened is left exactly as it was.
     #[test]

@@ -68,10 +68,6 @@ three answers, as in a fresh `--separate-git-dir` clone or submodule with no rec
 init` refuses that linked worktree and tells you to run `spoolway init` in the main checkout
 first. Run `spoolway init` there before working from a linked worktree of such a clone.
 
-The shared dispatch workspace sits at `~/.spoolway/.dispatcher/`. A project home always ends in
-`-<id>`, so the two can never collide. See [One home for every run, in every
-project](dispatcher.md#one-home-for-every-run-in-every-project).
-
 | Directory | Holds | Swept by |
 |---|---|---|
 | `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
@@ -153,7 +149,6 @@ Write and inspect the layer with `spoolway pipeline override`, `prompt override`
 ```toml
 [dispatch]
 backend = "herdr"
-herdr_mode = "split"
 lane_quiet = "15m"
 auto_commit = true
 ```
@@ -161,7 +156,6 @@ auto_commit = true
 | Key | Default | What it controls |
 |---|---|---|
 | `backend` | `herdr` | Where lanes run. `herdr` is the supported runtime and puts each agent in a pane you can watch and take over. `headless` is an internal test backend; dispatch refuses it unless the test harness sets `SPOOLWAY_TEST_BACKEND`. |
-| `herdr_mode` | `split` | Layout under `backend = "herdr"`. `split` gives each task its own workspace named `spoolway/<task>`. `grouped` puts every project in the shared `spoolway-dispatcher` workspace, one tab per project, one pane per task. See [the dispatcher](dispatcher.md#one-home-for-every-run-in-every-project). |
 | `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
@@ -556,11 +550,13 @@ inline table such as `issue_tracking = { ..., on_fail = "" }`. Commands that wri
 such as `spoolway config set`, `spoolway init --tracker` and `spoolway override promote`,
 leave a retired key in the file. `spoolway sync` drops it. These keys load with a note:
 `dispatch.interval`, `issue_tracking.on_fail`, a non-blank `dispatch.worktree_root`,
-`dispatch.backend` set to `tmux` (which loads as `herdr` instead), `dispatch.tear_lanes_on_stop`, an `[agents.<profile>.env]` table, and an `[agents.<profile>]`
-naming a kind spoolway no longer knows how to launch. Only the notes for `dispatch.interval`,
-`issue_tracking.on_fail` and `dispatch.worktree_root` name `spoolway sync` as the command that
-drops the key for good. The others say the key is rewritten or dropped on the next save. The
-rest of the table below are dropped with nothing printed.
+`dispatch.backend` set to `tmux` (which loads as `herdr` instead),
+`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode`, an `[agents.<profile>.env]` table, and an
+`[agents.<profile>]` naming a kind spoolway no longer knows how to launch. Only the notes for
+`dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
+name `spoolway sync` as the command that drops the key for good. The others say the key is
+rewritten or dropped on the next save. The rest of the table below are dropped with nothing
+printed.
 `spoolway sync` also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
 
 | Key | Replaced by |
@@ -572,6 +568,7 @@ rest of the table below are dropped with nothing printed.
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode`, `worktree_root` | Nothing |
+| `dispatch.herdr_mode` (`split` or `grouped`) | Nothing. Every task runs in a herdr workspace of its own. |
 | `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always pauses its task. |
 | `[pipeline_gen]` | Nothing |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |

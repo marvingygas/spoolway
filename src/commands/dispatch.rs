@@ -226,33 +226,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
     let interval = crate::dispatch::PROBE_INTERVAL;
 
-    // The dispatcher's own pane stays wherever it was started, under both
-    // `grouped` and `split` — herdr has nothing to move it into. This still
-    // has to find or open the run's shared workspace, though, under
-    // `grouped`: a task's lane joins that workspace's tab, and it must exist
-    // before the first one starts.
-    //
-    // A failure here is held for `workspace_open_notice`, just below, rather
-    // than printed on the spot — this is the one notice `warnings_gate`,
-    // above, could not carry: this is only attempted once the lock is held,
-    // past the point `esc` could still mean "nothing happened yet".
-    let mut workspace_open_error = None;
-    match mux.dispatch_workspace(&repo.root, true) {
-        Ok(_) => {}
-        Err(err) => {
-            workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"))
-        }
-    }
-
-    // The one notice `warnings_gate` ran too early to carry — see just
-    // above. Held on screen the same way, but with only `[enter]` to
-    // dismiss it: by now the lock is held, so there is no earlier screen
-    // left for `esc` to mean "back to" — see `workspace_open_notice`'s own
-    // doc.
-    if let Some(err) = &workspace_open_error {
-        workspace_open_notice(err)?;
-    }
-
     // From here the run holds live lanes, so an interrupted one's spend and
     // launch counter still have to be settled on the way out. Caught rather
     // than left to kill the process where it stands — see
@@ -659,12 +632,7 @@ fn overrides_gate_kind(row: &OverrideRow) -> String {
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`.
 /// After [`overrides_gate`], and — like it — before `Lock::acquire`: `esc`
 /// here must still mean "nothing has happened yet", which is only true ahead
-/// of the lock. The other notice this task
-/// exists to fix, a failure to open the run's shared workspace, cannot join
-/// this screen for exactly that reason — it is only attempted once the lock
-/// is held — so it gets its own, smaller one instead; see
-/// [`workspace_open_notice`].
-///
+/// of the lock.
 fn warnings_gate(repo: &Repo, pipelines: &Pipelines) -> Result<bool> {
     warnings_gate_with(
         repo,
@@ -850,55 +818,6 @@ pub(crate) fn warnings_popup(repo: &Repo, pipelines: &Pipelines) -> Option<GateP
         fingerprint,
         overrides: false,
     })
-}
-
-/// The one screen [`warnings_gate`] cannot show: a failure to find or open
-/// this run's own shared workspace, only known once `dispatch` has already
-/// taken the lock and attempted it — see that call site's own comment.
-/// Unlike `warnings_gate`, there is no earlier screen left to decline back
-/// to here, so `[enter]` is the only key this reads, and nothing is
-/// fingerprinted: opening a workspace either works or it does not, once,
-/// this run — there is no standing state worth hiding until it changes.
-///
-fn workspace_open_notice(err: &str) -> Result<()> {
-    workspace_open_notice_with(
-        err,
-        crate::ask::interactive(),
-        &mut crate::screen::RawStdin,
-        &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::screen as fn() -> _),
-    )
-}
-
-/// [`workspace_open_notice`]'s own logic, against an injected reader, writer
-/// and terminal guard — see [`overrides_gate_with`]'s own doc comment on the
-/// pattern. With no tty on either end the notice is still printed, once, so
-/// it is on record; nothing here may then block on a keypress nobody can
-/// answer.
-pub(crate) fn workspace_open_notice_with(
-    err: &str,
-    interactive: bool,
-    input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
-    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
-) -> Result<()> {
-    let problems = [err.to_string()];
-    if !interactive {
-        print_warnings_notice(out, &[], &[], &problems)?;
-        return Ok(());
-    }
-
-    let _term = term.map(|term| term());
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    print_warnings_notice(out, &[], &[], &problems)?;
-    writeln!(out, "[enter] continue")?;
-
-    loop {
-        match crate::screen::read_key(input) {
-            Some(crate::screen::Key::Enter) | None => return Ok(()),
-            _ => {}
-        }
-    }
 }
 
 /// The warnings screen's own body: the mockup's heading, then whichever of
@@ -1142,15 +1061,12 @@ pub(crate) fn check_index_lock(repo: &Repo) -> Result<Option<String>> {
 ///
 /// - `repo.root` has no main checkout `main_checkout` can place at all — a
 ///   bare repository, or a `.git` too unusual for it to place.
-/// - Under `MuxMode::Split` (`Mux::task_owns_workspace`) only: `repo.checkout`
-///   — the checkout the dispatcher actually ran in, and what `Herdr` hands
-///   herdr as `--cwd` — is itself a linked worktree. herdr refuses a `--cwd`
-///   that is a linked worktree with `linked_worktree_source` (verified
-///   against a live herdr; see `Herdr::anchor`'s doc), and only `split`'s own
-///   routes hand that failure nowhere to fall back to. `grouped` is not
-///   refused this same checkout — see
-///   `backend_checkout_passes_herdr_on_a_dispatcher_started_in_a_linked_worktree_under_grouped_mode`
-///   in this module's tests for why.
+/// - `repo.checkout` — the checkout the dispatcher actually ran in, and what
+///   `Herdr` hands herdr as `--cwd` — is itself a linked worktree. herdr
+///   refuses a `--cwd` that is a linked worktree with
+///   `linked_worktree_source` (verified against a live herdr; see
+///   `Herdr::anchor`'s doc), and the first cut of a task's workspace,
+///   `Mux::create_workspace`, has nowhere to fall back to.
 pub(crate) fn check_backend_checkout(
     repo: &Repo,
     mux: &dyn crate::mux::Mux,
@@ -1170,29 +1086,20 @@ pub(crate) fn check_backend_checkout(
                     .to_string(),
             }));
         }
-        // Only `MuxMode::Split` (`Mux::task_owns_workspace`) ever hands
-        // herdr this checkout as `--cwd` at all: `MuxMode::Grouped`'s own
-        // per-task route, `project_tab` in `src/dispatch.rs`, takes the
-        // `false` arm of `task_owns_workspace` unconditionally — borrowed
-        // checkout or freshly cut, `grouped` never calls `Mux::create_pane`
-        // or reaches `open_worktree_workspace` from the ordinary dispatch
-        // loop at all. `split`'s own first cut, `Mux::create_workspace`,
-        // propagates a refused anchor with no fallback; `split`'s other two
-        // routes, `Mux::create_pane` (a borrowed checkout) and the default
-        // `Mux::reopen_owned_pane` (which is exactly `create_pane`), each
-        // already fall back to a plain `workspace create` when herdr
-        // refuses the anchor they tried first — but a checkout the anchor
-        // is genuinely wrong for is refused here regardless of which of the
-        // three a given task would have hit, so every `split` task started
-        // on it fails or degrades the same way rather than some of them
-        // working oddly while others crash. Refusing `grouped` the same
-        // checkout would be a new failure it never had, not the bug this
-        // task fixes.
+        // `Mux::create_workspace`, a task's first cut, propagates a refused
+        // anchor with no fallback; the other two routes, `Mux::create_pane`
+        // (a borrowed checkout) and the default `Mux::reopen_owned_pane`
+        // (which is exactly `create_pane`), each already fall back to a plain
+        // `workspace create` when herdr refuses the anchor they tried first —
+        // but a checkout the anchor is genuinely wrong for is refused here
+        // regardless of which of the three a given task would have hit, so
+        // every task started on it fails or degrades the same way rather than
+        // some of them working oddly while others crash.
         //
         // A linked worktree's own top always carries a `.git` *file*
         // pointing at the common git dir; the main checkout's is a
         // directory. The same test herdr itself makes of `--cwd`.
-        if mux.task_owns_workspace() && repo.checkout.join(".git").is_file() {
+        if repo.checkout.join(".git").is_file() {
             let main = crate::repo::main_checkout(&repo.checkout).unwrap_or(repo.root.clone());
             return Err(anyhow::Error::new(Refusal {
                 reason: format!(
@@ -1833,8 +1740,7 @@ mod tests {
     /// A repo dispatched from a linked worktree — `checkout` a sibling
     /// worktree cut off `root`, `root` the main checkout beside it — paired
     /// with a closure that removes the worktree and the scratch tree
-    /// afterwards. Shared by the refusal test below and its `grouped`
-    /// counterpart, which differ only in what `Mux` they hand it.
+    /// afterwards.
     fn linked_worktree_repo(name: &str) -> (Repo, std::path::PathBuf, impl FnOnce()) {
         let root_dir = crate::scratch::root(&format!("linked-worktree-checkout-{name}"));
         let _ = std::fs::remove_dir_all(&root_dir);
@@ -1880,17 +1786,13 @@ mod tests {
     }
 
     /// A `Mux` standing in for herdr (or anything else), answering only
-    /// `name`/`is_available`/`task_owns_workspace` for real — the only three
+    /// `name`/`is_available` for real — the only two
     /// [`check_backend_checkout`] ever reads — and refusing every other call
     /// outright, so a test that somehow reached one fails loudly rather than
     /// doing something real.
     struct StubMux {
         name: &'static str,
         available: bool,
-        /// `Mux::task_owns_workspace`'s own default (`true`) unless a test
-        /// sets it otherwise — see `backend_checkout_passes_herdr_under_grouped_mode`,
-        /// the one case this matters for `check_backend_checkout`.
-        owns_workspace: bool,
         /// `Mux::in_own_pane`'s own default (`true`) unless a test sets it
         /// otherwise — see `dispatcher_visible_refuses_herdr_outside_a_pane`.
         in_own_pane: bool,
@@ -1905,9 +1807,6 @@ mod tests {
         }
         fn unavailable(&self) -> String {
             "the stub backend is never available".into()
-        }
-        fn task_owns_workspace(&self) -> bool {
-            self.owns_workspace
         }
         fn in_own_pane(&self) -> bool {
             self.in_own_pane
@@ -1984,7 +1883,6 @@ mod tests {
         let mux = StubMux {
             name: "headless",
             available: true,
-            owns_workspace: true,
             in_own_pane: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
@@ -1998,7 +1896,6 @@ mod tests {
         let mux = StubMux {
             name: "herdr",
             available: true,
-            owns_workspace: true,
             in_own_pane: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
@@ -2012,7 +1909,6 @@ mod tests {
         let mux = StubMux {
             name: "herdr",
             available: true,
-            owns_workspace: true,
             in_own_pane: true,
         };
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
@@ -2031,28 +1927,23 @@ mod tests {
 
     /// herdr against a dispatcher started inside a linked worktree of its
     /// own project — `repo.checkout` a sibling worktree, `repo.root` the
-    /// main checkout beside it — is refused, under `split`. Naming both
+    /// main checkout beside it — is refused. Naming both
     /// checkouts and no backend to switch to is the acceptance criterion in
     /// full: unlike the bare-repository refusal above, there is no other
     /// backend that would fix this, so none is offered.
     ///
-    /// `split` specifically: `owns_workspace: true`, the same as the real
-    /// `Herdr` under `MuxMode::Split`, whose `Mux::create_workspace` — the
-    /// route a task's first cut always takes — hands `open_worktree_workspace`
-    /// no fallback at all, a `--cwd` herdr refuses fails that task outright.
-    /// See `check_backend_checkout`'s own doc, above it in this module, for
-    /// why `split`'s other two routes are still refused the same checkout
-    /// here even though each degrades on its own rather than failing
-    /// outright, and
-    /// `backend_checkout_passes_herdr_on_a_dispatcher_started_in_a_linked_worktree_under_grouped_mode`
-    /// for why `grouped` is not refused it at all.
+    /// A task's first cut, `Mux::create_workspace`, hands
+    /// `open_worktree_workspace` no fallback at all: a `--cwd` herdr refuses
+    /// fails that task outright. See `check_backend_checkout`'s own doc, above
+    /// it in this module, for why the other two routes are still refused the
+    /// same checkout here even though each degrades on its own rather than
+    /// failing outright.
     #[test]
     fn backend_checkout_refuses_herdr_on_a_dispatcher_started_in_a_linked_worktree() {
         let (repo, main, cleanup) = linked_worktree_repo("split");
         let mux = StubMux {
             name: "herdr",
             available: true,
-            owns_workspace: true,
             in_own_pane: true,
         };
 
@@ -2080,41 +1971,6 @@ mod tests {
         cleanup();
     }
 
-    /// The same dispatcher-in-a-linked-worktree shape as the `split` test
-    /// above, but under `grouped` — `owns_workspace: false`, matching
-    /// `Herdr::task_owns_workspace` under `MuxMode::Grouped` — passes.
-    ///
-    /// `grouped`'s own per-task route is `project_tab`, in `src/dispatch.rs`:
-    /// every branch of `prepare_boot`'s dispatch match — a borrowed checkout, a
-    /// freshly cut one, a healed stale pane — takes the `task_owns_workspace
-    /// == false` arm into `project_tab` unconditionally, which opens the
-    /// shared dispatch workspace on `dispatch_home()` and the task's own tab
-    /// on the task's checkout directly, through `Mux::dispatch_workspace`
-    /// and `Mux::open_tab`. Neither reads `Herdr::anchor` or calls
-    /// `open_worktree_workspace` at all, so `grouped`'s ordinary dispatch
-    /// loop never hands herdr this checkout as `--cwd` in the first place —
-    /// there is nothing here for a linked worktree to break, and this
-    /// non-goal is preserved by never refusing it up front.
-    #[test]
-    fn backend_checkout_passes_herdr_on_a_dispatcher_started_in_a_linked_worktree_under_grouped_mode()
-     {
-        let (repo, _main, cleanup) = linked_worktree_repo("grouped");
-        let mux = StubMux {
-            name: "herdr",
-            available: true,
-            owns_workspace: false,
-            in_own_pane: true,
-        };
-
-        assert!(
-            check_backend_checkout(&repo, &mux).unwrap().is_some(),
-            "grouped dispatch never hands herdr this checkout as --cwd, so it is not this \
-             refusal's to make"
-        );
-
-        cleanup();
-    }
-
     /// A herdr run with no pane to draw in is refused, naming the way in —
     /// `herdr` and then `spoolway` — with no exemption, and no longer saying
     /// that a dispatcher has to be visible: the dispatch tab shows this
@@ -2124,7 +1980,6 @@ mod tests {
         let mux = StubMux {
             name: "herdr",
             available: true,
-            owns_workspace: true,
             in_own_pane: false,
         };
         let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
@@ -2140,7 +1995,6 @@ mod tests {
         let mux = StubMux {
             name: "herdr",
             available: true,
-            owns_workspace: true,
             in_own_pane: true,
         };
         assert!(check_dispatcher_visible(&mux).is_ok());
@@ -2157,7 +2011,6 @@ mod tests {
         let mux = StubMux {
             name: "headless",
             available: true,
-            owns_workspace: true,
             in_own_pane: false,
         };
         let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
@@ -2176,7 +2029,6 @@ mod tests {
         let mux = StubMux {
             name: "headless",
             available: true,
-            owns_workspace: true,
             in_own_pane: false,
         };
         let result =
@@ -2736,64 +2588,5 @@ mod tests {
             printed.contains("\n[enter] start the run"),
             "footer must not be indented: {printed:?}"
         );
-    }
-
-    /// `workspace_open_notice_with`'s own case: no tty, so the failure is
-    /// printed once, on record, and nothing here blocks on a key nobody can
-    /// answer — `input` is left empty, or a `read_key` call would hang the
-    /// test.
-    #[test]
-    fn workspace_open_notice_with_no_tty_prints_and_returns() {
-        let mut input = keys("");
-        let mut out = Vec::new();
-        workspace_open_notice_with(
-            "could not open this run's own workspace: nope",
-            false,
-            &mut input,
-            &mut out,
-            Some(crate::platform::TermGuard::inert),
-        )
-        .unwrap();
-        let printed = String::from_utf8(out).unwrap();
-        assert!(printed.contains("problems"), "{printed}");
-        assert!(printed.contains("nope"), "{printed}");
-    }
-
-    /// `[enter]` is the only key this reads — there is no earlier screen
-    /// left to decline back to by the time this notice can show, so unlike
-    /// `warnings_gate_with` there is no `esc` branch to exercise here at
-    /// all.
-    #[test]
-    fn workspace_open_notice_with_enter_dismisses() {
-        let mut input = keys("\r");
-        let mut out = Vec::new();
-        workspace_open_notice_with(
-            "could not open this run's own workspace: nope",
-            true,
-            &mut input,
-            &mut out,
-            Some(crate::platform::TermGuard::inert),
-        )
-        .unwrap();
-        let printed = String::from_utf8(out).unwrap();
-        assert!(printed.contains("[enter] continue"), "{printed}");
-    }
-
-    /// The tty going away mid-question dismisses rather than hangs — the
-    /// same reasoning `warnings_gate_with`'s own `None` branch gives, and for
-    /// the same reason: nothing here may wait forever for an answer that can
-    /// no longer come.
-    #[test]
-    fn workspace_open_notice_with_none_dismisses() {
-        let mut input = keys("");
-        let mut out = Vec::new();
-        workspace_open_notice_with(
-            "could not open this run's own workspace: nope",
-            true,
-            &mut input,
-            &mut out,
-            Some(crate::platform::TermGuard::inert),
-        )
-        .unwrap();
     }
 }

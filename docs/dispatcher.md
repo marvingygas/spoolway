@@ -399,41 +399,31 @@ A blocked task keeps its pane open until it is resumed.
 
 ## Where a lane lives
 
-```toml
-[dispatch]
-herdr_mode = "split"  # or "grouped"
-```
+Every task runs in a herdr workspace of its own, nested under the project's row as
+`spoolway/<task>`. There is no setting for the layout. A config that still names
+`dispatch.herdr_mode` loads with a note, and `spoolway sync` drops the key.
 
-| Mode | Where a lane runs |
-|---|---|
-| `grouped` | One tab per project in the shared `spoolway-dispatcher` workspace. One pane per running task. |
-| `split` | One herdr workspace per task, nested under the project's row as `spoolway/<task>`. |
+A task that an older release left in a pane of the shared `spoolway-dispatcher` workspace is
+moved on its next step. Spoolway closes that pane and opens the task a workspace of its own on
+the checkout it already has.
 
 Under a multiplexer every lane is a real pane you can watch and type into. A task holds one
 pane for its whole life. See [Vacating a pane](#vacating-a-pane). A lane is named
 `<task> · <step>`. Sessions you start by hand are never touched.
 
-### One home for every run, in every project
-
-`spoolway-dispatcher` is one herdr workspace shared by every project on the
-machine. It opens on `~/.spoolway/.dispatcher/`, which is not a repository. Every project's home
-is named `<label>-<id>`, so no project can take the name `.dispatcher`. The board itself stays
-in the pane you ran `spoolway dispatch` in.
+The board itself stays in the pane you ran `spoolway dispatch` in.
 
 ### herdr
 
-Under `grouped`, the project's tab closes when its last task is archived. The shared workspace
-is only ever closed by hand. Under `split`, each task's workspace is bound to its worktree with
-`herdr worktree open`.
+Each task's workspace is bound to its worktree with `herdr worktree open`.
 
 A task gets one tab, whichever step it is on. Every pane after the first splits inside that same
 tab. Each split halves the smallest pane in the tab along its longer side, so a tab grows as a
 spiral. A tab left holding nothing is closed on the next pass, unless it is its workspace's only
 tab.
 
-Under `split`, a task's tab is renamed to the task's slug, and stays that way across a
-dispatcher restart. Its panes then show only the step. Under `grouped`, several tasks share one
-tab, so its panes show `<task> · <step>`, the same as the lane's own name.
+A task's tab is renamed to the task's slug, and stays that way across a dispatcher restart. Its
+panes then show only the step.
 
 ### Vacating a pane
 

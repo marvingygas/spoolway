@@ -811,7 +811,6 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
 
 # The pane gate itself, proven end to end rather than only by the unit tests
 # in src/commands/dispatch.rs — those already know the answer they are
@@ -966,7 +965,7 @@ else
   bad "a command step with no headless: key runs in a pane of its own"
 fi
 
-# Under `split` the task's own tab already names it, so the pane inside it
+# The task's own tab already names it, so the pane inside it
 # carries only the step — not `paned · visible`, the identity `PANE_FILE`
 # above is keyed on. Read from the double's own tables, by the ids `RECORDED`
 # already proved live, rather than from anything spoolway itself reported.
@@ -1142,70 +1141,12 @@ dispatcher_stop
 must "the failing-pane task is taken back out before its pipeline goes" \
   "$SPOOLWAY" queue unqueue panedfail --force
 
-# ---------------------------------------------------- grouped keeps task and step
-# Under `grouped`, several tasks share one project tab, so a pane still has
-# to say which task it belongs to as well as which step — proven here
-# against the same double as split's own case above, rather than only by
-# `src/dispatch.rs`'s unit tests.
-must "herdr_mode grouped, for the pane label alone" \
-  "$SPOOLWAY" config set dispatch.herdr_mode grouped
-GROUPED_RELEASE="$LIVE/grouped.release"
-rm -f "$GROUPED_RELEASE"
-sed "s|@RELEASE@|$GROUPED_RELEASE|" > .spoolway/pipelines/panegrouped.yml <<'YML'
-description: One paned command step, for the grouped pane label.
-
-steps:
-  - id: visible
-    description: Stand in a pane until the suite has read its own label.
-    run: 'echo grouped-pane-marker; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
-    timeout: 120s
-    on_pass: done
-    on_fail: blocked
-YML
-works "a pipeline for the grouped case checks out" "$SPOOLWAY" pipeline check
-
-dispatcher_restart
-task_doc "$LIVE/groupedpane.md" groupedpane "$BODY" "group: groupedpane" \
-  "pipeline: panegrouped"
-must "a task through a grouped paned command step" \
-  "$SPOOLWAY" queue add --from "$LIVE/groupedpane.md"
-
-GROUPED_PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/groupedpane · visible.pane"
-GROUPED_RECORDED=""
-for _ in $(seq 1 1200); do
-  GROUPED_RECORDED=$(cat "$GROUPED_PANE_FILE" 2>/dev/null || true)
-  if [ -n "$GROUPED_RECORDED" ] && grep -q "^$GROUPED_RECORDED	" "$HSTATE/panes"; then
-    break
-  fi
-  GROUPED_RECORDED=""
-  sleep 0.1
-done
-if [ -n "$GROUPED_RECORDED" ]; then
-  ok "a grouped command step also runs in a pane"
-else
-  bad "a grouped command step also runs in a pane"
-fi
-GROUPED_LABEL=$(awk -F'\t' -v p="$GROUPED_RECORDED" '$1==p {print $4}' "$HSTATE/panes")
-if [ "$GROUPED_LABEL" = "groupedpane · visible" ]; then
-  ok "and its pane keeps both the task and the step, unlike split's"
-else
-  bad "and its pane keeps both the task and the step (was \`$GROUPED_LABEL\`)"
-fi
-
-touch "$GROUPED_RELEASE"
-if drive groupedpane gone 180; then
-  ok "the grouped task carries on once the command has passed"
-else
-  bad "the grouped task carries on once the command has passed (at \`$(stage_of groupedpane)\`)"
-fi
-must "back to herdr_mode split" "$SPOOLWAY" config set dispatch.herdr_mode split
-
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
-  .spoolway/pipelines/paneflaky.yml .spoolway/pipelines/panegrouped.yml
+  .spoolway/pipelines/paneflaky.yml
 
 # ---------------------------------------------- a big environment, handed over
 # A pane's shell does not inherit the dispatcher's environment: it belongs to
@@ -1233,7 +1174,6 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
 
 # The two variables this case is about, both set before the dispatcher starts
 # so they are really part of the environment it inherited.

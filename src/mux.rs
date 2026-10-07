@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use crate::config::{DispatchConfig, MuxMode};
 use crate::repo::run;
 
 /// What a lane is doing right now, as the multiplexer sees it.
@@ -165,11 +164,9 @@ pub struct LaneSpec<'a> {
     pub name: &'a str,
     /// What the pane is labelled. Purely for the person looking at it: the
     /// lane's identity is [`LaneSpec::name`], which is the multiplexer's own
-    /// session name and is what [`Mux::list_lanes`] reads back. Under
-    /// `MuxMode::Split` the task's own tab already carries the task — see
-    /// [`Mux::rename_tab`] — so this carries the step alone; under
-    /// `MuxMode::Grouped`, where several tasks share one tab, this carries
-    /// both, the same as [`LaneSpec::name`].
+    /// session name and is what [`Mux::list_lanes`] reads back. The task's
+    /// own tab already carries the task — see [`Mux::rename_tab`] — so this
+    /// carries the step alone.
     pub label: &'a str,
     /// herdr agent kind: `pi`, `claude`, `codex`, …
     pub kind: &'a str,
@@ -289,75 +286,18 @@ pub trait Mux: Sync {
         Ok(true)
     }
 
-    /// The one workspace every run of every project shares, found or opened.
-    ///
-    /// Fixed rather than named after a project — see
-    /// [`DISPATCH_WORKSPACE_LABEL`] — so that two projects dispatching at
-    /// once are one row in the sidebar, not two: it holds no checkout of its
-    /// own, and each project gets one tab of its own inside it.
-    ///
-    /// Found rather than made whenever one is already there, because that is
-    /// what makes a second project's `dispatch` land in the workspace that
-    /// already exists instead of opening another beside it.
-    ///
-    /// `create` says whether to open one that is not there yet. Cutting a
-    /// worktree asks for it; the stop sweep asks without it, because a run
-    /// that never opened a tab in it must not open the shared workspace on
-    /// its way out just to close a tab in it.
-    ///
-    /// `None` from a backend with no such notion — headless has no workspaces
-    /// at all — and under [`MuxMode::Split`], where every task is a group of
-    /// its own and there is no shared workspace to open.
-    fn dispatch_workspace(&self, _root: &Path, _create: bool) -> Result<Option<String>> {
-        Ok(None)
-    }
-
-    /// A tab of `workspace_id`, opened on `cwd` with
-    /// one pane, already sitting in `cwd` and free for the caller's own use —
-    /// never a placeholder to be split from. Used to open a project's own tab
-    /// in the run's shared workspace, on the worktree of whichever task is
-    /// opening it, and — under [`MuxMode::Split`] — to give a task borrowing
-    /// somebody else's checkout a home to run in.
-    fn open_tab(&self, _workspace_id: &str, _cwd: &Path, _label: &str) -> Result<Workspace> {
-        bail!("this backend has no tabs to open")
-    }
-
     /// Open a pane on `cwd` and run `command` in it — not a bare shell for
-    /// the caller to drive itself the way [`Mux::create_pane`] and
-    /// [`Mux::open_tab`] do, but a foreground program already running by the
-    /// time the pane appears. For the board's `o`: an editor is the person's
-    /// own, not a lane, so nothing here waits for it to exit or reads
-    /// anything back from it.
+    /// the caller to drive itself the way [`Mux::create_pane`] does, but a
+    /// foreground program already running by the time the pane appears. For
+    /// the board's `o`: an editor is the person's own, not a lane, so nothing
+    /// here waits for it to exit or reads anything back from it.
     ///
-    /// The default refuses, the same as [`Mux::open_tab`]: a backend gets
-    /// this only by implementing it. Headless inherits the refusal rather
-    /// than overriding it — it has no pane to run anything in at all — and
-    /// is the only backend left on it: herdr is the only one that implements
-    /// this.
+    /// The default refuses: a backend gets this only by implementing it.
+    /// Headless inherits the refusal rather than overriding it — it has no
+    /// pane to run anything in at all — and is the only backend left on it:
+    /// herdr is the only one that implements this.
     fn open_command(&self, _cwd: &Path, _label: &str, _command: &str) -> Result<()> {
         bail!("this backend has no pane to open a command in")
-    }
-
-    /// The tab of `workspace_id` already labelled `label`, if there is one —
-    /// a project's own tab in the shared workspace.
-    ///
-    /// Asked of the multiplexer rather than reconstructed from what the queue
-    /// recorded, because the queue is not a complete record of them: a
-    /// project whose tasks are all between steps holds no tab id anywhere.
-    /// Found here, so a second dispatch pass joins the tab that already
-    /// exists instead of opening another beside it.
-    ///
-    /// The label alone, with no pane or directory to check it against: since
-    /// every pane a task's tab holds is now one of its lanes, sitting in that
-    /// lane's own worktree, there is no anchor left standing anywhere to pick
-    /// the right tab out with. Nor is there a same-named collision to guard
-    /// against — [`crate::commands::init::claim`] refuses a second checkout
-    /// that claims a project basename already pointed at another root, so a
-    /// label is unique on this machine.
-    ///
-    /// `None` from a backend with no tabs, and whenever nothing matches.
-    fn find_tab(&self, _workspace_id: &str, _label: &str) -> Result<Option<String>> {
-        Ok(None)
     }
 
     /// Every tab this backend currently has open on a checkout of ours,
@@ -372,35 +312,43 @@ pub trait Mux: Sync {
         Ok(Vec::new())
     }
 
-    /// Is the workspace and tab recorded against a task the task's own, or
-    /// ones the whole run shares?
+    /// Close `pane_id`, if `workspace_id` is the shared `spoolway-dispatcher`
+    /// workspace an earlier release opened, and say whether it was.
     ///
-    /// Its own under [`MuxMode::Split`], where every task cuts a workspace of
-    /// its own; shared under [`MuxMode::Grouped`], where every task is a
-    /// *pane* in the one tab its project shares. Two things turn on the
-    /// answer and both would be disasters if it were assumed: tearing a task
-    /// down must never close a tab or workspace that is not its own, and only
-    /// a task that owns its row gets a fixed `spoolway/<task>` label at
-    /// creation — a shared tab is never task's to rename.
-    fn task_owns_workspace(&self) -> bool {
-        true
+    /// Releases that laid tasks out as panes of one shared tab per project left
+    /// that workspace and tab recorded on their task files. The shared
+    /// workspace is never opened any more, but a task still recorded in it must
+    /// not keep running there: [`crate::dispatch::ensure_workspace`] opens the
+    /// task a workspace of its own on finding `true` here, and
+    /// [`crate::teardown`] removes only the task's own checkout. Both pass the
+    /// pane the task last occupied, which is not always the one recorded on its
+    /// task file — only the first task of a project's run recorded the pane its
+    /// tab opened with — so the pane closed here is the caller's to name, and
+    /// closing it means the shared tab does not outlive the last task that
+    /// used it.
+    ///
+    /// Only the pane is closed, never the tab or the workspace: other tasks of
+    /// the project may still be in them, and a tab whose last pane closes goes
+    /// with it. `false` — and nothing touched — for any workspace that is not
+    /// that shared one, and by default, which is right for a backend that never
+    /// had one: headless has no workspaces at all.
+    fn leave_shared_workspace(&self, _workspace_id: &str, _pane_id: Option<&str>) -> Result<bool> {
+        Ok(false)
     }
 
     /// Remove a checkout this backend cut outside the multiplexer's knowledge.
     ///
-    /// Only ever called when [`Mux::task_owns_workspace`] is false: everywhere
-    /// else the checkout goes with the workspace that owns it, and
-    /// [`Mux::remove_workspace`] is what takes both. Never called for a
-    /// borrowed checkout, which is a person's own.
+    /// Only ever called for a task with no workspace of its own — none
+    /// recorded, or only the shared one [`Mux::leave_shared_workspace`] names —
+    /// or one whose [`Mux::remove_workspace`] refused: otherwise the checkout goes with the
+    /// workspace that owns it, and that call is what takes both. Never called
+    /// for a borrowed checkout, which is a person's own.
     fn remove_checkout(&self, _path: &Path) -> Result<()> {
         Ok(())
     }
 
     /// Cut a task's own worktree, with git, and open its own workspace on it.
-    /// Only ever called when [`Mux::task_owns_workspace`] is true: under
-    /// [`MuxMode::Grouped`] a task's checkout is cut the same way but opens no
-    /// workspace of its own — its lane runs in a pane of its project's shared
-    /// tab instead. The checkout lands at [`worktree_root`] under a directory
+    /// The checkout lands at [`worktree_root`] under a directory
     /// named after `branch`, flattened by [`branch_slug`] — the one rule every
     /// backend now shares.
     fn create_workspace(
@@ -419,8 +367,7 @@ pub trait Mux: Sync {
     /// Close one tab, leaving the workspace it lived in alone.
     fn close_tab(&self, tab_id: &str) -> Result<()>;
     /// A bare pane in an existing checkout, for a lane that needs no worktree
-    /// of its own. Only ever called when [`Mux::task_owns_workspace`] is
-    /// true, for the same reason [`Mux::create_workspace`] is.
+    /// of its own.
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace>;
     /// The same, but for a checkout this task cut for itself rather than
     /// borrowed — [`crate::dispatch::ensure_workspace`]'s heal path, the only
@@ -488,12 +435,11 @@ pub trait Mux: Sync {
     /// run's own `<task> · <step>` identity, unseen by anyone, that names the
     /// handover file this writes so two tasks running the same step at once
     /// never collide over it; `label` is what the pane is actually renamed
-    /// to, which is `key` itself under `MuxMode::Grouped` but the step alone
-    /// under `MuxMode::Split`, where the tab already carries the task.
+    /// to, which is the step alone, since the task's own tab already carries
+    /// the task.
     ///
-    /// The default refuses nothing, the same shape [`Mux::open_tab`] takes:
-    /// it declines outright rather than half-answering. headless inherits it
-    /// unchanged — its panes are not real, so there is nothing to split.
+    /// The default declines outright rather than half-answering. headless
+    /// inherits it unchanged — its panes are not real, so there is nothing to split.
     fn run_in_pane(
         &self,
         _tab_id: &str,
@@ -593,15 +539,13 @@ pub trait Mux: Sync {
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()>;
     /// Rename a tab in place, by id.
     ///
-    /// Only ever called under [`Mux::task_owns_workspace`], on the tab a task
-    /// cut for itself — a shared tab under `MuxMode::Grouped` is never a
-    /// single task's to rename, per [`Mux::task_owns_workspace`]'s own doc.
-    /// Called both the moment such a tab is opened, whose default label is
-    /// unhelpfully numeric, and again on every later pass that finds the task
-    /// still sitting on it — a resumed dispatcher rediscovers the tab id from
-    /// the task file, never from a rename that outlived the process that made
-    /// it, so re-asserting the label costs nothing and is the only way a
-    /// resumed task's tab reliably shows its slug too.
+    /// Only ever called on the tab a task cut for itself. Called both the
+    /// moment such a tab is opened, whose default label is unhelpfully
+    /// numeric, and again on every later pass that finds the task still
+    /// sitting on it — a resumed dispatcher rediscovers the tab id from the
+    /// task file, never from a rename that outlived the process that made it,
+    /// so re-asserting the label costs nothing and is the only way a resumed
+    /// task's tab reliably shows its slug too.
     ///
     /// The default does nothing and never fails: headless records no tab to
     /// rename, and a test double with no visible tab has nothing to assert
@@ -620,9 +564,7 @@ pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
     let root = &repo.root;
     let config = &repo.config;
     Ok(match config.dispatch.backend {
-        crate::config::Backend::Herdr => {
-            Box::new(Herdr::new(root, &repo.checkout, &config.dispatch)?)
-        }
+        crate::config::Backend::Herdr => Box::new(Herdr::new(root, &repo.checkout)?),
         crate::config::Backend::Headless => {
             Box::new(crate::headless::Headless::new(root, repo.headless_dir())?)
         }
@@ -813,7 +755,7 @@ impl std::error::Error for PaneBusy {}
 #[derive(Debug)]
 pub struct Herdr {
     /// Where `herdr` is invoked from, and the repository every worktree of a
-    /// `MuxMode::Split` task is cut from: the project root.
+    /// task is cut from: the project root.
     pub cwd: PathBuf,
 
     /// The checkout a task's own workspace is anchored to — given to herdr as
@@ -839,14 +781,10 @@ pub struct Herdr {
     /// worktree actions start from the repo parent workspace."}}` — the same
     /// refusal whether the linked worktree is named directly with `--cwd` or
     /// indirectly through `--workspace <ID>` of a workspace already holding
-    /// one. Under `MuxMode::Split`, where a refusal has nowhere to fall back
-    /// to, that case is refused before this checkout is ever opened, at
+    /// one. A refusal has nowhere to fall back to, so that case is refused
+    /// before this checkout is ever opened, at
     /// [`crate::commands::dispatch::check_backend_checkout`] — called after
-    /// a `Herdr` already exists, but before any of its methods run. Under
-    /// `MuxMode::Grouped` this field is not read through `worktree open` at
-    /// all in the ordinary per-task route, so nothing there needs the same
-    /// guard — see that function's own doc for the full split between the
-    /// two.
+    /// a `Herdr` already exists, but before any of its methods run.
     ///
     /// `--workspace <ID>` itself turned out not to do what its name suggests.
     /// It never opens a tab inside the named workspace and never rebinds it:
@@ -863,25 +801,8 @@ pub struct Herdr {
     /// never passes it, and passing it would not do anything spoolway wants.
     anchor: PathBuf,
 
-    /// How this run is laid out — see [`MuxMode`], which is the one thing
-    /// deciding whether a task cuts a workspace of its own or shares its
-    /// project's pane in the run's one shared workspace.
-    mode: MuxMode,
-
-    /// Where this run's checkouts are cut, under [`MuxMode::Split`] — see
-    /// [`worktree_root`]. Never where the shared workspace itself is opened;
-    /// that is fixed, at [`dispatch_home`].
+    /// Where this run's checkouts are cut — see [`worktree_root`].
     worktree_root: PathBuf,
-
-    /// The tab `workspace create` opened the shared workspace with, recorded
-    /// only when *this* process is the one that opened it.
-    ///
-    /// A workspace cannot be created without a pane, and that pane is a bare
-    /// shell nobody asked for. [`Herdr::open_tab`] closes it once a project's
-    /// own tab exists to replace it, and remembering it rather than guessing
-    /// is what keeps a second project — or a second run of this one — from
-    /// closing a tab it never opened.
-    root_tab: Mutex<Option<String>>,
 
     /// Where this project's [`crate::lane_alias`] records live — read and
     /// written whenever a lane's full name outgrows herdr's own 32-character
@@ -911,17 +832,15 @@ pub struct Herdr {
 
 impl Herdr {
     /// `cwd` is the project root: where `herdr` is invoked from, and where
-    /// [`worktree_root`] cuts a `MuxMode::Split` task's checkouts. `checkout`
+    /// [`worktree_root`] cuts a task's checkouts. `checkout`
     /// is [`crate::repo::Repo::checkout`] — the checkout the dispatcher was
     /// actually started in — and becomes [`Herdr::anchor`]; see its doc for
     /// why the two are kept apart rather than one collapsing into the other.
-    pub fn new(cwd: &Path, checkout: &Path, config: &DispatchConfig) -> Result<Herdr> {
+    pub fn new(cwd: &Path, checkout: &Path) -> Result<Herdr> {
         Ok(Herdr {
             cwd: cwd.to_path_buf(),
             anchor: checkout.to_path_buf(),
-            mode: config.herdr_mode,
             worktree_root: worktree_root(cwd)?,
-            root_tab: Mutex::new(None),
             project_home: project_home_lenient(cwd).0,
             alias_reservation: Mutex::new(()),
         })
@@ -1077,31 +996,9 @@ impl Herdr {
         }
     }
 
-    /// The shared dispatch workspace, if this multiplexer already has one.
-    ///
-    /// Identified by its label *and* by holding no checkout, and both halves
-    /// are load-bearing. The label is fixed — [`DISPATCH_WORKSPACE_LABEL`] —
-    /// and the absent worktree is the other half, only true because the
-    /// workspace is opened on [`dispatch_home`], which is not a checkout: a
-    /// workspace opened anywhere inside a repository comes back bound to it,
-    /// which is what made this test match nothing and open a new workspace on
-    /// every single run.
-    ///
-    /// Verified against a live pair of calls, not assumed: `workspace create`
-    /// on a directory that is not a checkout answers with `worktree: null`.
-    fn dispatch_workspace_id(&self) -> Result<Option<String>> {
-        let list: WorkspaceList = self.call(&["workspace", "list"])?;
-        Ok(list
-            .workspaces
-            .into_iter()
-            .find(|w| w.label == DISPATCH_WORKSPACE_LABEL && w.worktree.is_none())
-            .map(|w| w.workspace_id))
-    }
-
-    /// Cut a task's own worktree with git, and say where it landed. Only ever
-    /// under [`MuxMode::Split`] — see [`Mux::create_workspace`]. The directory
-    /// is named after the branch slug, the rule every backend now shares — see
-    /// [`branch_slug`].
+    /// Cut a task's own worktree with git, and say where it landed. See
+    /// [`Mux::create_workspace`]. The directory is named after the branch
+    /// slug, the rule every backend now shares — see [`branch_slug`].
     fn cut_task_worktree(&self, branch: &str, base: &str) -> Result<PathBuf> {
         let path = self.worktree_root.join(branch_slug(branch));
         cut_worktree(&self.cwd, &path, branch, base)?;
@@ -1379,40 +1276,32 @@ fn choose_split(layout: RawLayout) -> Option<SplitTarget> {
     })
 }
 
-/// The id of the tab labelled `label`, if the workspace has one.
-///
-/// Its own function, like [`choose_split`], so the rule can be read against a
-/// captured `tab list` payload rather than only against a live herdr.
-///
-/// The label — always [`project_label`] — is the whole of the rule now.
-/// Once a project's tab holds nothing but lanes, each sitting in its own
-/// task's worktree, there is no anchor pane left standing in the project
-/// root to pick the tab out with, and no directory to match against. Nor
-/// can two tabs share the label and mean different projects:
-/// [`crate::commands::init::claim`] refuses a second checkout that claims a
-/// project basename already pointed at another root.
-fn find_tab_id(tabs: TabList, label: &str) -> Option<String> {
-    tabs.tabs
-        .into_iter()
-        .find(|t| t.label.as_deref() == Some(label))
-        .map(|t| t.tab_id)
-}
-
 /// The tab of a `tab list` reply that a workspace already has, if it has one
-/// — the first one herdr names, since a workspace under
-/// [`MuxMode::Split`] is never opened with more than one until a stray anchor
+/// — the first one herdr names, since a task's workspace
+/// is never opened with more than one until a stray anchor
 /// (one left by a session predating this fix, or by a crash) puts a second
 /// beside it for the sweep to find later. Its own function, like
-/// [`find_tab_id`], so it can be read against a captured `tab list` payload.
+/// [`choose_split`], so it can be read against a captured `tab list` payload.
 fn tab_in(tabs: TabList) -> Option<String> {
     tabs.tabs.into_iter().next().map(|t| t.tab_id)
+}
+
+/// Is this the shared workspace an earlier release opened for every run?
+///
+/// Identified by its label *and* by holding no checkout, and both halves are
+/// needed: the workspace was opened on a directory that is not a checkout, so
+/// herdr bound no worktree to it, while the workspace herdr labels after a
+/// repository directory carries one. Its own function, like [`tab_in`], so the
+/// rule can be read against a captured `workspace list` payload.
+fn is_retired_shared_workspace(workspace: &RawWorkspaceEntry) -> bool {
+    workspace.label == DISPATCH_WORKSPACE_LABEL && workspace.worktree.is_none()
 }
 
 /// Every pane `pane list` says sits in `tab_id`, right now — the account
 /// [`Herdr::split_pane`] takes both before and after a split, so the pane
 /// that *appeared* between the two readings is the one it trusts, rather
-/// than the split's own JSON reply. Its own function, like [`choose_split`]
-/// and [`find_tab_id`], so the rule can be read against a captured `pane
+/// than the split's own JSON reply. Its own function, like [`choose_split`],
+/// so the rule can be read against a captured `pane
 /// list` payload rather than only against a live herdr.
 fn pane_ids_in_tab(list: &PaneList, tab_id: &str) -> HashSet<String> {
     list.panes
@@ -1428,7 +1317,7 @@ fn pane_ids_in_tab(list: &PaneList, tab_id: &str) -> HashSet<String> {
 /// `before` and `after` are [`pane_ids_in_tab`]'s answer for the same tab,
 /// read from two separate `pane list` calls straddling the split; `reported`
 /// is the pane id the split's own JSON reply claimed. Its own function, like
-/// [`choose_split`] and [`find_tab_id`], so each of the three ways this can
+/// [`choose_split`], so each of the three ways this can
 /// refuse — nothing new appeared, more than one pane appeared, or the one
 /// that did disagrees with the reply — has a test of its own, rather than
 /// living only inline in [`Herdr::split_pane`] where nothing exercises the
@@ -1498,13 +1387,11 @@ struct TabList {
     tabs: Vec<RawTabRow>,
 }
 
-/// One row of `tab list`. A tab opened by hand carries no label at all, which
-/// is why this is optional rather than an empty string.
+/// One row of `tab list`. Only the id is read; the label a row carries is
+/// dropped rather than rejected.
 #[derive(Debug, Deserialize)]
 struct RawTabRow {
     tab_id: String,
-    #[serde(default)]
-    label: Option<String>,
 }
 
 /// `pane layout` answers about the whole tab the pane it was given sits in,
@@ -1649,17 +1536,6 @@ struct WorkspaceCreated {
 }
 
 #[derive(Debug, Deserialize)]
-struct TabCreated {
-    tab: RawTab,
-    root_pane: RawPane,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawTab {
-    tab_id: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct WorkspaceList {
     workspaces: Vec<RawWorkspaceEntry>,
 }
@@ -1671,10 +1547,10 @@ struct RawWorkspaceEntry {
     label: String,
     /// Absent for a workspace that is not a checkout of anything.
     ///
-    /// This absence is load-bearing: it is what tells the dispatch workspace
-    /// apart from the workspace herdr already labels after the repository
-    /// directory, which for this project is the same word. See
-    /// [`Herdr::dispatch_workspace`].
+    /// This absence is load-bearing: it is what tells the retired shared
+    /// workspace apart from the workspace herdr already labels after the
+    /// repository directory, which for this project is the same word. See
+    /// [`is_retired_shared_workspace`].
     #[serde(default)]
     worktree: Option<RawWorkspaceWorktree>,
 }
@@ -1719,80 +1595,6 @@ impl Mux for Herdr {
             .map(|r| r.pane.pane_id)
     }
 
-    fn dispatch_workspace(&self, _root: &Path, create: bool) -> Result<Option<String>> {
-        // Nothing to find and nothing to open: `split` puts every task in the
-        // project's own group and leaves the dispatcher where it was started,
-        // which is what it is for.
-        if self.mode == MuxMode::Split {
-            return Ok(None);
-        }
-        if let Some(existing) = self.dispatch_workspace_id()? {
-            return Ok(Some(existing));
-        }
-        if !create {
-            return Ok(None);
-        }
-
-        // Opened on the fixed dispatch home, shared by every project, and
-        // never on a repository. A workspace opened inside a checkout comes
-        // back bound to it, which files the run inside that project's own
-        // group and makes it unfindable next time; this directory is not a
-        // checkout, so herdr binds nothing to it.
-        let home_dir = dispatch_home();
-        std::fs::create_dir_all(&home_dir)
-            .with_context(|| format!("creating {}", home_dir.display()))?;
-        let home = home_dir.display().to_string();
-        let created: WorkspaceCreated = self.call(&[
-            "workspace",
-            "create",
-            "--cwd",
-            &home,
-            "--label",
-            DISPATCH_WORKSPACE_LABEL,
-            // Never steal focus: `dispatch` is usually started from a pane the
-            // person is watching, and a project's own tab is about to draw
-            // beside it.
-            "--no-focus",
-        ])?;
-        // The bare shell it had to be created with. Remembered so
-        // [`Herdr::open_tab`] can close exactly that tab, once a project's own
-        // tab replaces it, and no other.
-        *self.root_tab.lock().unwrap() = created.root_pane.tab_id.clone();
-        Ok(Some(created.workspace.workspace_id))
-    }
-
-    fn open_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<Workspace> {
-        let path = cwd.display().to_string();
-        let created: TabCreated = self.call(&[
-            "tab",
-            "create",
-            "--workspace",
-            workspace_id,
-            "--cwd",
-            &path,
-            "--label",
-            label,
-            "--no-focus",
-        ])?;
-
-        // Now that there is a tab beyond the bare shell `workspace create` had
-        // to open with, that shell can go — which is what makes a project's
-        // own tab the first one rather than the one after an empty prompt
-        // nobody typed into. Only ever the tab *this instance* opened: a
-        // second project finding the workspace already there recorded no
-        // root tab and closes nothing of another project's.
-        if let Some(tab) = self.root_tab.lock().unwrap().take() {
-            let _ = self.close_tab(&tab);
-        }
-
-        Ok(Workspace {
-            workspace_id: workspace_id.to_string(),
-            pane_id: created.root_pane.pane_id,
-            tab_id: Some(created.tab.tab_id),
-            checkout_path: cwd.to_path_buf(),
-        })
-    }
-
     fn open_command(&self, cwd: &Path, label: &str, command: &str) -> Result<()> {
         // A pane exactly the way `create_pane` gives a lane one — under the
         // checkout's own workspace if it already has one open, or a fresh
@@ -1801,11 +1603,6 @@ impl Mux for Herdr {
         // own environment into a fresh pane before the agent starts.
         let workspace = self.create_pane(cwd, label)?;
         self.call_ignoring_result(&["pane", "run", &workspace.pane_id, command])
-    }
-
-    fn find_tab(&self, workspace_id: &str, label: &str) -> Result<Option<String>> {
-        let tabs: TabList = self.call(&["tab", "list", "--workspace", workspace_id])?;
-        Ok(find_tab_id(tabs, label))
     }
 
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
@@ -1844,10 +1641,21 @@ impl Mux for Herdr {
         Ok(out)
     }
 
-    fn task_owns_workspace(&self) -> bool {
-        // Under `split` every task cuts a workspace of its own; under
-        // `grouped` every task is a pane in the one tab its project shares.
-        self.mode == MuxMode::Split
+    fn leave_shared_workspace(&self, workspace_id: &str, pane_id: Option<&str>) -> Result<bool> {
+        let list: WorkspaceList = self.call(&["workspace", "list"])?;
+        let shared = list
+            .workspaces
+            .iter()
+            .any(|w| w.workspace_id == workspace_id && is_retired_shared_workspace(w));
+        if !shared {
+            return Ok(false);
+        }
+        if let Some(pane_id) = pane_id {
+            // Best effort: the pane may already be gone, and the task is
+            // moved out of the shared workspace either way.
+            let _ = self.close_pane(pane_id);
+        }
+        Ok(true)
     }
 
     fn remove_checkout(&self, path: &Path) -> Result<()> {
@@ -2055,7 +1863,7 @@ impl Mux for Herdr {
                 // is reached, and nothing upstream gets a pane id to close.
                 // Exactly one new pane is provably this split's own, so it
                 // is closed here rather than left as a bare shell in the
-                // project tab on every pass — three such passes park the
+                // task's tab on every pass — three such passes park the
                 // task, each with an orphan behind it. With more than one,
                 // ownership is ambiguous and `confirm_split`'s own message
                 // says none was touched.
@@ -2091,7 +1899,7 @@ impl Mux for Herdr {
         // shell left waiting on the unterminated quote that leaves behind
         // never gets as far as the script line below it.
         //
-        // Named off `key`, never `label`: under `MuxMode::Split` `label` is
+        // Named off `key`, never `label`: `label` is
         // the step alone, and two tasks running the same step at once would
         // otherwise hand each other's environment file the same name.
         if !env.is_empty() {
@@ -2321,9 +2129,9 @@ impl Mux for Herdr {
             }
             if Instant::now() >= deadline {
                 // Left exactly as it was found. Closing it here would be the
-                // one thing a caller cannot undo, and under a shared tab a
-                // pane closed without a replacement beside it takes the tab
-                // with it.
+                // one thing a caller cannot undo, and a tab's last pane
+                // closed without a replacement beside it takes the tab with
+                // it.
                 return Ok(Vacated::StillOccupied);
             }
             std::thread::sleep(VACATE_POLL);
@@ -2358,42 +2166,23 @@ pub fn lane_name(step: &str, task: &str) -> String {
     tab_label(task, step)
 }
 
-/// What every run's one shared workspace is called, in every project.
+/// What the shared workspace earlier releases opened for every run was called.
 ///
-/// Fixed, rather than named after a project: the one thing every dispatched
-/// project has in common is that spoolway is running, and a workspace named
-/// after each project separately never said so. Two projects dispatching at
-/// once now share this one row in the sidebar, each holding a tab of its
-/// own — see [`Mux::open_tab`] — rather than a row each.
+/// Never created any more: every task has a workspace of its own. Kept only so
+/// [`Herdr::leave_shared_workspace`] can recognise a task still recorded in
+/// one, left by a release that grouped tasks into a tab per project.
 pub const DISPATCH_WORKSPACE_LABEL: &str = "spoolway-dispatcher";
 
-/// The name reserved for [`dispatch_home`], under `~/.spoolway/`. No checkout
-/// may claim it as its own directory name — `spoolway init` refuses it the
-/// same way it refuses a name another checkout already holds.
-pub const DISPATCH_HOME_NAME: &str = ".dispatcher";
-
-/// The directory the shared dispatch workspace is opened on.
-///
-/// Not a checkout of anything, which is what lets [`Herdr::dispatch_workspace_id`]
-/// find the workspace again by its label alone: a workspace opened inside a
-/// repository comes back bound to it, and this directory holds none. Named
-/// with a leading dot so that it sorts apart from every project directory
-/// beside it under `~/.spoolway/` — see [`project_home`] — and so that a name
-/// a checkout could plausibly have can never collide with it.
-pub fn dispatch_home() -> PathBuf {
-    state_root().join(DISPATCH_HOME_NAME)
-}
-
-/// `~/.spoolway/` itself: the one directory every project's home and the
-/// shared dispatch workspace sit under. Named once so that
+/// `~/.spoolway/` itself: the one directory every project's home sits
+/// under. Named once so that
 /// [`crate::repo::Repo::discover`]'s ancestor walk can refuse it by identity
 /// — it is a `.spoolway` directory, but never a project's.
 pub fn state_root() -> PathBuf {
     home().join(".spoolway")
 }
 
-/// A checkout's current basename — what its tab in the shared dispatch
-/// workspace is labelled, and what names its rows under [`MuxMode::Split`].
+/// A checkout's current basename — what names a project's rows in the
+/// sidebar and its home under `~/.spoolway/` when nothing else does.
 ///
 /// Not what [`project_home`] resolves under `~/.spoolway/` once a project has
 /// been stamped: that keeps the basename frozen at the moment of stamping
@@ -2723,9 +2512,9 @@ pub fn lane_task(name: &str) -> &str {
 /// strips it says so rather than repeating a literal nobody could check.
 const LANE_NAME_SEPARATOR: &str = " · ";
 
-/// The label a lane's own name is built from: task first, since a lane's pane
-/// sits in its project's tab, where the task is what tells one apart from
-/// another and the step is what changes as it moves.
+/// The label a lane's own name is built from: task first, since the name is
+/// what addresses the lane across every task, where the task is what tells one
+/// apart from another and the step is what changes as it moves.
 pub fn tab_label(task: &str, step: &str) -> String {
     format!("{task}{LANE_NAME_SEPARATOR}{step}")
 }
@@ -3130,8 +2919,8 @@ mod tests {
     /// every task's workspace filed under the main checkout beside it
     /// instead. The anchor is now whatever checkout it is handed, passed
     /// straight through — main checkout or linked worktree alike, since
-    /// telling the two apart and refusing one of them (under `MuxMode::Split`
-    /// only) is [`crate::commands::dispatch::check_backend_checkout`]'s job,
+    /// telling the two apart and refusing one of them (for a
+    /// linked worktree) is [`crate::commands::dispatch::check_backend_checkout`]'s job,
     /// run before this checkout is ever opened, not `Herdr::new`'s.
     #[test]
     fn herdr_anchors_a_task_workspace_to_whatever_checkout_it_was_given() {
@@ -3160,15 +2949,14 @@ mod tests {
             ],
         );
 
-        let config = crate::config::DispatchConfig::default();
-        let ordinary = Herdr::new(&work, &work, &config).unwrap();
+        let ordinary = Herdr::new(&work, &work).unwrap();
         assert_eq!(
             ordinary.anchor.canonical().unwrap(),
             work.canonical().unwrap(),
             "the main checkout anchors to itself"
         );
 
-        let from_worktree = Herdr::new(&work, &wt, &config).unwrap();
+        let from_worktree = Herdr::new(&work, &wt).unwrap();
         assert_eq!(
             from_worktree.anchor.canonical().unwrap(),
             wt.canonical().unwrap(),
@@ -3222,8 +3010,7 @@ mod tests {
             ],
         );
 
-        let config = crate::config::DispatchConfig::default();
-        let dispatcher = Herdr::new(&work, &release, &config).unwrap();
+        let dispatcher = Herdr::new(&work, &release).unwrap();
         let task_checkout = release.join(".spoolway-worktrees/task-refresh-tokens");
         let argv = worktree_open_argv(
             &dispatcher.anchor.display().to_string(),
@@ -3262,8 +3049,7 @@ mod tests {
         // this thread's own home — see [`crate::platform::test_home`] — so
         // this stands in for `~` rather than actually writing there.
         crate::platform::test_home::with_home(&base, || {
-            let config = crate::config::DispatchConfig::default();
-            let herdr = Herdr::new(&base, &base, &config).unwrap();
+            let herdr = Herdr::new(&base, &base).unwrap();
             let env = BTreeMap::from([
                 ("SPOOLWAY_TASK".to_string(), "demo".to_string()),
                 ("SPOOLWAY_STEP".to_string(), "implement".to_string()),
@@ -3397,40 +3183,6 @@ mod tests {
         assert_eq!(found.pane_id, "w65:p2");
     }
 
-    /// A project's tab is found by its label alone, read against the same
-    /// `tab list` payload herdr actually answers with — no pane, and no
-    /// directory, involved.
-    ///
-    /// Before `pane-per-task` this also had to pick the anchor's tab out from
-    /// a same-named one belonging to a different project, by the directory
-    /// its anchor stood in. That guard is gone along with the anchor: a
-    /// second checkout claiming a project basename already pointed at
-    /// another root is refused at `init` time, so a label collision between
-    /// two different projects cannot happen on one machine to begin with.
-    #[test]
-    fn a_projects_tab_is_found_by_its_label_alone() {
-        let tabs: TabList = serde_json::from_str(
-            r#"{"tabs": [
-              {"tab_id": "w66:t2", "label": "otherapp", "workspace_id": "w66"},
-              {"tab_id": "w66:t9", "label": "spoolway",  "workspace_id": "w66"}
-            ]}"#,
-        )
-        .expect("a live tab list parses");
-
-        assert_eq!(find_tab_id(tabs, "spoolway"), Some("w66:t9".to_string()));
-    }
-
-    /// A label nothing carries is a tab to open, not one to guess at: a
-    /// project whose tab is not there yet must come back as nothing at all.
-    #[test]
-    fn a_tab_nobody_has_opened_is_not_found() {
-        let tabs: TabList = serde_json::from_str(
-            r#"{"tabs": [{"tab_id": "w66:t2", "label": "otherapp", "workspace_id": "w66"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(find_tab_id(tabs, "spoolway"), None);
-    }
-
     /// The ordinary case: a workspace opened with exactly one tab, which
     /// `create_pane` must reuse rather than open a second one beside.
     #[test]
@@ -3440,6 +3192,30 @@ mod tests {
         )
         .expect("a live tab list parses");
         assert_eq!(tab_in(tabs), Some("w9:t1".to_string()));
+    }
+
+    /// Only a workspace carrying the retired shared label and no worktree is
+    /// the shared one: a repository workspace that happens to share the word
+    /// has a worktree, and a task's own workspace is labelled `spoolway/<task>`.
+    #[test]
+    fn only_a_labelled_workspace_with_no_worktree_is_the_retired_shared_one() {
+        let list: WorkspaceList = serde_json::from_str(
+            r#"{"workspaces": [
+              {"workspace_id": "w1", "label": "spoolway-dispatcher"},
+              {"workspace_id": "w2", "label": "spoolway-dispatcher",
+               "worktree": {"checkout_path": "/repo"}},
+              {"workspace_id": "w3", "label": "spoolway/demo",
+               "worktree": {"checkout_path": "/wt/demo"}}
+            ]}"#,
+        )
+        .expect("a live workspace list parses");
+        let shared: Vec<&str> = list
+            .workspaces
+            .iter()
+            .filter(|w| is_retired_shared_workspace(w))
+            .map(|w| w.workspace_id.as_str())
+            .collect();
+        assert_eq!(shared, ["w1"]);
     }
 
     /// A workspace with no tab at all — herdr has never heard of it, or its
@@ -4084,10 +3860,11 @@ mod tests {
         assert_eq!(mux.closed.lock().unwrap().as_slice(), ["pane-1"]);
     }
 
-    /// Fixed, and the same for every project: two projects dispatching at
-    /// once share one row in the sidebar rather than opening one each.
+    /// The label an earlier release gave its shared workspace. A workspace
+    /// carrying it is how a task left there is recognised, so it must keep
+    /// the spelling those releases used.
     #[test]
-    fn the_dispatch_workspace_is_shared_by_every_project() {
+    fn the_retired_shared_workspace_keeps_its_old_label() {
         assert_eq!(DISPATCH_WORKSPACE_LABEL, "spoolway-dispatcher");
     }
 
@@ -4117,30 +3894,6 @@ mod tests {
         );
     }
 
-    /// `grouped` puts every task in a pane of its project's shared tab, so
-    /// nothing may tear that tab or workspace down on a task's behalf;
-    /// `split` gives each task a workspace of its own, which is the task's to
-    /// remove.
-    #[test]
-    fn only_a_task_with_a_workspace_of_its_own_owns_one() {
-        let mut config = DispatchConfig::default();
-        let root = Path::new("/repo");
-
-        config.herdr_mode = MuxMode::Grouped;
-        assert!(
-            !Herdr::new(root, root, &config)
-                .unwrap()
-                .task_owns_workspace()
-        );
-
-        config.herdr_mode = MuxMode::Split;
-        assert!(
-            Herdr::new(root, root, &config)
-                .unwrap()
-                .task_owns_workspace()
-        );
-    }
-
     /// Two lanes with names too long for herdr's own wire rule, booting on
     /// their own threads under [`crate::dispatch::Dispatcher::start_lanes`],
     /// both reach [`Herdr::reserve_alias`] — a load-modify-save over the
@@ -4161,9 +3914,8 @@ mod tests {
         // `project_home` is resolved once, here, off this thread's home —
         // see [`crate::platform::test_home`] — so the alias file lands under
         // `root`, never the real `~/.spoolway`.
-        let herdr = crate::platform::test_home::with_home(&root, || {
-            Herdr::new(&root, &root, &DispatchConfig::default()).unwrap()
-        });
+        let herdr =
+            crate::platform::test_home::with_home(&root, || Herdr::new(&root, &root).unwrap());
 
         let lanes = [
             ("task-a · a-step-name-longer-than-herdrs-own-rule", "pane-a"),
@@ -4226,38 +3978,6 @@ mod tests {
         }
         assert!(herdr.project_home.starts_with(&root));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// `MuxMode::Grouped`'s own per-task route is `project_tab`, in
-    /// `src/dispatch.rs`: every branch of `prepare_boot`'s dispatch match —
-    /// borrowed, freshly cut, or a healed stale pane — takes the
-    /// `task_owns_workspace == false` arm into `project_tab`
-    /// unconditionally. `Mux::dispatch_workspace` opens the run's one shared
-    /// workspace on `dispatch_home()`, never a checkout, and `Mux::open_tab`
-    /// opens a task's own tab on its checkout with a plain `tab create
-    /// --cwd`; neither reads `Herdr::anchor` or calls
-    /// `open_worktree_workspace` at all, so `grouped`'s ordinary dispatch
-    /// loop never reaches it — there is no fallback to reason about because
-    /// there is nothing to fall back from. Nothing here shells out to a
-    /// real herdr, which is why this is a unit test at all — see the
-    /// module's other `self.call(...)` methods, none of which are. What
-    /// this task's actual non-goal rests on is
-    /// `check_backend_checkout`'s own tests, in `src/commands/dispatch.rs`
-    /// — `backend_checkout_refuses_herdr_on_a_dispatcher_started_in_a_linked_worktree`
-    /// for `split`, whose `Mux::create_workspace` has no such route to fall
-    /// back to, and its `_under_grouped_mode` counterpart proving `grouped`
-    /// is not refused the same checkout at all.
-    #[test]
-    fn a_grouped_herdrs_anchor_is_still_whatever_checkout_it_was_given() {
-        let mut config = DispatchConfig::default();
-        config.herdr_mode = MuxMode::Grouped;
-        let checkout = Path::new("/checkouts/release");
-        let grouped = Herdr::new(Path::new("/repo"), checkout, &config).unwrap();
-        assert_eq!(
-            grouped.anchor, checkout,
-            "mode never changes what the anchor resolves to"
-        );
-        assert!(!grouped.task_owns_workspace());
     }
 
     /// Every worktree builds its own `target/debug`. A symlink into one

@@ -3769,8 +3769,8 @@ mod tests {
 
             // `mux.rs` and `models.rs` join a `.spoolway/…` literal onto a
             // different directory entirely: `crate::mux::home()`, the
-            // machine's own `~/.spoolway/` (project homes, the shared
-            // dispatch workspace, the vendored model-price cache) rather
+            // machine's own `~/.spoolway/` (project homes, the vendored
+            // model-price cache) rather
             // than a checkout's tracked control plane — see
             // [`crate::mux::state_root`]. Out of scope for this rule, which
             // is only about the checkout-relative folder `Repo::setup_dir`

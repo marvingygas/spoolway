@@ -99,7 +99,6 @@ export HERDR_STUB_STATE="$HSTATE"
 PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
 
 cat > .spoolway/pipelines/selfsweep.yml <<'YML'
 description: One command step that passes at once, so a run against the herdr double reaches an ordinary end in a single pass.

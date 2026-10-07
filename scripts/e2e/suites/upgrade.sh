@@ -287,7 +287,25 @@ assert_init_reused_everything 0.6.0
 PIPELINE=".spoolway/pipelines/default.yml"
 cp "$PIPELINE" "$WORK/0.6.0/before-default.yml"
 
+# 0.6.0's own `init` wrote `dispatch.herdr_mode = "split"`. The key is retired
+# now that every task runs in a herdr workspace of its own, so the file must
+# still load, say so once, and lose the key on `sync`.
+"$SPOOLWAY" pipeline check >"$WORK/0.6.0/check-before.out" 2>&1 || true
+has "the 0.6.0 fixture's retired herdr_mode still loads, with a note naming it" \
+  "note: dispatch.herdr_mode in" "$WORK/0.6.0/check-before.out"
+has "and the note says every task now runs in a workspace of its own" \
+  "a herdr workspace of its own" "$WORK/0.6.0/check-before.out"
+HERDR_NOTES=$(grep -c "dispatch.herdr_mode" "$WORK/0.6.0/check-before.out" || true)
+if [ "$HERDR_NOTES" = "1" ]; then
+  ok "and it says so exactly once"
+else
+  bad "and it says so exactly once (said it $HERDR_NOTES times)"
+fi
+
 must "spoolway sync runs against the 0.6.0 project" "$SPOOLWAY" sync
+
+lacks "sync dropped the retired herdr_mode key, and its header row with it" \
+  "herdr_mode" .spoolway/config.toml
 
 has "the housekeeping value the 0.6.0 fixture set survives the sync" \
   "retention_days = 45" .spoolway/config.toml

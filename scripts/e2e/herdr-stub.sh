@@ -224,7 +224,7 @@ case "$DOMAIN $VERB" in
 
   "workspace create")
     # No checkout bound: this is the call herdr answers with `worktree: null`,
-    # and `Herdr::dispatch_workspace` leans on that absence.
+    # and `mux::is_retired_shared_workspace` leans on that absence.
     make_workspace "${FLAG[label]:-}" "" "${FLAG[cwd]:-$PWD}"
     ;;
 

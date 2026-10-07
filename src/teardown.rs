@@ -214,8 +214,6 @@ impl<'a> Dispatcher<'a> {
         }
         drop(index_guard);
 
-        self.close_project_tab_if_empty(task);
-
         // The task has left the queue for good. Its hook and command run
         // files under `tracking/` and `commands/` are litter now, and left
         // in place `tracking::failure_count` would go on counting a failed
@@ -334,31 +332,6 @@ impl<'a> Dispatcher<'a> {
         ));
     }
 
-    /// Close this project's shared tab, once the project has nothing left in
-    /// the queue.
-    ///
-    /// Called with the task already archived, so what is left to read is
-    /// exactly what the project still has to do: a sibling still queued,
-    /// still running or still blocked is a pane this tab is about to hold
-    /// again, and closing it under them would take a live lane with it.
-    ///
-    /// Under `split` there is nothing here to do — the task's own workspace
-    /// is already gone with [`Dispatcher::tear_down_checkout`], and the tab
-    /// recorded on it went with it.
-    fn close_project_tab_if_empty(&mut self, task: &Task) {
-        if self.mux.task_owns_workspace() {
-            return;
-        }
-        let Some(tab_id) = task.front.tab_id.clone() else {
-            return;
-        };
-        let left = self.repo.tasks().unwrap_or_default();
-        if left.iter().any(|other| other.id() != task.id()) {
-            return;
-        }
-        let _ = self.mux.close_tab(&tab_id);
-    }
-
     /// Give back everything a task's checkout is holding: its workspace, the
     /// worktree under it, and — if every commit on it has reached a remote —
     /// the local branch it was cut on.
@@ -371,14 +344,6 @@ impl<'a> Dispatcher<'a> {
     /// `report` is where a branch kept because it is not fully pushed gets
     /// named — see the comment on the delete itself, below.
     pub(crate) fn tear_down_checkout(&mut self, task: &mut Task, report: &mut Report) {
-        // Whether the workspace recorded on this task is the task's own or the
-        // one the whole run shares — see [`Mux::task_owns_workspace`]. Under
-        // `grouped` every task is a pane in the tab its project shares, so
-        // there is nothing of the task's own to close here at all — its lane
-        // pane is already stopped by the time this runs, and the shared tab
-        // is not this task's to close.
-        let owns_workspace = self.mux.task_owns_workspace();
-
         // The checkout this task cut for itself, if it cut one. A borrowed
         // checkout is somebody else's and is never removed here, whatever else
         // happens below. Read from what was recorded when the lane was set up,
@@ -389,7 +354,43 @@ impl<'a> Dispatcher<'a> {
             false => task.front.worktree_path.clone(),
         };
 
-        if owns_workspace && let Some(workspace) = task.front.workspace_id.clone() {
+        // A task an earlier release left in the shared dispatch workspace has
+        // no workspace or tab of its own: both ids name ones every other
+        // grouped task of every project is still using, so removing or
+        // closing either would take their panes with it. Only the task's own
+        // pane goes — `leave_shared_workspace` closes it — and its checkout,
+        // which was cut for it alone, is removed below like any workspace-less
+        // one.
+        //
+        // A lookup that fails is an unknown answer, not a `false`: acting on
+        // `false` would run `remove_workspace` on ids that may be the shared
+        // ones, which herdr refuses for want of a worktree, and the fallback
+        // then closes the whole workspace. So an unknown answer is treated as
+        // the shared case, and the failure is named for a person to see.
+        let in_shared_workspace = match task.front.workspace_id.as_deref() {
+            Some(workspace) => match self
+                .mux
+                .leave_shared_workspace(workspace, task.front.pane_id.as_deref())
+            {
+                Ok(shared) => shared,
+                Err(err) => {
+                    report.problems.push(format!(
+                        "{}: could not tell whether workspace `{workspace}` is the shared \
+                         one, so it was left standing: {err:#}",
+                        task.id()
+                    ));
+                    true
+                }
+            },
+            None => false,
+        };
+
+        if let Some(workspace) = task
+            .front
+            .workspace_id
+            .clone()
+            .filter(|_| !in_shared_workspace)
+        {
             // Which call this is matters more than it looks: one removes the
             // worktree under the workspace, and a borrowed workspace is pointed
             // at somebody's own checkout. Already gone is a fine outcome, not
@@ -439,12 +440,10 @@ impl<'a> Dispatcher<'a> {
             }
         } else if let Some(checkout) = &own_checkout {
             // Nothing above took the checkout with it, and it is still
-            // spoolway's own cut. Either this run groups its tasks into one
-            // shared tab, so the worktree was made with git directly and has no
-            // row of its own to go with — see
-            // [`crate::mux::Mux::create_workspace`] — or the task holds a
-            // worktree with no workspace recorded against it at all, which used
-            // to leak for want of anywhere to hang the removal.
+            // spoolway's own cut: the task holds a worktree with no workspace
+            // of its own to go with — none recorded at all, which used to
+            // leak for want of anywhere to hang the removal, or only the
+            // shared one an earlier release grouped tasks into.
             let _ = self.mux.remove_checkout(checkout);
         }
 
@@ -1055,7 +1054,6 @@ pub fn discard_trial(
             removed += 1;
         }
         drop(index_guard);
-        dispatcher.close_project_tab_if_empty(&arm);
     }
 
     // The same shape `settle_trial_if_last_arm` prints, so the two triggers
