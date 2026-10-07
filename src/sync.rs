@@ -1905,6 +1905,39 @@ mod tests {
         )
     }
 
+    /// A checkout in home mode: it has no `.spoolway/` folder, and a
+    /// workspace's `project.toml` under a scratch `$HOME` lists it, so
+    /// `repo.setup_dir()` is the workspace's `config/` — which starts out
+    /// empty. Returns the scratch `$HOME` to run under
+    /// [`crate::platform::test_home::with_home`].
+    fn home_mode_fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot, PathBuf) {
+        let root = crate::scratch::root(&format!("sync-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join(".ws-home");
+        let workspace = home.join(".spoolway").join("home-mode-ws");
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"home-mode-ws\"\nclones = [{{ root = {:?}, dispatcher = \"api\" }}]\n",
+                root.display(),
+            ),
+        )
+        .unwrap();
+        let repo = Repo {
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+        (repo, root, home)
+    }
+
+    /// The workspace's `config/` for a [`home_mode_fixture`] repo.
+    fn workspace_config_dir(repo: &Repo, home: &Path) -> PathBuf {
+        crate::platform::test_home::with_home(home, || repo.setup_dir())
+    }
+
     fn args() -> SyncArgs {
         SyncArgs {
             dry_run: false,
@@ -1948,19 +1981,7 @@ mod tests {
     /// `repo.checkout` whether or not a workspace claims it.
     #[test]
     fn sync_writes_nothing_into_a_home_mode_checkout() {
-        let (repo, _root_guard) = fixture("home-mode");
-        let home = repo.root.join(".ws-home");
-        let _ = std::fs::remove_dir_all(&home);
-        let workspace = home.join(".spoolway").join("home-mode-ws");
-        std::fs::create_dir_all(workspace.join("config")).unwrap();
-        std::fs::write(
-            workspace.join(crate::repo::BINDING_FILE),
-            format!(
-                "id = \"home-mode-ws\"\nclones = [{{ root = {:?}, dispatcher = \"api\" }}]\n",
-                repo.root.display(),
-            ),
-        )
-        .unwrap();
+        let (repo, _root_guard, home) = home_mode_fixture("home-mode");
 
         // A tracked `.gitignore` carrying spoolway's own marked block —
         // `sync`'s `ignores` step removes this in repo mode, but must leave
@@ -2000,6 +2021,97 @@ mod tests {
             std::fs::read_to_string(&first.path).unwrap(),
             "stale, from an older release\n",
             "home mode must leave an installed skill in the checkout untouched"
+        );
+    }
+
+    /// The workspace's `config/` is where the fixture says it is, and the
+    /// checkout carries no `.spoolway/` — so every test below that finds
+    /// something under `config/` is proving the workspace was written, not
+    /// the checkout.
+    #[test]
+    fn the_home_mode_fixture_resolves_to_the_workspace_config() {
+        let (repo, _root_guard, home) = home_mode_fixture("home-fixture");
+        let config_dir = workspace_config_dir(&repo, &home);
+        assert_eq!(
+            config_dir,
+            home.join(".spoolway").join("home-mode-ws").join("config")
+        );
+        assert!(!repo.checkout.join(".spoolway").exists());
+    }
+
+    /// A missing `config.toml` is written under the workspace's `config/`,
+    /// and no `.spoolway/` appears in the checkout.
+    #[test]
+    fn a_home_mode_sync_writes_a_missing_config_into_the_workspace() {
+        let (repo, _root_guard, home) = home_mode_fixture("home-missing-config");
+        let config_dir = workspace_config_dir(&repo, &home);
+        assert!(!config_dir.join(crate::config::CONFIG_FILE).exists());
+
+        crate::platform::test_home::with_home(&home, || {
+            run(&repo, &args(), false).unwrap();
+        });
+
+        assert!(
+            config_dir.join(crate::config::CONFIG_FILE).is_file(),
+            "config.toml should be written under the workspace's config/"
+        );
+        assert!(
+            !repo.checkout.join(".spoolway").exists(),
+            "home mode must not create .spoolway/ in the checkout"
+        );
+    }
+
+    /// A stale `config.toml` and a pipeline file with a stale key reference,
+    /// both in the workspace's `config/`, are rewritten in place. The
+    /// checkout gains nothing.
+    #[test]
+    fn a_home_mode_sync_rewrites_stale_workspace_files_in_place() {
+        let (repo, _root_guard, home) = home_mode_fixture("home-stale");
+        let config_dir = workspace_config_dir(&repo, &home);
+
+        let config_path = config_dir.join(crate::config::CONFIG_FILE);
+        std::fs::write(
+            &config_path,
+            "[dispatch]\nbackend = \"headless\"\nlane_quiet = \"45m\"\n",
+        )
+        .unwrap();
+        let pipelines_dir = config_dir.join(crate::pipeline::PIPELINE_DIR);
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        let pipeline_path = pipelines_dir.join("hotfix.yml");
+        std::fs::write(
+            &pipeline_path,
+            format!(
+                "# hotfix — mine.\n\n{}\n# Top level\n#   template    What this used to say.\n{}\n\n\
+                 steps:\n  - id: work\n    end: true\n",
+                crate::assets::PIPELINE_KEYS_BEGIN,
+                crate::assets::PIPELINE_KEYS_END
+            ),
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            run(&repo, &args(), false).unwrap();
+        });
+
+        let config_after = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            config_after.contains("lane_quiet = \"45m\""),
+            "{config_after}"
+        );
+        assert!(
+            config_after.contains("auto_commit"),
+            "a setting the file lacked should be added: {config_after}"
+        );
+        let pipeline_after = std::fs::read_to_string(&pipeline_path).unwrap();
+        assert!(
+            pipeline_after.contains(crate::pipeline::key_block()),
+            "{pipeline_after}"
+        );
+        assert!(!pipeline_after.contains("What this used to say"));
+        assert!(pipeline_after.contains("# hotfix — mine."));
+        assert!(
+            !repo.checkout.join(".spoolway").exists(),
+            "home mode must not create .spoolway/ in the checkout"
         );
     }
 

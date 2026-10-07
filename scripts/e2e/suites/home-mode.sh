@@ -121,6 +121,13 @@ must "the stale .gitignore block and skill folder are committed" \
   git commit -qm "e2e: a stale spoolway .gitignore block and skill folder"
 before_sync=$(git rev-parse HEAD)
 
+# The checkout staying unchanged does not show that sync did its work: one that
+# skipped the workspace entirely would pass that too. So the workspace's own
+# config.toml is made stale first, cut down to a file written before most
+# settings existed, and checked again once sync has run.
+printf '[dispatch]\nlane_quiet = "45m"\n' > "$WS/config/config.toml"
+lacks "the workspace's config.toml is stale before the sync" "auto_commit" "$WS/config/config.toml"
+
 works "a dry-run sync runs cleanly in home mode" "$SPOOLWAY" sync --dry-run
 works "a real sync runs cleanly in home mode" "$SPOOLWAY" sync
 if [ "$(git rev-parse HEAD)" = "$before_sync" ] && [ -z "$(git status --porcelain --ignored)" ]; then
@@ -129,6 +136,8 @@ else
   bad "sync leaves the checkout unchanged"
   git status --porcelain --ignored | sed 's/^/        /'
 fi
+has "sync brought the workspace's config.toml current" "auto_commit" "$WS/config/config.toml"
+has "sync kept the value the workspace's config.toml already had" 'lane_quiet = "45m"' "$WS/config/config.toml"
 has "the .gitignore still carries spoolway's old block" "# >>> spoolway >>>" .gitignore
 has "the stale skill file is unchanged" "stale, from before this checkout moved into the workspace" \
   .claude/skills/spoolway-config/SKILL.md
