@@ -7,27 +7,44 @@
 # codes. This one cannot be. What it is about is the last link in a chain that
 # nothing else can reach:
 #
-#     a real transcript → usage::touched_at → carried_session → resume
+#     a real transcript → usage::session_age → carried_session → resume
 #
 # `dispatch::tests::carried_session_reports_which_of_the_four_misses_it_was`
 # proves the same bound with a transcript the test writes to order — and a
 # transcript a test writes is a transcript that agrees with spoolway's parser
-# by construction, mtime included. What it cannot say is whether a transcript
-# *Claude Code actually writes today* still
-# leaves spoolway anything to read at all: `read_turn`'s claude arm still
-# splits `usage.cache_creation` by lifetime, which is what the billed cost of
-# a cache write is priced off, quite apart from the horizon this suite is
-# named for. If that shape ever moved, every claude session would still be
-# aged correctly off its file's own mtime — the horizon does not depend on
-# it — but its cost would silently be wrong, with nothing anywhere going red.
-# `check_shape` below is what stands in the gap.
+# by construction. What it cannot say is whether a transcript *Claude Code
+# actually writes today* still leaves spoolway anything to read at all: the age
+# of a session is the timestamp of its last reply, read out of the transcript,
+# and `read_turn`'s claude arm splits `usage.cache_creation` by lifetime, which
+# is what the billed cost of a cache write is priced off. If either shape ever
+# moved, nothing anywhere would go red — and a missing reply timestamp is
+# worse, since age then falls back to the modified time, which with real waits
+# is nearly the same and would keep every check here green. `check_shape` below
+# is what stands in the gap for both.
 #
 # And it has to be a *cloud* model for the same reason it always did: `claude`
 # is the one kind this project ever spends real money running headlessly, and
 # the shape worth watching is its transcript's, not pi's.
 #
-# **Cost.** Eight turns of `claude-haiku-4-5` — six through the pipeline
-# scenarios, two more through `agent verify --live` at the end — each a few
+# **Real waits.** Age is never faked. The suite never edits a transcript at
+# all: every byte stays as Claude Code wrote it, and a session is old because
+# the suite waited. That is why a run takes about ten minutes:
+#
+#     0:00  a real lane runs one turn and holds at the first gate
+#     2:00  resume → the same session, and its first turn reads the cache
+#           the lane settles at a second gate
+#     8:00  resume → a fresh session, because the default five minutes have
+#           passed since the last reply
+#
+# The suite checks spoolway's call at eight minutes and does not assert the
+# cache is cold then: Claude Code often writes to the one-hour cache, which is
+# still warm. What the two-minute check adds is Anthropic's own
+# `cache_read_input_tokens`, so a pass shows a warm resume really hit the
+# cache. A failure prints the turn's usage, which tells an early eviction on
+# Anthropic's side from a bug here.
+#
+# **Cost.** Five turns of `claude-haiku-4-5` — three through the pipeline
+# scenario, two more through `agent verify --live` at the end — each a few
 # thousand tokens against a fixture repo of two files. Fractions of a cent, and
 # it is opt-in either way: nothing here runs unless `SPOOLWAY_E2E_CLOUD=1` is
 # set. It is in no local tier.
@@ -36,13 +53,9 @@
 # credentials, and its transcripts land where it puts them. What it writes there
 # is its own new sessions, in a project directory named after this suite's
 # scratch tree — the same thing running `claude` in a new directory does. It
-# edits nothing of yours. The one transcript it *does* edit is one of its own,
-# and only its mtime: a store sitting past `prompt_cache_ttl` is not a wait a
-# test can perform, so the stale scenarios move the file's clock back instead.
-# Every field inside it stays exactly as Claude Code wrote it, which is the
-# whole point.
+# edits nothing of yours, and nothing of its own either.
 #
-# covers: models.<glob>.prompt_cache_ttl — against a real claude session: unset, a store past the 5m default is refused; "0", one of any age still resumes
+# covers: models.<glob>.prompt_cache_ttl — against a real claude session, aged by waiting: unset, a resume inside the 5m default continues the session and reads the cache, and one past it is refused
 # covers: agent.verify.live — every transcript reading, off a real turn and a resumed one, named one by one
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -125,7 +138,7 @@ ln -sf "$SPOOLWAY" "$LIVE/bin/spoolway"
 # with the previous run's own home still sitting behind wherever it landed.
 new_repo "$LIVE/proj"
 # What actually keeps this run clean is the sweep below. Every task this
-# suite mints is named below (`warm`, `thaw`, `chill`, `stuck`), so a stale
+# suite mints is named below (`waits`, `stuck`), so a stale
 # `proj-*` home is this suite's own leavings and nothing else's: remove it
 # before init writes the fresh one.
 #
@@ -150,16 +163,16 @@ must "one cloud lane at a time"  "$SPOOLWAY" config set agents.claude.concurrenc
 must "the model's window"        "$SPOOLWAY" config set "models.$MODEL.context_window" 200000
 must "a share nothing crosses"   "$SPOOLWAY" config set agents.claude.session_reuse_ctx 90
 
-# Two visits by one prompt, with a gate between them.
+# Three visits by one prompt, with a gate after each of the first two.
 #
 # The gate is the sequencing, and it is the only way to get one: the decision
-# under test is taken when the *second* lane starts, and it is taken in the same
-# pass that banks the first lane's ledger line — so there is no gap between them
-# for a suite to reach into and doctor a transcript. `gate: true` opens one that
-# spoolway itself holds. The task parks on `paused` with the first lane's spend
-# banked, the suite does its work, and `spoolway resume` starts the second.
+# under test is taken when the next lane starts, in the same pass that banks the
+# previous lane's ledger line — so there is no gap between them for a suite to
+# wait in. `gate: true` opens one that spoolway itself holds. The task parks on
+# `paused` with the lane's spend banked, the suite waits a real while, and
+# `spoolway resume` starts the next lane.
 cat > .spoolway/pipelines/warmth.yml <<YAML
-# Written by scripts/e2e/suites/warmth.sh. Two steps, one prompt, one gate.
+# Written by scripts/e2e/suites/warmth.sh. Three steps, one prompt, two gates.
 steps:
   - id: first
     description: Write the note, and stop for a person.
@@ -170,7 +183,16 @@ steps:
     on_pass: second
 
   - id: second
-    description: Come back to the same conversation, or not — which is the subject.
+    description: Come back to the same conversation about two minutes on, and stop again.
+    agent: claude
+    prompt: builder
+    model: $MODEL
+    session: true
+    gate: true
+    on_pass: third
+
+  - id: third
+    description: Come back after the five minutes have passed — and open fresh.
     agent: claude
     prompt: builder
     model: $MODEL
@@ -202,18 +224,18 @@ TASKBODY
 
 # ------------------------------------------------------------------- helpers
 
-# The session the first lane actually opened, out of the ledger — which is the
+# The session a step's lane actually ran in, out of the ledger — which is the
 # same correlation `carried_session` makes, so reading it here is reading what
 # the decision under test will read.
 session_of() {
-  local task=$1 line
+  local task=$1 step=${2:-first} line
   line=$(grep "\"task\":\"$task\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl" 2>/dev/null \
-         | grep '"step":"first"' | tail -1)
+         | grep "\"step\":\"$step\"" | tail -1)
   [ -n "$line" ] || return 1
   sed -n 's/.*"session":"\([^"]*\)".*/\1/p' <<<"$line"
 }
 
-# Whether the first lane's spend has reached the ledger yet.
+# Whether a step's spend has reached the ledger yet.
 #
 # Two different writers, and the suite has to wait for the second: the *lane*
 # writes the stage when it reports, and the *dispatcher* banks the spend on the
@@ -221,7 +243,7 @@ session_of() {
 # stops it before the ledger line exists — and then waiting for that line is
 # waiting for something nothing is left running to do.
 banked() {
-  poll_until 90 grep -q "\"task\":\"$1\".*\"step\":\"first\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl"
+  poll_until 90 grep -q "\"task\":\"$1\".*\"step\":\"$2\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl"
 }
 
 # Where the real claude put it. Never guessed at: both agents shard their
@@ -232,17 +254,7 @@ transcript_of() {
   find "$HOME/.claude/projects" -name "$1.jsonl" -print -quit 2>/dev/null
 }
 
-# Move a real transcript's own clock back, and nothing else about it.
-#
-# `touched_at` reads the store's mtime, not any record inside it, so ageing a
-# session for this suite means moving the file's clock rather than rewriting
-# its content — every byte Claude Code wrote stays exactly as it wrote it.
-backdate() {
-  touch -d "-$2 seconds" "$1"
-}
-
-# Whether the second lane carried the first one's conversation, read off the
-# task's own record.
+# Whether a step opened a fresh session, read off the task's own record.
 #
 # Not off the lane's log: a real `claude --print` writes its *answer* there and
 # nothing about how it was launched, so the "this is your own session,
@@ -254,38 +266,41 @@ backdate() {
 # `dispatch::prepare_boot`.
 #
 # Read out of the archive, since a landed task has left the queue.
-carried() {
-  local task=$1 fresh=$2 what=$3
-  if [ "$fresh" -eq 1 ]; then
-    has   "$what" 'opened fresh' "$SPOOLWAY_PROJECT_HOME/archive/$task.md"
+opened_fresh() {
+  local task=$1 step=$2 what=$3 file="$SPOOLWAY_PROJECT_HOME/archive/$1.md"
+  if grep -qE "\`$step\`.*opened fresh" "$file" 2>/dev/null; then
+    ok "$what"
   else
-    lacks "$what" 'opened fresh' "$SPOOLWAY_PROJECT_HOME/archive/$task.md"
+    bad "$what (no \`$step\` ... opened fresh in $file)"
   fi
 }
 
-# One scenario: run the first lane for real, hold at the gate, do `$3`, resume.
-#
-# `$1` is the task, `$2` how long a real lane may take, `$3` a function run
-# while the queue is held still.
-at_the_gate() {
-  local task=$1 secs=$2 doctor=$3
-  task_doc "$LIVE/$task.md" "$task" "$BODY" \
-    "group: $task" "pipeline: warmth"
-  must "a task for $task" "$SPOOLWAY" queue add --from "$LIVE/$task.md"
-  if ! drive "$task" paused "$secs"; then
-    bad "$task: the first real lane reached the gate (at \`$(stage_of "$task")\`)"
-    tail -20 "$SPOOLWAY_PROJECT_HOME/headless/logs/$task · first.log" 2>/dev/null | sed 's/^/        /'
+# When the last lane was banked, in `$SECONDS`. A session's age is measured from
+# its last reply, which is written before the pass that banks the spend, so
+# waiting this long from here is never less than the age asked for.
+BANKED_AT=0
+
+# Wait, for real, until the last banked lane is at least `$1` seconds old.
+age() {
+  while [ $((SECONDS - BANKED_AT)) -lt "$1" ]; do sleep 5; done
+}
+
+# Run a step's lane for real, to the gate after it, with the dispatcher stopped
+# and nothing done to the transcript. `$1` is the task and `$2` the step.
+reach_gate() {
+  local task=$1 step=$2
+  if ! drive "$task" paused 600; then
+    bad "$task: the \`$step\` real lane reached its gate (at \`$(stage_of "$task")\`)"
+    tail -20 "$SPOOLWAY_PROJECT_HOME/headless/logs/$task · $step.log" 2>/dev/null | sed 's/^/        /'
     return 1
   fi
-  ok "$task: a real lane ran, reported a pass, and the gate held it on \`paused\`"
-  if ! banked "$task"; then
-    bad "$task: and the pass that parked it banked what it spent"
+  if ! banked "$task" "$step"; then
+    bad "$task: the pass that parked \`$step\` banked what it spent"
     dispatcher_stop
     return 1
   fi
+  BANKED_AT=$SECONDS
   dispatcher_stop
-  "$doctor" "$task" || return 1
-  must "resume $task" "$SPOOLWAY" resume "$task"
   return 0
 }
 
@@ -345,6 +360,8 @@ for line in open(sys.argv[1]):
         last = record
 if last is None:
     sys.exit("no assistant record")
+if not isinstance(last.get("timestamp"), str):
+    sys.exit("no `timestamp` on the last reply — a session's age would fall back to the modified time")
 usage = last.get("message", {}).get("usage", {})
 detail = usage.get("cache_creation")
 if not isinstance(detail, dict):
@@ -355,72 +372,87 @@ if not any(k in detail for k in buckets):
 if not any(detail.get(k, 0) for k in buckets):
     sys.exit("every cache bucket is zero — this turn wrote to no cache to measure")
 PY
-  then ok "a real turn still carries the cache split billing is read from"
-  else bad "a real turn still carries the cache split billing is read from"; fi
+  then ok "a real turn still carries the reply timestamp and the cache split billing is read from"
+  else bad "a real turn still carries the reply timestamp and the cache split billing is read from"; fi
 
   printf '%s\n' "$file" > "$LIVE/transcript.$task"
   return 0
 }
 
-# ------------------------------------------------------------- warm, resumed
+# --------------------------------------------------- one task, gated twice
 #
 # No `prompt_cache_ttl` is set on this model — every model ships that way, so
-# the five-minute default applies — and the store is untouched, well inside it,
-# so the conversation is carried. On its own this proves little, and that is
-# exactly why it is here: it is the control the two scenarios below are
-# measured against. Same lane, same transcript, one thing different each time.
-if at_the_gate warm 600 check_shape; then
-  if drive warm gone 600; then
-    ok "the second real lane runs and the task lands"
-    carried warm 0 "a fresh real session is resumed"
-  else
-    bad "the second real lane runs and the task lands (at \`$(stage_of warm)\`)"
-    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/warm · second.log" 2>/dev/null | sed 's/^/        /'
-  fi
-fi
+# the five-minute default applies, and nothing in the project names the limit.
+task_doc "$LIVE/waits.md" waits "$BODY" "group: waits" "pipeline: warmth"
+must "a task for waits" "$SPOOLWAY" queue add --from "$LIVE/waits.md"
+if reach_gate waits first; then
+  ok "a real lane ran, reported a pass, and the gate held it on \`paused\`"
+  check_shape waits
+  first_sid=$(session_of waits first)
+  # How long the transcript is at the gate, so the check below can find the
+  # first turn the resumed lane added.
+  FIRST_LINES=$(wc -l < "$(transcript_of "$first_sid")" 2>/dev/null || echo 0)
 
-# ------------------------------------------ old, past the default horizon
-#
-# Still no `prompt_cache_ttl` on this model — the store is just old now, two
-# hours backdated. A hosted model with nothing set is limited to five minutes
-# by default, so a store that has sat this long is refused rather than
-# resumed, whatever it is made of. Nothing in the project names the limit:
-# this is the default doing its job against a real session.
-stale() {
-  local task=$1 sid file
-  sid=$(session_of "$task") || return 1
-  file=$(transcript_of "$sid")
-  [ -n "$file" ] || { bad "no transcript to age"; return 1; }
-  backdate "$file" 7200
-  return 0
-}
+  # About two minutes on, well inside the default horizon, so the conversation
+  # is carried. The resumed lane's first turn must read Anthropic's cache. A
+  # failure prints that turn's usage: zero cache read with a healthy shape is
+  # an eviction on Anthropic's side, and a missing usage block is a bug here.
+  age 120
+  must "resume waits" "$SPOOLWAY" resume waits
+  if reach_gate waits second; then
+    second_sid=$(session_of waits second)
+    if [ -n "$first_sid" ] && [ "$first_sid" = "$second_sid" ]; then
+      ok "a resume at 2m continued the same session"
+    else
+      bad "a resume at 2m continued the same session (first \`$first_sid\`, second \`$second_sid\`)"
+      grep '"task":"waits"' "$SPOOLWAY_PROJECT_HOME/usage.jsonl" | sed 's/^/        /'
+    fi
+    if usage=$(python3 - "$(transcript_of "$second_sid")" "$FIRST_LINES" <<'PY'
+import json, sys
+path, skip = sys.argv[1], int(sys.argv[2])
+for n, line in enumerate(open(path)):
+    if n < skip:
+        continue
+    try:
+        record = json.loads(line)
+    except ValueError:
+        continue
+    if record.get("type") != "assistant":
+        continue
+    usage = record.get("message", {}).get("usage", {})
+    print(json.dumps(usage))
+    sys.exit(0 if usage.get("cache_read_input_tokens", 0) > 0 else 1)
+print("{}")
+sys.exit(1)
+PY
+    ); then
+      ok "its first turn read the cache (cache_read_input_tokens > 0)"
+    else
+      bad "its first turn read the cache (cache_read_input_tokens > 0)"
+      printf '        first turn usage after the resume: %s\n' "${usage:-none found}"
+    fi
 
-if at_the_gate thaw 600 stale; then
-  if drive thaw gone 600; then
-    ok "the second real lane runs and that task lands too"
-    carried thaw 1 "with no prompt_cache_ttl set, a two-hour-old real store is refused and a fresh one opened"
-    has "and the task file says which bound refused it" \
-      "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/thaw.md"
-  else
-    bad "the second real lane runs and that task lands too (at \`$(stage_of thaw)\`)"
-    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/thaw · second.log" 2>/dev/null | sed 's/^/        /'
-  fi
-fi
-
-# ------------------------------------------------------ old, and no horizon
-#
-# The discriminating case: the same two hours of age, and now the model says
-# `prompt_cache_ttl = "0"`, which lifts the limit. The store's age refuses
-# nothing, and the conversation is carried regardless — which is what the
-# retired `session_reuse_uncached = true` used to mean.
-must "no horizon" "$SPOOLWAY" config set "models.$MODEL.prompt_cache_ttl" 0
-if at_the_gate chill 600 stale; then
-  if drive chill gone 600; then
-    ok "the second real lane runs and that task lands too"
-    carried chill 0 "with prompt_cache_ttl = \"0\", a two-hour-old real store still resumes"
-  else
-    bad "the second real lane runs and that task lands too (at \`$(stage_of chill)\`)"
-    tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/chill · second.log" 2>/dev/null | sed 's/^/        /'
+    # More than five minutes after the second lane's last reply, with the
+    # default still in force: the store is refused and the ledger names a new
+    # session. Nothing here says the cache is cold — Claude Code often writes
+    # to the one-hour cache. The check is spoolway's call.
+    age 360
+    must "resume waits again" "$SPOOLWAY" resume waits
+    if drive waits gone 600; then
+      third_sid=$(session_of waits third)
+      if [ -n "$third_sid" ] && [ "$third_sid" != "$second_sid" ]; then
+        ok "a resume at 8m opened a fresh session"
+      else
+        bad "a resume at 8m opened a fresh session (second \`$second_sid\`, third \`$third_sid\`)"
+        grep '"task":"waits"' "$SPOOLWAY_PROJECT_HOME/usage.jsonl" | sed 's/^/        /'
+      fi
+      opened_fresh waits third "and the task file says the third step opened fresh"
+      has "and which bound refused it" \
+        "prompt_cache_ttl — opened fresh" "$SPOOLWAY_PROJECT_HOME/archive/waits.md"
+    else
+      bad "a resume at 8m opened a fresh session (the task stopped at \`$(stage_of waits)\`)"
+      tail -10 "$SPOOLWAY_PROJECT_HOME/headless/logs/waits · third.log" 2>/dev/null | sed 's/^/        /'
+    fi
   fi
 fi
 
@@ -456,7 +488,7 @@ else
 fi
 has "the tokens come back off the transcript claude actually wrote" \
   "tokens read back" "$LIVE_OUT"
-has "and so does the mtime this whole suite's horizon is read against" \
+has "and so does the transcript mtime the stall watchdog reads" \
   "mtime moved while the turn ran" "$LIVE_OUT"
 has "and the running totals the ledger banks" \
   "running totals read back" "$LIVE_OUT"
