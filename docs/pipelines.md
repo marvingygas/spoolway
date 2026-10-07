@@ -286,6 +286,13 @@ A build, a test suite, a formatter or a deploy script is a command step.
   passes when it starts, so it has no exit to hold, and `gate` is refused there.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
+- Every arrival at a command step runs the command in full. The move onto the step stops any old
+  run still going and deletes its exit code, pid and kill count. The log stays. This holds for
+  every way a task reaches the step, including a lane's report and a resume.
+- A dispatcher restart is not an arrival. The restarted dispatcher adopts the run it finds on
+  the step, or routes on the exit code that run wrote.
+- A run killed without writing an exit code runs again. A run killed three times in a row
+  blocks the task. The task's `## Status Log` names the run's log.
 - A late background failure can move a task off a command step. That stops the step's running
   command and deletes its run files, including an exit code it already wrote. The next visit
   runs the command again.

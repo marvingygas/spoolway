@@ -94,6 +94,11 @@ const MAX_LAUNCHES: u32 = 1;
 /// rule out a one-off blip without leaving a broken tab retried forever.
 const MAX_LAUNCH_FAILURES: u32 = 3;
 
+/// How many runs of one command step may be killed in a row, each without an
+/// exit code, before the task is blocked instead of running it again. See the
+/// `Interrupted` arm of [`Dispatcher::run_command`].
+const MAX_COMMAND_KILLS: u32 = 3;
+
 /// How long a step tolerates its pane refusing `agent start` with
 /// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before treating the wait as
 /// [`MAX_LAUNCH_FAILURES`]'s own ceiling does: routed to `step.on_fail`, or
@@ -605,7 +610,9 @@ pub struct Dispatcher<'a> {
     /// its destination comes from *starting* the run, in the `Fresh` arm,
     /// not from reading it finished, and by the time a caller looked again
     /// the run could easily have finished on its own in the background.
-    /// Only the arm that actually consumed a code for routing may set this.
+    /// Only an arm that routes the task on a finished run may set this: the
+    /// `Exited` arm, and the `Interrupted` arm once a run has been killed
+    /// often enough to block the task.
     pending_command_forget: Option<String>,
 }
 
@@ -4546,12 +4553,38 @@ impl<'a> Dispatcher<'a> {
                 // turn re-diagnosing a failure that never happened, and a
                 // second one costs the task its loop budget.
                 //
-                // Nothing counts the re-runs. A command that reaches this arm
-                // twice was `SIGKILL`ed twice, and the thing doing the killing
-                // is a dispatcher shutting down or the machine going down —
-                // neither of which is a loop this could break out of by
-                // escalating instead.
-                runs.forget(&key)?;
+                // The count is kept on disk beside the run, so it survives a
+                // restart between kills. Three in a row is no longer a
+                // shutdown or a machine going down: something kills this
+                // command every time it starts, and running it again would go
+                // on forever. That blocks the task, naming the log, rather
+                // than routing down `on_fail`, because no verdict exists to
+                // route on. An exit code from any run resets the count.
+                let kills = runs.note_kill(&key)?;
+                if kills >= MAX_COMMAND_KILLS {
+                    // Left on disk, like an `Exited` run: the caller forgets
+                    // it once the move to `blocked` has landed. Forgotten any
+                    // earlier, a block that could not be placed this pass (no
+                    // free slot at a staffed `blocked` step, or a dropped
+                    // write) would leave the task here with no count, and the
+                    // next pass would run the command again for good.
+                    self.pending_command_forget = Some(key.clone());
+                    if let Some(pane) = runs.pane(&key) {
+                        let _ = self.mux.close_pane(&pane);
+                        runs.forget_pane(&key);
+                    }
+                    task.log_status(&format!(
+                        "`{}` was killed {kills} times in a row without an exit code — see {}",
+                        step.id,
+                        runs.log_path(&key).display()
+                    ));
+                    report.actions.push(format!(
+                        "{id}: `{}` was killed {kills} times in a row — moving to `blocked`",
+                        step.id
+                    ));
+                    return Ok(Some((crate::pipeline::BLOCKED.to_string(), Outcome::Fail)));
+                }
+                runs.discard(&key)?;
                 // Closed rather than left standing: the run is about to be
                 // started again from `Fresh`, which would only replace it
                 // anyway, and a killed multiplexer is the one case a pane
@@ -4796,10 +4829,11 @@ impl<'a> Dispatcher<'a> {
     ///
     /// A reroute is the one time this does touch that run: the task is being
     /// pulled off its current step, so the command on that step is stopped
-    /// and its run files forgotten before the task moves. Left alone, its
-    /// exit code would sit on disk and the next visit to the step would route
-    /// on it without running anything. Stopping before the move is persisted
-    /// is safe: if the write is dropped, the background step's exit code is
+    /// and its run files forgotten before the task moves. Left alone, a
+    /// blocking command would run on after the task has gone, and this sweep
+    /// would later read its leftover non-zero code off a step the task is no
+    /// longer on, and pull the task back off its new step. Stopping before
+    /// the move is persisted is safe: if the write is dropped, the background step's exit code is
     /// still on disk and pulls the task off again on the retry, so the
     /// stopped command would have been abandoned anyway.
     ///
@@ -4884,9 +4918,9 @@ impl<'a> Dispatcher<'a> {
                     };
                     // Read once and cleared — by the caller, once the move
                     // is on disk — the same discipline `run_command`'s own
-                    // `Exited` arm keeps: without it a step that comes back
-                    // round to `step_id` later would read this stale code
-                    // and route on it again with nothing new having run.
+                    // `Exited` arm keeps. This step's task has already left
+                    // it, so a code left in place would be read here again on
+                    // every later pass and reroute the task each time.
                     report.actions.push(format!(
                         "{}: `{step_id}` (background) exited {code} — moving to `{destination}`",
                         task.id()
@@ -4901,9 +4935,8 @@ impl<'a> Dispatcher<'a> {
                     }
                     // The task is leaving the step it is on, so whatever
                     // command that step has running is stopped and its run
-                    // files forgotten. Left alone, its exit code would sit on
-                    // disk and the next visit to the step would route on it
-                    // without running the command. A no-op for a step with no
+                    // files forgotten, so a blocking command does not run on
+                    // after the task has gone. A no-op for a step with no
                     // run.
                     runs.stop(&crate::command_step::Runs::key(task.stage(), task.id()));
                     task.set_stage(&destination, None);
@@ -7779,6 +7812,7 @@ mod tests {
             path: path.clone(),
             front,
             body: "## Goal\ndemo\n".into(),
+            arrived_at: Default::default(),
         };
         task.save().unwrap();
         path
@@ -16835,6 +16869,162 @@ mod tests {
         );
     }
 
+    /// The rule the arrival clears: a code left on disk by any earlier visit
+    /// must not route this one. The code is planted by hand and the task is
+    /// moved by `set_stage` and `save` alone, the way a lane's report or a
+    /// resume from the board moves it, so the dispatcher's own cleanup after
+    /// an exited run has no part in it.
+    #[test]
+    fn arriving_at_a_command_step_clears_a_code_an_earlier_visit_left() {
+        let (repo, _root_guard) = fixture("command-arrival-clears");
+        let path = add_task_with_worktree(&repo, "demo", "review");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("echo ran >> count.txt", false);
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::write(repo.commands_dir().join(format!("{key}.exit")), "0").unwrap();
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+
+        // A pass that only reads the queue leaves it alone, which is what lets
+        // a restarted dispatcher adopt a run it left behind.
+        let _ = reload(&path);
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+
+        let mut moved = reload(&path);
+        moved.set_stage("implement", None);
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(0),
+            "the move is not the write"
+        );
+        moved.save().unwrap();
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+        let worktree = reload(&path).front.worktree_path.clone().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("count.txt"))
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "the command must run on this visit rather than route on the old code"
+        );
+    }
+
+    /// Three kills in a row block the task and the block names the log; two
+    /// do not, and each is run again.
+    #[test]
+    fn a_command_killed_three_times_in_a_row_blocks_the_task() {
+        let (repo, _root_guard) = fixture("command-killed-thrice");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("sleep 60", false);
+        for step in &mut pipelines.pipelines.get_mut("default").unwrap().steps {
+            if step.id == "implement" {
+                step.headless = true;
+            }
+        }
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+
+        for kill in 1..=3 {
+            let started = std::time::Instant::now();
+            let pid = loop {
+                Dispatcher::new(&repo, &pipelines, &mux)
+                    .pass(&mut || {})
+                    .unwrap();
+                if let Some(pid) = runs.read_pid(&key) {
+                    break pid;
+                }
+                assert!(started.elapsed() < Duration::from_secs(20), "never started");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &format!("-{pid}")])
+                .status();
+            while crate::headless::alive(pid) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+            match kill {
+                3 => assert_eq!(reload(&path).stage(), "blocked"),
+                _ => assert_eq!(reload(&path).stage(), "implement", "kill {kill}"),
+            }
+        }
+
+        let task = reload(&path);
+        let log = runs.log_path(&key).display().to_string();
+        assert!(
+            task.section("## Status Log")
+                .unwrap()
+                .lines()
+                .any(|l| l.contains("killed 3 times") && l.contains(&log)),
+            "the block must name the log: {:?}",
+            task.section("## Status Log")
+        );
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+    }
+
+    /// The block is not final until its move lands. A pass that returns the
+    /// `blocked` destination but cannot place it must leave the kill count on
+    /// disk, so the next pass reads the same run and blocks again rather than
+    /// running the command a fourth time from a count of zero.
+    #[test]
+    fn a_block_that_did_not_land_is_reached_again_on_the_next_pass() {
+        let (repo, _root_guard) = fixture("command-block-retried");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("sleep 60", false);
+        let step = pipelines.pipelines["default"]
+            .steps
+            .iter()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .clone();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        // The pid of a child that has already been waited on: dead, and so
+        // read as a run killed without an exit code. A made-up number could
+        // belong to a live process.
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        std::fs::write(
+            repo.commands_dir().join(format!("{key}.pid")),
+            dead_pid.to_string(),
+        )
+        .unwrap();
+        runs.note_kill(&key).unwrap();
+        runs.note_kill(&key).unwrap();
+
+        for pass in 1..=2 {
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+            let mut task = reload(&path);
+            let mut report = Report::default();
+            let routed = dispatcher
+                .run_command(&mut task, &step, &[], &mut report)
+                .unwrap();
+            assert_eq!(
+                routed.map(|(to, _)| to).as_deref(),
+                Some("blocked"),
+                "pass {pass}"
+            );
+            assert_eq!(
+                dispatcher.pending_command_forget.as_deref(),
+                Some(key.as_str()),
+                "the caller must be handed the run to forget once the move lands"
+            );
+            // The move never landed: nothing was saved, and the run is as it was.
+        }
+        assert_eq!(reload(&path).stage(), "implement");
+    }
+
     /// A third way a destination can "land": `finish_launch_bookkeeping`
     /// writes its own stage move and persists it before `boot_prompt` ever
     /// prompts the lane `boot_start_lane` just started — so a `mux.prompt`
@@ -18065,9 +18255,11 @@ mod tests {
         assert_eq!(reload(&path).stage(), "review");
 
         // The destination could not be placed: the task is back on the
-        // step, and the run it started is still going behind it.
+        // step, and the run it started is still going behind it. Put back
+        // without an arrival, since a real arrival would stop that run — a
+        // pass that fails to place a destination never moves the task at all.
         let mut task = reload(&path);
-        task.set_stage("implement", None);
+        task.set_stage_unbanked("implement", "put back");
         task.save().unwrap();
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("implement", "demo");

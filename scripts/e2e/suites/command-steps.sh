@@ -1440,7 +1440,8 @@ lacks "and the dispatcher never took it for an interrupted run" \
 # the task is. If the task is on a blocking command at that moment, the pull
 # used to leave that command's run files on disk, and the next visit to the
 # step routed on them without running the command at all. Now the pull stops
-# the run and forgets it, so the command runs on every visit. The command
+# the run, and arriving back at the step clears whatever run files are left,
+# so the command runs on every visit. The command
 # sleeps past the background step's one-second failure, which is the
 # still-running half; the file it appends to counts how often it really ran.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
@@ -1476,6 +1477,47 @@ if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c)" -eq 2 ]; then
   ok "and the task arrived at it twice"
 else
   bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c) time(s))"
+fi
+
+# ------------------------------------------------------------- a second visit runs again
+# Arriving at a command step starts it from nothing, whichever road the task
+# took in. Here the road is the ordinary one: `visit-d` fails once and sends the
+# task back through the agent step to `visit-c`, which must run its command a
+# second time rather than route on the code the first visit left. The file the
+# command appends to counts how often it really ran.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+VISIT_MARK="$LIVE/visit-d.mark"
+VISIT_RAN="$LIVE/visit-c.txt"
+rm -f "$VISIT_MARK" "$VISIT_RAN"
+{
+  printf '\n  - id: visit-c\n'
+  printf '    description: Counts its own runs, once per visit.\n'
+  printf '    run: echo ran >> %s\n' "$VISIT_RAN"
+  printf '    headless: true\n'
+  printf '    on_pass: visit-d\n    on_fail: implement\n'
+  printf '\n  - id: visit-d\n'
+  printf '    description: Fails the first time and passes after that.\n'
+  printf '    run: if [ -f %s ]; then exit 0; fi; touch %s; exit 1\n' "$VISIT_MARK" "$VISIT_MARK"
+  printf '    headless: true\n'
+  printf '    on_pass: review\n    on_fail: implement\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: visit-c/" .spoolway/pipelines/default.yml
+works "a command step revisited through the agent step checks out" "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/visited.md" visited "$BODY" "group: visited"
+must "a task for the second-visit case queues" "$SPOOLWAY" queue add --from "$LIVE/visited.md"
+if drive visited gone 240; then ok "a task sent back to a command step still reaches the end"
+else bad "a task sent back to a command step still reaches the end (at \`$(stage_of visited)\`)"; fi
+if [ "$(wc -l < "$VISIT_RAN" 2>/dev/null || echo 0)" -eq 2 ]; then
+  ok "the command ran again on the second visit rather than routing on the first visit's code"
+else
+  bad "the command ran again on the second visit rather than routing on the first visit's code \
+($(wc -l < "$VISIT_RAN" 2>/dev/null || echo 0) run(s) in $VISIT_RAN, wanted 2)"
+fi
+if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/visited.md visit-c)" -eq 2 ]; then
+  ok "and the task arrived at it twice"
+else
+  bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/visited.md visit-c) time(s))"
 fi
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml

@@ -145,6 +145,61 @@ PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 rm -f .spoolway/pipelines/selfsweep.yml
 must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
 
+# ------------------------------------ a restart adopts the run it left behind
+# Arriving at a command step starts it from nothing, but a restarted
+# dispatcher is not an arrival: it only reads the queue. So the real sequence
+# is needed: a dispatcher starts the step's slow run, is killed outright, the
+# run finishes on its own while nothing is dispatching, and a second dispatcher
+# starts. The command appends a line to a file outside the worktree each time
+# it runs, and the restart must leave that at one line.
+ADOPT_COUNT="$WORK/adopt-count.txt"
+rm -f "$ADOPT_COUNT"
+cat > .spoolway/pipelines/adopt.yml <<YML
+description: One slow command step, whose run a restart must adopt rather than repeat.
+
+steps:
+  - id: adopted
+    description: Counts its own runs, outside the worktree, and takes a few seconds.
+    run: echo ran >> $ADOPT_COUNT; sleep 4
+    headless: true
+    on_pass: done
+    on_fail: blocked
+YML
+works "the adopt pipeline checks out" "$SPOOLWAY" pipeline check
+
+ADOPT_BODY="$WORK/adopt-body.md"
+task_body "$ADOPT_BODY"
+task_doc adopt.md adopt "$ADOPT_BODY" "group: adopt" "pipeline: adopt"
+must "a task for the restart case queues" "$SPOOLWAY" queue add --from adopt.md
+
+"$SPOOLWAY" dispatch >/dev/null 2>&1 &
+ADOPT_DISPATCHER=$!
+for _ in $(seq 1 100); do
+  [ -s "$ADOPT_COUNT" ] && break
+  sleep 0.2
+done
+kill -9 "$ADOPT_DISPATCHER" 2>/dev/null
+wait "$ADOPT_DISPATCHER" 2>/dev/null
+rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
+if [ -s "$ADOPT_COUNT" ]; then ok "the first dispatcher started the run before it was killed"
+else bad "the first dispatcher started the run before it was killed (nothing in $ADOPT_COUNT)"; fi
+
+# The run was started detached, so it outlives the dispatcher and writes its
+# own exit code.
+for _ in $(seq 1 100); do
+  ls "$SPOOLWAY_PROJECT_HOME/commands/"*adopted.exit >/dev/null 2>&1 && break
+  sleep 0.2
+done
+
+exit_code "a restarted dispatcher routes on the run it left behind" 0 "$SPOOLWAY" dispatch
+if [ "$(wc -l < "$ADOPT_COUNT" 2>/dev/null || echo 0)" -eq 1 ]; then
+  ok "a restart adopts the old run without running the command again"
+else
+  bad "a restart adopts the old run without running the command again \
+($(wc -l < "$ADOPT_COUNT" 2>/dev/null || echo 0) run(s) in $ADOPT_COUNT, wanted 1)"
+fi
+rm -f .spoolway/pipelines/adopt.yml
+
 # --------------------------------------------- refused before the lock: git identity
 # A start that would actually try to run something and cannot — no git
 # identity, and the shipped `handover` step reaches `spoolway stack`, which

@@ -1093,7 +1093,12 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     }
 
     let path = std::path::PathBuf::from(format!("{}.md", front.id));
-    Ok(Task { path, front, body })
+    Ok(Task {
+        path,
+        front,
+        body,
+        arrived_at: Default::default(),
+    })
 }
 
 /// Parse and validate every task as one set: a `depends_on` naming a

@@ -496,6 +496,7 @@ mod tests {
 
     fn task(id: &str, stage: &str, depends_on: &[&str], group: Option<&str>) -> Task {
         Task {
+            arrived_at: Default::default(),
             path: PathBuf::from(format!("{id}.md")),
             front: Frontmatter {
                 id: id.into(),

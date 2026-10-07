@@ -376,6 +376,7 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the task. |
 | Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the task. |
 | A step's `loop:` | How many times a task may arrive at the step, by any route. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
+| Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 

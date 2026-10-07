@@ -942,6 +942,7 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             front,
             body: String::new(),
+            arrived_at: Default::default(),
         }
     }
 
