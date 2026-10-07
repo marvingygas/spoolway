@@ -1800,10 +1800,10 @@ fn back_onto_its_step(
 /// Put a `parked_from` task back on the step it never left — the road
 /// `back_onto_its_step` takes instead of `resume_at` when nothing actually
 /// failed a check: a person's own keypress or Escape, or a lane
-/// `escalate_clock` gave up on. One code path either way in: the board's
-/// `enter` and `R` call this same `resume` with no `--stage` of their own,
-/// the same as a bare `spoolway resume <task>` does, and [`resume_road`] is
-/// what finds `parked_from` and sends it here.
+/// `escalate_clock` gave up on. One code path either way in: the `(next)`
+/// row of the board's `r` picker calls this same `resume` with no `--stage`
+/// of its own, the same as a bare `spoolway resume <task>` does, and
+/// [`resume_road`] is what finds `parked_from` and sends it here.
 ///
 /// `parked_from` (and `escalated` beside it) are left in the task file rather
 /// than cleared here — the launch that actually continues this step is what

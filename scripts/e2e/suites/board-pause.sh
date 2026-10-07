@@ -17,12 +17,13 @@
 # pausing and stopping with `i` are the two answers that can also abort a
 # live lane; `U` gets one pass through the same `enter`/`esc` answers near
 # the bottom, to cover the other panels, and a park off `queued` is checked
-# for the `parked_from` record it leaves; `R` proves it sends that
-# same kind of row straight back to `queued`, dependency or not, still
-# gating on a real one beside it. Last of all is the pass-yields section,
-# which queues six more hang lanes of its own — placed after `R` simply so
-# it does not disturb the state `R`'s own assertions read, not because
-# anything here is scarce enough to make the order matter.
+# for the `parked_from` record it leaves; `r` proves it sends that
+# same kind of row straight back to `queued`, dependency or not, and opens
+# the step picker on a real gate beside it. Last of all is the pass-yields
+# section, which queues six more hang lanes of its own — placed after the
+# `r` section simply so it does not disturb the state that section's own
+# assertions read, not because anything here is scarce enough to make the
+# order matter.
 #
 # How a key gets in. The dispatch tab reads stdin between redraws, and the
 # dispatcher it started runs as a child of its own, so a key answers at the
@@ -702,29 +703,50 @@ says "\`--from -\` reads the new section from standard input" \
 has "and the stdin content lands on disk" "read from stdin" \
   "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md"
 
-# --------------------------------- `R` sends a queued park back to `queued`
-# The reach this task adds: the run-wide resume key reaches a row parked off
-# `queued` itself exactly as it reaches a real step, and does not hold it for
-# a dependency the way a real step's row still would. `behind` and `late`
-# have sat on `paused` since `queue pause` parked them off `queued`, both
-# still gated by `busy` — `behind` directly, `late` through `behind` —
-# paused itself, and never resumed since, so neither has a finished
-# dependency. `gate-edit` is still paused too, a real
-# gate, so this also proves `R`'s panel still gates on it the same as ever
-# while the queued parks beside it need no such asking. `mid-turn` and
-# `busy` go past `R`'s own panel back onto `implement` here too, so their
-# `hang`-mode lanes are running again once this section ends — the
-# pass-race section after this one queues six more of its own regardless,
-# since nothing in this fixture caps `agents.<profile>.concurrency` or a
-# model's `slots` (both default to `0`, uncapped — `src/config.rs`), so
-# there is no worker-slot budget here for a later section to run short of.
-press R
-draws "\`R\` still gates on the one real gate among the parks" "resume all"
-draws "naming it, not the queued parks beside it" "gate-edit"
-press $'\r'
+# ------------------------------ `r` sends a queued park back to `queued`
+# The reach this task adds: `r` on a row parked off `queued` itself resumes
+# it at once, with no picker, and does not hold it for a dependency the way
+# a real step's row still would. `behind` and `late` have sat on `paused`
+# since `queue pause` parked them off `queued`, both still gated by `busy`
+# — `behind` directly, `late` through `behind` — and neither has a finished
+# dependency. `gate-edit` is still paused too, a real gate, so `r` there
+# opens the step picker with the cursor on the step a plain resume goes to,
+# and `enter` takes that road. `mid-turn` and `busy` come back onto
+# `implement` the same way, so their `hang`-mode lanes are running again
+# once this section ends — the pass-race section after this one queues six
+# more of its own regardless, since nothing in this fixture caps
+# `agents.<profile>.concurrency` or a model's `slots` (both default to `0`,
+# uncapped — `src/config.rs`), so there is no worker-slot budget here for a
+# later section to run short of.
+#
+# The suite does not track which row the cursor is on. It walks the cursor
+# from the top, pressing `r` on every row: a row that is not paused opens
+# nothing, a queued park resumes at once, and a picker is answered with
+# `enter`. The one thing it does count is the gate, whose picker must have
+# been drawn.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do press $'\x1b[A'; done
+next_frame 3
+SAW_PICKER=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  MARK=$(wc -l < "$BOARD_LOG")
+  press r
+  next_frame 3
+  if tail -n "+$((MARK + 1))" "$BOARD_LOG" | grep -qF -- "] pick"; then
+    tail -n "+$((MARK + 1))" "$BOARD_LOG" | grep -qF -- "resume gate-edit" && SAW_PICKER=gate-edit
+    press $'\r'
+    next_frame 3
+  fi
+  press $'\x1b[B'
+  next_frame 3
+done
+if [ "$SAW_PICKER" = gate-edit ]; then ok "\`r\` on the real gate opens the step picker"
+else bad "\`r\` on the real gate opens the step picker"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 stage_reaches "a row parked off \`queued\` goes back to \`queued\`, dependency or not" \
   late queued 25
 stage_reaches "and every other queued park along with it" behind queued 25
+_left_paused() { [ "$(stage_of "$1")" != paused ]; }
+if poll_until 25 _left_paused gate-edit; then ok "\`enter\` on the picker's preselected row resumes the gate"
+else bad "\`enter\` on the picker's preselected row resumes the gate"; fi
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 

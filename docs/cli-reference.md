@@ -110,7 +110,7 @@ a second `enter` while a stop is already going does nothing. Starting dispatchin
 every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
-finishing` for one, left out once none are). `r`/`R`, `p` and `u`/`U` work whether or not a
+finishing` for one, left out once none are). `r`, `p` and `u`/`U` work whether or not a
 child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
@@ -287,7 +287,7 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task, the way the board's `r` key does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
+Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
 
 A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 

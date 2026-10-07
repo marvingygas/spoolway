@@ -246,19 +246,49 @@ stateDiagram-v2
 
 ### Keys
 
-Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole run.
+Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whole run.
 
 | Key | What it does |
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Resume a paused or blocked row whose dependencies are done. A row parked by `p` or Escape is live even while its own lane reads `Working` or `Blocked`: it puts the task back on its step and leaves that lane running. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Also restarts a row on a step with nothing running behind it. Otherwise the same as `spoolway resume <task>`. |
-| `R` | Resume every paused task. Asks first if any of them is at a real gate. |
+| `r` | Open the resume picker for a paused or blocked row whose dependencies are done. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
+
+### Resume picker
+
+`r` on a held row opens a picker titled `resume <task>`. It lists every step of the task's pipeline except `blocked` and `done`, in pipeline order. The line above the list says where the task stopped.
+
+```
+paused at review — it passed
+
+  reproduce   on fail
+  review      paused
+▸ document    on pass (next)
+
+[↑↓] pick   [enter] resume   [esc] cancel
+```
+
+| Label | Meaning |
+|---|---|
+| `paused`, `blocked` | The step the task stopped at. |
+| `on pass`, `on fail` | The steps the stopped step sends a pass or a fail to. |
+| `(next)` | Where `spoolway resume <task>` sends the task. The cursor starts here. |
+
+When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `done (next)` row sits under the steps. When the stopped step is not in the pipeline, the header names it, no row reads `(next)`, and the cursor starts on the first step.
+
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Move the cursor. A long list scrolls, with `▲ n more` and `▼ n more` lines. |
+| `enter` on the `(next)` row | The same as `spoolway resume <task>`. |
+| `enter` on any other row | The same as `spoolway resume <task> --stage <step>`. |
+| `esc` | Close the picker and change nothing. |
+
+An `enter` the resume refuses leaves the picker open and prints the reason under the list. When the task has moved on since the picker opened, `enter` resumes nothing and says so. Press `esc` and `r` again to see where the task stands.
 
 Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
 a command step kills the run, and the command runs again in full on resume.

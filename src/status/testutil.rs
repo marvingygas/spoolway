@@ -179,10 +179,44 @@ pub fn live_headless_lane_at(
     step: &str,
     label: &str,
 ) -> (Box<dyn crate::mux::Mux>, String) {
+    headless_lane_running(repo, id, step, label, "sleep 30")
+}
+
+/// A headless lane for `login · implement` whose turn has already ended,
+/// left standing — what an interrupted herdr lane looks like while its task
+/// sits parked: settled, its pane still open. Headless's own interrupt
+/// removes the lane outright, so a test of what a resume closes needs this
+/// instead.
+pub fn settled_headless_lane(repo: &Repo) -> (Box<dyn crate::mux::Mux>, String) {
+    let (mux, name) = headless_lane_running(repo, "login", "implement", "implementer", "true");
+    // The turn exits at once, but in its own process: wait for the lane to
+    // read settled rather than race it.
+    for _ in 0..200 {
+        let settled = mux
+            .list_lanes()
+            .unwrap()
+            .iter()
+            .any(|lane| lane.name == name && lane.status.is_settled());
+        if settled {
+            return (mux, name);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("lane `{name}` never settled");
+}
+
+/// A headless lane at `id` and `step`, its turn running `body` as the agent.
+fn headless_lane_running(
+    repo: &Repo,
+    id: &str,
+    step: &str,
+    label: &str,
+    body: &str,
+) -> (Box<dyn crate::mux::Mux>, String) {
     let bin = repo.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = bin.join("pi");
-    std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::process::Command::new("chmod")
         .args(["+x", &script.display().to_string()])
         .status()
