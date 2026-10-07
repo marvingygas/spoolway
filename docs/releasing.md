@@ -20,6 +20,7 @@ flowchart LR
 
 | Step | What it does |
 |---|---|
+| `anchor` | `scripts/release-anchor.sh`. Records the base commit and the run name in `.release-run/` in the worktree. Every later step that needs either reads it from there. |
 | `ready` | Runs the whole local gate and a fresh nightly CI run on the candidate. Verifies only — it never edits. |
 | `upgrade` | Sets a project up with the last release, upgrades it to this `main`, and walks it until it runs. A defect goes to `fix`; every edit the project's owner had to make goes forward to `notes`. Verifies only — it never edits. |
 | `fix` | Repairs a release blocker, from `ready`, `upgrade` or `preflight`, in one pull request and drives its checks green. Product code included. |
@@ -55,6 +56,27 @@ impossible version, but they do not change its semver class or argue for the ear
 can report a recovery finished, but neither's own success is the registry's or the release page's
 real state. `released` reads the tag, the packages, the archives and the published body directly,
 so `done` means the release is actually public, not merely that a script or a lane said so.
+
+## The run directory
+
+The `anchor` step writes two files into `.release-run/` in the release worktree. The directory is listed in `.gitignore`, so it never reaches a pull request.
+
+| File | Holds | Read by |
+|---|---|---|
+| `.release-run/base-commit` | The commit `main` stood at when the worktree was cut. | `release-publish.sh`, `release-verify.sh` |
+| `.release-run/run` | The worktree's branch name without a leading `task/`. | `release-run-name.sh`, which the `await-*` steps, `release-fixture.sh` and the release prompts use |
+
+`<run>` in a branch name such as `release/<run>`, `release-fix/<run>` and `fixture/<run>` is the contents of `.release-run/run`. Print it with `scripts/release-run-name.sh`.
+
+`release-publish.sh` stops when `.release-run/base-commit` is missing or empty. `release-verify.sh` stops when the file is empty or does not hold a commit. When the file is missing, `release-verify.sh` runs without the anchor. `release-run-name.sh` stops when `.release-run/run` is missing or empty.
+
+No release script reads a spoolway environment variable. A person can run the steps by hand:
+
+1. Cut a fresh worktree from `main`.
+2. Run `scripts/release-anchor.sh` once in it, before anything else.
+3. Run the scripts of the later steps from the same worktree.
+
+`scripts/release-anchor.sh` keeps a `.release-run/` that already exists. Delete the directory before reusing a checkout for a second release. Otherwise the second release is anchored to the first release's base commit and run name.
 
 ## Cutting a release
 
@@ -119,8 +141,8 @@ branch is `main`, and `ci.yml` has no push trigger, so a commit that is not yet 
 release commit lands the way every other change does, through a pull request:
 
 ```sh
-git push origin HEAD:release/<task>
-gh pr create --base main --head release/<task> --fill
+git push origin HEAD:release/<run>
+gh pr create --base main --head release/<run> --fill
 gh pr checks <number> --watch
 ```
 
@@ -170,7 +192,7 @@ exemption into a failing check.
 The `fixture` step does this, straight after `released`. It builds the binary at the tag just
 pushed, scaffolds a throwaway project with it, sets `housekeeping.retention_days`, hand-adds the
 one line of prose below the pipeline file's generated key block, and opens a pull request from
-branch `fixture/<task>`. `review-fixture` reviews it, and a person merges it on GitHub. The script
+branch `fixture/<run>`. `review-fixture` reviews it, and a person merges it on GitHub. The script
 is idempotent, so a fixture already on `main` costs it one lookup.
 
 It is a pipeline step rather than a line in this runbook because it was a line in this runbook

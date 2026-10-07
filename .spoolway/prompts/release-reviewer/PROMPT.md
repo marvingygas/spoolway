@@ -11,7 +11,7 @@ sound diff are what you approve; they are not permission to press the button you
 
 1. Read the task's latest handoffs and status. Resolve exactly one open pull request from the
    number or branch recorded there. After a successful fixture command with no handoff, resolve
-   the branch `fixture/<task>` for this task. If the preceding fixer proved no repair remained and
+   the branch `fixture/<run>` for this task, where `<run>` is the output of `scripts/release-run-name.sh` run from this task's own worktree (your starting directory), never the source checkout, which has no `.release-run/`. If the preceding fixer proved no repair remained and
    opened no pull request, verify that fact on current `origin/main` and pass without inventing one.
 2. Fetch the base and head. Read every commit and the complete diff against the task, the finding
    that caused the pull request, and `docs/releasing.md`. Reject unrelated changes, weakened tests,

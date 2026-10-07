@@ -14,13 +14,10 @@
 # pushed nothing at all leaves this script proving the release that shipped
 # last time and exiting 0 — which is how run `release-spoolway-3` reached
 # `done` with no tag, no packages and nothing published. So the run is
-# anchored to the candidate it was cut for: `SPOOLWAY_TASK_FILE`, the one
-# variable a command step is given that leads back to this task, names the
-# task whose `base_commit:` is the commit `main` stood at when the lane
-# was cut. If `origin/main` is still sitting on it, no release commit was
-# pushed and there is nothing here to verify. (Agent lanes are handed
-# `SPOOLWAY_HEAD`, which carries the same fact in one word; command steps
-# are not, so this reads the task instead.)
+# anchored to the candidate it was cut for: `.release-run/base-commit`,
+# written by scripts/release-anchor.sh, is the commit `main` stood at when
+# the worktree was cut. If `origin/main` is still sitting on it, no release
+# commit was pushed and there is nothing here to verify.
 #
 # Needs only git, curl, jq and gh for the checks that prove the release is
 # public. npm is used only for the one check that installs it — a release
@@ -37,43 +34,30 @@ registry=https://registry.npmjs.org
 
 git fetch --quiet --tags --force origin
 
-# The frozen candidate, read out of the leading `---` block of the task
-# file so a `base_commit:` written in the prose below it cannot be
-# mistaken for the key. Empty when the variable is unset — run by hand, or by
-# anything that is not a dispatched command step — and empty too when the
-# task carries no such key, which is what a borrowed checkout records:
-# neither of those has a candidate to anchor to, and both keep the
-# unanchored behaviour rather than failing a release over a missing hint.
+# The frozen candidate, recorded by scripts/release-anchor.sh. Absent when the
+# anchor step never ran — a checkout that was not cut for a release — and then
+# there is no candidate to anchor to, so the unanchored behaviour is kept
+# rather than failing a release over a missing hint. Present but not a commit
+# is a different matter: something wrote it wrongly, and falling back would
+# silently reopen the hole above.
 anchor=""
-if [ -n "${SPOOLWAY_TASK_FILE:-}" ]; then
-  # Set but unreadable is not the same absence: the dispatcher writes this
-  # path itself, so a path that does not resolve means something is wrong
-  # with the run, and falling back would silently reopen the hole above.
-  [ -r "$SPOOLWAY_TASK_FILE" ] || die "SPOOLWAY_TASK_FILE names $SPOOLWAY_TASK_FILE, which is not readable"
-  anchor="$(awk '
-    NR == 1 { if ($0 != "---") exit; next }
-    $0 == "---" { exit }
-    /^base_commit:/ {
-      sub(/^base_commit:[ \t]*/, "")
-      gsub(/["\047]/, "")
-      sub(/[ \t]*$/, "")
-      print
-      exit
-    }
-  ' "$SPOOLWAY_TASK_FILE")"
+anchor_file=.release-run/base-commit
+if [ -e "$anchor_file" ]; then
+  [ -r "$anchor_file" ] || die "$anchor_file is not readable"
+  anchor="$(tr -d '[:space:]' < "$anchor_file")"
   case "$anchor" in
-    "") ;;
-    *[!0-9a-f]*) die "base_commit in $SPOOLWAY_TASK_FILE is '$anchor', which is not a commit" ;;
+    "") die "$anchor_file is empty — scripts/release-anchor.sh did not finish; rerun it after deleting the file" ;;
+    *[!0-9a-f]*) die "$anchor_file holds '$anchor', which is not a commit" ;;
   esac
 fi
 
 if [ -n "$anchor" ]; then
   head="$(git rev-parse origin/main)"
-  # Prefix rather than equality: `base_commit:` is a full rev-parse when the
-  # dispatcher writes it, but an abbreviated one hand-edited into the
-  # task still names the same commit.
+  # Prefix rather than equality: the file holds a full rev-parse when
+  # scripts/release-anchor.sh writes it, but an abbreviated one written by hand
+  # still names the same commit.
   if [ "${head#"$anchor"}" != "$head" ]; then
-    die "origin/main is still at $head, the candidate this task was cut from — publish pushed no release commit, so there is nothing to verify"
+    die "origin/main is still at $head, the candidate this run was cut from — publish pushed no release commit, so there is nothing to verify"
   fi
   say "anchored to $anchor; origin/main has moved on to $head"
 fi

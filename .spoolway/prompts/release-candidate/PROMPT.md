@@ -17,7 +17,7 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
    the candidate recorded by preflight and notes. If `origin/main` moved, leave it untouched, remove
    only this attempt's unpushed work and stale scratch `release-notes.md` and `migrations.md`, and
    send the task back for a fresh version decision and preflight.
-2. Use one branch named `release/<task>` from that candidate, where `<task>` is this task's own id.
+2. Use one branch named `release/<run>` from that candidate, where `<run>` is the output of `scripts/release-run-name.sh` run from this task's own worktree (your starting directory), never the source checkout, which has no `.release-run/`.
    `scripts/release-publish.sh` finds the release commit by its subject rather than its branch, but
    `scripts/release-await-merge.sh` waits on this exact prefix, so a differently named branch leaves
    nothing for it to find. Reuse its open pull request after proving it belongs to this attempt;

@@ -4,9 +4,11 @@
 # stopping on a merge Claude Code's auto-mode permission layer refuses. Run by
 # the `await-fix`, `await-release` and `await-fixture` steps.
 #
-# Takes the branch prefix the producing step already uses: `release-fix/<task>`
-# from release-fixer, `release/<task>` from release-candidate, and
-# `fixture/<task>` from scripts/release-fixture.sh. The reviewer only ever
+# Takes the branch prefix the producing step already uses: `release-fix/<run>`
+# from release-fixer, `release/<run>` from release-candidate, and
+# `fixture/<run>` from scripts/release-fixture.sh. `<run>` is the output of
+# scripts/release-run-name.sh, which is not always the task id: with issue
+# tracking's key_in_names on it carries the tracker key too. The reviewer only ever
 # fixes findings on the existing branch and never opens a second pull request
 # for the same one, so the newest pull request whose head starts with that
 # prefix is always the one it reviewed.

@@ -29,6 +29,11 @@ set -euo pipefail
 say() { printf '%s\n' "$*" >&2; }
 die() { say "release-fixture: $*"; exit 1; }
 
+# Read before the `cd` into scratch below: the file is relative to the release
+# worktree this script is started in. scripts/release-run-name.sh names the
+# missing file when the anchor step has not run.
+run_name="$("$(dirname "${BASH_SOURCE[0]}")/release-run-name.sh")"
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH=
 
@@ -145,9 +150,8 @@ nightly upgrade suite asks for it from the first bump past $version."
 # trigger, so a commit that is not yet on `main` can never have one. The
 # fixture lands the way every other change does, through a pull request. This
 # step opens it and stops; a person merges it, and scripts/release-await-merge.sh
-# waits on this exact `fixture/<task>` prefix for that merge.
-[ -n "${SPOOLWAY_TASK:-}" ] || die "SPOOLWAY_TASK is unset — this script only runs as a command step"
-branch="fixture/$SPOOLWAY_TASK"
+# waits on this exact `fixture/<run>` prefix for that merge.
+branch="fixture/$run_name"
 git -C "$SCRATCH/main" push --quiet --force-with-lease origin "HEAD:refs/heads/$branch" \
   || die "could not push $dest/ to $branch"
 

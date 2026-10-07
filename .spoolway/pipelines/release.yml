@@ -8,6 +8,15 @@ description: >-
 task_template: default
 
 steps:
+  # Records the base commit and the run's name under `.release-run/` while the
+  # worktree is still the one cut from main. Later steps read those files, not
+  # spoolway's environment, so a person can walk the same steps by hand.
+  - id: anchor
+    description: Record the base commit and the run's name in the worktree for the steps after it.
+    run: scripts/release-anchor.sh
+    timeout: 1m
+    on_pass: ready
+
   - id: ready
     description: Prove clean main passes the complete local and hosted release-readiness suite.
     agent: claude
@@ -62,9 +71,12 @@ steps:
   # A command step, so Claude Code's auto-mode permission layer never sees the
   # merge and never has a chance to refuse it. `--optional` covers a repair
   # round that found nothing left to fix and opened no pull request.
+  # `run=$(…) && …` rather than the name inline: a failed substitution inside an
+  # argument does not stop `sh -c`, and the wait would then match any older pull
+  # request on a bare `release-fix/` prefix.
   - id: await-fix
     description: Wait for a person to merge the readiness repair, then rerun readiness.
-    run: scripts/release-await-merge.sh --optional "release-fix/$SPOOLWAY_TASK"
+    run: run=$(scripts/release-run-name.sh) && scripts/release-await-merge.sh --optional "release-fix/$run"
     timeout: 24h
     on_pass: ready
 
@@ -118,7 +130,7 @@ steps:
 
   - id: await-release
     description: Wait for a person to merge the release candidate, then publish it.
-    run: scripts/release-await-merge.sh "release/$SPOOLWAY_TASK"
+    run: run=$(scripts/release-run-name.sh) && scripts/release-await-merge.sh "release/$run"
     timeout: 24h
     on_pass: publish
 
@@ -184,6 +196,6 @@ steps:
 
   - id: await-fixture
     description: Wait for a person to merge the upgrade fixture so the release leaves main complete.
-    run: scripts/release-await-merge.sh "fixture/$SPOOLWAY_TASK"
+    run: run=$(scripts/release-run-name.sh) && scripts/release-await-merge.sh "fixture/$run"
     timeout: 24h
     on_pass: done

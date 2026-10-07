@@ -10,8 +10,8 @@
 # is never shown to auto mode, so the push happens without one.
 #
 # The release commit and version are found the way scripts/release-verify.sh
-# finds them: `base_commit:` out of `$SPOOLWAY_TASK_FILE` anchors the
-# candidate this task was cut from, and the version comes from
+# finds them: `.release-run/base-commit` anchors the candidate this run was
+# cut from, and the version comes from
 # `origin/main:Cargo.toml`. Unlike release-verify, there is no tag yet to read
 # the commit from, so the release commit is the one commit between the anchor
 # and `origin/main` whose subject is `chore(release): v<version>`.
@@ -38,25 +38,15 @@ workflow=release.yml
 
 git fetch --quiet --tags --force origin
 
-[ -n "${SPOOLWAY_TASK_FILE:-}" ] || die "no SPOOLWAY_TASK_FILE — this script only runs as a command step"
-[ -r "$SPOOLWAY_TASK_FILE" ] || die "SPOOLWAY_TASK_FILE names $SPOOLWAY_TASK_FILE, which is not readable"
-
-# Same leading-`---`-block read as release-verify.sh, so a `base_commit:`
-# written in the prose below it is never mistaken for the key.
-anchor="$(awk '
-  NR == 1 { if ($0 != "---") exit; next }
-  $0 == "---" { exit }
-  /^base_commit:/ {
-    sub(/^base_commit:[ \t]*/, "")
-    gsub(/["\047]/, "")
-    sub(/[ \t]*$/, "")
-    print
-    exit
-  }
-' "$SPOOLWAY_TASK_FILE")"
-[ -n "$anchor" ] || die "no base_commit in $SPOOLWAY_TASK_FILE to anchor the candidate to"
+# `scripts/release-anchor.sh` recorded the commit `main` stood at when this
+# worktree was cut. There is no fallback: without it the release commit cannot
+# be told from an earlier one.
+anchor_file=.release-run/base-commit
+[ -r "$anchor_file" ] || die "no $anchor_file — run scripts/release-anchor.sh from the release worktree first"
+anchor="$(tr -d '[:space:]' < "$anchor_file")"
+[ -n "$anchor" ] || die "$anchor_file is empty, so there is no base commit to anchor the candidate to"
 git rev-parse --verify --quiet "${anchor}^{commit}" >/dev/null \
-  || die "base_commit $anchor in $SPOOLWAY_TASK_FILE does not resolve to a commit"
+  || die "base commit $anchor in $anchor_file does not resolve to a commit"
 
 version="$(git show origin/main:Cargo.toml | awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}')"
 [ -n "$version" ] || die "could not read the package version from origin/main:Cargo.toml"
@@ -83,7 +73,7 @@ while IFS=' ' read -r sha rest; do
 done < <(git log --format='%H %s' --reverse "$anchor..origin/main")
 
 [ -n "$release_sha" ] || die "no 'chore(release): $tag' commit between $anchor and origin/main ($head) — nothing to publish"
-say "candidate anchored to base_commit $anchor (SPOOLWAY_TASK_FILE)"
+say "candidate anchored to base_commit $anchor ($anchor_file)"
 
 # ---------------------------------------------------------------------------
 
