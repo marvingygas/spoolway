@@ -162,6 +162,10 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 ```
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- Every way a task reaches a step counts as an arrival: a lane's report, a command's exit code,
+  a walk-past by `skip:`, `first:` or `last:`, a lane that cannot start or whose pane stays
+  busy, and a background command that fails after the task moved on. A walk-past counts one
+  arrival at the step it lands on, and none at the step it skips.
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
@@ -180,8 +184,9 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 
 `spoolway pipeline check` proves a pipeline's graph has a way out. A `cargo test` in
 `src/route_sim.rs` proves the counters that walk that graph agree with it. It routes every
-outcome at every step, to a bounded depth, over the shipped pipelines, the tracked
-`.spoolway/pipelines` files, and pipelines it generates that pass `spoolway pipeline check`.
+outcome at every step, and the walk-past and the failed launch or busy pane, to a bounded
+depth. It runs over the shipped pipelines, the tracked `.spoolway/pipelines` files, and
+pipelines it generates that pass `spoolway pipeline check`.
 Each path it walks must reach a terminal step, keep every `loop` count rising, and start no
 more lanes than a stated bound.
 
@@ -397,6 +402,7 @@ flowchart LR
 ### `skip:` — walking past a step
 
 A task's own `skip:` field walks the named steps to their `on_pass` without starting a lane.
+The step it lands on spends its `loop:` budget. A task over that limit lands on `blocked`.
 The queue screen's `t` trial picker writes it, so a trial arm never opens a pull request. See
 [Runs](eval.md#runs).
 

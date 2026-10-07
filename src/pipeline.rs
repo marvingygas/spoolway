@@ -4003,6 +4003,19 @@ mod tests {
         assert!(message.contains("`b`"), "{message}");
     }
 
+    /// A background step passes the moment it starts and its late failure moves
+    /// the task to `on_fail` only once, so a pipeline whose `on_fail` leads
+    /// somewhere that never comes back is not a loop and must keep loading.
+    #[test]
+    fn a_background_step_with_an_on_fail_that_never_returns_is_no_loop() {
+        parse(
+            "steps:\n  - id: build\n    run: make\n    background: true\n    on_pass: write\n    \
+             on_fail: fix\n  - id: write\n    agent: pi\n    on_pass: done\n  \
+             - id: fix\n    agent: pi\n    on_pass: done\n",
+        )
+        .unwrap();
+    }
+
     /// One bounded route is enough for the whole cycle: it escalates, its
     /// exit leaves, and the task leaves too. Demanding one on every route
     /// would refuse the pipeline we ship.

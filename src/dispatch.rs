@@ -1330,6 +1330,18 @@ impl<'a> Dispatcher<'a> {
                     }
                     FallThrough::Stuck => continue 'tasks,
                     FallThrough::To { destination, why } => {
+                        // The walk-past lands on `destination`, so it is that
+                        // step's `loop:` it spends, not the skipped step's.
+                        let destination = crate::commands::apply_loop_budget(
+                            &pipeline,
+                            &mut tasks[index],
+                            &this_step.id,
+                            destination,
+                            self.unattended,
+                        );
+                        if destination == crate::pipeline::BLOCKED {
+                            crate::commands::set_blocked_from(&mut tasks[index], &this_step.id);
+                        }
                         report.actions.push(format!(
                             "{}: `{}` does not run for this task ({why}) — moving to \
                              `{destination}`",
@@ -4337,11 +4349,30 @@ impl<'a> Dispatcher<'a> {
             None => self.note_launch_failure(task, step, "start", &err, report),
         };
         if let Some(destination) = destination {
-            // Final as computed — nothing downstream of this arm redirects
-            // it further, unlike a command step's own destination, which
-            // still has `apply_loop_budget` ahead of it — so this is the one
-            // caller that can print where the task is going and be sure it
-            // is right.
+            // A failed start is a move like any other, so `on_fail` is
+            // bound by its target's `loop:` the same way a lane's report is.
+            let destination = match self.pipelines.for_task(task) {
+                Ok(pipeline) => crate::commands::apply_loop_budget(
+                    pipeline,
+                    task,
+                    &step.id,
+                    destination,
+                    self.unattended,
+                ),
+                Err(err) => {
+                    // The task was launched from this pipeline, so this is a
+                    // pipeline that went missing mid-pass. Say so, and let the
+                    // failure route as it was, rather than strand the task.
+                    report.problems.push(format!(
+                        "{}: `{}`'s loop limit was not checked: {err:#}",
+                        task.id(),
+                        step.id
+                    ));
+                    destination
+                }
+            };
+            // Final as computed, so this is the one caller that can print
+            // where the task is going and be sure it is right.
             report.actions.push(format!(
                 "{}: `{}` could not be started — moving to `{destination}`",
                 task.id(),
@@ -4916,6 +4947,17 @@ impl<'a> Dispatcher<'a> {
                     let Some(destination) = step.on_fail.clone() else {
                         continue;
                     };
+                    // The failure pulls the task off the step it is on, so
+                    // it is a move like any other and answers to the
+                    // `loop:` of the step it lands on.
+                    let current = task.stage().to_string();
+                    let destination = crate::commands::apply_loop_budget(
+                        pipeline,
+                        task,
+                        &current,
+                        destination,
+                        self.unattended,
+                    );
                     // Read once and cleared — by the caller, once the move
                     // is on disk — the same discipline `run_command`'s own
                     // `Exited` arm keeps. This step's task has already left
@@ -8980,6 +9022,133 @@ mod tests {
         assert_eq!(mux.did("start"), ["start demo · document"]);
         let task = reload(&path);
         assert_eq!(task.stage(), "document");
+    }
+
+    /// Walking past a step is a move between steps like a lane's report, so
+    /// the step it lands on answers to its `loop:`. Two steps that both
+    /// `skip:` names and that pass to each other would otherwise trade the
+    /// task back and forth for as many passes as anyone cared to run.
+    #[test]
+    fn a_walk_past_lands_on_blocked_once_the_step_it_reaches_is_spent() {
+        let (repo, _root_guard) = fixture("skip-loop-limit");
+        let yaml = "steps:\n  \
+             - id: a\n    run: true\n    loop: 2\n    on_pass: b\n  \
+             - id: b\n    run: true\n    on_pass: a\n    on_fail: z\n  \
+             - id: z\n    end: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let path = add_task_with(&repo, "demo", "a", |f| {
+            f.skip = vec!["a".into(), "b".into()];
+        });
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..4 {
+            run_pass_with(&repo, &mux, &pipelines);
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.rounds_at("a"), 2, "{:?}", task.front.arrivals);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("b"));
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains("`b` may not send this to `a` a 3rd time — `a` has `loop: 2`"),
+            "{log}"
+        );
+    }
+
+    /// A pipeline of `steps` as `default`, over the shipped ones.
+    fn pipelines_of(yaml: &str) -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        pipelines
+    }
+
+    /// A lane that cannot be started falls back to `on_fail` after its third
+    /// try, and that move answers to the `loop:` of the step it lands on. `b`
+    /// has already had its one arrival, so `a` is sent to `blocked` instead.
+    #[test]
+    fn a_failed_launch_may_not_land_on_a_spent_step() {
+        let (repo, _root_guard) = fixture("launch-failure-loop-limit");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: z\n    on_fail: b\n  \
+             - id: b\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             loop: 1\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        );
+        let path = add_task_with(&repo, "demo", "a", |f| {
+            f.arrivals.insert("b".into(), 1);
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        let home = crate::scratch::root("launch-failure-loop-limit-home");
+
+        for _ in 0..3 {
+            with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("a"));
+        assert!(
+            task.body
+                .contains("`a` may not send this to `b` a 2nd time — `b` has `loop: 1`"),
+            "{}",
+            task.body
+        );
+    }
+
+    /// A background command that fails after its task has moved on pulls the
+    /// task to its `on_fail`, and that move answers to the `loop:` of the step
+    /// it lands on as well: `f` is spent, so the task goes to `blocked`, with
+    /// `blocked_from` naming the step it was pulled off.
+    #[test]
+    fn a_late_background_failure_may_not_land_on_a_spent_step() {
+        let (repo, _root_guard) = fixture("background-failure-loop-limit");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: bg\n    run: exit 1\n    background: true\n    on_pass: w\n    on_fail: f\n  \
+             - id: w\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: z\n  \
+             - id: f\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             loop: 1\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        );
+        let worktree = repo.root.join("wt-demo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let path = add_task_with(&repo, "demo", "bg", |f| {
+            f.arrivals.insert("f".into(), 1);
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree);
+        });
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(reload(&path).stage(), "w", "the task walked away from bg");
+
+        drive(&repo, &pipelines, &mux, &path, crate::pipeline::BLOCKED);
+
+        let task = reload(&path);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("w"));
+        assert!(
+            task.body
+                .contains("`w` may not send this to `f` a 2nd time — `f` has `loop: 1`"),
+            "{}",
+            task.body
+        );
     }
 
     /// A `skip:` tail walks itself all the way to `done` in the pass that

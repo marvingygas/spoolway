@@ -1520,6 +1520,60 @@ else
   bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/visited.md visit-c) time(s))"
 fi
 
+# ------------------------------------------------------------- a walk-past stops at the limit
+# `loop:` limits arrivals "by any route", and a step a task's `skip:` names is
+# walked past without a lane. Two steps that both are, passing to each other,
+# are the shape that once ran 56 arrivals at a step with `loop: 2` in half a
+# minute: the walk-past never asked the step it landed on whether it was spent.
+cat > .spoolway/pipelines/default.yml <<'YAML'
+steps:
+  - id: walk-a
+    description: Bounded, and reached again by every lap of the walk-past below.
+    run: "true"
+    loop: 2
+    on_pass: walk-b
+  - id: walk-b
+    description: Hands the task straight back to walk-a.
+    run: "true"
+    on_pass: walk-a
+    on_fail: done
+YAML
+works "a pipeline whose only loop is a walk-past checks out" "$SPOOLWAY" pipeline check
+
+# The dispatcher the last case left up would take `walked` the moment it is
+# queued, and run `walk-a` as a command before the `skip:` below lands on it.
+# `drive` starts a fresh one once the file is ready.
+dispatcher_stop
+task_doc "$LIVE/walked.md" walked "$BODY" "group: walked"
+must "a task for the walk-past case queues" "$SPOOLWAY" queue add --from "$LIVE/walked.md"
+# `queue add` empties `skip:` on every task it queues, so it is written onto the
+# queued file afterwards, before the dispatcher is up to read it.
+sed -i '0,/^group: walked$/s//group: walked\nskip: [walk-a, walk-b]/' \
+  "$SPOOLWAY_PROJECT_HOME/queue/walked.md"
+has "the queued task carries the skip: list" "skip: [walk-a, walk-b]" \
+  "$SPOOLWAY_PROJECT_HOME/queue/walked.md"
+if drive walked blocked 120; then
+  ok "a walk-past that would circle forever stops the task at the limit"
+else
+  bad "a walk-past that would circle forever stops the task at the limit (at \`$(stage_of walked)\`)"
+fi
+has "the steps were walked past rather than run" "does not run for this task (skip)" \
+  "$E2E_DISPATCH_LOG"
+if [ -e "$SPOOLWAY_PROJECT_HOME/commands/walked · walk-a.log" ]; then
+  bad "no command ran for a walked-past step (found walked · walk-a.log)"
+else
+  ok "no command ran for a walked-past step"
+fi
+has "and the block names the step and the arrival it refused" \
+  "\`walk-b\` may not send this to \`walk-a\` a 3rd time — \`walk-a\` has \`loop: 2\`" \
+  $SPOOLWAY_PROJECT_HOME/queue/walked.md
+if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/queue/walked.md walk-a)" -eq 2 ]; then
+  ok "walk-a was arrived at exactly its limit of times"
+else
+  bad "walk-a was arrived at exactly its limit of times (arrived \
+$(arrivals $SPOOLWAY_PROJECT_HOME/queue/walked.md walk-a) time(s), wanted 2)"
+fi
+
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
 
