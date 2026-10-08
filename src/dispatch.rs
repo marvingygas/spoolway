@@ -3023,8 +3023,7 @@ impl<'a> Dispatcher<'a> {
     /// is sized by the turn before the one still in flight, since there is no
     /// reading of an unfinished one to take.
     ///
-    /// `None` on a ceiling of `0` (off, the default, and every shipped
-    /// profile's), on a lane with no session recorded yet to size, and on a
+    /// `None` on a ceiling of `0` (off), on a lane with no session recorded yet to size, and on a
     /// model whose `context_window` never resolves — a config like that never
     /// fires and never gets a reason here; `spoolway doctor` is where that
     /// gap is called out instead, because a silent `None` is exactly what a
@@ -15057,11 +15056,11 @@ mod tests {
 
     /// The standing form: `fix` is the same prompt as `implement`, so its
     /// next visit is the same conversation rather than a fresh one. The
-    /// default zero ceiling does not require a model window just to reuse it.
+    /// zero ceiling does not require a model window just to reuse it.
     #[test]
     fn a_zero_reuse_ceiling_resumes_its_prompts_earlier_conversation() {
-        let (repo, _root_guard) = fixture("session-carry");
-        assert_eq!(repo.config.agents["pi"].session_reuse_ctx, 0);
+        let (mut repo, _root_guard) = fixture("session-carry");
+        repo.config.agents.get_mut("pi").unwrap().session_reuse_ctx = 0;
         add_task(&repo, "demo", "fix");
         let kind = local_kind(&repo);
         write_entry(
@@ -15367,7 +15366,8 @@ mod tests {
     /// spend, so this step's own session carry is unaffected.
     #[test]
     fn a_restart_naming_another_step_leaves_this_steps_carry_alone() {
-        let (repo, _root_guard) = fixture("restart-other-step");
+        let (mut repo, _root_guard) = fixture("restart-other-step");
+        repo.config.agents.get_mut("pi").unwrap().session_reuse_ctx = 0;
         let path = add_task_with(&repo, "demo", "fix", |f| {
             f.restart = Some("implement".into());
         });
@@ -15843,8 +15843,8 @@ mod tests {
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("fix").unwrap();
-        let profile = repo.config.agent("pi").unwrap().clone();
-        assert_eq!(profile.session_reuse_ctx, 0, "size is not what this checks");
+        let mut profile = repo.config.agent("pi").unwrap().clone();
+        profile.session_reuse_ctx = 0; // size is not what this checks
 
         for (model, expected) in [
             ("hosted-model", Err(SessionMiss::Stale)),

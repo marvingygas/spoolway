@@ -1015,14 +1015,14 @@ pub struct AgentProfile {
     /// model's `context_window` in `[models]`: a ledger entry's own token
     /// count is a running sum across every turn the session has ever spent,
     /// and a sum only grows, so it says what the session has cost rather
-    /// than how large it now is. `0` — the default — disables this ceiling;
-    /// otherwise the value is 1..=100.
+    /// than how large it now is. The default is `20`; `0` disables this
+    /// ceiling; otherwise the value is 1..=100.
     pub session_reuse_ctx: u8,
 
     /// How large a *running* lane's last completed turn may get, as a
     /// percentage of the model's context window, before the dispatcher stops
-    /// the lane outright rather than let it carry on. `0` — the default — is
-    /// off: nothing watches a live lane's size at all. Checked the same
+    /// the lane outright rather than let it carry on. The default is `40`;
+    /// `0` is off: nothing watches a live lane's size at all. Checked the same
     /// reading `session_reuse_ctx` is — the last turn's own usage against
     /// `context_window` in `[models]` — but on every dispatch pass rather
     /// than only at launch, and against a session that may still be mid-turn
@@ -1113,8 +1113,8 @@ impl Default for AgentProfile {
             // means. Asserting a cap of one here was arbitrary anyway.
             concurrency: 0,
             context_window: 0,
-            session_reuse_ctx: 0,
-            session_blocked_ctx: 0,
+            session_reuse_ctx: 20,
+            session_blocked_ctx: 40,
             quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
@@ -1143,11 +1143,8 @@ impl AgentProfile {
             // model's `slots`, not this profile's business.
             concurrency: 0,
             context_window: 0,
-            // Off until the project chooses a percentage ceiling.
-            session_reuse_ctx: 0,
-            // Off, like every shipped profile: nothing watches a live
-            // lane's size until a person turns this on.
-            session_blocked_ctx: 0,
+            session_reuse_ctx: 20,
+            session_blocked_ctx: 40,
             quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
@@ -1164,8 +1161,8 @@ impl AgentProfile {
             // Unset: spoolway cannot infer an account's safe parallelism.
             concurrency: 0,
             context_window: 0,
-            session_reuse_ctx: 0,
-            session_blocked_ctx: 0,
+            session_reuse_ctx: 20,
+            session_blocked_ctx: 40,
             quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
@@ -1188,8 +1185,8 @@ impl AgentProfile {
             sandbox_extension: false,
             concurrency: 0,
             context_window: 0,
-            session_reuse_ctx: 0,
-            session_blocked_ctx: 0,
+            session_reuse_ctx: 20,
+            session_blocked_ctx: 40,
             quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
@@ -2256,8 +2253,8 @@ mod tests {
         // something else.
         for name in ["pi", "claude", "codex"] {
             assert_eq!(parsed.agents[name].concurrency, 0, "{name}");
-            assert_eq!(parsed.agents[name].session_reuse_ctx, 0, "{name}");
-            assert_eq!(parsed.agents[name].session_blocked_ctx, 0, "{name}");
+            assert_eq!(parsed.agents[name].session_reuse_ctx, 20, "{name}");
+            assert_eq!(parsed.agents[name].session_blocked_ctx, 40, "{name}");
         }
         assert!(
             !text.contains("concurrency ="),
