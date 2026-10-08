@@ -94,9 +94,19 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
             repo.root.display()
         );
     }
+    crate::confkv::check_typed(key, value)?;
     let updated = crate::confkv::set(&repo.config, key, value)?;
     updated.save_key(&repo.root, key)?;
     println!("{key} = {}", crate::confkv::get(&updated, key)?);
+    for warning in crate::confkv::warnings(&updated, key) {
+        eprintln!("warning: {warning}");
+    }
+    // The file-based checks `doctor` runs, on the config just saved. These
+    // are warnings, never refusals: a script sets keys in sequence, and the
+    // next command may be the one that makes the check pass.
+    for failure in super::doctor::failures_after_set(repo, &updated, key) {
+        eprintln!("warning: {failure}");
+    }
     Ok(())
 }
 

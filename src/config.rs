@@ -825,6 +825,30 @@ pub enum Backend {
     Headless,
 }
 
+impl Backend {
+    /// The spellings a person may type for `dispatch.backend`, in the order
+    /// error messages list them. `tmux` is not among them: it still loads, as
+    /// the alias on [`Backend::Herdr`], but only so an old file keeps working.
+    pub const NAMES: [&'static str; 2] = ["herdr", "headless"];
+
+    /// The backend `text` names, or an error naming the values that are
+    /// allowed.
+    ///
+    /// `config set` calls this before it writes, because deserialising alone
+    /// accepts the retired `tmux` and saves `herdr` in its place — a different
+    /// value from the one typed.
+    pub fn parse_typed(text: &str) -> Result<Backend> {
+        match text {
+            "herdr" => Ok(Backend::Herdr),
+            "headless" => Ok(Backend::Headless),
+            other => bail!(
+                "`{other}` is not a backend — use {}",
+                Self::NAMES.join(" or ")
+            ),
+        }
+    }
+}
+
 /// How a run is laid out in its multiplexer: one shared group for every run
 /// of every project, or one group per task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

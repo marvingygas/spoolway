@@ -158,7 +158,7 @@ impl Report {
 /// report with one loop, instead of every helper taking `&mut Report` and
 /// every call site losing track of what order things run in.
 #[derive(Debug)]
-enum Finding {
+pub(crate) enum Finding {
     /// Becomes a `Row::Ok` or `Row::Fail`, via [`Report::check`].
     Check(String, Result<Option<String>>),
     /// Becomes a `Row::Note` that both report modes print.
@@ -690,6 +690,58 @@ fn config_owner_label(repo: &Repo) -> &'static str {
     }
 }
 
+/// The checks on a config's own values that read nothing but the config.
+///
+/// Shared with `spoolway config set`, which runs them on the config it has
+/// just produced, so a value typed there and a value `doctor` reads are judged
+/// by the same code.
+pub(crate) fn config_value_checks(config: &Config) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    // An unattended run resumes a block by staffing `blocked` with a lane —
+    // every pipeline has one now, materialised by `Pipelines::assemble` from
+    // `[unattended]`'s own keys, or overridden by the pipeline itself — and a
+    // lane needs a model to run on. Checked here rather than left to
+    // `pipeline check`'s soft "names no model" problem, because this is the
+    // one missing model that stops a *run* from starting at all rather than
+    // just one step of it.
+    findings.push(Finding::Check(
+        "an unattended run staffs `blocked`".into(),
+        match config.unattended.enabled && config.unattended.blocked_model.trim().is_empty() {
+            true => Err(anyhow::anyhow!("unattended.blocked_model is blank")),
+            false => Ok(None),
+        },
+    ));
+    findings
+}
+
+/// What `spoolway doctor` would fail on after `key` was set, one warning line
+/// per failing check, for `spoolway config set` to print.
+///
+/// Runs the checks that need no network and no multiplexer. They are not all
+/// pure reads: the issue-tracking ones look for `acli` and `jq` on `PATH` and
+/// run `<tool> --version` for each tool a hook declares, so setting an
+/// `issue_tracking.*` key can start those processes. Only the sections `key`
+/// can affect are run, so a script setting unrelated keys is not told about a
+/// gap it has not reached.
+pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    if key.starts_with("unattended.") {
+        findings.extend(config_value_checks(config));
+    }
+    if key.starts_with("issue_tracking.") {
+        findings.extend(issue_tracking_checks(repo, &config.issue_tracking));
+    }
+    findings
+        .into_iter()
+        .filter_map(|finding| match finding {
+            Finding::Check(label, Err(err)) => Some(format!(
+                "`spoolway doctor` fails its check \"{label}\": {err:#}"
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The checks that only need the checkout's own loaded `config` and whether
 /// the project's own copy (`repo.root`'s) parsed — see the module doc for why
 /// those are two different questions. Order matches `doctor`'s own: the
@@ -730,20 +782,7 @@ fn config_checks(
             Err(err.context(Config::path_in(&repo.root).display().to_string())),
         ));
     }
-    // An unattended run resumes a block by staffing `blocked` with a lane —
-    // every pipeline has one now, materialised by `Pipelines::assemble` from
-    // `[unattended]`'s own keys, or overridden by the pipeline itself — and a
-    // lane needs a model to run on. Checked here rather than left to
-    // `pipeline check`'s soft "names no model" problem, because this is the
-    // one missing model that stops a *run* from starting at all rather than
-    // just one step of it.
-    findings.push(Finding::Check(
-        "an unattended run staffs `blocked`".into(),
-        match config.unattended.enabled && config.unattended.blocked_model.trim().is_empty() {
-            true => Err(anyhow::anyhow!("unattended.blocked_model is blank")),
-            false => Ok(None),
-        },
-    ));
+    findings.extend(config_value_checks(config));
     if let Some(note) = current_price_table_age_note(config.housekeeping.price_max_age_days) {
         findings.push(Finding::Note(note));
     }
@@ -775,10 +814,11 @@ fn price_table_age_note(max_age_days: u64, age_days: u64) -> Option<String> {
 /// shells out — the binaries it needs beside it.
 ///
 /// Also what `commands::dispatch::dispatch` runs once as it starts, through
-/// `cheap_findings` — the one caller that turns this function's own `FAIL`
-/// rows into a warning read before the run rather than doctor's own
-/// refusal.
-fn issue_tracking_checks(
+/// `cheap_findings`, which turns this function's own `FAIL` rows into a
+/// warning read before the run rather than doctor's own refusal, and what
+/// `spoolway config set` runs through [`failures_after_set`] to warn about
+/// the value just typed.
+pub(crate) fn issue_tracking_checks(
     repo: &Repo,
     tracking: &crate::config::IssueTrackingConfig,
 ) -> Vec<Finding> {
@@ -809,16 +849,9 @@ fn issue_tracking_checks(
     // five events.
     findings.push(Finding::Check(
         "`issue_tracking.hook` is a bare filename".into(),
-        match !tracking.hook.trim().is_empty()
-            && !crate::tracking::is_bare_filename(tracking.hook.trim())
-        {
-            true => Err(anyhow::anyhow!(
-                "{config_path}: [issue_tracking] names `{}`, which is not a bare filename — a \
-                 hook only ever runs a script inside .spoolway/hooks/, so this can never run. \
-                 Use a bare name, or clear hook to switch issue tracking off.",
-                tracking.hook.trim()
-            )),
-            false => Ok(None),
+        match crate::tracking::not_bare_filename_problem(&tracking.hook) {
+            Some(problem) => Err(anyhow::anyhow!("{config_path}: [issue_tracking] {problem}")),
+            None => Ok(None),
         },
     ));
     // A bare, well-formed name still fails silently on every one of a task's
@@ -2755,6 +2788,32 @@ mod tests {
             },
             checkout,
         )
+    }
+
+    #[test]
+    fn failures_after_set_runs_only_the_checks_the_key_can_affect() {
+        let (repo, _root) = scratch_repo("failures-after-set");
+        let mut config = Config::default();
+        config.issue_tracking.hook = "ghost.sh".into();
+        config.unattended.enabled = true;
+        config.unattended.blocked_model = String::new();
+
+        let tracking = failures_after_set(&repo, &config, "issue_tracking.hook");
+        assert!(
+            tracking.iter().any(|f| f.contains("script exists")),
+            "{tracking:?}"
+        );
+        assert!(
+            !tracking.iter().any(|f| f.contains("staffs")),
+            "{tracking:?}"
+        );
+
+        let unattended = failures_after_set(&repo, &config, "unattended.blocked_model");
+        assert!(
+            unattended.iter().any(|f| f.contains("staffs `blocked`")),
+            "{unattended:?}"
+        );
+        assert!(failures_after_set(&repo, &config, "housekeeping.retention_days").is_empty());
     }
 
     /// A hook named with nothing to hand it: `project_key` blank while
