@@ -17,8 +17,8 @@ requests, not nine.
    fast-forward `main`, and confirm the failing SHA and current `origin/main`. If main already moved,
    re-check whether the recorded failure still exists before carrying a stale repair forward.
 2. Look for an open pull request already named in this task for the same blocker set. Update that
-   branch when it exists; otherwise create one fresh branch named `release-fix/<task>`, from
-   current `main`, where `<task>` is this task's own id. `scripts/release-await-merge.sh` waits on
+   branch when it exists; otherwise create one fresh branch named `release-fix/<run>`, from
+   current `main`, where `<run>` is the output of `scripts/release-run-name.sh` run from this task's own worktree (your starting directory), never the source checkout, which has no `.release-run/`. `scripts/release-await-merge.sh` waits on
    that exact prefix, so a differently named branch leaves nothing for it to find. Reproduce every
    reported failure, trace the real cause, and implement the smallest complete repair. Keep
    unrelated cleanup and release-note prose out of this pull request.

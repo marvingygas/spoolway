@@ -359,7 +359,13 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "run",
         "The command line a command step runs, through the environment's own \
-         shell, in the task's worktree. Refused on any other kind of step.",
+         shell, in the task's worktree. Refused on any other kind of step. The \
+         line names none of the six variables `spoolway prompt contract` lists \
+         in its section 4 (`SPOOLWAY_TASK`, `SPOOLWAY_TASK_FILE`, `SPOOLWAY_REPO`, \
+         `SPOOLWAY_STEP`, `SPOOLWAY_WORKTREE`, `SPOOLWAY_SCRATCH`) and no \
+         `spoolway report`, and nothing it calls reads one, so a person could \
+         run it by hand. Any other `SPOOLWAY_` name or subcommand is legal. \
+         The one exception is `spoolway stack` on a handover step.",
     ),
     (
         "timeout",
@@ -614,7 +620,10 @@ fn template() -> String {
          \n\
          \x20\x20# A command step: no model, no lane, no worker slot. `run:` is what makes\n\
          \x20\x20# it one, and its exit code is the outcome — zero takes `on_pass`, anything\n\
-         \x20\x20# else `on_fail`.\n\
+         \x20\x20# else `on_fail`. A `run:` line names none of the six variables in\n\
+         \x20\x20# `spoolway prompt contract` section 4 and no `spoolway report`, and\n\
+         \x20\x20# nothing it calls reads one; any other `SPOOLWAY_` name or subcommand is\n\
+         \x20\x20# legal. `spoolway stack` on a handover step is the one exception.\n\
          \x20\x20- id: handover\n\
          \x20\x20\x20\x20run: spoolway stack\n\
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
@@ -4132,6 +4141,41 @@ mod tests {
             "`loop`'s sentence should recommend a ceiling: {}",
             fields["loop"]
         );
+    }
+
+    /// The `run` sentence states the portability rule, naming every variable
+    /// section 4 of the prompt contract prints. The six names are copied by
+    /// hand, so this is what notices `ENVIRONMENT` growing a seventh.
+    #[test]
+    fn run_field_states_the_portability_rule() {
+        let fields: std::collections::BTreeMap<&str, &str> =
+            FIELD_SENTENCES.iter().copied().collect();
+        for (name, _) in crate::prompt::ENVIRONMENT {
+            assert!(
+                fields["run"].contains(name),
+                "`run`'s sentence should ban `{name}`: {}",
+                fields["run"]
+            );
+        }
+        for phrase in ["spoolway report", "spoolway stack"] {
+            assert!(
+                fields["run"].contains(phrase),
+                "`run`'s sentence should mention `{phrase}`: {}",
+                fields["run"]
+            );
+        }
+    }
+
+    /// The annotated template carries the rule beside its command step and
+    /// still shows the one `run:` line the rule allows.
+    #[test]
+    fn template_comments_the_portability_rule_on_its_command_step() {
+        let template = template();
+        assert!(
+            template.contains("nothing it calls reads one"),
+            "the template should state the portability rule"
+        );
+        assert!(template.contains("run: spoolway stack"));
     }
 
     /// The top-level `description` sentence asks for one sentence, not the

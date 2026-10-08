@@ -79,10 +79,7 @@ pub const ENVIRONMENT: &[(&str, &str)] = &[
         "SPOOLWAY_STEP",
         "which step this is — not yours to read, and a prompt that branches on it is two prompts",
     ),
-    (
-        "SPOOLWAY_WORKTREE",
-        "your worktree — already your cwd, so rarely needed",
-    ),
+    ("SPOOLWAY_WORKTREE", "your worktree — already your cwd"),
     (
         "SPOOLWAY_SCRATCH",
         "writable space outside the worktree, one per task, removed when the task is archived",
@@ -251,7 +248,11 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     }
 
     println!();
-    println!("4  THE ENVIRONMENT EVERY LANE HAS");
+    println!("4  THE ENVIRONMENT EVERY LANE HAS, AND NEVER READS");
+    println!("   Set for the lane's own tooling, not for your prose.");
+    println!("   A prompt naming one of these is a prompt that only");
+    println!("   runs under spoolway.");
+    println!();
     let width = ENVIRONMENT
         .iter()
         .map(|(name, _)| name.len())
@@ -260,6 +261,9 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     for (name, why) in ENVIRONMENT {
         println!("   {name:width$}  {why}");
     }
+    println!();
+    println!("   What a role needs is in the task file, and section 3");
+    println!("   names its path in the opening message.");
 
     println!();
     println!("5  WHAT A LANE MAY REACH");
