@@ -117,10 +117,18 @@ if command -v npm >/dev/null 2>&1; then
   install_dir="$(mktemp -d)"
   cleanup_install() { rm -rf "$install_dir"; }
   trap cleanup_install EXIT
-  (
-    cd "$install_dir"
-    npm install --silent "spoolway@$version" >/dev/null
-  ) || die "npm install spoolway@$version failed in $install_dir"
+  # The install reads the package documents, which npm's CDN can serve stale
+  # for a while after the per-version reads above already succeed, so it gets
+  # a few tries of its own.
+  for attempt in 1 2 3 4 5; do
+    (
+      cd "$install_dir"
+      npm install --silent --prefer-online "spoolway@$version" >/dev/null
+    ) && break
+    [ "$attempt" -lt 5 ] || die "npm install spoolway@$version failed in $install_dir"
+    say "release-verify: npm install spoolway@$version failed (attempt $attempt) — trying again in 30s"
+    sleep 30
+  done
   got="$("$install_dir/node_modules/.bin/spoolway" --version)" \
     || die "the installed wrapper in $install_dir would not run"
   case "$got" in
