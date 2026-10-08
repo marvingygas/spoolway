@@ -296,7 +296,13 @@ impl Entry {
 /// rather than one apiece because both are true of the model itself, not of
 /// a launch profile — `agents.*.context_window` and `[pricing]` used to be
 /// two places disagreeing about that.
+///
+/// Serialised by hand around a derived core — see the `Serialize` and
+/// `Deserialize` impls below — because one key is not a field: a tier
+/// sub-table carries its threshold in its own name, which no derive can
+/// spell.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelPrice {
     /// What one session gets to work in, in tokens. Already final: spoolway
@@ -405,6 +411,178 @@ pub struct ModelPrice {
     /// assuming either way.
     #[serde(skip_serializing_if = "not_local")]
     pub local: bool,
+
+    /// The rates a request is charged once its prompt passes a threshold,
+    /// written as the sub-table `[models."<glob>".above_<N>k_tokens]`.
+    ///
+    /// One tier at most: litellm lists a second threshold for a handful of
+    /// models, and [`crate::models::distill`] keeps only the lowest. Skipped
+    /// by the derive because its key is not a fixed name; the hand-written
+    /// impls below read and write it.
+    #[serde(skip)]
+    pub tier: Option<PriceTier>,
+}
+
+/// The five rates of one price, in USD per 1M tokens: a model's base rates,
+/// or the rates of its higher tier.
+///
+/// A tier's sub-table holds exactly these keys, so it refuses any other the
+/// way the base entry does. A rate left out is zero, which is unset, the same
+/// as on the base entry — and [`Rates::apply`] gives both the same one-hour
+/// fallback, since the base entry prices through it too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rates {
+    /// USD per 1M input tokens.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub input: f64,
+    /// USD per 1M output tokens.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub output: f64,
+    /// USD per 1M tokens read from the prompt cache.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub cache_read: f64,
+    /// USD per 1M tokens written to a five-minute cache.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub cache_write_5m: f64,
+    /// USD per 1M tokens written to a one-hour cache. Zero falls back to the
+    /// five-minute rate; see [`Rates::apply`].
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub cache_write_1h: f64,
+}
+
+impl Rates {
+    /// What `tokens` cost at these rates.
+    ///
+    /// A one-hour rate left at zero falls back to the five-minute rate rather
+    /// than pricing an hour cache at nothing — a config that predates the
+    /// split, or a tier that left the rate out, under-reports rather than
+    /// silently dropping a whole class of spend.
+    pub(crate) fn apply(&self, tokens: &Tokens) -> f64 {
+        let per = |n: u64, rate: f64| (n as f64) * rate / 1_000_000.0;
+        let hourly = match self.cache_write_1h {
+            0.0 => self.cache_write_5m,
+            rate => rate,
+        };
+        per(tokens.input, self.input)
+            + per(tokens.output, self.output)
+            + per(tokens.cache_read, self.cache_read)
+            + per(tokens.cache_write_5m, self.cache_write_5m)
+            + per(tokens.cache_write_1h, hourly)
+    }
+}
+
+/// A model's one higher price tier: the rates a request pays once its prompt
+/// passes `above_k` thousand tokens.
+///
+/// Named the way litellm names it — `input_cost_per_token_above_100k_tokens`
+/// becomes the sub-table `above_100k_tokens` — so the threshold lives in the
+/// key, and all three price tables share one shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceTier {
+    /// The threshold in thousands of tokens: the `100` of `above_100k_tokens`.
+    pub above_k: u64,
+    pub rates: Rates,
+}
+
+impl PriceTier {
+    /// The sub-table name this tier is written under.
+    pub fn key(&self) -> String {
+        format!("above_{}k_tokens", self.above_k)
+    }
+
+    /// The threshold a sub-table name carries, or `None` if the name does not
+    /// read as `above_<N>k_tokens`.
+    ///
+    /// Strict, so a name that loads always writes back as itself: digits
+    /// only, no leading zero, and not zero itself, since a tier above no
+    /// tokens at all is the base price under another name.
+    pub fn threshold_in(key: &str) -> Option<u64> {
+        let digits = key.strip_prefix("above_")?.strip_suffix("k_tokens")?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if digits.starts_with('0') {
+            return None;
+        }
+        digits.parse().ok()
+    }
+}
+
+/// Every table-valued key of an entry is a tier attempt, since every field
+/// [`ModelPrice`] has is a scalar. So a misspelt sub-table such as
+/// `above_100K_token` is refused by its own name rather than sliding past as
+/// an unknown field nobody reads, and a second tier is refused rather than
+/// one of the two silently winning. What is left is handed to the derived
+/// reader, which still refuses an unknown scalar.
+///
+/// Read through `toml::Value` because both `config.toml` and the JSON price
+/// tables arrive here, and the split has to see the keys before the derive
+/// does.
+impl<'de> Deserialize<'de> for ModelPrice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let toml::Value::Table(mut table) = toml::Value::deserialize(deserializer)? else {
+            return Err(D::Error::custom("a model entry must be a table"));
+        };
+        let nested: Vec<String> = table
+            .iter()
+            .filter(|(_, value)| value.is_table())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut tier: Option<PriceTier> = None;
+        for key in nested {
+            let Some(value) = table.remove(&key) else {
+                continue;
+            };
+            let Some(above_k) = PriceTier::threshold_in(&key) else {
+                return Err(D::Error::custom(format!(
+                    "`{key}` is not a price tier: a tier is named `above_<N>k_tokens`, \
+                     such as `above_100k_tokens`"
+                )));
+            };
+            if let Some(first) = tier {
+                return Err(D::Error::custom(format!(
+                    "`{key}`: a model carries one price tier, and this one already has `{}`; \
+                     remove one of the two sub-tables, and keep the lower threshold if both \
+                     are wanted, as `models refresh` does",
+                    first.key()
+                )));
+            }
+            let rates =
+                Rates::deserialize(value).map_err(|e| D::Error::custom(format!("`{key}`: {e}")))?;
+            tier = Some(PriceTier { above_k, rates });
+        }
+        let mut price =
+            ModelPrice::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)?;
+        price.tier = tier;
+        Ok(price)
+    }
+}
+
+/// The derived fields, then the tier under its own name. Flattened so the
+/// tier is a sibling of the rates, and last so a TOML writer can put the
+/// sub-table after the entry's own keys.
+impl Serialize for ModelPrice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Written {
+            #[serde(flatten, with = "ModelPrice")]
+            fields: ModelPrice,
+            #[serde(flatten)]
+            tier: BTreeMap<String, Rates>,
+        }
+        Written {
+            fields: *self,
+            tier: self
+                .tier
+                .iter()
+                .map(|tier| (tier.key(), tier.rates))
+                .collect(),
+        }
+        .serialize(serializer)
+    }
 }
 
 /// A zero in `[models]` is *unset*, and unset is written by leaving the key
@@ -474,23 +652,35 @@ impl ModelPrice {
             slots: 1,
             exclusive: true,
             local: true,
+            tier: Some(PriceTier {
+                above_k: 1,
+                rates: Rates {
+                    input: 1.0,
+                    output: 1.0,
+                    cache_read: 1.0,
+                    cache_write_5m: 1.0,
+                    cache_write_1h: 1.0,
+                },
+            }),
         }
     }
 
-    /// What `tokens` cost at this price. Crate-visible so `spoolway eval` can
-    /// price one token class at a time through the same rates — see
+    /// The base rates, in the shape a tier's rates take.
+    pub fn rates(&self) -> Rates {
+        Rates {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write_5m: self.cache_write_5m,
+            cache_write_1h: self.cache_write_1h,
+        }
+    }
+
+    /// What `tokens` cost at the base rates. Crate-visible so `spoolway eval`
+    /// can price one token class at a time through the same rates — see
     /// `eval::ClassCost` — rather than repeat them.
     pub(crate) fn apply(&self, tokens: &Tokens) -> f64 {
-        let per = |n: u64, rate: f64| (n as f64) * rate / 1_000_000.0;
-        let hourly = match self.cache_write_1h {
-            0.0 => self.cache_write_5m,
-            rate => rate,
-        };
-        per(tokens.input, self.input)
-            + per(tokens.output, self.output)
-            + per(tokens.cache_read, self.cache_read)
-            + per(tokens.cache_write_5m, self.cache_write_5m)
-            + per(tokens.cache_write_1h, hourly)
+        self.rates().apply(tokens)
     }
 }
 
@@ -3594,6 +3784,7 @@ mod tests {
                     slots: 0,
                     exclusive: false,
                     local: false,
+                    tier: None,
                 },
             ),
             (
@@ -3609,6 +3800,7 @@ mod tests {
                     slots: 0,
                     exclusive: false,
                     local: false,
+                    tier: None,
                 },
             ),
         ])
@@ -3718,6 +3910,7 @@ mod tests {
                 slots: 0,
                 exclusive: false,
                 local: false,
+                tier: None,
             },
         )]);
         let hour = Tokens {
@@ -7268,5 +7461,126 @@ mod tests {
         assert_eq!(task_worktree_roots(&repo), expected(&["bare", "kept"]));
         lose_index(&repo);
         assert_eq!(task_worktree_roots(&repo), expected(&["bare", "kept"]));
+    }
+
+    /// The haiku entry as a project writes it, tier included.
+    const TIERED_ENTRY: &str = r#"
+[models."claude-haiku-5-5"]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write_5m = 0.125
+cache_write_1h = 0.20
+
+[models."claude-haiku-5-5".above_100k_tokens]
+input = 0.50
+output = 2.50
+cache_read = 0.05
+cache_write_5m = 0.625
+"#;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct Models {
+        models: BTreeMap<String, ModelPrice>,
+    }
+
+    #[test]
+    fn a_tier_sub_table_loads_beside_the_base_rates() {
+        let parsed: Models = toml::from_str(TIERED_ENTRY).unwrap();
+        let price = parsed.models["claude-haiku-5-5"];
+        assert_eq!(price.input, 0.10);
+        let tier = price.tier.expect("the sub-table is the tier");
+        assert_eq!(tier.above_k, 100);
+        assert_eq!(
+            tier.rates,
+            Rates {
+                input: 0.50,
+                output: 2.50,
+                cache_read: 0.05,
+                cache_write_5m: 0.625,
+                cache_write_1h: 0.0,
+            }
+        );
+    }
+
+    /// The tier leaves out `cache_write_1h`, so an hour write prices at the
+    /// tier's own five-minute rate — the base entry's fallback, not zero.
+    #[test]
+    fn a_tier_rate_left_out_falls_back_like_the_base_entry() {
+        let parsed: Models = toml::from_str(TIERED_ENTRY).unwrap();
+        let tier = parsed.models["claude-haiku-5-5"].tier.unwrap();
+        let hour = Tokens {
+            cache_write_1h: 1_000_000,
+            ..Tokens::default()
+        };
+        assert_eq!(tier.rates.apply(&hour), 0.625);
+    }
+
+    #[test]
+    fn a_tier_round_trips_through_toml_and_json() {
+        let parsed: Models = toml::from_str(TIERED_ENTRY).unwrap();
+
+        let toml_text = toml::to_string(&parsed).unwrap();
+        assert!(
+            toml_text.contains("[models.claude-haiku-5-5.above_100k_tokens]"),
+            "{toml_text}"
+        );
+        let again: Models = toml::from_str(&toml_text).unwrap();
+        assert_eq!(again.models, parsed.models);
+
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            json["models"]["claude-haiku-5-5"]["above_100k_tokens"]["input"],
+            0.5
+        );
+        let again: Models = serde_json::from_value(json).unwrap();
+        assert_eq!(again.models, parsed.models);
+    }
+
+    /// An untiered entry writes no tier key at all, so tables written before
+    /// tiers existed read and write exactly as they did.
+    #[test]
+    fn an_untiered_entry_writes_no_tier_key() {
+        let price = ModelPrice {
+            input: 1.0,
+            ..ModelPrice::default()
+        };
+        assert_eq!(serde_json::to_string(&price).unwrap(), r#"{"input":1.0}"#);
+    }
+
+    #[test]
+    fn a_sub_table_not_named_as_a_tier_is_refused_by_name() {
+        for name in [
+            "above_100K_token",
+            "above_100k",
+            "above_k_tokens",
+            "above_0k_tokens",
+            "above_0100k_tokens",
+            "tier",
+        ] {
+            let text = format!("[models.m]\ninput = 1.0\n\n[models.m.{name}]\ninput = 2.0\n");
+            let err = toml::from_str::<Models>(&text).unwrap_err().to_string();
+            assert!(err.contains(&format!("`{name}`")), "{name}: {err}");
+            assert!(err.contains("above_<N>k_tokens"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_second_tier_and_an_unknown_tier_rate_are_refused() {
+        let two = "[models.m.above_100k_tokens]\ninput = 1.0\n\n\
+                   [models.m.above_200k_tokens]\ninput = 2.0\n";
+        let err = toml::from_str::<Models>(two).unwrap_err().to_string();
+        assert!(err.contains("one price tier"), "{err}");
+        assert!(err.contains("remove one of the two sub-tables"), "{err}");
+
+        let typo = "[models.m.above_100k_tokens]\ninptu = 1.0\n";
+        let err = toml::from_str::<Models>(typo).unwrap_err().to_string();
+        assert!(err.contains("`above_100k_tokens`"), "{err}");
+        assert!(err.contains("inptu"), "{err}");
+
+        // An unknown scalar on the base entry is still refused as before.
+        let typo = "[models.m]\ninptu = 1.0\n";
+        let err = toml::from_str::<Models>(typo).unwrap_err().to_string();
+        assert!(err.contains("inptu"), "{err}");
     }
 }

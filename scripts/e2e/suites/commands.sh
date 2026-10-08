@@ -94,6 +94,15 @@ cat >"$PRICE_FIXTURE" <<'JSON'
     "input_cost_per_token": 0.000001,
     "output_cost_per_token": 0.000002
   },
+  "fake-tiered": {
+    "mode": "chat",
+    "input_cost_per_token": 0.0000001,
+    "output_cost_per_token": 0.0000005,
+    "input_cost_per_token_above_100k_tokens": 0.0000005,
+    "output_cost_per_token_above_100k_tokens": 0.0000025,
+    "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 0.000001,
+    "input_cost_per_token_above_200k_tokens": 0.000009
+  },
   "not-chat": {
     "mode": "embedding",
     "input_cost_per_token": 0.000001,
@@ -106,6 +115,13 @@ must "models refresh fetches and distils a local fixture through curl" \
 works "the refreshed machine-wide table is valid JSON" \
   jq -e '.source and .license == "MIT" and .generated and .models["fake-local"].input == 1' \
   "$HOME/.spoolway/model-prices.json"
+# The lowest of the row's two thresholds is the one kept, converted to USD
+# per million like the base rates, the one-hour cache write included.
+works "a tiered row reaches the refreshed table as its lowest tier" \
+  jq -e '.models["fake-tiered"] | .input == 0.1
+    and .above_100k_tokens == {"input": 0.5, "output": 2.5, "cache_write_1h": 1}
+    and (has("above_200k_tokens") | not)' \
+  "$HOME/.spoolway/model-prices.json"
 MODELS_OUT="$LIVE/models-refreshed.out"
 "$SPOOLWAY" models >"$MODELS_OUT"
 if grep -qE '^fake-local[[:space:]].*[[:space:]]refreshed[[:space:]]' "$MODELS_OUT"; then
@@ -113,6 +129,18 @@ if grep -qE '^fake-local[[:space:]].*[[:space:]]refreshed[[:space:]]' "$MODELS_O
 else
   bad "models reads the new row back with SOURCE refreshed"
   sed 's/^/        /' "$MODELS_OUT"
+fi
+# The tier is drawn on an indented row under its model, so a step has to name
+# the tiered model for the table to show it. The pipeline is put back after.
+cp .spoolway/pipelines/default.yml "$LIVE/default.yml.keep"
+set_step_of default implement model fake-tiered
+"$SPOOLWAY" models >"$LIVE/models-tiered.out"
+cp "$LIVE/default.yml.keep" .spoolway/pipelines/default.yml
+if grep -qE '^ +above 100k tokens +\$0\.50 +\$2\.50 ' "$LIVE/models-tiered.out"; then
+  ok "models draws a tiered model's higher rates on an indented row under it"
+else
+  bad "models draws a tiered model's higher rates on an indented row under it"
+  sed 's/^/        /' "$LIVE/models-tiered.out"
 fi
 REFRESHED_GENERATED=$(jq -r '.generated' "$HOME/.spoolway/model-prices.json")
 MODELS_FOOTER=$(tail -n 1 "$MODELS_OUT")

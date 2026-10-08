@@ -41,6 +41,10 @@ pub struct Reference {
     pub sentence: &'static str,
 }
 
+/// The [`REFERENCE`] row every rate of a price tier shares, which [`note`]
+/// finds by this key rather than by its leaf.
+const TIER_RATE_KEY: &str = "models.<glob>.above_<N>k_tokens.<rate>";
+
 /// Every setting in `config.toml`, in the order the reference table prints
 /// them.
 pub const REFERENCE: &[Reference] = &[
@@ -287,6 +291,13 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Cost per million tokens written to a 1-hour cache.",
     },
     Reference {
+        key: TIER_RATE_KEY,
+        values: "<USD per 1M tokens>",
+        default: "0",
+        sentence: "The same five rates, charged once a prompt passes N thousand tokens. \
+                    One such tier per model.",
+    },
+    Reference {
         key: "models.<glob>.prompt_cache_ttl",
         values: "<duration>",
         default: "5m (none if local)",
@@ -324,8 +335,22 @@ pub const REFERENCE: &[Reference] = &[
 /// concrete key like `agents.claude.permission_mode` and the reference's own
 /// `agents.<profile>.permission_mode` share a leaf either way, so one row
 /// covers every profile or model glob that has that field.
+///
+/// A tier rate is the exception: its leaf is a base rate's leaf too, and
+/// matching on it alone would note `models.m.above_100k_tokens.input` with
+/// the base sentence, beside a rate that only applies past the threshold. So
+/// a key whose segment before the leaf reads as a tier takes the tier row.
 pub fn note(key: &str) -> Option<&'static str> {
     let leaf = key.rsplit('.').next().unwrap_or(key);
+    let parent = key.rsplit('.').nth(1);
+    if key.starts_with("models.")
+        && parent.is_some_and(|p| crate::usage::PriceTier::threshold_in(p).is_some())
+    {
+        return REFERENCE
+            .iter()
+            .find(|r| r.key == TIER_RATE_KEY)
+            .map(|r| r.sentence);
+    }
     REFERENCE
         .iter()
         .find(|r| r.key.rsplit('.').next() == Some(leaf))
@@ -437,14 +462,28 @@ pub fn all_settings(config: &Config) -> Result<Vec<Entry>> {
     }
     // The field *names* on `[models]`, read off the probe the same way
     // `models_key` does — a rendered default names none, since a zero is
-    // omitted.
-    let price_fields: Vec<String> = match Value::try_from(crate::usage::ModelPrice::probe()) {
-        Ok(Value::Table(table)) => table.keys().cloned().collect(),
-        _ => Vec::new(),
+    // omitted. Scalars only: the probe's tier sub-table is not a setting, and
+    // its rates are listed below for a glob that has a tier.
+    let scalar_fields = |value: Option<Value>| -> Vec<String> {
+        match value {
+            Some(Value::Table(table)) => table
+                .iter()
+                .filter(|(_, value)| is_scalar(value))
+                .map(|(key, _)| key.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
     };
-    for glob in config.models.keys() {
+    let price_fields = scalar_fields(Value::try_from(crate::usage::ModelPrice::probe()).ok());
+    let tier_fields = scalar_fields(tier_probe());
+    for (glob, price) in &config.models {
         for field in &price_fields {
             push_omitted(&mut out, format!("models.{glob}.{field}"));
+        }
+        if let Some(tier) = price.tier {
+            for field in &tier_fields {
+                push_omitted(&mut out, format!("models.{glob}.{}.{field}", tier.key()));
+            }
         }
     }
     // The omitted keys are appended after everything the file carries, so
@@ -569,20 +608,13 @@ fn unset_value(config: &Config, key: &str) -> Option<String> {
     if key == "dispatch.keep_finished_lanes" {
         return Some(config.dispatch.keep_finished_lanes.to_string());
     }
-    let field = match models_key(config, key) {
-        Some(parts) => parts[2],
-        None => {
-            concurrency_key(config, key)?;
-            "concurrency"
-        }
+    let Some(parts) = models_key(config, key) else {
+        concurrency_key(config, key)?;
+        return Some("0".to_string());
     };
     // The zero of the field's own type, read off the struct rather than
     // spelled out here, the same way `ensure_models_entry` reads it.
-    if field == "concurrency" {
-        return Some("0".to_string());
-    }
-    let probe = Value::try_from(crate::usage::ModelPrice::probe()).ok()?;
-    Some(match probe.get(field)? {
+    Some(match models_field_probe(&parts)? {
         Value::Integer(_) => "0".to_string(),
         Value::Float(_) => "0.0".to_string(),
         Value::Boolean(_) => "false".to_string(),
@@ -605,7 +637,7 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
     // created on first write rather than rejected as unknown.
     let parts = match models_key(config, key) {
         Some(parts) => {
-            ensure_models_entry(&mut value, parts[1], parts[2])?;
+            ensure_models_entry(&mut value, &parts)?;
             parts
         }
         None => {
@@ -758,26 +790,56 @@ pub fn parts<'a>(config: &Config, key: &'a str) -> Vec<&'a str> {
     models_key(config, key).unwrap_or_else(|| key.split('.').collect())
 }
 
-/// Split `models.<model glob>.<field>` into its three parts, or `None` if this
-/// is not a models key.
+/// Split `models.<model glob>.<field>` into its three parts, or
+/// `models.<model glob>.above_<N>k_tokens.<field>` into its four, or `None` if
+/// this is not a models key.
 ///
-/// Split from both ends rather than on every dot, because a model glob is a
+/// Split from the right rather than on every dot, because a model glob is a
 /// name from someone else's catalogue and quite reasonably contains one:
-/// `models.gpt-4.1-*.input` is three parts, not four.
+/// `models.gpt-4.1-*.input` is three parts, not four. A segment before the
+/// field that reads as a tier name is taken as the tier, not as the end of
+/// the glob.
 fn models_key<'a>(config: &Config, key: &'a str) -> Option<Vec<&'a str>> {
     let rest = key.strip_prefix("models.")?;
-    let (glob, field) = rest.rsplit_once('.')?;
-    if glob.is_empty() {
+    let (head, field) = rest.rsplit_once('.')?;
+    let parts = match head.rsplit_once('.') {
+        Some((glob, tier)) if crate::usage::PriceTier::threshold_in(tier).is_some() => {
+            vec!["models", glob, tier, field]
+        }
+        _ => vec!["models", head, field],
+    };
+    if parts[1].is_empty() {
         return None;
     }
     // Only fields ModelPrice actually has, so a misspelt one is still refused.
-    // Against `probe` rather than `default`: a default is all zeros now, and a
-    // zero is omitted from the serialised form, so a default would name no
-    // fields at all and every models key would read as a typo.
-    let known = Value::try_from(crate::usage::ModelPrice::probe()).ok()?;
     let _ = config;
-    known.get(field)?;
-    Some(vec!["models", glob, field])
+    models_field_probe(&parts)?;
+    Some(parts)
+}
+
+/// The probe's value for the field a [`models_key`] split names — a scalar
+/// whose type is the field's, or `None` for a field spoolway does not know.
+///
+/// Against `probe` rather than `default`: a default is all zeros now, and a
+/// zero is omitted from the serialised form, so a default would name no
+/// fields at all and every models key would read as a typo. A table is not a
+/// field, so the probe's own tier sub-table never answers a three-part key.
+fn models_field_probe(parts: &[&str]) -> Option<Value> {
+    let table = match parts.len() {
+        4 => tier_probe()?,
+        _ => Value::try_from(crate::usage::ModelPrice::probe()).ok()?,
+    };
+    table
+        .get(parts[parts.len() - 1])
+        .filter(|value| is_scalar(value))
+        .cloned()
+}
+
+/// The rates a tier sub-table holds, rendered from the probe's own tier so
+/// the keys are read off the struct like every other `[models]` field.
+fn tier_probe() -> Option<Value> {
+    let tier = crate::usage::ModelPrice::probe().tier?;
+    Value::try_from(tier.rates).ok()
 }
 
 /// The profile name in `agents.<profile>.concurrency`, or `None` if this is
@@ -835,9 +897,9 @@ fn ensure_concurrency(value: &mut Value, profile: &str) -> Result<()> {
     Ok(())
 }
 
-/// Put an entry at `models.<glob>` if there is none yet, and the one field
-/// about to be written if *it* is missing, so the generic walk below has
-/// something to write into.
+/// Put an entry at `models.<glob>` if there is none yet, its tier sub-table
+/// when the key names one, and the one field about to be written if *it* is
+/// missing, so the generic walk below has something to write into.
 ///
 /// Both halves are needed now that a zero is omitted: a fresh entry serialises
 /// to an empty table, and even an entry that already exists holds only the
@@ -845,7 +907,12 @@ fn ensure_concurrency(value: &mut Value, profile: &str) -> Result<()> {
 /// taken from [`crate::usage::ModelPrice::probe`] so the shape is read off the
 /// struct rather than repeated here — the value is overwritten a moment later
 /// either way.
-fn ensure_models_entry(value: &mut Value, glob: &str, field: &str) -> Result<()> {
+///
+/// A tier with a different threshold from one the entry already has is still
+/// created here; deserialising the result is what refuses a second tier.
+fn ensure_models_entry(value: &mut Value, parts: &[&str]) -> Result<()> {
+    let glob = parts[1];
+    let field = parts[parts.len() - 1];
     let table = value
         .get_mut("models")
         .context("config has no `models` section")?;
@@ -855,13 +922,22 @@ fn ensure_models_entry(value: &mut Value, glob: &str, field: &str) -> Result<()>
     let entry = table
         .entry(glob.to_string())
         .or_insert_with(|| Value::Table(Default::default()));
-    let Some(entry) = entry.as_table_mut() else {
+    let Some(mut entry) = entry.as_table_mut() else {
         bail!("`models.{glob}` is not a table");
     };
+    if parts.len() == 4 {
+        let tier = parts[2];
+        let Some(table) = entry
+            .entry(tier.to_string())
+            .or_insert_with(|| Value::Table(Default::default()))
+            .as_table_mut()
+        else {
+            bail!("`models.{glob}.{tier}` is not a table");
+        };
+        entry = table;
+    }
     if !entry.contains_key(field) {
-        let probe = Value::try_from(crate::usage::ModelPrice::probe())
-            .context("rendering the model field probe")?;
-        let zero = match probe.get(field) {
+        let zero = match models_field_probe(parts).as_ref() {
             Some(Value::Integer(_)) => Value::Integer(0),
             Some(Value::Float(_)) => Value::Float(0.0),
             Some(Value::Boolean(_)) => Value::Boolean(false),
@@ -1564,5 +1640,72 @@ mod tests {
                 "`{present}` must be listed"
             );
         }
+    }
+
+    /// A tier rate is set through its nested key, on a glob nothing has
+    /// written yet, and reads back as the value written.
+    #[test]
+    fn a_models_tier_rate_is_created_on_first_write_and_reads_back() {
+        let key = "models.claude-haiku-5-5.above_100k_tokens.input";
+        assert_eq!(get(&Config::default(), key).unwrap(), "0.0");
+
+        let updated = set(&Config::default(), key, "0.5").unwrap();
+        let tier = updated.models["claude-haiku-5-5"].tier.unwrap();
+        assert_eq!(tier.above_k, 100);
+        assert_eq!(tier.rates.input, 0.5);
+        assert_eq!(get(&updated, key).unwrap(), "0.5");
+
+        // A glob with a dot in it still splits right.
+        let dotted = "models.gpt-4.1-*.above_128k_tokens.cache_write_1h";
+        let updated = set(&updated, dotted, "2").unwrap();
+        assert_eq!(
+            updated.models["gpt-4.1-*"]
+                .tier
+                .unwrap()
+                .rates
+                .cache_write_1h,
+            2.0
+        );
+
+        // The tier's unset rates are listed for a glob that has a tier.
+        let listed = all_settings(&updated).unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|e| e.key == "models.claude-haiku-5-5.above_100k_tokens.output")
+        );
+        assert!(!listed.iter().any(|e| e.key.contains("above_1k_tokens")));
+    }
+
+    /// A tier rate shares its leaf with a base rate, but its note says it
+    /// applies past the threshold rather than repeating the base sentence.
+    #[test]
+    fn a_models_tier_rate_takes_the_tier_note_not_the_base_one() {
+        let base = note("models.m.input").unwrap();
+        let tier = note("models.m.above_100k_tokens.input").unwrap();
+        assert_eq!(base, "Cost per million input tokens.");
+        assert!(
+            tier.contains("once a prompt passes N thousand tokens"),
+            "{tier}"
+        );
+        assert_eq!(
+            note("models.gpt-4.1-*.above_128k_tokens.cache_write_1h"),
+            Some(tier)
+        );
+        assert!(reference_table().contains(TIER_RATE_KEY));
+    }
+
+    #[test]
+    fn a_models_tier_key_that_names_no_rate_or_a_second_tier_is_refused() {
+        let config = set(
+            &Config::default(),
+            "models.m.above_100k_tokens.input",
+            "0.5",
+        )
+        .unwrap();
+        assert!(set(&config, "models.m.above_100k_tokens.slots", "2").is_err());
+        assert!(set(&config, "models.m.above_100k_tokens", "2").is_err());
+        let err = set(&config, "models.m.above_200k_tokens.input", "1").unwrap_err();
+        assert!(format!("{err:#}").contains("one price tier"), "{err:#}");
     }
 }

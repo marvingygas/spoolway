@@ -6786,6 +6786,7 @@ mod tests {
                 slots: 0,
                 exclusive: false,
                 local: false,
+                tier: None,
             },
         )]);
 

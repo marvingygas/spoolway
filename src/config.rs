@@ -3626,4 +3626,44 @@ mod tests {
             );
         });
     }
+
+    /// `spoolway config set` on a tier rate writes the sub-table into the
+    /// file, and the file loads back with the same value.
+    #[test]
+    fn saving_a_tier_rate_writes_the_sub_table_and_reads_back() {
+        let dir = crate::scratch::root("config-save-tier-rate");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[models.\"claude-haiku-5-5\"]\ninput = 0.1\n",
+        )
+        .unwrap();
+
+        let key = "models.claude-haiku-5-5.above_100k_tokens.input";
+        let config = crate::confkv::set(&Config::load(&dir).unwrap(), key, "0.5").unwrap();
+        config.save_key(&dir, key).unwrap();
+
+        let after = std::fs::read_to_string(Config::path_in(&dir)).unwrap();
+        assert!(
+            after.contains("[models.\"claude-haiku-5-5\".above_100k_tokens]"),
+            "{after}"
+        );
+        let loaded = Config::load(&dir).unwrap();
+        assert_eq!(crate::confkv::get(&loaded, key).unwrap(), "0.5");
+        assert_eq!(loaded.models["claude-haiku-5-5"].input, 0.1);
+    }
+
+    /// A misspelt tier sub-table is refused at load, naming the key.
+    #[test]
+    fn a_misnamed_tier_sub_table_is_refused_at_load() {
+        let dir = crate::scratch::root("config-misnamed-tier");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[models.\"claude-haiku-5-5\".above_100K_token]\ninput = 0.5\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", Config::load(&dir).unwrap_err());
+        assert!(err.contains("above_100K_token"), "{err}");
+    }
 }

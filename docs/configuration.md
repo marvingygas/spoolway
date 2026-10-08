@@ -587,6 +587,19 @@ model. An unpriced model is reported as unpriced, not counted as free. See
 | `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. A lane off its task's current step counts for nothing, so typing into one on a local model may make the server swap weights. |
 | `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
 
+A row can also carry one higher tier: the rates a request pays once its prompt passes a
+threshold. The tier is a sub-table named `above_<N>k_tokens` with the five rate keys above.
+
+```toml
+[models."claude-haiku-5-5".above_100k_tokens]
+input = 0.50
+output = 2.50
+```
+
+A sub-table with any other name is refused when the config loads, and so is a second tier.
+Set a tier rate with `spoolway config set models.'<glob>'.above_100k_tokens.input <usd>`. See
+[Pricing](cost.md#pricing).
+
 The window here is what spoolway believes, not what the server reports. Keep it in step with
 the server yourself.
 

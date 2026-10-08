@@ -4,7 +4,8 @@
 //! and it is empty by default: spoolway does not know what you run. Behind
 //! it sit two tables nobody has to write — a refreshed copy of litellm's price
 //! map under `~/.spoolway/`, then the copy vendored into the binary. Both are
-//! distilled to the six numbers [`crate::usage::ModelPrice`] holds. [`resolve`]
+//! distilled to the six numbers [`crate::usage::ModelPrice`] holds, plus one
+//! higher tier's rates where litellm prices one. [`resolve`]
 //! is the one place that order is applied: a project's own glob first, each
 //! price table by exact name after that, and nothing last.
 //!
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::cli::ModelsRefreshArgs;
 use crate::pipeline::{Pipelines, StepKind};
 use crate::repo::Repo;
-use crate::usage::ModelPrice;
+use crate::usage::{ModelPrice, PriceTier, Rates};
 
 /// The sentinel older scaffolds and the annotated generation template use to
 /// instruct a person to name a local model.
@@ -90,11 +91,57 @@ pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<Str
                     cache_write_1h: optional_rate(
                         row.get("cache_creation_input_token_cost_above_1hr"),
                     ),
+                    tier: lowest_tier(row),
                     ..Default::default()
                 },
             ))
         })
         .collect()
+}
+
+/// Which of a tier's [`Rates`] one litellm field fills.
+type RateField = fn(&mut Rates) -> &mut f64;
+
+/// litellm's per-token field for each rate, as it is spelled before a tier's
+/// `_above_<N>k_tokens` suffix. Batch, priority, fast-mode and regional
+/// fields carry further suffixes or other names, so they match none of these
+/// and stay unread.
+const TIER_FIELDS: [(&str, RateField); 5] = [
+    ("input_cost_per_token", |r| &mut r.input),
+    ("output_cost_per_token", |r| &mut r.output),
+    ("cache_read_input_token_cost", |r| &mut r.cache_read),
+    ("cache_creation_input_token_cost", |r| &mut r.cache_write_5m),
+    ("cache_creation_input_token_cost_above_1hr", |r| {
+        &mut r.cache_write_1h
+    }),
+];
+
+/// The row's lowest-threshold tier, read from its `*_above_<N>k_tokens`
+/// fields and converted to USD per million, or `None` when it has no tier.
+///
+/// A row with more than one threshold keeps its lowest: spoolway prices one
+/// tier per model, and the lowest is the one a growing prompt reaches first.
+/// The one-hour field's own `_above_1hr` never reads as a threshold, because
+/// [`PriceTier::threshold_in`] takes digits only.
+fn lowest_tier(row: &serde_json::Map<String, serde_json::Value>) -> Option<PriceTier> {
+    let mut tiers: BTreeMap<u64, Rates> = BTreeMap::new();
+    for (key, value) in row {
+        let Some(rate) = finite_number(value) else {
+            continue;
+        };
+        for (base, field) in TIER_FIELDS {
+            let Some(above_k) = key
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix('_'))
+                .and_then(PriceTier::threshold_in)
+            else {
+                continue;
+            };
+            *field(tiers.entry(above_k).or_default()) = per_million(rate);
+        }
+    }
+    let (above_k, rates) = tiers.into_iter().next()?;
+    Some(PriceTier { above_k, rates })
 }
 
 /// Fetch and replace the machine-wide or vendored price table.
@@ -517,6 +564,26 @@ struct Row<'a> {
     exclusive: bool,
     source: &'static str,
     steps: &'a [&'a str],
+    /// Left out for an untiered model, so its JSON reads as it always has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<TierRow>,
+}
+
+/// A tiered model's higher rates, drawn on an indented row under it.
+#[derive(Serialize)]
+struct TierRow {
+    above_tokens: u64,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write_5m: f64,
+    cache_write_1h: f64,
+}
+
+impl TierRow {
+    fn label(&self) -> String {
+        format!("  above {}k tokens", self.above_tokens / 1000)
+    }
 }
 
 /// `spoolway models`: every model this project's pipelines name, with what it
@@ -542,6 +609,14 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
                 exclusive: resolved.price.is_some_and(|p| p.exclusive),
                 source: resolved.source.label(),
                 steps,
+                tier: resolved.price.and_then(|p| p.tier).map(|tier| TierRow {
+                    above_tokens: tier.above_k * 1000,
+                    input: tier.rates.input,
+                    output: tier.rates.output,
+                    cache_read: tier.rates.cache_read,
+                    cache_write_5m: tier.rates.cache_write_5m,
+                    cache_write_1h: tier.rates.cache_write_1h,
+                }),
             }
         })
         .collect();
@@ -557,9 +632,17 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // A tier's label spans the model and window columns, which stay blank
+    // under it, so a table of short model names widens to fit the label.
+    const WINDOW_SPAN: usize = 2 + 9;
     let width = rows
         .iter()
         .map(|r| r.model.len())
+        .chain(
+            rows.iter()
+                .filter_map(|r| r.tier.as_ref())
+                .map(|tier| tier.label().len().saturating_sub(WINDOW_SPAN)),
+        )
         .max()
         .unwrap_or(5)
         .max("MODEL".len());
@@ -596,6 +679,18 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
             row.source,
             row.steps.join(", "),
         );
+        if let Some(tier) = &row.tier {
+            println!(
+                "{:<span$}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
+                tier.label(),
+                crate::fmt::money(Some(tier.input)),
+                crate::fmt::money(Some(tier.output)),
+                crate::fmt::money(Some(tier.cache_read)),
+                crate::fmt::money(Some(tier.cache_write_5m)),
+                crate::fmt::money(Some(tier.cache_write_1h)),
+                span = width + WINDOW_SPAN,
+            );
+        }
     }
 
     let unknown: Vec<&str> = rows
@@ -1144,5 +1239,73 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn litellm_tier_fields_become_one_tier_at_the_lowest_threshold() {
+        let raw: BTreeMap<String, serde_json::Value> = serde_json::from_value(serde_json::json!({
+            "tiered": {
+                "mode": "chat",
+                "input_cost_per_token": 0.0000001,
+                "output_cost_per_token": 0.0000005,
+                "input_cost_per_token_above_100k_tokens": 0.0000005,
+                "output_cost_per_token_above_100k_tokens": 0.0000025,
+                "cache_read_input_token_cost_above_100k_tokens": 0.00000005,
+                "cache_creation_input_token_cost_above_100k_tokens": 0.000000625,
+                "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 0.000001,
+                "input_cost_per_token_above_100k_tokens_priority": 0.000009,
+                "input_cost_per_token_batches": 0.000009
+            },
+            "two-thresholds": {
+                "mode": "chat",
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+                "input_cost_per_token_above_256k_tokens": 0.000004,
+                "input_cost_per_token_above_128k_tokens": 0.000003,
+                "output_cost_per_token_above_128k_tokens": 0.000006
+            },
+            "untiered": {
+                "mode": "chat",
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+                "cache_creation_input_token_cost_above_1hr": 0.000002
+            }
+        }))
+        .unwrap();
+
+        let table = distill(&raw);
+        assert_eq!(
+            table["tiered"].tier,
+            Some(PriceTier {
+                above_k: 100,
+                rates: Rates {
+                    input: 0.5,
+                    output: 2.5,
+                    cache_read: 0.05,
+                    cache_write_5m: 0.625,
+                    cache_write_1h: 1.0,
+                },
+            })
+        );
+        assert_eq!(
+            table["two-thresholds"].tier,
+            Some(PriceTier {
+                above_k: 128,
+                rates: Rates {
+                    input: 3.0,
+                    output: 6.0,
+                    ..Rates::default()
+                },
+            })
+        );
+        assert_eq!(table["untiered"].tier, None);
+    }
+
+    /// The vendored table carries Haiku 5.5's tier, so a build prices it
+    /// without a refresh.
+    #[test]
+    fn the_vendored_table_carries_haiku_5_5_with_its_tier() {
+        let haiku = builtin()["claude-haiku-5-5"];
+        assert_eq!(haiku.tier.map(|tier| tier.above_k), Some(100));
     }
 }
