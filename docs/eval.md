@@ -233,6 +233,7 @@ root's own row. A session in a worktree a task owns counts on the lanes table in
 |---|---|
 | `SESSIONS` | Sessions run in that directory |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per run: `IN/SESSION`, `OUT/SESSION`, `CACHE R/SESSION`, `CACHE W/SESSION`, each divided by `SESSIONS`. |
+| `IN USD`, `OUT USD`, `CACHE R USD`, `CACHE W USD` | The cost of the token column before each, priced at today's price table when eval reads, as on the lanes table. Together they can differ from `USD`. Blank when no session on the row that spent tokens has a price today. Per run: `IN USD/SESSION`, `OUT USD/SESSION`, `CACHE R USD/SESSION`, `CACHE W USD/SESSION`, each divided by `SESSIONS`. |
 | `USD` | Total cost. Drawn in both views. |
 | `USD/SESSION` | Cost per session. Drawn per run only. |
 | `CTX PEAK AVG` | The mean of its sessions' own peak context reading, each as a share of its model's window |
@@ -249,6 +250,7 @@ views.
 | `SKILL` | The first skill the session ran, with `+n` when it ran more than one. A dash when it ran none. |
 | `MODEL` | The model the session used |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | That session's own token counts |
+| `IN USD`, `OUT USD`, `CACHE R USD`, `CACHE W USD` | The cost of the token column before each, priced at today's price table. Blank when nothing the session spent has a price today. |
 | `USD` | That session's own cost |
 | `TIME` | That session's own wall time |
 
@@ -257,12 +259,14 @@ way names the same skill. A subagent's tokens, cost and skills count on the sess
 it, not on a row of its own.
 
 A summary line closes the `by dir` table and is pinned the same way as the lanes table's. In the
-totals view it is `Total`: the session count and the sums of every token class, `USD` and `TIME`.
-In the per-run view it is `Average`: the session count, each token class and `TIME` divided by
-`SESSIONS`, `USD` blank and `USD/SESSION` carrying the cost divided by `SESSIONS`. `CTX PEAK AVG`
-and `CTX PEAK` are blank. A table with no sessions shows a dash in its token, `TIME` and cost cells.
+totals view it is `Total`: the session count and the sums of every token class, the four class
+costs, `USD` and `TIME`. In the per-run view it is `Average`: the session count, each token class,
+each class cost and `TIME` divided by `SESSIONS`, `USD` blank and `USD/SESSION` carrying the cost
+divided by `SESSIONS`. `CTX PEAK AVG` and `CTX PEAK` are blank. A table with no sessions shows a
+dash in its token, `TIME` and cost cells.
 
-Under `by session`, the `Total` line carries every token class, `USD` and `TIME` in both views.
+Under `by session`, the `Total` line carries every token class, the four class costs, `USD` and
+`TIME` in both views.
 
 Its filter panel has five rows: `by`, `dir`, `skill`, `since` and `until`. The `skill` filter
 keeps whole sessions whose transcript names that skill. There is no command-line flag for the
@@ -312,7 +316,9 @@ and `cache_write_usd`, each with a `_per_run` twin. These are blank in CSV, and 
 carry the sums and the per-run figures the screen's `Total` and `Average` lines show:
 `in_tokens`, `out_tokens`, `cache_read_tokens`, `cache_write_tokens`, the four `*_per_run`
 token columns, the four class-cost columns and their `_per_run` twins, `cost_per_run`, `time_s` and `time_per_run_s`. The directory table's export carries the
-`*_per_session` columns instead. The pass and context columns stay blank on the CSV total row, and
+`*_per_session` columns instead, including `in_usd_per_session`, `out_usd_per_session`,
+`cache_read_usd_per_session` and `cache_write_usd_per_session`. Under `by session` it carries
+`in_usd`, `out_usd`, `cache_read_usd` and `cache_write_usd` with no twins. The pass and context columns stay blank on the CSV total row, and
 both views export the same row. `--json` prints an object, `{"by", "rows",
 "total"}`, rather than a bare array, so the `Total` line cannot be mistaken for a row. Its own
 `by` column reads `total`. `--csv` and `--json` are not allowed together.
@@ -325,6 +331,11 @@ both views export the same row. `--json` prints an object, `{"by", "rows",
 Every task is different work. A pipeline that drew easy tasks looks better than one that drew
 hard ones. Read every figure against `RUNS`, the sample size. `spoolway eval` catches drift,
 such as a review step that got a third pricier after a prompt edit.
+
+Every figure is a floor, not an invoice. spoolway reads what each agent writes to its
+transcript, and an agent does not always write every request it makes there. A request
+missing from the transcript is missing from eval, so eval can read low. Compare pipelines,
+steps and versions here, and read what you paid on your provider's bill.
 
 ## Where the fields come from
 

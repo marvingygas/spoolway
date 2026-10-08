@@ -504,7 +504,9 @@ impl EvalBy {
         CACHE R/RUN, CACHE W/RUN, USD/RUN and TIME/RUN are each that total over RUNS. \n  \
         IN USD, OUT USD, CACHE R USD and CACHE W USD price the column before each at \n  \
         today's price table, so together they can differ from USD, which was banked when \n  \
-        the lane settled. With --per-run each is divided by RUNS like the rest.\n\n\
+        the lane settled. With --per-run each is divided by RUNS like the rest.\n\n  \
+        Every figure is a floor: an agent does not always write every request it makes \n  \
+        to its transcript, and what it leaves out is missing here.\n\n\
         \x1b[1mThe last line:\x1b[0m\n  \
         Total carries distinct RUNS, BLOCKS and the sums of IN, OUT, CACHE R, CACHE W, \n  \
         their four USD columns, USD and TIME. Its TIME is lane time added up, not the \n  \
