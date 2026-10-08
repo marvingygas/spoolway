@@ -30,12 +30,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: clippy, rustfmt
           targets: aarch64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # First, because it is the cheapest thing that can fail and the only one
       # whose fix is a single command. There is no rustfmt.toml: the default
@@ -150,6 +150,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories
