@@ -1496,8 +1496,8 @@ if drive walked blocked 120; then
 else
   bad "a walk-past that would circle forever stops the task at the limit (at \`$(stage_of walked)\`)"
 fi
-has "the steps were walked past rather than run" "does not run for this task (skip)" \
-  "$E2E_DISPATCH_LOG"
+has "the steps were walked past rather than run" "walked past \`walk-a\` (skip)" \
+  "$SPOOLWAY_PROJECT_HOME/queue/walked.md"
 if [ -e "$SPOOLWAY_PROJECT_HOME/commands/walked · walk-a.log" ]; then
   bad "no command ran for a walked-past step (found walked · walk-a.log)"
 else

@@ -223,12 +223,12 @@ else
   bad "and no run was started for it at all"
   grep "base: running" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
-# The dispatcher's own account, not the task file's: walking past a step is a
-# fact about a pass, and the task file records where a task went rather than
-# what was decided about it on the way.
-has "and the pass says why it walked past" \
-  "\`suite\` does not run for this task (not last in its chain)" \
-  "$E2E_DISPATCH_LOG"
+# The task's own Status Log names the step it was routed past and the rule, on
+# the line for the step it landed on: a move never writes the hidden step as a
+# stage, so that line is the only record of the walk-past.
+has "and the task's Status Log says why it walked past" \
+  "walked past \`suite\` (not last in its chain)" \
+  "$SPOOLWAY_PROJECT_HOME/queue/base.md"
 
 # The bottom of the stack is the root of it — an empty `depends_on` — so
 # `bootstrap` is the opposite story: `base` really ran it, once, before it
@@ -368,9 +368,9 @@ if [ ! -e "$SPOOLWAY_PROJECT_HOME/commands/top · bootstrap.log" ]; then
 else
   bad "and no run was ever started for \`top\` at \`bootstrap\`"
 fi
-has "and the pass says why it walked past" \
-  "\`bootstrap\` does not run for this task (not first in its chain)" \
-  "$E2E_DISPATCH_LOG"
+has "and the task's Status Log says why it walked past" \
+  "walked past \`bootstrap\` (not first in its chain)" \
+  "$SPOOLWAY_PROJECT_HOME/queue/top.md"
 
 # -------------------------------------------------- a third link, joining both
 # A task naming both `base` and `top` in its own `depends_on` — the case
