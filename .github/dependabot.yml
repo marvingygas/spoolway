@@ -1,0 +1,35 @@
+# Version updates. Security updates are turned on in the repository settings
+# and open their own pull requests as soon as an advisory lands, whatever the
+# schedule below says.
+#
+# npm/ is left out on purpose: scripts/build-npm.mjs generates those manifests
+# at release time and stamps the version from Cargo.toml, so a bump there would
+# be overwritten by the next release.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One pull request for every compatible bump, so a week of patch
+      # releases is one merge. Major bumps still arrive one at a time.
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+      include: scope
