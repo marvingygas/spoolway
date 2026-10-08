@@ -376,18 +376,11 @@ pub struct ModelPrice {
     #[serde(skip_serializing_if = "unset_slots")]
     pub slots: u32,
 
-    /// This model never runs alongside a different model also carrying
-    /// `exclusive = true`, however many slots either has and whatever the
-    /// step's own `slot:` says.
-    ///
-    /// For a local server that can only ever have one set of weights loaded
-    /// at a time: two `exclusive` models are a statement that swapping one in
-    /// evicts the other, not a request for more concurrency. A step whose
-    /// `slot:` is `false` still waits behind a live `exclusive` model — the
-    /// exclusion is about what the server can hold, which a step opting out
-    /// of the profile's slot budget does not change.
-    #[serde(skip_serializing_if = "not_exclusive")]
-    pub exclusive: bool,
+    /// The retired `exclusive` flag, read only so a config that still sets it
+    /// parses past `deny_unknown_fields`. Nothing reads it and it is never
+    /// written back; `spoolway sync` drops it from a private override.
+    #[serde(rename = "exclusive", default, skip_serializing)]
+    pub(crate) retired_exclusive: Option<bool>,
 
     /// This model runs on hardware you own rather than a metered API.
     ///
@@ -398,20 +391,19 @@ pub struct ModelPrice {
     /// standing line on the dispatcher's board when a queued task routes through a step naming this model,
     /// asking a person not to open their own sessions against the same server
     /// while the run lasts. spoolway never infers it: a model carrying
-    /// `slots` or `exclusive` is describing the same kind of hardware, but so
-    /// is a local model nobody has sized, and a mistyped hosted model name
-    /// reads as unpriced the way a free local one does — so `spoolway doctor`
-    /// notes a `slots`/`exclusive` model that has not set this rather than
-    /// assuming either way.
+    /// `slots` is describing the same kind of hardware, but so is a local
+    /// model nobody has sized, and a mistyped hosted model name reads as
+    /// unpriced the way a free local one does — so `spoolway doctor` notes a
+    /// `slots` model that has not set this rather than assuming either way.
     #[serde(skip_serializing_if = "not_local")]
     pub local: bool,
 }
 
 /// A zero in `[models]` is *unset*, and unset is written by leaving the key
 /// out. Every rate in this table is zero for a local model, and eight lines
-/// saying a free model is free is noise around the three fields that carry
-/// the answer — `slots`, `exclusive` and `local`. See [`ModelPrice::probe`]
-/// for the one thing this costs.
+/// saying a free model is free is noise around the two fields that carry the
+/// answer — `slots` and `local`. See [`ModelPrice::probe`] for the one thing
+/// this costs.
 fn unset_usize(n: &usize) -> bool {
     *n == 0
 }
@@ -422,10 +414,6 @@ fn unset_rate(rate: &f64) -> bool {
 
 fn unset_slots(slots: &u32) -> bool {
     *slots == 0
-}
-
-fn not_exclusive(exclusive: &bool) -> bool {
-    !*exclusive
 }
 
 fn not_local(local: &bool) -> bool {
@@ -472,7 +460,7 @@ impl ModelPrice {
             cache_write_1h: 1.0,
             prompt_cache_ttl: Some(std::time::Duration::from_secs(1)),
             slots: 1,
-            exclusive: true,
+            retired_exclusive: None,
             local: true,
         }
     }
@@ -3592,7 +3580,7 @@ mod tests {
                     cache_write_1h: 6.0,
                     prompt_cache_ttl: None,
                     slots: 0,
-                    exclusive: false,
+                    retired_exclusive: None,
                     local: false,
                 },
             ),
@@ -3607,7 +3595,7 @@ mod tests {
                     cache_write_1h: 10.0,
                     prompt_cache_ttl: None,
                     slots: 0,
-                    exclusive: false,
+                    retired_exclusive: None,
                     local: false,
                 },
             ),
@@ -3716,7 +3704,7 @@ mod tests {
                 cache_write_1h: 0.0,
                 prompt_cache_ttl: None,
                 slots: 0,
-                exclusive: false,
+                retired_exclusive: None,
                 local: false,
             },
         )]);

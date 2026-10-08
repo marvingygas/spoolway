@@ -385,7 +385,6 @@ session_blocked_ctx = 0
 [models."Ornith-1.5-35B-A3B"]  # a local model, served by llama.cpp
 context_window = 100096
 slots = 2                    # parallel lanes the local server can actually hold
-exclusive = true             # never alongside another exclusive model
 local = true                 # runs on hardware you own
 ```
 

@@ -1568,10 +1568,9 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
 
 /// Every check and note that reads a model's own settings rather than an
 /// agent profile's: the legacy/template placeholder, a name that resolves to nothing,
-/// a step nothing caps, an `exclusive` model with no `slots` of its own, a
-/// `slots`/`exclusive` model that has not said whether it is `local`, and a
-/// `session_blocked_ctx` set against a model that cannot honour it. Grouped
-/// together because all six walk the same `pipelines`/`config.models` data,
+/// a step nothing caps, a `slots` model that has not said whether it is
+/// `local`, and a `session_blocked_ctx` set against a model that cannot
+/// honour it. Grouped together because all five walk the same `pipelines`/`config.models` data,
 /// several of them by way of the same `named` map.
 fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1688,49 +1687,19 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         )));
     }
 
-    // `exclusive` says this model never shares a card with a different
-    // exclusive one — the point of that, on a server holding one set of
-    // weights at a time, is that a step naming it still runs several at once
-    // up to a real cap. With no `slots` of its own that cap silently falls
-    // back to its profile's `concurrency`, which was sized for the binary,
-    // not the model.
-    let exclusive_no_slots: Vec<(&str, Vec<&str>)> = named
-        .into_iter()
-        .filter(|(model, _)| *model != crate::models::PLACEHOLDER)
-        .filter_map(|(model, steps)| {
-            let price = crate::models::resolve(&config.models, model).price?;
-            (price.exclusive && price.slots == 0).then_some((model, steps))
-        })
-        .collect();
-    for (model, steps) in &exclusive_no_slots {
-        findings.push(Finding::Note(format!(
-            "model `{model}` is `exclusive` with no `slots`, and {} will run on it",
-            steps.join(", ")
-        )));
-    }
-
-    // `slots` and `exclusive` both describe one card's worth of hardware, so a
-    // model carrying either is almost certainly local. Setting `local` lifts
-    // the 5m `prompt_cache_ttl` default from it, so a carried session is not
-    // refused for age, and it quiets this note.
+    // `slots` describes one card's worth of hardware, so a model carrying it
+    // is almost certainly local. Setting `local` lifts the 5m
+    // `prompt_cache_ttl` default from it, so a carried session is not refused
+    // for age, and it quiets this note.
     // Read straight off `config.models` rather than the `named` map: the flag
     // is worth setting on a sized model whether or not a pipeline here points
     // at it yet. `local` itself is never a failure, so this is a note.
     for (glob, price) in &config.models {
-        if price.local || (price.slots == 0 && !price.exclusive) {
+        if price.local || price.slots == 0 {
             continue;
         }
-        // Name `slots` whenever it is set, whether or not `exclusive` is too:
-        // the mockup this note follows reads "sets `slots` but not `local`".
-        // `exclusive` is named only for an entry that carries it alone — the
-        // `continue` above has already ruled out neither being set.
-        let which = if price.slots > 0 {
-            "`slots`"
-        } else {
-            "`exclusive`"
-        };
         findings.push(Finding::Note(format!(
-            "model `{glob}` sets {which} but not `local`"
+            "model `{glob}` sets `slots` but not `local`"
         )));
     }
 
@@ -2484,21 +2453,19 @@ mod tests {
         }));
     }
 
-    /// One note per `[models]` entry that sets `slots` or `exclusive` without
-    /// saying whether it is `local`. A model that has set `local`, and one
-    /// that sets neither `slots` nor `exclusive`, draw nothing. The note
-    /// names `slots` whenever it is set — the task mockup's wording — and
-    /// `exclusive` only for an
-    /// entry that carries it alone.
+    /// One note per `[models]` entry that sets `slots` without saying whether
+    /// it is `local`. A model that has set `local`, and one that sets no
+    /// `slots` — including one that still carries the retired `exclusive` —
+    /// draw nothing.
     #[test]
     fn a_sized_model_that_has_not_set_local_is_noted() {
         let pipelines = crate::pipeline::Pipelines::builtin();
-        let mut config = Config::default();
+        let mut config: Config = toml::from_str("[models.\"*Muse-*\"]\nexclusive = true\n")
+            .expect("a retired exclusive must still load");
         config.models.insert(
             "*Qwen3.6-35B-A3B".into(),
             crate::usage::ModelPrice {
                 slots: 3,
-                exclusive: true,
                 ..Default::default()
             },
         );
@@ -2506,15 +2473,7 @@ mod tests {
             "*Ornith-1.5-35B-A3B".into(),
             crate::usage::ModelPrice {
                 slots: 3,
-                exclusive: true,
                 local: true,
-                ..Default::default()
-            },
-        );
-        config.models.insert(
-            "*Muse-*".into(),
-            crate::usage::ModelPrice {
-                exclusive: true,
                 ..Default::default()
             },
         );
@@ -2534,27 +2493,13 @@ mod tests {
             })
             .collect();
 
-        // One for Qwen, one for the exclusive-only Muse glob; nothing for the
-        // `local` Ornith entry or the priced cloud one.
-        assert_eq!(local_notes.len(), 2, "{local_notes:#?}");
-        let note = |glob: &str| {
-            local_notes
-                .iter()
-                .find(|n| n.contains(&format!("model `{glob}`")))
-                .unwrap_or_else(|| panic!("no note for {glob}: {local_notes:#?}"))
-        };
-        // `slots` is set, so the note names `slots` even though `exclusive` is
-        // set too — the wording the task mockup draws.
+        // One for Qwen; nothing for the `local` Ornith entry, the priced
+        // cloud one or the Muse glob that carries only the retired flag.
+        assert_eq!(local_notes.len(), 1, "{local_notes:#?}");
         assert!(
-            note("*Qwen3.6-35B-A3B").contains("sets `slots` but not `local`"),
+            local_notes[0].contains("model `*Qwen3.6-35B-A3B` sets `slots` but not `local`"),
             "{}",
-            note("*Qwen3.6-35B-A3B")
-        );
-        // `exclusive` alone is the only case that names `exclusive`.
-        assert!(
-            note("*Muse-*").contains("sets `exclusive` but not `local`"),
-            "{}",
-            note("*Muse-*")
+            local_notes[0]
         );
     }
 

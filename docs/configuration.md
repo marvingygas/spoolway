@@ -564,7 +564,6 @@ prompt_cache_ttl = "1h"
 [models."Qwen3.6-35B-A3B"]
 context_window = 100096
 slots = 3
-exclusive = true
 local = true
 ```
 
@@ -584,15 +583,13 @@ model. An unpriced model is reported as unpriced, not counted as free. See
 | `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
 | `prompt_cache_ttl` | `5m`, none if `local` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. `"0"` turns it off. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
-| `exclusive` | `false` | Never run alongside a different model that is also `exclusive`. Set `slots` too. A lane off its task's current step counts for nothing, so typing into one on a local model may make the server swap weights. |
 | `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
 
 The window here is what spoolway believes, not what the server reports. Keep it in step with
 the server yourself.
 
-`spoolway doctor` notes a row with `slots` or `exclusive` but no `local`, an `exclusive` row
-with no `slots`, a row no pipeline step uses, and a row that still names `cache_ttl` or
-`session_reuse_idle`.
+`spoolway doctor` notes a row with `slots` but no `local`, a row no pipeline step uses, and a
+row that still names `cache_ttl` or `session_reuse_idle`.
 
 ## Retired keys
 
@@ -622,6 +619,7 @@ printed.
 | `dispatch.herdr_mode` (`split` or `grouped`) | Nothing. Every task runs in a herdr workspace of its own. |
 | `issue_tracking.on_fail` | Nothing. A failing `queued`, `started` or `done` hook always pauses its task. |
 | `[pipeline_gen]` | Nothing |
+| `models.<glob>.exclusive` | Nothing. Serving one model at a time, and sizing `slots` and `concurrency` to match, is up to you. |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.prompt_cache_ttl` |
 
 ## When the config will not parse

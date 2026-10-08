@@ -85,7 +85,7 @@ steps:
 | `effort` | none | Passed to the agent kind's effort flag. Blank sends no flag. See [Effort](agents.md#effort). |
 | `skills` | none | Skills the lane invokes before the task briefing, each as its own message. Comma separated, names only. See [Skills](agents.md#skills). |
 | `session` | `false` | `true` resumes this prompt's earlier conversation on the task. |
-| `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` and `exclusive` apply either way. |
+| `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` applies either way. |
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |

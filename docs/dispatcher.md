@@ -100,7 +100,7 @@ that step. A pass also draws on the same once-a-second cadence between the check
 own work, so the board keeps redrawing through a slow pass too.
 
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
-profile. A model marked `exclusive` never runs beside a different exclusive model. See
+profile. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 Only the lane on a task's current step counts against those caps, from the pass that starts it.
@@ -590,8 +590,8 @@ task has run stays on screen and you can still type into it. See [Leaving a pane
 it](agents.md#leaving-a-pane-without-closing-it).
 
 A finished lane does not count as running. A profile's `concurrency` and a model's `slots`
-and `exclusive` count only the lane on the step the task is on. A follow-up you type into a
-finished pane runs outside every cap, the same as a session you started by hand. A report from a
+count only the lane on the step the task is on. A follow-up you type into a finished pane runs
+outside every cap, the same as a session you started by hand. A report from a
 finished lane is refused, because the task has left its step.
 
 A step that comes back replaces its own pane. A review that fails and sends the task round again
