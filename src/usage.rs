@@ -335,9 +335,11 @@ pub struct ModelPrice {
     #[serde(skip_serializing_if = "unset_rate")]
     pub cache_write_1h: f64,
 
-    /// How long a carried session may sit before `dispatch::carried_session`
-    /// refuses to resume it — measured against this model's own store,
-    /// `usage::touched_at`.
+    /// How long a session's prompt cache is trusted to stay warm: a carried
+    /// session whose last reply is older is refused, whether
+    /// `dispatch::carried_session` or a one-shot resume would continue it,
+    /// and opens fresh. Age is [`session_age`]'s. Read it through
+    /// [`Self::cache_ttl_limit`], which applies the default.
     ///
     /// **Why this is a model's fact and not an agent kind's.** A cache belongs
     /// to whoever serves the model, and pi and codex are *harnesses*
@@ -347,19 +349,20 @@ pub struct ModelPrice {
     /// the model is where its lifetime is declared — beside the prices, which
     /// are the same kind of fact and are already matched by the same glob.
     ///
-    /// `None` means nobody has said, and a carried session under this model
-    /// is never refused for its age — the honest answer, not a guess that it
-    /// has gone cold. Renamed from `cache_ttl`: the alias keeps an existing
-    /// config parsing, and this is consulted on every carried session now
-    /// rather than only on a turn that happened to touch a cache, which is
-    /// what the old name overstated.
+    /// `None` means nobody has said, and the default applies: five minutes,
+    /// or no limit on a model marked `local`. An explicit zero (`"0"`) is a
+    /// statement, not an absence, and turns the limit off on any model — which
+    /// is why this is an `Option` and not a bare duration. Renamed from
+    /// `session_reuse_idle`, itself renamed from `cache_ttl`; both old
+    /// spellings stay as aliases so an existing config keeps parsing.
     #[serde(
+        alias = "session_reuse_idle",
         alias = "cache_ttl",
         default,
         skip_serializing_if = "Option::is_none",
         with = "crate::config::human_duration::optional"
     )]
-    pub session_reuse_idle: Option<std::time::Duration>,
+    pub prompt_cache_ttl: Option<std::time::Duration>,
 
     /// How many lanes may run this model at once, in place of its profile's
     /// `agents.<profile>.concurrency` when set.
@@ -388,10 +391,11 @@ pub struct ModelPrice {
 
     /// This model runs on hardware you own rather than a metered API.
     ///
-    /// Purely informational: it sizes nothing, caps nothing and never reaches
-    /// the scheduler — a run takes exactly the same decisions whether this is
-    /// `true` or absent. Its one effect is a standing line on the dispatcher's
-    /// board when a queued task routes through a step naming this model,
+    /// It sizes nothing, caps nothing and never reaches the scheduler. It has
+    /// two effects. A model marked `local` has no `prompt_cache_ttl` default,
+    /// so a carried session under it is never refused for its age unless the
+    /// project sets one; see [`ModelPrice::cache_ttl_limit`]. And it puts a
+    /// standing line on the dispatcher's board when a queued task routes through a step naming this model,
     /// asking a person not to open their own sessions against the same server
     /// while the run lasts. spoolway never infers it: a model carrying
     /// `slots` or `exclusive` is describing the same kind of hardware, but so
@@ -428,7 +432,25 @@ fn not_local(local: &bool) -> bool {
     !*local
 }
 
+/// How long a session's prompt cache is trusted when a model sets no
+/// `prompt_cache_ttl`. Five minutes is the shortest cache lifetime Anthropic
+/// uses, so a resume inside it is warm on Anthropic's models. Other providers
+/// are held to the same figure for consistency, and a project can change it.
+pub const DEFAULT_PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 impl ModelPrice {
+    /// The age past which a carried session under this model is refused, or
+    /// `None` for no limit. `price` is `None` for a model with no entry at all,
+    /// which still gets the default: it is hosted until someone says `local`.
+    pub fn cache_ttl_limit(price: Option<&Self>) -> Option<std::time::Duration> {
+        let limit = match price.and_then(|price| price.prompt_cache_ttl) {
+            Some(set) => set,
+            None if price.is_some_and(|price| price.local) => return None,
+            None => DEFAULT_PROMPT_CACHE_TTL,
+        };
+        (!limit.is_zero()).then_some(limit)
+    }
+
     /// A value with every field present when serialised — nothing zero,
     /// nothing `None`.
     ///
@@ -448,7 +470,7 @@ impl ModelPrice {
             cache_read: 1.0,
             cache_write_5m: 1.0,
             cache_write_1h: 1.0,
-            session_reuse_idle: Some(std::time::Duration::from_secs(1)),
+            prompt_cache_ttl: Some(std::time::Duration::from_secs(1)),
             slots: 1,
             exclusive: true,
             local: true,
@@ -876,13 +898,52 @@ pub fn live_of(kind: &str, path: &Path) -> Option<Live> {
 ///
 /// Consulted by `dispatch::carried_session`, which checks this against an
 /// enabled `agents.<profile>.session_reuse_ctx` and the session's own age against
-/// `models.<glob>.session_reuse_idle` — the second reading is [`touched_at`]'s,
-/// not this function's, since it is a fact about the store rather than about
-/// any one turn.
+/// `models.<glob>.prompt_cache_ttl` — the second reading is
+/// [`session_age`]'s, not this function's, since it is a fact about when the
+/// model last answered rather than about the size of any one turn.
 pub fn last_turn(kind: &str, session: &str) -> Option<u64> {
     let path = session_file(kind, session)?;
     let turn = last_turn_at(kind, &path)?;
     Some(turn.tokens.input + turn.tokens.cache_read + turn.tokens.cache_write())
+}
+
+/// Which clock a session's age was read off. See [`session_age`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeReading {
+    /// The timestamp on the transcript's last line that carries model usage.
+    LastReply,
+    /// The file's modified time, for a transcript with no such timestamp.
+    Modified,
+}
+
+/// How long ago `session` last had a reply from the model, and which clock
+/// said so.
+///
+/// A provider's prompt cache is refreshed only by a request to the model.
+/// Claude Code also appends lines that send nothing — `queue-operation`,
+/// `cost-state`, `last-prompt` — and each moves the file's modified time, so
+/// a transcript whose last reply was 34 hours ago can have been "touched"
+/// seconds ago. The age therefore comes from the last usage-bearing line's
+/// own timestamp, read as UTC, and falls back to the modified time only for a
+/// transcript that has none, which is the reading this replaced.
+///
+/// `None` when the transcript cannot be found or neither clock can be read.
+/// A timestamp ahead of this machine's clock reads as zero age rather than
+/// as an error. A timestamp behind it reads as older, as it is.
+pub fn session_age(kind: &str, session: &str) -> Option<(std::time::Duration, AgeReading)> {
+    session_age_at(kind, &session_file(kind, session)?)
+}
+
+fn session_age_at(kind: &str, path: &Path) -> Option<(std::time::Duration, AgeReading)> {
+    let now = std::time::SystemTime::now();
+    if let Some(at) = last_turn_at(kind, path).and_then(|turn| turn.at) {
+        let age = now
+            .duration_since(std::time::SystemTime::from(at))
+            .unwrap_or_default();
+        return Some((age, AgeReading::LastReply));
+    }
+    let age = now.duration_since(touched_at(path)?).unwrap_or_default();
+    Some((age, AgeReading::Modified))
 }
 
 /// Whether `session`'s transcript, for a lane of this `kind`, ends in a turn
@@ -1119,6 +1180,10 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
 
 struct Turn {
     id: Option<String>,
+    /// The record's own top-level `timestamp`, when it has one that parses.
+    /// All three kinds write it on the line that carries the usage; a
+    /// transcript from before one did leaves it `None`.
+    at: Option<chrono::DateTime<chrono::Utc>>,
     model: String,
     tokens: Tokens,
     cost: Option<f64>,
@@ -1128,6 +1193,11 @@ struct Turn {
 /// shapes this agent writes.
 fn read_turn(kind_name: &str, value: &serde_json::Value) -> Option<Turn> {
     let num = |v: &serde_json::Value, key: &str| v.get(key).and_then(|n| n.as_u64()).unwrap_or(0);
+    let at = value
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc));
 
     // Deliberately exhaustive, with no wildcard arm: adding a `Format` should
     // fail to compile here rather than silently account every lane of that
@@ -1142,6 +1212,7 @@ fn read_turn(kind_name: &str, value: &serde_json::Value) -> Option<Turn> {
             }
             let usage = message.get("usage")?;
             Some(Turn {
+                at,
                 id: value.get("id").and_then(|v| v.as_str()).map(str::to_string),
                 model: message
                     .get("model")
@@ -1187,6 +1258,7 @@ fn read_turn(kind_name: &str, value: &serde_json::Value) -> Option<Turn> {
                 None => (num(usage, "cache_creation_input_tokens"), 0),
             };
             Some(Turn {
+                at,
                 id: value
                     .get("requestId")
                     .and_then(|v| v.as_str())
@@ -1243,6 +1315,7 @@ fn read_turn(kind_name: &str, value: &serde_json::Value) -> Option<Turn> {
             let cache_read = num(usage, "cached_input_tokens");
             let cache_write = num(usage, "cache_write_input_tokens");
             Some(Turn {
+                at,
                 // No per-request id, and none is needed: codex writes one
                 // `token_count` per *request*, each carrying that request's own
                 // usage — a task that calls a tool has two, and their `last`
@@ -3517,7 +3590,7 @@ mod tests {
                     cache_read: 0.3,
                     cache_write_5m: 3.75,
                     cache_write_1h: 6.0,
-                    session_reuse_idle: None,
+                    prompt_cache_ttl: None,
                     slots: 0,
                     exclusive: false,
                     local: false,
@@ -3532,7 +3605,7 @@ mod tests {
                     cache_read: 0.5,
                     cache_write_5m: 6.25,
                     cache_write_1h: 10.0,
-                    session_reuse_idle: None,
+                    prompt_cache_ttl: None,
                     slots: 0,
                     exclusive: false,
                     local: false,
@@ -3641,7 +3714,7 @@ mod tests {
                 cache_read: 0.5,
                 cache_write_5m: 6.25,
                 cache_write_1h: 0.0,
-                session_reuse_idle: None,
+                prompt_cache_ttl: None,
                 slots: 0,
                 exclusive: false,
                 local: false,
@@ -5686,6 +5759,55 @@ mod tests {
             "nothing has arrived since the ledger last saw this session"
         );
         assert_eq!(read(&repo).unwrap().len(), 1, "no line was appended");
+    }
+
+    /// A real Claude Code transcript's shape: the last reply is old, and later
+    /// lines that never reach the model — a queue operation, a user line, and
+    /// two with no timestamp at all — moved the file's modified time to now.
+    #[test]
+    fn session_age_reads_the_last_reply_not_the_modified_time() {
+        let root = crate::scratch::root("usage-session-age-last-reply");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("s.jsonl");
+        let reply = chrono::Utc::now() - chrono::Duration::hours(34);
+        let later = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"assistant\",\"requestId\":\"r1\",\"timestamp\":\"{}\",\
+                 \"message\":{{\"model\":\"claude-opus-5\",\"usage\":{{\"input_tokens\":2,\
+                 \"output_tokens\":1,\"cache_read_input_tokens\":376693,\
+                 \"cache_creation_input_tokens\":0}}}}}}\n\
+                 {{\"type\":\"system\",\"timestamp\":\"{later}\"}}\n\
+                 {{\"type\":\"queue-operation\",\"timestamp\":\"{later}\"}}\n\
+                 {{\"type\":\"cost-state\"}}\n\
+                 {{\"type\":\"last-prompt\"}}\n",
+                reply.to_rfc3339()
+            ),
+        )
+        .unwrap();
+        let (age, reading) = session_age_at("claude", &path).unwrap();
+        assert_eq!(reading, AgeReading::LastReply);
+        assert!(age > std::time::Duration::from_secs(33 * 3600), "{age:?}");
+    }
+
+    /// No timestamp on the usage line: the modified time is the only clock,
+    /// and the reading says so.
+    #[test]
+    fn session_age_falls_back_to_the_modified_time_without_a_reply_timestamp() {
+        let root = crate::scratch::root("usage-session-age-modified");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("s.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"requestId\":\"r1\",\"message\":{\"model\":\"claude-opus-5\",\
+             \"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"cache_read_input_tokens\":0,\
+             \"cache_creation_input_tokens\":0}}}\n",
+        )
+        .unwrap();
+        let (age, reading) = session_age_at("claude", &path).unwrap();
+        assert_eq!(reading, AgeReading::Modified);
+        assert!(age < std::time::Duration::from_secs(60), "{age:?}");
     }
 
     /// The tie: a transcript last written in the very second its banked line

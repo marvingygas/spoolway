@@ -74,19 +74,32 @@ and its transcript is read from the agent's own home.
 
 ### Cache warmth is a model's fact
 
-A carried session is reused only while its transcript file is young enough. The limit is
-`models."<glob>".session_reuse_idle`, matched by the same glob that prices the model:
+A session is continued only while its last reply is recent enough. The check applies to a
+`session: true` carry and to the one-shot resume after `blocked` or a park. A resume past the
+limit opens a fresh session at the same step.
+
+Age is the time since the last line in the transcript that carries model usage, read as UTC.
+Lines that never reach the model do not count. A transcript with no such timestamp uses the
+file's modified time instead.
+`spoolway agent verify <kind> --live` prints which of the two the kind gave.
+
+The limit is `models."<glob>".prompt_cache_ttl`, matched by the same glob that prices the model. It is
+five minutes unless you set it, on every model that is not marked `local = true`. That
+includes a model with no `[models]` entry at all.
 
 ```toml
 [models."claude-*"]
-session_reuse_idle = "5m"
+prompt_cache_ttl = "1h"
 
 [models."gpt-*"]
-session_reuse_idle = "10m"
+prompt_cache_ttl = "10m"
 ```
 
-Unset means no age limit. Leave it unset on a local model. A llama.cpp cache has no timer,
-and an expired limit makes the lane re-send the whole conversation.
+Five minutes is the shortest cache lifetime Anthropic uses. A Claude lane that writes to the
+one-hour cache is still refused at five minutes, so set `"1h"` on `claude-*` if you want the
+hour. A model marked `local = true` has no limit unless you set one, because a llama.cpp
+cache has no timer. `"0"` turns the limit off on any model. The older names
+`session_reuse_idle` and `cache_ttl` still parse and are rewritten on the next save.
 
 ```mermaid
 flowchart TD
@@ -94,7 +107,7 @@ flowchart TD
   B -- no --> F[start fresh]
   B -- yes --> C{session_reuse_ctx set and last turn over it?}
   C -- yes --> F
-  C -- no --> D{session_reuse_idle set and transcript older?}
+  C -- no --> D{last reply older than prompt_cache_ttl?}
   D -- yes --> F
   D -- no --> R[resume the session]
   R --> E{session_blocked_ctx set and a running turn over it?}

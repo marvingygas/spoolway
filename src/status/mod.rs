@@ -5684,7 +5684,7 @@ mod tests {
                 cache_read: 0.3,
                 cache_write_5m: 3.75,
                 cache_write_1h: 6.0,
-                session_reuse_idle: None,
+                prompt_cache_ttl: None,
                 slots: 0,
                 exclusive: false,
                 local: false,

@@ -287,11 +287,11 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Cost per million tokens written to a 1-hour cache.",
     },
     Reference {
-        key: "models.<glob>.session_reuse_idle",
+        key: "models.<glob>.prompt_cache_ttl",
         values: "<duration>",
-        default: "(unset)",
-        sentence: "How long a carried session may sit before it is refused rather than \
-                    resumed. Never set it on a local model.",
+        default: "5m (none if local)",
+        sentence: "How long a session's prompt cache is trusted to stay warm. A resume \
+                    past it opens a fresh session. \"0\" turns it off.",
     },
     Reference {
         key: "models.<glob>.slots",
@@ -313,7 +313,8 @@ pub const REFERENCE: &[Reference] = &[
         default: "false",
         sentence: "Whether this model runs on hardware you own. Setting it on a model that \
                     carries `slots` or `exclusive` silences doctor's note that it should \
-                    probably say so; it changes nothing else.",
+                    probably say so. It also removes the 5m `prompt_cache_ttl` default from \
+                    this model.",
     },
 ];
 

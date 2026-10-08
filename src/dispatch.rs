@@ -6088,9 +6088,17 @@ fn prepare_boot(
     // `escalate_clock` gave up on, both of which leave the same `parked_from`
     // behind. See [`crate::task::Frontmatter::escalated`].
     let escalated = parked && task.front.escalated;
+    // The same age check a `session:` carry passes, on the same clock. A task
+    // can wait on `blocked` or a park for far longer than any cache lives,
+    // and continuing its session then re-sends the whole conversation at
+    // cache-write price. A refused session opens fresh at this step with no
+    // `note`, so nothing is added to RECENT. A blocked task's `## Blocker`
+    // carries what the old lane knew; a park leaves its Handoff and commits.
+    let price = crate::models::resolve(&repo.config.models, &model).price;
     let one_shot = resuming
         .then(|| lane_session_in(repo, ledger, &name))
-        .flatten();
+        .flatten()
+        .filter(|(kind, session)| !session_is_cold(price.as_ref(), kind, session));
     // `session:` is a different question from the one-shot flag, not a
     // fallback for it — a task coming back from `blocked` names an exact
     // session to continue, and a miss there says that lane's session is
@@ -6433,8 +6441,8 @@ enum SessionMiss {
     /// Found with a size ceiling enabled, but this model's window is unset,
     /// so the session cannot be measured against that ceiling.
     WindowUnset,
-    /// Found and under size, but its store has sat longer than the model's
-    /// `session_reuse_idle`.
+    /// Found and under size, but its last reply is older than the model's
+    /// `prompt_cache_ttl`.
     Stale,
 }
 
@@ -6452,7 +6460,7 @@ impl SessionMiss {
             }
             SessionMiss::Stale => {
                 format!(
-                    "its earlier session's store has sat past `{model}`'s session_reuse_idle — \
+                    "its earlier session's store has sat past `{model}`'s prompt_cache_ttl — \
                      opened fresh"
                 )
             }
@@ -6477,9 +6485,11 @@ impl SessionMiss {
 /// `session_reuse_ctx` is `profile`'s, not the step's, per that split.
 ///
 /// Age is checked after size, and only refuses a session that is otherwise
-/// carried: a session whose store's `touched_at` cannot be read, or whose
-/// model sets no `session_reuse_idle` at all, refuses nothing — there is no
-/// per-profile override left, only the model's own horizon.
+/// carried: a session whose age ([`session_is_cold`]) cannot be read, or whose
+/// model has no limit (`local = true` with none set, or `"0"`), refuses
+/// nothing. A model that sets no `prompt_cache_ttl`, with or without a
+/// `[models]` entry, is limited to five minutes. There is no per-profile
+/// override left, only the model's own horizon.
 fn carried_session(
     repo: &Repo,
     pipeline: &Pipeline,
@@ -6515,17 +6525,27 @@ fn carried_session(
         }
     }
 
-    if let Some(idle) = price.and_then(|price| price.session_reuse_idle) {
-        let stale = crate::usage::session_path(&entry.kind, &entry.session)
-            .and_then(|path| crate::usage::touched_at(&path))
-            .and_then(|touched| std::time::SystemTime::now().duration_since(touched).ok())
-            .is_some_and(|age| age > idle);
-        if stale {
-            return Err(SessionMiss::Stale);
-        }
+    if session_is_cold(price.as_ref(), &entry.kind, &entry.session) {
+        return Err(SessionMiss::Stale);
     }
 
     Ok((entry.kind.clone(), entry.session.clone()))
+}
+
+/// Whether `session` has gone unanswered for longer than the model's
+/// `prompt_cache_ttl`, so continuing it would re-send its whole conversation
+/// at cache-write price.
+///
+/// The one check both roads into an old session pass: the `session: true`
+/// carry in [`carried_session`] and the one-shot resume in `prepare_boot`.
+/// Age is [`crate::usage::session_age`]'s — time since the last reply, not
+/// since the file last changed. A model with no limit (`local = true` with
+/// none set, or `"0"`) and a session whose age cannot be read are never cold.
+fn session_is_cold(price: Option<&crate::usage::ModelPrice>, kind: &str, session: &str) -> bool {
+    let Some(limit) = crate::usage::ModelPrice::cache_ttl_limit(price) else {
+        return false;
+    };
+    crate::usage::session_age(kind, session).is_some_and(|(age, _)| age > limit)
 }
 
 /// Whether `size` tokens is past `pct`% of a `window`-token model — the
@@ -14144,8 +14164,9 @@ mod tests {
 
     /// A scratch home with one claude transcript whose store has sat
     /// `elapsed` seconds since it was last touched — the fixture the `Stale`
-    /// miss needs, since the horizon is now read off the store's own mtime
-    /// rather than a timestamp inside the record.
+    /// miss needs. Its usage line carries no `timestamp`, so the age falls
+    /// back to the file's mtime (`AgeReading::Modified`), which is what is
+    /// backdated here.
     fn claude_home_with(session: &str, elapsed: i64, size: u64) -> crate::scratch::ScratchRoot {
         let root = crate::scratch::root(&format!("dispatch-warmth-{session}"));
         let dir = root.join(".claude/projects/-home-someone-work");
@@ -14370,6 +14391,85 @@ mod tests {
              along the way must not override it"
         );
         assert_eq!(reload(&path).front.resume, None);
+    }
+
+    /// A claude transcript shaped like a real one: the last reply is 34 hours
+    /// old, and a `queue-operation`, a `user` line and two timestamp-less lines
+    /// came after it, moving the file's modified time to now. Judged by the
+    /// file it would be fresh; judged by the reply it is cold.
+    #[test]
+    fn a_claude_transcript_with_later_non_model_lines_is_refused_as_stale() {
+        let home = crate::scratch::root("dispatch-claude-cold-reply");
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let reply = (chrono::Utc::now() - chrono::Duration::hours(34)).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            dir.join("cold-reply.jsonl"),
+            format!(
+                "{{\"type\":\"assistant\",\"requestId\":\"r1\",\"timestamp\":\"{reply}\",\
+                 \"message\":{{\"model\":\"claude-opus-5\",\"usage\":{{\"input_tokens\":2,\
+                 \"output_tokens\":1,\"cache_read_input_tokens\":376693,\
+                 \"cache_creation_input_tokens\":0}}}}}}\n\
+                 {{\"type\":\"queue-operation\",\"timestamp\":\"{now}\"}}\n\
+                 {{\"type\":\"user\",\"timestamp\":\"{now}\",\
+                 \"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n\
+                 {{\"type\":\"cost-state\"}}\n{{\"type\":\"last-prompt\"}}\n"
+            ),
+        )
+        .unwrap();
+        // No price at all: the hosted default of five minutes applies.
+        let cold = with_home(&home, || session_is_cold(None, "claude", "cold-reply"));
+        std::fs::remove_dir_all(&home).ok();
+        assert!(cold);
+    }
+
+    /// A one-shot resume passes the same cache check a standing `session:`
+    /// does, on the last reply's own time. The transcript file here was
+    /// written just now in both cases, so only the reply timestamp inside it
+    /// tells the cold session from the warm one.
+    #[test]
+    fn a_one_shot_resume_past_the_cache_ttl_opens_fresh() {
+        for (name, reply_age_secs, continued) in [
+            ("session-resume-warm", 120, true),
+            ("session-resume-cold", 600, false),
+        ] {
+            let (repo, _root_guard) = fixture(name);
+            let path = add_task_with(&repo, "demo", "fix", |f| {
+                f.resume = Some("fix".into());
+            });
+            let kind = local_kind(&repo);
+            record_lane(&repo, "demo · fix", "old-session", &kind);
+
+            let home = crate::scratch::root(&format!("dispatch-{name}-home"));
+            let dir = home.join(".pi/agent/sessions/--home-someone-work--");
+            std::fs::create_dir_all(&dir).unwrap();
+            let reply = chrono::Utc::now() - chrono::Duration::seconds(reply_age_secs);
+            std::fs::write(
+                dir.join("2026-08-04T06-14-15-743Z_old-session.jsonl"),
+                format!(
+                    "{{\"type\":\"message\",\"id\":\"1\",\"timestamp\":\"{}\",\
+                     \"message\":{{\"role\":\"assistant\",\"content\":[],\"model\":\"test-model\",\
+                     \"usage\":{{\"input\":10,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0}}}}}}\n",
+                    reply.to_rfc3339()
+                ),
+            )
+            .unwrap();
+
+            with_home(&home, || {
+                Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
+                    .pass(&mut || {})
+                    .unwrap();
+            });
+            std::fs::remove_dir_all(&home).ok();
+
+            assert_eq!(
+                load_lane_records(&repo)["demo · fix"].session == "old-session",
+                continued,
+                "a reply {reply_age_secs}s old against the default five-minute limit"
+            );
+            assert_eq!(reload(&path).front.resume, None, "spent either way");
+        }
     }
 
     /// Distinct wording for a distinct reason: nobody was in between for a
@@ -14657,7 +14757,7 @@ mod tests {
     /// real pass would reach it: no entry at all, an entry whose model prices
     /// nowhere, an entry whose model is priced but whose transcript is too
     /// big, and one that is well under size but whose store has sat past the
-    /// model's `session_reuse_idle`.
+    /// model's `prompt_cache_ttl`.
     #[test]
     fn carried_session_reports_which_of_the_four_misses_it_was() {
         let (mut repo, _root_guard) = fixture("session-misses");
@@ -14745,13 +14845,13 @@ mod tests {
         );
 
         // A newer entry still, well under size, but its store has sat 400
-        // seconds without moving — past the five-minute `session_reuse_idle`
+        // seconds without moving — past the five-minute `prompt_cache_ttl`
         // this model declares.
         repo.config
             .models
             .get_mut("priced-model")
             .unwrap()
-            .session_reuse_idle = Some(Duration::from_secs(300));
+            .prompt_cache_ttl = Some(Duration::from_secs(300));
         write_entry(
             &repo,
             "demo",
@@ -14774,13 +14874,13 @@ mod tests {
         });
         assert_eq!(result, Err(SessionMiss::Stale));
 
-        // Unset the horizon, and the same stale store resumes — the only way
-        // left to say "carry this regardless of age."
+        // Zero the horizon, and the same stale store resumes — the way left
+        // to say "carry this regardless of age" on a hosted model.
         repo.config
             .models
             .get_mut("priced-model")
             .unwrap()
-            .session_reuse_idle = None;
+            .prompt_cache_ttl = Some(Duration::ZERO);
         let resumed = with_home(&home, || {
             carried_session(
                 &repo,
@@ -14792,9 +14892,61 @@ mod tests {
                 &crate::usage::read(&repo).unwrap(),
             )
         })
-        .expect("a session with no idle horizon should resume however old its store");
+        .expect("a session with a zero horizon should resume however old its store");
         std::fs::remove_dir_all(&home).ok();
         assert_eq!(resumed.1, "stale-session");
+    }
+
+    /// The default horizon, reached the three ways it can be: a hosted model
+    /// with a `[models]` entry that sets none, a hosted model with no entry at
+    /// all, and a `local = true` model that sets none. The same 400-second-old
+    /// store is refused by the first two and resumed by the third.
+    #[test]
+    fn carried_session_defaults_to_five_minutes_unless_the_model_is_local() {
+        let (mut repo, _root_guard) = fixture("session-default-ttl");
+        repo.config.models.insert(
+            "hosted-model".into(),
+            crate::usage::ModelPrice {
+                context_window: 1000,
+                ..Default::default()
+            },
+        );
+        repo.config.models.insert(
+            "local-model".into(),
+            crate::usage::ModelPrice {
+                context_window: 1000,
+                local: true,
+                ..Default::default()
+            },
+        );
+        let task = reload(&add_task(&repo, "demo", "fix"));
+        let pipelines = session_pipelines();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("fix").unwrap();
+        let profile = repo.config.agent("pi").unwrap().clone();
+        assert_eq!(profile.session_reuse_ctx, 0, "size is not what this checks");
+
+        for (model, expected) in [
+            ("hosted-model", Err(SessionMiss::Stale)),
+            ("unlisted-model", Err(SessionMiss::Stale)),
+            ("local-model", Ok(())),
+        ] {
+            write_entry(&repo, "demo", "implement", "claude", model, "old-session");
+            let home = claude_home_with("old-session", 400, 10);
+            let result = with_home(&home, || {
+                carried_session(
+                    &repo,
+                    pipeline,
+                    &task,
+                    step,
+                    &profile,
+                    model,
+                    &crate::usage::read(&repo).unwrap(),
+                )
+            });
+            std::fs::remove_dir_all(&home).ok();
+            assert_eq!(result.map(|_| ()), expected, "{model}");
+        }
     }
 
     /// The end-to-end shape `session_blocked_ctx` exists for: a lane still

@@ -936,7 +936,7 @@ spoolway agent verify pi --live --model qwen3-coder
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--live` | | Run one real turn and one resumed turn, and read the transcript. Spends tokens |
+| `--live` | | Run one real turn and one resumed turn, and read the transcript. Prints whether the session age comes from the last reply or the file's modified time. Spends tokens |
 | `--model <MODEL>` | a model this project's pipelines name for the kind | The model the live turns run |
 
 `--json` prints the launch checks as one object. `--json` and `--live` cannot be combined. A

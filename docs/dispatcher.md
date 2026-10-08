@@ -337,7 +337,7 @@ messages to receive, the pass types the next one instead. Otherwise:
 2. Each later pass where the transcript has grown sends another reminder, up to three.
 3. A lane whose transcript has not grown since the last reminder is blocked, with the last of
    what the pane said in the task's `## Blocker`. `spoolway resume` restarts the step on the
-   same session.
+   same session, unless its last reply is past `prompt_cache_ttl`, in which case it opens fresh.
 4. A fourth due reminder blocks the task instead.
 
 A lane that still holds a process it started, such as a long build, is excused from reminders
@@ -362,11 +362,11 @@ The step carries the session on if two bounds hold:
 | Bound | Setting | Checked against |
 |---|---|---|
 | Size | `agents.<profile>.session_reuse_ctx`, a percentage | The input, cache-read and cache-write tokens of the session's last turn, over the model's `context_window`. |
-| Age | `models.<glob>.session_reuse_idle` | The session store's modification time. |
+| Age | `models.<glob>.prompt_cache_ttl`, `5m` unless set, none for a `local` model | The time since the session's last reply to the model, read from the transcript. A transcript with no reply timestamp uses the file's modification time. |
 
 Otherwise the step opens a fresh session, and `RECENT` says why. The lookup goes by prompt,
-so two steps running the same prompt share one conversation. A blocked task's resume is
-separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-a-person).
+so two steps running the same prompt share one conversation. A blocked task's resume
+passes the same age check but not the size bound. See [When a task needs a person](tasks.md#when-a-task-needs-a-person).
 
 ## Restarts, laps and escalation
 

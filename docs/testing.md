@@ -100,7 +100,7 @@ with a `// covers:` line.
 | `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one |
 | `upgrade` | Whether this binary still reads what the 0.6.0 release wrote. The 0.6.0 `.spoolway/` tree under `scripts/e2e/fixtures/` goes through a real `spoolway sync`: its `housekeeping.retention_days` survives, the prose around the pipeline file's key block comes back byte for byte, `spoolway pipeline check` loads the result, and a task queues against it |
-| `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. |
+| `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. It ages sessions by waiting, so a run takes about ten minutes. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |
 
 Each suite runs in its own process and scratch tree under `/tmp`, with its own prompts, so no
@@ -113,8 +113,9 @@ once, which is the default — see `--jobs`.
 SPOOLWAY_E2E_CLOUD=1 scripts/e2e/run.sh --tier cloud
 ```
 
-`warmth` runs eight turns of `claude-haiku-4-5` against a two-file repo. It uses your real
-`$HOME` and the real `claude`. Put the build under test on `PATH`, because the prompt runs
+`warmth` runs five turns of `claude-haiku-4-5` against a two-file repo, and waits real minutes
+to age its sessions, so a run takes about ten minutes. It uses your real `$HOME` and the real
+`claude`. Put the build under test on `PATH`, because the prompt runs
 `spoolway report`.
 
 ## The suite that runs the real binaries

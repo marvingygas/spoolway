@@ -963,6 +963,23 @@ fn agent_verify_live(
         }
     }
 
+    // Which clock `prompt_cache_ttl` would be measured against for this kind.
+    // A kind whose transcript carries no per-reply timestamp reads the file's
+    // modified time, which Claude Code moves on lines that never reach the
+    // model — worth naming, so a person sees which reading they got.
+    report(
+        "session age reading",
+        match crate::usage::session_age(&args.kind, &session) {
+            Some((_, crate::usage::AgeReading::LastReply)) => {
+                Clause::Ok("last reply — the timestamp on the last line with model usage".into())
+            }
+            Some((_, crate::usage::AgeReading::Modified)) => {
+                Clause::Ok("modified time — this kind's transcript has no reply timestamp".into())
+            }
+            None => Clause::Fail("no age — `prompt_cache_ttl` could not be applied".into()),
+        },
+    );
+
     report(
         "mtime moved while the turn ran",
         match crate::usage::last_written(&args.kind, &session) {

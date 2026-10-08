@@ -272,8 +272,10 @@ spoolway resume <task>
 spoolway resume <task> --stage review -m "credentials rotated"
 ```
 
-`resume` continues the blocked lane's own session at the step it stopped on. `--stage` starts
-a fresh session at the step you name. A task that leaves `blocked` by any road starts every
+`resume` continues the blocked lane's own session at the step it stopped on, if that session's
+last reply is within the model's [`prompt_cache_ttl`](agents.md#cache-warmth-is-a-models-fact).
+Past it, `resume` opens a fresh session at the same step. The same check applies to a task
+that comes back from a park. `--stage` always starts a fresh session at the step you name. A task that leaves `blocked` by any road starts every
 step's [`loop:`](pipelines.md#loops) count again from zero.
 
 ### Paused is the other one, and it is not a block
