@@ -455,7 +455,10 @@ impl ModelPrice {
         }
     }
 
-    fn apply(&self, tokens: &Tokens) -> f64 {
+    /// What `tokens` cost at this price. Crate-visible so `spoolway eval` can
+    /// price one token class at a time through the same rates — see
+    /// `eval::ClassCost` — rather than repeat them.
+    pub(crate) fn apply(&self, tokens: &Tokens) -> f64 {
         let per = |n: u64, rate: f64| (n as f64) * rate / 1_000_000.0;
         let hourly = match self.cache_write_1h {
             0.0 => self.cache_write_5m,

@@ -482,7 +482,7 @@ impl EvalBy {
         One row per pipeline by default. `--by` groups the same lanes by group, task, \
         pipeline, step or version instead; only the columns naming a row change with it. A \
         Total line closes the table with what adds up: distinct RUNS, BLOCKS, and the sums of \
-        IN, OUT, CACHE R, CACHE W, USD and TIME. Its TIME is lane time added up, not the \
+        IN, OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, not the \
         calendar time the lanes took. With --per-run the table ends on an Average line \
         instead: each sum over the table's distinct RUNS, with USD left blank and USD/RUN \
         carrying the average. Read RUNS before believing a figure: a row that has only run a couple of times can \
@@ -501,13 +501,16 @@ impl EvalBy {
         context reading any lane on the row banked, and CTX PEAK AVG the mean of every \n  \
         lane's own peak, each as a share of its model's window. IN, OUT, CACHE R, \n  \
         CACHE W, USD and TIME are each the row's total. With --per-run, IN/RUN, OUT/RUN, \n  \
-        CACHE R/RUN, CACHE W/RUN, USD/RUN and TIME/RUN are each that total over RUNS.\n\n\
+        CACHE R/RUN, CACHE W/RUN, USD/RUN and TIME/RUN are each that total over RUNS. \n  \
+        IN USD, OUT USD, CACHE R USD and CACHE W USD price the column before each at \n  \
+        today's price table, so together they can differ from USD, which was banked when \n  \
+        the lane settled. With --per-run each is divided by RUNS like the rest.\n\n\
         \x1b[1mThe last line:\x1b[0m\n  \
         Total carries distinct RUNS, BLOCKS and the sums of IN, OUT, CACHE R, CACHE W, \n  \
-        USD and TIME. Its TIME is lane time added up, not the calendar time the lanes \n  \
-        took. With --per-run the line is Average: each sum over the table's distinct \n  \
-        RUNS, with USD blank and USD/RUN carrying the average. PASS and the CTX PEAK \n  \
-        columns stay blank on either."
+        their four USD columns, USD and TIME. Its TIME is lane time added up, not the \n  \
+        calendar time the lanes took. With --per-run the line is Average: each sum over \n  \
+        the table's distinct RUNS, with USD blank and USD/RUN carrying the average. \n  \
+        PASS and the CTX PEAK columns stay blank on either."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under

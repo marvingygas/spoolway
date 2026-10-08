@@ -12,10 +12,10 @@ the ledger described in [Cost accounting](cost.md). There is no second store.
 spoolway eval
 ```
 ```
-PIPELINE    RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
-impl          41   82%       3           32%       52%    26.3k    6.39M    1.72B   32.78M    692.90   49h 12m
-impl_ui       15   79%       2           31%       50%    12.2k    2.95M   793.5M   15.15M    319.95   31h 00m
-Total         56             5                            38.5k    9.34M    2.51B   47.93M   1012.85   80h 12m
+PIPELINE  RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
+impl        28   79%       1           13%       46%    11.6k    0.01    2.95M    37.19  952.76M       190.55   12.15M        66.00    293.86   16h 18m
+impl_ui     11   84%       1           13%       24%     4.7k    0.01    1.34M    20.10  267.48M        53.50    5.74M        40.26    113.87    5h 55m
+Total       39             2                                16.3k    0.02    4.29M    57.29    1.22B       244.05   17.89M       106.26    407.73   22h 13m
 ```
 
 The token, cost and time columns show each row's totals. `spoolway eval --per-run` prints each of
@@ -78,12 +78,12 @@ name, so no column moves.
 
 The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts correctly against
 `54m` and `54.2k` against `9.1M`. Ties keep the table's default order. A blank figure, such as
-`—` or an unpriced `USD`, sorts last in both directions, and the `Total` or `Average` line always
+`—` or an unpriced cost, sorts last in both directions, and the `Total` or `Average` line always
 stays last.
 
 The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
 own sort. Pressing `[t]` moves a sort on a figure column to the matching column of the other
-view, such as `IN` to `IN/RUN` and `TIME` to `TIME/RUN`. A sort on `USD/RUN` moves to `USD`.
+view, such as `IN` to `IN/RUN` and `TIME` to `TIME/RUN`. `IN USD` moves to `IN USD/RUN`, and the other three class costs move the same way. A sort on `USD/RUN` moves to `USD`.
 
 The cursor moves to the first row after a sort. A view that does not draw the sorted
 column falls back to the default order until that column comes back.
@@ -113,6 +113,7 @@ same under every `by`, so switching how the rows are grouped never moves a figur
 | `CTX PEAK AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window |
 | `CTX PEAK` | The largest context reading any lane on the row banked, as a share of the model's window. A raw token count when the model has no `context_window`. `—` when no lane banked one. |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per run: `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`, each divided by `RUNS`. |
+| `IN USD`, `OUT USD`, `CACHE R USD`, `CACHE W USD` | The cost of the token column before each, priced at today's price table when eval reads. `CACHE W USD` prices the five-minute and one-hour writes each at its own rate and adds them. Together they can differ from `USD`, which was banked when the lane settled. Blank when every lane on the row that spent tokens has no price today. Per run: `IN USD/RUN`, `OUT USD/RUN`, `CACHE R USD/RUN`, `CACHE W USD/RUN`, each divided by `RUNS`. |
 | `USD` | Total cost. Drawn in both views. |
 | `USD/RUN` | Cost per run. Drawn per run only. |
 | `TIME` | Wall time, summed over the row. Per run: `TIME/RUN`, divided by `RUNS`. |
@@ -130,6 +131,7 @@ computed from the ledger entries on screen.
 | `RUNS` | Distinct runs in the table | The same |
 | `BLOCKS` | The `BLOCKS` lanes counted above | `BLOCKS/RUN`: that count divided by distinct runs, with two decimals |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | The sum of each | `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`: each sum divided by distinct runs |
+| `IN USD`, `OUT USD`, `CACHE R USD`, `CACHE W USD` | The sum of each | `IN USD/RUN`, `OUT USD/RUN`, `CACHE R USD/RUN`, `CACHE W USD/RUN`: each sum divided by distinct runs |
 | `USD` | The sum | Blank |
 | `USD/RUN` | Not drawn | Total cost divided by distinct runs |
 | `TIME` | Lane time added up | `TIME/RUN`: lane time added up, divided by distinct runs |
@@ -205,10 +207,10 @@ trial id. See [Trials](planning.md#trials).
 spoolway eval --by task --trial t-8c21e0
 ```
 ```
-TASK                PIPELINE   VER  WHEN        RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  CACHE W       USD      TIME
-cart-totals-1       impl       1.0  2026-09-26     1   83%       0           19%       31%       433   105.1k   28.27M   539.2k     11.40   38m 20s
-cart-totals-2       impl_fast  1.0  2026-09-26     1  100%       0           14%       22%       276    67.1k   18.05M   344.3k      7.28   28m 40s
-Total                                              2             0                              709   172.2k   46.32M   883.5k     18.68     1h 07m
+TASK                PIPELINE   VER  WHEN        RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
+cart-totals-1       impl       1.0  2026-09-26     1   83%       0           19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
+cart-totals-2       impl_fast  1.0  2026-09-26     1  100%       0           14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
+Total                                              2             0                             709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68     1h 07m
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
@@ -299,15 +301,17 @@ overwriting the first.
 spoolway eval --by step --pipeline impl --csv
 ```
 ```
-project,by,pipeline,step,pipeline_version,runs,lanes,pass,blocks,ctx_peak_tokens,ctx_peak_pct,ctx_peak_avg_tokens,ctx_peak_avg_pct,in_tokens,out_tokens,cache_read_tokens,cache_write_tokens,in_per_run,out_per_run,cache_read_per_run,cache_write_per_run,cost_usd,cost_per_run,unpriced,time_s,time_per_run_s
-spoolway,step,impl,implement,,48,106,0.98,2,520000,0.52,322000,0.32,17140,4166300,1120540000,21362400,357,86800,23343000,445117,451.68,9.41,0,81120,1690
+project,by,pipeline,step,pipeline_version,runs,lanes,pass,blocks,ctx_peak_tokens,ctx_peak_pct,ctx_peak_avg_tokens,ctx_peak_avg_pct,in_tokens,out_tokens,cache_read_tokens,cache_write_tokens,in_per_run,out_per_run,cache_read_per_run,cache_write_per_run,in_usd,out_usd,cache_read_usd,cache_write_usd,in_usd_per_run,out_usd_per_run,cache_read_usd_per_run,cache_write_usd_per_run,cost_usd,cost_per_run,unpriced,time_s,time_per_run_s
+spoolway,step,impl,implement,,48,106,0.98,2,520000,0.52,322000,0.32,17140,4166300,1120540000,21362400,357,86800,23343000,445117,0.05,62.49,336.16,80.11,0.00,1.30,7.00,1.67,451.68,9.41,0,81120,1690
 ```
 
 The CSV and `--json` rows carry the per-run token figures beside the raw totals, the
-`ctx_peak_avg` pair, and `pipeline_version`. The `total` row and the `--json` `total` object
+`ctx_peak_avg` pair, and `pipeline_version`. They also carry `in_usd`, `out_usd`, `cache_read_usd`
+and `cache_write_usd`, each with a `_per_run` twin. These are blank in CSV, and `null` in
+`--json`, when every lane on the row that spent tokens is unpriced. The `total` row and the `--json` `total` object
 carry the sums and the per-run figures the screen's `Total` and `Average` lines show:
 `in_tokens`, `out_tokens`, `cache_read_tokens`, `cache_write_tokens`, the four `*_per_run`
-columns, `cost_per_run`, `time_s` and `time_per_run_s`. The directory table's export carries the
+token columns, the four class-cost columns and their `_per_run` twins, `cost_per_run`, `time_s` and `time_per_run_s`. The directory table's export carries the
 `*_per_session` columns instead. The pass and context columns stay blank on the CSV total row, and
 both views export the same row. `--json` prints an object, `{"by", "rows",
 "total"}`, rather than a bare array, so the `Total` line cannot be mistaken for a row. Its own

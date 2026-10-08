@@ -167,7 +167,7 @@ fn run_to(
     if let Some(sort) = &sort {
         sort_lane_rows(args.by, &mut rows, sort);
     }
-    let total = LaneTotal::of(&refs, &fallback);
+    let total = LaneTotal::of(&refs, &fallback, &repo.config.models);
 
     if json {
         writeln!(
@@ -375,6 +375,9 @@ struct Metrics {
     blocked: usize,
     /// Every token class, summed over the row's lines — deltas, like cost.
     tokens: Tokens,
+    /// Each of `tokens`' classes priced at today's price table — see
+    /// [`ClassCost`]. Apart from `cost`, which is what was banked.
+    class_cost: ClassCost,
     cost: f64,
     /// Ledger lines behind `cost`, and those among them nothing could price.
     /// Counted in lines rather than lanes because a price is missing from a
@@ -436,6 +439,7 @@ impl Metrics {
             }
         }
         out.runs = runs.len();
+        out.class_cost = ClassCost::of(matching.iter().copied(), models);
         (out.ctx_peak_tokens, out.ctx_peak_pct) = ctx_peak_of(matching, models);
         out.ctx_avg = ctx_avg_of(by_lane.values(), models);
         out
@@ -479,6 +483,110 @@ impl Metrics {
             1 => self.versions.iter().next().map(String::as_str),
             _ => None,
         }
+    }
+}
+
+/// What each token class on a set of ledger lines costs at today's price
+/// table: the `IN USD`, `OUT USD`, `CACHE R USD` and `CACHE W USD` columns.
+///
+/// Priced as eval reads, not banked: a ledger line carries one `cost_usd`
+/// for its whole lane and no split by class. So the four need not add up to
+/// `USD`, which is what the lane cost when it settled — under that day's
+/// price table, or the agent's own report where it banks one, as pi does.
+/// Resolved the way banking resolves a price, through
+/// [`crate::models::resolve`].
+#[derive(Default, Clone, Copy)]
+struct ClassCost {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    /// The five-minute and one-hour writes, each priced at its own rate and
+    /// then added — see [`ModelPrice::apply`] for the one-hour fallback.
+    cache_write: f64,
+    /// Lines that spent any tokens, and those among them whose model today's
+    /// table has no price for. Kept apart from [`Metrics::unpriced`] because
+    /// a banked cost and today's price can disagree on whether a model has
+    /// one at all. A line that spent nothing is not counted: it costs
+    /// nothing at any price, and counting it would draw `0.00` on a row
+    /// whose every spending lane is unpriced.
+    spent: usize,
+    unpriced: usize,
+}
+
+impl ClassCost {
+    fn of<'a>(
+        entries: impl IntoIterator<Item = &'a Entry>,
+        models: &BTreeMap<String, ModelPrice>,
+    ) -> ClassCost {
+        // One resolution per model, not per line: `models::resolve` reads
+        // the refreshed price file from disk on every call, and the screen
+        // rebuilds its table on every keypress.
+        let mut prices: HashMap<&str, Option<ModelPrice>> = HashMap::new();
+        let mut out = ClassCost::default();
+        for entry in entries.into_iter().filter(|e| !e.tokens.is_zero()) {
+            out.spent += 1;
+            let price = *prices
+                .entry(entry.model.as_str())
+                .or_insert_with(|| crate::models::resolve(models, &entry.model).price);
+            match price {
+                Some(price) => out.add(&price, &entry.tokens),
+                None => out.unpriced += 1,
+            }
+        }
+        out
+    }
+
+    /// `tokens` priced at `price`, one class at a time through
+    /// [`ModelPrice::apply`] so each column uses the rates banking does.
+    fn add(&mut self, price: &ModelPrice, tokens: &Tokens) {
+        let only = |class: Tokens| price.apply(&class);
+        self.input += only(Tokens {
+            input: tokens.input,
+            ..Tokens::default()
+        });
+        self.output += only(Tokens {
+            output: tokens.output,
+            ..Tokens::default()
+        });
+        self.cache_read += only(Tokens {
+            cache_read: tokens.cache_read,
+            ..Tokens::default()
+        });
+        self.cache_write += only(Tokens {
+            cache_write_5m: tokens.cache_write_5m,
+            cache_write_1h: tokens.cache_write_1h,
+            ..Tokens::default()
+        });
+    }
+
+    /// Whether the figures say anything: some line that spent tokens could
+    /// be priced, or no line spent any, which is a true `0.00`. Where every
+    /// spending line is unpriced, each class cell is blank — unknown, not
+    /// free.
+    fn priced(&self) -> bool {
+        self.spent == 0 || self.spent > self.unpriced
+    }
+
+    /// The four figures in column order, each through `each` — a division
+    /// by runs, or nothing.
+    fn figures(&self, each: impl Fn(f64) -> f64) -> [f64; 4] {
+        [self.input, self.output, self.cache_read, self.cache_write].map(each)
+    }
+
+    /// The four figures as drawn: two places, as `0.00` where a class cost
+    /// under a cent, and blank where nothing could be priced — see
+    /// [`ClassCost::priced`].
+    fn cells(&self, each: impl Fn(f64) -> f64) -> [String; 4] {
+        self.figures(each).map(|usd| match self.priced() {
+            true => format!("{usd:.2}"),
+            false => String::new(),
+        })
+    }
+
+    /// The four figures for `--json`: `null` where nothing could be priced.
+    fn json(&self, each: impl Fn(f64) -> f64) -> [Option<f64>; 4] {
+        let priced = self.priced();
+        self.figures(each).map(|usd| priced.then_some(usd))
     }
 }
 
@@ -658,17 +766,22 @@ fn lane_columns(by: EvalBy) -> &'static [(&'static str, &'static str)] {
 /// The figure columns the per-run view draws, identical under every `by`,
 /// in the order [`lane_figures`] draws them — each beside the export column
 /// a sort on it reads. A per-run cell sorts on its per-run figure, not the
-/// total beside it in an export.
-const LANE_FIGURE_COLUMNS: [(&str, &str); 12] = [
+/// total beside it in an export. Each token class is followed by its cost at
+/// today's prices — see [`ClassCost`].
+const LANE_FIGURE_COLUMNS: [(&str, &str); 16] = [
     ("RUNS", "runs"),
     ("PASS", "pass"),
     ("BLOCKS/RUN", "blocks_per_run"),
     ("CTX PEAK AVG", "ctx_peak_avg_pct"),
     ("CTX PEAK", "ctx_peak_pct"),
     ("IN/RUN", "in_per_run"),
+    ("IN USD/RUN", "in_usd_per_run"),
     ("OUT/RUN", "out_per_run"),
+    ("OUT USD/RUN", "out_usd_per_run"),
     ("CACHE R/RUN", "cache_read_per_run"),
+    ("CACHE R USD/RUN", "cache_read_usd_per_run"),
     ("CACHE W/RUN", "cache_write_per_run"),
+    ("CACHE W USD/RUN", "cache_write_usd_per_run"),
     ("USD", "cost_usd"),
     ("USD/RUN", "cost_per_run"),
     ("TIME/RUN", "time_per_run_s"),
@@ -678,16 +791,22 @@ const LANE_FIGURE_COLUMNS: [(&str, &str); 12] = [
 /// [`lane_total_figures`] draws them. No `USD/RUN` beside `USD` here: in
 /// this view `USD` already is the total, and a second column saying the same
 /// thing per run would be the one per-run figure left in a view of totals.
-const LANE_TOTAL_COLUMNS: [(&str, &str); 11] = [
+/// `USD` stays last among the costs, as the banked total the four class
+/// costs before it are priced apart from — see [`ClassCost`].
+const LANE_TOTAL_COLUMNS: [(&str, &str); 15] = [
     ("RUNS", "runs"),
     ("PASS", "pass"),
     ("BLOCKS", "blocks"),
     ("CTX PEAK AVG", "ctx_peak_avg_pct"),
     ("CTX PEAK", "ctx_peak_pct"),
     ("IN", "in_tokens"),
+    ("IN USD", "in_usd"),
     ("OUT", "out_tokens"),
+    ("OUT USD", "out_usd"),
     ("CACHE R", "cache_read_tokens"),
+    ("CACHE R USD", "cache_read_usd"),
     ("CACHE W", "cache_write_tokens"),
+    ("CACHE W USD", "cache_write_usd"),
     ("USD", "cost_usd"),
     ("TIME", "time_s"),
 ];
@@ -782,12 +901,16 @@ impl Figures {
 
 /// The lanes table's totals, each beside its per-run figure — what
 /// [`Figures::carry`] moves a lanes sort between.
-const LANE_PAIRS: [(&str, &str); 7] = [
+const LANE_PAIRS: [(&str, &str); 11] = [
     ("blocks", "blocks_per_run"),
     ("in_tokens", "in_per_run"),
+    ("in_usd", "in_usd_per_run"),
     ("out_tokens", "out_per_run"),
+    ("out_usd", "out_usd_per_run"),
     ("cache_read_tokens", "cache_read_per_run"),
+    ("cache_read_usd", "cache_read_usd_per_run"),
     ("cache_write_tokens", "cache_write_per_run"),
+    ("cache_write_usd", "cache_write_usd_per_run"),
     ("cost_usd", "cost_per_run"),
     ("time_s", "time_per_run_s"),
 ];
@@ -983,13 +1106,16 @@ fn ordered_steps(entries: &[&Entry], pipeline: &str, pipelines: Option<&Pipeline
 /// The only figures that add up across the lanes table's rows. `RUNS` is
 /// distinct runs over the whole table, not a sum of the rows' — a run
 /// touches every step it ran, so summing `--by step` would count it once per
-/// step. `BLOCKS`, the token classes, `USD` and `TIME` do sum: every ledger
-/// line sits on exactly one row. `TIME` is lane time added up, so lanes that
-/// ran side by side count once each — it is not the calendar time they took.
+/// step. `BLOCKS`, the token classes and their costs, `USD` and `TIME` do
+/// sum: every ledger line sits on exactly one row. `TIME` is lane time added
+/// up, so lanes that ran side by side count once each — it is not the
+/// calendar time they took.
 struct LaneTotal {
     runs: usize,
     blocked: usize,
     tokens: Tokens,
+    /// What `tokens` cost at today's price table — see [`ClassCost`].
+    class_cost: ClassCost,
     cost: f64,
     lines: usize,
     unpriced: usize,
@@ -997,7 +1123,11 @@ struct LaneTotal {
 }
 
 impl LaneTotal {
-    fn of(entries: &[&Entry], fallback: &HashMap<(String, String), String>) -> LaneTotal {
+    fn of(
+        entries: &[&Entry],
+        fallback: &HashMap<(String, String), String>,
+        models: &BTreeMap<String, ModelPrice>,
+    ) -> LaneTotal {
         let runs: HashSet<(String, String)> = entries
             .iter()
             .map(|e| (e.project.clone(), run_key(e, fallback)))
@@ -1014,6 +1144,7 @@ impl LaneTotal {
             runs: runs.len(),
             blocked,
             tokens,
+            class_cost: ClassCost::of(entries.iter().copied(), models),
             cost: entries.iter().filter_map(|e| e.cost_usd).sum(),
             lines: entries.len(),
             unpriced: entries
@@ -1060,8 +1191,8 @@ const SEP: &str = "  ";
 /// The per-run view's figure columns, identical under every `by`. `RUNS`
 /// is drawn one wider than its title, as the mockup draws it: the extra
 /// column is the gap that sets the figures off from whichever naming column
-/// precedes them.
-fn lane_figures(cells: [&str; 12]) -> String {
+/// precedes them. Each class cost is as wide as its own title.
+fn lane_figures(cells: [&str; 16]) -> String {
     let [
         runs,
         pass,
@@ -1069,29 +1200,51 @@ fn lane_figures(cells: [&str; 12]) -> String {
         avg,
         peak,
         inp,
+        inp_usd,
         out,
+        out_usd,
         cr,
+        cr_usd,
         cw,
+        cw_usd,
         usd,
         usd_run,
         time,
     ] = cells;
     format!(
         "{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>10}{SEP}{avg:>12}{SEP}{peak:>8}{SEP}{inp:>6}\
-         {SEP}{out:>7}{SEP}{cr:>11}{SEP}{cw:>11}{SEP}{usd:>8}{SEP}{usd_run:>7}{SEP}{time:>8}"
+         {SEP}{inp_usd:>10}{SEP}{out:>7}{SEP}{out_usd:>11}{SEP}{cr:>11}{SEP}{cr_usd:>15}\
+         {SEP}{cw:>11}{SEP}{cw_usd:>15}{SEP}{usd:>8}{SEP}{usd_run:>7}{SEP}{time:>8}"
     )
 }
 
 /// The figure columns of the totals view — see [`LANE_TOTAL_COLUMNS`] —
 /// padded the way [`lane_figures`] pads the per-run ones. Each token column
-/// is seven wide, room for `149.71M`, and `USD` and `TIME` eight, room for
-/// `128h 39m`. A wider cell pushes the rest of its row right, as a wide
-/// per-run cell does.
-fn lane_total_figures(cells: [&str; 11]) -> String {
-    let [runs, pass, blocks, avg, peak, inp, out, cr, cw, usd, time] = cells;
+/// is seven wide, room for `149.71M`, each class cost as wide as its own
+/// title, and `USD` and `TIME` eight, room for `128h 39m`. A wider cell
+/// pushes the rest of its row right, as a wide per-run cell does.
+fn lane_total_figures(cells: [&str; 15]) -> String {
+    let [
+        runs,
+        pass,
+        blocks,
+        avg,
+        peak,
+        inp,
+        inp_usd,
+        out,
+        out_usd,
+        cr,
+        cr_usd,
+        cw,
+        cw_usd,
+        usd,
+        time,
+    ] = cells;
     format!(
         "{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>6}{SEP}{avg:>12}{SEP}{peak:>8}{SEP}{inp:>7}\
-         {SEP}{out:>7}{SEP}{cr:>7}{SEP}{cw:>7}{SEP}{usd:>8}{SEP}{time:>8}"
+         {SEP}{inp_usd:>6}{SEP}{out:>7}{SEP}{out_usd:>7}{SEP}{cr:>7}{SEP}{cr_usd:>11}\
+         {SEP}{cw:>7}{SEP}{cw_usd:>11}{SEP}{usd:>8}{SEP}{time:>8}"
     )
 }
 
@@ -1190,37 +1343,53 @@ fn lanes_table(
             );
             let usd = cost_of(m.cost, m.lines, m.unpriced);
             let figures = match figures {
-                Figures::Totals => lane_total_figures([
-                    &runs,
-                    &pass,
-                    &blocks,
-                    &avg,
-                    &peak,
-                    &tokens_cell(m.tokens.input),
-                    &tokens_cell(m.tokens.output),
-                    &tokens_cell(m.tokens.cache_read),
-                    &tokens_cell(m.tokens.cache_write()),
-                    &usd,
-                    &crate::status::human_secs(m.time_s),
-                ]),
-                Figures::PerRun => lane_figures([
-                    &runs,
-                    &pass,
-                    &format!("{:.2}", m.blocks_per_run()),
-                    &avg,
-                    &peak,
-                    &tokens_cell(m.tokens_per_run(m.tokens.input)),
-                    &tokens_cell(m.tokens_per_run(m.tokens.output)),
-                    &tokens_cell(m.tokens_per_run(m.tokens.cache_read)),
-                    &tokens_cell(m.tokens_per_run(m.tokens.cache_write())),
-                    &usd,
-                    // Dividing a floor by its run count is still a floor,
-                    // but `cost_of` prints the same plain number either way
-                    // — the note under the table says once, for the whole
-                    // thing, when any row's figure is an underestimate.
-                    &cost_of(m.cost_per_run(), m.lines, m.unpriced),
-                    &crate::status::human_secs(m.time_per_run_s().round() as i64),
-                ]),
+                Figures::Totals => {
+                    let [in_usd, out_usd, cr_usd, cw_usd] = m.class_cost.cells(|usd| usd);
+                    lane_total_figures([
+                        &runs,
+                        &pass,
+                        &blocks,
+                        &avg,
+                        &peak,
+                        &tokens_cell(m.tokens.input),
+                        &in_usd,
+                        &tokens_cell(m.tokens.output),
+                        &out_usd,
+                        &tokens_cell(m.tokens.cache_read),
+                        &cr_usd,
+                        &tokens_cell(m.tokens.cache_write()),
+                        &cw_usd,
+                        &usd,
+                        &crate::status::human_secs(m.time_s),
+                    ])
+                }
+                Figures::PerRun => {
+                    let [in_usd, out_usd, cr_usd, cw_usd] =
+                        m.class_cost.cells(|usd| m.per_run(usd));
+                    lane_figures([
+                        &runs,
+                        &pass,
+                        &format!("{:.2}", m.blocks_per_run()),
+                        &avg,
+                        &peak,
+                        &tokens_cell(m.tokens_per_run(m.tokens.input)),
+                        &in_usd,
+                        &tokens_cell(m.tokens_per_run(m.tokens.output)),
+                        &out_usd,
+                        &tokens_cell(m.tokens_per_run(m.tokens.cache_read)),
+                        &cr_usd,
+                        &tokens_cell(m.tokens_per_run(m.tokens.cache_write())),
+                        &cw_usd,
+                        &usd,
+                        // Dividing a floor by its run count is still a floor,
+                        // but `cost_of` prints the same plain number either
+                        // way — the note under the table says once, for the
+                        // whole thing, when any row's figure is an
+                        // underestimate.
+                        &cost_of(m.cost_per_run(), m.lines, m.unpriced),
+                        &crate::status::human_secs(m.time_per_run_s().round() as i64),
+                    ])
+                }
             };
             format!("{}{figures}", naming(cells, &widths))
         })
@@ -1231,35 +1400,50 @@ fn lanes_table(
     let runs = total.runs.to_string();
     let t = &total.tokens;
     let total_figures = match figures {
-        Figures::Totals => lane_total_figures([
-            &runs,
-            "",
-            &total.blocked.to_string(),
-            "",
-            "",
-            &tokens_cell(t.input),
-            &tokens_cell(t.output),
-            &tokens_cell(t.cache_read),
-            &tokens_cell(t.cache_write()),
-            &cost_of(total.cost, total.lines, total.unpriced),
-            &crate::status::human_secs(total.time_s),
-        ]),
+        Figures::Totals => {
+            let [in_usd, out_usd, cr_usd, cw_usd] = total.class_cost.cells(|usd| usd);
+            lane_total_figures([
+                &runs,
+                "",
+                &total.blocked.to_string(),
+                "",
+                "",
+                &tokens_cell(t.input),
+                &in_usd,
+                &tokens_cell(t.output),
+                &out_usd,
+                &tokens_cell(t.cache_read),
+                &cr_usd,
+                &tokens_cell(t.cache_write()),
+                &cw_usd,
+                &cost_of(total.cost, total.lines, total.unpriced),
+                &crate::status::human_secs(total.time_s),
+            ])
+        }
         // `USD` is left blank here: a total has no place on a line of
         // averages, and `USD/RUN` beside it carries the average.
-        Figures::PerRun => lane_figures([
-            &runs,
-            "",
-            &format!("{:.2}", total.per_run(total.blocked as f64)),
-            "",
-            "",
-            &tokens_cell(total.tokens_per_run(t.input)),
-            &tokens_cell(total.tokens_per_run(t.output)),
-            &tokens_cell(total.tokens_per_run(t.cache_read)),
-            &tokens_cell(total.tokens_per_run(t.cache_write())),
-            "",
-            &cost_of(total.per_run(total.cost), total.lines, total.unpriced),
-            &crate::status::human_secs(total.per_run(total.time_s as f64).round() as i64),
-        ]),
+        Figures::PerRun => {
+            let [in_usd, out_usd, cr_usd, cw_usd] =
+                total.class_cost.cells(|usd| total.per_run(usd));
+            lane_figures([
+                &runs,
+                "",
+                &format!("{:.2}", total.per_run(total.blocked as f64)),
+                "",
+                "",
+                &tokens_cell(total.tokens_per_run(t.input)),
+                &in_usd,
+                &tokens_cell(total.tokens_per_run(t.output)),
+                &out_usd,
+                &tokens_cell(total.tokens_per_run(t.cache_read)),
+                &cr_usd,
+                &tokens_cell(total.tokens_per_run(t.cache_write())),
+                &cw_usd,
+                "",
+                &cost_of(total.per_run(total.cost), total.lines, total.unpriced),
+                &crate::status::human_secs(total.per_run(total.time_s as f64).round() as i64),
+            ])
+        }
     };
     let total = format!("{}{total_figures}", naming(&total_cells, &widths))
         .trim_end()
@@ -1298,8 +1482,9 @@ fn trial_delta_line(baseline: &LaneRow, row: &LaneRow) -> String {
 
 /// The one header a lanes export carries: `project,by`, the `by`'s own
 /// naming columns, `pipeline_version`, then the figures — raw totals first,
-/// and each token class per run beside them, so a spreadsheet can re-derive
-/// the screen's figures or pick its own.
+/// and each token class per run beside them, then each class's cost at
+/// today's prices the same way, so a spreadsheet can re-derive the screen's
+/// figures or pick its own.
 fn lanes_csv_header(by: EvalBy) -> String {
     let mut cols = vec!["project", "by"];
     cols.extend(lane_csv_keys(by));
@@ -1321,6 +1506,14 @@ fn lanes_csv_header(by: EvalBy) -> String {
         "out_per_run",
         "cache_read_per_run",
         "cache_write_per_run",
+        "in_usd",
+        "out_usd",
+        "cache_read_usd",
+        "cache_write_usd",
+        "in_usd_per_run",
+        "out_usd_per_run",
+        "cache_read_usd_per_run",
+        "cache_write_usd_per_run",
         "cost_usd",
         "cost_per_run",
         "unpriced",
@@ -1341,6 +1534,8 @@ fn opt_share(v: Option<f64>) -> String {
 fn lanes_csv_row(by: EvalBy, row: &LaneRow) -> String {
     let m = &row.metrics;
     let t = &m.tokens;
+    let class_usd = m.class_cost.cells(|usd| usd);
+    let class_usd_per_run = m.class_cost.cells(|usd| m.per_run(usd));
     let mut cells: Vec<String> = vec![csv_field(&row.project).into_owned(), by.label().to_string()];
     cells.extend(row.keys.iter().map(|k| csv_field(k).into_owned()));
     cells.extend([
@@ -1361,6 +1556,10 @@ fn lanes_csv_row(by: EvalBy, row: &LaneRow) -> String {
         m.tokens_per_run(t.output).to_string(),
         m.tokens_per_run(t.cache_read).to_string(),
         m.tokens_per_run(t.cache_write()).to_string(),
+    ]);
+    cells.extend(class_usd);
+    cells.extend(class_usd_per_run);
+    cells.extend([
         csv_cost(m.cost, m.lines, m.unpriced),
         csv_cost(m.cost_per_run(), m.lines, m.unpriced),
         m.unpriced.to_string(),
@@ -1379,6 +1578,9 @@ fn lanes_csv_total(by: EvalBy, total: &LaneTotal) -> String {
     let header = lanes_csv_header(by);
     let names: Vec<&str> = header.split(',').collect();
     let t = &total.tokens;
+    let [in_usd, out_usd, cr_usd, cw_usd] = total.class_cost.cells(|usd| usd);
+    let [in_usd_run, out_usd_run, cr_usd_run, cw_usd_run] =
+        total.class_cost.cells(|usd| total.per_run(usd));
     names
         .iter()
         .map(|name| match *name {
@@ -1393,6 +1595,14 @@ fn lanes_csv_total(by: EvalBy, total: &LaneTotal) -> String {
             "out_per_run" => total.tokens_per_run(t.output).to_string(),
             "cache_read_per_run" => total.tokens_per_run(t.cache_read).to_string(),
             "cache_write_per_run" => total.tokens_per_run(t.cache_write()).to_string(),
+            "in_usd" => in_usd.clone(),
+            "out_usd" => out_usd.clone(),
+            "cache_read_usd" => cr_usd.clone(),
+            "cache_write_usd" => cw_usd.clone(),
+            "in_usd_per_run" => in_usd_run.clone(),
+            "out_usd_per_run" => out_usd_run.clone(),
+            "cache_read_usd_per_run" => cr_usd_run.clone(),
+            "cache_write_usd_per_run" => cw_usd_run.clone(),
             "cost_usd" => csv_cost(total.cost, total.lines, total.unpriced),
             "cost_per_run" => csv_cost(total.per_run(total.cost), total.lines, total.unpriced),
             "time_s" => total.time_s.max(0).to_string(),
@@ -1412,6 +1622,9 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
             let m = &row.metrics;
             let t = &m.tokens;
             let priced = m.lines > m.unpriced;
+            let [in_usd, out_usd, cr_usd, cw_usd] = m.class_cost.json(|usd| usd);
+            let [in_usd_run, out_usd_run, cr_usd_run, cw_usd_run] =
+                m.class_cost.json(|usd| m.per_run(usd));
             let mut obj = serde_json::Map::new();
             obj.insert("project".into(), row.project.clone().into());
             for (name, value) in lane_csv_keys(by).iter().zip(&row.keys) {
@@ -1435,6 +1648,14 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
                 "out_per_run": m.tokens_per_run(t.output),
                 "cache_read_per_run": m.tokens_per_run(t.cache_read),
                 "cache_write_per_run": m.tokens_per_run(t.cache_write()),
+                "in_usd": in_usd,
+                "out_usd": out_usd,
+                "cache_read_usd": cr_usd,
+                "cache_write_usd": cw_usd,
+                "in_usd_per_run": in_usd_run,
+                "out_usd_per_run": out_usd_run,
+                "cache_read_usd_per_run": cr_usd_run,
+                "cache_write_usd_per_run": cw_usd_run,
                 "cost_usd": priced.then_some(m.cost),
                 "cost_per_run": priced.then_some(m.cost_per_run()),
                 // How many lines are missing from `cost_usd` — 0 when it is
@@ -1453,6 +1674,9 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
         })
         .collect();
     let total_priced = total.lines > total.unpriced;
+    let [in_usd, out_usd, cr_usd, cw_usd] = total.class_cost.json(|usd| usd);
+    let [in_usd_run, out_usd_run, cr_usd_run, cw_usd_run] =
+        total.class_cost.json(|usd| total.per_run(usd));
     serde_json::json!({
         "by": by.label(),
         "rows": rows,
@@ -1467,6 +1691,14 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
             "out_per_run": total.tokens_per_run(total.tokens.output),
             "cache_read_per_run": total.tokens_per_run(total.tokens.cache_read),
             "cache_write_per_run": total.tokens_per_run(total.tokens.cache_write()),
+            "in_usd": in_usd,
+            "out_usd": out_usd,
+            "cache_read_usd": cr_usd,
+            "cache_write_usd": cw_usd,
+            "in_usd_per_run": in_usd_run,
+            "out_usd_per_run": out_usd_run,
+            "cache_read_usd_per_run": cr_usd_run,
+            "cache_write_usd_per_run": cw_usd_run,
             "cost_usd": total_priced.then_some(total.cost),
             "cost_per_run": total_priced.then_some(total.per_run(total.cost)),
             "time_s": total.time_s,
@@ -1649,6 +1881,9 @@ fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
     let t = &m.tokens;
     let priced = m.lines > m.unpriced;
     let per_run = |n: u64| SortValue::figure(m.tokens_per_run(n) as f64);
+    // Unpriced class costs sort last, the way an unpriced `USD` does.
+    let class = |usd: f64| m.class_cost.priced().then_some(SortValue::Figure(0, usd));
+    let c = &m.class_cost;
     match key {
         "project" => SortValue::text(&row.project),
         // The `VER` and `VERSION` cells name a version where an export's
@@ -1682,6 +1917,14 @@ fn lane_sort_value(by: EvalBy, row: &LaneRow, key: &str) -> Option<SortValue> {
         "out_per_run" => per_run(t.output),
         "cache_read_per_run" => per_run(t.cache_read),
         "cache_write_per_run" => per_run(t.cache_write()),
+        "in_usd" => class(c.input),
+        "out_usd" => class(c.output),
+        "cache_read_usd" => class(c.cache_read),
+        "cache_write_usd" => class(c.cache_write),
+        "in_usd_per_run" => class(m.per_run(c.input)),
+        "out_usd_per_run" => class(m.per_run(c.output)),
+        "cache_read_usd_per_run" => class(m.per_run(c.cache_read)),
+        "cache_write_usd_per_run" => class(m.per_run(c.cache_write)),
         "cost_usd" => priced.then_some(SortValue::Figure(0, m.cost)),
         "cost_per_run" => priced.then(|| SortValue::Figure(0, m.cost_per_run())),
         "unpriced" => SortValue::figure(m.unpriced as f64),
@@ -3583,7 +3826,7 @@ fn view_lines(
                 return vec![Line::Text("Nothing to compare in this window.".to_string())];
             }
             let (rows, sort) = screen_lane_rows(loaded, filters, pipelines, &entries);
-            let total = LaneTotal::of(&entries, &loaded.fallback);
+            let total = LaneTotal::of(&entries, &loaded.fallback, &loaded.models);
             table_lines(lanes_table(
                 filters.by,
                 &rows,
@@ -3640,7 +3883,7 @@ fn export_rows(
         TableKind::Lanes => {
             let entries = scoped_entries(loaded, filters);
             let (rows, _) = screen_lane_rows(loaded, filters, pipelines, &entries);
-            let total = LaneTotal::of(&entries, &loaded.fallback);
+            let total = LaneTotal::of(&entries, &loaded.fallback, &loaded.models);
             let mut lines: Vec<String> =
                 rows.iter().map(|r| lanes_csv_row(filters.by, r)).collect();
             lines.push(lanes_csv_total(filters.by, &total));
@@ -5169,6 +5412,25 @@ mod tests {
         BTreeMap::new()
     }
 
+    /// `sized` at `window`, with rates: $3 in, $15 out, $0.30 a cache read
+    /// and $3.75 a five-minute cache write, each per million tokens — so
+    /// the class-cost columns have something to draw.
+    fn priced_models(window: usize) -> BTreeMap<String, ModelPrice> {
+        let mut models = sized_models(window);
+        models.insert(
+            "sized".to_string(),
+            ModelPrice {
+                context_window: window,
+                input: 3.0,
+                output: 15.0,
+                cache_read: 0.30,
+                cache_write_5m: 3.75,
+                ..ModelPrice::default()
+            },
+        );
+        models
+    }
+
     fn sized_models(window: usize) -> BTreeMap<String, ModelPrice> {
         let mut models = BTreeMap::new();
         models.insert(
@@ -5204,8 +5466,12 @@ mod tests {
     }
 
     fn total_of(entries: &[Entry]) -> LaneTotal {
+        total_of_with(entries, &no_models())
+    }
+
+    fn total_of_with(entries: &[Entry], models: &BTreeMap<String, ModelPrice>) -> LaneTotal {
         let refs: Vec<&Entry> = entries.iter().collect();
-        LaneTotal::of(&refs, &fallback_keys(entries))
+        LaneTotal::of(&refs, &fallback_keys(entries), models)
     }
 
     // ------------------------------------------------------------- metrics
@@ -5677,13 +5943,15 @@ mod tests {
             runs: 0,
             blocked: 0,
             tokens: Tokens::default(),
+            class_cost: ClassCost::default(),
             cost: 0.0,
             lines: 0,
             unpriced: 0,
             time_s: 0,
         };
-        const FIGURES: &str = "RUNS  PASS  BLOCKS/RUN  CTX PEAK AVG  CTX PEAK  IN/RUN  OUT/RUN  \
-                               CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN";
+        const FIGURES: &str = "RUNS  PASS  BLOCKS/RUN  CTX PEAK AVG  CTX PEAK  IN/RUN  IN USD/RUN  \
+                               OUT/RUN  OUT USD/RUN  CACHE R/RUN  CACHE R USD/RUN  CACHE W/RUN  \
+                               CACHE W USD/RUN       USD  USD/RUN  TIME/RUN";
         let cases: [(EvalBy, &[&str], &str); 5] = [
             (EvalBy::Pipeline, &["impl_fast"], "PIPELINE    "),
             (
@@ -5738,26 +6006,29 @@ mod tests {
             e.wall_s = 4_320;
             entries.push(e);
         }
-        let rows = rows_by_with(&entries, EvalBy::Pipeline, &sized_models(100_000));
+        let models = priced_models(100_000);
+        let rows = rows_by_with(&entries, EvalBy::Pipeline, &models);
         let table = lanes_table(
             EvalBy::Pipeline,
             &rows,
-            &total_of(&entries),
+            &total_of_with(&entries, &models),
             None,
             Figures::PerRun,
         );
         assert_eq!(
             table.rows[0],
-            "impl          2  100%        0.00           32%       52%     642   155.8k       \
-             41.91M       799.4k     33.80    16.90    1h 12m"
+            "impl          2  100%        0.00           32%       52%     642        0.00   \
+             155.8k         2.34       41.91M            12.57       799.4k             3.00     \
+             33.80    16.90    1h 12m"
         );
-        // The average run: `BLOCKS/RUN` to two places, each token class
-        // and `TIME` over the table's two runs, `USD` blank and `USD/RUN`
-        // carrying the average.
+        // The average run: `BLOCKS/RUN` to two places, each token class,
+        // its cost and `TIME` over the table's two runs, `USD` blank and
+        // `USD/RUN` carrying the average.
         assert_eq!(
             table.total,
-            "Average       2              0.00                             642   155.8k       \
-             41.91M       799.4k              16.90    1h 12m"
+            "Average       2              0.00                             642        0.00   \
+             155.8k         2.34       41.91M            12.57       799.4k             3.00              \
+             16.90    1h 12m"
         );
     }
 
@@ -5783,24 +6054,214 @@ mod tests {
             e.wall_s = 4_320;
             entries.push(e);
         }
-        let rows = rows_by_with(&entries, EvalBy::Pipeline, &sized_models(100_000));
-        let total = total_of(&entries);
+        let models = priced_models(100_000);
+        let rows = rows_by_with(&entries, EvalBy::Pipeline, &models);
+        let total = total_of_with(&entries, &models);
         let table = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::Totals);
         assert_eq!(
             table.header,
-            "PIPELINE   RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN      OUT  CACHE R  \
-             CACHE W       USD      TIME"
+            "PIPELINE   RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK       IN  IN USD      OUT  \
+             OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME"
         );
+        // Each class cost is its tokens at today's rates — 311.6k out at
+        // $15 a million is 4.67 — and need not add up to the banked `USD`.
         assert_eq!(
             table.rows[0],
-            "impl          2  100%       0           32%       52%     1.3k   311.6k   83.82M    \
-             1.60M     33.80    2h 24m"
+            "impl          2  100%       0           32%       52%     1.3k    0.00   311.6k     \
+             4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
         assert_eq!(
             table.total,
-            "Total         2             0                             1.3k   311.6k   83.82M    \
-             1.60M     33.80    2h 24m"
+            "Total         2             0                             1.3k    0.00   311.6k     \
+             4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
+    }
+
+    /// The cell `row` draws under `title` in `header`. Every class-cost
+    /// column is exactly as wide as its title, so the title's own span is
+    /// the cell's. Counted in characters: a `—` cell is three bytes.
+    fn cell_under(header: &str, row: &str, title: &str) -> String {
+        let start = header
+            .find(title)
+            .map(|byte| header[..byte].chars().count())
+            .unwrap_or_else(|| panic!("no {title}: {header}"));
+        let cell: String = row
+            .chars()
+            .skip(start)
+            .take(title.chars().count())
+            .collect();
+        cell.trim().to_string()
+    }
+
+    /// `CACHE W USD` prices the five-minute and the one-hour writes each at
+    /// its own rate and adds them, and a model with no one-hour rate prices
+    /// both at the five-minute one — the rule banking keeps.
+    #[test]
+    fn cache_w_usd_prices_each_write_at_its_own_rate() {
+        let mut e = lane("t", "implement", 1, Some("pass"));
+        e.model = "sized".into();
+        e.tokens = Tokens {
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 500_000,
+            ..Tokens::default()
+        };
+        let mut models = priced_models(100_000);
+        let sized = models.get_mut("sized").unwrap();
+        (sized.cache_write_5m, sized.cache_write_1h) = (4.0, 8.0);
+        let cost = ClassCost::of([&e], &models);
+        assert_eq!(cost.cache_write, 4.0 + 4.0);
+        assert_eq!((cost.input, cost.output, cost.cache_read), (0.0, 0.0, 0.0));
+
+        models.get_mut("sized").unwrap().cache_write_1h = 0.0;
+        assert_eq!(ClassCost::of([&e], &models).cache_write, 4.0 + 2.0);
+    }
+
+    /// A row whose every lane has no price today draws its four class
+    /// cells blank, never `0.00`; a priced row beside it draws its own, and
+    /// the `Total` line sums what could be priced. The note under the table
+    /// still names the unpriced model.
+    #[test]
+    fn an_unpriced_row_draws_its_class_costs_blank() {
+        let mut unpriced = lane("t1", "implement", 1, Some("pass"));
+        unpriced.pipeline = "local".into();
+        unpriced.tokens.output = 1_000_000;
+        unpriced.cost_usd = None;
+        let mut priced = lane("t2", "implement", 1, Some("pass"));
+        priced.model = "sized".into();
+        priced.tokens.output = 1_000_000;
+        // Spends nothing, so it must not count as a priced line on `local`.
+        let idle = lane("t3", "implement", 1, Some("pass"));
+        let entries = vec![
+            unpriced,
+            priced,
+            Entry {
+                pipeline: "local".into(),
+                ..idle
+            },
+        ];
+        let models = priced_models(100_000);
+        let rows = rows_by_with(&entries, EvalBy::Pipeline, &models);
+        let total = total_of_with(&entries, &models);
+        let table = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::Totals);
+        let row = |name: &str| {
+            table
+                .rows
+                .iter()
+                .find(|r| r.starts_with(name))
+                .unwrap_or_else(|| panic!("no {name} row: {:?}", table.rows))
+        };
+        for title in ["IN USD", "OUT USD", "CACHE R USD", "CACHE W USD"] {
+            assert_eq!(
+                cell_under(&table.header, row("local"), title),
+                "",
+                "{title}"
+            );
+        }
+        assert_eq!(
+            cell_under(&table.header, row("default"), "OUT USD"),
+            "15.00"
+        );
+        assert_eq!(cell_under(&table.header, row("default"), "IN USD"), "0.00");
+        assert_eq!(cell_under(&table.header, &table.total, "OUT USD"), "15.00");
+
+        let per_run = lanes_table(EvalBy::Pipeline, &rows, &total, None, Figures::PerRun);
+        let local = per_run
+            .rows
+            .iter()
+            .find(|r| r.starts_with("local"))
+            .unwrap();
+        assert_eq!(cell_under(&per_run.header, local, "OUT USD/RUN"), "");
+        // 15.00 over the table's three runs.
+        assert_eq!(
+            cell_under(&per_run.header, &per_run.total, "OUT USD/RUN"),
+            "5.00"
+        );
+
+        let note = unpriced_note(entries.iter()).expect("one lane is unpriced");
+        assert!(note.contains("qwen"), "{note}");
+    }
+
+    /// `--csv` and `--json` carry each class cost and its per-run twin —
+    /// blank and `null` where nothing could be priced — and `--sort` on
+    /// one puts an unpriced row last whichever way it runs.
+    #[test]
+    fn the_class_costs_export_and_sort() {
+        let mut a = lane("t1", "implement", 1, Some("pass"));
+        a.model = "sized".into();
+        a.tokens = Tokens {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 10_000_000,
+            cache_write_5m: 1_000_000,
+            ..Tokens::default()
+        };
+        let mut b = lane("t2", "implement", 1, Some("pass"));
+        b.pipeline = "local".into();
+        b.tokens.input = 5;
+        let entries = vec![a, b];
+        let models = priced_models(100_000);
+        let mut rows = rows_by_with(&entries, EvalBy::Pipeline, &models);
+        let total = total_of_with(&entries, &models);
+
+        let header = lanes_csv_header(EvalBy::Pipeline);
+        let names: Vec<&str> = header.split(',').collect();
+        let at = |line: &str, name: &str| {
+            let i = names.iter().position(|n| *n == name).unwrap();
+            line.split(',').nth(i).unwrap().to_string()
+        };
+        let row_of = |name: &str| rows.iter().find(|r| r.keys[0] == name).unwrap();
+        let line = lanes_csv_row(EvalBy::Pipeline, row_of("default"));
+        let figures = [
+            ("in_usd", "3.00"),
+            ("out_usd", "15.00"),
+            ("cache_read_usd", "3.00"),
+            ("cache_write_usd", "3.75"),
+            ("in_usd_per_run", "3.00"),
+            ("out_usd_per_run", "15.00"),
+            ("cache_read_usd_per_run", "3.00"),
+            ("cache_write_usd_per_run", "3.75"),
+        ];
+        for (name, value) in figures {
+            assert_eq!(at(&line, name), value, "{name}: {line}");
+        }
+        let line = lanes_csv_row(EvalBy::Pipeline, row_of("local"));
+        for (name, _) in figures {
+            assert_eq!(at(&line, name), "", "{name}: {line}");
+        }
+        // Over the table's two runs.
+        let line = lanes_csv_total(EvalBy::Pipeline, &total);
+        assert_eq!(at(&line, "out_usd"), "15.00", "{line}");
+        assert_eq!(at(&line, "out_usd_per_run"), "7.50", "{line}");
+
+        let json = lanes_json(EvalBy::Pipeline, &rows, &total);
+        let json_row = |name: &str| {
+            json["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["pipeline"] == name)
+                .unwrap()
+                .clone()
+        };
+        let priced = json_row("default");
+        assert_eq!(priced["in_usd"], 3.0);
+        assert_eq!(priced["cache_write_usd"], 3.75);
+        assert_eq!(priced["out_usd_per_run"], 15.0);
+        let unpriced = json_row("local");
+        for (name, _) in figures {
+            assert!(unpriced[name].is_null(), "{name}: {unpriced}");
+        }
+        assert_eq!(json["total"]["out_usd"], 15.0);
+        assert_eq!(json["total"]["out_usd_per_run"], 7.5);
+
+        for (name, _) in figures {
+            for descending in [true, false] {
+                let sort = parse_sort(EvalBy::Pipeline, name).unwrap();
+                let sort = Sort { descending, ..sort };
+                sort_lane_rows(EvalBy::Pipeline, &mut rows, &sort);
+                assert_eq!(rows[1].keys[0], "local", "{name}, descending {descending}");
+            }
+        }
     }
 
     /// The directory table's totals view: the sums under `IN` … `TIME`, and
@@ -5968,7 +6429,8 @@ mod tests {
     // ------------------------------------------------------------- export
 
     /// The mockup's own `--csv` header for `--by step`, with the four
-    /// per-run token columns beside the raw totals.
+    /// per-run token columns beside the raw totals, and each class's cost
+    /// after them the same way. `qwen` has no price, so those stay blank.
     #[test]
     fn a_lanes_export_carries_totals_beside_per_run_figures_and_marks_its_total() {
         assert_eq!(
@@ -5976,7 +6438,9 @@ mod tests {
             "project,by,pipeline,step,pipeline_version,runs,lanes,pass,blocks,ctx_peak_tokens,\
              ctx_peak_pct,ctx_peak_avg_tokens,ctx_peak_avg_pct,in_tokens,out_tokens,\
              cache_read_tokens,cache_write_tokens,in_per_run,out_per_run,cache_read_per_run,\
-             cache_write_per_run,cost_usd,cost_per_run,unpriced,time_s,time_per_run_s"
+             cache_write_per_run,in_usd,out_usd,cache_read_usd,cache_write_usd,in_usd_per_run,\
+             out_usd_per_run,cache_read_usd_per_run,cache_write_usd_per_run,cost_usd,\
+             cost_per_run,unpriced,time_s,time_per_run_s"
         );
         let mut entries = vec![
             lane("login", "implement", 1, Some("block")),
@@ -5990,7 +6454,8 @@ mod tests {
         assert_eq!(line.split(',').count(), header_cols, "{line}");
         assert!(
             line.starts_with(
-                "demo,step,default,implement,,2,2,0.50,1,,,,,300,0,0,0,150,0,0,0,2.00,1.00,0,120,60"
+                "demo,step,default,implement,,2,2,0.50,1,,,,,300,0,0,0,150,0,0,0,,,,,,,,,2.00,1.00,0,120,\
+                 60"
             ),
             "two versions on one row name neither: {line}"
         );
@@ -6001,7 +6466,7 @@ mod tests {
         // `unpriced` and the shares and peaks stay blank.
         assert_eq!(
             total,
-            ",total,,,,2,,,1,,,,,300,0,0,0,150,0,0,0,2.00,1.00,,120,60"
+            ",total,,,,2,,,1,,,,,300,0,0,0,150,0,0,0,,,,,,,,,2.00,1.00,,120,60"
         );
     }
 
@@ -8312,8 +8777,8 @@ mod screen_tests {
     #[test]
     fn a_sort_survives_tab_refresh_and_a_new_by_and_each_table_keeps_its_own() {
         let (repo, _root_guard) = fixture_to_sort("screen-sort-survives");
-        // `USD` is the eleventh column under `by pipeline`.
-        let to_usd = DOWN.repeat(11);
+        // `USD` is the fifteenth column under `by pipeline`.
+        let to_usd = DOWN.repeat(15);
         let text = screen(&repo, &format!("d{to_usd}\r\t\t\trf{RIGHT}\rq"));
         let all = frames(&text);
         let sorted = |f: &str| f.contains("▼USD");
@@ -8856,7 +9321,10 @@ mod screen_tests {
         let last = last_frame(&opened);
         assert!(last.contains("┌─ eval · by pipeline · totals "), "{last}");
         assert!(
-            header_of(last).contains("CACHE R  CACHE W       USD      TIME"),
+            header_of(last).contains(
+                "IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       \
+                 USD      TIME"
+            ),
             "{last}"
         );
         assert!(!header_of(last).contains("/RUN"), "{last}");
@@ -8865,8 +9333,10 @@ mod screen_tests {
         let last = last_frame(&text);
         assert!(last.contains("┌─ eval · by pipeline · per run "), "{last}");
         assert!(
-            header_of(last)
-                .contains("IN/RUN  OUT/RUN  CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN"),
+            header_of(last).contains(
+                "IN/RUN  IN USD/RUN  OUT/RUN  OUT USD/RUN  CACHE R/RUN  CACHE R USD/RUN  \
+                 CACHE W/RUN  CACHE W USD/RUN       USD  USD/RUN  TIME/RUN"
+            ),
             "{last}"
         );
         assert!(
@@ -8912,9 +9382,10 @@ mod screen_tests {
         assert!(header_of(last).contains("TIME/RUN"), "{last}");
     }
 
-    /// A sort on `IN` becomes one on `IN/RUN` after `t`, and one on
-    /// `USD/RUN` becomes one on `USD` after `t` back. The popup lists the
-    /// columns of the view on screen.
+    /// A sort on `IN` becomes one on `IN/RUN` after `t`, a sort on `IN USD`
+    /// becomes one on `IN USD/RUN`, and one on `USD/RUN` becomes one on
+    /// `USD` after `t` back. The popup lists the columns of the view on
+    /// screen.
     #[test]
     fn t_carries_the_sort_to_the_matching_column() {
         let (repo, _root_guard) = fixture_to_sort("screen-t-sort");
@@ -8932,9 +9403,20 @@ mod screen_tests {
             "opens on the carried column: {popup}"
         );
         assert!(popup.contains("│    TIME/RUN"), "{popup}");
+        assert!(popup.contains("│    CACHE W USD/RUN"), "{popup}");
 
-        // Per run, `USD/RUN` is five further on than `IN/RUN`.
-        let to_usd_run = DOWN.repeat(12);
+        // `IN USD` is the one after `IN`, in either view.
+        let to_in_usd = DOWN.repeat(8);
+        let text = screen(&repo, &format!("d{to_in_usd}\rq"));
+        let last = last_frame(&text);
+        assert!(header_of(last).contains(" ▼IN USD "), "{last}");
+        let text = screen(&repo, &format!("d{to_in_usd}\rtq"));
+        let last = last_frame(&text);
+        assert!(header_of(last).contains(" ▼IN USD/RUN"), "{last}");
+
+        // Per run, `USD/RUN` is nine further on than `IN/RUN`: each token
+        // class has its cost beside it.
+        let to_usd_run = DOWN.repeat(16);
         let text = screen(&repo, &format!("td{to_usd_run}\r"));
         let last = last_frame(&text);
         assert!(header_of(last).contains("▼USD/RUN"), "{last}");
@@ -8951,7 +9433,10 @@ mod screen_tests {
         let table = print(&repo, &[]).unwrap();
         let header = table.lines().next().unwrap();
         assert!(
-            header.ends_with("       IN      OUT  CACHE R  CACHE W       USD      TIME"),
+            header.ends_with(
+                "       IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       \
+                 USD      TIME"
+            ),
             "{table}"
         );
         assert!(
@@ -8963,7 +9448,8 @@ mod screen_tests {
         let header = table.lines().next().unwrap();
         assert!(
             header.ends_with(
-                "IN/RUN  OUT/RUN  CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN"
+                "IN/RUN  IN USD/RUN  OUT/RUN  OUT USD/RUN  CACHE R/RUN  CACHE R USD/RUN  \
+                 CACHE W/RUN  CACHE W USD/RUN       USD  USD/RUN  TIME/RUN"
             ),
             "{table}"
         );
@@ -8979,6 +9465,30 @@ mod screen_tests {
         assert!(!table.contains('▼'), "{table}");
         let table = print(&repo, &["--sort", "time_s"]).unwrap();
         assert!(table.contains("▼TIME"), "{table}");
+        // Each class cost sorts under its own name, in the view that draws it.
+        for (key, view, mark) in [
+            ("in_usd", None, "▼IN USD "),
+            ("out_usd", None, "▼OUT USD "),
+            ("cache_read_usd", None, "▼CACHE R USD"),
+            ("cache_write_usd", None, "▼CACHE W USD"),
+            ("in_usd_per_run", Some("--per-run"), "▼IN USD/RUN"),
+            ("out_usd_per_run", Some("--per-run"), "▼OUT USD/RUN"),
+            (
+                "cache_read_usd_per_run",
+                Some("--per-run"),
+                "▼CACHE R USD/RUN",
+            ),
+            (
+                "cache_write_usd_per_run",
+                Some("--per-run"),
+                "▼CACHE W USD/RUN",
+            ),
+        ] {
+            let mut args = vec!["--sort", key];
+            args.extend(view);
+            let table = print(&repo, &args).unwrap();
+            assert!(table.contains(mark), "{key}: {table}");
+        }
     }
 
     /// `--per-run` changes only the printed table, so beside an export or
