@@ -138,14 +138,17 @@ pub fn queue_show(repo: &Repo, id: &str) -> Result<()> {
 /// runs, a step to an entry, and leaves out `blocked` — reached from any step
 /// and routed by whichever step the task stopped on, it has no route of its
 /// own to draw — and every agent, model and prompt name, which a reader asking
-/// what happens next has no use for.
+/// what happens next has no use for. It also leaves out every step this task
+/// walks past, and names each route by the step it really lands on — see
+/// [`route_view`].
 ///
 /// Read-only, and so never refused from inside a lane the way
 /// `spoolway resume` is: a lane reads this before it tells a person where
 /// resuming sends its task.
 pub fn queue_route(repo: &Repo, pipelines: &Pipelines, id: &str, json: bool) -> Result<()> {
     let task = repo.task(id)?;
-    let route = route_view(&task, pipelines)?;
+    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+    let route = route_view(&task, pipelines, dependents)?;
     match json {
         true => println!("{}", serde_json::to_string_pretty(&route)?),
         false => print!("{}", render_route(&route)),
@@ -172,7 +175,8 @@ struct RouteView {
     /// the board offers `r` on. Only then does a resume line apply.
     held: bool,
     /// Where resuming it on the board sends it — [`crate::commands::
-    /// resume_road`], the function `spoolway resume` itself acts on. `None`
+    /// resume_road`], the function `spoolway resume` itself acts on, landed
+    /// past the steps the task walks past the way the resume lands it. `None`
     /// when it is not held, or when that function refused.
     resumes_to: Option<String>,
     /// Why `resume_road` refused, when it did: the same error a resume
@@ -189,11 +193,23 @@ struct RouteStep {
     /// The task's own `gate_at` names this step: whatever it reports waits
     /// for a person.
     gate_at: bool,
+    /// Where a pass and a fail write the task, each landed past the steps it
+    /// walks past — the stage a report really writes, not the raw route.
     on_pass: Option<String>,
     on_fail: Option<String>,
 }
 
-fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
+/// The facts `queue route` prints for `task`, judged against `dependents` —
+/// [`crate::dispatch::same_group_dependents`]'s count, which decides whether
+/// a `last:` step runs for it.
+///
+/// A step the task walks past ([`crate::dispatch::walk_past`]) is left out,
+/// and every route and the resume line land past such steps through
+/// [`crate::dispatch::land_past_hidden`], as a report and a resume do. A
+/// route naming a hidden step would send a person looking for an entry that
+/// is not printed. The step the task is on, or held at, stays even when
+/// hidden, because the task really is there and it carries the marker.
+fn route_view(task: &Task, pipelines: &Pipelines, dependents: usize) -> Result<RouteView> {
     let pipeline = pipelines.for_task(task)?;
     let (state, at) = route_state(task, pipeline);
     let held = matches!(
@@ -203,7 +219,7 @@ fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
     let (resumes_to, resume_error) = match held {
         false => (None, None),
         true => match crate::commands::resume_road(task, pipelines) {
-            Ok(road) => (Some(road.destination().to_string()), None),
+            Ok(road) => (Some(road.landing(pipeline, task, dependents)), None),
             Err(err) => (None, Some(format!("{err:#}"))),
         },
     };
@@ -211,13 +227,25 @@ fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
         .steps
         .iter()
         .filter(|step| step.id != crate::pipeline::BLOCKED)
-        .map(|step| RouteStep {
-            id: step.id.clone(),
-            description: step.description.clone(),
-            gate: step.gate,
-            gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
-            on_pass: step.destination(Outcome::Pass).map(str::to_string),
-            on_fail: step.destination(Outcome::Fail).map(str::to_string),
+        .filter(|step| {
+            at.as_deref() == Some(step.id.as_str())
+                || crate::dispatch::walk_past(step, task, dependents).is_none()
+        })
+        .map(|step| {
+            let land = |outcome| {
+                step.destination(outcome).map(|to| {
+                    crate::dispatch::land_past_hidden(pipeline, task, to.to_string(), dependents)
+                        .destination
+                })
+            };
+            RouteStep {
+                id: step.id.clone(),
+                description: step.description.clone(),
+                gate: step.gate,
+                gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
+                on_pass: land(Outcome::Pass),
+                on_fail: land(Outcome::Fail),
+            }
         })
         .collect();
     Ok(RouteView {
@@ -3249,9 +3277,14 @@ enum Mode {
     /// `ScreenState` rather than here, so it survives leaving this mode —
     /// see that field's own doc comment.
     Filter,
-    /// Choosing a step off the highlighted task's own pipeline, cursor into
-    /// that pipeline's `steps`.
-    Gate(usize),
+    /// Choosing a step off the highlighted task's own pipeline: `cursor`
+    /// into [`gate_steps`], the steps the task will run, and `dependents`,
+    /// the count those steps were judged against — read once when `g`
+    /// opened the picker, by [`gate_dependents`].
+    Gate {
+        cursor: usize,
+        dependents: usize,
+    },
     /// Forking a whole group once per ticked pipeline — `t`'s own two
     /// screens, ticking the pipelines and then choosing what each one
     /// skips. The whole of what was picked lives on the [`TrialState`] it
@@ -4294,9 +4327,9 @@ fn run_screen_from(
         // and pipeline search.
         match &state.mode {
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
-            Mode::Gate(cursor) => {
-                let cursor = *cursor;
-                handle_gate_key(&groups, pipelines, &mut state, cursor, key);
+            Mode::Gate { cursor, dependents } => {
+                let (cursor, dependents) = (*cursor, *dependents);
+                handle_gate_key(&groups, pipelines, &mut state, (cursor, dependents), key);
             }
             Mode::Trial(trial) => match key {
                 // The first screen's own `enter`: advance to the second
@@ -4594,9 +4627,23 @@ fn run_screen_from(
                     );
                     known_reading = known_reading.max(reader.started_count());
                 }
-                // Gated exactly the way `g` is — see `handle_browse_key`'s
-                // own `g` arm — since a task only exists to open when
-                // the tasks pane is focused on one.
+                // `g`: the gate picker on the highlighted task. Read here
+                // rather than in `handle_browse_key`, which is never handed
+                // the repository: whether a `last:` step runs for a pending
+                // task depends on the open queue as well as the pending set,
+                // and that is read once, now, rather than on every key the
+                // picker then takes.
+                Key::Char('g')
+                    if state.focus == Focus::Tasks
+                        && highlighted_task_key(&groups, &state).is_some() =>
+                {
+                    state.mode = Mode::Gate {
+                        cursor: 0,
+                        dependents: gate_dependents(repo, &groups, &state),
+                    };
+                }
+                // Gated exactly the way `g` is, since a task only exists to
+                // open when the tasks pane is focused on one.
                 Key::Char('o')
                     if state.focus == Focus::Tasks
                         && highlighted_task_key(&groups, &state).is_some() =>
@@ -4605,9 +4652,9 @@ fn run_screen_from(
                 }
                 // `t`: open the trial picker on whichever group the cursor
                 // sits on — see `trial_target`. Needs `pipelines`, which
-                // `handle_browse_key` is not handed, so this is the one key
-                // `run_screen` reads before falling through to it, the same
-                // way `o` already does.
+                // `handle_browse_key` is not handed, so this is one of the
+                // keys `run_screen_from` reads before falling through to it,
+                // the same way `o` and `g` are.
                 Key::Char('t') => {
                     if let Some(group) = trial_target(&groups, &state) {
                         state.mode = Mode::Trial(TrialState::new(pipelines, group));
@@ -4907,11 +4954,13 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
     (!group.tasks.is_empty()).then_some(group)
 }
 
-/// One key while browsing: moving, focus, selection and the gate picker.
+/// One key while browsing: moving, focus and selection.
 ///
 /// None of the keys that need the repo are handled here — `enter` needs the
 /// repo and the pipelines to submit, `o` needs the repo to open an editor,
-/// and `t` needs the pipelines to seed the trial picker's first screen — so
+/// `g` needs the repo to count the pending task's dependents across the
+/// pending set and the open queue, and `t` needs the pipelines to seed the
+/// trial picker's first screen — so `run_screen_from` reads all four first, and
 /// nothing this reads can leave the screen or reach outside it. `q` reaches
 /// this function like any other unrecognised character and does nothing.
 ///
@@ -4969,11 +5018,6 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
                     state.selected.insert(key);
                 }
             }
-        }
-        Key::Char('g')
-            if state.focus == Focus::Tasks && highlighted_task_key(groups, state).is_some() =>
-        {
-            state.mode = Mode::Gate(0);
         }
         // `s`: save the highlighted group as a routine. Gated on the group
         // itself, not on which pane has focus — the same way `enter` reads
@@ -5215,11 +5259,87 @@ fn doc_pipeline_name(doc: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The steps the gate picker offers `task`, read from `doc`, its text:
+/// every step of `pipeline` that the task will run once it is queued.
+///
+/// A `gate_at` on a step the task walks past never holds, since the task is
+/// never written onto that step, so offering one would let a person set a
+/// gate that silently does nothing. Each step is judged by
+/// [`crate::dispatch::walk_past`] against [`as_submitted`]'s task and
+/// `dependents`, the count [`gate_dependents`] read when the picker opened.
+/// A pending task has not stopped anywhere yet, so there is no stopped step
+/// to keep listed. A doc that submission would refuse keeps every step:
+/// there is no task to judge, and submitting it reports the real error.
+fn gate_steps<'a>(
+    task: &PendingTask,
+    doc: &str,
+    pipeline: &'a Pipeline,
+    dependents: usize,
+) -> Vec<&'a Step> {
+    let parsed = as_submitted(task, doc);
+    pipeline
+        .steps
+        .iter()
+        .filter(|step| {
+            parsed
+                .as_ref()
+                .is_none_or(|parsed| crate::dispatch::walk_past(step, parsed, dependents).is_none())
+        })
+        .collect()
+}
+
+/// [`crate::dispatch::same_group_dependents`] for the highlighted pending
+/// task, judged against the pending set and the open queue together.
+///
+/// A group still in the pending directory has not been queued, so the tasks
+/// above this one in its chain may exist only there; the queue alone would
+/// count none of them and offer a `last:` step that the task will walk past.
+/// The pending tasks come from `groups`, which the screen already read; a
+/// pending task whose id the queue already holds is left to the queue's own
+/// copy, so no id is counted twice. A queue that cannot be read counts as
+/// empty, the way the screen degrades every other read it cannot make,
+/// rather than closing the picker over it.
+fn gate_dependents(repo: &Repo, groups: &[Group], state: &ScreenState) -> usize {
+    let Some(task) = shown(groups, state)
+        .get(state.group_cursor)
+        .and_then(|group| group.tasks.get(state.task_cursor))
+    else {
+        return 0;
+    };
+    let Some(me) = task.text().ok().and_then(|doc| as_submitted(task, &doc)) else {
+        return 0;
+    };
+    let mut tasks = repo.tasks().unwrap_or_default();
+    let queued: BTreeSet<String> = tasks.iter().map(|t| t.id().to_string()).collect();
+    let pending = groups
+        .iter()
+        .flat_map(|group| &group.tasks)
+        .filter(|t| t.state == TaskState::Pending && !queued.contains(&t.id))
+        .filter_map(|t| as_submitted(t, &t.doc));
+    tasks.extend(pending);
+    let graph = Graph::build(&tasks, &repo.archive_dir());
+    crate::dispatch::same_group_dependents(repo, &tasks, &graph, &me)
+}
+
+/// Pending `task`, with text `doc`, as the queue would hold it once
+/// submitted, or `None` when submission would refuse it.
+///
+/// Read through [`parse_submission`] rather than [`Task::parse`], for two
+/// reasons. A pending task carries no `stage:`, which `Task::parse` requires.
+/// And submission clears a task's own `skip:` (only a trial arm is given
+/// one), so a pending `skip:` hides nothing; judging the raw doc would leave
+/// out a step the queued task will in fact run. The base handed in is a
+/// placeholder: none of the fields [`crate::dispatch::walk_past`] or the
+/// dependency graph read depend on it.
+fn as_submitted(task: &PendingTask, doc: &str) -> Option<Task> {
+    parse_submission(&task.id, doc, Some(crate::pipeline::QUEUED)).ok()
+}
+
 fn handle_gate_key(
     groups: &[Group],
     pipelines: &Pipelines,
     state: &mut ScreenState,
-    cursor: usize,
+    (cursor, dependents): (usize, usize),
     key: Key,
 ) {
     let Some(key_of_task) = highlighted_task_key(groups, state) else {
@@ -5237,22 +5357,33 @@ fn handle_gate_key(
     // The same pipeline `parse_submission` would resolve this task
     // against once it is actually submitted — a malformed `pipeline:` on it
     // degrades to "no steps to page through" here rather than a panic, and is
-    // caught properly, with a real error, at submit time.
-    let pipeline = task
-        .text()
-        .ok()
-        .and_then(|doc| task_pipeline(&doc, pipelines).ok());
-    let steps = pipeline.map_or(0, |p| p.steps.len());
+    // caught properly, with a real error, at submit time. The cursor indexes
+    // `gate_steps`, the same list `gate_panel` draws.
+    let doc = task.text().ok();
+    let steps = doc
+        .as_deref()
+        .and_then(|doc| Some((doc, task_pipeline(doc, pipelines).ok()?)))
+        .map_or_else(Vec::new, |(doc, pipeline)| {
+            gate_steps(task, doc, pipeline, dependents)
+        });
 
     match key {
-        Key::Up | Key::Char('k') => state.mode = Mode::Gate(cursor.saturating_sub(1)),
+        Key::Up | Key::Char('k') => {
+            state.mode = Mode::Gate {
+                cursor: cursor.saturating_sub(1),
+                dependents,
+            }
+        }
         Key::Down | Key::Char('j') => {
-            state.mode = Mode::Gate((cursor + 1).min(steps.saturating_sub(1)))
+            state.mode = Mode::Gate {
+                cursor: (cursor + 1).min(steps.len().saturating_sub(1)),
+                dependents,
+            }
         }
         Key::Enter | Key::Char(' ') => {
             // Pressing it again on the same step clears it, per the
             // acceptance criterion — a gate is a toggle, not a one-way choice.
-            if let Some(step) = pipeline.and_then(|p| p.steps.get(cursor)) {
+            if let Some(step) = steps.get(cursor) {
                 if state.gates.get(&key_of_task) == Some(&step.id) {
                     state.gates.remove(&key_of_task);
                 } else {
@@ -6250,7 +6381,7 @@ fn footer(state: &ScreenState) -> String {
         Mode::DeleteRoutine { .. } => key_hint(DELETE_ROUTINE_KEYS),
         Mode::NewJob { walk, .. } => walk.footer(),
         Mode::JobSaved { .. } => hint(&confirm()),
-        Mode::Gate(_) => key_hint(GATE_KEYS),
+        Mode::Gate { .. } => key_hint(GATE_KEYS),
         Mode::Trial(trial) => match trial.stage {
             TrialStage::PickPipelines => key_hint(PICK_KEYS),
             TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
@@ -6468,7 +6599,9 @@ fn popup(
     layout: Layout,
 ) -> Option<Vec<String>> {
     match &state.mode {
-        Mode::Gate(cursor) => gate_panel(groups, pipelines, state, *cursor),
+        Mode::Gate { cursor, dependents } => {
+            gate_panel(groups, pipelines, state, (*cursor, *dependents))
+        }
         Mode::Trial(trial) => trial_panel(
             groups,
             pipelines,
@@ -6584,27 +6717,34 @@ fn paint(
     writer.write_frame(&frame, crate::screen::pane_size(), out);
 }
 
-/// The gate picker: the highlighted task's own pipeline, a step at a time,
-/// with the one currently chosen marked. `None` when there is no task under
+/// The gate picker: the highlighted task's own pipeline, one row for each
+/// step it will run (see [`gate_steps`]), with the one currently chosen
+/// marked. `None` when there is no task under
 /// the cursor to gate, or its task names a pipeline that will not
 /// resolve — the same degradation [`handle_gate_key`] already makes.
 fn gate_panel(
     groups: &[Group],
     pipelines: &Pipelines,
     state: &ScreenState,
-    cursor: usize,
+    (cursor, dependents): (usize, usize),
 ) -> Option<Vec<String>> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     let task = group.tasks.get(state.task_cursor)?;
-    let pipeline = task_pipeline(&task.text().ok()?, pipelines).ok()?;
+    let doc = task.text().ok()?;
+    let pipeline = task_pipeline(&doc, pipelines).ok()?;
 
     let chosen = state.gates.get(&task_key(task));
     let mut body = vec![String::new()];
-    body.extend(pipeline.steps.iter().enumerate().map(|(i, step)| {
-        let marker = if i == cursor { ">" } else { " " };
-        let mark = if chosen == Some(&step.id) { " ·" } else { "" };
-        format!("{marker} {}{mark}", step.id)
-    }));
+    body.extend(
+        gate_steps(task, &doc, pipeline, dependents)
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let marker = if i == cursor { ">" } else { " " };
+                let mark = if chosen == Some(&step.id) { " ·" } else { "" };
+                format!("{marker} {}{mark}", step.id)
+            }),
+    );
 
     Some(panel(
         &format!("gate {} at", task.id),
@@ -18285,7 +18425,9 @@ body\n";
     /// What `queue route` says a resume does, then what a real resume did:
     /// the two must name the same stage. Returns that stage.
     fn route_then_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> String {
-        let said = route_view(&queued(repo, id), pipelines)
+        let task = queued(repo, id);
+        let dependents = crate::dispatch::queue_dependents(repo, &task).unwrap();
+        let said = route_view(&task, pipelines, dependents)
             .unwrap()
             .resumes_to
             .expect("a held task names where resuming sends it");
@@ -18315,7 +18457,7 @@ body\n";
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let text = render_route(&route_view(&queued(&repo, "ship"), &pipelines).unwrap());
+        let text = render_route(&route_view(&queued(&repo, "ship"), &pipelines, 0).unwrap());
         assert!(
             text.starts_with("default — held at deploy, waiting for a person\n"),
             "{text}"
@@ -18348,7 +18490,7 @@ body\n";
         task.set_stage(crate::pipeline::BLOCKED, None);
         task.save().unwrap();
 
-        let text = render_route(&route_view(&queued(&repo, "wall"), &pipelines).unwrap());
+        let text = render_route(&route_view(&queued(&repo, "wall"), &pipelines, 0).unwrap());
         assert!(text.starts_with("default — blocked at deploy\n"), "{text}");
         assert!(text.contains("▸ deploy"), "{text}");
 
@@ -18365,7 +18507,7 @@ body\n";
         task.save().unwrap();
         queue_pause(&repo, &pipelines, "solo", false).unwrap();
 
-        let text = render_route(&route_view(&queued(&repo, "solo"), &pipelines).unwrap());
+        let text = render_route(&route_view(&queued(&repo, "solo"), &pipelines, 0).unwrap());
         assert!(text.starts_with("default — paused at build\n"), "{text}");
         assert!(text.contains("▸ build"), "{text}");
 
@@ -18379,7 +18521,7 @@ body\n";
         add(&repo, "fresh", &[]);
         queue_pause(&repo, &pipelines, "fresh", false).unwrap();
 
-        let text = render_route(&route_view(&queued(&repo, "fresh"), &pipelines).unwrap());
+        let text = render_route(&route_view(&queued(&repo, "fresh"), &pipelines, 0).unwrap());
         assert!(
             text.starts_with("default — paused before it started\n"),
             "{text}"
@@ -18403,7 +18545,7 @@ body\n";
         task.set_stage("build", None);
         task.save().unwrap();
 
-        let route = route_view(&queued(&repo, "busy"), &pipelines).unwrap();
+        let route = route_view(&queued(&repo, "busy"), &pipelines, 0).unwrap();
         assert_eq!(route.resumes_to, None);
         let text = render_route(&route);
         assert!(text.starts_with("default — at build\n"), "{text}");
@@ -18425,7 +18567,7 @@ body\n";
         task.set_stage("nowhere", None);
         task.save().unwrap();
 
-        let route = route_view(&queued(&repo, "lost"), &pipelines).unwrap();
+        let route = route_view(&queued(&repo, "lost"), &pipelines, 0).unwrap();
         assert_eq!(route.at, None);
         let text = render_route(&route);
         assert!(
@@ -18446,7 +18588,7 @@ body\n";
         task.set_stage("build", None);
         task.save().unwrap();
 
-        let text = render_route(&route_view(&queued(&repo, "watched"), &pipelines).unwrap());
+        let text = render_route(&route_view(&queued(&repo, "watched"), &pipelines, 0).unwrap());
         assert!(
             text.contains("Build it. Whatever it reports waits for a person."),
             "{text}"
@@ -18472,7 +18614,7 @@ body\n";
             Some(crate::pipeline::BLOCKED)
         );
 
-        let route = route_view(&queued(&repo, "wall"), &pipelines).unwrap();
+        let route = route_view(&queued(&repo, "wall"), &pipelines, 0).unwrap();
         assert_eq!(route.at.as_deref(), Some("deploy"));
         let text = render_route(&route);
         assert!(
@@ -18500,8 +18642,8 @@ body\n";
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let json =
-            serde_json::to_value(route_view(&queued(&repo, "ship"), &pipelines).unwrap()).unwrap();
+        let json = serde_json::to_value(route_view(&queued(&repo, "ship"), &pipelines, 0).unwrap())
+            .unwrap();
         assert_eq!(json["pipeline"], "default");
         assert_eq!(json["state"], "held at deploy, waiting for a person");
         assert_eq!(json["at"], "deploy");
@@ -18516,6 +18658,299 @@ body\n";
         assert_eq!(ids, ["build", "deploy", "announce"]);
         assert_eq!(json["steps"][1]["gate"], true);
         assert_eq!(json["steps"][1]["on_fail"], "build");
+    }
+
+    /// The three ways a step can be hidden from a task, as the `check` step's
+    /// own key and the task frontmatter that makes it bite: a `skip:` naming
+    /// it, a `last:` step with a same-group dependent above the task, and a
+    /// `first:` step on a task that is not its chain's root.
+    const HIDDEN_RULES: [(&str, &str); 3] = [
+        ("skip", ""),
+        ("last", "last: true"),
+        ("first", "first: true"),
+    ];
+
+    /// A gated `build` whose pass and fail both route into `check`, the step
+    /// each rule in [`HIDDEN_RULES`] hides, then `announce`. `extra` is the
+    /// key `check` carries.
+    fn hidden_route_pipelines(extra: &str) -> Pipelines {
+        let yaml = format!(
+            "steps:\n  \
+             - id: build\n    agent: pi\n    gate: true\n    on_pass: check\n    on_fail: check\n  \
+             - id: check\n    run: 'true'\n    {extra}\n    on_pass: announce\n  \
+             - id: announce\n    agent: pi\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n"
+        );
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", &yaml).unwrap(),
+        );
+        pipelines
+    }
+
+    /// Queue `ship` so that `rule` hides `check` from it, held at `stopped`'s
+    /// gate: a `skip:` of its own, a same-group dependent for `last:`, a
+    /// dependency for `first:`.
+    fn queue_hidden(repo: &Repo, rule: &str, stopped: &str) {
+        match rule {
+            "first" => {
+                add(repo, "root", &[]);
+                add(repo, "ship", &["root"]);
+            }
+            "last" => {
+                add(repo, "ship", &[]);
+                add(repo, "above", &["ship"]);
+            }
+            _ => add(repo, "ship", &[]),
+        }
+        let mut task = queued(repo, "ship");
+        if rule == "skip" {
+            task.front.skip = vec!["check".into()];
+        }
+        task.set_stage(stopped, None);
+        task.front.paused_at = Some(stopped.into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+    }
+
+    /// `queue route` leaves out a step the task walks past, under each of the
+    /// three rules: no entry for it, `build`'s pass and fail name the step
+    /// past it, and so do the resume line and `--json`. The resume really
+    /// lands there.
+    #[test]
+    fn route_leaves_out_a_step_the_task_walks_past() {
+        for (rule, extra) in HIDDEN_RULES {
+            let (repo, _root_guard) = fixture(&format!("route-hidden-{rule}"));
+            let pipelines = hidden_route_pipelines(extra);
+            queue_hidden(&repo, rule, "build");
+            let task = queued(&repo, "ship");
+            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+
+            let route = route_view(&task, &pipelines, dependents).unwrap();
+            let text = render_route(&route);
+            assert!(
+                !text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("check")),
+                "{rule}: {text}"
+            );
+            assert!(
+                text.contains("pass → announce · fail → announce"),
+                "{rule}: {text}"
+            );
+            assert!(!text.contains("→ check"), "{rule}: {text}");
+            assert!(
+                text.contains("Resuming on the board sends it to announce.\n"),
+                "{rule}: {text}"
+            );
+
+            let json = serde_json::to_value(&route).unwrap();
+            let ids: Vec<&str> = json["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| step["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, ["build", "announce"], "{rule}");
+            assert_eq!(json["steps"][0]["on_pass"], "announce", "{rule}");
+            assert_eq!(json["steps"][0]["on_fail"], "announce", "{rule}");
+            assert_eq!(json["resumes_to"], "announce", "{rule}");
+
+            assert_eq!(
+                route_then_resume(&repo, &pipelines, "ship"),
+                "announce",
+                "{rule}"
+            );
+        }
+    }
+
+    /// A task already held on a step it now walks past is still listed there
+    /// and marked: the task really is on that step.
+    #[test]
+    fn route_keeps_a_hidden_step_the_task_is_on() {
+        for (rule, extra) in HIDDEN_RULES {
+            let (repo, _root_guard) = fixture(&format!("route-hidden-on-{rule}"));
+            let pipelines = hidden_route_pipelines(extra);
+            queue_hidden(&repo, rule, "check");
+            let task = queued(&repo, "ship");
+            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+
+            let route = route_view(&task, &pipelines, dependents).unwrap();
+            assert_eq!(route.at.as_deref(), Some("check"), "{rule}");
+            let text = render_route(&route);
+            assert!(text.contains("▸ check"), "{rule}: {text}");
+            assert!(
+                text.contains("pass → announce · fail → announce"),
+                "{rule}: {text}"
+            );
+        }
+    }
+
+    /// Without the rule that hides it, `check` is listed and routed to as
+    /// before: the same pipelines, a task alone in its group with no
+    /// `skip:` and no dependency.
+    #[test]
+    fn route_lists_a_step_no_rule_hides() {
+        for (rule, extra) in HIDDEN_RULES {
+            let (repo, _root_guard) = fixture(&format!("route-shown-{rule}"));
+            let pipelines = hidden_route_pipelines(extra);
+            queue_hidden(&repo, "none", "build");
+            let task = queued(&repo, "ship");
+            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+
+            let text = render_route(&route_view(&task, &pipelines, dependents).unwrap());
+            assert!(text.contains("\n  check"), "{rule}: {text}");
+            assert!(
+                text.contains("pass → check · fail → check"),
+                "{rule}: {text}"
+            );
+            assert!(
+                text.contains("Resuming on the board sends it to check.\n"),
+                "{rule}: {text}"
+            );
+        }
+    }
+
+    /// Write `ship` and whatever else `rule` needs into the pending directory
+    /// only — nothing queued — so that `rule` hides `check` from `ship`.
+    fn pending_hidden(repo: &Repo, rule: &str) {
+        let ship_extra = match rule {
+            "skip" => "group: demo\nskip: [check]\n",
+            "first" => "group: demo\ndepends_on: [root]\n",
+            _ => "group: demo\n",
+        };
+        write_pending(repo, "ship", &task_text("ship", ship_extra, BODY));
+        match rule {
+            "first" => {
+                write_pending(repo, "root", &task_text("root", "group: demo\n", BODY));
+            }
+            "last" => {
+                let above = task_text("above", "group: demo\ndepends_on: [ship]\n", BODY);
+                write_pending(repo, "above", &above);
+            }
+            _ => {}
+        }
+    }
+
+    /// The screen state with the tasks pane on pending `id`.
+    fn on_pending_task(groups: &[Group], id: &str) -> ScreenState {
+        let mut state = ScreenState::new();
+        state.focus = Focus::Tasks;
+        let shown = shown(groups, &state);
+        state.group_cursor = shown
+            .iter()
+            .position(|group| group.tasks.iter().any(|t| t.id == id))
+            .unwrap();
+        state.task_cursor = shown[state.group_cursor]
+            .tasks
+            .iter()
+            .position(|t| t.id == id)
+            .unwrap();
+        state
+    }
+
+    /// The `g` picker leaves out a step the pending task will walk past,
+    /// under `first:` and `last:` — `last:` judged against a dependent that
+    /// is only pending — and its cursor walks the same list: one `j` from
+    /// `build` and `enter` gates `announce`, not `check`.
+    #[test]
+    fn gate_picker_leaves_out_a_step_the_task_walks_past() {
+        for (rule, extra) in HIDDEN_RULES.into_iter().filter(|(rule, _)| *rule != "skip") {
+            let (repo, _root_guard) = fixture(&format!("gate-hidden-{rule}"));
+            let pipelines = hidden_route_pipelines(extra);
+            pending_hidden(&repo, rule);
+            let groups = listed(&repo);
+            let mut state = on_pending_task(&groups, "ship");
+            let dependents = gate_dependents(&repo, &groups, &state);
+
+            let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
+                .unwrap()
+                .join("\n");
+            assert!(panel.contains("> build"), "{rule}: {panel}");
+            assert!(panel.contains("  announce"), "{rule}: {panel}");
+            assert!(!panel.contains("check"), "{rule}: {panel}");
+
+            handle_gate_key(
+                &groups,
+                &pipelines,
+                &mut state,
+                (0, dependents),
+                Key::Char('j'),
+            );
+            let Mode::Gate { cursor, .. } = state.mode else {
+                panic!("{rule}: the picker closed");
+            };
+            handle_gate_key(
+                &groups,
+                &pipelines,
+                &mut state,
+                (cursor, dependents),
+                Key::Enter,
+            );
+            assert_eq!(
+                state.gates.values().collect::<Vec<_>>(),
+                ["announce"],
+                "{rule}"
+            );
+        }
+    }
+
+    /// A pending task's own `skip:` hides nothing from the picker:
+    /// submission clears it, so the queued task runs `check` after all.
+    #[test]
+    fn gate_picker_lists_a_step_a_pending_skip_names() {
+        let (repo, _root_guard) = fixture("gate-pending-skip");
+        let pipelines = hidden_route_pipelines("");
+        pending_hidden(&repo, "skip");
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "ship");
+        let dependents = gate_dependents(&repo, &groups, &state);
+
+        let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
+            .unwrap()
+            .join("\n");
+        assert!(panel.contains("  check"), "{panel}");
+    }
+
+    /// The same pending task, with nothing in place that hides `check`:
+    /// the picker lists it.
+    #[test]
+    fn gate_picker_lists_a_step_no_rule_hides() {
+        for (rule, extra) in HIDDEN_RULES {
+            let (repo, _root_guard) = fixture(&format!("gate-shown-{rule}"));
+            let pipelines = hidden_route_pipelines(extra);
+            pending_hidden(&repo, "none");
+            let groups = listed(&repo);
+            let state = on_pending_task(&groups, "ship");
+            let dependents = gate_dependents(&repo, &groups, &state);
+
+            let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
+                .unwrap()
+                .join("\n");
+            assert!(panel.contains("  check"), "{rule}: {panel}");
+        }
+    }
+
+    /// `last:` is judged against the open queue as well: a queued task above
+    /// the pending one in its group holds `check` back too.
+    #[test]
+    fn gate_picker_counts_a_queued_dependent_for_last() {
+        let (repo, _root_guard) = fixture("gate-hidden-last-queued");
+        let pipelines = hidden_route_pipelines("last: true");
+        write_pending(&repo, "ship", &task_text("ship", "group: demo\n", BODY));
+        let above = "---\nid: above\ntitle: above, done\ngroup: demo\npipeline: default\n\
+                     depends_on: [ship]\nstage: queued\n---\n## Goal\n\nDo the thing.\n";
+        std::fs::write(repo.queue_dir().join("above.md"), above).unwrap();
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "ship");
+        let dependents = gate_dependents(&repo, &groups, &state);
+        assert_eq!(dependents, 1);
+
+        let panel = gate_panel(&groups, &pipelines, &state, (0, dependents))
+            .unwrap()
+            .join("\n");
+        assert!(!panel.contains("check"), "{panel}");
     }
 
     /// `impl_ui`'s steps, descriptions and routes as this command was drawn
@@ -18597,7 +19032,7 @@ body\n";
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let text = render_route(&route_view(&queued(&repo, "example"), &pipelines).unwrap());
+        let text = render_route(&route_view(&queued(&repo, "example"), &pipelines, 0).unwrap());
         assert!(
             text.lines().count() <= 45,
             "{} lines:\n{text}",

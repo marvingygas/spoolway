@@ -151,6 +151,8 @@ board's branch.
 | `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/`. See [Routines](planning.md#routines) |
 
+`g` opens a picker of the steps the pending task will run. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while another task in its group depends on this one, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
+
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that fails validation is
 refused and nothing is deleted. See [Queueing a plan](planning.md#queueing-a-plan).
@@ -261,7 +263,7 @@ Print one task file.
 
 ### `spoolway queue route <task>`
 
-Print the task's own pipeline in step order, with the step the task is on marked, and where resuming it on the board sends it. The command only reads, and a lane may run it.
+Print the steps of the task's own pipeline that the task runs, in step order, with the step the task is on marked, and where resuming it on the board sends it. The command only reads, and a lane may run it.
 
 ```
 spoolway queue route <task>
@@ -269,6 +271,8 @@ spoolway queue route <task> --json
 ```
 
 The first line names the pipeline and says where the task stands. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
+
+A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while another open task in its group depends on this one. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
 ```
 impl_ui — held at look, waiting for a person
@@ -286,7 +290,7 @@ To send it to another step, in your own shell:
   spoolway resume example --stage <step>
 ```
 
-The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
+The last lines apply to a task on `paused` or `blocked`. They name the step `spoolway resume <task>` sends it to, past any step the task walks past. A task in any other state ends with `It is not held, so there is nothing to resume.` A task whose `stage:` is not a step of its pipeline reads `at \`<stage>\`, a step this pipeline does not have`, and marks no step.
 
 `--json` prints the same facts as one object.
 

@@ -186,7 +186,7 @@ pub(crate) fn situating(
          - Nothing will wake you. Poll anything you wait on.\n\
          - Reporting is the only exit. A turn ended any other way stalls the task.\n\
          - Commit as you go. Anything uncommitted is committed for you when you report.\n\
-         - `spoolway queue route {task}` shows every step, what each does, and where \
+         - `spoolway queue route {task}` shows every step this task runs, what each does, and where \
          resuming sends this task. Read it before you tell a person what happens next.\n\
          - If a person talks to you in this pane, do what they ask, whichever step's work it \
          is. Write every change they ask for into the task file, so later steps see it: \

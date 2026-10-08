@@ -19922,7 +19922,7 @@ mod tests {
 - Nothing will wake you. Poll anything you wait on.
 - Reporting is the only exit. A turn ended any other way stalls the task.
 - Commit as you go. Anything uncommitted is committed for you when you report.
-- `spoolway queue route example` shows every step, what each does, and where resuming sends this task. Read it before you tell a person what happens next.
+- `spoolway queue route example` shows every step this task runs, what each does, and where resuming sends this task. Read it before you tell a person what happens next.
 - If a person talks to you in this pane, do what they ask, whichever step's work it is. Write every change they ask for into the task file, so later steps see it: `spoolway task edit example --section <heading> --from -` while the task is held on `paused` or `blocked`, `--handoff` while it runs.
 - Resuming a held task stays the person's: once their request is done, tell them where resuming sends it, and to resume it on the board.
 - What a person has to do, name on the board, never as a `spoolway` command. To send the task to another step than resuming would, tell them to press `r` on its row and pick the step.";
@@ -19940,7 +19940,7 @@ mod tests {
         );
         assert!(!lane.contains("do not do another step's"), "{lane}");
         assert!(
-            lane.contains("`spoolway queue route stuck` shows every step"),
+            lane.contains("`spoolway queue route stuck` shows every step this task runs"),
             "{lane}"
         );
         assert!(lane.contains("`--handoff` while it runs."), "{lane}");

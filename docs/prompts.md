@@ -100,7 +100,7 @@ The system prompt opens with the step and the task, then nine rules:
 - Nothing will wake you. Poll anything you wait on.
 - Reporting is the only exit. A turn ended any other way stalls the task.
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
-- `spoolway queue route <task>` shows every step, what each does, and where resuming sends the
+- `spoolway queue route <task>` shows every step the task runs, what each does, and where resuming sends the
   task. The lane reads it before it tells a person what happens next.
 - If a person talks to the lane in its pane, it does what they ask, whichever step's work it
   is. It writes every change they ask for into the task file, so later steps see it:
