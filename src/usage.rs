@@ -2868,8 +2868,9 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
 /// finished, and its worktree removed, long ago. Only a task with no
 /// recorded path — cleared by a self-heal check, or never dispatched under a
 /// build that wrote one — falls back to recomputing both shapes
-/// [`crate::mux::worktree_root`] could have named it: `task.id()` under a
-/// grouped workspace, `branch_slug(branch)` under every other layout.
+/// [`crate::mux::worktree_root`] could have named it: `task.id()` for a task an
+/// earlier release grouped into a shared tab, `branch_slug(branch)` for every
+/// task cut since.
 fn task_worktree_roots(repo: &Repo) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     let mut collect = |tasks: Vec<crate::task::Task>| {

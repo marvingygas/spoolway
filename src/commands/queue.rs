@@ -5098,7 +5098,7 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
 /// actually live, the same file every other read of the screen uses.
 ///
 /// A backend with no pane to open one in — headless, which refuses the way
-/// `open_tab` already does — is surfaced through [`Mode::Outcome`] rather
+/// `Mux::open_command`'s default does — is surfaced through [`Mode::Outcome`] rather
 /// than lost: an `Err` this discarded would leave a person pressing `o` on a
 /// headless run with no sign the key did anything at all.
 fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode {
@@ -14700,7 +14700,7 @@ mod tests {
     }
 
     /// `o` on a headless run has no pane to open an editor in — headless
-    /// refuses it the way `open_tab` already does — and the refusal is
+    /// refuses it the way `Mux::open_command`'s default does — and the refusal is
     /// surfaced through `Mode::Outcome` rather than lost: an `Err` this
     /// discarded would leave a person pressing `o` on a headless run with no
     /// sign the key did anything at all.

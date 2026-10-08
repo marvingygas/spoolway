@@ -71,7 +71,7 @@ with a `// covers:` line.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | A person, by hand |
-| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
+| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, kept-panes | The `suite` step of the pipelines, on the last task of a chain |
 | `nightly` | the `pr` suites plus `upgrade` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
@@ -99,6 +99,7 @@ with a `// covers:` line.
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, `--force` over a live lane, and the tool-requirements gate over `queue add --from` on a real pty, checking no alternate screen and the task left in pending |
 | `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one |
+| `kept-panes` | A two-step task driven through the herdr double: `spoolway lane` still lists the first step's lane while the second step runs, and both lanes are gone once the task is done |
 | `upgrade` | Whether this binary still reads what the 0.6.0 release wrote. The 0.6.0 `.spoolway/` tree under `scripts/e2e/fixtures/` goes through a real `spoolway sync`: its `housekeeping.retention_days` survives, the prose around the pipeline file's key block comes back byte for byte, `spoolway pipeline check` loads the result, and a task queues against it |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. It ages sessions by waiting, so a run takes about ten minutes. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |

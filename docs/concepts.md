@@ -183,6 +183,9 @@ the implementer working on `login`.
 A lane takes one turn. When it reports an outcome, the task moves on. A lane that stops
 without reporting is usually asking a question. See [The dispatcher](dispatcher.md).
 
+A lane that has reported stays open, idle, in its own pane until the task is done. See
+[Finished lanes keep their pane](dispatcher.md#finished-lanes-keep-their-pane).
+
 ## Worker slot
 
 Each agent profile declares a `concurrency`: how many of its lanes run at once. A step with

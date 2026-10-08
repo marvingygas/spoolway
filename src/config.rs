@@ -411,10 +411,6 @@ pub struct DispatchConfig {
     /// harness that sets `SPOOLWAY_TEST_BACKEND`.
     pub backend: Backend,
 
-    /// How a herdr run is laid out in the multiplexer. Read only under
-    /// `backend = "herdr"`; headless has no workspaces to lay out.
-    pub herdr_mode: MuxMode,
-
     /// How long a lane may say nothing before the dispatcher reminds it to
     /// report.
     ///
@@ -469,12 +465,12 @@ pub struct DispatchConfig {
 
     /// Retired: how a tmux run was laid out in the multiplexer. The tmux
     /// backend is gone — see [`Backend::Herdr`]'s own note — so there is no
-    /// longer a second multiplexer for this to lay out differently from
-    /// `herdr_mode`. Kept only so an existing config still parses; dropped
-    /// unconditionally on the next save.
+    /// multiplexer left for this to lay out. Kept only so an existing config
+    /// still parses, whatever it holds; dropped unconditionally on the next
+    /// save.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    tmux_mode: MuxMode,
+    tmux_mode: Option<toml::Value>,
 
     /// Retired: which branches a task's base could not be. Which branch is
     /// safe to build on is a fact about this project's own git workflow, not
@@ -588,6 +584,17 @@ pub struct DispatchConfig {
     /// read; dropped unconditionally on the next save.
     #[serde(alias = "cleanup_on_stop", default, skip_serializing)]
     pub(crate) tear_lanes_on_stop: Option<toml::Value>,
+
+    /// Retired: how a herdr run was laid out — `split`, a workspace per task,
+    /// or `grouped`, every task a pane in one tab its project shared. Every
+    /// task now runs in a herdr workspace of its own, so there is no longer a
+    /// second layout for this key to choose. Kept, whatever value it holds,
+    /// only so an existing config still parses — every scaffolded config's
+    /// reference header listed the key, and refusing it would take every
+    /// command down with the file. [`Config::load`] says once that it is no
+    /// longer read; dropped unconditionally on the next save.
+    #[serde(default, skip_serializing)]
+    pub(crate) herdr_mode: Option<toml::Value>,
 }
 
 /// Skips an hour on the way out — see [`DispatchConfig::lane_child_ceiling`]
@@ -600,10 +607,6 @@ impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
             backend: Backend::default(),
-            // A row per task is the layout a fresh project starts on; `grouped`
-            // stays `MuxMode`'s own `#[default]` for a config that omits the
-            // key entirely, which is not this.
-            herdr_mode: MuxMode::Split,
             // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
             // minutes the shipped pipelines allow their longest command —
             // `scripts/gate.sh` and `scripts/e2e-pr.sh` both carry
@@ -612,7 +615,7 @@ impl Default for DispatchConfig {
             // escalates, four of these later.
             lane_quiet: Duration::from_secs(15 * 60),
             lane_child_ceiling: Duration::from_secs(3600),
-            tmux_mode: MuxMode::default(),
+            tmux_mode: None,
             protected_branches: Vec::new(),
             notify: String::new(),
             open_on_escalation: false,
@@ -624,6 +627,7 @@ impl Default for DispatchConfig {
             auto_commit: true,
             priority: Priority::default(),
             tear_lanes_on_stop: None,
+            herdr_mode: None,
         }
     }
 }
@@ -823,37 +827,6 @@ pub enum Backend {
     /// only the end-to-end harness exports. A config edited onto `headless`
     /// by hand is refused the same way a herdr run outside any pane is.
     Headless,
-}
-
-/// How a run is laid out in its multiplexer: one shared group for every run
-/// of every project, or one group per task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MuxMode {
-    /// One workspace shared by every project that dispatches on this
-    /// machine, named `spoolway-dispatcher` and holding no checkout
-    /// of its own — see [`crate::mux::DISPATCH_WORKSPACE_LABEL`]. Each
-    /// project gets one tab of its own inside it, carrying a
-    /// placeholder pane in the project root plus one pane per running task —
-    /// no tab per task any more. Spoolway cuts every task's worktree itself,
-    /// with git, which also means nothing a task owns ever appears in the
-    /// sidebar.
-    ///
-    /// The old spelling `workspace` still parses; the next save rewrites it.
-    #[default]
-    #[serde(alias = "workspace")]
-    Grouped,
-
-    /// No group for the run at all: every task is a top-level group of its
-    /// own, rows named `spoolway/<task>`, a herdr workspace — and the
-    /// dispatcher draws where it was started.
-    ///
-    /// The layout to pick when a row per task is what you want to look at.
-    ///
-    /// The old spellings `worktrees` and `worktree` both still parse; the
-    /// next save rewrites either to this one.
-    #[serde(alias = "worktrees", alias = "worktree")]
-    Split,
 }
 
 /// Whether a free slot is filled from every ready task, or from the group
@@ -1377,6 +1350,7 @@ fn leftover_placeholder(rendered: &str) -> Option<String> {
 const RETIRED_KEYS: &[(&str, &str)] = &[
     ("dispatch", "interval"),
     ("dispatch", "tmux_mode"),
+    ("dispatch", "herdr_mode"),
     ("dispatch", "protected_branches"),
     ("dispatch", "notify"),
     ("dispatch", "open_on_escalation"),
@@ -1609,6 +1583,17 @@ impl Config {
                          stood. The key is dropped on the next save.",
                         path.display(),
                     );
+                }
+                // A person who chose `grouped` wanted every task in one tab per
+                // project; one who chose `split` already has what every task now
+                // gets. Either way the note says the same thing.
+                if config.dispatch.herdr_mode.is_some() {
+                    notices.push(format!(
+                        "note: dispatch.herdr_mode in {} is no longer read — every task now \
+                         runs in a herdr workspace of its own. Run `spoolway sync` to drop \
+                         the key.",
+                        path.display(),
+                    ));
                 }
                 for (name, profile) in &config.agents {
                     if !profile.env.is_empty() {
@@ -2880,6 +2865,33 @@ mod tests {
 
         let notices = Config::load_with_notices(&dir, None).unwrap().1;
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    /// A config naming `dispatch.herdr_mode`, whichever of its two old values it
+    /// holds, still loads and earns one note naming the key and the one layout
+    /// left. Neither value comes back out on the next save.
+    #[test]
+    fn the_retired_herdr_mode_key_loads_with_one_note_for_either_value() {
+        for value in ["grouped", "split"] {
+            let dir = crate::scratch::root(&format!("config-herdr-mode-{value}"));
+            std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+            std::fs::write(
+                Config::path_in(&dir),
+                format!("[dispatch]\nherdr_mode = \"{value}\"\n"),
+            )
+            .unwrap();
+
+            let (config, notices, _) = Config::load_with_notices(&dir, None).unwrap();
+            assert_eq!(notices.len(), 1, "{value}: {notices:?}");
+            assert!(notices[0].contains("dispatch.herdr_mode"), "{notices:?}");
+            assert!(
+                notices[0].contains("herdr workspace of its own"),
+                "{notices:?}"
+            );
+            assert!(notices[0].contains("spoolway sync"), "{notices:?}");
+            assert!(!toml::to_string(&config).unwrap().contains("herdr_mode"));
+        }
+        assert!(Config::default().dispatch.herdr_mode.is_none());
     }
 
     /// A config still holding a key 0.7 retired loads with a note, so saving

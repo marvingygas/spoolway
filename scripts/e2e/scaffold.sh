@@ -176,8 +176,10 @@ clean_mux() {
         herdr workspace close "$ws" >/dev/null 2>&1 || true
       done
 
-  # The dispatcher's own workspace — `spoolway-dispatcher`, see
-  # `mux::DISPATCH_WORKSPACE_LABEL` — holds no herdr worktree, so the match
+  # The shared workspace an older release opened — `spoolway-dispatcher`, see
+  # `mux::DISPATCH_WORKSPACE_LABEL`. This binary never opens one, but a
+  # project scaffolded over a run of an older release can still have it, so
+  # the sweep stays. It holds no herdr worktree, so the match
   # above never finds it, and its base panes hold no agent, so the lane sweep
   # misses them too: a whole workspace of shells sitting in deleted
   # directories used to survive every `--clean`. Its panes' directories are

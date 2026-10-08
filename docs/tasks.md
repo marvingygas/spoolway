@@ -45,7 +45,7 @@ as JSON.
 |---|---|---|
 | `id` | you | The task's name. Also the file name and the branch suffix. Required. |
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
-| `group` | you | The group of work this task belongs to. Tasks of one group run in one shared tab. Required. |
+| `group` | you | The group of work this task belongs to. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
 | `depends_on` | you | Task ids that must reach `done` before this one starts. See [Expressing order](#expressing-order). |
 | `gate_at` | you | A step id. The task pauses after that step reports, or after a command step exits, once, whatever it reports or exits with. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |

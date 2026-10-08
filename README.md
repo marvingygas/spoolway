@@ -338,7 +338,6 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 
 ```toml
 [dispatch]
-herdr_mode = "split"         # "split": a workspace per task; "grouped": one shared tab, a pane per task
 lane_quiet = "15m"           # silence before a lane is reminded to report
 auto_commit = true           # commit a lane's leftover work when its step settles
 

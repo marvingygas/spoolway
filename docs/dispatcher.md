@@ -103,6 +103,11 @@ A model's `slots` caps lanes on that model, and a profile's `concurrency` caps l
 profile. A model marked `exclusive` never runs beside a different exclusive model. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
+Only the lane on a task's current step counts against those caps, from the pass that starts it.
+A lane whose task has moved to another step counts for nothing, even while it is `Working`, the
+same as a session you started by hand. Typing into one on a local model may make the server swap
+weights. The footer counts lanes by the same rule.
+
 A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
 from `base:`. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
@@ -399,50 +404,62 @@ A blocked task keeps its pane open until it is resumed.
 
 ## Where a lane lives
 
-```toml
-[dispatch]
-herdr_mode = "split"  # or "grouped"
-```
+Every task runs in a herdr workspace of its own, nested under the project's row as
+`spoolway/<task>`. There is no setting for the layout. A config that still names
+`dispatch.herdr_mode` loads with a note, and `spoolway sync` drops the key.
 
-| Mode | Where a lane runs |
-|---|---|
-| `grouped` | One tab per project in the shared `spoolway-dispatcher` workspace. One pane per running task. |
-| `split` | One herdr workspace per task, nested under the project's row as `spoolway/<task>`. |
+A task that an older release left in a pane of the shared `spoolway-dispatcher` workspace is
+moved on its next step. Spoolway closes that pane and opens the task a workspace of its own on
+the checkout it already has.
 
-Under a multiplexer every lane is a real pane you can watch and type into. A task holds one
-pane for its whole life. See [Vacating a pane](#vacating-a-pane). A lane is named
-`<task> · <step>`. Sessions you start by hand are never touched.
+Under a multiplexer every lane is a real pane you can watch and type into. Each agent step of a
+task gets a pane of its own, and keeps it until the task is done. See [Finished lanes keep their
+pane](#finished-lanes-keep-their-pane). A lane is named `<task> · <step>`. Sessions you start by
+hand are never touched.
 
-### One home for every run, in every project
-
-`spoolway-dispatcher` is one herdr workspace shared by every project on the
-machine. It opens on `~/.spoolway/.dispatcher/`, which is not a repository. Every project's home
-is named `<label>-<id>`, so no project can take the name `.dispatcher`. The board itself stays
-in the pane you ran `spoolway dispatch` in.
+The board itself stays in the pane you ran `spoolway dispatch` in.
 
 ### herdr
 
-Under `grouped`, the project's tab closes when its last task is archived. The shared workspace
-is only ever closed by hand. Under `split`, each task's workspace is bound to its worktree with
-`herdr worktree open`.
+Each task's workspace is bound to its worktree with `herdr worktree open`.
 
 A task gets one tab, whichever step it is on. Every pane after the first splits inside that same
-tab. Each split halves the smallest pane in the tab along its longer side, so a tab grows as a
-spiral. A tab left holding nothing is closed on the next pass, unless it is its workspace's only
-tab.
+tab. Each new step's split halves the smallest pane in the tab along its longer side, so a tab
+grows as a spiral. A step that comes back is the exception. See [Finished lanes keep their
+pane](#finished-lanes-keep-their-pane). A tab left holding nothing is closed on the next pass,
+unless it is its workspace's only tab.
 
-Under `split`, a task's tab is renamed to the task's slug, and stays that way across a
-dispatcher restart. Its panes then show only the step. Under `grouped`, several tasks share one
-tab, so its panes show `<task> · <step>`, the same as the lane's own name.
+A task's tab is renamed to the task's slug, and stays that way across a dispatcher restart. Its
+panes then show only the step.
 
-### Vacating a pane
+### Finished lanes keep their pane
 
-When a step finishes, the dispatcher asks its session to leave the pane, so the next step can
-start in the same pane. Only `claude` has a quit gesture. See [Leaving a pane without closing
+When a step finishes, its agent is left running, idle, in its own pane. Nothing is typed into it
+and nothing is closed. The task's next step splits a new pane in the same tab, so every step the
+task has run stays on screen and you can still type into it. See [Leaving a pane without closing
 it](agents.md#leaving-a-pane-without-closing-it).
 
-The next step waits up to two minutes for the earlier lane to leave. After that it splits its
-own pane and the old one is closed. The pane goes blank during the transition.
+A finished lane does not count as running. A profile's `concurrency` and a model's `slots`
+and `exclusive` count only the lane on the step the task is on. A follow-up you type into a
+finished pane runs outside every cap, the same as a session you started by hand. A report from a
+finished lane is refused, because the task has left its step.
+
+A step that comes back replaces its own pane. A review that fails and sends the task round again
+splits the old review pane, and then closes it. The new pane takes the old one's whole area, so
+the tab looks the same. A tab therefore holds at most one pane per agent step. The old run's
+transcript stays on disk under its session id, and its report stays in the task file. If the old
+lane is still mid-turn, its spend is banked first.
+
+A lane is banked when its step moves on, and again when the task is done. The second bank
+counts only what was added since the first, so rounds you ran in a finished pane are counted.
+
+A task whose pane is parked for you, on `paused` or on a `blocked` step nobody staffs, is still
+focused once. Its pane stays open when the task moves on. `spoolway resume` closes only the
+settled lane on the step it sends the task to. Every pane closes with the task's workspace when
+the task is done.
+
+Command steps open no pane of their own beyond what they always have. The headless backend has
+no panes, so none are kept there.
 
 ## Looking into a lane
 
@@ -467,13 +484,17 @@ Each worktree builds into its own `target/` directory. Lanes never share a build
 
 When a task reaches `done`:
 
-1. Leftover work is committed as `wip(<task>): <step>`. If that fails, the task is held on
-   `blocked`.
-2. The worktree is removed, unless it was borrowed.
-3. The branch is deleted, unless a queued task still depends on it or it has commits no remote
+1. A lane that is still mid-turn is waited for while its transcript keeps moving. Closing its
+   pane ends the wait. A lane silent for two minutes is stopped. On the headless backend a busy
+   lane is stopped at once.
+2. Leftover work is committed as `wip(<task>): <step>`. If that fails, the task is held on
+   `blocked` and keeps every pane open.
+3. Every lane of the task is stopped, its pane closes, and its spend is banked.
+4. The worktree is removed, unless it was borrowed.
+5. The branch is deleted, unless a queued task still depends on it or it has commits no remote
    has.
-4. The task file moves to `archive/`, and its run files and session homes are deleted.
-5. One line for the task is appended to `archive/index.jsonl`.
+6. The task file moves to `archive/`, and its run files and session homes are deleted.
+7. One line for the task is appended to `archive/index.jsonl`.
 
 ### The archive index
 

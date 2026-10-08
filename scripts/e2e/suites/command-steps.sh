@@ -811,7 +811,6 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
 
 # The pane gate itself, proven end to end rather than only by the unit tests
 # in src/commands/dispatch.rs — those already know the answer they are
@@ -875,8 +874,8 @@ if [ "$STATUS" -ne 0 ] \
 else bad "and an ordinary dispatch is refused the same way, not exempted"; sed 's/^/        /' <<<"$OUT"; fi
 
 # Taken back out rather than left to be picked up for real: its pipeline is
-# an ordinary agent-starting one, and this suite has no live agent to answer
-# `herdr-stub.sh`'s own missing `agent start` — the resident dispatcher the
+# an ordinary agent-starting one, and this suite has nothing to report for
+# its lane, which `herdr-stub.sh` only registers — the resident dispatcher the
 # next scenario starts would just find it stuck.
 must "the pane-gate task is taken back out" "$SPOOLWAY" queue unqueue paneless
 
@@ -905,8 +904,8 @@ export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 # A second step, `resume`, follows `visible` before either routes to `done` —
 # not the `default` pipeline's `implement` → this step chain the tmux-backed
 # version of this case used, because that starts on an agent lane, and
-# `herdr-stub.sh` answers no `agent start` verb at all: it is here for the
-# handover, not for a full agent lifecycle (see its own header), and `resume`
+# `herdr-stub.sh` only registers one: it is here for the handover, not for a
+# full agent lifecycle (see its own header), and `resume`
 # is the cheap stand-in for one: a later pass finding this task already
 # sitting on its own tab, the same as a resumed dispatcher would.
 VISIBLE_RELEASE="$LIVE/visible.release"
@@ -966,7 +965,7 @@ else
   bad "a command step with no headless: key runs in a pane of its own"
 fi
 
-# Under `split` the task's own tab already names it, so the pane inside it
+# The task's own tab already names it, so the pane inside it
 # carries only the step — not `paned · visible`, the identity `PANE_FILE`
 # above is keyed on. Read from the double's own tables, by the ids `RECORDED`
 # already proved live, rather than from anything spoolway itself reported.
@@ -981,12 +980,11 @@ fi
 # `prepare_boot`, and hands it to the same `rename_pane` this case just proved
 # carries a label through to herdr — but it is never asserted here, and that
 # is deliberate rather than forgotten. `Herdr::start_lane` only reaches
-# `rename_pane` once `agent start` has succeeded, and this double answers no
-# `agent start` at all: hosting one means a believable `pane process-info`,
-# an `agent list` schema and a whole lane lifecycle grafted onto a double
-# every herdr case here shares. See `herdr-stub.sh`'s own header, and
-# `run.sh`'s, which records the same boundary. The agent half of this branch
-# is decided instead where a unit test can reach it, in
+# `rename_pane` once `agent start` has succeeded, and this double's `agent
+# start` only registers a session: it takes no turn and sends no label back.
+# See `herdr-stub.sh`'s own header, and `run.sh`'s, which records the same
+# boundary. The agent half of this branch is decided instead where a unit test
+# can reach it, in
 # `src/dispatch.rs::tests::a_split_agent_panes_label_is_only_its_step_not_the_task`.
 PANED_TAB=$(awk -F'\t' -v p="$RECORDED" '$1==p {print $2}' "$HSTATE/panes")
 TAB_LABEL=$(awk -F'\t' -v t="$PANED_TAB" '$1==t {print $3}' "$HSTATE/tabs")
@@ -1142,70 +1140,12 @@ dispatcher_stop
 must "the failing-pane task is taken back out before its pipeline goes" \
   "$SPOOLWAY" queue unqueue panedfail --force
 
-# ---------------------------------------------------- grouped keeps task and step
-# Under `grouped`, several tasks share one project tab, so a pane still has
-# to say which task it belongs to as well as which step — proven here
-# against the same double as split's own case above, rather than only by
-# `src/dispatch.rs`'s unit tests.
-must "herdr_mode grouped, for the pane label alone" \
-  "$SPOOLWAY" config set dispatch.herdr_mode grouped
-GROUPED_RELEASE="$LIVE/grouped.release"
-rm -f "$GROUPED_RELEASE"
-sed "s|@RELEASE@|$GROUPED_RELEASE|" > .spoolway/pipelines/panegrouped.yml <<'YML'
-description: One paned command step, for the grouped pane label.
-
-steps:
-  - id: visible
-    description: Stand in a pane until the suite has read its own label.
-    run: 'echo grouped-pane-marker; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
-    timeout: 120s
-    on_pass: done
-    on_fail: blocked
-YML
-works "a pipeline for the grouped case checks out" "$SPOOLWAY" pipeline check
-
-dispatcher_restart
-task_doc "$LIVE/groupedpane.md" groupedpane "$BODY" "group: groupedpane" \
-  "pipeline: panegrouped"
-must "a task through a grouped paned command step" \
-  "$SPOOLWAY" queue add --from "$LIVE/groupedpane.md"
-
-GROUPED_PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/groupedpane · visible.pane"
-GROUPED_RECORDED=""
-for _ in $(seq 1 1200); do
-  GROUPED_RECORDED=$(cat "$GROUPED_PANE_FILE" 2>/dev/null || true)
-  if [ -n "$GROUPED_RECORDED" ] && grep -q "^$GROUPED_RECORDED	" "$HSTATE/panes"; then
-    break
-  fi
-  GROUPED_RECORDED=""
-  sleep 0.1
-done
-if [ -n "$GROUPED_RECORDED" ]; then
-  ok "a grouped command step also runs in a pane"
-else
-  bad "a grouped command step also runs in a pane"
-fi
-GROUPED_LABEL=$(awk -F'\t' -v p="$GROUPED_RECORDED" '$1==p {print $4}' "$HSTATE/panes")
-if [ "$GROUPED_LABEL" = "groupedpane · visible" ]; then
-  ok "and its pane keeps both the task and the step, unlike split's"
-else
-  bad "and its pane keeps both the task and the step (was \`$GROUPED_LABEL\`)"
-fi
-
-touch "$GROUPED_RELEASE"
-if drive groupedpane gone 180; then
-  ok "the grouped task carries on once the command has passed"
-else
-  bad "the grouped task carries on once the command has passed (at \`$(stage_of groupedpane)\`)"
-fi
-must "back to herdr_mode split" "$SPOOLWAY" config set dispatch.herdr_mode split
-
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
-  .spoolway/pipelines/paneflaky.yml .spoolway/pipelines/panegrouped.yml
+  .spoolway/pipelines/paneflaky.yml
 
 # ---------------------------------------------- a big environment, handed over
 # A pane's shell does not inherit the dispatcher's environment: it belongs to
@@ -1233,7 +1173,6 @@ PATH_BEFORE_HERDR_STUB="$PATH"
 PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
-must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
 
 # The two variables this case is about, both set before the dispatcher starts
 # so they are really part of the environment it inherited.

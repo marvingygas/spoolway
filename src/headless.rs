@@ -901,12 +901,6 @@ impl Mux for Headless {
         self.stop_lane(name, "")
     }
 
-    // [`Mux::vacate_lane`] is not implemented here either: there is no pane.
-    // A headless turn is a process that runs to completion and exits, so
-    // there is nothing resident to ask to leave and nothing left standing to
-    // hand back. The trait's default defers to `stop_lane` below, which is
-    // exactly what a headless lane has always done to end.
-
     fn stop_lane(&self, name: &str, _pane_id: &str) -> Result<()> {
         self.kill(name);
         // The record goes; the log stays, in `logs/`. One is bookkeeping the

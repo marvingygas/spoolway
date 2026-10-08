@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::AgentProfile;
 use crate::graph::Graph;
 use crate::mux::{
-    Lane, LaneSpec, LaneStatus, Mux, SweepTab, Vacated, lane_name, parse_lane_name, tab_label,
+    Lane, LaneSpec, LaneStatus, Mux, SweepTab, lane_name, parse_lane_name, tab_label,
 };
 use crate::pipeline::{Pipeline, Pipelines, Step, StepKind};
 use crate::platform::PathExt;
@@ -151,26 +151,6 @@ pub fn skip_wait(report: &Report, consecutive_working: u32) -> bool {
     report.moved && consecutive_working < MAX_CONSECUTIVE_WORKING_PASSES
 }
 
-/// How long a task's next step waits for the step before it to let go of the
-/// task's pane.
-///
-/// A lane runs `spoolway report` mid-turn and keeps talking afterwards, so the
-/// pass that reads the moved stage still sees the old lane working. Starting
-/// the next step there and then is what put two live panes in one task's tab.
-/// The next step waits instead — but not for ever, because a lane can stop
-/// reporting progress and never settle, and a task whose one pane is waited on
-/// for ever would never run another step.
-///
-/// Two minutes: far longer than the second or two a lane spends finishing
-/// its sentence, and short enough that a lane that is never coming back does
-/// not hold its task up for long. A constant rather than a config key for the same
-/// reason [`MAX_REMINDERS`] is one — nothing has needed to tune it, and the
-/// figure only has to be bigger than "a moment" and smaller than "for ever".
-///
-/// Past it, the next step starts anyway: its pane is split first and the stuck
-/// lane's pane is closed after, so the task's tab is never momentarily empty.
-const HANDOVER_WAIT: Duration = Duration::from_secs(120);
-
 /// How long a task waits before its lane is launched again, in an unattended
 /// run, after `attempts` launches that left nothing behind.
 ///
@@ -240,9 +220,11 @@ pub struct Report {
     /// started nothing, with the figures. The run ends once
     /// [`Report::lanes_live`] goes false.
     pub ceiling: Option<Ceiling>,
-    /// Whether any lane of this run was still open at the end of the pass.
+    /// Whether any lane of this run was still working a step at the end of the
+    /// pass. A finished lane kept open for reading is not one, or a run would
+    /// never end while a task had a pane left to read.
     pub lanes_live: bool,
-    /// Whether this pass changed at least one task's own stage, freed a
+    /// Whether this pass changed at least one task's own stage, finished a
     /// lane, or archived a task — see [`skip_wait`], which is the only
     /// reader.
     ///
@@ -251,7 +233,7 @@ pub struct Report {
     /// busy pane retried every pass up to `LAUNCH_BUSY_TIMEOUT`, an
     /// exclusivity or slot wait, an unattended relaunch backoff, the
     /// output/cost ceiling's own drain note — none of which mean anything
-    /// will be different next pass. Only an actual stage change, a freed
+    /// will be different next pass. Only an actual stage change, a finished
     /// lane or an archive is that.
     pub moved: bool,
 }
@@ -264,7 +246,7 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LaneRecord {
     started_at: i64,
-    last_progress: i64,
+    pub(crate) last_progress: i64,
     output_hash: u64,
     /// Seconds this lane has been `LaneStatus::Working` since the last time
     /// it was actually banked — a running total this pass's own
@@ -275,7 +257,7 @@ pub(crate) struct LaneRecord {
     /// caller that keeps its record in `self.lanes` afterwards zeroes this
     /// itself, and only once `record_usage` answers `true`: a call that
     /// banked nothing must leave the accrued time standing for the next one
-    /// to bank instead. `hold_for_block`, the held branch of
+    /// to bank instead. `hold_for_block`, `finish_lane`, the held branch of
     /// `tear_down_and_escalate`, and `teardown::sweep_on_stop` and
     /// `teardown::discard_arm` (both of which read `self.lanes` rather than
     /// remove from it, since the lane they bank is left running) all do
@@ -342,8 +324,8 @@ pub(crate) struct LaneRecord {
     head: String,
     /// This lane is over, and its pane is kept open only so a person can read
     /// the session that stopped. Set when its task lands on `blocked` or is
-    /// held for `paused` by `tear_down_and_escalate`, cleared by the pane
-    /// being closed once the task moves on. The name predates the `paused`
+    /// held for `paused` by `tear_down_and_escalate`, cleared by
+    /// `finish_lane` once the task moves on. The name predates the `paused`
     /// landing; both share this one flag, since both are "kept for a person
     /// to read".
     ///
@@ -351,6 +333,19 @@ pub(crate) struct LaneRecord {
     /// when it was held, so the close that comes later must not book it twice.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     held_for_block: bool,
+    /// This lane is over and its pane stays open, idle, until its task is
+    /// done: the step it ran has moved on, or it reported and its task came
+    /// back round to the same step. Set by [`Dispatcher::finish_lane`], which
+    /// banks what the lane had spent; read to leave the lane out of every
+    /// count of what is running and to find the pane a step that comes back
+    /// replaces.
+    ///
+    /// Written down here because a dispatcher builds itself fresh for every
+    /// pass, and the lane records file is the only thing that carries it to
+    /// the next. The record outlives a pane a person closes by hand and is
+    /// dropped with the task, or when the same step starts again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    kept: bool,
     /// Set while a held lane's pane is busy, and read back the moment it goes
     /// idle again — that transition is a person's round finishing, and the
     /// one thing worth committing the worktree for. Cleared once that commit
@@ -358,30 +353,6 @@ pub(crate) struct LaneRecord {
     /// on every later pass.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     person_turn_busy: bool,
-    /// When the task this lane belongs to first arrived on a step this lane is
-    /// not, and so first wanted its pane back. `None` until that happens.
-    ///
-    /// The clock [`HANDOVER_WAIT`] is measured against, and it lives here
-    /// because a dispatcher builds itself fresh for every pass — the lane
-    /// records file is the only thing that carries a number from one pass to
-    /// the next. It dies with the record, which is dropped the moment the lane
-    /// is freed, so a lane that hands its pane over cleanly never carries one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    handing_over_since: Option<i64>,
-    /// The pane [`Dispatcher::retire`] left standing when its lane's task
-    /// routed back to the very step it was already on. `None` for every
-    /// ordinary lane.
-    ///
-    /// A cross-step handover has a next pass ready to spend it, because that
-    /// pass is the one starting the step after it — see [`PaneHandover`]. A
-    /// step that retired on its own name has no such pass: the same name is
-    /// what starts again, on some later pass, and by then a fresh
-    /// `Dispatcher` has forgotten anything that was not written down. This is
-    /// the write-down, kept under the retired lane's own name so
-    /// `start_lanes` finds it the moment that name is started again — and
-    /// removed then, so it is spent at most once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    retired_pane: Option<RetiredPane>,
     /// When this lane was first seen holding a process it started open while
     /// the transcript signal called it silent. `None` whenever the two
     /// signals agree — the lane is settled and quiet, or genuinely busy —
@@ -413,18 +384,6 @@ pub(crate) struct LaneRecord {
     /// nothing is ever typed into the dialog.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     opening: Vec<String>,
-}
-
-/// A pane [`Dispatcher::retire`] left behind for its own lane name to inherit,
-/// the next time that name is started — see [`LaneRecord::retired_pane`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RetiredPane {
-    pane_id: String,
-    /// Whether the pane is empty and standing at its shell —
-    /// [`crate::mux::Vacated::Shell`]. False is a session that would not
-    /// leave: the pane is only closed once the lane started in its place has
-    /// a pane of its own, exactly as a [`PaneHandover`] that is not `ready`.
-    ready: bool,
 }
 
 impl LaneRecord {
@@ -459,8 +418,7 @@ impl LaneRecord {
             head: String::new(),
             held_for_block: false,
             person_turn_busy: false,
-            handing_over_since: None,
-            retired_pane: None,
+            kept: false,
             child_since: None,
             launch_grace_since: None,
             opening: Vec::new(),
@@ -521,39 +479,6 @@ impl LaneRecord {
             let _ = std::fs::remove_dir_all(home);
         }
     }
-
-    /// A stub record carrying nothing but the pane [`Dispatcher::retire`]
-    /// left standing. Its usage fields are blank like [`LaneRecord::adopted`]'s
-    /// — `record_usage` is a no-op on an empty `session`, so a stale caller
-    /// still holding this record from before it retired cannot bank it twice.
-    fn retired(now: i64, pane: RetiredPane) -> LaneRecord {
-        LaneRecord {
-            retired_pane: Some(pane),
-            ..LaneRecord::adopted(now)
-        }
-    }
-}
-
-/// A pane a finished lane left behind, on its way to the task's next step.
-///
-/// Built by [`Dispatcher::free_finished_lanes`] and spent by
-/// [`Dispatcher::start_lanes`] in the same pass — one pass is where a handover
-/// happens, because the pass that frees a lane is the pass that starts the
-/// step after it. Anything still here at the end of the pass is closed rather
-/// than left in the tab.
-#[derive(Debug, Clone)]
-struct PaneHandover {
-    /// The lane the pane came from. Its record goes when the pane does.
-    lane: String,
-    pane_id: String,
-    /// Whether the pane is empty and standing at its shell, and so can simply
-    /// be started in again — [`crate::mux::Vacated::Shell`].
-    ///
-    /// False is a pane that still has an agent in it: the session was asked to
-    /// leave and did not, or its lane never settled at all. Such a pane is
-    /// never handed to the next step, and is only closed once that step's own
-    /// pane has been split.
-    ready: bool,
 }
 
 pub struct Dispatcher<'a> {
@@ -873,7 +798,7 @@ impl<'a> Dispatcher<'a> {
     /// anchor-tab sweep, after each task `collect_candidates` settles or
     /// turns into a candidate, after each lane `start_lanes` starts or
     /// skips, and after each task `clean_up` archives — and, while every
-    /// lane a pass claims this round boots at once, once every `VACATE_POLL`
+    /// lane a pass claims this round boots at once, once every `HERDR_POLL`
     /// for as long as any of their `Mux::start_lane` or `Mux::prompt` calls
     /// is still running on its own thread, up to the two minutes `agent
     /// start` is bounded at. That last one is not a checkpoint between
@@ -968,7 +893,7 @@ impl<'a> Dispatcher<'a> {
         // `ensure_workspace` can reach `Herdr::create_pane` for any task this
         // pass, so a stray anchor is gone before a fresh pane is ever split
         // into a tab. This is *not* ordered ahead of `self.mux.list_lanes()`
-        // above, whose snapshot `owned` and `free_finished_lanes` reason from
+        // above, whose snapshot `owned` and `finish_lanes` reason from
         // below: closing a tab here can leave that snapshot naming a pane in
         // a tab that no longer exists, which is why `sweep_anchor_tabs` never
         // closes a workspace's only tab — see its own doc.
@@ -978,7 +903,7 @@ impl<'a> Dispatcher<'a> {
         // Only sessions we named, in a directory that is ours, are ours.
         // Anything else in this multiplexer belongs to a person or to another
         // project, and is never counted, prompted, or torn down.
-        let mut owned: Vec<(String, String, &Lane)> = all_lanes
+        let owned: Vec<(String, String, &Lane)> = all_lanes
             .iter()
             .filter(|lane| owns_cwd(&mine, &lane.cwd))
             .filter_map(|lane| {
@@ -995,29 +920,28 @@ impl<'a> Dispatcher<'a> {
         // data, so the rest of the pass is free to keep writing task files.
         let graph = Graph::build(&tasks, &self.repo.archive_dir());
 
-        // The list is read once at the top of the pass, so a pane closed during
-        // it would otherwise be looked at again by the rest of the pass as if it
-        // were still there. That matters for exactly one lane: the pane held
-        // open for a task that has since been unblocked, whose step is the
-        // task's current one again — the rest of the pass would take it for a
-        // live session sitting on that step, tell a person it is waiting, and
-        // leave the step unstarted for a pass.
-        //
-        // The panes those lanes hand back go in `handovers` — see
-        // [`PaneHandover`]. Filled here, spent by `start_lanes` below, and
-        // emptied before this pass returns.
-        let mut handovers: HashMap<String, PaneHandover> = HashMap::new();
-        let freed = self.free_finished_lanes(&owned, &mut tasks, &mut handovers, &mut report)?;
-        owned.retain(|(_, _, lane)| !freed.contains(&lane.name));
+        // A lane whose step is over keeps its pane, but it is no longer the
+        // task's work: it is banked, marked `kept`, and dropped from `owned`,
+        // so the rest of the pass counts, reminds and launches as though it
+        // were not there. Its pane is remembered in `kept_panes`, because a
+        // step that comes back replaces the pane its last run left.
+        let finished = self.finish_lanes(&owned, &mut tasks, &mut report)?;
+        let (kept, owned): (Vec<_>, Vec<_>) = owned
+            .into_iter()
+            .partition(|(_, _, lane)| self.is_kept(&lane.name));
+        // A lane stopped outright, on a backend with no pane to keep, is gone
+        // as far as the rest of this pass is concerned.
+        let owned: Vec<_> = owned
+            .into_iter()
+            .filter(|(_, _, lane)| !finished.contains(&lane.name))
+            .collect();
+        let kept_panes: HashMap<String, String> = kept
+            .iter()
+            .map(|(_, _, lane)| (lane.name.clone(), lane.pane_id.clone()))
+            .collect();
 
-        let (candidates, archived) = self.collect_candidates(
-            &mut tasks,
-            &owned,
-            &graph,
-            &mut handovers,
-            &mut report,
-            tick,
-        )?;
+        let (candidates, archived) =
+            self.collect_candidates(&mut tasks, &owned, &kept, &graph, &mut report, tick)?;
         let candidates = self.rank_candidates(candidates, &tasks, &archived, &graph);
 
         // The two things that end an unattended run short of an empty queue —
@@ -1039,28 +963,18 @@ impl<'a> Dispatcher<'a> {
             None => self.start_lanes(
                 &mut tasks,
                 &owned,
+                &kept_panes,
                 candidates,
-                &mut handovers,
                 &mut report,
                 tick,
             )?,
         }
 
-        // Whatever no step took. A pane handed on is only worth keeping if
-        // something starts in it, and one nothing started in is clutter in the
-        // task's tab — or, for a pane whose session never left, an agent still
-        // sitting there with nothing left to do. Both close here, after every
-        // pane that replaces one has already been split.
-        let left_over: Vec<PaneHandover> = handovers.into_values().collect();
-        for handover in left_over {
-            self.close_handover(&handover, &mut report);
-        }
-
         report.quiet = report.actions.is_empty() && owned.is_empty();
         report.lanes_live = !owned.is_empty();
         // See `Report::moved`'s own doc for why this is a stage diff and a
-        // check of `freed`/`archived`, not `!report.actions.is_empty()`.
-        report.moved = !freed.is_empty()
+        // check of `finished`/`archived`, not `!report.actions.is_empty()`.
+        report.moved = !finished.is_empty()
             || !archived.is_empty()
             || tasks
                 .iter()
@@ -1174,8 +1088,8 @@ impl<'a> Dispatcher<'a> {
         &mut self,
         tasks: &mut [Task],
         owned: &[(String, String, &Lane)],
+        kept: &[(String, String, &Lane)],
         graph: &Graph,
-        handovers: &mut HashMap<String, PaneHandover>,
         report: &mut Report,
         tick: &mut dyn FnMut(),
     ) -> Result<(Vec<Candidate>, Vec<String>)> {
@@ -1252,6 +1166,7 @@ impl<'a> Dispatcher<'a> {
                     &pipeline,
                     graph,
                     owned,
+                    kept,
                     &mut candidates,
                     &mut archived,
                     report,
@@ -1529,29 +1444,7 @@ impl<'a> Dispatcher<'a> {
                     // `escalate_clock` is the same road a dead lane takes, so
                     // its usage is banked and its task lands on `paused` the
                     // same way.
-                    //
-                    // **Not a lane that has already reported.** A step that
-                    // routes back to itself — `blocked` reporting `--block`
-                    // again — is the same lane name settled on the same step
-                    // a pass later, and the settled arm below tells that
-                    // apart from a genuinely stuck lane by reading whether
-                    // the task's own `last_report` lands after this lane
-                    // `started_at`. The same read here, ahead of the same
-                    // question: a lane that already reported is not "live"
-                    // in the sense the ceiling means, and escalating it would
-                    // overwrite a real report with a blocker claiming the
-                    // conversation is gone when it plainly is not — see
-                    // `retire`, which is what a reported lane is for.
-                    let already_reported = lane.is_some_and(|lane| {
-                        lane.status.is_settled()
-                            && self
-                                .lanes
-                                .get(&lane.name)
-                                .map(|record| record.started_at)
-                                .is_some_and(|since| tasks[index].reported_since(since))
-                    });
-                    if !already_reported
-                        && let Some(lane) = lane
+                    if let Some(lane) = lane
                         && let Some(reason) = self.ctx_ceiling_hold(&step, lane)
                     {
                         self.escalate_clock(
@@ -1577,12 +1470,7 @@ impl<'a> Dispatcher<'a> {
                     // its pane then goes too. A settled lane that *did* report
                     // has `set_stage` behind it, which zeroes the counter on
                     // every report — whether or not the destination it landed
-                    // on differs from where the lane started. It used to be
-                    // enough to say that difference was the tell; on a step
-                    // that routes back to itself, like `blocked`, it is not,
-                    // which is what the settled arm twenty lines below now
-                    // reads `last_report` for instead of inferring from stage
-                    // movement.
+                    // on differs from where the lane started.
                     //
                     // Spelled out rather than `is_busy()`: a lane sitting on a
                     // permission prompt is still proof the launch survived, so
@@ -1651,15 +1539,11 @@ impl<'a> Dispatcher<'a> {
 
                         // The lane finished a turn and its task is still on this
                         // step, so either it asked something and is waiting for an
-                        // answer in its own pane, or it stopped without reporting —
-                        // or it reported and this pass simply has not caught up to
-                        // the stage move yet, a report and a reminder racing on the
-                        // same pass. Stage movement answers the first two correctly
-                        // by itself; the race is what reading `last_report.at`
-                        // against this lane's own `started_at` is for instead, which
-                        // needs no counter and nothing cleared, and never mistakes a
-                        // lane that already reported for one still holding a
-                        // question.
+                        // answer in its own pane, or it stopped without reporting.
+                        // A lane that reported never gets here: `finish_lanes`
+                        // reads `last_report.at` against its `started_at` ahead
+                        // of this arm, which needs no counter and nothing
+                        // cleared, and keeps it out of `owned`.
                         //
                         // Either way this pass no longer marks anything for
                         // the board to read back: `paused` means the stage
@@ -1669,12 +1553,6 @@ impl<'a> Dispatcher<'a> {
                         // notices this lane and, in time, parks the task for
                         // real — see `check_unreported` and `escalate_clock`.
                         Some(lane) if lane.status.is_settled() => {
-                            let started_at = self.lanes.get(&lane.name).map(|r| r.started_at);
-                            if started_at.is_some_and(|since| tasks[index].reported_since(since)) {
-                                self.retire(&tasks[index], &pipeline, &step, lane, report)?;
-                                continue;
-                            }
-
                             // A person's own Escape, not a forgotten report —
                             // read off the transcript itself, ahead of the
                             // `lane_quiet` gate `check_unreported` opens with,
@@ -1739,23 +1617,6 @@ impl<'a> Dispatcher<'a> {
                         Some(_) => {}
 
                         None => {
-                            // A step of this task's is not started while an
-                            // earlier one is still alive. The lane that moved
-                            // the stage reported mid-turn and is still
-                            // talking, so it still holds the task's pane —
-                            // starting here would put a second live pane in
-                            // the task's tab, which is the whole of the bug
-                            // this guard closes.
-                            if self.handover_pending(
-                                &tasks[index],
-                                &pipeline,
-                                &step.id,
-                                owned,
-                                handovers,
-                                report,
-                            ) {
-                                continue 'tasks;
-                            }
                             let id = tasks[index].id().to_string();
                             candidates.push(Candidate {
                                 task_index: index,
@@ -1816,6 +1677,7 @@ impl<'a> Dispatcher<'a> {
         pipeline: &Pipeline,
         graph: &Graph,
         owned: &[(String, String, &Lane)],
+        kept: &[(String, String, &Lane)],
         candidates: &mut Vec<Candidate>,
         archived: &mut Vec<String>,
         report: &mut Report,
@@ -1984,7 +1846,10 @@ impl<'a> Dispatcher<'a> {
             // to be a `cleanup: true` on a declared terminal, which
             // every shipped pipeline wrote identically — a key whose
             // only correct value was the one it always had.
-            if self.clean_up(task, owned, report)? {
+            // Every lane the task has run, finished ones included: each has a
+            // pane to close and a last bank to make.
+            let every_lane: Vec<_> = owned.iter().chain(kept).cloned().collect();
+            if self.clean_up(task, &every_lane, report)? {
                 archived.push(task.id().to_string());
                 // Tearing a worktree down is one of the slower things a
                 // pass does — see [`Dispatcher::pass`]'s own doc.
@@ -2213,10 +2078,11 @@ impl<'a> Dispatcher<'a> {
 
     /// Drop any lane record for a task this pass did not read from the queue.
     ///
-    /// `free_finished_lanes` only removes a record once the multiplexer's own
-    /// lane list shows the pane it belongs to — see its doc comment. A pane
-    /// that closed while the dispatcher itself was down is never in that list
-    /// again, so its record is never reached that way, and sits in
+    /// A lane's record outlives its step: `finish_lanes` keeps it for the
+    /// pane that stays open, and the same step starting again or the task
+    /// being done is what drops it. A pane that closed while the dispatcher
+    /// itself was down, or that a person closed by hand, is never in the lane
+    /// list again, so its record is never reached that way, and sits in
     /// `lanes.json` forever once the task it belongs to has left the queue.
     /// This is the other half: anything whose task id no longer appears among
     /// `tasks`, or whose name does not even parse into a known step, is
@@ -2234,7 +2100,7 @@ impl<'a> Dispatcher<'a> {
 
     /// Whether `task` is parked in front of a person rather than in front of
     /// this dispatcher — the one question both [`Dispatcher::sweep_on_stop`]
-    /// and [`Dispatcher::free_finished_lanes`] need answered the same way, so
+    /// and [`Dispatcher::finish_lanes`] need answered the same way, so
     /// a paused task and a staffed-vs-unstaffed blocked one are treated alike
     /// everywhere that matters and not just in the one place each was first
     /// written.
@@ -2303,36 +2169,54 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// End any lane whose work is done, and take its pane back for the task.
+    /// Whether this lane is over and only its pane is left — see
+    /// [`LaneRecord::kept`].
+    fn is_kept(&self, lane: &str) -> bool {
+        self.lanes.get(lane).is_some_and(|record| record.kept)
+    }
+
+    /// End the lanes whose work is done, and leave their panes open.
     ///
-    /// Taking it back rather than closing it is what gives a task one pane for
-    /// its whole life instead of one per step: a kind that has a way to leave
-    /// its pane is asked to, and the pane it leaves standing is handed to the
-    /// task's next step through `handovers`. Every other kind, and every
-    /// backend whose pane is the agent itself, closes as it always did and
-    /// hands nothing on.
+    /// A lane is done when its task has moved to another step, or when it has
+    /// reported and the task came back round to the very step it ran. Its
+    /// agent is left running, idle, in its own pane until the task is done, so
+    /// a person can still read what it said and type to it. What changes is
+    /// that it stops counting: [`Dispatcher::finish_lane`] banks what it spent
+    /// and marks it kept, and the rest of the pass leaves it out of `owned`.
     ///
-    /// With one exception, which is the whole of what a person sees when a
-    /// task stops: a lane whose task has landed on `blocked` or `paused` —
+    /// Done whatever the lane is doing. It used to be waited for, because its
+    /// pane was about to be handed to the next step. Nothing is handed on any
+    /// more, so a lane that reported mid-turn and is still talking simply
+    /// finishes its sentence beside the step that follows it. A backend with
+    /// no pane to keep is the exception, and still waits for a lane to settle
+    /// before it stops it.
+    ///
+    /// With two more exceptions. The first is what a person sees when a task stops:
+    /// a lane whose task has landed on `blocked` or `paused` —
     /// `held_for_block`, set by `hold_for_block` and by
-    /// `tear_down_and_escalate` alike — keeps its pane, and is focused once.
-    /// A stage change and fifteen lines of tail do not tell anybody what the
-    /// session was doing when it stopped, and by the time they come to look
-    /// the only copy of that is the pane. It is held until the task moves on
-    /// — closed on the pass after it does, before the step's new lane is
-    /// started, because the two would want the same name.
+    /// `tear_down_and_escalate` alike — is focused once, and while the task
+    /// stays parked a person's rounds in it are committed as they end. A stage
+    /// change and fifteen lines of tail do not tell anybody what the session
+    /// was doing when it stopped, and by the time they come to look the only
+    /// copy of that is the pane. It becomes a kept lane like any other on the
+    /// pass after the task moves on.
     ///
-    /// Answers with the lanes whose panes are gone, which the rest of the pass
-    /// must stop counting as sessions.
-    fn free_finished_lanes(
+    /// The second is a held lane that is busy while its task has come back to
+    /// its step: a person is mid-round in it, and it is finished on the pass
+    /// after that round ends, not under their hands.
+    ///
+    /// Answers with the lanes finished on this pass.
+    fn finish_lanes(
         &mut self,
         owned: &[(String, String, &Lane)],
         tasks: &mut [Task],
-        handovers: &mut HashMap<String, PaneHandover>,
         report: &mut Report,
     ) -> Result<HashSet<String>> {
-        let mut freed = HashSet::new();
+        let mut finished = HashSet::new();
         for (step_id, task_id, lane) in owned {
+            if self.is_kept(&lane.name) {
+                continue;
+            }
             let held = self
                 .lanes
                 .get(&lane.name)
@@ -2343,7 +2227,7 @@ impl<'a> Dispatcher<'a> {
             // paused task's pane is the more useful of the two — it holds the
             // work being approved. `blocked` only counts when nobody is coming
             // to look — a staffed `blocked` lane settles like any other step,
-            // and its pane is freed like any other's.
+            // and its pane is finished like any other's.
             //
             // ...and only on a backend where a pane is a thing to keep. Same
             // question `tear_down_and_escalate` asks before it holds one,
@@ -2361,216 +2245,135 @@ impl<'a> Dispatcher<'a> {
             // A held pane is a person's now, and its busy/idle status means
             // something the rest of this loop never has to consider: busy is
             // them mid-round, and idle right after busy is a round finished —
-            // the one moment worth reaching into the worktree for. Handled
-            // ahead of the general busy check below, which would otherwise
-            // skip a busy held pane outright and never notice the round.
+            // the one moment worth reaching into the worktree for.
             if held && parked {
                 self.settle_person_turn(lane, task_id, step_id, tasks, report)?;
                 continue;
             }
 
             // Spelled out rather than `is_busy()`: a lane on a permission
-            // prompt has not finished anything, so its pane is exactly as
-            // unfree as a working one's — reclaiming it here would pull the
-            // pane out from under the very prompt a person is about to
-            // answer.
-            if matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked) {
-                continue;
-            }
-
+            // prompt has not finished anything either, so a parked task's
+            // pane is as unready to be held as a working one's — held on the
+            // pass after the prompt is answered.
+            let busy = matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked);
             let current = tasks.iter().find(|t| t.id() == task_id);
 
             if parked {
-                // `held` is false here — the `held && parked` case above
-                // already claimed and skipped every other pass.
-                self.hold_for_block(lane, task_id, step_id, current, report);
+                if !busy {
+                    // `held` is false here — the `held && parked` case above
+                    // already claimed every other pass.
+                    self.hold_for_block(lane, task_id, step_id, current, report);
+                }
                 continue;
             }
 
-            // Still the task's current step: it is either mid-conversation
-            // behind a gate or it exited silently. Both are handled per-task.
-            // A held pane is neither — it is the leftover of a block that has
-            // since been cleared, and the step it belongs to is about to be
-            // started again.
+            // A backend with no pane to keep ends a finished lane, and does so
+            // when it has settled, not under a turn it is still taking.
+            if busy && !self.mux.resident_while_waiting() {
+                continue;
+            }
+
             let still_current = current.map(|t| t.stage() == step_id).unwrap_or(false);
-            if still_current && !held {
-                continue;
-            }
-
-            // The pane is the task's, not this step's, so it is asked for back
-            // rather than closed: the task's next step starts in the pane this
-            // one is leaving, and the task keeps one `pane_id` for its whole
-            // life. What actually makes a session leave is per kind —
-            // see [`crate::agent::Quit`] — and a kind with no gesture, or a
-            // backend whose pane *is* the agent, answers
-            // [`Vacated::PaneClosed`]: exactly the close-and-re-split this
-            // call has always done.
-            //
-            // The record's kind is preferred over the multiplexer's own
-            // because it is what spoolway launched with, and so what the
-            // adapter table was read for; a lane this dispatcher did not start
-            // has no record, and the multiplexer's answer is all there is.
-            let kind = self
-                .lanes
-                .get(&lane.name)
-                .map(|record| record.kind.clone())
-                .filter(|kind| !kind.is_empty())
-                .unwrap_or_else(|| lane.kind.clone());
-
-            // A pane that will not let go is one task's tab left cluttered, not
-            // a reason to abandon the pass: every other task still deserves its
-            // turn, and the next pass tries this one again.
-            let left = match self.mux.vacate_lane(&lane.name, &kind, &lane.pane_id) {
-                Ok(left) => left,
-                Err(err) => {
-                    report.problems.push(format!("{}: {err:#}", lane.name));
+            if still_current {
+                if held && busy {
                     continue;
                 }
-            };
-            // `readopted` rather than a plain `remove`: a dispatcher that
-            // died between launching this lane and finishing that pass never
-            // wrote its record to `lanes.json`, so a restarted one reaching
-            // this free with nothing under `lane.name` still recovers what
-            // the ledger remembers of it rather than banking nothing for a
-            // step that finished clean — see `LaneRecord::readopted`.
-            let ledger = self.ledger();
+                // The task is on this lane's step, so the lane is the task's
+                // current work, mid-conversation behind a gate or exited
+                // silently — handled per-task — unless it has already
+                // reported. A report that left the task on the same step (a
+                // step that routes back to itself) is this lane's last word:
+                // the next run of the step is a new lane, and this one is
+                // over. A held lane is the exception to the exception:
+                // its report is what parked the task, and it is over only
+                // once the task has come back.
+                let reported = self
+                    .lanes
+                    .get(&lane.name)
+                    .zip(current)
+                    .is_some_and(|(record, task)| task.reported_since(record.started_at));
+                if !held && !reported {
+                    continue;
+                }
+            }
+
+            if self.finish_lane(lane, task_id, step_id, current, report) {
+                finished.insert(lane.name.clone());
+            }
+        }
+        Ok(finished)
+    }
+
+    /// Bank what a finished lane has spent, and mark it kept. Answers whether
+    /// the lane is finished: `false` only for a backend whose stop failed.
+    ///
+    /// On a backend with no pane to keep, headless, a lane that is done is
+    /// stopped and its record dropped, as it always was: a turn there is a
+    /// process, and nobody can read one that has finished.
+    ///
+    /// `readopted` rather than a plain `get`: a dispatcher that died between
+    /// launching this lane and finishing that pass never wrote its record to
+    /// `lanes.json`, so a restarted one reaching this with nothing under
+    /// `lane.name` still recovers what the ledger remembers of it rather than
+    /// banking nothing for a step that finished clean — see
+    /// `LaneRecord::readopted`.
+    ///
+    /// Banked whether or not the lane was held. `record_usage` diffs the
+    /// transcript against what `usage_banked` says is already on the ledger, so
+    /// a hold-time line is subtracted and only the rounds a person added in
+    /// that pane while it was held are appended now. The record stays in
+    /// `self.lanes`, as a held lane's does, so the same diff is taken again
+    /// when the lane's pane closes with its task or is replaced by the same
+    /// step's next run, and a person's rounds in the kept pane in between are
+    /// counted too. Its `busy_s` goes back to 0 for the same reason a held
+    /// lane's does, and only once a line was actually appended.
+    fn finish_lane(
+        &mut self,
+        lane: &Lane,
+        task_id: &str,
+        step_id: &str,
+        task: Option<&Task>,
+        report: &mut Report,
+    ) -> bool {
+        let ledger = self.ledger();
+        let pipeline = task
+            .and_then(|t| self.pipelines.for_task(t).ok())
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        if !self.mux.resident_while_waiting() {
+            // A stop that fails is one lane left for the next pass, not a
+            // reason to abandon this one: every other task still deserves
+            // its turn.
+            if let Err(err) = self.mux.stop_lane(&lane.name, &lane.pane_id) {
+                report.problems.push(format!("{}: {err:#}", lane.name));
+                return false;
+            }
             let record = self
                 .lanes
                 .remove(&lane.name)
                 .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
-            // A pane that is still there is the task's to hand on. `Shell` is
-            // handed to the next step as it stands; `StillOccupied` is a
-            // session that would not go, and is only closed once that step's
-            // own pane has been split — see [`PaneHandover`].
-            if left != Vacated::PaneClosed {
-                self.stash_handover(
-                    handovers,
-                    task_id,
-                    PaneHandover {
-                        lane: lane.name.clone(),
-                        pane_id: lane.pane_id.clone(),
-                        ready: left == Vacated::Shell,
-                    },
-                    report,
-                );
-            }
-            // Banked whether or not the lane was held. `record_usage` diffs
-            // the transcript against what `usage_banked` says is already on
-            // the ledger, so the hold-time line is subtracted and only the
-            // rounds a person added in that pane while it was held are
-            // appended now — without this, that spend was lost entirely
-            // (review finding 34).
-            let pipeline = current
-                .and_then(|t| self.pipelines.for_task(t).ok())
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            self.record_usage(&record, task_id, step_id, current, &pipeline);
-            freed.insert(lane.name.clone());
+            self.record_usage(&record, task_id, step_id, task, &pipeline);
             report.actions.push(format!("freed {}", lane.name));
-        }
-        Ok(freed)
-    }
-
-    /// Whether `task`'s next step has to wait before it starts, because a lane
-    /// of this task's on an earlier step is still alive and still holds the
-    /// task's pane.
-    ///
-    /// A lane runs `spoolway report` mid-turn: the stage moves on the spot and
-    /// the lane keeps talking, so the pass that reads the moved stage finds the
-    /// old lane still working. `free_finished_lanes` is right to leave a busy
-    /// lane alone; what was wrong is that the scan below it never asked, found
-    /// no lane under the new step's own name, and started one anyway.
-    ///
-    /// Bounded by [`HANDOVER_WAIT`], measured from the first pass that wanted
-    /// the pane back — kept on the old lane's own record, because a dispatcher
-    /// builds itself fresh for every pass. Past the bound the old lane is
-    /// written off: what it spent is booked, its record is dropped, and its
-    /// pane is put in `handovers` to be closed *after* the next step's pane has
-    /// been split.
-    fn handover_pending(
-        &mut self,
-        task: &Task,
-        pipeline: &Pipeline,
-        step_id: &str,
-        owned: &[(String, String, &Lane)],
-        handovers: &mut HashMap<String, PaneHandover>,
-        report: &mut Report,
-    ) -> bool {
-        let Some((old_step, _, old)) = owned
-            .iter()
-            .find(|(lane_step, lane_task, _)| lane_task == task.id() && lane_step != step_id)
-        else {
-            return false;
-        };
-
-        let now = now_secs();
-        let ledger = self.ledger();
-        let record = self
-            .lanes
-            .entry(old.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(&old.name, now, &ledger));
-        let since = *record.handing_over_since.get_or_insert(now);
-        if now.saturating_sub(since) < HANDOVER_WAIT.as_secs() as i64 {
-            report.actions.push(format!(
-                "{}: `{step_id}` is waiting for `{old_step}` to hand the task's pane over",
-                task.id()
-            ));
             return true;
         }
-
-        // Past the bound. A lane that has held the pane this long after its
-        // task moved on is not finishing a sentence, and a task whose one pane
-        // is waited on for ever would never run another step.
-        let stuck = PaneHandover {
-            lane: old.name.clone(),
-            pane_id: old.pane_id.clone(),
-            ready: false,
-        };
-        if let Some(record) = self.lanes.remove(&stuck.lane) {
-            self.record_usage(&record, task.id(), old_step, Some(task), &pipeline.name);
+        let record = self
+            .lanes
+            .entry(lane.name.clone())
+            .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+        record.kept = true;
+        record.held_for_block = false;
+        record.person_turn_busy = false;
+        let record = record.clone();
+        if self.record_usage(&record, task_id, step_id, task, &pipeline)
+            && let Some(record) = self.lanes.get_mut(&lane.name)
+        {
+            record.busy_s = 0;
         }
         report.actions.push(format!(
-            "{}: `{old_step}` has held the task's pane for {} without finishing — starting \
-             `{step_id}` beside it",
-            task.id(),
-            crate::config::human_duration::format(HANDOVER_WAIT)
+            "kept {} open — its step is over, and its pane stays until the task is done",
+            lane.name
         ));
-        self.stash_handover(handovers, task.id(), stuck, report);
-        false
-    }
-
-    /// Put a pane aside for `task_id`'s next step.
-    ///
-    /// A task has one pane, so it has one entry — and a second pane arriving
-    /// for the same task means the one already there is not going to be
-    /// started in by anybody. It is closed here rather than dropped, because a
-    /// forgotten pane is one nothing ever closes again.
-    fn stash_handover(
-        &mut self,
-        handovers: &mut HashMap<String, PaneHandover>,
-        task_id: &str,
-        handover: PaneHandover,
-        report: &mut Report,
-    ) {
-        if let Some(displaced) = handovers.insert(task_id.to_string(), handover) {
-            self.close_handover(&displaced, report);
-        }
-    }
-
-    /// Close a pane no step took over, and forget the lane it came from.
-    ///
-    /// Both halves matter. A pane nothing started in is clutter in the task's
-    /// tab, and a lane record outliving its pane is a session the next pass
-    /// would go on counting as live. The record is usually gone already —
-    /// `free_finished_lanes` drops it when it books what the lane spent — so
-    /// this is the second half of the one path that does not, a lane written
-    /// off for holding its pane past [`HANDOVER_WAIT`].
-    fn close_handover(&mut self, handover: &PaneHandover, report: &mut Report) {
-        if let Err(err) = self.mux.close_pane(&handover.pane_id) {
-            report.problems.push(format!("{}: {err:#}", handover.lane));
-            return;
-        }
-        self.lanes.remove(&handover.lane);
+        true
     }
 
     /// Keep a parked task's pane, book what it spent, and put it in front of
@@ -2605,7 +2408,7 @@ impl<'a> Dispatcher<'a> {
         // `held_for_block` for `settle_person_turn` to keep finding it every
         // later pass. Its `busy_s` has to go back to 0 the same way tokens
         // already do via `usage_banked`, or the next bank of this same lane
-        // (`free_finished_lanes`, once the block clears) would carry this
+        // (`finish_lane`, once the block clears) would carry this
         // interval a second time — but only once a line was actually
         // appended; a call that banked nothing (no session, no readable
         // transcript) must leave the accrued time for that next bank to
@@ -2719,8 +2522,8 @@ impl<'a> Dispatcher<'a> {
     /// racing this call for the *same carried session* — a narrow window
     /// accepted in favour of not re-reading the ledger per lane.
     ///
-    /// Answers whether a line was actually appended — `false` on either
-    /// early return below. A caller that keeps `record` in `self.lanes`
+    /// Answers whether a line was actually appended — `false` on any early
+    /// return below. A caller that keeps `record` in `self.lanes`
     /// afterwards (`hold_for_block`, and the held branch of
     /// `tear_down_and_escalate`) reads this before it zeroes `busy_s`: a
     /// call that banked nothing still owes that busy time to the next bank,
@@ -2771,6 +2574,20 @@ impl<'a> Dispatcher<'a> {
         let tokens = harvest.tokens.since(&banked.tokens);
         let banked_cost = banked.cost_usd;
         let banked_turns = banked.turns;
+        // A kept lane is banked when its step moves on and again when its pane
+        // closes, and a pane nobody typed into in between has spent nothing
+        // the second time. Appending an all-zero line for it would put one
+        // empty row in the ledger for every kept lane a task ever ran.
+        // Only once a line is already on the ledger for the session: a lane
+        // that never spent anything still gets its one row, the same as before.
+        if record.kept
+            && (banked_turns > 0 || !banked.tokens.is_zero())
+            && tokens.is_zero()
+            && harvest.turns <= banked_turns
+            && record.busy_s == 0
+        {
+            return false;
+        }
         // The mutable borrow of `self` from `usage_banked()` above ends
         // here, at its last use — needed before the immutable borrow of
         // `self.repo` just below, which the borrow checker cannot see is a
@@ -2889,7 +2706,7 @@ impl<'a> Dispatcher<'a> {
     /// `started_at` stays on the record even though this no longer answers with
     /// how long a lane has been alive — the usage ledger is its other reader,
     /// and dropping the field would take that away too.
-    fn note_progress(&mut self, lane: &Lane, now: i64) -> Duration {
+    pub(crate) fn note_progress(&mut self, lane: &Lane, now: i64) -> Duration {
         // Read before the record is borrowed, and only for a lane that named a
         // session — the fallback below is what the rest get.
         let wrote_at = self
@@ -3324,65 +3141,6 @@ impl<'a> Dispatcher<'a> {
         Ok(())
     }
 
-    /// End a settled lane's round on a step it reported on that routed back to
-    /// itself — `blocked` reporting `--block` again, most often.
-    ///
-    /// The task already went where the report sent it: on a step that routes
-    /// to itself, that is exactly where it already sits, so there is no
-    /// further stage change to make here — nothing this pass is going to start
-    /// in this pane. What is left is the same vacate
-    /// [`Dispatcher::free_finished_lanes`] gives a lane whose task moved off
-    /// its step: bank what the lane spent, drop its record, and let the pane
-    /// go the way its kind allows.
-    ///
-    /// A pane that comes back empty is not closed. There is no `PaneHandover`
-    /// for it to ride in — that mechanism is spent within the pass that fills
-    /// it, and the pass that starts this same step again is a later one — so
-    /// it is written down on [`LaneRecord::retired_pane`] instead, under this
-    /// exact lane name, for `start_lanes` to find and inherit whenever that
-    /// name is started next. A kind with no gesture, or a session that would
-    /// not leave, is handled the same as any other pane a name might inherit:
-    /// see [`RetiredPane::ready`].
-    fn retire(
-        &mut self,
-        task: &Task,
-        pipeline: &Pipeline,
-        step: &Step,
-        lane: &Lane,
-        report: &mut Report,
-    ) -> Result<()> {
-        // The record's kind is preferred over the multiplexer's own for the
-        // same reason `free_finished_lanes` prefers it: it is what spoolway
-        // launched with, and so what the adapter table was read for.
-        let kind = self
-            .lanes
-            .get(&lane.name)
-            .map(|record| record.kind.clone())
-            .filter(|kind| !kind.is_empty())
-            .unwrap_or_else(|| lane.kind.clone());
-        let left = self.mux.vacate_lane(&lane.name, &kind, &lane.pane_id)?;
-        if let Some(record) = self.lanes.remove(&lane.name) {
-            self.record_usage(&record, task.id(), &step.id, Some(task), &pipeline.name);
-        }
-        if left != Vacated::PaneClosed {
-            let now = now_secs();
-            self.lanes.insert(
-                lane.name.clone(),
-                LaneRecord::retired(
-                    now,
-                    RetiredPane {
-                        pane_id: lane.pane_id.clone(),
-                        ready: left == Vacated::Shell,
-                    },
-                ),
-            );
-        }
-        report
-            .actions
-            .push(format!("freed {} — reported", lane.name));
-        Ok(())
-    }
-
     /// Close a lane spoolway has given up on, and move its task to `paused`
     /// with the last of what its pane said — the same landing the board's own
     /// `p` key gives a person's interrupt, with `parked_from` naming the step
@@ -3436,9 +3194,9 @@ impl<'a> Dispatcher<'a> {
         }
         // A lane that went wrong spent exactly as much as one that went right,
         // and is the one you most want to find in `spoolway eval` afterwards.
-        // Booked here rather than in `free_finished_lanes`, which never sees a
-        // lane this path has already torn down — or, for a held one, sees it
-        // every pass and would book it on each.
+        // Booked here rather than in `finish_lanes`, which never sees a lane
+        // this path has already torn down — or, for a held one, only banks
+        // what a person added after the hold.
         let ledger = self.ledger();
         let record = match hold {
             true => {
@@ -3663,15 +3421,20 @@ impl<'a> Dispatcher<'a> {
     /// different axes: one is how much of the machine a set of weights takes,
     /// the other is how many lanes of a harness it is polite to run.
     ///
-    /// Every lane that exists is counted, not only the ones the multiplexer
-    /// calls busy this second — see the counting loop for what that cost.
+    /// Every lane on its task's current step is counted, not only the ones the
+    /// multiplexer calls busy this second — see [`lane_counts`] for what that
+    /// cost, and for why a lane the task has left counts for nothing.
+    ///
+    /// `kept_panes` maps a finished lane's name to its pane. A step that comes
+    /// back finds its own old pane there, and its new lane is split off that
+    /// pane, which is then closed — see [`prepare_boot`].
     #[allow(clippy::too_many_arguments)]
     fn start_lanes(
         &mut self,
         tasks: &mut [Task],
         owned: &[(String, String, &Lane)],
+        kept_panes: &HashMap<String, String>,
         candidates: Vec<Candidate>,
-        handovers: &mut HashMap<String, PaneHandover>,
         report: &mut Report,
         tick: &mut dyn FnMut(),
     ) -> Result<()> {
@@ -3688,35 +3451,9 @@ impl<'a> Dispatcher<'a> {
             let Ok(pipeline) = self.pipelines.for_task(task) else {
                 continue;
             };
-            // A parked task's pane is kept for a person to read, and a pane
-            // being read is not work in flight. Both stages, for the same
-            // reason: two forgotten panes are two of `[agents.pi]
-            // concurrency = 2` — the whole pipeline, held by nothing that is
-            // running. A staffed `blocked` lane is not one of them: it is a
-            // running lane like any other, and does count against its cap.
-            let parked = task.stage() == crate::pipeline::PAUSED
-                || (task.stage() == crate::pipeline::BLOCKED
-                    && !pipeline.blocked_is_staffed(self.unattended));
-            if parked {
+            if !lane_counts(task, pipeline, step_id, self.unattended) {
                 continue;
             }
-            // Every surviving lane counts, whatever the multiplexer says it is
-            // doing this second. It used to count only the lanes the
-            // multiplexer called `working` or `blocked`, and that is the bug
-            // that put five lanes on a
-            // three-slot model: a lane spends its first seconds `idle`
-            // ("started but never prompted", and `unknown` while the backend
-            // is still labelling its pane), so the pass ten seconds after the
-            // one that started three of them counted none of the three and
-            // filled the model up again. A settled lane mid-conversation is
-            // the same story more slowly: it holds a session, its weights and
-            // its pane until something frees it.
-            //
-            // What "surviving" means is already decided, above this call:
-            // `free_finished_lanes` has closed the panes that are finished and
-            // `owned` has had them retained out of it, so anything still here
-            // is a session that exists. Status is how a lane *is*, not whether
-            // it *is* — and a cap is about occupancy.
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
@@ -3994,42 +3731,16 @@ impl<'a> Dispatcher<'a> {
             let task = &mut tasks[candidate.task_index];
             claims.claim(task.id(), &step.id);
 
-            // A retry reuses the lane name, so the previous attempt's record is
-            // about to be overwritten. Bank what it spent first: those tokens
-            // were real, and a task that took three attempts should say so.
-            // It may also carry a pane [`Dispatcher::retire`] left standing
-            // under this exact name on an earlier pass — see
-            // [`LaneRecord::retired_pane`] — pulled out before the record goes.
-            let previous = self.lanes.remove(&lane_name(&step.id, task.id()));
-            let retired_pane = previous
-                .as_ref()
-                .and_then(|record| record.retired_pane.clone());
-            if let Some(previous) = previous {
-                self.record_usage(&previous, task.id(), &step.id, Some(task), &pipeline.name);
+            // A retry, or a step that came back, reuses the lane name, so the
+            // previous attempt's record is about to be overwritten. Bank what
+            // it spent first: those tokens were real, and a task that took
+            // three attempts should say so. This is also the bank that makes
+            // closing its pane safe, even if the old lane is still mid-turn.
+            let lane = lane_name(&step.id, task.id());
+            let previous = self.lanes.remove(&lane);
+            if let Some(previous) = &previous {
+                self.record_usage(previous, task.id(), &step.id, Some(task), &pipeline.name);
             }
-
-            // The pane the step before this one left behind, if this pass took
-            // one back, or — with no such pass, because it is this step's own
-            // name starting again — the one `retired_pane` just carried
-            // forward from whichever pass `Dispatcher::retire` ran on. A
-            // `ready` pane is standing empty at its shell, so the lane starts
-            // in it and the task carries the same `pane_id` across the step
-            // change instead of churning a pane per step. Anything else is a
-            // pane with an agent still in it: `prepare_boot` splits a fresh
-            // one, and the stuck pane is closed below — after that split,
-            // never before, or a tab whose last pane it was would go with it.
-            let handover = handovers.remove(task.id()).or_else(|| {
-                retired_pane.map(|pane| PaneHandover {
-                    lane: lane_name(&step.id, task.id()),
-                    pane_id: pane.pane_id,
-                    ready: pane.ready,
-                })
-            });
-            let inherited = handover
-                .as_ref()
-                .filter(|handover| handover.ready)
-                .map(|handover| handover.pane_id.clone());
-
             // The pass's one ledger snapshot, built on first use here and
             // reused for every later candidate — `prepare_boot`'s session
             // lookups answer from it rather than each parsing `usage.jsonl`
@@ -4049,7 +3760,7 @@ impl<'a> Dispatcher<'a> {
                 task,
                 &step,
                 &profile,
-                inherited.as_deref(),
+                kept_panes,
                 &mut self.file_seen,
                 &ledger,
             ) {
@@ -4072,26 +3783,41 @@ impl<'a> Dispatcher<'a> {
                     if model_price.is_some_and(|p| p.exclusive) {
                         resident_exclusive.get_or_insert(model_name.clone());
                     }
+                    // The new pane exists beside the old one, so the old one
+                    // can go: it was banked above, and its agent's name has to
+                    // be free before the new lane takes it. Closed before the
+                    // boot rather than after it so the tab never shows both
+                    // for as long as an agent takes to start.
+                    if let Some(old) = &boot.replaced
+                        && let Err(err) = self.mux.close_pane(old)
+                    {
+                        report.problems.push(format!("{}: {err:#}", boot.name));
+                    }
                     pending.push(PendingLane {
                         candidate,
                         step,
                         agent_name,
                         kind: profile.kind.clone(),
                         pipeline_version: pipeline.version.clone(),
-                        handover,
                         boot,
                         persisted: None,
                     });
                 }
                 Err(err) => {
                     claims.release(task.id());
-                    if let Some(stuck) = handover.filter(|handover| !handover.ready) {
-                        // Nothing replaced it, so it is not closed here.
-                        // Handed back instead, and closed with the rest of
-                        // what this pass did not place — a stuck pane left
-                        // for the next pass is a lane it would count as
-                        // live.
-                        handovers.insert(task.id().to_string(), stuck);
+                    // A kept lane's agent is still in its pane under this
+                    // lane's name, because the pane is only closed once the
+                    // boot is prepared. Its record goes back, or the next
+                    // pass finds a lane with no record, reads it as the
+                    // task's live lane and reminds a finished conversation to
+                    // report. Its wall time was banked above, so it is zeroed
+                    // here: banked again later it would repeat as a second
+                    // row. Any other previous record belongs to an agent that
+                    // is already gone, and restoring it would add an empty
+                    // ledger row on every failed retry.
+                    if let Some(mut previous) = previous.filter(|p| p.kept) {
+                        previous.busy_s = 0;
+                        self.lanes.insert(lane, previous);
                     }
                     self.handle_boot_failure(
                         task,
@@ -4111,7 +3837,7 @@ impl<'a> Dispatcher<'a> {
         // `&mut dyn FnMut()`, and more than one thread calling it at once
         // would be more than one mutable borrow of whatever it closes over.
         // So each thread gets nothing to call, and this thread calls `tick`
-        // itself, at the same [`crate::mux::VACATE_POLL`] rate `Mux::
+        // itself, at the same [`crate::mux::HERDR_POLL`] rate `Mux::
         // start_lane`'s own wait used to hand it back at — see
         // [`Dispatcher::pass`]'s own doc on `tick`.
         let start_results: Vec<Result<()>> = std::thread::scope(|scope| {
@@ -4151,12 +3877,6 @@ impl<'a> Dispatcher<'a> {
                 Err(err) => {
                     let task = &mut tasks[pending[i].candidate.task_index];
                     claims.release(task.id());
-                    // Handed back rather than closed — see the matching
-                    // arm above, where a stuck pane first gets this
-                    // treatment.
-                    if let Some(stuck) = pending[i].handover.take().filter(|h| !h.ready) {
-                        handovers.insert(task.id().to_string(), stuck);
-                    }
                     let command_forget = pending[i].candidate.command_forget.clone();
                     self.handle_boot_failure(
                         task,
@@ -4194,12 +3914,8 @@ impl<'a> Dispatcher<'a> {
             // Its boot has returned, whichever way — the lane is up and
             // listed, or the failure below settles the task.
             claims.release(task.id());
-            let handover = pending[i].handover.take();
             match prompt_result {
                 Ok(started) => {
-                    if let Some(stuck) = handover.filter(|h| !h.ready) {
-                        self.close_handover(&stuck, report);
-                    }
                     // The launch actually started, so whatever this step's
                     // last few could-not-start attempts counted is over — a
                     // busy-pane wait included, see [`Task::launch_busy_since`].
@@ -4236,8 +3952,7 @@ impl<'a> Dispatcher<'a> {
                             head: started.head,
                             held_for_block: false,
                             person_turn_busy: false,
-                            handing_over_since: None,
-                            retired_pane: None,
+                            kept: false,
                             child_since: None,
                             launch_grace_since: None,
                             opening: started.opening,
@@ -4266,12 +3981,6 @@ impl<'a> Dispatcher<'a> {
                     }
                 }
                 Err(err) => {
-                    // Handed back rather than closed — see the note on the
-                    // first of the three arms in this function that takes a
-                    // stuck handover this way, above in the prep loop.
-                    if let Some(stuck) = handover.filter(|h| !h.ready) {
-                        handovers.insert(task.id().to_string(), stuck);
-                    }
                     // `boot_prompt` can fail after its own stage move already
                     // landed on disk — see [`StageMovedBeforeFailure`]: a
                     // `mux.prompt` refusal is the one error it returns once
@@ -4737,15 +4446,12 @@ impl<'a> Dispatcher<'a> {
             .or_else(|| task.front.pane_id.clone())
             .context("task has a workspace but no recorded tab or pane")?;
         // Same split as an agent lane's own pane label — see `prepare_boot`
-        // — for the same reason: under `split` the task's tab already says
-        // which task this is, so the pane says only the step. No need for
+        // — for the same reason: the task's tab already says which task
+        // this is, so the pane says only the step. No need for
         // `prepare_boot`'s extra `task.front.tab_id.is_some()` gate against
         // headless: headless's own `run_in_pane` is the trait default, which
         // answers `None` and never looks at `label` at all.
-        let label = match self.mux.task_owns_workspace() {
-            true => step.id.clone(),
-            false => key.clone(),
-        };
+        let label = step.id.clone();
         let script = runs.script_for_pane(&key, run, env)?;
         // This process's own environment, because a pane belongs to the
         // multiplexer's server rather than to the dispatcher: without this the
@@ -5407,8 +5113,21 @@ fn ensure_workspace(
     // call that finds it already alive and does nothing here at all.
     let mut fresh_pane: Option<String> = None;
 
+    // A task an earlier release put in a pane of the shared dispatch
+    // workspace is moved out of it the same way a stale placement is: its pane
+    // there is closed, and the heal below opens it a workspace of its own on
+    // the checkout it already has. Asked first, and only of a task that has a
+    // workspace at all. That costs every such task one `workspace list` call
+    // on top of the one `workspace_alive` makes next.
+    let in_retired_shared = match task.front.workspace_id.as_deref() {
+        Some(workspace_id) => {
+            mux.leave_shared_workspace(workspace_id, task.front.pane_id.as_deref())?
+        }
+        None => false,
+    };
     if let Some(workspace_id) = task.front.workspace_id.clone()
-        && !mux.workspace_alive(&workspace_id, task.front.tab_id.as_deref())?
+        && (in_retired_shared
+            || !mux.workspace_alive(&workspace_id, task.front.tab_id.as_deref())?)
     {
         task.front.workspace_id = None;
         task.front.pane_id = None;
@@ -5428,31 +5147,14 @@ fn ensure_workspace(
         // `Mux::reopen_owned_pane`'s own doc for why no backend does this
         // any more. A genuinely borrowed checkout gets the unstamped pane it
         // always did: it is not this task's to remove either way.
-        match mux.task_owns_workspace() {
-            true if task.front.borrowed => {
-                let workspace = mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?;
-                task.front.workspace_id = Some(workspace.workspace_id);
-                task.front.pane_id = Some(workspace.pane_id.clone());
-                task.front.tab_id = workspace.tab_id;
-                fresh_pane = Some(workspace.pane_id);
-            }
-            true => {
-                let workspace =
-                    mux.reopen_owned_pane(&checkout, &format!("spoolway/{}", task.id()))?;
-                task.front.workspace_id = Some(workspace.workspace_id);
-                task.front.pane_id = Some(workspace.pane_id.clone());
-                task.front.tab_id = workspace.tab_id;
-                fresh_pane = Some(workspace.pane_id);
-            }
-            false => {
-                let tab = project_tab(repo, mux, Some(&checkout))?
-                    .context("the run has no shared tab to open this task's pane in")?;
-                task.front.workspace_id = Some(tab.workspace_id);
-                task.front.pane_id = tab.opened_pane.clone();
-                task.front.tab_id = Some(tab.tab_id);
-                fresh_pane = tab.opened_pane;
-            }
-        }
+        let workspace = match task.front.borrowed {
+            true => mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?,
+            false => mux.reopen_owned_pane(&checkout, &format!("spoolway/{}", task.id()))?,
+        };
+        task.front.workspace_id = Some(workspace.workspace_id);
+        task.front.pane_id = Some(workspace.pane_id.clone());
+        task.front.tab_id = workspace.tab_id;
+        fresh_pane = Some(workspace.pane_id);
         persist_task(repo, task, file_seen)?;
     }
 
@@ -5481,34 +5183,16 @@ fn ensure_workspace(
         .unwrap_or_else(|| crate::task::default_branch(task.id()));
 
     if task.front.workspace_id.is_none() {
-        // Under `split` a task cuts a workspace (or a pane) of its own, named
-        // for itself; under `grouped` every task shares the tab its *project*
-        // has in the run's workspace, so what it needs is that tab's own
-        // bookkeeping rather than a row of its own — see [`project_tab`].
-        let owns = mux.task_owns_workspace();
         match repo.worktree_for(&branch)? {
             // Borrowed. There is no worktree of ours under this workspace, and
             // cleanup has to know that, so it is written down rather than
             // guessed at later — by then our own worktree would look the same.
             Some(checkout) => {
-                match owns {
-                    true => {
-                        let workspace =
-                            mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?;
-                        task.front.workspace_id = Some(workspace.workspace_id);
-                        task.front.pane_id = Some(workspace.pane_id.clone());
-                        task.front.tab_id = workspace.tab_id;
-                        fresh_pane = Some(workspace.pane_id);
-                    }
-                    false => {
-                        let tab = project_tab(repo, mux, Some(&checkout))?
-                            .context("the run has no shared tab to open this task's pane in")?;
-                        task.front.workspace_id = Some(tab.workspace_id);
-                        task.front.pane_id = tab.opened_pane.clone();
-                        task.front.tab_id = Some(tab.tab_id);
-                        fresh_pane = tab.opened_pane;
-                    }
-                };
+                let workspace = mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?;
+                task.front.workspace_id = Some(workspace.workspace_id);
+                task.front.pane_id = Some(workspace.pane_id.clone());
+                task.front.tab_id = workspace.tab_id;
+                fresh_pane = Some(workspace.pane_id);
                 task.front.borrowed = true;
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
@@ -5563,42 +5247,17 @@ fn ensure_workspace(
                     ])
                     .ok()
                     .map(|c| c.trim().to_string());
-                match owns {
-                    true => {
-                        let workspace = mux.create_workspace(
-                            &repo.root,
-                            &branch,
-                            &starts_from,
-                            &format!("spoolway/{}", task.id()),
-                        )?;
-                        task.front.workspace_id = Some(workspace.workspace_id);
-                        task.front.pane_id = Some(workspace.pane_id.clone());
-                        task.front.tab_id = workspace.tab_id;
-                        task.front.worktree_path = Some(workspace.checkout_path);
-                        fresh_pane = Some(workspace.pane_id);
-                    }
-                    false => {
-                        // Cut with git directly rather than opened through the
-                        // multiplexer: the shared tab has no worktree of its
-                        // own for `Mux::create_workspace` to cut one under —
-                        // see `Mux::remove_checkout`, the removal this pairs
-                        // with.
-                        let path = crate::mux::worktree_root(&repo.root)?.join(task.id());
-                        crate::mux::cut_worktree(&repo.root, &path, &branch, &starts_from)?;
-                        // Opened on this exact worktree — the first task
-                        // through here gives the project's shared tab a real
-                        // home instead of the bare project root, and its pane
-                        // is this task's own rather than a placeholder to
-                        // split from.
-                        let tab = project_tab(repo, mux, Some(&path))?
-                            .context("the run has no shared tab to open this task's pane in")?;
-                        task.front.workspace_id = Some(tab.workspace_id);
-                        task.front.pane_id = tab.opened_pane.clone();
-                        task.front.tab_id = Some(tab.tab_id);
-                        task.front.worktree_path = Some(path);
-                        fresh_pane = tab.opened_pane;
-                    }
-                };
+                let workspace = mux.create_workspace(
+                    &repo.root,
+                    &branch,
+                    &starts_from,
+                    &format!("spoolway/{}", task.id()),
+                )?;
+                task.front.workspace_id = Some(workspace.workspace_id);
+                task.front.pane_id = Some(workspace.pane_id.clone());
+                task.front.tab_id = workspace.tab_id;
+                task.front.worktree_path = Some(workspace.checkout_path);
+                fresh_pane = Some(workspace.pane_id);
 
                 task.front.borrowed = false;
                 task.front.branch = Some(branch);
@@ -5612,7 +5271,7 @@ fn ensure_workspace(
     }
 
     // Herdr labels a freshly opened tab numerically, and forgets any rename
-    // once its own process restarts — so this runs every pass a split task
+    // once its own process restarts — so this runs every pass a task
     // still owns its tab, fresh open and every resume alike, rather than
     // once at creation. Every caller of this function reaches a task's tab
     // this way — an agent lane's own `prepare_boot` and a command step's
@@ -5621,9 +5280,7 @@ fn ensure_workspace(
     // `task.front.tab_id` specifically, never the pane fallback `prepare_boot`
     // and `start_command_in_pane` split from: a backend with no tab, like
     // headless, has nothing here to rename.
-    if mux.task_owns_workspace()
-        && let Some(tab_id) = task.front.tab_id.as_deref()
-    {
+    if let Some(tab_id) = task.front.tab_id.as_deref() {
         mux.rename_tab(tab_id, task.id())?;
     }
 
@@ -5634,86 +5291,6 @@ fn ensure_workspace(
             .unwrap_or_else(|| repo.root.clone()),
         fresh_pane,
     ))
-}
-
-/// The tab every lane of this project is split into, in the run's shared
-/// dispatch workspace — a pane for every task of this project the run
-/// currently has going, whatever plan each belongs to, and nothing else:
-/// there is no anchor pane sitting in the project root taking up space any
-/// more, now that a task owns its pane for its whole life instead of
-/// splitting a new one every step.
-///
-/// One tab per project rather than one per plan: what a person switches
-/// between is projects, not plans, and the dispatcher draws in the caller's
-/// own pane now rather than a tab of its own — see
-/// [`crate::commands::dispatch`] — so there is no board tab left to keep
-/// separate from this one.
-///
-/// The label is [`crate::mux::project_label`], which is what the sidebar
-/// shows.
-///
-/// Found rather than made whenever this project already has one: the tab a
-/// previous run opened is still there under this project's label, which is
-/// what makes a second `spoolway dispatch` join it instead of opening
-/// another beside it. Asked of the multiplexer rather than reconstructed
-/// from what the queue recorded, because the queue is not a complete
-/// record of it: a project whose tasks are all between steps holds no tab
-/// id anywhere.
-///
-/// `None` under [`crate::config::MuxMode::Split`] or from a backend with no
-/// shared workspace at all.
-///
-/// `open_on` says whether to open the shared workspace, and then this
-/// project's tab in it, when neither turns up anything — and, when it does,
-/// the worktree to open the tab on: the first task through here gives the
-/// tab a real home instead of the bare project root, so the pane it opens
-/// with is one this task can use directly rather than a placeholder to
-/// split from — see [`ProjectTab::opened_pane`]. `None` only for a caller
-/// that wants to look without opening; every caller here passes `Some`, and
-/// the stop sweep closes the tab from the id already recorded on the task,
-/// so it never calls this at all.
-pub fn project_tab(
-    repo: &Repo,
-    mux: &dyn Mux,
-    open_on: Option<&Path>,
-) -> Result<Option<ProjectTab>> {
-    let Some(workspace_id) = mux.dispatch_workspace(&repo.root, open_on.is_some())? else {
-        return Ok(None);
-    };
-
-    let label = crate::mux::project_label(&repo.root);
-    if let Some(tab_id) = mux.find_tab(&workspace_id, &label)? {
-        return Ok(Some(ProjectTab {
-            workspace_id,
-            tab_id,
-            opened_pane: None,
-        }));
-    }
-
-    let Some(cwd) = open_on else {
-        return Ok(None);
-    };
-    let opened = mux.open_tab(&workspace_id, cwd, &label)?;
-    Ok(Some(ProjectTab {
-        workspace_id: opened.workspace_id,
-        tab_id: opened
-            .tab_id
-            .context("a multiplexer with tabs opened one with no id")?,
-        opened_pane: Some(opened.pane_id),
-    }))
-}
-
-/// What [`project_tab`] found or made.
-pub struct ProjectTab {
-    pub workspace_id: String,
-    pub tab_id: String,
-    /// Set only when this call is the one that just opened the tab: its own
-    /// pane, sitting exactly on the worktree the caller gave, and free to
-    /// use directly as that task's first lane rather than splitting one off
-    /// it — see `ensure_workspace`, the only caller. `None` when the tab was
-    /// already there: every pane inside it already belongs to some other
-    /// task's lane, and the caller splits its own the ordinary way.
-    pub opened_pane: Option<String>,
 }
 
 /// Everything [`Dispatcher::start_lanes`]' two threaded rounds need to boot a
@@ -5728,6 +5305,10 @@ struct Boot {
     label: String,
     kind: String,
     pane_id: String,
+    /// The finished pane of this step's last run that `pane_id` was split off,
+    /// to be closed once the new pane stands — see [`prepare_boot`]. `None`
+    /// for a step that has not run before.
+    replaced: Option<String>,
     args: Vec<String>,
     env: BTreeMap<String, String>,
     /// The messages typed into the pane, in order. Only an opening can be
@@ -5779,7 +5360,6 @@ struct PendingLane {
     /// booted with and this is about what gets recorded once it has.
     kind: String,
     pipeline_version: String,
-    handover: Option<PaneHandover>,
     boot: Boot,
     /// Whether `finish_launch_bookkeeping`'s own stage-move write reached
     /// disk — `None` until that call has run, `Some` from then on. Read by
@@ -5789,7 +5369,7 @@ struct PendingLane {
 }
 
 /// Blocks until every one of `handles` has finished, calling `tick` and
-/// sleeping [`crate::mux::VACATE_POLL`] between checks — the same rate
+/// sleeping [`crate::mux::HERDR_POLL`] between checks — the same rate
 /// `Mux::start_lane`'s own wait used to hand `tick` back at before its call
 /// moved onto a thread of its own; see [`Dispatcher::pass`]'s doc on `tick`.
 /// `is_finished` never blocks, so this thread's own `tick` calls land on
@@ -5800,7 +5380,7 @@ fn join_all_ticking<'scope, T>(
 ) -> Vec<T> {
     while handles.iter().any(|h| !h.is_finished()) {
         tick();
-        std::thread::sleep(crate::mux::VACATE_POLL);
+        std::thread::sleep(crate::mux::HERDR_POLL);
     }
     handles
         .into_iter()
@@ -5815,7 +5395,7 @@ fn boot_start_lane(mux: &dyn Mux, boot: &Boot) -> Result<()> {
     if let Err(err) = mux.start_lane(&boot.lane_spec(), &mut || {}) {
         // Taking a pane back rather than leaving it behind means the same
         // step retries into a fresh one instead of the tab filling up over a
-        // few dispatch passes. Under `split`, on the very first step of a
+        // few dispatch passes. On the very first step of a
         // task, this pane is the *only* thing in its workspace — the one
         // `Mux::create_workspace` opened — so closing it takes the tab and
         // the workspace with it, exactly what `Mux::close_pane`'s own doc
@@ -5967,11 +5547,12 @@ fn prepare_boot(
     task: &mut Task,
     step: &Step,
     profile: &AgentProfile,
-    // A pane the step before this one left standing and empty, for this lane
-    // to start in rather than splitting one of its own. `None` on the first
-    // step of a task, on a kind with no way to leave a pane behind, and on a
-    // backend whose pane is the agent itself.
-    inherited: Option<&str>,
+    // Every finished lane that is still open, by lane name, with its pane. A
+    // step that has run before finds its own last run here: the new lane is
+    // split off that pane rather than off the smallest pane in the tab, and
+    // the caller closes it afterwards, so the new pane ends up in the same
+    // place with the same area.
+    kept_panes: &HashMap<String, String>,
     file_seen: &mut HashMap<String, u64>,
     // The pass's one usage-ledger snapshot, for the session lookups below —
     // see [`Dispatcher::ledger`] and review finding 33.
@@ -5980,25 +5561,48 @@ fn prepare_boot(
     let name = lane_name(&step.id, task.id());
 
     // Read before `ensure_workspace`, which is the one thing here that can cut
-    // the task a new workspace underneath us. An inherited pane belongs to the
-    // placement the task had when the pane was taken back; if that placement
-    // has just been replaced, the pane id names something in a workspace that
-    // is gone, and splitting a fresh one is the only correct answer.
+    // the task a new workspace underneath us. A pane being replaced belongs to
+    // the placement the task had when it was kept; if that placement has just
+    // been replaced, the pane id names something in a workspace that is gone,
+    // and splitting off the tab's smallest pane is the only correct answer.
     let placement = task.front.workspace_id.clone();
+    let replaces: Option<&str> = kept_panes.get(&name).map(String::as_str);
+    // Kept panes in the shared dispatch workspace an earlier release grouped
+    // tasks into are closed here, ahead of `ensure_workspace` moving the task
+    // out. Those panes are where the task's earlier steps actually ran, and
+    // `task.front.pane_id` need not name them: only the first task of a
+    // project's run recorded the pane its tab opened with. Left alone, they
+    // would sit as idle agents in a tab the task no longer belongs to, because
+    // a replaced pane that placement has moved on from is dropped below, never
+    // closed. The first answer says whether the workspace is that shared one,
+    // so the rest are only closed when it is.
+    if let Some(workspace) = placement.as_deref() {
+        for (lane, pane) in kept_panes {
+            if crate::mux::lane_task(lane) != task.id() {
+                continue;
+            }
+            if !mux
+                .leave_shared_workspace(workspace, Some(pane))
+                .unwrap_or(false)
+            {
+                break;
+            }
+        }
+    }
     let (_, fresh_pane) = ensure_workspace(repo, mux, task, file_seen)?;
-    let inherited: Option<String> = inherited
+    let replaces: Option<String> = replaces
         .filter(|_| placement.is_some() && placement == task.front.workspace_id)
-        .map(str::to_string)
-        // `ensure_workspace` just placed the task in a pane nobody else is
-        // using — the tab it just opened, or the workspace it just cut or
-        // reopened — so this step starts in it directly instead of splitting
-        // one more off it. Gated on a real tab: headless leaves `tab_id`
-        // unset and reaches `Mux::split_pane` for every step regardless, and
-        // this must never change that — see [`crate::headless::Headless`].
-        .or_else(|| fresh_pane.filter(|_| task.front.tab_id.is_some()));
+        .map(str::to_string);
+    // `ensure_workspace` just placed the task in a pane nobody else is
+    // using — the tab it just opened, or the workspace it just cut or
+    // reopened — so this step starts in it directly instead of splitting
+    // one more off it. Gated on a real tab: headless leaves `tab_id`
+    // unset and reaches `Mux::split_pane` for every step regardless, and
+    // this must never change that — see [`crate::headless::Headless`].
+    let fresh_pane = fresh_pane.filter(|_| task.front.tab_id.is_some());
 
     // The tab recorded on the task is where its lane's pane is split — its
-    // own, under `split`, or its project's shared one under `grouped`. Which
+    // own. Which
     // pane in it actually splits is the backend's own decision, every time —
     // see [`Mux::split_pane`].
     //
@@ -6215,15 +5819,9 @@ fn prepare_boot(
         scratch.display().to_string(),
     );
 
-    // The pane this lane runs in: the one the step before it handed over, or a
-    // fresh split off the task's tab when there is none.
-    //
-    // A handed-over pane has already been checked, not assumed — it is only
-    // offered here after the multiplexer said the session left and the pane
-    // came back to its shell, which is the one thing that must be true before
-    // anything is typed into it. Everything else still splits: the first step
-    // of a task has nothing to inherit, and a kind with no way to leave its
-    // pane closes it as it always did.
+    // The pane this lane runs in: the one the task's workspace has just opened
+    // for it, or a fresh split. A step that has run before splits its own old
+    // pane, so closing that pane afterwards hands the new one its whole area.
     //
     // Split last, after everything that can refuse this start has been checked,
     // and taken back if the launch itself fails — a pane left behind by every
@@ -6233,34 +5831,37 @@ fn prepare_boot(
     // here, so it was kept, but the ids beside it are somebody else's. Let go of
     // the placement rather than failing forever — the next pass cuts a workspace
     // of its own and the task carries on.
-    // Under `split` the task's own tab already carries the task — see the
-    // `rename_tab` call above — so the pane inside it carries only the step;
-    // under `grouped` several tasks share one tab and the pane has to say
-    // which is which, same as it always did. Gated on a real tab, not just
-    // `task_owns_workspace()` alone: headless answers that the same way split
-    // does, but records no tab at all — see `Mux::create_workspace`'s doc on
-    // `Headless` — and has no visible row to lean on for the task half of
+    // The task's own tab already carries the task — see the `rename_tab` call
+    // above — so the pane inside it carries only the step. Gated on a real
+    // tab: headless records no tab at all — see `Mux::create_workspace`'s doc
+    // on `Headless` — and has no visible row to lean on for the task half of
     // this label, which its own turn header still needs.
-    let label = match mux.task_owns_workspace() && task.front.tab_id.is_some() {
+    let label = match task.front.tab_id.is_some() {
         true => step.id.clone(),
         false => tab_label(task.id(), &step.id),
     };
-    let pane_id = match inherited {
-        Some(pane_id) => pane_id,
-        None => match mux.split_pane(&tab, &worktree) {
-            Ok(pane_id) => pane_id,
-            Err(err) => {
-                task.front.worktree_path = None;
-                task.front.workspace_id = None;
-                task.front.pane_id = None;
-                task.front.tab_id = None;
-                persist_task(repo, task, file_seen)?;
-                return Err(err.context(format!(
-                    "tab `{tab}` is not in this multiplexer; the task's placement has \
-                     been cleared and the next pass will cut it a workspace of its own"
-                )));
+    let (pane_id, replaced) = match fresh_pane {
+        Some(pane_id) => (pane_id, None),
+        None => {
+            let split = match replaces.as_deref() {
+                Some(old) => mux.split_beside(&tab, old, &worktree),
+                None => mux.split_pane(&tab, &worktree),
+            };
+            match split {
+                Ok(pane_id) => (pane_id, replaces),
+                Err(err) => {
+                    task.front.worktree_path = None;
+                    task.front.workspace_id = None;
+                    task.front.pane_id = None;
+                    task.front.tab_id = None;
+                    persist_task(repo, task, file_seen)?;
+                    return Err(err.context(format!(
+                        "tab `{tab}` is not in this multiplexer; the task's placement has \
+                         been cleared and the next pass will cut it a workspace of its own"
+                    )));
+                }
             }
-        },
+        }
     };
     // `parked` takes the match before `via_session` gets a say: `resuming` is
     // always true for a park (see the note beside it above), so without this
@@ -6291,6 +5892,7 @@ fn prepare_boot(
         label,
         kind: profile.kind.clone(),
         pane_id,
+        replaced,
         args,
         env,
         prompts,
@@ -6556,6 +6158,34 @@ fn exceeds_percent(window: usize, pct: u8, size: u64) -> bool {
     size > (window as u64) * (pct as u64) / 100
 }
 
+/// Whether a lane holds a slot: the one rule behind a profile's `concurrency`,
+/// a model's `slots` and a model's `exclusive`, called by both
+/// `Dispatcher::start_lanes` and the board's footer so the two cannot disagree.
+///
+/// A lane counts only while its task's stage is the lane's own step, from the
+/// pass that starts it. Its first seconds are `idle` or `unknown` in the
+/// multiplexer, and skipping those is what once put five lanes on a
+/// three-slot model, so the lane's reported status plays no part.
+///
+/// A lane the task has left counts for nothing, even `Working`. It is a
+/// finished session that someone may still type into, the same as one started
+/// by hand, and counting it would let finished panes fill a profile with
+/// nothing running.
+///
+/// A parked task counts for nothing either. A `paused` task, or a `blocked` one
+/// whose pipeline does not staff that step, keeps its pane for a person to
+/// read. A staffed `blocked` lane is on its own step (`blocked`) and counts.
+pub(crate) fn lane_counts(
+    task: &Task,
+    pipeline: &crate::pipeline::Pipeline,
+    step_id: &str,
+    unattended: bool,
+) -> bool {
+    let parked = task.stage() == crate::pipeline::PAUSED
+        || (task.stage() == crate::pipeline::BLOCKED && !pipeline.blocked_is_staffed(unattended));
+    !parked && task.stage() == step_id
+}
+
 /// Where this project's lanes work: the checkout itself, and the worktree each
 /// task recorded when its workspace was cut.
 ///
@@ -6636,7 +6266,7 @@ fn tabs_to_sweep(
 
 /// Whether `task` cannot move without a person: parked on `paused`, or on an
 /// unstaffed `blocked`. The one question [`Dispatcher::sweep_on_stop`] and
-/// [`Dispatcher::free_finished_lanes`] both need answered the same way, so a
+/// [`Dispatcher::finish_lanes`] both need answered the same way, so a
 /// free function rather than a method on [`Dispatcher`] alone.
 ///
 /// `paused` always is: the whole stage exists to wait for `spoolway
@@ -6718,7 +6348,7 @@ pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
             // A corrupt `lanes.json` — one bad byte from a hand edit or a
             // disk error — used to map to an empty map that the pass then
             // saved back over, dropping every lane's session id, reminder
-            // count, `held_for_block` and `retired_pane` at once with no
+            // count, `held_for_block` and `kept` at once with no
             // message. Keep the bytes as a `.bad` copy and say so in the
             // problem log before the pass overwrites the file. See review
             // finding 31.
@@ -6818,6 +6448,9 @@ mod tests {
         refuse_start_named: Option<String>,
         /// The same, for `Mux::prompt`.
         refuse_prompt_named: Option<String>,
+        /// Make `split_beside` refuse, the way herdr does when the pane a
+        /// returning step wants to split has gone from its layout.
+        refuse_split_beside: bool,
         /// How long `start_lane` sleeps before answering — a fixed stand-in
         /// for the real boot herdr's own `agent start` blocks on, so a test
         /// can measure whether several lanes' boots actually overlap rather
@@ -6827,29 +6460,21 @@ mod tests {
         /// Whether a waiting lane keeps a process alive, as a multiplexer's
         /// does and a headless lane's does not.
         resident: bool,
-        /// The dispatch workspace this backend hands out, and how many times it
-        /// was asked to. A backend with no workspaces leaves it `None`, which
-        /// is what headless does.
-        workspace: Option<String>,
-        workspace_calls: Mutex<usize>,
-        /// Whether a task's recorded workspace is the task's own. False is a
-        /// herdr run laid out as `workspace`, where every task is a tab of the
-        /// one workspace the run opened.
-        task_owns_workspace: bool,
-        /// The tabs `open_tab` has opened, by label — what `find_tab` answers
-        /// from, exactly as a real backend answers from the multiplexer's own
-        /// listing rather than from anything the queue recorded.
-        tabs: Mutex<HashMap<String, Workspace>>,
+        /// The retired shared workspace a task may still be recorded in, if
+        /// this backend models one — see [`Mux::leave_shared_workspace`].
+        shared_workspace: Option<String>,
+        /// Whether `leave_shared_workspace` fails, as a herdr whose workspace
+        /// list cannot be read does.
+        shared_lookup_fails: bool,
+        /// Whether `create_workspace` cuts a real worktree with git, under the
+        /// run's worktree root, instead of answering with the one stand-in
+        /// path every other test shares.
+        cuts_real_worktrees: bool,
         /// What `read` answers for a lane, mutated by `prompt` the way a real
         /// pane's screen is: typing a message into it changes what is on it.
         /// Absent for a lane nothing has prompted, which is most of them —
         /// `read` falls back to empty exactly as it always did.
         screen: Mutex<HashMap<String, String>>,
-        /// Whether a session asked to leave its pane refuses to go — the one
-        /// failure [`Vacated::StillOccupied`] exists for. False is the
-        /// ordinary case, where a kind with a gesture leaves and the pane
-        /// comes back to its shell.
-        stubborn: bool,
         /// Workspace and tab ids this backend has "forgotten" — what a real
         /// multiplexer answers once it has restarted out from under a
         /// recorded id. Empty by default: a fake that remembers everything is
@@ -6890,14 +6515,13 @@ mod tests {
                 refuse_prompt: false,
                 refuse_start_named: None,
                 refuse_prompt_named: None,
+                refuse_split_beside: false,
                 boot_delay: Duration::ZERO,
                 resident: true,
-                workspace: Some("wD".into()),
-                workspace_calls: Mutex::new(0),
-                task_owns_workspace: true,
-                tabs: Mutex::new(HashMap::new()),
+                shared_workspace: None,
+                cuts_real_worktrees: false,
+                shared_lookup_fails: false,
                 screen: Mutex::new(HashMap::new()),
-                stubborn: false,
                 forgotten: Mutex::new(HashSet::new()),
                 unbound_workspace: false,
                 run_commands_in_pane: false,
@@ -6916,21 +6540,22 @@ mod tests {
         fn with_busy_child(&self, name: &str) {
             self.busy_children.lock().unwrap().insert(name.to_string());
         }
-        /// A backend whose agents are asked to leave their pane and stay put —
-        /// the modal sitting there with nobody to answer it.
-        fn refusing_to_leave(mut self) -> FakeMux {
-            self.stubborn = true;
+        /// A backend that still has `workspace_id` as the shared workspace an
+        /// earlier release grouped every task into.
+        fn with_retired_shared_workspace(mut self, workspace_id: &str) -> FakeMux {
+            self.shared_workspace = Some(workspace_id.to_string());
             self
         }
-        /// A backend that puts every task in a tab of the run's one workspace,
-        /// which is what `herdr_mode = "workspace"` is.
-        fn tabs_in_one_workspace(mut self) -> FakeMux {
-            self.task_owns_workspace = false;
+        /// A backend whose workspace list cannot be read, so it cannot say
+        /// whether a recorded workspace is the shared one.
+        fn failing_to_list_workspaces(mut self) -> FakeMux {
+            self.shared_lookup_fails = true;
             self
         }
-        /// A backend with no notion of a workspace to cut against.
-        fn without_workspaces(mut self) -> FakeMux {
-            self.workspace = None;
+        /// A backend whose `create_workspace` really cuts the worktree with git,
+        /// for a test about what the worktree contains.
+        fn cutting_real_worktrees(mut self) -> FakeMux {
+            self.cuts_real_worktrees = true;
             self
         }
         /// A backend whose lanes do not survive between turns — what
@@ -6990,6 +6615,11 @@ mod tests {
         /// The same, for `Mux::prompt`.
         fn refusing_to_prompt_named(mut self, name: &str) -> FakeMux {
             self.refuse_prompt_named = Some(name.to_string());
+            self
+        }
+        /// A multiplexer whose `split_beside` always refuses.
+        fn refusing_to_split_beside(mut self) -> FakeMux {
+            self.refuse_split_beside = true;
             self
         }
         /// A multiplexer that has forgotten `id` — a workspace or tab a
@@ -7069,44 +6699,22 @@ mod tests {
             }
             Ok(true)
         }
-        fn dispatch_workspace(&self, _root: &Path, create: bool) -> Result<Option<String>> {
-            *self.workspace_calls.lock().unwrap() += 1;
-            self.log(match create {
-                true => "dispatch_workspace find-or-create".to_string(),
-                false => "dispatch_workspace find-only".to_string(),
-            });
-            Ok(self.workspace.clone())
-        }
-
-        /// A tab per label, the way a real backend has one: the first is
-        /// `w9:t1`, and a second label gets `w9:t2` beside it rather than the
-        /// same tab again. Remembered so `find_tab` can answer with it.
-        fn open_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<Workspace> {
-            self.log(format!("open_tab {workspace_id} {label}"));
-            let mut tabs = self.tabs.lock().unwrap();
-            let n = tabs.len() + 1;
-            let opened = Workspace {
-                workspace_id: workspace_id.to_string(),
-                pane_id: format!("w9:p{n}"),
-                tab_id: Some(format!("w9:t{n}")),
-                checkout_path: cwd.to_path_buf(),
-            };
-            tabs.insert(label.to_string(), opened.clone());
-            Ok(opened)
-        }
-
-        fn find_tab(&self, _workspace_id: &str, label: &str) -> Result<Option<String>> {
-            self.log(format!("find_tab {label}"));
-            Ok(self
-                .tabs
-                .lock()
-                .unwrap()
-                .get(label)
-                .and_then(|tab| tab.tab_id.clone()))
-        }
-
-        fn task_owns_workspace(&self) -> bool {
-            self.task_owns_workspace
+        fn leave_shared_workspace(
+            &self,
+            workspace_id: &str,
+            pane_id: Option<&str>,
+        ) -> Result<bool> {
+            if self.shared_lookup_fails {
+                anyhow::bail!("herdr workspace list: timed out");
+            }
+            if self.shared_workspace.as_deref() != Some(workspace_id) {
+                return Ok(false);
+            }
+            self.log(format!(
+                "leave_shared_workspace {workspace_id} {}",
+                pane_id.unwrap_or("-")
+            ));
+            Ok(true)
         }
 
         fn remove_checkout(&self, path: &Path) -> Result<()> {
@@ -7116,12 +6724,22 @@ mod tests {
 
         fn create_workspace(
             &self,
-            _cwd: &Path,
+            cwd: &Path,
             branch: &str,
             base: &str,
             _label: &str,
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
+            if self.cuts_real_worktrees {
+                let path = crate::mux::worktree_root(cwd)?.join(crate::mux::branch_slug(branch));
+                crate::mux::cut_worktree(cwd, &path, branch, base)?;
+                return Ok(Workspace {
+                    workspace_id: "w9".into(),
+                    pane_id: "w9:p1".into(),
+                    tab_id: Some("w9:t1".into()),
+                    checkout_path: path,
+                });
+            }
             let checkout_path = PathBuf::from("/tmp/spoolway-fake-worktree");
             // A real (if minimal) git repo, not just a path: a launch now
             // resolves `{git_dir}` by asking git from inside the checkout,
@@ -7179,6 +6797,16 @@ mod tests {
             *splits += 1;
             let pane = format!("{tab_id}.s{splits}");
             self.log(format!("split_pane {tab_id} -> {pane}"));
+            Ok(pane)
+        }
+        fn split_beside(&self, tab_id: &str, pane_id: &str, _cwd: &Path) -> Result<String> {
+            if self.refuse_split_beside {
+                anyhow::bail!("no such pane {pane_id}");
+            }
+            let mut splits = self.splits.lock().unwrap();
+            *splits += 1;
+            let pane = format!("{tab_id}.s{splits}");
+            self.log(format!("split_beside {tab_id} {pane_id} -> {pane}"));
             Ok(pane)
         }
         fn run_in_pane(
@@ -7291,25 +6919,6 @@ mod tests {
             self.log(format!("stop {name}"));
             self.log(format!("close_pane {pane_id}"));
             Ok(())
-        }
-        /// Answers the way a real backend does, and for the same reason: what
-        /// makes a session leave is per kind, so a kind with no `quit` row
-        /// closes the pane exactly as `stop_lane` would and a kind with one
-        /// leaves it standing at its shell. `refusing_to_leave` is the third
-        /// answer — the gesture sent, the agent still there at the bound.
-        fn vacate_lane(&self, name: &str, kind: &str, pane_id: &str) -> Result<Vacated> {
-            if crate::agent::adapter(kind)
-                .and_then(|adapter| adapter.quit.as_ref())
-                .is_none()
-            {
-                self.stop_lane(name, pane_id)?;
-                return Ok(Vacated::PaneClosed);
-            }
-            self.log(format!("vacate {name}"));
-            match self.stubborn {
-                true => Ok(Vacated::StillOccupied),
-                false => Ok(Vacated::Shell),
-            }
         }
         fn focus_lane(&self, name: &str) -> Result<()> {
             self.log(format!("focus {name}"));
@@ -7987,117 +7596,6 @@ mod tests {
         // would answer `Some(false)` for this ask instead.
         repo.git(&["remote", "remove", "origin"]).unwrap();
         assert_eq!(branch_known(&repo, "ghost", &mut cache), None);
-    }
-
-    /// A run of two plans is still one tab: every lane of one project shares
-    /// it, whatever plan each task came from. Found the second and third
-    /// time rather than opened again, which is what makes a second
-    /// `spoolway dispatch` (or a second task) join the tab a first one
-    /// already opened.
-    #[test]
-    fn every_lane_of_a_project_shares_one_tab_whatever_its_plan() {
-        let (repo, _root_guard) = fixture("plan-tabs");
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-
-        let wing = project_tab(&repo, &mux, Some(&repo.root)).unwrap().unwrap();
-        let keel = project_tab(&repo, &mux, Some(&repo.root)).unwrap().unwrap();
-
-        assert_eq!(
-            wing.tab_id,
-            keel.tab_id,
-            "one project is one tab, whatever plan asks for it: {:?}",
-            mux.calls()
-        );
-        assert_eq!(
-            mux.did("open_tab"),
-            [format!(
-                "open_tab wD {}",
-                crate::mux::project_label(&repo.root)
-            )],
-            "opened once and found every time after: {:?}",
-            mux.calls()
-        );
-    }
-
-    /// Under `grouped`, the first task of a project's run gives the shared
-    /// tab a real home instead of the bare project root, and starts directly
-    /// in the pane that opened it — no anchor left idle, and no split to
-    /// make one. A second task joining that same tab has no pane of its own
-    /// waiting for it, so it still splits one the ordinary way.
-    #[test]
-    fn a_projects_first_task_starts_in_the_pane_that_opened_its_tab() {
-        let (repo, _root_guard) = fixture("queued-grouped");
-        let first = add_task(&repo, "first", "queued");
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-
-        run_pass(&repo, &mux);
-
-        assert!(
-            mux.did("split_pane").is_empty(),
-            "the first task's own pane is the one the tab just opened with: {:?}",
-            mux.calls()
-        );
-        assert_eq!(
-            mux.did("launch"),
-            ["launch first · implement pane=w9:p1"],
-            "{:?}",
-            mux.calls()
-        );
-        let task = reload(&first);
-        assert_eq!(task.front.tab_id.as_deref(), Some("w9:t1"));
-        assert_eq!(task.front.pane_id.as_deref(), Some("w9:p1"));
-
-        let second = add_task(&repo, "second", "queued");
-        run_pass(&repo, &mux);
-
-        assert_eq!(
-            mux.did("split_pane"),
-            ["split_pane w9:t1 -> w9:t1.s1"],
-            "the tab already has a pane in it, so the second task's own is split: {:?}",
-            mux.calls()
-        );
-        let task = reload(&second);
-        assert_eq!(task.front.tab_id.as_deref(), Some("w9:t1"));
-        assert_eq!(task.front.pane_id, None);
-    }
-
-    /// A project's tab is closed by its *last* task and by none of the ones
-    /// before it: closing it while a sibling is still queued would take a
-    /// lane that project is about to run — or one it is running right now —
-    /// with it.
-    #[test]
-    fn a_projects_tab_goes_with_the_last_task_of_the_project() {
-        let (repo, _root_guard) = fixture("plan-tab-last");
-        let planned = |front: &mut Frontmatter| {
-            front.workspace_id = Some("wD".into());
-            front.tab_id = Some("wD:t7".into());
-        };
-        let first = add_task_with(&repo, "first", "implement", planned);
-        let second = add_task_with(&repo, "second", "implement", planned);
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
-        let mut report = Report::default();
-
-        dispatcher
-            .clean_up(&mut reload(&first), &[], &mut report)
-            .unwrap();
-        assert!(
-            mux.did("close_tab").is_empty(),
-            "the project still has a task in the queue: {:?}",
-            mux.calls()
-        );
-
-        dispatcher
-            .clean_up(&mut reload(&second), &[], &mut report)
-            .unwrap();
-        assert_eq!(
-            mux.did("close_tab"),
-            ["close_tab wD:t7"],
-            "and the project's last task takes its tab with it: {:?}",
-            mux.calls()
-        );
     }
 
     /// The sparing itself, shared by the two stages that park a task in
@@ -8853,12 +8351,10 @@ mod tests {
         );
     }
 
-    /// A project's shared tab — and the workspace behind it — used to close
-    /// once the sweep emptied it, and stay open when something was spared for
-    /// a person to read. Now a stop tears nothing down at all, so neither
-    /// ever closes, whether or not a sibling task is parked.
+    /// A stop tears nothing down: neither a task's tab nor its workspace is
+    /// closed, whether or not a sibling task is parked.
     #[test]
-    fn a_stop_closes_neither_a_projects_tab_nor_its_shared_workspace() {
+    fn a_stop_closes_neither_a_tasks_tab_nor_its_workspace() {
         for stage in ["implement", crate::pipeline::BLOCKED] {
             let (repo, _root_guard) = fixture(&format!("stop-close-{stage}"));
             let path = add_task(&repo, "demo", stage);
@@ -8868,7 +8364,7 @@ mod tests {
             task.front.branch = Some("task/demo".into());
             task.save().unwrap();
 
-            let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
+            let mux = FakeMux::new(vec![]);
             let mut report = Report::default();
             Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
                 .sweep_on_stop(&mut report)
@@ -8878,53 +8374,12 @@ mod tests {
         }
     }
 
-    /// A run that opened no tab of its own must not open one on its way out
-    /// just to close it again — a sweep with nothing to give back asks the
-    /// multiplexer for nothing at all.
+    /// A task cuts its worktree through `Mux::create_workspace`.
     #[test]
-    fn stopping_never_opens_a_workspace_to_close_it() {
-        let (repo, _root_guard) = fixture("stop-no-workspace");
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert!(
-            mux.did("dispatch_workspace").is_empty(),
-            "{:?}",
-            mux.calls()
-        );
-        assert!(mux.did("open_tab").is_empty(), "{:?}", mux.calls());
-        assert!(mux.did("close_tab").is_empty(), "{:?}", mux.calls());
-    }
-
-    /// A task that owns its own workspace cuts its worktree through
-    /// `Mux::create_workspace`, whatever the shared dispatch workspace itself
-    /// answers — that call is only ever made under `MuxMode::Grouped`, and a
-    /// task that owns its own row never reaches it.
-    #[test]
-    fn a_task_that_owns_its_workspace_cuts_its_own_worktree() {
+    fn a_task_cuts_its_own_worktree() {
         let (repo, _root_guard) = fixture("cut-against");
         add_task(&repo, "demo", "queued");
         let mux = FakeMux::new(vec![]);
-
-        run_pass(&repo, &mux);
-
-        assert_eq!(
-            mux.did("create_workspace"),
-            ["create_workspace on task/demo from work"]
-        );
-    }
-
-    /// Headless has no workspaces at all, and neither does a herdr too old to
-    /// answer — and a task that owns its own workspace does not need one:
-    /// `create_workspace` cuts its worktree with git either way.
-    #[test]
-    fn a_backend_with_no_workspaces_still_cuts_its_own_worktree() {
-        let (repo, _root_guard) = fixture("cut-against-none");
-        add_task(&repo, "demo", "queued");
-        let mux = FakeMux::new(vec![]).without_workspaces();
 
         run_pass(&repo, &mux);
 
@@ -9350,28 +8805,7 @@ mod tests {
         );
     }
 
-    /// Under `grouped`, several tasks share one project tab, so a pane still
-    /// has to say which task it belongs to as well as which step — the same
-    /// string [`LaneSpec::name`] addresses it by, unlike under `split` where
-    /// the task's own tab already says so (see the next test).
-    #[test]
-    fn a_grouped_pane_is_labelled_with_the_lanes_own_name() {
-        let (repo, _root_guard) = fixture("pane-label");
-        add_task(&repo, "demo", "queued");
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-
-        run_pass(&repo, &mux);
-
-        assert_eq!(mux.did("pane"), ["pane demo · implement"]);
-        assert_eq!(mux.did("start"), ["start demo · implement"]);
-        assert!(
-            mux.did("rename_tab").is_empty(),
-            "a shared tab is never a single task's to rename: {:?}",
-            mux.calls()
-        );
-    }
-
-    /// Under `split`, every task already has its own tab naming it, so its
+    /// Every task has its own tab naming it, so its
     /// pane only needs to say which step is running there — not repeat the
     /// task name the tab beside it already shows. The lane's own name (what
     /// `start_lane` addresses it by) stays `task · step` regardless; only
@@ -9380,7 +8814,7 @@ mod tests {
     fn a_split_agent_panes_label_is_only_its_step_not_the_task() {
         let (repo, _root_guard) = fixture("split-pane-label");
         add_task(&repo, "demo", "queued");
-        let mux = FakeMux::new(vec![]); // default: task_owns_workspace() == true, i.e. split
+        let mux = FakeMux::new(vec![]);
 
         run_pass(&repo, &mux);
 
@@ -9407,7 +8841,7 @@ mod tests {
     fn a_freshly_cut_split_tasks_tab_is_renamed_to_its_slug() {
         let (repo, _root_guard) = fixture("split-tab-fresh");
         add_task(&repo, "demo", "queued");
-        let mux = FakeMux::new(vec![]); // default: task_owns_workspace() == true, i.e. split
+        let mux = FakeMux::new(vec![]);
 
         run_pass(&repo, &mux);
 
@@ -9449,6 +8883,182 @@ mod tests {
             ["rename_tab w1:t1 demo"],
             "a resumed task's already-existing tab should be renamed to its \
              slug too: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// A task an earlier release put in a pane of the shared dispatch
+    /// workspace opens a workspace of its own on its next step, and the pane
+    /// it leaves behind is closed. Its checkout is kept: it is the one the
+    /// task already cut, and the new workspace opens onto it.
+    #[test]
+    fn a_task_left_in_the_retired_shared_workspace_moves_to_one_of_its_own() {
+        let (repo, _root_guard) = fixture("shared-workspace-heal");
+        let path = add_task_with_worktree(&repo, "demo", "queued");
+        let mut task = reload(&path);
+        let checkout = task.front.worktree_path.clone().unwrap();
+        task.front.workspace_id = Some("wD".into());
+        task.front.tab_id = Some("wD:t7".into());
+        task.front.pane_id = Some("wD:p3".into());
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]).with_retired_shared_workspace("wD");
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(
+            mux.did("leave_shared_workspace"),
+            ["leave_shared_workspace wD wD:p3"],
+            "{:?}",
+            mux.calls()
+        );
+        assert!(
+            mux.did("create_workspace").is_empty(),
+            "the task keeps the checkout it already cut: {:?}",
+            mux.calls()
+        );
+        let task = reload(&path);
+        assert_ne!(task.front.workspace_id.as_deref(), Some("wD"));
+        assert_ne!(task.front.tab_id.as_deref(), Some("wD:t7"));
+        assert_eq!(
+            task.front.worktree_path.as_deref(),
+            Some(checkout.as_path())
+        );
+    }
+
+    /// A task that joined a project's existing shared tab never recorded a
+    /// `pane_id`: its lane ran in a split pane, and that pane is the one its
+    /// previous step left open. It is closed when the task moves out, not left
+    /// as an idle agent in a tab the task no longer belongs to.
+    #[test]
+    fn a_kept_pane_in_the_retired_shared_workspace_is_closed_when_the_task_moves() {
+        let (repo, _root_guard) = fixture("shared-workspace-kept");
+        let worktree = a_checkout("dispatch-shared-kept");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("wD".into());
+            f.tab_id = Some("wD:t7".into());
+            f.pane_id = None;
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![Lane {
+            kind: "claude".into(),
+            ..lane_in(&repo, "demo · implement", LaneStatus::Done, "wD:p7")
+        }])
+        .with_retired_shared_workspace("wD");
+
+        run_pass(&repo, &mux);
+
+        assert!(
+            mux.did("leave_shared_workspace")
+                .contains(&"leave_shared_workspace wD wD:p7".to_string()),
+            "the pane the previous step ran in is the one closed: {:?}",
+            mux.calls()
+        );
+        assert_ne!(reload(&path).front.workspace_id.as_deref(), Some("wD"));
+    }
+
+    /// A task an earlier release left in the shared workspace, finishing
+    /// without another step, takes only its own pane and checkout with it.
+    /// The workspace and tab it was recorded in are every other grouped task's
+    /// too, so neither is removed nor closed — borrowed checkout or not.
+    #[test]
+    fn finishing_a_task_in_the_retired_shared_workspace_leaves_the_workspace_standing() {
+        for borrowed in [false, true] {
+            let (repo, _root_guard) = fixture(&format!("shared-workspace-clean-{borrowed}"));
+            let path = add_task_with(&repo, "demo", "done", |f| {
+                f.workspace_id = Some("wD".into());
+                f.tab_id = Some("wD:t7".into());
+                f.pane_id = Some("wD:p3".into());
+                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+                f.branch = Some("task/demo".into());
+                f.borrowed = borrowed;
+            });
+            let mux = FakeMux::new(vec![]).with_retired_shared_workspace("wD");
+            let pipelines = Pipelines::builtin();
+            let mut report = Report::default();
+
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .clean_up(&mut reload(&path), &[], &mut report)
+                .unwrap();
+
+            assert_eq!(
+                mux.did("leave_shared_workspace"),
+                ["leave_shared_workspace wD wD:p3"],
+                "borrowed {borrowed}: {:?}",
+                mux.calls()
+            );
+            for call in ["remove_workspace", "close_workspace", "close_tab"] {
+                assert!(
+                    mux.did(call).is_empty(),
+                    "borrowed {borrowed}: `{call}` would take other tasks' panes: {:?}",
+                    mux.calls()
+                );
+            }
+            assert_eq!(
+                mux.did("remove_checkout").len(),
+                usize::from(!borrowed),
+                "only a checkout the task cut is removed, borrowed {borrowed}: {:?}",
+                mux.calls()
+            );
+        }
+    }
+
+    /// When herdr cannot say whether a finishing task's workspace is the
+    /// shared one, teardown must not guess "no": a task left in the shared
+    /// workspace would have it removed, then closed, with every other task's
+    /// panes in it. The workspace and tab are left standing and the failure is
+    /// reported.
+    #[test]
+    fn finishing_a_task_whose_workspace_cannot_be_checked_leaves_it_standing() {
+        for borrowed in [false, true] {
+            let (repo, _root_guard) = fixture(&format!("shared-workspace-unknown-{borrowed}"));
+            let path = add_task_with(&repo, "demo", "done", |f| {
+                f.workspace_id = Some("wD".into());
+                f.tab_id = Some("wD:t7".into());
+                f.pane_id = Some("wD:p3".into());
+                f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+                f.branch = Some("task/demo".into());
+                f.borrowed = borrowed;
+            });
+            let mux = FakeMux::new(vec![]).failing_to_list_workspaces();
+            let pipelines = Pipelines::builtin();
+            let mut report = Report::default();
+
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .clean_up(&mut reload(&path), &[], &mut report)
+                .unwrap();
+
+            for call in ["remove_workspace", "close_workspace", "close_tab"] {
+                assert!(
+                    mux.did(call).is_empty(),
+                    "borrowed {borrowed}: `{call}` on an unchecked workspace: {:?}",
+                    mux.calls()
+                );
+            }
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|problem| problem.contains("left standing")),
+                "borrowed {borrowed}: {:?}",
+                report.problems
+            );
+        }
+    }
+
+    /// A task in a workspace of its own is not asked to leave anything: the
+    /// shared workspace's id is the only one that moves a task.
+    #[test]
+    fn a_task_in_its_own_workspace_stays_put() {
+        let (repo, _root_guard) = fixture("shared-workspace-bystander");
+        let path = add_task_with_worktree(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]).with_retired_shared_workspace("wD");
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(reload(&path).front.workspace_id.as_deref(), Some("w1"));
+        assert!(
+            mux.did("create_pane").is_empty() && mux.did("reopen_owned_pane").is_empty(),
+            "{:?}",
             mux.calls()
         );
     }
@@ -9649,10 +9259,10 @@ mod tests {
     /// `tick` keeps the keyboard alive while a lane's boot runs — see
     /// [`Dispatcher::pass`]'s own doc. Moving `Mux::start_lane` onto a
     /// thread of its own must not lose that: `Dispatcher::start_lanes` calls
-    /// `tick` itself now, on this thread, once every `VACATE_POLL` for as
+    /// `tick` itself now, on this thread, once every `HERDR_POLL` for as
     /// long as any thread it is waiting on is still booting. gh-464.
     #[test]
-    fn tick_runs_at_vacate_poll_rate_while_a_lane_boots() {
+    fn tick_runs_at_herdr_poll_rate_while_a_lane_boots() {
         let (repo, _root_guard) = fixture("boot-together-ticks");
         add_task(&repo, "a", crate::pipeline::QUEUED);
         let boot_time = Duration::from_millis(650);
@@ -9666,7 +9276,7 @@ mod tests {
             .pass(&mut tick)
             .unwrap();
 
-        // `VACATE_POLL` is 250ms; a 650ms boot crosses it at least twice.
+        // `HERDR_POLL` is 250ms; a 650ms boot crosses it at least twice.
         // Generously bounded below rather than pinned exactly, since this
         // thread's own scheduling (not the boot) decides the count.
         assert!(
@@ -9856,6 +9466,53 @@ mod tests {
 
         // One of two slots is taken, so exactly one new lane starts.
         assert_eq!(mux.did("start").len(), 1);
+    }
+
+    /// A lane whose task has moved on to another step holds nothing, even
+    /// while a person is typing into it and the multiplexer calls it
+    /// `working`. The task sits on `document` of `bugfix` with one lane there
+    /// and three on steps it has left, one of them `Working`. `review` sits on
+    /// `claude`, so the other two (`reproduce` and `fix`) are `pi` lanes.
+    /// Counted, they would join `document` for three `pi` lanes against a cap
+    /// of 2, and the queued task behind them would wait on sessions that are
+    /// not any task's current work.
+    ///
+    /// The dispatcher must count exactly one: a cap of 1 refuses the queued
+    /// task, and a cap of 2 lets it through. The footer is held to the same
+    /// task by `only_the_lane_on_the_tasks_current_step_counts`.
+    #[test]
+    fn only_the_lane_on_the_current_step_takes_a_slot() {
+        let (mut repo, _root_guard) = fixture("cap-off-step");
+        add_task_with(&repo, "moved-on", "document", |f| {
+            f.pipeline = Some("bugfix".into());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        add_task(&repo, "next", "queued");
+        let lanes = vec![
+            lane(&repo, "moved-on · document", LaneStatus::Idle),
+            lane(&repo, "moved-on · reproduce", LaneStatus::Idle),
+            lane(&repo, "moved-on · fix", LaneStatus::Working),
+            lane(&repo, "moved-on · review", LaneStatus::Idle),
+        ];
+
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 1;
+        let mux = FakeMux::new(lanes.clone());
+        run_pass(&repo, &mux);
+        assert!(
+            mux.did("start").is_empty(),
+            "the one lane on its step fills a cap of 1: {:?}",
+            mux.did("start")
+        );
+
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 2;
+        let mux = FakeMux::new(lanes.clone());
+        run_pass(&repo, &mux);
+        assert_eq!(
+            mux.did("start"),
+            ["start next · implement"],
+            "the three lanes off its step leave a cap of 2 one slot free"
+        );
     }
 
     #[test]
@@ -10524,9 +10181,11 @@ mod tests {
         );
     }
 
+    /// A lane whose task has moved on is finished, not closed: its pane stays
+    /// open and idle until the task is done.
     #[test]
-    fn a_settled_lane_on_a_superseded_step_is_freed() {
-        let (repo, _root_guard) = fixture("free");
+    fn a_settled_lane_on_a_superseded_step_is_kept_open() {
+        let (repo, _root_guard) = fixture("keep");
         // The prompt already reported, so the task moved to `review` while
         // `implement`'s finished session still occupies the pane.
         add_task_with(&repo, "demo", "review", |f| {
@@ -10535,24 +10194,68 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
-        run_pass(&repo, &mux);
+        let report = run_pass(&repo, &mux);
 
-        assert_eq!(mux.did("stop"), ["stop demo · implement"]);
+        assert!(mux.did("stop").is_empty(), "{:?}", mux.calls());
+        assert!(mux.did("close_pane").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("kept demo · implement open")),
+            "{:?}",
+            report.actions
+        );
+        assert!(
+            load_lane_records(&repo)["demo · implement"].kept,
+            "the record is what keeps the lane out of every count on later passes"
+        );
     }
 
-    /// The bug `pane-per-task` exists to close: a report moves the task's
-    /// stage on the spot, but the lane that wrote it keeps talking and so is
-    /// still `Working` — busy, not settled — when this pass reads the queue.
-    /// `free_finished_lanes` leaves a busy lane alone, which is right; what is
-    /// wrong is that the candidate scan below it does not know the old lane
-    /// is still alive, finds no lane recorded under the new step's own name,
-    /// and starts one anyway. For a moment the task holds two panes in its
-    /// tab. The next step must instead wait for `implement`'s lane to settle
-    /// before it is allowed to start at all.
+    /// The headless backend has no pane to keep, so a finished lane there is
+    /// stopped and forgotten as it always was — once it has settled, and not
+    /// under a turn it is still taking.
     #[test]
-    fn a_task_holds_only_one_lane_while_its_old_step_is_still_busy() {
-        let (repo, _root_guard) = fixture("pane-per-task");
-        let worktree = a_checkout("dispatch-pane-per-task");
+    fn a_backend_with_no_panes_still_stops_a_finished_lane() {
+        let (repo, _root_guard) = fixture("detached-finish");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        let mux = FakeMux::new(vec![
+            lane(&repo, "demo · implement", LaneStatus::Done),
+            lane(&repo, "demo · fix", LaneStatus::Working),
+        ])
+        .detached();
+        let report = run_pass(&repo, &mux);
+
+        assert_eq!(
+            mux.did("stop"),
+            ["stop demo · implement"],
+            "the settled lane is stopped, the working one is left to finish"
+        );
+        assert!(
+            report.actions.iter().any(|a| a == "freed demo · implement"),
+            "{:?}",
+            report.actions
+        );
+        let records = load_lane_records(&repo);
+        assert!(
+            !records.contains_key("demo · implement"),
+            "and its record goes with it"
+        );
+    }
+
+    /// A report moves the task's stage on the spot, but the lane that wrote it
+    /// keeps talking, so it is still `Working` when this pass reads the queue.
+    /// Nothing is handed to the next step any more, so the next step does not
+    /// wait: it splits a pane of its own beside the old one, which is left
+    /// alone to finish its turn.
+    #[test]
+    fn the_next_step_starts_beside_an_old_step_that_is_still_busy() {
+        let (repo, _root_guard) = fixture("busy-old-step");
+        let worktree = a_checkout("dispatch-busy-old-step");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
@@ -10560,9 +10263,6 @@ mod tests {
             f.worktree_path = Some(worktree.to_path_buf());
         });
 
-        // `implement` reported and the task moved to `review`, but its lane
-        // is still mid-sentence — `Working`, not settled — so nothing has
-        // freed its pane yet.
         let mux = FakeMux::new(vec![lane_in(
             &repo,
             "demo · implement",
@@ -10571,24 +10271,24 @@ mod tests {
         )]);
         run_pass(&repo, &mux);
 
+        assert_eq!(mux.did("split_pane"), ["split_pane w1:t1 -> w1:t1.s1"]);
+        assert_eq!(
+            mux.did("launch demo · review")[0],
+            "launch demo · review pane=w1:t1.s1"
+        );
         assert!(
-            mux.did("split_pane").is_empty(),
-            "`review` must not split a second pane while `implement`'s lane \
-             is still alive: {:?}",
-            mux.did("split_pane")
+            mux.did("close_pane").is_empty(),
+            "the old lane finishes its sentence in its own pane: {:?}",
+            mux.did("close_pane")
         );
     }
 
-    /// A kind with no way to leave its pane keeps the lifecycle it always had:
-    /// its pane closes with it, and the next step splits one of its own. `pi`
-    /// is such a kind — nothing in the adapter table says how to talk one out
-    /// of a pane, so there is nothing to send and nothing to wait for.
-    ///
-    /// The tab recorded on the task is what every such pane is split from, and
-    /// it is never closed on a step's account — closing it would take the
-    /// workspace with it, and with the workspace the task's worktree.
+    /// Every step gets a pane of its own, and the finished step's stays. The
+    /// tab recorded on the task is what each new pane is split from, and it is
+    /// never closed on a step's account — closing it would take the workspace
+    /// with it, and with the workspace the task's worktree.
     #[test]
-    fn a_kind_with_no_way_to_leave_still_gets_a_pane_of_its_own() {
+    fn every_step_gets_a_pane_of_its_own_and_the_finished_one_stays() {
         let (repo, _root_guard) = fixture("pane-per-step");
         let worktree = a_checkout("dispatch-pane-per-step");
         add_task_with(&repo, "demo", "review", |f| {
@@ -10600,12 +10300,10 @@ mod tests {
 
         // `implement` reported and the task moved on, but its agent is still
         // sitting in the pane it was given.
-        let mux = FakeMux::new(vec![lane_in(
-            &repo,
-            "demo · implement",
-            LaneStatus::Done,
-            "w1:p7",
-        )]);
+        let mux = FakeMux::new(vec![Lane {
+            kind: "claude".into(),
+            ..lane_in(&repo, "demo · implement", LaneStatus::Done, "w1:p7")
+        }]);
         run_pass(&repo, &mux);
 
         assert_eq!(mux.did("split_pane"), ["split_pane w1:t1 -> w1:t1.s1"]);
@@ -10614,154 +10312,290 @@ mod tests {
             "launch demo · review pane=w1:t1.s1",
             "the new step has to be launched into the pane just split, not the tab itself"
         );
-        assert_eq!(
-            mux.did("close_pane"),
-            ["close_pane w1:p7"],
-            "the finished lane's pane goes, and nothing else does"
+        assert!(
+            mux.did("close_pane").is_empty() && mux.did("stop").is_empty(),
+            "the finished lane is left running in its pane: {:?}",
+            mux.calls()
         );
     }
 
-    /// The pane is the task's, not the step's. A `claude` lane that has
-    /// settled is talked out of its pane rather than having it closed, and the
-    /// step after it starts in that same pane — so the task's `pane_id` is the
-    /// one thing about it that does not change from step to step.
+    /// A step that comes back replaces its own pane in the same spot: the new
+    /// lane is split off the old one's pane, rather than off the smallest, and
+    /// the old pane is closed only after that, so the tab is never without it
+    /// and the new pane takes the old one's whole area.
     #[test]
-    fn a_settled_lane_hands_its_pane_to_the_next_step() {
-        let (repo, _root_guard) = fixture("pane-handover");
-        let worktree = a_checkout("dispatch-pane-handover");
-        add_task_with(&repo, "demo", "review", |f| {
+    fn a_step_that_comes_back_splits_its_own_old_pane_and_closes_it() {
+        let (repo, _root_guard) = fixture("step-returns");
+        let worktree = a_checkout("dispatch-step-returns");
+        let path = add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
             f.worktree_path = Some(worktree.to_path_buf());
         });
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Done,
+            "w1:p7",
+        )]);
+        run_pass(&repo, &mux);
+        assert!(mux.did("close_pane").is_empty(), "kept, not closed");
 
-        // `implement` reported, the task moved on, and its lane has finished
-        // talking — settled, on a kind that knows how to leave a pane.
-        let mux = FakeMux::new(vec![Lane {
-            kind: "claude".into(),
-            ..lane_in(&repo, "demo · implement", LaneStatus::Done, "w1:p7")
-        }]);
+        // `review` sent the task back round to `implement`, whose first run
+        // is still sitting in its pane.
+        let mut task = reload(&path);
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        mux.clear_calls();
         run_pass(&repo, &mux);
 
         assert_eq!(
-            mux.did("vacate"),
-            ["vacate demo · implement"],
-            "the finished lane is asked to leave its pane, not closed out of it"
+            mux.did("split_beside"),
+            ["split_beside w1:t1 w1:p7 -> w1:t1.s2"],
+            "split off the old pane, not the smallest one"
         );
-        assert!(
-            mux.did("split_pane").is_empty(),
-            "nothing is split: the pane the last step left is the pane this one \
-             starts in — {:?}",
-            mux.did("split_pane")
-        );
-        assert!(
-            mux.did("close_pane").is_empty(),
-            "and nothing is closed either — {:?}",
-            mux.did("close_pane")
-        );
-        assert_eq!(
-            mux.did("launch demo · review")[0],
-            "launch demo · review pane=w1:p7",
-            "the next step is launched into the pane its predecessor handed over"
-        );
-    }
-
-    /// The one failure a handover has to survive: the gesture is sent and the
-    /// agent stays put, which is a modal in the pane with nobody there to
-    /// answer it. The pane cannot simply be closed — under a shared tab, a
-    /// pane closed with nothing beside it takes the tab with it — so the next
-    /// step's pane is split first and the stuck one closed after.
-    #[test]
-    fn a_session_that_will_not_leave_is_closed_only_after_its_replacement_is_split() {
-        let (repo, _root_guard) = fixture("pane-stuck");
-        let worktree = a_checkout("dispatch-pane-stuck");
-        add_task_with(&repo, "demo", "review", |f| {
-            f.workspace_id = Some("w1".into());
-            f.tab_id = Some("w1:t1".into());
-            f.pane_id = Some("w1:p1".into());
-            f.worktree_path = Some(worktree.to_path_buf());
-        });
-
-        let mux = FakeMux::new(vec![Lane {
-            kind: "claude".into(),
-            ..lane_in(&repo, "demo · implement", LaneStatus::Done, "w1:p7")
-        }])
-        .refusing_to_leave();
-        run_pass(&repo, &mux);
-
-        assert_eq!(
-            mux.did("split_pane"),
-            ["split_pane w1:t1 -> w1:t1.s1"],
-            "a pane that would not empty is not handed on: `review` splits its own"
-        );
-        assert_eq!(
-            mux.did("close_pane"),
-            ["close_pane w1:p7"],
-            "and the stuck one goes, once there is something else in the tab"
-        );
+        assert!(mux.did("split_pane").is_empty(), "{:?}", mux.calls());
+        assert_eq!(mux.did("close_pane"), ["close_pane w1:p7"]);
         let order: Vec<String> = mux
             .calls()
             .into_iter()
-            .filter(|call| call.starts_with("split_pane") || call.starts_with("close_pane"))
+            .filter(|call| {
+                call.starts_with("split_beside")
+                    || call.starts_with("close_pane")
+                    || call.starts_with("start ")
+            })
             .collect();
         assert_eq!(
             order,
-            ["split_pane w1:t1 -> w1:t1.s1", "close_pane w1:p7"],
-            "split first, close second — the other order leaves the tab empty for a moment"
+            [
+                "split_beside w1:t1 w1:p7 -> w1:t1.s2",
+                "close_pane w1:p7",
+                "start demo · implement"
+            ],
+            "split first, close second, and only then the agent takes its name"
+        );
+        assert_eq!(
+            mux.did("launch demo · implement")[0],
+            "launch demo · implement pane=w1:t1.s2"
         );
     }
 
-    /// A lane that reported and then never stopped talking would hold its
-    /// task's pane for ever, and with it every step the task has left. The
-    /// wait is bounded: past `HANDOVER_WAIT` the next step starts anyway,
-    /// splitting its own pane before the stuck lane's is closed.
+    /// The old lane's spend is banked before its pane is closed, even if it is
+    /// still mid-turn when its step comes round again.
     #[test]
-    fn a_lane_that_never_settles_stops_holding_the_next_step_up() {
-        let (repo, _root_guard) = fixture("handover-bound");
-        let worktree = a_checkout("dispatch-handover-bound");
-        add_task_with(&repo, "demo", "review", |f| {
+    fn a_returning_step_banks_the_old_lane_even_mid_turn() {
+        let (mut repo, _root_guard) = fixture("step-returns-busy");
+        priced(&mut repo, "priced-model");
+        let worktree = a_checkout("dispatch-step-returns-busy");
+        add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.tab_id = Some("w1:t1".into());
             f.pane_id = Some("w1:p1".into());
             f.worktree_path = Some(worktree.to_path_buf());
         });
+        // A lane from an earlier arrival, still working, kept by a pass that
+        // saw its task on another step.
+        let session = "returning-mid-turn";
+        let kind = local_kind(&repo);
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kept: true,
+                session: session.into(),
+                kind,
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
 
+        let home = pi_home_with(session, 6_000);
         let mux = FakeMux::new(vec![lane_in(
             &repo,
             "demo · implement",
             LaneStatus::Working,
             "w1:p7",
         )]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
 
-        // The first pass starts the clock and waits, as it should.
-        run_pass(&repo, &mux);
+        assert_eq!(
+            mux.did("split_beside"),
+            ["split_beside w1:t1 w1:p7 -> w1:t1.s1"]
+        );
+        assert_eq!(mux.did("close_pane"), ["close_pane w1:p7"]);
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "banked once, before the pane went: {banked:?}"
+        );
+        assert_eq!(lines[0].tokens.input, 6_000);
         assert!(
-            mux.did("split_pane").is_empty(),
-            "still inside the bound: {:?}",
-            mux.did("split_pane")
+            !load_lane_records(&repo)["demo · implement"].kept,
+            "the new lane's own record replaced the kept one"
+        );
+    }
+
+    /// A kept lane is banked when its step moves on, and the difference again
+    /// when the task is done, so the rounds a person typed into the kept pane
+    /// in between are counted, as a held pane's are. The second bank is only
+    /// what the first did not see.
+    #[test]
+    fn a_kept_lane_is_banked_when_its_step_moves_on_and_again_at_done() {
+        let (mut repo, _root_guard) = fixture("kept-lane-banks");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.branch = Some("task/demo".into());
+        });
+        let session = "kept-s1";
+        let kind = local_kind(&repo);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind,
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        // `implement` has moved on and sits idle in its pane.
+        let home = pi_home_with(session, 5_000);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 1, "banked when the step moved on: {banked:?}");
+        assert_eq!(lines[0].tokens.input, 5_000);
+        assert!(
+            mux.did("stop").is_empty(),
+            "and kept open: {:?}",
+            mux.calls()
         );
 
-        // A lane still working a whole `HANDOVER_WAIT` after its task moved on
-        // is not finishing a sentence.
-        age_handover(
+        // A person types into the kept pane, then the task is done.
+        let mut task = reload(&path);
+        task.set_stage("done", None);
+        task.save().unwrap();
+        let home = pi_home_with(session, 7_500);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        assert!(!path.exists(), "the task reached the archive");
+        assert_eq!(
+            mux.did("stop"),
+            ["stop demo · implement"],
+            "the kept pane closes with its task"
+        );
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 2, "{banked:?}");
+        assert_eq!(
+            lines[1].tokens.input, 2_500,
+            "only what the person added since the first bank"
+        );
+    }
+
+    /// A kept pane nobody typed into has spent nothing since it was banked, so
+    /// closing it at done adds no empty row to the ledger.
+    #[test]
+    fn a_kept_lane_nobody_typed_into_adds_no_second_ledger_line() {
+        let (mut repo, _root_guard) = fixture("kept-lane-quiet");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.branch = Some("task/demo".into());
+        });
+        let session = "kept-quiet";
+        let kind = local_kind(&repo);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind,
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+        let home = pi_home_with(session, 5_000);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let mut task = reload(&path);
+        task.set_stage("done", None);
+        task.save().unwrap();
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 1, "{banked:?}");
+    }
+
+    /// A step coming back does not wait on its own finished lane: that lane
+    /// is out of every count, so a profile whose only slot it once held starts
+    /// the new run at once instead of stalling behind a pane that is about to
+    /// be closed.
+    #[test]
+    fn a_returning_step_does_not_wait_on_its_own_kept_lane_for_a_slot() {
+        let (mut repo, _root_guard) = fixture("step-returns-cap");
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 1;
+        let worktree = a_checkout("dispatch-step-returns-cap");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![lane_in(
             &repo,
             "demo · implement",
-            HANDOVER_WAIT + Duration::from_secs(1),
-        );
-        mux.clear_calls();
+            LaneStatus::Done,
+            "w1:p7",
+        )]);
         run_pass(&repo, &mux);
 
-        assert_eq!(
-            mux.did("split_pane"),
-            ["split_pane w1:t1 -> w1:t1.s1"],
-            "past the bound `review` starts anyway, in a pane of its own"
+        let mut task = reload(&path);
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        mux.clear_calls();
+        let report = run_pass(&repo, &mux);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .all(|line| !line.contains("waiting for")),
+            "{:?}",
+            report.actions
         );
-        assert_eq!(
-            mux.did("close_pane"),
-            ["close_pane w1:p7"],
-            "and only then is the lane that would not let go closed"
-        );
+        assert_eq!(mux.did("start").len(), 1, "{:?}", mux.calls());
     }
 
     /// Every failed start would otherwise leave a pane behind — and, below
@@ -11312,7 +11146,7 @@ mod tests {
         assert_eq!(relaunch_backoff(0), seed);
     }
 
-    /// A pass that moved something — changed a task's stage, freed a lane
+    /// A pass that moved something — changed a task's stage, finished a lane
     /// or archived one — is worth trying again at once; one that found
     /// nothing to do, or only pushed an action line that says nothing has
     /// changed, is not.
@@ -11373,7 +11207,7 @@ mod tests {
         assert!(!idle.moved, "an idle pass reported moved: {idle:?}");
 
         // A lane genuinely still working, on the task's own current step —
-        // free_finished_lanes leaves a live one alone, so there is nothing
+        // finish_lanes leaves a live one alone, so there is nothing
         // here to call moved.
         let (repo, _root_guard) = fixture("report-moved-busy");
         add_task_with(&repo, "demo", "implement", |_| {});
@@ -11461,8 +11295,7 @@ mod tests {
     }
 
     /// A task's row is named once, at creation, and never relabelled as it
-    /// moves through its steps — under `split` it is fixed `spoolway/<task>`;
-    /// under `grouped` there is no row of the task's own to rename at all.
+    /// moves through its steps — it is fixed `spoolway/<task>`.
     /// What tells one step from the next is the lane's own name, on its pane.
     #[test]
     fn a_tasks_row_is_never_relabelled_as_it_moves_steps() {
@@ -12331,9 +12164,9 @@ mod tests {
         );
     }
 
-    /// `free_finished_lanes` only drops a record once the multiplexer's own
-    /// lane list shows the pane it belongs to. A pane that closed while the
-    /// dispatcher was down is never in that list again, so a record like
+    /// A lane record outlives its pane when the pane closes while the
+    /// dispatcher is down, or a person closes a kept pane by hand. The pane is
+    /// never in the lane list again, so a record like
     /// `ghost · implement` — whose task has since left the queue entirely —
     /// would sit in `lanes.json` forever without the prune this test proves.
     #[test]
@@ -12434,16 +12267,14 @@ mod tests {
         );
     }
 
-    /// `retire` has no next-step pane to hand its `PaneHandover` to within the
-    /// same pass — the step starting again is this one's own name, and that
-    /// only happens on a later pass. So a claude lane vacated here is written
-    /// down on its own record instead, and the pass that finally starts
-    /// `blocked` again finds no lane under that name but does find the pane
-    /// its last round left standing — and starts in it rather than splitting
-    /// one of its own, exactly as a cross-step handover would.
+    /// A step that routes back to itself — `blocked` reporting `--block`
+    /// again — has reported, so its lane is over though its task is still on
+    /// the step. The restart is a new lane in the pane the old one's own: the
+    /// pane is split off first, the old one is closed, and the agent starts in
+    /// the new one. A claude lane is not asked to leave anything.
     #[test]
-    fn a_self_routing_step_hands_its_pane_to_its_own_restart() {
-        let (repo, _root_guard) = unattended_fixture("blocked-self-handover");
+    fn a_self_routing_step_replaces_its_own_pane_with_its_restart() {
+        let (repo, _root_guard) = unattended_fixture("blocked-self-replace");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.workspace_id = Some("w1".into());
             f.pane_id = Some("w1:p1".into());
@@ -12480,32 +12311,85 @@ mod tests {
         }]);
         run_pass(&repo, &mux);
 
+        let order: Vec<String> = mux
+            .calls()
+            .into_iter()
+            .filter(|call| {
+                call.starts_with("split_")
+                    || call.starts_with("close_pane")
+                    || call.starts_with("start ")
+            })
+            .collect();
         assert_eq!(
-            mux.did("vacate"),
-            ["vacate demo · blocked"],
-            "a claude lane is asked to leave, not closed"
+            order,
+            [
+                "split_beside w1:p1 w1:p7 -> w1:p1.s1",
+                "close_pane w1:p7",
+                "start demo · blocked"
+            ],
+            "split off the old pane, close it, and only then start the restart"
         );
+        assert_eq!(
+            mux.did("launch demo · blocked")[0],
+            "launch demo · blocked pane=w1:p1.s1"
+        );
+    }
+
+    /// The old pane is closed only once the new one is prepared. A restart
+    /// whose split fails leaves the old agent standing in its pane, so its
+    /// record has to stay: without one the next pass reads the finished
+    /// conversation as the task's live lane and reminds it to report.
+    #[test]
+    fn a_returning_step_whose_boot_fails_keeps_its_old_lane_and_record() {
+        let (repo, _root_guard) = unattended_fixture("blocked-self-boot-fails");
+        let path = add_task_with(&repo, "demo", "blocked", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.blocked_from = Some("implement".into());
+        });
+
+        let started_at = now_secs() - 30;
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · blocked".to_string(),
+                LaneRecord {
+                    started_at,
+                    last_progress: started_at,
+                    kind: "claude".into(),
+                    busy_s: 90,
+                    ..LaneRecord::adopted(started_at)
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+        let mut task = reload(&path);
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "block".into(),
+            at: started_at + 5,
+            blocked: false,
+        });
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![Lane {
+            kind: "claude".into(),
+            ..lane_in(&repo, "demo · blocked", LaneStatus::Done, "w1:p7")
+        }])
+        .refusing_to_split_beside();
+        run_pass(&repo, &mux);
+
         assert!(
             mux.did("close_pane").is_empty(),
-            "nothing is closed on the pass that retires it — {:?}",
-            mux.did("close_pane")
+            "the old pane was closed though its replacement never booted: {:?}",
+            mux.calls()
         );
-
-        // A later pass: the session really ended, so this backend no longer
-        // reports a lane under this name at all — only `lanes.json`, on disk,
-        // still knows the pane it left behind.
-        let mux2 = FakeMux::new(vec![]);
-        run_pass(&repo, &mux2);
-
-        assert!(
-            mux2.did("split_pane").is_empty(),
-            "nothing is split: the pane retire vacated is the pane this restart uses — {:?}",
-            mux2.did("split_pane")
-        );
+        let record = load_lane_records(&repo)
+            .remove("demo · blocked")
+            .expect("the old lane lost its record while its agent is still running");
         assert_eq!(
-            mux2.did("launch demo · blocked")[0],
-            "launch demo · blocked pane=w1:p7",
-            "the restart is launched into the pane its own last round handed forward"
+            record.busy_s, 0,
+            "its wall time was banked and must not be banked again"
         );
     }
 
@@ -12516,7 +12400,7 @@ mod tests {
     /// would nudge this lane forever, since there is no movement to read; the
     /// identity check reads the report directly and retires the lane instead.
     #[test]
-    fn a_settled_lane_that_reported_on_a_self_routing_step_is_retired_not_reminded() {
+    fn a_settled_lane_that_reported_on_a_self_routing_step_is_replaced_not_reminded() {
         let (repo, _root_guard) = unattended_fixture("blocked-self-route");
         let path = add_task_with(&repo, "demo", "blocked", |f| {
             f.workspace_id = Some("w1".into());
@@ -12556,19 +12440,21 @@ mod tests {
         let report = run_pass(&repo, &mux);
 
         assert!(
-            mux.did("prompt").is_empty(),
-            "a lane that already reported is not nudged"
+            report.actions.iter().all(|line| !line.contains("reminded")),
+            "a lane that already reported is not nudged: {:?}",
+            report.actions
         );
-        assert_eq!(mux.did("stop"), vec!["stop demo · blocked"]);
-        assert!(
-            !load_lane_records(&repo).contains_key("demo · blocked"),
-            "its bookkeeping ends with the round"
+        assert_eq!(
+            mux.did("close_pane"),
+            ["close_pane w1:p1"],
+            "its pane is replaced by the restart rather than stopped"
         );
+        assert!(mux.did("stop").is_empty(), "{:?}", mux.calls());
         assert!(
             report
                 .actions
                 .iter()
-                .any(|line| line.contains("demo · blocked") && line.contains("freed")),
+                .any(|line| line.contains("demo · blocked") && line.contains("kept")),
             "got {:?}",
             report.actions
         );
@@ -12779,15 +12665,15 @@ mod tests {
         );
     }
 
-    /// A held pane's lane is banked when the block clears and the pane is
-    /// freed, so the rounds a person drove in it while it was held reach the
-    /// ledger. `free_finished_lanes` used to skip `record_usage` for any
-    /// `held_for_block` lane, on the belief that booking it a second time
-    /// would double-count it — but `record_usage` diffs the transcript
-    /// against what the hold-time line already banked, so only the person's
-    /// own delta is appended (review finding 34).
+    /// A held pane's lane is banked when the block clears and the lane is
+    /// finished, so the rounds a person drove in it while it was held reach
+    /// the ledger. `finish_lanes` must not skip `record_usage` for a
+    /// `held_for_block` lane on the belief that booking it a second time
+    /// would double-count it — `record_usage` diffs the transcript against
+    /// what the hold-time line already banked, so only the person's own delta
+    /// is appended (review finding 34).
     #[test]
-    fn a_held_lane_banks_the_persons_rounds_when_its_pane_is_freed() {
+    fn a_held_lane_banks_the_persons_rounds_when_it_is_finished() {
         let (mut repo, _root_guard) = fixture("held-lane-banks");
         priced(&mut repo, "priced-model");
         let _task = reload(&add_task_with(&repo, "demo", "implement", |f| {
@@ -12817,8 +12703,8 @@ mod tests {
         }
 
         // The block is cleared: the task is back on its step and its lane has
-        // gone idle, so `free_finished_lanes` frees the held pane — and banks
-        // it on the way.
+        // gone idle, so `finish_lanes` finishes the held lane — and banks it
+        // on the way.
         let home = pi_home_with(session, 8_400);
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
@@ -12832,7 +12718,7 @@ mod tests {
         assert_eq!(
             lines.len(),
             2,
-            "the hold-time line and the freed lane's own bank: {banked:?}"
+            "the hold-time line and the finished lane's own bank: {banked:?}"
         );
         assert_eq!(
             lines[1].tokens.input, 8_400,
@@ -12887,7 +12773,7 @@ mod tests {
         let line = banked
             .iter()
             .rfind(|e| e.session == session)
-            .expect("the freed lane's own bank");
+            .expect("the finished lane's own bank");
         assert_eq!(line.trial.as_deref(), Some("t1"), "{banked:?}");
         assert_eq!(line.trial_group.as_deref(), Some("demo"), "{banked:?}");
     }
@@ -12896,8 +12782,8 @@ mod tests {
     /// already banked, the same way its tokens are (see the test above) —
     /// not the whole time since the lane was launched. A pause with no new
     /// work in the transcript should therefore bank `wall_s: 0` on the
-    /// freed-pane line, whatever the person left the pane sitting for
-    /// between the hold and the free (see gh-378 / issue #380: the ledger
+    /// finishing line, whatever the person left the pane sitting for
+    /// between the hold and the finish (see gh-378 / issue #380: the ledger
     /// today holds a second line carrying the wait itself, because
     /// `record_usage` always writes `now_secs() - record.started_at`).
     #[test]
@@ -12968,7 +12854,7 @@ mod tests {
             save_lane_records(&repo, &lanes).unwrap();
         }
 
-        // The block clears and the pane is freed. Nothing ran in it while
+        // The block clears and the lane is finished. Nothing ran in it while
         // it was parked, so the transcript is unchanged from what the
         // hold-time line already banked.
         let home = pi_home_with(session, 500);
@@ -12984,7 +12870,7 @@ mod tests {
         assert_eq!(
             lines.len(),
             2,
-            "the hold-time line and the freed lane's own bank: {banked:?}"
+            "the hold-time line and the finished lane's own bank: {banked:?}"
         );
         assert_eq!(
             lines[1].tokens.input, 0,
@@ -12992,7 +12878,7 @@ mod tests {
         );
         assert_eq!(
             lines[1].wall_s, 0,
-            "nothing ran while the lane was parked, so the freed-pane line \
+            "nothing ran while the lane was parked, so the finishing line \
              should carry none of that wait — got the whole elapsed span \
              instead: {banked:?}"
         );
@@ -13220,22 +13106,6 @@ mod tests {
     /// Backdate a lane's record so the clocks read as `how_long` having passed.
     /// The record is the dispatcher's own bookkeeping, so a test that wants a
     /// timeout to fire moves that rather than the wall clock.
-    /// Push back the moment a lane's task first wanted its pane back, which is
-    /// the clock `HANDOVER_WAIT` is measured against. Written by the pass that
-    /// first waited, so this only ever runs after one.
-    fn age_handover(repo: &Repo, lane: &str, how_long: Duration) {
-        let mut records = load_lane_records(repo);
-        let record = records
-            .get_mut(lane)
-            .unwrap_or_else(|| panic!("no record for `{lane}`: {:?}", lanes_path(repo)));
-        let since = record
-            .handing_over_since
-            .as_mut()
-            .unwrap_or_else(|| panic!("`{lane}` is not handing its pane over"));
-        *since -= how_long.as_secs() as i64;
-        save_lane_records(repo, &records).unwrap();
-    }
-
     fn age_lane(repo: &Repo, lane: &str, how_long: Duration) {
         let mut records = load_lane_records(repo);
         let record = records
@@ -15063,12 +14933,12 @@ mod tests {
     #[test]
     fn a_lane_that_already_reported_is_not_caught_by_the_ctx_ceiling() {
         // Unattended, and specifically for this: an attended run's `blocked`
-        // is a pane parked in front of a person, which `free_finished_lanes`
+        // is a pane parked in front of a person, which `finish_lanes`
         // holds through its own separate `hold_for_block` road before the
         // per-task loop this test means to reach is ever entered — see
         // `parked_for_a_person`. A staffed `blocked` settles like any other
-        // step instead, which is the shape `retire` (and so this exclusion)
-        // is for.
+        // step instead, which is the shape this test is about: a lane that
+        // reported is finished before the context ceiling is ever read.
         let (mut repo, _root_guard) = unattended_fixture("ctx-ceiling-reported");
         // `blocked` is the shipped step that routes back to itself — a
         // `--block` report leaves the stage exactly where it found it — so
@@ -15142,8 +15012,8 @@ mod tests {
             "no escalation — the report already answered for this lane"
         );
         assert!(
-            report.actions.iter().any(|line| line.contains("freed")),
-            "retired like any other reported lane: {:?}",
+            report.actions.iter().any(|line| line.contains("kept")),
+            "finished like any other reported lane: {:?}",
             report.actions
         );
         assert!(
@@ -15901,7 +15771,7 @@ mod tests {
         // of the real `~/.spoolway/`.
         let worktree = crate::mux::worktree_root(&repo.root)
             .unwrap()
-            .join("second");
+            .join(crate::mux::branch_slug("task/second"));
         let _ = std::fs::remove_dir_all(&worktree);
 
         // A finished dependency's branch: real commits, exactly what `done`
@@ -15922,7 +15792,7 @@ mod tests {
         }));
         // A real cut, with git, rather than `FakeMux`'s stand-in workspace —
         // the point here is what the worktree actually contains.
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees();
 
         ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
@@ -15965,7 +15835,7 @@ mod tests {
         let (repo, _root_guard) = fixture("dep-not-found");
         let worktree = crate::mux::worktree_root(&repo.root)
             .unwrap()
-            .join("second");
+            .join(crate::mux::branch_slug("task/second"));
         let _ = std::fs::remove_dir_all(&worktree);
 
         // `second` names `first` as a dependency, but no `first` task file
@@ -15973,7 +15843,7 @@ mod tests {
         let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
             f.depends_on = vec!["first".into()];
         }));
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees();
 
         let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
             .expect_err("an unresolvable dependency must not silently reach the worktree cut");
@@ -16000,7 +15870,7 @@ mod tests {
         let (repo, _root_guard) = fixture("cut-from-own-starts-from");
         let worktree = crate::mux::worktree_root(&repo.root)
             .unwrap()
-            .join("second");
+            .join(crate::mux::branch_slug("task/second"));
         let _ = std::fs::remove_dir_all(&worktree);
 
         repo.git(&["checkout", "-q", "-b", "elsewhere"]).unwrap();
@@ -16017,7 +15887,7 @@ mod tests {
             f.depends_on = vec!["first".into()];
             f.starts_from = Some("elsewhere".into());
         }));
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees();
 
         ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
@@ -16570,7 +16440,7 @@ mod tests {
     /// `session:` step resuming it wants its transcript. Reclamation only
     /// runs after the archive rename, past every early return.
     #[test]
-    fn a_cleanup_held_at_blocked_keeps_the_lanes_session_home() {
+    fn a_cleanup_held_at_blocked_keeps_its_lanes_open_and_their_session_home() {
         let (mut repo, _root_guard) = fixture("cleanup-blocked-keeps-home");
         repo.config.dispatch.auto_commit = false;
 
@@ -16624,7 +16494,7 @@ mod tests {
 
             // A live owned lane for the task — the path the reclaim used to
             // run on before the early return.
-            let owned_lane = lane(&repo, "demo · implement", LaneStatus::Working);
+            let owned_lane = lane(&repo, "demo · implement", LaneStatus::Done);
             let owned: Vec<(String, String, &Lane)> =
                 vec![("implement".into(), "demo".into(), &owned_lane)];
             let mut report = Report::default();
@@ -16637,6 +16507,15 @@ mod tests {
                 session_home.join("auth.json").exists(),
                 "the owned lane's session home was reclaimed on a path that never archived the task"
             );
+            // The task is still live, so the person who comes to it finds
+            // every pane it has run still open, and the dispatcher still
+            // holds the record of each.
+            assert!(
+                mux.did("stop").is_empty() && mux.did("close_pane").is_empty(),
+                "a task held at blocked had a lane stopped: {:?}",
+                mux.calls()
+            );
+            assert!(dispatcher.lanes.contains_key("demo · implement"));
         });
 
         assert!(path.exists(), "a held task stays in the queue");
@@ -16647,13 +16526,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// A lane still writing when its task reaches a cleaning terminal step is
-    /// skipped by `free_finished_lanes` as busy and then killed by
-    /// `clean_up`. `clean_up` used to drop its record without banking it, so
-    /// its tokens were lost (review finding 14); now it banks each owned lane
-    /// first, the way `sweep_on_stop` does.
+    /// A lane still mid-turn when its task reaches a cleaning terminal step
+    /// holds the cleanup back, so nothing it writes is lost with the worktree.
+    /// Once it is quiet, `clean_up` banks it before dropping its record, once
+    /// (review finding 14); it used to drop the record without banking.
     #[test]
-    fn clean_up_banks_a_lane_still_running_when_the_task_reaches_done() {
+    fn clean_up_waits_for_a_lane_mid_turn_then_banks_it_once() {
         let (mut repo, _root_guard) = fixture("cleanup-banks");
         priced(&mut repo, "priced-model");
         let path = add_task_with(&repo, "demo", "done", |f| {
@@ -16672,14 +16550,33 @@ mod tests {
                     kind: kind.clone(),
                     agent: "pi".into(),
                     model: "priced-model".into(),
-                    ..LaneRecord::adopted(now_secs())
+                    busy_s: 120,
+                    // Launched an hour ago: what keeps the cleanup waiting is
+                    // the transcript written just now, not the launch time.
+                    last_progress: now_secs() - 3_600,
+                    ..LaneRecord::adopted(now_secs() - 3_600)
                 },
             );
             save_lane_records(&repo, &lanes).unwrap();
         }
 
         let home = pi_home_with(session, 5_000);
-        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        // Mid-turn: the cleanup waits and stops nothing. (`finish_lanes` banks
+        // the lane as its task leaves the step, which is not the cleanup.)
+        let busy = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &busy)
+                .pass(&mut || {})
+                .unwrap();
+        });
+        assert!(
+            path.exists(),
+            "a task with a lane mid-turn is not cleaned up"
+        );
+        assert!(busy.did("stop").is_empty() && busy.did("close_pane").is_empty());
+
+        // Once it has stopped talking the task is archived and the lane banked.
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
             Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
                 .pass(&mut || {})
@@ -16688,15 +16585,71 @@ mod tests {
 
         assert!(!path.exists(), "the task still reached the archive");
         let banked = crate::usage::read(&repo).unwrap();
+        // One row: banking the lane twice on the way to the archive would
+        // append a second, tokenless row repeating the same wall time.
+        assert_eq!(
+            banked.iter().filter(|e| e.session == session).count(),
+            1,
+            "a lane reaching done is banked once"
+        );
         let line = banked
             .iter()
             .find(|e| e.session == session)
-            .expect("clean_up killed the lane without banking it");
+            .expect("clean_up archived the task without banking the lane");
         assert_eq!(line.tokens.input, 5_000);
         // The lane's own step, not the terminal `done` the task now sits on:
         // `lane_name(&line.step, &line.task)` has to name a lane that existed.
         assert_eq!(line.step, "implement");
         assert_eq!(line.task, "demo");
+    }
+
+    /// The wait for a mid-turn lane is bounded: one whose transcript has not
+    /// moved for longer than [`crate::teardown`]'s wait is stopped and banked,
+    /// and the task is cleaned up in the same pass.
+    #[test]
+    fn clean_up_stops_a_lane_stuck_mid_turn_past_the_wait() {
+        let (mut repo, _root_guard) = fixture("cleanup-stuck");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+        });
+        let session = "cleanup-stuck-s1";
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: local_kind(&repo),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    last_progress: now_secs() - 3_600,
+                    ..LaneRecord::adopted(now_secs() - 3_600)
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+        let home = pi_home_with(session, 5_000);
+        let transcript = home
+            .join(".pi/agent/sessions/--home-someone-work--")
+            .join(format!("2026-08-04T06-14-15-743Z_{session}.jsonl"));
+        std::fs::File::options()
+            .write(true)
+            .open(&transcript)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_600))
+            .unwrap();
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+        assert!(!path.exists(), "a hung lane does not hold the task on done");
+        assert_eq!(mux.did("stop demo · implement").len(), 1);
+        let banked = crate::usage::read(&repo).unwrap();
+        assert_eq!(banked.iter().filter(|e| e.session == session).count(), 1);
     }
 
     #[test]
@@ -17064,12 +17017,11 @@ mod tests {
         );
     }
 
-    /// Same as the test above, but for the visible label: under `split` — the
-    /// default `FakeMux::new` — a command pane drops the task the same way an
-    /// agent lane's own pane does, since the step's own tab already names it.
-    /// The run's own identity (what the log file and pane lookup are keyed
-    /// on) still carries `demo · implement`, logged here as `run_in_pane`'s
-    /// own `key`.
+    /// Same as the test above, but for the visible label: a command pane
+    /// drops the task the same way an agent lane's own pane does, since the
+    /// step's own tab already names it. The run's own identity (what the log
+    /// file and pane lookup are keyed on) still carries `demo · implement`,
+    /// logged here as `run_in_pane`'s own `key`.
     #[test]
     fn a_split_command_panes_label_is_only_its_step_not_the_task() {
         let (repo, _root_guard) = fixture("command-pane-split-label");
@@ -17102,29 +17054,6 @@ mod tests {
         assert!(
             !mux.did("rename_tab").is_empty(),
             "the tab should have been renamed at least once: {:?}",
-            mux.calls()
-        );
-    }
-
-    /// Under `grouped`, the shared tab names no single task, so a command
-    /// pane keeps both — same as the identity it is already keyed on.
-    #[test]
-    fn a_grouped_command_panes_label_keeps_task_and_step() {
-        let (repo, _root_guard) = fixture("command-pane-grouped-label");
-        let path = add_task_with_worktree(&repo, "demo", "implement");
-        let mux = FakeMux::new(vec![])
-            .offering_panes()
-            .tabs_in_one_workspace();
-        let pipelines = pipelines_running("echo paned", false);
-
-        drive(&repo, &pipelines, &mux, &path, "review");
-
-        assert!(
-            mux.did("run_in_pane")
-                .iter()
-                .any(|call| call.contains("(demo · implement) (demo · implement)")),
-            "a grouped command pane's visible label should still be \
-             task-and-step: {:?}",
             mux.calls()
         );
     }

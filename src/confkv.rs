@@ -52,13 +52,6 @@ pub const REFERENCE: &[Reference] = &[
                     test backend, refused unless SPOOLWAY_TEST_BACKEND is set.",
     },
     Reference {
-        key: "dispatch.herdr_mode",
-        values: "grouped, split",
-        default: "split",
-        sentence: "How a herdr run is laid out: a pane per task in its project's shared \
-                    tab, or a row of its own per task.",
-    },
-    Reference {
         key: "dispatch.lane_quiet",
         values: "<duration>",
         default: "15m",

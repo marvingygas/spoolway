@@ -763,8 +763,8 @@ impl Board {
     /// while it is open, exactly as if nothing had happened.
     ///
     /// A backend with no pane to open one in — headless, which refuses the
-    /// way `open_tab` already does — is best-effort like every other key
-    /// here: the refusal is swallowed, exactly as an `Err` out of `on_key`
+    /// way `Mux::open_command`'s default does — is best-effort like every
+    /// other key here: the refusal is swallowed, exactly as an `Err` out of `on_key`
     /// already is by the dispatch loop that calls it, and the task file it
     /// would have opened is left exactly as it was.
     fn open_cursor(&mut self, repo: &Repo) -> Result<()> {
@@ -2444,13 +2444,11 @@ fn paint(
 ///   saying no work can start while the dispatcher starts some. A staffed
 ///   `blocked` lane is not parked at all — see
 ///   [`crate::pipeline::Pipeline::blocked_is_staffed`] — and does count.
-/// - It is still the task's own step, or mid-turn. A lane whose task has
-///   already moved on and that is not currently `Working` or `Blocked` is a
-///   finished pane the multiplexer has not yet reported closed —
-///   `Dispatcher::free_finished_lanes`'s own `still_current` check, mirrored
-///   here read-only. Counted here it would read as an occupied slot for a
-///   pass after the one where `start_lanes`' own `in_flight` already
-///   started another lane in its place.
+/// - It is on the task's own step. A lane whose task has moved on counts for
+///   nothing, idle or `Working`: it is a finished session someone may still
+///   type into, the same as one started by hand. The dispatcher applies the
+///   same rule through [`crate::dispatch::lane_counts`], and so does this walk
+///   for the parked check above.
 ///
 /// `agent_model`, on its own, is wider than the other two: after the live
 /// walk above it is widened again over every task's whole pipeline, so a
@@ -2487,27 +2485,7 @@ fn slots_used<'a>(
         let Ok(pipeline) = pipelines.for_task(task) else {
             continue;
         };
-        let parked = task.stage() == crate::pipeline::PAUSED
-            || (task.stage() == crate::pipeline::BLOCKED
-                && !pipeline.blocked_is_staffed(repo.unattended()));
-        if parked {
-            continue;
-        }
-        // A lane whose task has already moved off the step this lane's own
-        // name carries, and is not mid-turn, is a finished pane the
-        // dispatcher's own `free_finished_lanes` would close and stop
-        // counting on this very pass — `still_current` there, mirrored here
-        // without touching a pane or a task file: reading the board must
-        // never do either. Left out, a lane that finished a while ago but
-        // whose pane the multiplexer has not yet reported closed reads as an
-        // occupied slot here while `start_lanes`' own `in_flight` has
-        // already stopped counting it and starts another lane in its place.
-        let live = task.stage() == step_id
-            || matches!(
-                lane.status,
-                crate::mux::LaneStatus::Working | crate::mux::LaneStatus::Blocked
-            );
-        if !live {
+        if !crate::dispatch::lane_counts(task, pipeline, step_id, repo.unattended()) {
             continue;
         }
         let Some(step) = pipeline.step(step_id) else {
@@ -4197,16 +4175,16 @@ mod tests {
         assert_eq!(used.agents.get("claude").copied(), Some(1), "{used:#?}");
     }
 
-    /// A lane whose pane the multiplexer has not yet reported closed, but
-    /// whose task has already moved off the step that lane belongs to and is
-    /// not mid-turn, is exactly the pane `Dispatcher::free_finished_lanes`
-    /// closes on this very pass — `start_lanes`' own `in_flight` has already
-    /// stopped counting it before the footer is ever drawn. Counting it here
-    /// too would read as a full profile for a pass where the dispatcher
-    /// starts another lane in its place.
+    /// A settled lane whose task has moved off the step that lane belongs to
+    /// stays open, idle, until the task is done. `start_lanes` does not count
+    /// it, and counting it here would read as a full profile while the
+    /// dispatcher has a slot free for the next lane.
+    ///
+    /// A `Working` lane off its step counts for nothing either.
+    /// `only_the_lane_on_the_tasks_current_step_counts` covers that one.
     #[test]
-    fn a_finished_lane_not_yet_closed_gives_its_slot_back() {
-        let (repo, _root_guard) = fixture("slots-finished-not-closed");
+    fn a_finished_lane_still_open_gives_its_slot_back() {
+        let (repo, _root_guard) = fixture("slots-finished-still-open");
         let pipelines = Pipelines::builtin();
         add(&repo, "moved-on", &[], Some("review"));
 
@@ -4218,28 +4196,42 @@ mod tests {
         assert!(used.agents.is_empty(), "{used:#?}");
     }
 
-    /// The other half of the same check: a lane still `Working` or
-    /// `Blocked` counts even once its task has moved off the step that lane
-    /// belongs to — a lane runs `spoolway report` mid-turn, so the stage
-    /// moves on the spot while the lane keeps talking, and
-    /// `free_finished_lanes` leaves a busy lane alone whatever step its task
-    /// now reads. Dropping this half and keeping only the idle one would
-    /// still pass `a_finished_lane_not_yet_closed_gives_its_slot_back`
-    /// above, so it needs its own case.
+    /// One lane on the task's current step and three on steps it has left, one
+    /// of them `Working` because a person typed into it. The task sits on
+    /// `document` of `bugfix`, with `reproduce`, `fix` and `review` behind it.
+    /// The footer counts one. The dispatcher's start check is held to the same
+    /// task by `only_the_lane_on_the_current_step_takes_a_slot`, and both go
+    /// through `lane_counts`.
     #[test]
-    fn a_lane_still_mid_turn_counts_even_once_its_task_has_moved_on() {
-        let (repo, _root_guard) = fixture("slots-busy-not-current");
+    fn only_the_lane_on_the_tasks_current_step_counts() {
+        let (repo, _root_guard) = fixture("slots-current-step-only");
         let pipelines = Pipelines::builtin();
-        add(&repo, "moved-on", &[], Some("review"));
+        add(&repo, "login", &[], Some("document"));
+        let mut login = repo.task("login").unwrap();
+        login.front.pipeline = Some("bugfix".to_string());
+        login.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let mut busy = lane("moved-on · implement", &repo.root);
-        busy.status = crate::mux::LaneStatus::Working;
-        let used = slots_used(&repo, &tasks, &pipelines, &[busy]);
+        let named = |name: &str, status| {
+            let mut l = lane(name, &repo.root);
+            l.status = status;
+            l
+        };
+        use crate::mux::LaneStatus::{Idle, Working};
+        let used = slots_used(
+            &repo,
+            &tasks,
+            &pipelines,
+            &[
+                named("login · document", Idle),
+                named("login · reproduce", Idle),
+                named("login · fix", Working),
+                named("login · review", Idle),
+            ],
+        );
 
-        // `Pipelines::builtin`'s own test hydration gives every agent step
-        // but `review` the `pi` profile — see its own doc comment.
         assert_eq!(used.agents.get("pi").copied(), Some(1), "{used:#?}");
+        assert_eq!(used.agents.get("claude").copied(), None, "{used:#?}");
     }
 
     /// The whole point of the column: a task that is moving is described by
@@ -7261,7 +7253,7 @@ mod tests {
     }
 
     /// `o` on a headless run has no pane to open an editor in — headless
-    /// refuses it the way `open_tab` already does — so the key is a no-op:
+    /// refuses it the way `Mux::open_command`'s default does — so the key is a no-op:
     /// best-effort, like every other key here, and the task file it would
     /// have opened is left exactly as it was.
     #[test]

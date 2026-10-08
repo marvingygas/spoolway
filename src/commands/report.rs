@@ -1824,16 +1824,21 @@ fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task, step: String) -> R
     Ok(())
 }
 
-/// This task's settled lanes freed, so the dispatcher does not mistake one
-/// left over from before a stop for a lane still waiting on an answer — the
-/// task would wait on it forever and no fresh lane would ever start. Shared
-/// by `back_onto_its_step` and `unpark`, the two roads that put a task back
-/// on a step a lane of its own might already be sitting settled on.
+/// The settled lane on the step a resume sends this task to, closed, so the
+/// dispatcher does not mistake one left over from before a stop for a lane
+/// still waiting on an answer — the task would wait on it forever and no fresh
+/// lane would ever start. Shared by `back_onto_its_step` and `unpark`, the two
+/// roads that put a task back on a step a lane of its own might already be
+/// sitting settled on.
 ///
-/// Only this task's settled lanes, and only ones working in this project's
-/// directories — the same ownership rules a pass applies. Busy ones are left
-/// alone: work that is genuinely running is the dispatcher's to watch, not
-/// ours to kill.
+/// Only that one lane. The task's other lanes belong to steps it has already
+/// run, and each stays open, idle, until the task is done; closing them here
+/// would throw away the very screen a person resumed the task to read. A
+/// resume that sends the task somewhere with no lane yet closes nothing.
+///
+/// Only a lane working in this project's directories — the same ownership
+/// rules a pass applies. A busy one is left alone: work that is genuinely
+/// running is the dispatcher's to watch, not ours to kill.
 fn free_stale_lanes(repo: &Repo, pipelines: &Pipelines, task: &Task) {
     let Ok(mux) = crate::mux::backend(repo) else {
         return;
@@ -1843,9 +1848,9 @@ fn free_stale_lanes(repo: &Repo, pipelines: &Pipelines, task: &Task) {
         for lane in lanes {
             let ours =
                 lane.cwd == repo.root || Some(&lane.cwd) == task.front.worktree_path.as_ref();
-            let this_task = crate::mux::parse_lane_name(&lane.name, &step_ids)
-                .is_some_and(|(_, task_id)| task_id == task.front.id);
-            if ours && this_task && lane.status.is_settled() {
+            let on_the_resumed_step = crate::mux::parse_lane_name(&lane.name, &step_ids)
+                .is_some_and(|(step, task_id)| task_id == task.front.id && step == task.stage());
+            if ours && on_the_resumed_step && lane.status.is_settled() {
                 let _ = mux.stop_lane(&lane.name, &lane.pane_id);
                 println!("  freed stale lane `{}`", lane.name);
             }
@@ -5678,6 +5683,65 @@ mod tests {
         assert!(
             headless.list_lanes().unwrap().is_empty(),
             "the stale lane must be freed, or the next pass waits on it forever"
+        );
+    }
+
+    /// A resume closes the settled lane on the step it sends the task to, and
+    /// no other. The task's lanes on steps it has already run are kept open
+    /// until it is done, so a person can read what they said; closing them
+    /// with every resume would throw that away.
+    #[test]
+    fn resuming_closes_only_the_lane_on_the_step_it_resumes() {
+        let (mut repo, _root_guard) = fixture("unpark-only-resumed-lane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        add(&repo, "stuck", &[]);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("implement", None);
+        task.front.parked_from = Some("implement".into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
+        task.save().unwrap();
+
+        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
+        for step in ["implement", "review"] {
+            headless
+                .start_lane(
+                    &crate::mux::LaneSpec {
+                        name: &crate::mux::lane_name(step, "stuck"),
+                        label: step,
+                        kind: "pi",
+                        pane_id: "p1",
+                        args: &[],
+                        env: &std::collections::BTreeMap::new(),
+                        path_prefix: None,
+                    },
+                    &mut || {},
+                )
+                .unwrap();
+        }
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let left: Vec<String> = headless
+            .list_lanes()
+            .unwrap()
+            .into_iter()
+            .map(|lane| lane.name)
+            .collect();
+        assert_eq!(
+            left,
+            [crate::mux::lane_name("review", "stuck")],
+            "the lane on the resumed step is closed, the one on another step stays"
         );
     }
 
