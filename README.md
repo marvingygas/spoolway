@@ -101,7 +101,7 @@ Platform notes and requirements in full: **[Installation and setup](docs/install
 
 ## Quick start
 
-### 1. Set up inside the project repo
+### 1. Set up
 
 ```
 spoolway init
@@ -113,12 +113,6 @@ spoolway init
 |---|---|---|
 | `repo` | `.spoolway/` in the checkout, tracked by git | The whole team should share the pipelines and prompts. |
 | `home` | A workspace under `~/.spoolway/` | Work with spoolway without touching repo code. |
-
-Several clones of the same repo can share one workspace. Each clone gets its own queue and worktrees. Run
-`spoolway init` and choose the existing workspace.
-
-Either way, runtime state such as the queue, the archive and the worktrees stays under
-`~/.spoolway/`. Run `spoolway config path` to see every place a project's setup lives.
 
 See **[Home mode](docs/concepts.md#home-mode)**.
 
@@ -238,44 +232,21 @@ steps:
     on_pass: done
 ```
 
-The `/spoolway-config` skill can write and edit pipelines for you.
-
 ## Try changes without committing them
 
 In a repo-mode project, the tracked `.spoolway/` is shared with everyone. You can still change
 things on your own machine first. There are two ways:
 
-### Overrides: change what is already tracked
+### Overrides
 
-An override patches a tracked pipeline, prompt or config value. It lives in
-`~/.spoolway/<project>/overrides/`.
+Apply changes that only affect you. An override patches a tracked pipeline, prompt or config value. It lives in `~/.spoolway/<project>/overrides/`. Use it to apply changes for making your own setup compatible (e.g. use your local LLM to replace certain steps).
 
-Tip: the `/spoolway-config` skill activates whenever you want to change something in the spoolway config.
-You can use it to create overrides or any other spoolway file.
-
-```
-spoolway pipeline override default --set implement.model=claude-opus-5
-spoolway prompt override reviewer     # copies the prompt so you can edit it
-spoolway config override              # opens your own copy of config.toml
-spoolway override list                # shows everything you have overridden
-```
-
-When an override works, `spoolway override promote <target>` writes it into the tracked
-file, ready to commit. `spoolway override drop <target>` throws it away.
-
-### Private pipelines: add something new
+### Private pipelines
 
 A private pipeline is a whole new pipeline that only your machine sees. It lives in
-`~/.spoolway/<project>/local/` with its own prompts and task skeleton.
+`~/.spoolway/<project>/local/` with its own prompts and task skeleton. Use this to copy pipelines or prompts to try something new without having to update the repository.
 
-```
-spoolway pipeline copy default experiment   # start from an existing pipeline
-spoolway prompt copy implementer my-impl    # start from an existing prompt
-spoolway pipeline promote experiment        # move it into .spoolway/ when it's ready
-```
-
-Home-mode projects don't need either of these. Their whole setup is already private to the
-machine, so you edit it directly.
+Tip: the `/spoolway-config` skill activates whenever you want to change something in the spoolway config.
 
 See **[The overrides layer](docs/configuration.md#the-overrides-layer)** and
 **[Private pipelines](docs/pipelines.md#private-pipelines)**.
