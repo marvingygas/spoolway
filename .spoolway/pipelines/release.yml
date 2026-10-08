@@ -1,201 +1,29 @@
 # Full reference: docs/pipelines.md
 
 description: >-
-  Make main release-ready, suggest the next version for a person to approve or
-  override, then cut, publish and verify the release with a person only
-  merging pull requests on GitHub.
-
-task_template: default
+  Release spoolway end to end: prepare one release pull request, then merge,
+  tag, publish and verify it, and land the upgrade fixture, with nobody waiting
+  on a merge button.
 
 steps:
-  # Records the base commit and the run's name under `.release-run/` while the
-  # worktree is still the one cut from main. Later steps read those files, not
-  # spoolway's environment, so a person can walk the same steps by hand.
-  - id: anchor
-    description: Record the base commit and the run's name in the worktree for the steps after it.
-    run: scripts/release-anchor.sh
-    timeout: 1m
-    on_pass: ready
-
-  - id: ready
-    description: Prove clean main passes the complete local and hosted release-readiness suite.
+  - id: prepare
+    description: Make main releasable, pick the version, write the changelog and open one green release pull request.
     agent: claude
-    prompt: release-readiness
+    prompt: releaser
     model: claude-opus-5-5
     effort: high
-    session: true
-    loop: 4
-    on_pass: upgrade
-    on_fail: fix
+    on_pass: ship
 
-  # Readiness proves main works on a fresh checkout; this proves it works on a
-  # project the last release set up. 0.5.0 -> main left both shipped pipelines
-  # refusing to load after a `sync` that reported success, and nothing in the
-  # suite or the gate asked. `preflight`'s upgrade suite asks a narrower
-  # question — whether one scripted fixture's values survive `sync` — and reads
-  # no message a person would meet. A defect goes to the same fixer as a red
-  # gate, and its merge returns through `ready`, since the repair moved main.
-  # Migration items pass forward to `notes`, which writes them into the
-  # changelog and `docs/migrations.md`.
-  - id: upgrade
-    description: Upgrade a project the last release set up to this main, and record every edit its owner has to make.
-    agent: claude
-    prompt: release-upgrade
-    model: claude-opus-5-5
-    effort: high
-    session: true
-    on_pass: version
-    on_fail: fix
-
-  # Four, not three: `ready`, `upgrade` and `preflight` all send defects here,
-  # and `review-fix` sends its findings back.
-  - id: fix
-    description: Repair every release blocker in one pull request and drive its checks green.
-    agent: claude
-    prompt: release-fixer
-    model: claude-opus-5-5
-    effort: high
-    session: true
-    loop: 4
-    on_pass: review-fix
-
-  - id: review-fix
-    description: Independently review the repair and correct its existing branch if needed.
-    agent: claude
-    prompt: release-reviewer
-    model: claude-opus-5-5
-    effort: high
-    on_pass: await-fix
-    on_fail: fix
-
-  # A command step, so Claude Code's auto-mode permission layer never sees the
-  # merge and never has a chance to refuse it. `--optional` covers a repair
-  # round that found nothing left to fix and opened no pull request.
-  # `run=$(…) && …` rather than the name inline: a failed substitution inside an
-  # argument does not stop `sh -c`, and the wait would then match any older pull
-  # request on a bare `release-fix/` prefix.
-  - id: await-fix
-    description: Wait for a person to merge the readiness repair, then rerun readiness.
-    run: run=$(scripts/release-run-name.sh) && scripts/release-await-merge.sh --optional "release-fix/$run"
-    timeout: 24h
-    on_pass: ready
-
-  - id: version
-    description: Recommend the next version and pause for a person's approval or override.
-    agent: claude
-    prompt: release-version
-    model: claude-opus-5-5
-    effort: high
-    gate: true
-    loop: 3
-    on_pass: preflight
-    on_fail: ready
-
-  - id: preflight
-    description: Freeze the chosen release version and assemble its diff, pull requests, contributors and changelog state.
-    agent: claude
-    prompt: release-preflight
-    model: claude-opus-5-5
-    effort: high
-    session: true
-    on_pass: notes
-    on_fail: fix
-
-  - id: notes
-    description: Write and validate the changelog section that ships everywhere, and the migration guide's section for this upgrade.
-    agent: claude
-    prompt: release-notes
-    model: claude-sonnet-5-5
-    effort: high
-    session: true
-    on_pass: candidate
-
-  - id: candidate
-    description: Build the exact release commit, with the migration guide when notes wrote one, and open one green pull request for it.
-    agent: claude
-    prompt: release-candidate
-    model: claude-opus-5-5
-    effort: high
-    on_pass: review-release
-    on_fail: version
-
-  - id: review-release
-    description: Independently review the exact release commit without changing its candidate.
-    agent: claude
-    prompt: release-reviewer
-    model: claude-opus-5-5
-    effort: high
-    on_pass: await-release
-    on_fail: version
-
-  - id: await-release
-    description: Wait for a person to merge the release candidate, then publish it.
-    run: run=$(scripts/release-run-name.sh) && scripts/release-await-merge.sh "release/$run"
-    timeout: 24h
-    on_pass: publish
-
-  # A command step for the same reason `await-fix` and `await-release` are:
-  # `git push origin refs/tags/…` is exactly what Claude Code's auto-mode
-  # permission layer refused as "Create Public Surface" in the 0.6.0 run.
-  # Nothing here asks a person to press a button — it is the authorized,
-  # unattended action itself, run by the dispatcher rather than shown to a
-  # model that would decline it.
-  - id: publish
-    description: Rehearse the merged release commit, tag it, and let its own workflow publish it.
-    run: scripts/release-publish.sh
-    timeout: 90m
-    on_pass: released
-    on_fail: recover
-
-  - id: released
-    description: Prove the tag, the six packages, the archives and the published body actually exist.
-    run: scripts/release-verify.sh
-    timeout: 15m
+  # A command step, so Claude Code's auto mode never sees the merge or the tag
+  # push. It refused both when an agent did them.
+  - id: ship
+    description: Rehearse, merge, tag and publish the release pull request, then verify what npm and GitHub serve.
+    run: scripts/release-ship.sh
+    timeout: 4h
     on_pass: fixture
-    on_fail: recover
 
-  # A pass goes back through `publish`, not straight to `released`, so the tag
-  # is only ever pushed by the script. It is idempotent: with the tag already
-  # on origin it re-checks the tag's own run and hands on; without it, it
-  # rehearses, tags and pushes. Before this, a tag push that failed for a
-  # reason outside the commit could only end in a revert or a person's push.
-  - id: recover
-    description: Recover a failed rehearsal, tag push or post-publication verification.
-    agent: claude
-    prompt: release-publisher
-    model: claude-opus-5-5
-    effort: high
-    loop: 3
-    on_pass: publish
-    on_fail: version
-
-  # The closing step of docs/releasing.md, which was prose nobody was gated on
-  # until 0.4.0 shipped without its fixture and main's dress rehearsal went red
-  # for two days. It can only run here: `scripts/e2e/suites/upgrade.sh` asks for
-  # `scripts/e2e/fixtures/<version>/` once the tag is out *and* Cargo.toml has
-  # moved past it, so the fixture is impossible to make before the tag and is
-  # not demanded until the next bump. A command step, for the same reason
-  # `released` is one — an agent step can be carried past by a cleared block.
-  #
-  # Thirty minutes because it builds the tagged binary to scaffold from, on
-  # whatever cache the lane's machine has. Idempotent, so a re-run after a
-  # failure costs one lookup when the fixture already landed.
   - id: fixture
-    description: Scaffold the released version's upgrade fixture from its own tag and open its pull request.
+    description: Scaffold the released version's upgrade fixture from its own tag and auto-merge its pull request.
     run: scripts/release-fixture.sh
     timeout: 30m
-    on_pass: review-fixture
-
-  - id: review-fixture
-    description: Independently review the generated upgrade fixture.
-    agent: claude
-    prompt: release-reviewer
-    model: claude-opus-5-5
-    effort: high
-    on_pass: await-fixture
-
-  - id: await-fixture
-    description: Wait for a person to merge the upgrade fixture so the release leaves main complete.
-    run: run=$(scripts/release-run-name.sh) && scripts/release-await-merge.sh "fixture/$run"
-    timeout: 24h
     on_pass: done

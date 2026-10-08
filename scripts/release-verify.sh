@@ -1,30 +1,16 @@
 #!/usr/bin/env bash
-# Prove the release the repository claims actually shipped, as an exit code.
-# Run by the `released` step of the release pipeline, after `publish`.
+# Prove the release actually shipped, as an exit code. Run by
+# scripts/release-ship.sh once the tag's own workflow is green, and runnable by
+# hand as `scripts/release-verify.sh <version>`.
 #
-# This step exists because a release is not `done` on anyone's say-so, agent
-# or script — it is done when the tag, the packages, the archives and the
-# published body actually exist. `publish` pushes the tag and watches its
-# workflow, but a workflow exit code is not the registry's own state, and a
-# release that recovered from a partial publish should not be trusted merely
-# because the recovery lane reported success. This script reads the public
-# record directly and is the real condition for `done`.
-#
-# Every check below reads the version from `origin/main`, so a `publish` that
-# pushed nothing at all leaves this script proving the release that shipped
-# last time and exiting 0 — which is how run `release-spoolway-3` reached
-# `done` with no tag, no packages and nothing published. So the run is
-# anchored to the candidate it was cut for: `.release-run/base-commit`,
-# written by scripts/release-anchor.sh, is the commit `main` stood at when
-# the worktree was cut. If `origin/main` is still sitting on it, no release
-# commit was pushed and there is nothing here to verify.
+# A workflow's exit code is not the registry's own state, so this reads the
+# public record directly: the tag, the packages, the archives, the published
+# body and a real install.
 #
 # Needs only git, curl, jq and gh for the checks that prove the release is
-# public. npm is used only for the one check that installs it — a release
-# lane's own machine is not required to have node or npm, so that check is
-# skipped with a note rather than failing the whole script when it is
-# missing. Nothing here authenticates to npm: every read is of a public
-# package, and the one install is of the just-published public wrapper.
+# public. npm is used only for the one check that installs it, and that check
+# is skipped with a note when npm is missing. Nothing here authenticates to
+# npm: every read is of a public package.
 set -euo pipefail
 
 say() { printf '%s\n' "$*" >&2; }
@@ -34,36 +20,8 @@ registry=https://registry.npmjs.org
 
 git fetch --quiet --tags --force origin
 
-# The frozen candidate, recorded by scripts/release-anchor.sh. Absent when the
-# anchor step never ran — a checkout that was not cut for a release — and then
-# there is no candidate to anchor to, so the unanchored behaviour is kept
-# rather than failing a release over a missing hint. Present but not a commit
-# is a different matter: something wrote it wrongly, and falling back would
-# silently reopen the hole above.
-anchor=""
-anchor_file=.release-run/base-commit
-if [ -e "$anchor_file" ]; then
-  [ -r "$anchor_file" ] || die "$anchor_file is not readable"
-  anchor="$(tr -d '[:space:]' < "$anchor_file")"
-  case "$anchor" in
-    "") die "$anchor_file is empty — scripts/release-anchor.sh did not finish; rerun it after deleting the file" ;;
-    *[!0-9a-f]*) die "$anchor_file holds '$anchor', which is not a commit" ;;
-  esac
-fi
-
-if [ -n "$anchor" ]; then
-  head="$(git rev-parse origin/main)"
-  # Prefix rather than equality: the file holds a full rev-parse when
-  # scripts/release-anchor.sh writes it, but an abbreviated one written by hand
-  # still names the same commit.
-  if [ "${head#"$anchor"}" != "$head" ]; then
-    die "origin/main is still at $head, the candidate this run was cut from — publish pushed no release commit, so there is nothing to verify"
-  fi
-  say "anchored to $anchor; origin/main has moved on to $head"
-fi
-
-version="$(git show origin/main:Cargo.toml | awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}')"
-[ -n "$version" ] || die "could not read the package version from origin/main:Cargo.toml"
+version="${1:-}"
+[ -n "$version" ] || die "usage: release-verify.sh <version>"
 tag="v$version"
 say "verifying $tag"
 
@@ -84,9 +42,8 @@ esac
 git merge-base --is-ancestor "$sha" origin/main \
   || die "the commit $tag names is not on origin/main"
 
-# 2. That release commit was not taken back out again. This is the exact
-#    wreckage the publisher leaves when a rehearsal goes red after the
-#    release commit is pushed: it reverts rather than force-pushing, so the
+# 2. That release commit was not taken back out again. `main` is never
+#    force-pushed, so a release backed out after it landed is a revert: the
 #    bump is gone from the tree while the commit stays in the history.
 # Matched with the same tolerance as the subject above, since GitHub names a
 # revert after the subject it reverts, pull request number and all.

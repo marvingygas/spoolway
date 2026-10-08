@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scaffold the fixture the nightly upgrade suite will start asking for, and
-# open the pull request that lands it. Run by the `fixture` step of the release
-# pipeline, after `released`.
+# open the pull request that lands it, with auto-merge on. Run by the `fixture`
+# step of the release pipeline, after `ship`.
 #
 # `scripts/e2e/suites/upgrade.sh` runs a project a *past* release actually
 # wrote through the new binary. It asks for `scripts/e2e/fixtures/<version>/`
@@ -16,9 +16,8 @@
 #
 # Scaffolded from a binary built at the tag, not from `npx spoolway@<version>`.
 # The tree is identical either way — same source, same commit — and the build
-# needs only what a release lane already has. scripts/release-verify.sh's own
-# header makes the rule: node and npm are not things a release lane's machine
-# is required to have.
+# needs only what a release lane already has: node and npm are not things a
+# release lane's machine is required to have.
 #
 # Idempotent. A fixture already on `main` is success, not a conflict, so a
 # re-run after a partial failure costs one `git cat-file`. The question is
@@ -28,11 +27,6 @@ set -euo pipefail
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "release-fixture: $*"; exit 1; }
-
-# Read before the `cd` into scratch below: the file is relative to the release
-# worktree this script is started in. scripts/release-run-name.sh names the
-# missing file when the anchor step has not run.
-run_name="$("$(dirname "${BASH_SOURCE[0]}")/release-run-name.sh")"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH=
@@ -47,18 +41,15 @@ trap cleanup EXIT
 
 git -C "$REPO" fetch --quiet --tags --force origin
 
-# The version that was just released, read off `origin/main` rather than the
-# lane's own checkout, for the same reason release-verify.sh does: the lane is
-# a worktree cut from the candidate, and the release commit landed on main
-# after it.
-version="$(git -C "$REPO" show origin/main:Cargo.toml \
-  | awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}')"
-[ -n "$version" ] || die "could not read the package version from origin/main:Cargo.toml"
+# The version that was just released, read from the release worktree's own
+# Cargo.toml, the same place scripts/release-ship.sh reads it.
+version="$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' "$REPO/Cargo.toml")"
+[ -n "$version" ] || die "could not read the package version from $REPO/Cargo.toml"
 tag="v$version"
 
 # Without the tag there is nothing to scaffold *from*, and no fixture is owed
-# yet either — the suite asks only once the tag is out. `released` runs before
-# this and asserts the tag, so reaching here without one means the pipeline was
+# yet either — the suite asks only once the tag is out. `ship` runs before
+# this and verifies the tag, so reaching here without one means the pipeline was
 # driven out of order rather than that the release is fine.
 git -C "$REPO" ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null \
   || die "$tag is not on origin — nothing to scaffold a fixture from"
@@ -148,10 +139,9 @@ nightly upgrade suite asks for it from the first bump past $version."
 # now says of the release commit: the required contexts are only recorded
 # against a check suite whose head branch is `main`, and `ci.yml` has no push
 # trigger, so a commit that is not yet on `main` can never have one. The
-# fixture lands the way every other change does, through a pull request. This
-# step opens it and stops; a person merges it, and scripts/release-await-merge.sh
-# waits on this exact `fixture/<run>` prefix for that merge.
-branch="fixture/$run_name"
+# fixture lands the way every other change does, through a pull request, which
+# GitHub merges by itself once its checks are green.
+branch="fixture/$tag"
 git -C "$SCRATCH/main" push --quiet --force-with-lease origin "HEAD:refs/heads/$branch" \
   || die "could not push $dest/ to $branch"
 
@@ -167,4 +157,7 @@ The nightly upgrade suite asks for \`$dest/\` from the first bump past $version,
     || die "could not open the pull request for $branch"
 fi
 
-say "release-fixture: $dest/ is on $branch, scaffolded by $tag's own binary — merge its pull request to land it"
+gh pr merge "$branch" --repo "$(git -C "$REPO" remote get-url origin)" --squash --auto \
+  || die "could not turn on auto-merge for $branch"
+
+say "release-fixture: $dest/ is on $branch, scaffolded by $tag's own binary, and merges once its checks are green"
