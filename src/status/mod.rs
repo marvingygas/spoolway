@@ -8897,10 +8897,11 @@ mod tests {
     }
 
     /// A reroute off a `p` park goes by `--stage` onto the picked step, and
-    /// closes the lane the park left standing on the step it left, so the
-    /// dispatcher does not read that lane as one still waiting on an answer.
+    /// leaves the lane the park left standing on the step it left. That lane
+    /// is a finished one now: it keeps its pane until the task is done, and
+    /// counts for nothing because the task is no longer on its step.
     #[test]
-    fn a_reroute_off_a_park_closes_the_parked_steps_lane() {
+    fn a_reroute_off_a_park_keeps_the_parked_steps_lane() {
         let (mut repo, _root_guard) = fixture("picker-reroute-park");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -8933,8 +8934,8 @@ mod tests {
         assert_eq!(task.stage(), "review");
         assert_eq!(task.front.parked_from, None);
         assert!(
-            !mux.list_lanes().unwrap().iter().any(|l| l.name == name),
-            "the parked step's lane is closed"
+            mux.list_lanes().unwrap().iter().any(|l| l.name == name),
+            "the parked step's lane keeps its pane"
         );
     }
 
