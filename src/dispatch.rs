@@ -92,7 +92,10 @@ const MAX_LAUNCHES: u32 = 1;
 ///
 /// Three, the same patience [`MAX_REMINDERS`] gives a silent lane: enough to
 /// rule out a one-off blip without leaving a broken tab retried forever.
-const MAX_LAUNCH_FAILURES: u32 = 3;
+///
+/// `pub(crate)` for the board, whose RECENT line reads a count at this
+/// ceiling as the launch failures that moved the task.
+pub(crate) const MAX_LAUNCH_FAILURES: u32 = 3;
 
 /// How many runs of one command step may be killed in a row, each without an
 /// exit code, before the task is blocked instead of running it again. See the
@@ -690,26 +693,65 @@ enum FallThrough {
 /// that dependency is archived, and `first:` has to keep seeing it: a task
 /// naming an archived dependency is still not the root of its chain.
 fn fall_through(step: &Step, task: &Task, dependents: usize) -> FallThrough {
-    let skipped_by_name = task.front.skip.iter().any(|named| named == &step.id);
-    let walked_past_as_not_last = step.last && dependents > 0;
-    let walked_past_as_not_first = step.first && !task.front.depends_on.is_empty();
-
-    if !skipped_by_name && !walked_past_as_not_last && !walked_past_as_not_first {
+    let Some(why) = walk_past(step, task, dependents) else {
         return FallThrough::Runs;
-    }
+    };
     match step.on_pass.clone() {
         None => FallThrough::Stuck,
-        Some(destination) => FallThrough::To {
-            destination,
-            why: if skipped_by_name {
-                "skip"
-            } else if walked_past_as_not_last {
-                "not last in its chain"
-            } else {
-                "not first in its chain"
-            },
-        },
+        Some(destination) => FallThrough::To { destination, why },
     }
+}
+
+/// Why `step` does not run for `task`, or `None` when it does — the three
+/// tests [`fall_through`]'s own doc explains. `dependents` is
+/// [`same_group_dependents`]'s count.
+fn walk_past(step: &Step, task: &Task, dependents: usize) -> Option<&'static str> {
+    if task.front.skip.iter().any(|named| named == &step.id) {
+        Some("skip")
+    } else if step.last && dependents > 0 {
+        Some("not last in its chain")
+    } else if step.first && !task.front.depends_on.is_empty() {
+        Some("not first in its chain")
+    } else {
+        None
+    }
+}
+
+/// How many open tasks above `task` in `graph` share its bare group — the
+/// only dependents that hold a `last:` step back (see [`fall_through`]).
+/// Bare groups are compared the same slug-stripped way
+/// `commands::queue::check_dependencies_set` does, so a task with no group
+/// (its own group of one) never matches a dependent that also has none.
+pub(crate) fn same_group_dependents(
+    repo: &Repo,
+    tasks: &[Task],
+    graph: &Graph,
+    task: &Task,
+) -> usize {
+    let Some(mine) = crate::commands::bare_group(repo, task) else {
+        return 0;
+    };
+    graph.dependents_where(task.id(), |dep| {
+        tasks
+            .iter()
+            .find(|t| t.id() == dep)
+            .and_then(|t| crate::commands::bare_group(repo, t))
+            .is_some_and(|theirs| theirs == mine)
+    })
+}
+
+/// Whether the dispatcher walks `task` past `step` without starting a lane,
+/// against the open queue `tasks` and its `graph` — the same question
+/// [`Dispatcher::collect_candidates`] asks through [`fall_through`], for a
+/// reader that needs only the answer.
+pub(crate) fn walks_past(
+    repo: &Repo,
+    tasks: &[Task],
+    graph: &Graph,
+    step: &Step,
+    task: &Task,
+) -> bool {
+    walk_past(step, task, same_group_dependents(repo, tasks, graph, task)).is_some()
 }
 
 impl<'a> Dispatcher<'a> {
@@ -1221,24 +1263,10 @@ impl<'a> Dispatcher<'a> {
 
                 // Only a dependent in this task's own group can hold its
                 // `last:` step back — see `fall_through`'s own doc, updated
-                // for groups that may now stack on one another. Bare
-                // groups, compared the same slug-stripped way
-                // `commands::queue::check_dependencies_set` already does,
-                // so a task with no group (its own group of one) never
-                // matches a dependent that also has none.
-                let mine = crate::commands::bare_group(self.repo, &tasks[index]);
-                let same_group_dependents = match &mine {
-                    Some(mine) => graph.dependents_where(tasks[index].id(), |dep| {
-                        tasks
-                            .iter()
-                            .find(|t| t.id() == dep)
-                            .and_then(|t| crate::commands::bare_group(self.repo, t))
-                            .is_some_and(|theirs| &theirs == mine)
-                    }),
-                    None => 0,
-                };
+                // for groups that may now stack on one another.
+                let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
 
-                match fall_through(&this_step, &tasks[index], same_group_dependents) {
+                match fall_through(&this_step, &tasks[index], dependents) {
                     FallThrough::Runs => {
                         step = Some(this_step);
                         break;

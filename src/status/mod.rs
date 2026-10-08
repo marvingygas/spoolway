@@ -39,9 +39,10 @@ pub use view::{banner, plain_table};
 // out a second time — see `screen::key_hint` — and bare `spoolway`'s tab strip
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
-    AMBER, RecentEvent, Style, Verdict, boxed, clamp_rows, footer, group_totals, masthead,
-    pane_height, pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel,
-    spool_frame, table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
+    AMBER, Cause, Move, RecentEvent, Reported, Style, boxed, clamp_rows, footer, group_totals,
+    masthead, pane_height, pane_width, pause_confirm_panel, restart_confirm_panel,
+    resume_picker_panel, spool_frame, table, ticker, unqueue_all_confirm_panel,
+    unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -2279,32 +2280,44 @@ fn build(
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
 
-    // The ticker sees the queue move: a stage that changed. A task entering
-    // the queue is already a new row on the table above, and one archiving
-    // just dims in place there — neither is a lane reporting anything, so
-    // neither earns a line here too.
+    // The ticker sees the queue move: a stage that changed, or a task that
+    // left the queue finished. A task entering the queue is already a new row
+    // on the table above, so it earns no line here too.
     let now = chrono::Local::now().format("%H:%M").to_string();
     let mut current: BTreeMap<String, String> = BTreeMap::new();
     for task in &tasks {
         current.insert(task.id().to_string(), task.stage().to_string());
     }
+    let queue = QueueView {
+        repo,
+        tasks: &tasks,
+        graph: &graph,
+        pipelines,
+    };
     for (id, stage) in &current {
-        // Names the step behind the move, not the one arrived at: `stage` is
-        // where the destination decides pass or fail, but `was` is the step
-        // that actually reported — see `arrival_event`. Clipped by `ticker`
-        // itself, the same as every other recent line, so a long id or step
+        // Names both the step the task left and the one it moved to — see
+        // `arrival_event`. Clipped by `ticker` itself, so a long id or step
         // name ends in `…` rather than wrapping.
         if let Some(was) = memory.stages.get(id)
             && was != stage
         {
             push_recent(
                 &mut memory.recent,
-                arrival_event(&now, id, was, stage, &tasks, pipelines),
+                arrival_event(&now, id, was, stage, &queue),
             );
             // Starts this row's grace clock: `build_rows`' state arm reads it
             // back to tell a task that just handed off, with no lane up for
             // it yet, apart from one genuinely out of workers.
             memory.arrived.insert(id.clone(), Instant::now());
+        }
+    }
+    // Only for a task the last reading had and this one does not, so the
+    // archive file is opened once per task that leaves, not once per reading.
+    for (id, was) in &memory.stages {
+        if !current.contains_key(id)
+            && let Some(event) = finished_event(&now, id, was, &queue)
+        {
+            push_recent(&mut memory.recent, event);
         }
     }
     memory.stages = current;
@@ -4150,97 +4163,486 @@ fn forget_dead_live_sessions(live: &HashSet<String>) {
     }
 }
 
-/// A RECENT event for a task that just moved from `was` to `stage`.
-///
-/// `paused` and `blocked` are not steps a pipeline declares — they are
-/// dispatcher states no `on_pass`/`on_fail` ever names, so the step worth
-/// naming and scoring is not `was` but the *real* step behind the wait:
-/// `paused_at`, the gate that passed; `parked_from`, the step a person
-/// interrupted; or `blocked_from`, the step the task stopped on and will
-/// return to — the three fields `spoolway resume` reads to tell one stop
-/// from the other. Everywhere else, `was` is the step that reported, and its
-/// own [`Step::destination`] against `stage` is what tells a pass from a
-/// fail — see [`Verdict`].
-///
-/// Both the step name and the position are worked out here, once, because
-/// they are facts about the pipeline the task is on at the moment it
-/// arrives; [`view::ticker`] only turns the result into a line, against the pane
-/// and the block around it.
-///
-/// [`Step::destination`]: crate::pipeline::Step::destination
-fn arrival_event(
-    now: &str,
-    id: &str,
-    was: &str,
-    stage: &str,
-    tasks: &[crate::task::Task],
-    pipelines: &Pipelines,
-) -> RecentEvent {
-    let task = tasks.iter().find(|t| t.id() == id);
-    let pipeline = task.and_then(|t| pipelines.for_task(t).ok());
+/// What a RECENT line reads a move against: this reading's queue, its
+/// dependency graph and the pipelines, exactly as [`build`] has them.
+struct QueueView<'a> {
+    repo: &'a Repo,
+    tasks: &'a [crate::task::Task],
+    graph: &'a Graph,
+    pipelines: &'a Pipelines,
+}
 
-    let (named, verdict) = match stage {
-        // `paused_at` names a gate; `parked_from` names a person's own
-        // interrupt (see the two fields' own comments in `src/task.rs`).
-        // Never both set, so falling back to the second whenever the first
-        // is absent picks up the step a `p`-park actually left — the common
-        // case now that `p` works from every state, not the rare one it was
-        // while `paused_at` alone was ever worth reading here.
-        crate::pipeline::PAUSED => (
-            task.and_then(|t| {
-                t.front
-                    .paused_at
-                    .clone()
-                    .or_else(|| t.front.parked_from.clone())
-            }),
-            Verdict::Paused,
-        ),
-        crate::pipeline::BLOCKED => (
-            task.and_then(|t| t.front.blocked_from.clone()),
-            Verdict::Blocked,
-        ),
-        _ => {
-            let verdict = match pipeline.and_then(|p| p.step(was)) {
-                Some(step) if step.destination(Outcome::Pass) == Some(stage) => Verdict::Pass,
-                Some(step) if step.destination(Outcome::Fail) == Some(stage) => Verdict::Fail,
-                _ => Verdict::None,
-            };
-            (Some(was.to_string()), verdict)
-        }
+/// A RECENT event for a task that just moved from `was` to `stage`, worded
+/// by [`view::sentence`] from what [`classify`] makes of the move.
+fn arrival_event(now: &str, id: &str, was: &str, stage: &str, queue: &QueueView) -> RecentEvent {
+    let change = match queue.tasks.iter().find(|t| t.id() == id) {
+        Some(task) => classify(was, stage, task, queue),
+        // `build` only asks about an id it read out of this same queue, so
+        // this is not reached; a move with no task file to read is named
+        // plainly rather than guessed at.
+        None => Move::Left {
+            from: was.to_string(),
+            to: stage.to_string(),
+        },
     };
-
-    // Falls back to the stage itself when there is no step to name — a
-    // task `p`-parked before it ever started is the real case that reaches
-    // this: it was on `queued`, which `park` never records into
-    // `parked_from` because no pipeline declares it as a step, so there is
-    // no step here to name or score, only the bare word `paused` and a `—`
-    // for its position.
-    let step = named.clone().unwrap_or_else(|| stage.to_string());
-    // The named step's own position in its pipeline's walk: its index plus
-    // one — the steps up to and including it — over that plus the length of
-    // `pass_chain` from it — the steps still ahead. `None` wherever the
-    // named step or its pipeline can't be resolved, which `ticker` draws as
-    // `—` rather than a wrong number.
-    let position = named.zip(pipeline).and_then(|(step, pipeline)| {
-        let numerator = pipeline.steps.iter().position(|s| s.id == step)? + 1;
-        let denominator = numerator + pipeline.pass_chain(&step).len();
-        Some((numerator, denominator))
-    });
-
     RecentEvent::Arrival {
         at: now.to_string(),
         id: id.to_string(),
-        step,
-        verdict,
-        position,
+        change,
     }
+}
+
+/// What a task did to move from `was` to `stage`, read off its task file and
+/// pipeline as they stand once the move has landed.
+///
+/// The move is classified here, once, because which kind it is depends on
+/// what the task file says at the moment the board sees it; [`view::sentence`]
+/// only words the result. A cause is read only from a field that names the
+/// step the move left, so a field left over from an earlier stop never names
+/// this one's. Where the file does not say which road was taken — a field the
+/// move itself cleared, or two roads that leave the same file behind — the
+/// sentence goes without a cause rather than guess one.
+///
+/// A step's own word is `last_report`, and only while it names `was`: the one
+/// slot is overwritten by every report, so a report naming any other step is
+/// an earlier step's, and says nothing about this move. A report from an
+/// earlier visit to `was` itself passes that test too. The file keeps no
+/// arrival time to tell the two apart, so a lane that never reports on a
+/// return visit is read by what it reported on the visit before.
+fn classify(was: &str, stage: &str, task: &crate::task::Task, queue: &QueueView) -> Move {
+    use crate::pipeline::{BLOCKED, PAUSED, QUEUED};
+
+    let pipeline = queue.pipelines.for_task(task).ok();
+    // An outcome this binary cannot parse is no word at all, and is read as
+    // the absent report it then is.
+    let report = task
+        .front
+        .last_report
+        .as_ref()
+        .filter(|r| r.step == was)
+        .and_then(|r| r.outcome.parse::<Outcome>().ok());
+
+    if stage == PAUSED {
+        return into_paused(was, task, pipeline, report);
+    }
+    let to = stage.to_string();
+    match (was, pipeline) {
+        (QUEUED, _) => Move::Started { to },
+        (PAUSED, _) => Move::Resumed { to },
+        (BLOCKED, _) => Move::Unblocked {
+            to,
+            by_lane: report == Some(Outcome::Pass),
+        },
+        (_, Some(pipeline)) => off_a_step(was, stage, task, pipeline, report, queue),
+        (_, None) => Move::Left {
+            from: was.to_string(),
+            to,
+        },
+    }
+}
+
+/// [`classify`] for a move into `paused`. The checks run in order, and the
+/// first that matches wins.
+fn into_paused(
+    was: &str,
+    task: &crate::task::Task,
+    pipeline: Option<&crate::pipeline::Pipeline>,
+    report: Option<Outcome>,
+) -> Move {
+    use crate::commands::Gate;
+    use crate::pipeline::{BLOCKED, DONE, PAUSED, QUEUED, STARTED};
+
+    let front = &task.front;
+    let stopped = |cause| Move::Stopped {
+        from: Some(was.to_string()),
+        cause,
+    };
+    // `was`'s report, worded as its own verb: a gate or a schedule holds
+    // whatever the step said, and a `--block` or `--fail` from `blocked`
+    // parks the task the same way.
+    let held = |cause: Option<Cause>| {
+        let (from, to) = (was.to_string(), PAUSED.to_string());
+        match report {
+            Some(Outcome::Pass) => Move::Passed { from, to, cause },
+            Some(Outcome::Fail) => Move::Failed { from, to, cause },
+            Some(Outcome::Block) => Move::Reported {
+                what: Reported::Block,
+                from,
+                to,
+                cause,
+            },
+            _ => stopped(cause),
+        }
+    };
+
+    // Nothing has started, so nothing but the dispatcher's own two checks
+    // before a start, and a person's park, stops a task here. `started` is
+    // a hook fired on the way out of `queued`, before the task moves.
+    if was == QUEUED {
+        let cause = if matches!(front.hook_paused.as_deref(), Some(QUEUED | STARTED)) {
+            Cause::HookFailed
+        } else if let Some(branch) = &front.missing_start_branch {
+            Cause::BranchMissing(branch.clone())
+        } else {
+            Cause::Manually
+        };
+        return Move::Stopped {
+            from: None,
+            cause: Some(cause),
+        };
+    }
+
+    // `done`'s own hook pauses a task already on `done`, so this move's own
+    // `set_stage` wrote `arrived_from: done` — whether or not a reading ever
+    // saw the task there.
+    if front.hook_paused.as_deref() == Some(DONE) && front.arrived_from.as_deref() == Some(DONE) {
+        return match finished_from(was, pipeline) {
+            Some(step) => Move::Passed {
+                from: step,
+                to: PAUSED.to_string(),
+                cause: Some(Cause::HookFailed),
+            },
+            None => stopped(Some(Cause::HookFailed)),
+        };
+    }
+
+    // A gate names the step it held in `paused_at` — except a pass from
+    // `blocked`, which names the step that pass stands in for instead.
+    if let Some(by) = front.paused_by.as_deref()
+        && (front.paused_at.as_deref() == Some(was)
+            || (was == BLOCKED && report == Some(Outcome::Pass)))
+    {
+        let cause = if by == Gate::Step.as_str() {
+            Some(Cause::Gate)
+        } else if by == Gate::Schedule.as_str() {
+            Some(Cause::Scheduled)
+        } else {
+            None
+        };
+        return held(cause);
+    }
+
+    if front.parked_from.as_deref() == Some(was) {
+        let cause = if front.parked_by_stop {
+            Cause::DispatchingStopped
+        } else if front.escalated {
+            Cause::Escalated
+        } else {
+            Cause::Manually
+        };
+        return stopped(Some(cause));
+    }
+
+    if was == BLOCKED {
+        return match report {
+            Some(Outcome::Pause) => Move::Reported {
+                what: Reported::Pause,
+                from: was.to_string(),
+                to: PAUSED.to_string(),
+                cause: None,
+            },
+            Some(Outcome::Block | Outcome::Fail) => held(None),
+            // `Dispatcher::escalate`'s road off `blocked`, which reports
+            // nothing and stamps the step to resume in `paused_at`.
+            _ if front.paused_at.is_some() => stopped(Some(Cause::Escalated)),
+            _ => stopped(None),
+        };
+    }
+
+    stopped(None)
+}
+
+/// [`classify`] for a move off `was`, a step of `pipeline` — or `done`, for a
+/// finished task held back from cleanup. The checks run in order, and the
+/// first that matches wins.
+fn off_a_step(
+    was: &str,
+    stage: &str,
+    task: &crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+    report: Option<Outcome>,
+    queue: &QueueView,
+) -> Move {
+    use crate::pipeline::{BLOCKED, DONE, StepKind};
+
+    let front = &task.front;
+    let (from, to) = (was.to_string(), stage.to_string());
+    let spent = |destination| loop_spent(pipeline, task, destination);
+    let into_blocked = stage == BLOCKED;
+
+    // Cleanup's own hold: the task reached `done`, and the move off it wrote
+    // `arrived_from: done`, whether or not a reading saw it there.
+    if into_blocked
+        && front.arrived_from.as_deref() == Some(DONE)
+        && let Some(step) = finished_from(was, Some(pipeline))
+    {
+        return Move::Passed {
+            from: step,
+            to,
+            cause: Some(Cause::UncommittedWork),
+        };
+    }
+    let Some(step) = pipeline.step(was) else {
+        return Move::Left { from, to };
+    };
+    let on_pass = step.destination(Outcome::Pass);
+    let on_fail = step.destination(Outcome::Fail);
+
+    // Ahead of the report: a launch refused this visit means no lane ran,
+    // so a report naming `was` can only be an earlier visit's. The count
+    // survives the move, since arriving clears only the step arrived at, and
+    // stands below the ceiling only while a launch is still being retried.
+    if let Some(&n) = front.launch_failures.get(was)
+        && n >= crate::dispatch::MAX_LAUNCH_FAILURES
+    {
+        return Move::CouldNotLaunch {
+            from,
+            to,
+            cause: Some(Cause::Attempts(n)),
+        };
+    }
+
+    match report {
+        Some(Outcome::Pass) => {
+            return if on_pass == Some(stage) {
+                Move::Passed {
+                    from,
+                    to,
+                    cause: None,
+                }
+            } else if into_blocked && on_pass == Some(DONE) {
+                // `report`'s own hold, for an agent step that routes
+                // straight to `done`.
+                Move::Passed {
+                    from,
+                    to,
+                    cause: Some(Cause::UncommittedWork),
+                }
+            } else if into_blocked && let Some(limit) = spent(on_pass) {
+                Move::Passed {
+                    from,
+                    to,
+                    cause: Some(Cause::LoopLimit(limit)),
+                }
+            } else {
+                Move::Left { from, to }
+            };
+        }
+        Some(Outcome::Fail) => {
+            return if on_fail == Some(stage) {
+                Move::Failed {
+                    from,
+                    to,
+                    cause: None,
+                }
+            } else if into_blocked && let Some(limit) = spent(on_fail) {
+                Move::Failed {
+                    from,
+                    to,
+                    cause: Some(Cause::LoopLimit(limit)),
+                }
+            } else {
+                Move::Left { from, to }
+            };
+        }
+        Some(Outcome::Block) if into_blocked => {
+            return Move::Reported {
+                what: Reported::Block,
+                from,
+                to,
+                cause: None,
+            };
+        }
+        Some(_) => return Move::Left { from, to },
+        None => {}
+    }
+
+    // No report from `was`. The dispatcher's own walk-past first, asked of
+    // the dispatcher itself, since a step walked past follows its `on_pass`
+    // exactly as a pass does.
+    if crate::dispatch::walks_past(queue.repo, queue.tasks, queue.graph, step, task) {
+        return if on_pass == Some(stage) {
+            Move::Skipped {
+                from,
+                to,
+                cause: None,
+            }
+        } else if into_blocked && let Some(limit) = spent(on_pass) {
+            Move::Skipped {
+                from,
+                to,
+                cause: Some(Cause::LoopLimit(limit)),
+            }
+        } else {
+            Move::Left { from, to }
+        };
+    }
+
+    // A background run the task had already walked past, failing into its
+    // own `on_fail` — named only when exactly one such step routes there,
+    // and only when none of `was`'s own routes could have brought the task
+    // here instead: the two roads leave the same file behind.
+    let in_background =
+        |s: &&crate::pipeline::Step| s.background && s.id != was && s.kind() == StepKind::Command;
+    let mut background = pipeline
+        .steps
+        .iter()
+        .filter(in_background)
+        .filter(|s| s.on_fail.as_deref() == Some(stage));
+    if let (Some(run), None) = (background.next(), background.next()) {
+        let own = on_pass == Some(stage) || on_fail == Some(stage) || into_blocked;
+        return match own {
+            true => Move::Left { from, to },
+            false => Move::FailedInBackground {
+                from: run.id.clone(),
+                to,
+            },
+        };
+    }
+    // `reap_stale_runs` sends a background failure through
+    // `apply_loop_budget` too, so one whose `on_fail` has spent its `loop:`
+    // lands on `blocked` instead — the same file a lane dead at launch or a
+    // step's own spent loop leaves. Every cause below would be a guess.
+    if into_blocked
+        && pipeline
+            .steps
+            .iter()
+            .filter(in_background)
+            .any(|s| spent(s.on_fail.as_deref()).is_some())
+    {
+        return Move::Left { from, to };
+    }
+
+    // A command step never reports: its exit code routes it, and the route
+    // it took is the only record of which way that went.
+    if step.kind() == StepKind::Command {
+        if on_pass == Some(stage) {
+            return Move::Passed {
+                from,
+                to,
+                cause: None,
+            };
+        }
+        if on_fail == Some(stage) {
+            return Move::Failed {
+                from,
+                to,
+                cause: None,
+            };
+        }
+        return match (into_blocked, spent(on_pass), spent(on_fail)) {
+            (true, Some(limit), None) => Move::Passed {
+                from,
+                to,
+                cause: Some(Cause::LoopLimit(limit)),
+            },
+            (true, None, Some(limit)) => Move::Failed {
+                from,
+                to,
+                cause: Some(Cause::LoopLimit(limit)),
+            },
+            _ => Move::Left { from, to },
+        };
+    }
+
+    // An agent step that sent no report: a pass needs one, so a move down
+    // its `on_pass` is a step walked past.
+    if on_pass == Some(stage) {
+        return Move::Skipped {
+            from,
+            to,
+            cause: None,
+        };
+    }
+    // A walk-past into a spent loop and a lane that never got going leave
+    // the same file behind.
+    if into_blocked && spent(on_pass).is_some() {
+        return Move::Left { from, to };
+    }
+    // Otherwise the lane never got going. Two roads lead here, and only one
+    // leaves its mark: a pane that never reached its prompt clears its own
+    // `launch_busy_since` on the way out, then takes `on_fail` as a refused
+    // launch does; a lane launched and gone without a word is escalated
+    // straight to `blocked` whatever `on_fail` says. So `blocked` names the
+    // second road only where the first would have gone somewhere else.
+    if on_fail == Some(stage) || into_blocked {
+        let died =
+            into_blocked && on_fail.is_some_and(|step| step != BLOCKED) && spent(on_fail).is_none();
+        return Move::CouldNotLaunch {
+            from,
+            to,
+            cause: died.then_some(Cause::LaneDiedAtLaunch),
+        };
+    }
+    Move::Left { from, to }
+}
+
+/// `destination`, when it is a step whose `loop:` this task has already
+/// spent — the step `commands::apply_loop_budget` refused a move to. The
+/// refused move never arrived, so its count still stands where the refusal
+/// found it.
+fn loop_spent(
+    pipeline: &crate::pipeline::Pipeline,
+    task: &crate::task::Task,
+    destination: Option<&str>,
+) -> Option<String> {
+    let destination = destination?;
+    let limit = pipeline.step(destination)?.arrival_limit()?;
+    (task.rounds_at(destination) >= limit).then(|| destination.to_string())
+}
+
+/// The step whose pass took the task to `done`, for a stop that happened
+/// once it got there: `was` itself when its own `on_pass` is `done`, or, for
+/// a task a reading already saw on `done`, the one step of `pipeline` whose
+/// `on_pass` is. `None` when there is no such step, or more than one.
+fn finished_from(was: &str, pipeline: Option<&crate::pipeline::Pipeline>) -> Option<String> {
+    use crate::pipeline::DONE;
+
+    let pipeline = pipeline?;
+    if was != DONE {
+        return (pipeline.step(was)?.on_pass.as_deref() == Some(DONE)).then(|| was.to_string());
+    }
+    let mut finishers = pipeline
+        .steps
+        .iter()
+        .filter(|s| s.on_pass.as_deref() == Some(DONE));
+    match (finishers.next(), finishers.next()) {
+        (Some(step), None) => Some(step.id.clone()),
+        _ => None,
+    }
+}
+
+/// A RECENT event for a task the last reading had and this one does not, or
+/// `None` when its leaving is no news.
+///
+/// A task leaves the queue three ways: it finishes and is archived, a person
+/// takes it out with `u`, or its file is deleted. Only the first earns a
+/// line, and only when the archive holds the task with stage `done` — a task
+/// archived on any other stage did not finish. `was` is the step the board
+/// last saw it on, classified against the archived file the way any other
+/// move is. One the board already saw on `done` has had its line, and would
+/// otherwise read as having passed `done` itself.
+fn finished_event(now: &str, id: &str, was: &str, queue: &QueueView) -> Option<RecentEvent> {
+    use crate::pipeline::DONE;
+
+    if was == DONE {
+        return None;
+    }
+    let archived =
+        crate::task::Task::load(&queue.repo.archive_dir().join(format!("{id}.md"))).ok()?;
+    (archived.stage() == DONE).then(|| RecentEvent::Arrival {
+        at: now.to_string(),
+        id: id.to_string(),
+        change: classify(was, DONE, &archived, queue),
+    })
 }
 
 /// Pushes one event onto the ticker's memory, keeping it to [`RECENT`] long.
 ///
-/// An arrival first drops any earlier arrival for the same task already
-/// sitting in `recent`: two moves of the same task inside the window are one
-/// row, not two, and the later move is the one worth a task's single slot.
+/// Kept oldest first; [`view::ticker`] draws it newest on top. An arrival
+/// first drops any earlier arrival for the same task already sitting in
+/// `recent`: two moves of the same task inside the window are one row, not
+/// two, and the later move is the one worth a task's single slot.
 /// Dropping it before the ring-buffer trim below also means a coalesced
 /// arrival never itself evicts another task's news just because a task
 /// bounced between steps.
@@ -4298,7 +4700,7 @@ pub fn run_start(repo: &Repo) -> Option<String> {
 mod tests {
     use super::*;
     use crate::status::testutil::*;
-    use crate::status::view::{GUTTER, OSC8, RecentEvent, ST, Verdict, ticker};
+    use crate::status::view::{GUTTER, Move, OSC8, RecentEvent, ST, ticker};
 
     // ---- Reader: coalescing and shutdown ----
 
@@ -6183,7 +6585,7 @@ mod tests {
 
     /// Keeps only [`RECENT`] of them, oldest first out — each its own task, so
     /// this is the plain ring-buffer trim rather than the coalescing
-    /// [`two_moves_of_the_same_task_coalesce_into_one_row_at_the_bottom`]
+    /// [`two_moves_of_the_same_task_coalesce_into_one_row_on_top`]
     /// covers.
     #[test]
     fn the_ticker_keeps_only_the_newest_transitions() {
@@ -6194,37 +6596,37 @@ mod tests {
                 RecentEvent::Arrival {
                     at: "10:00".into(),
                     id: format!("task-{i}"),
-                    step: format!("line {i}"),
-                    verdict: Verdict::None,
-                    position: None,
+                    change: Move::Started {
+                        to: format!("line {i}"),
+                    },
                 },
             );
         }
         assert_eq!(recent.len(), RECENT);
         assert!(matches!(
             recent.front().unwrap(),
-            RecentEvent::Arrival { step, .. } if step == "line 4"
+            RecentEvent::Arrival { change: Move::Started { to }, .. } if to == "line 4"
         ));
         assert!(matches!(
             recent.back().unwrap(),
-            RecentEvent::Arrival { step, .. } if step == "line 9"
+            RecentEvent::Arrival { change: Move::Started { to }, .. } if to == "line 9"
         ));
     }
 
     /// Two moves of the same task inside the window are one row, not two: the
-    /// later move replaces the earlier one, and it sits at the bottom of the
-    /// block — the newest news, where a reader's eye already goes.
+    /// later move replaces the earlier one, and it sits on top of the block —
+    /// the newest news, drawn first.
     #[test]
-    fn two_moves_of_the_same_task_coalesce_into_one_row_at_the_bottom() {
+    fn two_moves_of_the_same_task_coalesce_into_one_row_on_top() {
         let mut recent = VecDeque::new();
         push_recent(
             &mut recent,
             RecentEvent::Arrival {
                 at: "14:20".into(),
                 id: "other-task".into(),
-                step: "review".into(),
-                verdict: Verdict::None,
-                position: None,
+                change: Move::Started {
+                    to: "review".into(),
+                },
             },
         );
         push_recent(
@@ -6232,9 +6634,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:21".into(),
                 id: "gate-board".into(),
-                step: "task".into(),
-                verdict: Verdict::None,
-                position: None,
+                change: Move::Started { to: "task".into() },
             },
         );
         push_recent(
@@ -6242,9 +6642,9 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:22".into(),
                 id: "gate-board".into(),
-                step: "checks".into(),
-                verdict: Verdict::None,
-                position: None,
+                change: Move::Started {
+                    to: "checks".into(),
+                },
             },
         );
 
@@ -6267,19 +6667,16 @@ mod tests {
             .lines()
             .position(|l| l.contains("gate-board"))
             .unwrap();
-        assert!(
-            gate_row > other_row,
-            "the later move sits at the bottom: {block}"
-        );
+        assert!(gate_row < other_row, "the later move sits on top: {block}");
     }
 
-    /// Neither end of a task's life on the board is a step change: entering
-    /// the queue is already a new row on the table, and archiving just dims
-    /// one in place there, so pushing either into the ticker too would only
-    /// repeat what the table already says. A real step change still reaches
-    /// it, so this is not just the ticker going silent altogether.
+    /// Entering the queue is not a step change: it is already a new row on
+    /// the table, so a line in the ticker too would only repeat it. Nor is a
+    /// task file simply taken away, with nothing in the archive to say it
+    /// finished. A real step change still reaches the ticker, so this is not
+    /// just the ticker going silent altogether.
     #[test]
-    fn a_task_entering_the_queue_or_archiving_pushes_no_ticker_entry() {
+    fn a_task_entering_the_queue_or_vanishing_pushes_no_ticker_entry() {
         let (repo, _root_guard) = fixture("queue-and-archive-silent");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "steady", &[], Some("implement"), Some("steady"));
@@ -6337,9 +6734,8 @@ mod tests {
             "a real step change still reaches the ticker"
         );
 
-        // "newcomer" archives: its task file leaves the queue directory the
-        // same way the archive step leaves it, taken out from under the
-        // board rather than moved through a stage this board would see.
+        // "newcomer"'s file is deleted: it leaves the queue with no archived
+        // copy behind it.
         std::fs::remove_file(repo.queue_dir().join("newcomer.md")).unwrap();
         let before = board.recent.len();
         board
@@ -6355,8 +6751,832 @@ mod tests {
         assert_eq!(
             board.recent.len(),
             before,
-            "a task archiving pushes no ticker entry"
+            "a task file deleted with no archived copy pushes no ticker entry"
         );
+    }
+
+    /// One reading of `board` over `repo`, for the tests below that drive a
+    /// task through its moves and read what the ticker kept.
+    fn read_once(board: &mut Board, repo: &Repo, pipelines: &Pipelines) {
+        board
+            .frame(
+                repo,
+                pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
+    }
+
+    /// The ticker's lines as drawn, newest first, with no colour in them.
+    fn drawn(board: &Board) -> String {
+        strip(&ticker(&board.recent, 120, 10))
+    }
+
+    /// `task`'s file moved out of the queue into the archive on `stage`, the
+    /// same rename the teardown makes once a task is finished.
+    fn archive_on(repo: &Repo, id: &str, stage: &str) {
+        let mut task = repo.task(id).unwrap();
+        task.set_stage(stage, None);
+        task.save().unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(
+            repo.queue_dir().join(format!("{id}.md")),
+            repo.archive_dir().join(format!("{id}.md")),
+        )
+        .unwrap();
+    }
+
+    /// A task that leaves the queue into the archive as `done` gets a line
+    /// naming the step the board last saw it on, even when the board never
+    /// saw it reach `done` itself.
+    #[test]
+    fn a_task_archived_as_done_reads_passed_its_last_step_moved_to_done() {
+        let (repo, _root_guard) = fixture("recent-finished");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], Some("handover"));
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        archive_on(&repo, "board-tabs", crate::pipeline::DONE);
+        read_once(&mut board, &repo, &pipelines);
+
+        let block = drawn(&board);
+        assert!(
+            block.contains("board-tabs   passed handover, moved to done"),
+            "{block}"
+        );
+    }
+
+    /// A finished task's move onto `done` is drawn once. The board that saw
+    /// it on `done` before it was archived has already said so, and the
+    /// archived copy must not add `passed done`.
+    #[test]
+    fn a_task_seen_on_done_before_archiving_keeps_its_one_line() {
+        let (repo, _root_guard) = fixture("recent-finished-seen-done");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], Some("handover"));
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        let mut task = repo.task("board-tabs").unwrap();
+        task.set_stage(crate::pipeline::DONE, None);
+        task.save().unwrap();
+        read_once(&mut board, &repo, &pipelines);
+        archive_on(&repo, "board-tabs", crate::pipeline::DONE);
+        read_once(&mut board, &repo, &pipelines);
+
+        let block = drawn(&board);
+        assert!(
+            block.contains("board-tabs   passed handover, moved to done"),
+            "{block}"
+        );
+        assert!(!block.contains("passed done"), "{block}");
+    }
+
+    /// A task taken out with `u` goes back to the pending directory, not the
+    /// archive, so it did not finish and gets no line.
+    #[test]
+    fn a_task_taken_out_with_u_gets_no_line() {
+        let (repo, _root_guard) = fixture("recent-unqueued");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], None);
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        unqueue_task(&repo, "board-tabs").unwrap();
+        assert!(!repo.queue_dir().join("board-tabs.md").exists());
+        read_once(&mut board, &repo, &pipelines);
+
+        assert!(board.recent.is_empty(), "{}", drawn(&board));
+    }
+
+    /// The archive holding a task is not enough: one archived on any stage
+    /// but `done` did not finish, and gets no line.
+    #[test]
+    fn a_task_archived_on_another_stage_gets_no_line() {
+        let (repo, _root_guard) = fixture("recent-archived-blocked");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], Some("handover"));
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        archive_on(&repo, "board-tabs", crate::pipeline::BLOCKED);
+        read_once(&mut board, &repo, &pipelines);
+
+        assert!(board.recent.is_empty(), "{}", drawn(&board));
+    }
+
+    // ---- RECENT: the sentence each road off a step reads back as ----
+
+    /// A pipeline with one of every road a RECENT sentence tells apart: an
+    /// agent step with no `on_fail` (`implement`) and one with
+    /// (`review`), three `loop:` budgets (`review`, `fix` and `e2e`, the
+    /// background step's `on_fail`), a command step
+    /// (`test`), a background one (`suite`), a gated step (`approve`), a
+    /// `last:` step (`handover`) and a staffed `blocked`.
+    const ROADS: &str = "steps:\n  \
+        - id: implement\n    agent: pi\n    on_pass: review\n  \
+        - id: review\n    agent: pi\n    loop: 2\n    on_pass: test\n    on_fail: fix\n  \
+        - id: fix\n    agent: pi\n    loop: 1\n    on_pass: review\n  \
+        - id: test\n    run: 'true'\n    on_pass: suite\n    on_fail: fix\n  \
+        - id: suite\n    run: 'true'\n    background: true\n    on_pass: approve\n    on_fail: e2e\n  \
+        - id: e2e\n    agent: pi\n    loop: 1\n    on_pass: approve\n  \
+        - id: approve\n    agent: pi\n    gate: true\n    on_pass: handover\n  \
+        - id: handover\n    run: 'true'\n    last: true\n    on_pass: done\n  \
+        - id: blocked\n    agent: pi\n    session: true\n";
+
+    fn roads() -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", ROADS).unwrap(),
+        );
+        pipelines
+    }
+
+    /// Walk `task` onto each of `steps` in turn, banking an arrival at every
+    /// one the way any route does — the history a `loop:` budget counts.
+    fn walk(task: &mut crate::task::Task, steps: &[&str]) {
+        for step in steps {
+            task.set_stage(step, None);
+        }
+    }
+
+    /// The RECENT sentence for task `t`'s next move: `setup` writes the task
+    /// as it stands before the move, a reading sees it there, `road` moves
+    /// it, and a second reading sees where it went — the board's own two
+    /// readings, and nothing in between.
+    fn line_after(
+        name: &str,
+        stage: &str,
+        setup: impl FnOnce(&mut crate::task::Task),
+        road: impl FnOnce(&Repo, &Pipelines),
+    ) -> String {
+        let (repo, _root_guard) = fixture(name);
+        let pipelines = roads();
+        add(&repo, "t", &[], None);
+        let mut task = repo.task("t").unwrap();
+        if stage != crate::pipeline::QUEUED {
+            task.set_stage(stage, None);
+        }
+        setup(&mut task);
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        road(&repo, &pipelines);
+        read_once(&mut board, &repo, &pipelines);
+        let RecentEvent::Arrival { change, .. } = board.recent.back().expect("the move is seen");
+        view::sentence(change)
+    }
+
+    /// A lane on `t` reporting `outcome`: routed by `commands::route`, the
+    /// decision `spoolway report` makes, then written the way `report`
+    /// writes it — the report first, then the arrival. `report` itself is
+    /// not called, since it commits whatever worktree the lane environment
+    /// of the process running these tests names.
+    fn lane_reports(repo: &Repo, pipelines: &Pipelines, outcome: Outcome) {
+        let mut task = repo.task("t").unwrap();
+        let current = task.stage().to_string();
+        let pipeline = pipelines.for_task(&task).unwrap().clone();
+        let routed =
+            crate::commands::route(&mut task, &pipeline, &current, outcome, false, None).unwrap();
+        task.front.last_report = Some(crate::task::LastReport {
+            step: current,
+            outcome: outcome.as_str().to_string(),
+            at: chrono::Utc::now().timestamp(),
+            blocked: routed.destination == crate::pipeline::BLOCKED,
+        });
+        task.set_stage(&routed.destination, routed.pause_note.as_deref());
+        task.save().unwrap();
+    }
+
+    /// `t` moved to `stage` with no report: a command step's exit, or one of
+    /// the dispatcher's own roads, which write nothing more than this.
+    fn moved(repo: &Repo, stage: &str) {
+        let mut task = repo.task("t").unwrap();
+        task.set_stage(stage, None);
+        task.save().unwrap();
+    }
+
+    fn reported(task: &mut crate::task::Task, step: &str, outcome: Outcome) {
+        task.front.last_report = Some(crate::task::LastReport {
+            step: step.into(),
+            outcome: outcome.as_str().into(),
+            at: 1,
+            blocked: false,
+        });
+    }
+
+    #[test]
+    fn leaving_queued_reads_started() {
+        let line = line_after(
+            "road-started",
+            "queued",
+            |_| {},
+            |repo, _| moved(repo, "implement"),
+        );
+        assert_eq!(line, "started, moved to implement");
+    }
+
+    #[test]
+    fn a_reported_pass_onto_on_pass_reads_passed() {
+        let line = line_after(
+            "road-passed",
+            "implement",
+            |_| {},
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Pass),
+        );
+        assert_eq!(line, "passed implement, moved to review");
+    }
+
+    #[test]
+    fn a_reported_failure_onto_on_fail_reads_failed() {
+        let line = line_after(
+            "road-failed",
+            "review",
+            |_| {},
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Fail),
+        );
+        assert_eq!(line, "failed review, moved to fix");
+    }
+
+    /// `implement` declares no `on_fail`, so its failure lands on `blocked`.
+    #[test]
+    fn a_reported_failure_with_no_on_fail_reads_failed_into_blocked() {
+        let line = line_after(
+            "road-failed-blocked",
+            "implement",
+            |_| {},
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Fail),
+        );
+        assert_eq!(line, "failed implement, moved to blocked");
+    }
+
+    /// A command step never reports: its exit routes it, so a move down its
+    /// `on_pass` is a pass, never a skip.
+    #[test]
+    fn a_command_step_exiting_onto_on_pass_reads_passed() {
+        let line = line_after(
+            "road-command-pass",
+            "test",
+            |_| {},
+            |repo, _| moved(repo, "suite"),
+        );
+        assert_eq!(line, "passed test, moved to suite");
+    }
+
+    /// The report left standing names `implement`, two steps back; `e2e`
+    /// itself sent none since the task arrived there, so its move down its
+    /// own `on_pass` is not a pass.
+    #[test]
+    fn an_agent_step_with_no_report_since_it_arrived_reads_skipped() {
+        let line = line_after(
+            "road-skipped",
+            "e2e",
+            |task| reported(task, "implement", Outcome::Pass),
+            |repo, _| moved(repo, "approve"),
+        );
+        assert_eq!(line, "skipped e2e, moved to approve");
+    }
+
+    /// The task's own `skip:`, walked past the way `dispatch::fall_through`
+    /// does — through `apply_loop_budget`, then down `on_pass`.
+    #[test]
+    fn a_step_named_in_skip_reads_skipped() {
+        let line = line_after(
+            "road-skip-named",
+            "test",
+            |task| task.front.skip = vec!["test".into()],
+            |repo, pipelines| {
+                let mut task = repo.task("t").unwrap();
+                let pipeline = pipelines.for_task(&task).unwrap().clone();
+                let to = crate::commands::apply_loop_budget(
+                    &pipeline,
+                    &mut task,
+                    "test",
+                    "suite".into(),
+                    false,
+                );
+                task.set_stage(&to, None);
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "skipped test, moved to suite");
+    }
+
+    /// A `last:` step is walked past while a task in its own group still
+    /// depends on this one — `handover` is a command step, so without the
+    /// walk-past it would read as passed.
+    #[test]
+    fn a_last_step_walked_past_for_a_dependent_reads_skipped() {
+        let (repo, _root_guard) = fixture("road-skip-last");
+        let pipelines = roads();
+        add(&repo, "t", &[], Some("handover"));
+        add(&repo, "after", &["t"], None);
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        moved(&repo, crate::pipeline::DONE);
+        read_once(&mut board, &repo, &pipelines);
+        let line = board
+            .recent
+            .iter()
+            .find_map(|RecentEvent::Arrival { id, change, .. }| {
+                (id == "t").then(|| view::sentence(change))
+            })
+            .expect("the move is seen");
+        assert_eq!(line, "skipped handover, moved to done");
+    }
+
+    #[test]
+    fn a_pass_held_by_the_steps_gate_reads_gate() {
+        let line = line_after(
+            "road-gate",
+            "approve",
+            |_| {},
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Pass),
+        );
+        assert_eq!(line, "passed approve, moved to paused (gate)");
+    }
+
+    #[test]
+    fn a_pass_held_by_the_tasks_own_schedule_reads_scheduled() {
+        let line = line_after(
+            "road-scheduled",
+            "implement",
+            |task| task.front.gate_at = Some("implement".into()),
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Pass),
+        );
+        assert_eq!(line, "passed implement, moved to paused (scheduled)");
+    }
+
+    /// `done`'s hook, as `Dispatcher::pause_for_hook_failure` writes it, on
+    /// a task the board last saw on `handover` and never saw on `done`.
+    #[test]
+    fn a_failed_done_hook_reads_hook_failed() {
+        let line = line_after(
+            "road-hook-done",
+            "handover",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.set_stage(crate::pipeline::DONE, None);
+                task.front.hook_paused = Some(crate::pipeline::DONE.into());
+                task.set_stage(
+                    crate::pipeline::PAUSED,
+                    Some("issue_tracking hook exited 1"),
+                );
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed handover, moved to paused (hook failed)");
+    }
+
+    /// The same pause, seen from `done`: the step that passed is the one
+    /// step whose `on_pass` is `done`.
+    #[test]
+    fn a_failed_done_hook_seen_from_done_names_the_step_that_passed() {
+        let line = line_after(
+            "road-hook-done-seen",
+            crate::pipeline::DONE,
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.front.hook_paused = Some(crate::pipeline::DONE.into());
+                task.set_stage(
+                    crate::pipeline::PAUSED,
+                    Some("issue_tracking hook exited 1"),
+                );
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed handover, moved to paused (hook failed)");
+    }
+
+    #[test]
+    fn a_failed_queued_hook_reads_hook_failed_before_starting() {
+        let line = line_after(
+            "road-hook-queued",
+            "queued",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.front.hook_paused = Some(crate::pipeline::QUEUED.into());
+                task.set_stage(
+                    crate::pipeline::PAUSED,
+                    Some("issue_tracking hook exited 1"),
+                );
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(
+            line,
+            "stopped before starting, moved to paused (hook failed)"
+        );
+    }
+
+    /// The board's `p`. An Escape in the pane parks through the same
+    /// `park`, with the same `false`.
+    #[test]
+    fn a_park_from_the_board_reads_manually() {
+        let line = line_after(
+            "road-manual",
+            "implement",
+            |_| {},
+            |repo, _| park_under_lock(repo, "t", false).unwrap(),
+        );
+        assert_eq!(line, "stopped on implement, moved to paused (manually)");
+    }
+
+    #[test]
+    fn a_park_from_queued_reads_manually_before_starting() {
+        let line = line_after(
+            "road-manual-queued",
+            "queued",
+            |_| {},
+            |repo, _| park_under_lock(repo, "t", false).unwrap(),
+        );
+        assert_eq!(line, "stopped before starting, moved to paused (manually)");
+    }
+
+    #[test]
+    fn a_park_by_the_stop_popup_reads_dispatching_stopped() {
+        let line = line_after(
+            "road-stop",
+            "implement",
+            |_| {},
+            |repo, _| park_under_lock(repo, "t", true).unwrap(),
+        );
+        assert_eq!(
+            line,
+            "stopped on implement, moved to paused (dispatching stopped)"
+        );
+    }
+
+    /// `Dispatcher::tear_down_and_escalate`'s own park.
+    #[test]
+    fn a_lane_the_dispatcher_gave_up_on_reads_escalated() {
+        let line = line_after(
+            "road-escalated",
+            "implement",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                park(&mut task, "`implement` went quiet", true);
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "stopped on implement, moved to paused (escalated)");
+    }
+
+    /// As `Dispatcher::pause_for_missing_start_branch` writes it.
+    #[test]
+    fn a_missing_start_branch_reads_branch_missing() {
+        let line = line_after(
+            "road-branch",
+            "queued",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.front.missing_start_branch = Some("feat/x".into());
+                task.set_stage(
+                    crate::pipeline::PAUSED,
+                    Some("start branch `feat/x` does not exist"),
+                );
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(
+            line,
+            "stopped before starting, moved to paused (branch feat/x missing)"
+        );
+    }
+
+    #[test]
+    fn a_pause_reported_from_blocked_reads_reported() {
+        let line = line_after(
+            "road-blocked-pause",
+            "blocked",
+            |task| task.front.blocked_from = Some("review".into()),
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Pause),
+        );
+        assert_eq!(line, "reported a pause on blocked, moved to paused");
+    }
+
+    /// `Dispatcher::escalate` on a `blocked` lane that could not be started:
+    /// no report, and the step to resume stamped in `paused_at`.
+    #[test]
+    fn a_blocked_lane_escalated_with_no_report_reads_escalated() {
+        let line = line_after(
+            "road-blocked-escalated",
+            "blocked",
+            |task| task.front.blocked_from = Some("review".into()),
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.reset_loop_counts();
+                task.front.paused_at = task.front.blocked_from.clone();
+                task.set_stage(crate::pipeline::PAUSED, Some("could not start `blocked`"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "stopped on blocked, moved to paused (escalated)");
+    }
+
+    #[test]
+    fn a_block_reported_by_a_lane_reads_reported() {
+        let line = line_after(
+            "road-block",
+            "review",
+            |_| {},
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Block),
+        );
+        assert_eq!(line, "reported a block on review, moved to blocked");
+    }
+
+    /// `fix` has `loop: 1` and has had its one arrival, so `review`'s
+    /// failure is refused by it and carried on to `blocked`.
+    #[test]
+    fn a_failure_refused_by_a_spent_loop_reads_loop_limit() {
+        let line = line_after(
+            "road-loop-fail",
+            "review",
+            |task| walk(task, &["fix", "review"]),
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Fail),
+        );
+        assert_eq!(line, "failed review, moved to blocked (loop limit on fix)");
+    }
+
+    /// `review` has `loop: 2` and has had both, so `fix`'s pass is refused.
+    #[test]
+    fn a_pass_refused_by_a_spent_loop_reads_loop_limit() {
+        let line = line_after(
+            "road-loop-pass",
+            "review",
+            |task| walk(task, &["fix", "review", "fix"]),
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Pass),
+        );
+        assert_eq!(line, "passed fix, moved to blocked (loop limit on review)");
+    }
+
+    /// Three refused launches, counted by `note_launch_failure` and routed
+    /// by `handle_boot_failure`. Arriving at `blocked` clears only
+    /// `blocked`'s own count, so `implement`'s survives the move.
+    #[test]
+    fn a_launch_refused_three_times_reads_attempts() {
+        let line = line_after(
+            "road-launch",
+            "implement",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                for _ in 0..crate::dispatch::MAX_LAUNCH_FAILURES {
+                    task.bump_launch_failures("implement");
+                }
+                crate::commands::set_blocked_from(&mut task, "implement");
+                task.set_stage(crate::pipeline::BLOCKED, None);
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(
+            line,
+            "could not launch implement, moved to blocked (3 attempts)"
+        );
+    }
+
+    /// The cause is dropped here: `note_pane_busy` clears the step's
+    /// `launch_busy_since` before it routes the task down `on_fail`, so
+    /// nothing in the file says the pane never got ready. The sentence still
+    /// says the lane never launched, since `review` sent no report.
+    #[test]
+    fn a_pane_that_never_got_ready_reads_could_not_launch_without_its_cause() {
+        let line = line_after(
+            "road-pane-busy",
+            "review",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.stamp_launch_busy("review", 1);
+                task.clear_launch_busy("review");
+                task.set_stage("fix", None);
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "could not launch review, moved to fix");
+    }
+
+    /// `Dispatcher::escalate` for a lane launched and gone with no report.
+    /// `review` routes a refused launch to `fix`, so `blocked` can only be
+    /// this road. The report left standing is `implement`'s, from an
+    /// earlier stop, and is not read as `review`'s block.
+    #[test]
+    fn a_lane_dead_at_launch_reads_lane_died_and_ignores_an_older_report() {
+        let line = line_after(
+            "road-died",
+            "review",
+            |task| reported(task, "implement", Outcome::Block),
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                crate::commands::set_blocked_from(&mut task, "review");
+                task.set_stage(crate::pipeline::BLOCKED, Some("started 1 time(s)"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(
+            line,
+            "could not launch review, moved to blocked (lane died at launch)"
+        );
+    }
+
+    /// The cause is dropped here: `implement` has no `on_fail`, so a pane
+    /// that never got ready would land on `blocked` too, with the same file
+    /// behind it.
+    #[test]
+    fn a_lane_dead_at_launch_with_no_on_fail_reads_could_not_launch_without_its_cause() {
+        let line = line_after(
+            "road-died-no-fail",
+            "implement",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                crate::commands::set_blocked_from(&mut task, "implement");
+                task.set_stage(crate::pipeline::BLOCKED, Some("started 1 time(s)"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "could not launch implement, moved to blocked");
+    }
+
+    /// Cleanup's hold, as `Dispatcher::clean_up` writes it, on a task that
+    /// reached `done` with work it could not commit.
+    #[test]
+    fn a_pass_into_done_held_on_blocked_reads_uncommitted_work() {
+        let line = line_after(
+            "road-uncommitted",
+            "handover",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                task.set_stage(crate::pipeline::DONE, None);
+                crate::commands::set_blocked_from(&mut task, "handover");
+                task.set_stage(
+                    crate::pipeline::BLOCKED,
+                    Some("uncommitted work could not be recorded before cleanup"),
+                );
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "passed handover, moved to blocked (uncommitted work)");
+    }
+
+    /// `suite` ran in the background while the task walked on to `approve`,
+    /// then exited non-zero: `reap_stale_runs` moves the task down
+    /// `suite`'s `on_fail` from wherever it is.
+    #[test]
+    fn a_background_run_failing_reads_failed_in_the_background() {
+        let line = line_after(
+            "road-background",
+            "approve",
+            |_| {},
+            |repo, pipelines| {
+                let mut task = repo.task("t").unwrap();
+                let pipeline = pipelines.for_task(&task).unwrap().clone();
+                let to = crate::commands::apply_loop_budget(
+                    &pipeline,
+                    &mut task,
+                    "approve",
+                    "e2e".into(),
+                    false,
+                );
+                task.set_stage(&to, None);
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "failed suite in the background, moved to e2e");
+    }
+
+    /// The cause is dropped here: `suite` fails in the background while the
+    /// task works `review`, and `reap_stale_runs` finds `e2e`'s `loop:`
+    /// already spent, so the task lands on `blocked`. `review` sent no
+    /// report and routes a refused launch to `fix`, so without the
+    /// background check this would read as a lane dead at launch.
+    #[test]
+    fn a_background_run_failing_into_a_spent_loop_reads_left_without_a_cause() {
+        let line = line_after(
+            "road-background-spent",
+            "review",
+            |task| walk(task, &["e2e", "review"]),
+            |repo, pipelines| {
+                let mut task = repo.task("t").unwrap();
+                let pipeline = pipelines.for_task(&task).unwrap().clone();
+                let to = crate::commands::apply_loop_budget(
+                    &pipeline,
+                    &mut task,
+                    "review",
+                    "e2e".into(),
+                    false,
+                );
+                assert_eq!(to, crate::pipeline::BLOCKED);
+                crate::commands::set_blocked_from(&mut task, "review");
+                task.set_stage(&to, None);
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "left review, moved to blocked");
+    }
+
+    /// A lane working `blocked` passes, and the task goes one step past
+    /// where it stopped.
+    #[test]
+    fn a_pass_from_a_lane_on_blocked_reads_unblocked_by_its_lane() {
+        let line = line_after(
+            "road-unblocked-lane",
+            "blocked",
+            |task| task.front.blocked_from = Some("review".into()),
+            |repo, pipelines| lane_reports(repo, pipelines, Outcome::Pass),
+        );
+        assert_eq!(line, "unblocked by its lane, moved to test");
+    }
+
+    /// A person's resume, with no report from `blocked`.
+    #[test]
+    fn a_resume_off_blocked_reads_unblocked() {
+        let line = line_after(
+            "road-unblocked",
+            "blocked",
+            |task| task.front.blocked_from = Some("review".into()),
+            |repo, _| moved(repo, "review"),
+        );
+        assert_eq!(line, "unblocked, moved to review");
+    }
+
+    #[test]
+    fn leaving_paused_reads_resumed() {
+        let line = line_after(
+            "road-resumed",
+            "paused",
+            |_| {},
+            |repo, _| moved(repo, "implement"),
+        );
+        assert_eq!(line, "resumed, moved to implement");
+    }
+
+    /// `launch_failures` for `implement` outlives its block, since only
+    /// arriving back at `implement` clears it. `review` reaching `blocked`
+    /// later on its own lane's word must not be read as `implement`'s
+    /// refused launches, and nor must the field be read for the step that
+    /// was left.
+    #[test]
+    fn a_launch_count_left_from_an_earlier_stop_is_not_this_ones_cause() {
+        let mut stale = None;
+        let line = line_after(
+            "road-stale",
+            "review",
+            |task| {
+                task.front
+                    .launch_failures
+                    .insert("implement".into(), crate::dispatch::MAX_LAUNCH_FAILURES);
+            },
+            |repo, pipelines| {
+                lane_reports(repo, pipelines, Outcome::Block);
+                stale = repo
+                    .task("t")
+                    .unwrap()
+                    .front
+                    .launch_failures
+                    .get("implement")
+                    .copied();
+            },
+        );
+        assert_eq!(stale, Some(3), "the old count is still in the file");
+        assert_eq!(line, "reported a block on review, moved to blocked");
+    }
+
+    /// A move into `paused` that no field explains goes without a cause.
+    #[test]
+    fn a_stop_nothing_explains_reads_stopped_without_a_cause() {
+        let line = line_after(
+            "road-stopped",
+            "review",
+            |_| {},
+            |repo, _| moved(repo, crate::pipeline::PAUSED),
+        );
+        assert_eq!(line, "stopped on review, moved to paused");
+    }
+
+    /// `implement` routes to `review` on a pass and `blocked` on a failure;
+    /// `handover` is neither, so the move is named without a guess.
+    #[test]
+    fn a_move_matching_no_route_reads_left() {
+        let line = line_after(
+            "road-left",
+            "implement",
+            |task| reported(task, "implement", Outcome::Pass),
+            |repo, _| moved(repo, "handover"),
+        );
+        assert_eq!(line, "left implement, moved to handover");
     }
 
     // ---- board-resume: cursor, resume key, forward-looking ticker ----

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::view::{RecentEvent, Verdict, strip_ansi};
+use super::view::{Move, RecentEvent, strip_ansi};
 use super::*;
 
 /// `text` as a reader sees it, with the escape codes taken out whole.
@@ -129,15 +129,15 @@ pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> c
 }
 
 /// `n` arrivals, oldest first, each its own task so none of them coalesce,
-/// and tagged in their `step` so a test can say which survived.
+/// and tagged in the step they moved to so a test can say which survived.
 pub fn arrivals(n: usize) -> VecDeque<RecentEvent> {
     (0..n)
         .map(|i| RecentEvent::Arrival {
             at: format!("10:0{i}"),
             id: format!("task-{i}"),
-            step: format!("note {i}"),
-            verdict: Verdict::None,
-            position: None,
+            change: Move::Started {
+                to: format!("note {i}"),
+            },
         })
         .collect()
 }

@@ -247,7 +247,43 @@ stateDiagram-v2
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
-`RECENT` lists the last task moves. Errors from a pass go to `~/.spoolway/logs/<project>.log`.
+### Recent moves
+
+`RECENT` says what each task last did, one sentence per task, newest on top.
+A cause in brackets follows when the route alone does not explain the move.
+
+| Line | When |
+|---|---|
+| `started, moved to <step>` | The task left `queued` for its first step. |
+| `passed <step>, moved to <step>` | The step passed, or a command step exited zero. |
+| `failed <step>, moved to <step>` | The step failed, or a command step exited non-zero. |
+| `skipped <step>, moved to <step>` | The task passed over the step without running it, or the step sent no report. |
+| `failed <step> in the background, moved to <step>` | A background command step exited non-zero after the task had moved on. |
+| `resumed, moved to <step>` | The task left `paused`. |
+| `unblocked, moved to <step>` | The task left `blocked`. |
+| `unblocked by its lane, moved to <step>` | The `blocked` lane reported a pass. |
+| `left <step>, moved to <step>` | The task file does not say how the task left the step. |
+| `passed <step>, moved to paused (gate)` | The step has `gate: true`. |
+| `passed <step>, moved to paused (scheduled)` | A scheduled pause took effect at the step. The same cause follows `failed <step>` and `reported a block on <step>`. |
+| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero. |
+| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero. |
+| `stopped on <step>, moved to paused (manually)` | A person pressed `p` on the board, or Escape in the lane's pane. |
+| `stopped before starting, moved to paused (manually)` | A person paused the task before it started. |
+| `stopped on <step>, moved to paused (dispatching stopped)` | The dispatch tab's stop popup parked the task. |
+| `stopped on <step>, moved to paused (escalated)` | The dispatcher stopped the lane. `escalated` always means this. The task file's `## Status Log` gives the exact reason. |
+| `stopped before starting, moved to paused (branch <name> missing)` | The branch the task starts from does not exist. |
+| `stopped on <step>, moved to paused` | The task file names no cause for the step the task left. A cause counts only when the file names that step. |
+| `reported a pause on blocked, moved to paused` | The `blocked` lane reported a pause. |
+| `reported a block on blocked, moved to paused` | The `blocked` lane reported a block. The same holds for `failed blocked` when it reported a fail. |
+| `stopped on blocked, moved to paused (escalated)` | The dispatcher stopped the `blocked` lane. The `## Status Log` gives the exact reason. |
+| `reported a block on <step>, moved to blocked` | The lane for the step reported a block. |
+| `failed <step>, moved to blocked (loop limit on <step>)` | The step failed, and the step it routes to has used its `loop:`. The same cause follows `passed <step>` and `skipped <step>`. |
+| `could not launch <step>, moved to <step> (3 attempts)` | The launch was refused three times in a row. |
+| `could not launch <step>, moved to <step> (lane died at launch)` | The lane started and left nothing behind. |
+| `could not launch <step>, moved to <step>` | The launch failed and the task file does not say why. A pane that never got ready reads this way. |
+| `passed <step>, moved to blocked (uncommitted work)` | The last step passed, and the worktree held work that could not be committed. |
+
+Errors from a pass go to `~/.spoolway/logs/<project>.log`.
 
 ### Keys
 
@@ -453,7 +489,7 @@ The step carries the session on if two bounds hold:
 | Size | `agents.<profile>.session_reuse_ctx`, a percentage | The input, cache-read and cache-write tokens of the session's last turn, over the model's `context_window`. |
 | Age | `models.<glob>.prompt_cache_ttl`, `5m` unless set, none for a `local` model | The time since the session's last reply to the model, read from the transcript. A transcript with no reply timestamp uses the file's modification time. |
 
-Otherwise the step opens a fresh session, and `RECENT` says why. The lookup goes by prompt,
+Otherwise the step opens a fresh session. The lookup goes by prompt,
 so two steps running the same prompt share one conversation. A task carrying `restart: <step>`
 opens a fresh session on that step whatever `session:` says. A blocked task's resume
 passes the same age check but not the size bound. See [When a task needs a person](tasks.md#when-a-task-needs-a-person).
