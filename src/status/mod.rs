@@ -39,8 +39,8 @@ pub use view::{banner, plain_table};
 // out a second time — see `screen::key_hint` — and bare `spoolway`'s tab strip
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
-    AMBER, Cause, Move, RecentEvent, Reported, Style, boxed, clamp_rows, footer, group_totals,
-    masthead, pane_height, pane_width, pause_confirm_panel, restart_confirm_panel,
+    AMBER, Cause, Move, RecentEvent, Reported, Style, board_masthead, boxed, clamp_rows, footer,
+    group_totals, pane_height, pane_width, pause_confirm_panel, restart_confirm_panel,
     resume_picker_panel, spool_frame, table, ticker, unqueue_all_confirm_panel,
     unqueue_confirm_panel,
 };
@@ -2706,12 +2706,12 @@ fn paint(
     let header = header_cells(phase, snapshot.finishing, version);
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
-    // in rather than landing flush on the pane's own top row. `masthead`
-    // stays untouched: `init` prints its banner through the same function and
-    // must not gain a line it never asked for. Inside bare `spoolway`'s
-    // dispatch tab the blank row under the tab strip is that margin already,
-    // and a second one would push the board a row lower than the mockup
-    // draws it.
+    // in rather than landing flush on the pane's own top row. The row is
+    // pushed here rather than by `board_masthead`, which draws only the
+    // lockup and the header, as the `masthead` behind `init`'s banner does.
+    // Inside bare `spoolway`'s dispatch tab the blank row under the tab strip
+    // is that margin already, and a second one would push the board a row
+    // lower than the mockup draws it.
     if crate::screen::shell::hosted().is_none() {
         frame.push('\n');
     }
@@ -2729,7 +2729,11 @@ fn paint(
         Some(n) => n > 0,
         None => logo_turns(&snapshot.rows),
     };
-    frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
+    frame.push_str(&board_masthead(
+        &header.join(" · "),
+        pane,
+        spool_frame(running),
+    ));
     frame.push('\n');
 
     if snapshot.rows.is_empty() {

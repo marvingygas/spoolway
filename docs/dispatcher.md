@@ -154,7 +154,9 @@ run of such passes in a row eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
-The header above the task rows names the running dispatcher's version, next to its pid. If a
+The header sits in the top-right corner of the board, on the first line of the wordmark. On a pane too narrow for both, it takes its own right-aligned row above the wordmark. On a pane too narrow for the wordmark, it stays at the left margin. A header wider than the pane is cut short with `…`.
+
+The header names the running dispatcher's version, next to its pid. If a
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
 
