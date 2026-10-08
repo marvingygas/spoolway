@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.7.1 to 0.8.0 | A pipeline with `end: true` on a step, or `on_pass: blocked`, is refused when it loads. | Replace `end: true` with `on_pass: done` on the step before it, replace `on_pass: blocked` with `gate: true`, and run `spoolway sync`. |
+| 0.7.1 to 0.8.0 | A pipeline with `end: true` or `on_pass: blocked` is refused when it loads; `session_reuse_idle` is renamed `prompt_cache_ttl` and defaults to five minutes on hosted models; `session_reuse_ctx` and `session_blocked_ctx` default to 20 and 40; `R` on the board is gone; `dispatch.herdr_mode` and `models.<glob>.exclusive` are retired; every step keeps its pane until its task is done; `loop:` limits every move; a running dispatcher routes on the pipelines it started with; a nested `.spoolway/` is refused; `config set` refuses values `doctor` would fail; `queue add --from` rows say `group issue` and `task issue`; `eval` gains USD columns. | Replace `end: true` and `on_pass: blocked`, set `prompt_cache_ttl` and `context_window` where the defaults do not fit, run `spoolway sync`, and restart the dispatcher after editing a pipeline. |
 | 0.7.0 to 0.7.1 | Pipelines that could never run are refused when they load: `loop: 0`, which 0.7.0 read as no limit, a first step of `blocked`, and a `gate_at:` that names no step; `spoolway jobs run` is removed; an unset or empty `HOME` is refused; `resume` refuses queued and running tasks; `gate: true` and `gate_at:` now work on a command step; leaving `blocked` resets every `loop:` count; each worktree builds into its own `target/`; workspace folders are never deleted; `init --force` keeps the provider and tracker; `sync --replace` writes `.bak.N`. | Delete every `loop: 0` line, drop `spoolway jobs run` from scripts, set `HOME` in CI, check queued tasks' `gate_at:`, remove the old `.cargo-target` folder once older tasks finish, and run `spoolway sync`. |
 | 0.6.x to 0.7.x | Bare `spoolway` is the one screen, and `dispatch`, `queue`, `jobs` and `eval` are plain commands; `dispatch.worktree_root` and `issue_tracking.on_fail` are gone; finished tasks are kept forever until `housekeeping.archive_retention_days` says otherwise; `issue_tracking.key_in_names` defaults to `true`; the tracker hooks are rewritten and the closing workflow and tracking templates are retired; `queue conflicts`, `touches:`, `parallel:`, `dispatch --plain`/`--force` and `init --adopt`/`--new-id`/`--take-over` are removed; `config path`, `eval` and `doctor` print differently; `sync` migrates only from 0.6.0 and applies nothing implicitly. | Run `spoolway sync`, replace your tracker hook, delete the closing workflow, drop the removed flags and keys from scripts, and run `spoolway herdr bind` once. |
 | 0.5.x to 0.6.x | Retired pipeline shapes are migrated on update; `loop:` counts arrivals; installed skills are always rewritten; `/spoolway-doctor` and `spoolway spend` are gone; `spoolway eval` flags change. | Open spoolway, apply the update, read what it migrated, and update scripts that call `spend` or the removed `eval` flags. |
@@ -24,7 +24,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 Install the target version, then read its embedded notes:
 
 ```
-npm install -g spoolway@0.7.1
+npm install -g spoolway@0.8.0
 spoolway whats-new --since <your-current-version>
 ```
 
@@ -44,8 +44,10 @@ wsl npm install -g spoolway
 ## 0.7.1 to 0.8.0
 
 Run `spoolway sync` (or `spoolway sync --dry-run` to read what it would do), then work through the
-list. `spoolway sync` and `spoolway pipeline check` both name each pipeline file and step that
-still uses a shape below. Neither rewrites a step for you.
+list. `spoolway sync` drops `dispatch.herdr_mode` and `models.<glob>.exclusive`. `spoolway sync`
+and `spoolway pipeline check` both name each pipeline file and step that still uses a shape below.
+Neither rewrites a step for you. Restart the dispatcher once you are done, because a running
+dispatcher keeps routing on the pipelines it loaded when it started.
 
 - Replace `end: true` with `on_pass: done`. A step with `end: true` stranded its task, and its
   dependents waited forever. 0.8.0 refuses the pipeline with ``step `X` sets end: true, which is
@@ -58,6 +60,74 @@ still uses a shape below. Neither rewrites a step for you.
   once a person resumes it.
 - A private pipeline under `~/.spoolway/<label>-<id>/local/pipelines/` is outside sync's reach, so
   look there yourself.
+- Check how long your sessions may be continued. `models.<glob>.session_reuse_idle` and
+  `cache_ttl` are now `prompt_cache_ttl`; both old names still load and are rewritten on the next
+  save, and `spoolway doctor` notes them. A model not marked `local = true`, including one with no
+  `[models]` entry, now opens a fresh session five minutes after the last reply, where 0.7.1 had
+  no limit unless you set one. The same check now applies when `spoolway resume` continues a task
+  from `blocked` or a park. Set `prompt_cache_ttl = "1h"` on `claude-*` if your lanes write the
+  one-hour cache, or `"0"` to turn the limit off:
+
+  ```
+  spoolway config set models.'claude-*'.prompt_cache_ttl 1h
+  ```
+
+- Check the new session size limits. Every profile now defaults to `session_reuse_ctx = 20` and
+  `session_blocked_ctx = 40`, where 0.7.1 had both off. A `session: true` step opens a fresh
+  session when the earlier one passed 20% of the model's `context_window`, or when neither
+  `[models]` nor the price table gives the model a window. A running lane past 40% is stopped and
+  its task blocked. Set `context_window` under `[models."<glob>"]` for a model the price table does
+  not know, such as a local one, or set either key to `0` on the profile to keep the 0.7.1
+  behaviour:
+
+  ```
+  spoolway config set agents.claude.session_blocked_ctx 0
+  ```
+
+- Use `r` on the board where you used `R`. `R` does nothing now. `r` opens a picker of the task's
+  steps with the next one preselected, so `r` `enter` resumes as before, and any other step
+  reroutes the task there.
+- Nothing to edit for `dispatch.herdr_mode`. Every task now runs in a herdr workspace of its own,
+  the key loads with a note until `spoolway sync` drops it, and a task whose pane still sits in the
+  shared `spoolway-dispatcher` workspace moves on its next step. Once no 0.7.1 dispatcher is
+  running, remove the folder nothing reads any more: `rm -rf ~/.spoolway/.dispatcher`.
+- Size `slots` and `concurrency` yourself if you relied on `models.<glob>.exclusive`. It does
+  nothing now, and `spoolway sync` drops it without a note.
+- Expect one idle agent process per agent step a task has run. Each step keeps its pane until the
+  task is done. To have each new agent step close the last one's pane instead, run
+  `spoolway config set dispatch.keep_finished_lanes false`.
+- Re-check `loop:` on steps a task reaches by a resume, a cleared block, a command step's exit or a
+  walk-past. `loop:` now counts every move onto a step, not only a lane's report, so a task 0.7.1
+  let return more often may now block with the step and the count named. Raise that `loop:` if it
+  should.
+- Expect a command step to run its command on every arrival. A run killed three times in a row now
+  blocks the task and names the run's log.
+- Restart the dispatcher after you edit a pipeline. While it runs, `spoolway report`,
+  `spoolway resume` and `spoolway queue add` use the pipelines it loaded when it started, and
+  `queue add` refuses a task whose pipeline it did not load. The dispatch tab footer and
+  `spoolway pipeline check` name each pipeline file changed since it started.
+- Handle exit 1 from `spoolway resume <task> --stage <step>` when the step is one the task walks
+  past by `skip:`, `first:` or `last:`. It moves nothing and names the rule, for example
+  ``` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. Nothing was resumed. ```
+- Move a `.spoolway/` that sits below the top of the repository up to the top, or remove it. 0.8.0
+  refuses it with ``<folder> is not at the top of the repo.`` A linked worktree on a branch with no
+  `.spoolway/` now reads the main checkout's setup, and `spoolway sync` refuses to write a setup
+  into it.
+- Run the command a refusal names if a checkout has lost its clone id. 0.8.0 never falls back to a
+  home named for the folder.
+- Handle a refusal from `spoolway config set` in scripts. It now runs `spoolway doctor`'s checks:
+  a value that can never be right, such as an unknown `dispatch.backend`, is refused with the
+  allowed values, and a value naming something not set up yet is saved with a warning.
+- Update any script that reads the rows `spoolway queue add --from` prints. They say `group issue`
+  and `task issue` where 0.7.1 wrote `epic` and `ticket`.
+- Update tooling that reads `spoolway eval` by column position. The lanes and directory tables add
+  `IN USD`, `OUT USD`, `CACHE R USD` and `CACHE W USD`, and `--csv` and `--json` add `in_usd`,
+  `out_usd`, `cache_read_usd` and `cache_write_usd` with their `_per_run` twins. `CTX PEAK` now
+  reads the highest share of a lane's own window. Do not compare a tiered model's `USD` across the
+  upgrade: a lane with turns over the model's price threshold now pays the higher rate for them.
+- Expect `spoolway models refresh` to refuse a table that keeps fewer than half the rows of the one
+  it replaces, and to drop rows with out-of-range rates on a `refused` line. A script that
+  refreshes from a small hand-made table through `SPOOLWAY_MODEL_PRICES_URL` must handle this.
 
 ## 0.7.0 to 0.7.1
 
