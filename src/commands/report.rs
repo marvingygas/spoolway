@@ -1468,13 +1468,31 @@ pub enum ResumeRoad {
 }
 
 impl ResumeRoad {
-    /// The stage the task is on once this road has been taken.
+    /// The stage this road names. A gate's and the ordinary road's then land
+    /// past any step the task walks past — see [`ResumeRoad::landing`].
     pub fn destination(&self) -> &str {
         match self {
             ResumeRoad::Gate { destination, .. } => destination,
             ResumeRoad::Unpark(step) | ResumeRoad::Step(step) => step,
             ResumeRoad::HookDone => crate::pipeline::DONE,
             ResumeRoad::Queued => crate::pipeline::QUEUED,
+        }
+    }
+
+    /// The stage [`resume`] writes for this road, before any `loop:` check:
+    /// a gate's and the ordinary road's [`ResumeRoad::destination`] landed
+    /// past the steps `task` walks past, as `resume_checked` and
+    /// `back_onto_its_step` land them. A park goes back onto its own step and
+    /// the other two onto `done` or `queued`, none of which is moved.
+    /// `dependents` is [`crate::dispatch::same_group_dependents`]'s count.
+    pub(crate) fn landing(&self, pipeline: &Pipeline, task: &Task, dependents: usize) -> String {
+        let destination = self.destination().to_string();
+        match self {
+            ResumeRoad::Gate { .. } | ResumeRoad::Step(_) => {
+                crate::dispatch::land_past_hidden(pipeline, task, destination, dependents)
+                    .destination
+            }
+            ResumeRoad::Unpark(_) | ResumeRoad::HookDone | ResumeRoad::Queued => destination,
         }
     }
 }

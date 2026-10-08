@@ -211,7 +211,7 @@ first task stacks onto another group's own last task reads `▌<group>  after <g
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task whose resume has no step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -255,8 +255,8 @@ A cause in brackets follows when the route alone does not explain the move.
 | Line | When |
 |---|---|
 | `started, moved to <step>` | The task left `queued` for its first step. |
-| `passed <step>, moved to <step>` | The step passed, or a command step exited zero. |
-| `failed <step>, moved to <step>` | The step failed, or a command step exited non-zero. |
+| `passed <step>, moved to <step>` | The step passed, or a command step exited zero. The move may go past steps the task walks past, such as `passed test, moved to document`. |
+| `failed <step>, moved to <step>` | The step failed, or a command step exited non-zero. The move may go past steps the task walks past. |
 | `skipped <step>, moved to <step>` | The task passed over the step without running it, or the step sent no report. |
 | `failed <step> in the background, moved to <step>` | A background command step exited non-zero after the task had moved on. |
 | `resumed, moved to <step>` | The task left `paused`. |
@@ -293,7 +293,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whol
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Open the resume picker for a paused or blocked row whose dependencies are done. The picker lists every step, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
+| `r` | Open the resume picker for a paused or blocked row whose dependencies are done. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `s` | On a running, paused or blocked row, open the restart panel. See [Restart panel](#restart-panel). On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
@@ -302,7 +302,9 @@ Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whol
 
 ### Resume picker
 
-`r` on a held row opens a picker titled `resume <task>`. It lists every step of the task's pipeline except `blocked` and `done`, in pipeline order. The line above the list says where the task stopped.
+`r` on a held row opens a picker titled `resume <task>`. It lists the steps of the task's pipeline in pipeline order, except `blocked` and `done`. The line above the list says where the task stopped.
+
+A step the task walks past is left out: a `first:` step when the task is not its chain's root, a `last:` step when a task in its group still depends on it, and a step its own `skip:` names. `spoolway resume --stage` refuses those steps, so the picker does not offer them. Two hidden steps are still listed. One is the step the task stopped at, so the person sees where the task is. `enter` on that row is refused unless it is also the `(next)` row. The other is the `(next)` row when a plain resume lands on a hidden step, which happens when that step has no `on_pass`.
 
 ```
 paused at review — it passed
@@ -317,8 +319,8 @@ paused at review — it passed
 | Label | Meaning |
 |---|---|
 | `paused`, `blocked` | The step the task stopped at. |
-| `on pass`, `on fail` | The steps the stopped step sends a pass or a fail to. |
-| `(next)` | Where `spoolway resume <task>` sends the task. The cursor starts here. |
+| `on pass`, `on fail` | The steps a pass or a fail of the stopped step lands on. A route onto a hidden step is followed past it, so these name the step the task would really run next. |
+| `(next)` | Where `spoolway resume <task>` sends the task, past any hidden step. The cursor starts here. |
 
 When a plain resume goes to `blocked` or `done`, one extra `blocked (next)` or `done (next)` row sits under the steps. When the stopped step is not in the pipeline, the header names it, no row reads `(next)`, and the cursor starts on the first step.
 

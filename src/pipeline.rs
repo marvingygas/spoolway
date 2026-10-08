@@ -1173,11 +1173,12 @@ impl Pipeline {
         self.steps.iter().map(|s| s.id.as_str()).collect()
     }
 
-    /// The step a task moves to when `from` passes, following `on_pass`.
+    /// The step `from`'s `on_pass` names, or `None` when it names no step:
+    /// the chain ends, and the task is done when this step passes.
     ///
-    /// Every step in a pipeline runs for every task on it, so this is one hop
-    /// and not a walk. `None` means nothing runs after this one: the chain
-    /// ends, and the task is done when this step passes.
+    /// One hop, read off the pipeline alone. The step it names may be one a
+    /// given task walks past; the board's NEXT column follows it on through
+    /// `crate::dispatch::land_past_hidden` to the step the task runs.
     pub fn next_running_step(&self, from: &str) -> Option<&str> {
         let next = self.step(self.step(from)?.on_pass.as_deref()?)?;
         Some(next.id.as_str())

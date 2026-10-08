@@ -825,7 +825,10 @@ impl Board {
         {
             return resume_task(repo, pipelines, &id);
         }
-        self.mode = BoardMode::ResumePicker(resume_picker(&task, pipelines)?);
+        // Read once, on the key: the picker is a snapshot, not redrawn from
+        // the queue every frame.
+        let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+        self.mode = BoardMode::ResumePicker(resume_picker(&task, pipelines, dependents)?);
         Ok(())
     }
 
@@ -1206,8 +1209,8 @@ enum BoardMode {
     /// instead, and `[esc]` leaves the task, every lane and every run
     /// exactly as they were.
     ConfirmPause { aborts: Vec<Abort>, id: String },
-    /// `r` on a held row: every step of its pipeline, with the one a bare
-    /// resume goes to preselected — see [`ResumePicker`].
+    /// `r` on a held row: every step of its pipeline the task runs, with the
+    /// one a bare resume goes to preselected — see [`ResumePicker`].
     ResumePicker(ResumePicker),
     /// `u` found a task that has not started, named along with every
     /// unstarted task that reaches it through `depends_on` — see
@@ -1258,8 +1261,9 @@ struct ResumePicker {
     hold: Hold,
     /// Where the task stopped, in words — the line above the list.
     header: String,
-    /// The steps in pipeline order, then the one pinned row a plain resume
-    /// to `blocked` or `done` adds under them — see [`resume_picker`].
+    /// The steps the task runs, in pipeline order, then the one pinned row a
+    /// plain resume to `blocked` or `done` adds under them — see
+    /// [`resume_picker`].
     rows: Vec<PickRow>,
     /// How many of `rows` are the pipeline's own steps — the part that
     /// scrolls. Any row past these is pinned under the list.
@@ -1417,16 +1421,32 @@ fn picker_header(
 /// and `done`, which `--stage` does not accept, labelled against the step it
 /// stopped at.
 ///
+/// A step the task walks past is left out, since `resume --stage` refuses it.
+/// Two are kept anyway. The step it stopped at is listed so the person sees
+/// where the task is, even if that step has become hidden since; picking it
+/// sends it as `--stage`, which refuses it, unless it is also the `(next)`
+/// row. The step a plain resume lands on is listed so the `(next)` row is
+/// never missing; that row sends no `--stage`, so picking it is accepted. It
+/// is only ever hidden for a hidden step with no `on_pass` to carry the task
+/// on.
+/// `dependents` is [`crate::dispatch::same_group_dependents`]'s count.
+///
 /// The `(next)` row is placed from `resume_road`, the function a bare resume
-/// acts on and `spoolway queue route` prints, so the preselected row cannot
-/// name a step the resume would not go to. When that destination is
+/// acts on and `spoolway queue route` prints, landed past hidden steps the
+/// way the resume lands it — see `ResumeRoad::landing` — so the preselected
+/// row cannot name a step the resume would not go to. The `on pass` and
+/// `on fail` labels are landed the same way. When that destination is
 /// `blocked` or `done`, one pinned row under the steps names it, since
 /// neither is a row anyone may pick on purpose. A stopped step the pipeline
 /// no longer has leaves no `(next)` row at all: `resume_road` either refuses
 /// it, sends the task back onto that same missing step, or falls back to a
 /// step the task never stopped at. The cursor starts on the first step
 /// instead, for a person to pick a real one.
-fn resume_picker(task: &crate::task::Task, pipelines: &Pipelines) -> Result<ResumePicker> {
+fn resume_picker(
+    task: &crate::task::Task,
+    pipelines: &Pipelines,
+    dependents: usize,
+) -> Result<ResumePicker> {
     let pipeline = pipelines.for_task(task)?;
     let stopped = stopped_at(task, pipeline);
     let stopped_step = stopped.as_deref().and_then(|id| pipeline.step(id));
@@ -1434,16 +1454,25 @@ fn resume_picker(task: &crate::task::Task, pipelines: &Pipelines) -> Result<Resu
         (true, None) => None,
         _ => crate::commands::resume_road(task, pipelines)
             .ok()
-            .map(|road| road.destination().to_string()),
+            .map(|road| road.landing(pipeline, task, dependents)),
     };
-    let target = |outcome| stopped_step.and_then(|step| step.destination(outcome));
+    let target = |outcome| {
+        stopped_step
+            .and_then(|step| step.destination(outcome))
+            .map(|destination| landed(pipeline, task, destination.to_string(), dependents))
+    };
     let on_pass = target(crate::pipeline::Outcome::Pass);
     let on_fail = target(crate::pipeline::Outcome::Fail);
+    let (on_pass, on_fail) = (on_pass.as_deref(), on_fail.as_deref());
 
     let mut rows: Vec<PickRow> = Vec::new();
     for step in &pipeline.steps {
         let id = step.id.as_str();
         if id == crate::pipeline::BLOCKED || id == crate::pipeline::DONE {
+            continue;
+        }
+        let kept = stopped.as_deref() == Some(id) || next.as_deref() == Some(id);
+        if !kept && crate::dispatch::walk_past(step, task, dependents).is_some() {
             continue;
         }
         let mut notes: Vec<&str> = Vec::new();
@@ -3006,7 +3035,16 @@ fn logo_turns(rows: &[Row]) -> bool {
 /// parked there the moment this step finishes — `commands::report` for an
 /// agent step's report, the dispatcher for a command step's exit — whatever
 /// the outcome, not only a pass.
-fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_id: &str) -> String {
+///
+/// Every step named here is the one the move lands on, past any step the
+/// task walks past — see [`landed`]. `dependents` is
+/// [`crate::dispatch::same_group_dependents`]'s count for `task`.
+fn onward(
+    task: &crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+    step_id: &str,
+    dependents: usize,
+) -> String {
     if task.front.gate_at.as_deref() == Some(step_id) {
         format!("→ paused after {step_id}")
     } else if step_id == crate::pipeline::BLOCKED {
@@ -3015,10 +3053,8 @@ fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_i
         // now reads the same destination a cleared block would, and nothing
         // else. Not resumable: a lane is already working this step, so there
         // is no `[r]` action to offer here.
-        format!(
-            "→ {}",
-            crate::commands::cleared_block_target(task, pipeline, true)
-        )
+        let target = crate::commands::cleared_block_target(task, pipeline, true);
+        format!("→ {}", landed(pipeline, task, target, dependents))
     } else {
         match pipeline.next_running_step(step_id) {
             // Plain text, no colour: this string is clipped to the room the
@@ -3026,10 +3062,27 @@ fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_i
             // rest of the board. No arrival count here — see `arrivals` in
             // `build_rows`, which counts the step this task is *on* rather
             // than the one named here.
-            Some(next) => format!("→ {next}"),
+            Some(next) => format!("→ {}", landed(pipeline, task, next.to_string(), dependents)),
             None => "→ done".to_string(),
         }
     }
+}
+
+/// The step a move to `destination` writes as `task`'s stage: `destination`
+/// itself, or the first step past it along `on_pass` that the task runs.
+///
+/// Every move that names a step for a task lands it there through
+/// [`crate::dispatch::land_past_hidden`] — a report, a command step's exit,
+/// a resume. A board that named the raw destination would point at a step
+/// the task never stands on: a `last:` step below a chain's top, a `first:`
+/// step off its root, or one its own `skip:` names.
+fn landed(
+    pipeline: &crate::pipeline::Pipeline,
+    task: &crate::task::Task,
+    destination: String,
+    dependents: usize,
+) -> String {
+    crate::dispatch::land_past_hidden(pipeline, task, destination, dependents).destination
 }
 
 /// The NEXT column of a blocked row parked for a person, prefixed for the
@@ -3045,12 +3098,17 @@ fn onward(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline, step_i
 ///
 /// A staffed block is not this row: an unblocker lane works it, and where its
 /// pass goes is `cleared_block_target`, which [`onward`] draws.
+///
+/// The step named is where the resume lands, past any step the task walks
+/// past — see [`landed`].
 fn blocked_next(
     task: &crate::task::Task,
     pipeline: &crate::pipeline::Pipeline,
     resumable: bool,
+    dependents: usize,
 ) -> String {
     let target = crate::commands::resume_target(task, pipeline);
+    let target = landed(pipeline, task, target, dependents);
     match resumable {
         true => format!("[r] → {target}"),
         false => format!("→ {target}"),
@@ -3074,11 +3132,19 @@ fn blocked_next(
 /// names nothing to pass: `unpark` sends the task straight back onto that
 /// exact step, so this names the step itself rather than whatever comes
 /// after it.
-fn paused_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -> Option<String> {
+///
+/// A gate's resume lands past the steps the task walks past, so its target is
+/// named where it lands — see [`landed`]. `unpark` lands nowhere but the step
+/// it names, so a park's is not.
+fn paused_next(
+    task: &crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+    dependents: usize,
+) -> Option<String> {
     if let Some(gated) = task.front.paused_at.as_deref() {
         let step = pipeline.step(gated)?;
         let caught = crate::commands::caught_at(task, gated);
-        return Some(match caught {
+        let target = match caught {
             None if task.front.blocked_from.as_deref() == Some(gated) => {
                 crate::commands::cleared_block_target(task, pipeline, false)
             }
@@ -3094,7 +3160,8 @@ fn paused_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -
             _ => step
                 .destination(crate::pipeline::Outcome::Pass)
                 .map(str::to_string)?,
-        });
+        };
+        return Some(landed(pipeline, task, target, dependents));
     }
     task.front.parked_from.clone()
 }
@@ -3178,6 +3245,9 @@ fn build_rows(
     for task in tasks {
         let pipeline = pipelines.for_task(task)?;
         let step = pipeline.step(task.stage());
+        // Read off the graph this frame already built, for every step NEXT
+        // names: the `last:` rule needs the open tasks above this one.
+        let dependents = crate::dispatch::same_group_dependents(repo, tasks, graph, task);
         // The step a boot mark names, when there is one. It is what STEP
         // reads for this row: a task coming off `queued` keeps that stage
         // on disk until its boot has returned, and the row should name the
@@ -3250,7 +3320,11 @@ fn build_rows(
             // Ahead of every other arm, the task's own stage included: while
             // the mark stands the dispatcher is booting this step, whatever
             // the task file still says.
-            _ if claimed.is_some() => (State::Starting, onward(task, pipeline, shown_stage), false),
+            _ if claimed.is_some() => (
+                State::Starting,
+                onward(task, pipeline, shown_stage, dependents),
+                false,
+            ),
             // The dispatcher's own states. `queued` names the dependency it is
             // held by, which is the only thing worth saying about a task there
             // — a fixed description said the same thing at every one of them.
@@ -3291,7 +3365,7 @@ fn build_rows(
                 let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
                 (
                     State::Blocked,
-                    blocked_next(task, pipeline, resumable),
+                    blocked_next(task, pipeline, resumable, dependents),
                     resumable,
                 )
             }
@@ -3332,7 +3406,7 @@ fn build_rows(
                         task.front.parked_from.is_some() && !task.front.escalated;
                     let resumable = graph.ready(task.id())
                         && (parked_by_a_person || !lane_busy(lanes, &step_ids, task.id()));
-                    let target = paused_next(task, pipeline);
+                    let target = paused_next(task, pipeline, dependents);
                     // The word this pause caught, ahead of the arrow — "review
                     // failed → e2e" rather than a bare "→ e2e" — so a caught
                     // fail or block never reads like the plain pass a gate
@@ -3405,7 +3479,7 @@ fn build_rows(
                     true => State::Running,
                     false => State::Queued,
                 };
-                (state, onward(task, pipeline, &step.id), false)
+                (state, onward(task, pipeline, &step.id, dependents), false)
             }
         };
         // The lane's clock, which runs from the launch of the round in flight
@@ -4385,8 +4459,25 @@ fn off_a_step(
     let Some(step) = pipeline.step(was) else {
         return Move::Left { from, to };
     };
-    let on_pass = step.destination(Outcome::Pass);
-    let on_fail = step.destination(Outcome::Fail);
+    // Where each outcome lands the task, past the steps it walks past — the
+    // stage a report or a command step's exit writes. Compared raw, a move
+    // from `test` straight to `document` past a hidden `suite` matches
+    // neither route and reads as a bare `left test`.
+    let dependents =
+        crate::dispatch::same_group_dependents(queue.repo, queue.tasks, queue.graph, task);
+    let land = |outcome| {
+        step.destination(outcome)
+            .map(|destination| landed(pipeline, task, destination.to_string(), dependents))
+    };
+    let on_pass = land(Outcome::Pass);
+    let on_fail = land(Outcome::Fail);
+    let (on_pass, on_fail) = (on_pass.as_deref(), on_fail.as_deref());
+    // The dispatcher's own walk-past still writes the raw `on_pass` — see
+    // `crate::dispatch::fall_through` — and a failed lane start the raw
+    // `on_fail` — see `Dispatcher::handle_boot_failure` — so a move either
+    // made is read against that.
+    let raw_pass = step.destination(Outcome::Pass);
+    let raw_fail = step.destination(Outcome::Fail);
 
     // Ahead of the report: a launch refused this visit means no lane ran,
     // so a report naming `was` can only be an earlier visit's. The count
@@ -4461,13 +4552,13 @@ fn off_a_step(
     // the dispatcher itself, since a step walked past follows its `on_pass`
     // exactly as a pass does.
     if crate::dispatch::walks_past(queue.repo, queue.tasks, queue.graph, step, task) {
-        return if on_pass == Some(stage) {
+        return if raw_pass == Some(stage) {
             Move::Skipped {
                 from,
                 to,
                 cause: None,
             }
-        } else if into_blocked && let Some(limit) = spent(on_pass) {
+        } else if into_blocked && let Some(limit) = spent(raw_pass) {
             Move::Skipped {
                 from,
                 to,
@@ -4546,8 +4637,9 @@ fn off_a_step(
     }
 
     // An agent step that sent no report: a pass needs one, so a move down
-    // its `on_pass` is a step walked past.
-    if on_pass == Some(stage) {
+    // its `on_pass` is a step walked past — by the dispatcher, which writes
+    // the raw `on_pass`.
+    if raw_pass == Some(stage) {
         return Move::Skipped {
             from,
             to,
@@ -4556,7 +4648,7 @@ fn off_a_step(
     }
     // A walk-past into a spent loop and a lane that never got going leave
     // the same file behind.
-    if into_blocked && spent(on_pass).is_some() {
+    if into_blocked && spent(raw_pass).is_some() {
         return Move::Left { from, to };
     }
     // Otherwise the lane never got going. Two roads lead here, and only one
@@ -4565,9 +4657,12 @@ fn off_a_step(
     // launch does; a lane launched and gone without a word is escalated
     // straight to `blocked` whatever `on_fail` says. So `blocked` names the
     // second road only where the first would have gone somewhere else.
-    if on_fail == Some(stage) || into_blocked {
-        let died =
-            into_blocked && on_fail.is_some_and(|step| step != BLOCKED) && spent(on_fail).is_none();
+    // The first writes the raw `on_fail`, unlanded, so that is the route
+    // both checks read.
+    if raw_fail == Some(stage) || into_blocked {
+        let died = into_blocked
+            && raw_fail.is_some_and(|step| step != BLOCKED)
+            && spent(raw_fail).is_none();
         return Move::CouldNotLaunch {
             from,
             to,
@@ -9180,7 +9275,7 @@ mod tests {
         });
         let pipeline = pipelines.pipelines.get("default").unwrap();
 
-        assert_eq!(paused_next(&task, pipeline).as_deref(), Some("rebase"));
+        assert_eq!(paused_next(&task, pipeline, 0).as_deref(), Some("rebase"));
 
         let mut agent_pipelines = Pipelines::builtin();
         let agent = agent_pipelines.pipelines.get_mut("default").unwrap();
@@ -9191,7 +9286,10 @@ mod tests {
             .unwrap()
             .on_fail = Some("rebase".into());
         let agent = agent_pipelines.pipelines.get("default").unwrap();
-        assert_eq!(paused_next(&task, agent).as_deref(), Some(on_pass.as_str()));
+        assert_eq!(
+            paused_next(&task, agent, 0).as_deref(),
+            Some(on_pass.as_str())
+        );
     }
 
     /// `o` on a headless run has no pane to open an editor in — headless
@@ -10180,7 +10278,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let picker = resume_picker(&repo.task("lost").unwrap(), &pipelines).unwrap();
+        let picker = resume_picker(&repo.task("lost").unwrap(), &pipelines, 0).unwrap();
         assert_eq!(
             picker.header,
             "paused at gone, a step pipeline `default` no longer has"
@@ -10298,7 +10396,7 @@ mod tests {
         park(&mut task, "paused from the board", false);
         task.save().unwrap();
 
-        let picker = resume_picker(&repo.task("tall").unwrap(), &pipelines).unwrap();
+        let picker = resume_picker(&repo.task("tall").unwrap(), &pipelines, 0).unwrap();
         assert_eq!(picker.rows[picker.cursor].step, "s12");
         let panel = resume_picker_panel(&picker, Some(15));
 
@@ -10459,7 +10557,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "ship-login", &[], None);
         caught_at_step(&repo, "ship-login", "review", "block");
-        let mut picker = resume_picker(&repo.task("ship-login").unwrap(), &pipelines).unwrap();
+        let mut picker = resume_picker(&repo.task("ship-login").unwrap(), &pipelines, 0).unwrap();
         picker.cursor = 1;
         picker.error = Some("one\ntwo\nthree\nfour\nfive".to_string());
 
@@ -10501,6 +10599,249 @@ mod tests {
             assert!(text.contains("has moved on"), "{outcome}: {text}");
             assert!(text.contains("[↑↓] pick"), "{outcome}: {text}");
             assert!(text.contains('▸'), "{outcome}: {text}");
+        }
+    }
+
+    // ---- Steps a task walks past: never named on the board ----
+
+    /// The three rules that hide `suite` from a task, each set up on task
+    /// `t`: its own `skip:`, `suite` declared `last:` with a task in `t`'s
+    /// group depending on it, and `suite` declared `first:` with `t`
+    /// depending on a finished `base`.
+    #[derive(Clone, Copy, Debug)]
+    enum Rule {
+        Skip,
+        Last,
+        First,
+    }
+
+    const RULES: [Rule; 3] = [Rule::Skip, Rule::Last, Rule::First];
+
+    /// `test` passes to `suite`, which passes to `document`; both fail back
+    /// to `fix`. `key` is spliced into `suite`, for the `last:` and `first:`
+    /// rules.
+    fn hides_suite(key: &str) -> Pipelines {
+        let yaml = format!(
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: test\n  \
+             - id: test\n    run: 'true'\n    on_pass: suite\n    on_fail: fix\n  \
+             - id: fix\n    agent: pi\n    loop: 2\n    on_pass: test\n  \
+             - id: suite\n    run: 'true'\n{key}    on_pass: document\n    on_fail: fix\n  \
+             - id: document\n    agent: pi\n    on_pass: handover\n  \
+             - id: handover\n    run: 'true'\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n"
+        );
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", &yaml).unwrap(),
+        );
+        pipelines
+    }
+
+    /// A queue in which `rule` hides `suite` from task `t`, standing on
+    /// `stage`, and the pipelines that go with it.
+    fn hidden_suite(
+        name: &str,
+        rule: Rule,
+        stage: &str,
+    ) -> (Repo, crate::scratch::ScratchRoot, Pipelines) {
+        let (repo, root_guard) = fixture(name);
+        let pipelines = match rule {
+            Rule::Skip => hides_suite(""),
+            Rule::Last => hides_suite("    last: true\n"),
+            Rule::First => hides_suite("    first: true\n"),
+        };
+        match rule {
+            Rule::Skip | Rule::Last => add(&repo, "t", &[], Some(stage)),
+            // `t` names `base` once it is archived: queueing it before would
+            // look for `base`'s branch to start from.
+            Rule::First => {
+                add(&repo, "base", &[], None);
+                archive_on(&repo, "base", crate::pipeline::DONE);
+                add(&repo, "t", &[], Some(stage));
+            }
+        }
+        let mut task = repo.task("t").unwrap();
+        match rule {
+            Rule::Skip => task.front.skip = vec!["suite".into()],
+            Rule::Last => add(&repo, "after", &["t"], None),
+            Rule::First => task.front.depends_on = vec!["base".into()],
+        }
+        task.save().unwrap();
+        (repo, root_guard, pipelines)
+    }
+
+    /// NEXT on a row working `test` names `document`, the first step past it
+    /// that the task runs, whichever rule hides `suite`.
+    #[test]
+    fn next_names_the_first_step_the_task_runs() {
+        for rule in RULES {
+            let (repo, _root_guard, pipelines) =
+                hidden_suite(&format!("next-past-{rule:?}"), rule, "test");
+            let rows = rows(&repo, &pipelines).unwrap();
+            let row = rows.iter().find(|r| r.id == "t").unwrap();
+            assert_eq!(row.next, "→ document", "{rule:?}");
+        }
+    }
+
+    /// The same pipelines name `suite` for a task none of the rules touch: the
+    /// top of a chain still runs its `last:` step, and a chain's root its
+    /// `first:` one.
+    #[test]
+    fn next_still_names_a_step_the_task_runs() {
+        for key in ["", "    last: true\n", "    first: true\n"] {
+            let (repo, _root_guard) = fixture("next-runs-suite");
+            let pipelines = hides_suite(key);
+            add(&repo, "t", &[], Some("test"));
+            let rows = rows(&repo, &pipelines).unwrap();
+            let row = rows.iter().find(|r| r.id == "t").unwrap();
+            assert_eq!(row.next, "→ suite", "{key:?}");
+        }
+    }
+
+    /// A paused row's NEXT names where its resume lands, past `suite`.
+    #[test]
+    fn a_paused_rows_next_names_where_its_resume_lands() {
+        for rule in RULES {
+            let (repo, _root_guard, pipelines) =
+                hidden_suite(&format!("next-paused-past-{rule:?}"), rule, "test");
+            caught_at_step(&repo, "t", "test", "pass");
+            let rows = rows(&repo, &pipelines).unwrap();
+            let row = rows.iter().find(|r| r.id == "t").unwrap();
+            assert_eq!(row.next, "[r] → document", "{rule:?}");
+        }
+    }
+
+    /// A command step's exit from `test` straight onto `document`, past a
+    /// hidden `suite`, reads as the pass it was.
+    #[test]
+    fn a_move_past_a_hidden_step_reads_passed() {
+        for rule in RULES {
+            let (repo, _root_guard, pipelines) =
+                hidden_suite(&format!("recent-past-{rule:?}"), rule, "test");
+            let mut board = Board::for_test();
+            read_once(&mut board, &repo, &pipelines);
+            moved(&repo, "document");
+            read_once(&mut board, &repo, &pipelines);
+            let line = board
+                .recent
+                .iter()
+                .find_map(|RecentEvent::Arrival { id, change, .. }| {
+                    (id == "t").then(|| view::sentence(change))
+                })
+                .expect("the move is seen");
+            assert_eq!(line, "passed test, moved to document", "{rule:?}");
+        }
+    }
+
+    /// A lane start refused on `document`, whose `on_fail` names the hidden
+    /// `suite`, writes that raw `on_fail` — a failed start does not land
+    /// past hidden steps — and still reads as the launch that failed.
+    #[test]
+    fn a_failed_start_onto_a_hidden_on_fail_reads_could_not_launch() {
+        for rule in RULES {
+            let (repo, _root_guard, mut pipelines) =
+                hidden_suite(&format!("recent-launch-{rule:?}"), rule, "document");
+            let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+            let document = pipeline.steps.iter_mut().find(|s| s.id == "document");
+            document.unwrap().on_fail = Some("suite".into());
+            let mut board = Board::for_test();
+            read_once(&mut board, &repo, &pipelines);
+            moved(&repo, "suite");
+            read_once(&mut board, &repo, &pipelines);
+            let line = board
+                .recent
+                .iter()
+                .find_map(|RecentEvent::Arrival { id, change, .. }| {
+                    (id == "t").then(|| view::sentence(change))
+                })
+                .expect("the move is seen");
+            assert_eq!(
+                line, "could not launch document, moved to suite",
+                "{rule:?}"
+            );
+        }
+    }
+
+    /// `r` on a task held after `test` passed leaves `suite` out, puts
+    /// `on pass (next)` on `document`, and `enter` lands the task there.
+    #[test]
+    fn the_picker_leaves_out_a_step_the_task_walks_past() {
+        for rule in RULES {
+            let (repo, _root_guard, pipelines) =
+                hidden_suite(&format!("picker-past-{rule:?}"), rule, "test");
+            caught_at_step(&repo, "t", "test", "pass");
+
+            let mut board = Board::for_test();
+            board.cursor = Some("t".to_string());
+            press(
+                &mut board,
+                &repo,
+                &pipelines,
+                &[crate::screen::Key::Char('r')],
+            );
+
+            let picker = open_picker(&board);
+            let rows: Vec<(&str, &str)> = picker
+                .rows
+                .iter()
+                .map(|r| (r.step.as_str(), r.note.as_str()))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("implement", ""),
+                    ("test", "paused"),
+                    ("fix", "on fail"),
+                    ("document", "on pass (next)"),
+                    ("handover", ""),
+                ],
+                "{rule:?}"
+            );
+            assert_eq!(picker.rows[picker.cursor].step, "document", "{rule:?}");
+
+            press(&mut board, &repo, &pipelines, &[crate::screen::Key::Enter]);
+            assert_eq!(repo.task("t").unwrap().stage(), "document", "{rule:?}");
+        }
+    }
+
+    /// A task stopped on a step it walks past is really there, so that step
+    /// stays listed, and `(next)` sits on where the resume lands past it.
+    #[test]
+    fn the_picker_keeps_a_hidden_step_the_task_stopped_at() {
+        for rule in RULES {
+            let (repo, _root_guard, pipelines) =
+                hidden_suite(&format!("picker-stopped-{rule:?}"), rule, "suite");
+            caught_at_step(&repo, "t", "suite", "pass");
+
+            let task = repo.task("t").unwrap();
+            let dependents = crate::dispatch::queue_dependents(&repo, &task).unwrap();
+            let picker = resume_picker(&task, &pipelines, dependents).unwrap();
+            let rows: Vec<(&str, &str)> = picker
+                .rows
+                .iter()
+                .map(|r| (r.step.as_str(), r.note.as_str()))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("implement", ""),
+                    ("test", ""),
+                    ("fix", "on fail"),
+                    ("suite", "paused"),
+                    ("document", "on pass (next)"),
+                    ("handover", ""),
+                ],
+                "{rule:?}"
+            );
+            let road = crate::commands::resume_road(&task, &pipelines).unwrap();
+            let pipeline = pipelines.for_task(&task).unwrap();
+            assert_eq!(
+                road.landing(pipeline, &task, dependents),
+                "document",
+                "{rule:?}"
+            );
         }
     }
 }
