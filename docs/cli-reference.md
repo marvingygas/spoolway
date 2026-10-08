@@ -1273,7 +1273,7 @@ spoolway sync
 | Flag | Default | What it does |
 |---|---|---|
 | `--dry-run` | | Print what would change. Writes nothing |
-| `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`, or `.bak.<n>` if that name is taken, with the same file mode. Repeatable |
+| `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`, or `.bak.<n>` if that name is taken, with the same file mode. In home mode a path under `.spoolway/` is the workspace's `config/`. Repeatable |
 
 At a terminal, with something to write or remove, `sync` lists it and waits: enter writes the
 files, records the stamp and prints the report; esc, ctrl-c, or the terminal going away

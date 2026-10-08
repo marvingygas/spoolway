@@ -121,6 +121,13 @@ must "the stale .gitignore block and skill folder are committed" \
   git commit -qm "e2e: a stale spoolway .gitignore block and skill folder"
 before_sync=$(git rev-parse HEAD)
 
+# The checkout staying unchanged does not show that sync did its work: one that
+# skipped the workspace entirely would pass that too. So the workspace's own
+# config.toml is made stale first, cut down to a file written before most
+# settings existed, and checked again once sync has run.
+printf '[dispatch]\nlane_quiet = "45m"\n' > "$WS/config/config.toml"
+lacks "the workspace's config.toml is stale before the sync" "auto_commit" "$WS/config/config.toml"
+
 works "a dry-run sync runs cleanly in home mode" "$SPOOLWAY" sync --dry-run
 works "a real sync runs cleanly in home mode" "$SPOOLWAY" sync
 if [ "$(git rev-parse HEAD)" = "$before_sync" ] && [ -z "$(git status --porcelain --ignored)" ]; then
@@ -129,9 +136,40 @@ else
   bad "sync leaves the checkout unchanged"
   git status --porcelain --ignored | sed 's/^/        /'
 fi
+has "sync brought the workspace's config.toml current" "auto_commit" "$WS/config/config.toml"
+has "sync kept the value the workspace's config.toml already had" 'lane_quiet = "45m"' "$WS/config/config.toml"
 has "the .gitignore still carries spoolway's old block" "# >>> spoolway >>>" .gitignore
 has "the stale skill file is unchanged" "stale, from before this checkout moved into the workspace" \
   .claude/skills/spoolway-config/SKILL.md
+
+# `--replace` takes a path spelled under `.spoolway/`, which in home mode is
+# the workspace's `config/` and not a folder of the checkout. The checkout has
+# no such file, so before this resolved through the setup folder the command
+# refused with "not a file spoolway ships".
+REPLACED="$WS/config/prompts/implementer/PROMPT.md"
+mkdir -p "$(dirname "$REPLACED")"
+echo "my own implementer prompt" > "$REPLACED"
+before_replace=$(git rev-parse HEAD)
+if "$SPOOLWAY" sync --replace .spoolway/prompts/implementer/PROMPT.md >"$LIVE/replace.out" 2>&1; then
+  ok "a home-mode replace of a path under .spoolway/ runs cleanly"
+else
+  bad "a home-mode replace of a path under .spoolway/ runs cleanly"
+  sed 's/^/        /' "$LIVE/replace.out" | head -30
+fi
+has "a home-mode replace names the workspace file it wrote, in its ~ form" \
+  "wrote   ~/${REPLACED#"$HOME"/}" "$LIVE/replace.out"
+has "a home-mode replace puts the note on its own line" \
+  "          (whole file, discarding your changes)" "$LIVE/replace.out"
+lacks "a home-mode replace does not point at git diff" "git diff" "$LIVE/replace.out"
+lacks "the workspace prompt no longer holds the old text" "my own implementer prompt" "$REPLACED"
+has "the old text is saved beside it" "my own implementer prompt" "$REPLACED.bak"
+if [ "$(git rev-parse HEAD)" = "$before_replace" ] && [ ! -e .spoolway ] && [ -z "$(git status --porcelain --ignored)" ]; then
+  ok "a home-mode replace leaves the checkout clean"
+else
+  bad "a home-mode replace leaves the checkout clean"
+  ls -d .spoolway 2>/dev/null | sed 's/^/        /'
+  git status --porcelain --ignored | sed 's/^/        /'
+fi
 
 # ------------------------------------------- init writes the workspace
 # A git repository spoolway has never seen, set up in home mode by `init`
