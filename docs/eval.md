@@ -111,7 +111,7 @@ same under every `by`, so switching how the rows are grouped never moves a figur
 | `PASS` | Share of lanes that reported `pass`. Lanes that never reported are left out. |
 | `BLOCKS` | Lanes that reported `--block`, and lanes whose pass or fail left the task on `blocked`. A pass or fail does that when the next step's `loop:` is spent, when a failing step has no `on_fail`, or when a passing step's worktree cannot be committed. A lane counts once, and a pass still counts in `PASS`. Per run, `BLOCKS/RUN` is that count divided by `RUNS`, with two decimals. |
 | `CTX PEAK AVG` | The mean of the row's lanes' own peak context reading, each as a share of its model's window |
-| `CTX PEAK` | The largest context reading any lane on the row banked, as a share of the model's window. A raw token count when the model has no `context_window`. `—` when no lane banked one. |
+| `CTX PEAK` | The highest share of its own model's window any lane on the row reached. A row can mix models with different windows, so this is not always the largest raw reading. A raw token count when no lane's model has a `context_window`. `—` when no lane banked one. |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | Each token class, summed over the row. Per run: `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN`, each divided by `RUNS`. |
 | `IN USD`, `OUT USD`, `CACHE R USD`, `CACHE W USD` | The cost of the token column before each, priced at today's price table when eval reads. `CACHE W USD` prices the five-minute and one-hour writes each at its own rate and adds them. Together they can differ from `USD`, which was banked when the lane settled. Blank when every lane on the row that spent tokens has no price today. Per run: `IN USD/RUN`, `OUT USD/RUN`, `CACHE R USD/RUN`, `CACHE W USD/RUN`, each divided by `RUNS`. |
 | `USD` | Total cost. Drawn in both views. |
@@ -237,7 +237,7 @@ root's own row. A session in a worktree a task owns counts on the lanes table in
 | `USD` | Total cost. Drawn in both views. |
 | `USD/SESSION` | Cost per session. Drawn per run only. |
 | `CTX PEAK AVG` | The mean of its sessions' own peak context reading, each as a share of its model's window |
-| `CTX PEAK` | The largest context reading any session banked |
+| `CTX PEAK` | The highest share of its own model's window any session reached |
 | `TIME` | Wall time, summed over the row. Per run: `TIME/SESSION`, divided by `SESSIONS`. |
 
 `by session` lists one row per session instead, newest first. Its columns are the same in both

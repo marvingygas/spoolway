@@ -645,29 +645,39 @@ fn ctx_avg_of<'a, 'b: 'a>(
     }
 }
 
-/// The largest `ctx_peak` among `lanes`, and — where it can be resolved —
-/// that peak as a share of the `context_window` of the model that banked it.
+/// The lane among `lanes` that came closest to its own model's window: its
+/// `ctx_peak`, and that peak as a share of the window.
 ///
-/// Only the winning lane's model is ever resolved: a row can mix models
-/// across its lanes, but `CTX PEAK` reports on the one reading that mattered,
-/// not an average of windows that may not even be comparable.
+/// A row can mix models, and the largest raw reading is not the closest call
+/// when the windows differ: 72k of a 100k local model is nearer the edge than
+/// 180k of a 1M one. So the winner is the highest share, and the raw reading
+/// decides only when no lane's model resolves a window — then the share is
+/// `None` and the cell falls back to tokens, see [`ctx_cell`].
 fn ctx_peak_of(
     lanes: &[&Entry],
     models: &BTreeMap<String, ModelPrice>,
 ) -> (Option<u64>, Option<f64>) {
-    let peak = lanes
+    let readings: Vec<(u64, Option<f64>)> = lanes
         .iter()
-        .filter_map(|e| e.ctx_peak.map(|tokens| (tokens, e.model.as_str())))
-        .max_by_key(|(tokens, _)| *tokens);
-    let tokens = peak.map(|(tokens, _)| tokens);
-    let pct = peak.and_then(|(tokens, model)| {
-        crate::models::resolve(models, model)
-            .price
-            .map(|price| price.context_window)
-            .filter(|window| *window > 0)
-            .map(|window| tokens as f64 / window as f64)
-    });
-    (tokens, pct)
+        .filter_map(|e| {
+            e.ctx_peak.map(|tokens| {
+                let share = crate::models::resolve(models, &e.model)
+                    .price
+                    .map(|price| price.context_window)
+                    .filter(|window| *window > 0)
+                    .map(|window| tokens as f64 / window as f64);
+                (tokens, share)
+            })
+        })
+        .collect();
+    let closest = readings
+        .iter()
+        .filter_map(|(tokens, share)| share.map(|share| (*tokens, share)))
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    match closest {
+        Some((tokens, share)) => (Some(tokens), Some(share)),
+        None => (readings.iter().map(|(tokens, _)| *tokens).max(), None),
+    }
 }
 
 /// The `CTX PEAK` cell: a percentage of the model's window when one
@@ -5798,6 +5808,32 @@ mod tests {
         let m = &rows[0].metrics;
         assert_eq!(m.ctx_peak_tokens, Some(91_000), "the larger of the two");
         assert_eq!(ctx_cell(m.ctx_peak_tokens, m.ctx_peak_pct), "91%");
+    }
+
+    /// Across models with different windows, `CTX PEAK` is the lane nearest
+    /// its own window, not the largest raw reading — so it can never sit
+    /// below `CTX PEAK AVG`.
+    #[test]
+    fn ctx_peak_is_the_highest_share_when_the_row_mixes_window_sizes() {
+        let mut models = sized_models(100_000);
+        models.insert(
+            "wide".to_string(),
+            ModelPrice {
+                context_window: 1_000_000,
+                ..ModelPrice::default()
+            },
+        );
+        let mut local = lane("login", "implement", 1, Some("pass"));
+        local.model = "sized".into();
+        local.ctx_peak = Some(72_000);
+        let mut cloud = lane("login", "review", 1, Some("pass"));
+        cloud.model = "wide".into();
+        cloud.ctx_peak = Some(180_000);
+        let rows = rows_by_with(&[local, cloud], EvalBy::Pipeline, &models);
+        let m = &rows[0].metrics;
+        assert_eq!(m.ctx_peak_tokens, Some(72_000), "the local lane's reading");
+        assert_eq!(ctx_cell(m.ctx_peak_tokens, m.ctx_peak_pct), "72%");
+        assert!(m.ctx_peak_pct.unwrap() >= m.ctx_avg.pct.unwrap());
     }
 
     /// `CTX PEAK AVG` is the mean of each lane's own peak — a lane that
