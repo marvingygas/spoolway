@@ -3955,6 +3955,127 @@ mod tests {
         );
     }
 
+    /// The table under "Recent moves" in `docs/dispatcher.md` lists the
+    /// sentences `sentence` writes. Each row's sentence, with `<step>` left as
+    /// it is written there, must be one `sentence` produces from
+    /// some move, so a reworded sentence or a stale row fails here.
+    #[test]
+    fn every_sentence_in_the_dispatcher_doc_is_one_sentence_writes() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/dispatcher.md"),
+        )
+        .unwrap();
+        let section = doc
+            .split("### Recent moves")
+            .nth(1)
+            .and_then(|rest| rest.split("\n### ").next())
+            .expect("docs/dispatcher.md has a `### Recent moves` section");
+        let documented: Vec<&str> = section
+            .lines()
+            .filter(|line| line.starts_with("| `"))
+            .map(|line| line[3..].split('`').next().unwrap())
+            .collect();
+        // Without this, a changed row marker or section heading would leave
+        // `documented` empty and the loop below would pass having checked
+        // nothing. It does not check the table is complete.
+        assert!(
+            !documented.is_empty(),
+            "found no Recent moves table rows to check"
+        );
+
+        let causes = [
+            None,
+            Some(Cause::Gate),
+            Some(Cause::Scheduled),
+            Some(Cause::HookFailed),
+            Some(Cause::Manually),
+            Some(Cause::DispatchingStopped),
+            Some(Cause::Escalated),
+            Some(Cause::BranchMissing("<name>".into())),
+            Some(Cause::LoopLimit("<step>".into())),
+            Some(Cause::Attempts(3)),
+            Some(Cause::LaneDiedAtLaunch),
+            Some(Cause::UncommittedWork),
+        ];
+        let mut written = std::collections::BTreeSet::new();
+        for from in ["<step>", "blocked"] {
+            for to in ["<step>", "paused", "blocked", "done"] {
+                let (f, t) = (from.to_string(), to.to_string());
+                for cause in &causes {
+                    for change in [
+                        Move::Passed {
+                            from: f.clone(),
+                            to: t.clone(),
+                            cause: cause.clone(),
+                        },
+                        Move::Failed {
+                            from: f.clone(),
+                            to: t.clone(),
+                            cause: cause.clone(),
+                        },
+                        Move::Skipped {
+                            from: f.clone(),
+                            to: t.clone(),
+                            cause: cause.clone(),
+                        },
+                        Move::Reported {
+                            what: Reported::Block,
+                            from: f.clone(),
+                            to: t.clone(),
+                            cause: cause.clone(),
+                        },
+                        Move::Reported {
+                            what: Reported::Pause,
+                            from: f.clone(),
+                            to: t.clone(),
+                            cause: cause.clone(),
+                        },
+                        Move::CouldNotLaunch {
+                            from: f.clone(),
+                            to: t.clone(),
+                            cause: cause.clone(),
+                        },
+                        Move::Stopped {
+                            from: Some(f.clone()),
+                            cause: cause.clone(),
+                        },
+                        Move::Stopped {
+                            from: None,
+                            cause: cause.clone(),
+                        },
+                    ] {
+                        written.insert(sentence(&change));
+                    }
+                }
+                written.insert(sentence(&Move::FailedInBackground {
+                    from: f.clone(),
+                    to: t.clone(),
+                }));
+                written.insert(sentence(&Move::Left { from: f, to: t }));
+            }
+        }
+        for to in ["<step>", "done", "queued"] {
+            let t = to.to_string();
+            written.insert(sentence(&Move::Started { to: t.clone() }));
+            written.insert(sentence(&Move::Resumed { to: t.clone() }));
+            written.insert(sentence(&Move::Unblocked {
+                to: t.clone(),
+                by_lane: false,
+            }));
+            written.insert(sentence(&Move::Unblocked {
+                to: t,
+                by_lane: true,
+            }));
+        }
+
+        for row in documented {
+            assert!(
+                written.contains(row),
+                "docs/dispatcher.md lists `{row}`, which `sentence` never writes"
+            );
+        }
+    }
+
     /// A line is the time, the id and the sentence, and nothing else: no
     /// verdict glyph, no position fraction, and no colour but the dim the
     /// whole line is drawn in.
