@@ -572,6 +572,13 @@ the tab looks the same. A tab therefore holds at most one pane per agent step. T
 transcript stays on disk under its session id, and its report stays in the task file. If the old
 lane is still mid-turn, its spend is banked first.
 
+To show one agent pane per task, set `keep_finished_lanes = false` under `[dispatch]`, or
+run `spoolway config set dispatch.keep_finished_lanes false`. Each new agent step then opens where
+the spiral puts it, and the task's most recent kept pane is closed once the new one is ready. Its
+spend is banked first. Panes that were already kept when you turned it off stay open until the
+task is done, and only the most recent one closes with each new step. A parked task's pane is still
+held for you.
+
 A lane is banked when its step moves on, and again when the task is done. The second bank
 counts only what was added since the first, so rounds you ran in a finished pane are counted.
 

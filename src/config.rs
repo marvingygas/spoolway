@@ -570,6 +570,21 @@ pub struct DispatchConfig {
     #[serde(skip_serializing_if = "Priority::is_group")]
     pub priority: Priority,
 
+    /// Whether a finished step's agent stays open in its own pane until its
+    /// task is done. On by default. Off, each new agent step is placed by the
+    /// same spiral split as ever, and the task's most recent kept pane is
+    /// closed once that step's boot is prepared, so a task shows one agent
+    /// pane at a time. Panes already kept when it is turned off stay until
+    /// their task is done: only the most recent one goes with each new step.
+    ///
+    /// Not written to `config.toml` while it holds its default, for the same
+    /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
+    /// runs a binary built from a branch behind main, and
+    /// `deny_unknown_fields` makes an unknown key a hard parse error rather
+    /// than something to ignore.
+    #[serde(skip_serializing_if = "is_true")]
+    pub keep_finished_lanes: bool,
+
     /// Retired: whether stopping the dispatcher ended the run's live lanes
     /// and took their worktrees with it. Stopping never does that any more —
     /// see [`crate::dispatch::Dispatcher::sweep_on_stop`] — so there is no
@@ -603,6 +618,12 @@ fn is_default_lane_child_ceiling(value: &Duration) -> bool {
     *value == Duration::from_secs(3600)
 }
 
+/// Skips a `true` on the way out — see [`DispatchConfig::keep_finished_lanes`]
+/// for why a key that holds its default is better off absent here.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
@@ -626,6 +647,7 @@ impl Default for DispatchConfig {
             worktree_root: String::new(),
             auto_commit: true,
             priority: Priority::default(),
+            keep_finished_lanes: true,
             tear_lanes_on_stop: None,
             herdr_mode: None,
         }
@@ -3142,6 +3164,28 @@ mod tests {
             toml::to_string(&custom)
                 .unwrap()
                 .contains("lane_child_ceiling = \"30m\"")
+        );
+    }
+
+    /// `keep_finished_lanes` stays out of a defaulted config, so a lane running
+    /// an older binary can still read the file, and is written once a person
+    /// turns it off.
+    #[test]
+    fn keep_finished_lanes_stays_out_of_a_defaulted_config() {
+        let config = Config::default();
+        assert!(config.dispatch.keep_finished_lanes);
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(!rendered.contains("keep_finished_lanes"), "{rendered}");
+
+        let absent: Config = toml::from_str("[dispatch]\nauto_commit = true\n").unwrap();
+        assert!(absent.dispatch.keep_finished_lanes);
+
+        let off: Config = toml::from_str("[dispatch]\nkeep_finished_lanes = false\n").unwrap();
+        assert!(!off.dispatch.keep_finished_lanes);
+        assert!(
+            toml::to_string(&off)
+                .unwrap()
+                .contains("keep_finished_lanes = false")
         );
     }
 
