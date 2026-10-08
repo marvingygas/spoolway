@@ -140,6 +140,10 @@ draws() {
 # is still proof it landed; waiting through a stretch with nothing to show
 # now spends the whole of `poll_until`'s own bound instead of the one frame
 # it used to see, which only costs this suite time, not correctness.
+# Every read of the log since a mark below feeds `grep -q` through `< <(…)`,
+# never a pipe. `grep -q` stops at its first match, and under `pipefail` the
+# SIGPIPE that gives a `tail` still writing a frame would read the match as a
+# miss — see `says` in lib.sh.
 _frame_count() { grep -aoF $'\x1b[?2026h\x1b[H' "$BOARD_LOG" 2>/dev/null | wc -l; }
 _frame_past()  { [ "$(_frame_count)" -gt "$1" ]; }
 
@@ -178,7 +182,7 @@ stops_drawing() {
   settle_frames 1
   mark=$(wc -l < "$BOARD_LOG")
   settle_frames 1
-  if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$unwanted"; then
+  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then
     bad "$what (the board is still drawing \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
   else ok "$what"; fi
@@ -188,7 +192,7 @@ stops_drawing() {
 # after this mark says it.
 never_draws() {
   local what=$1 unwanted=$2 mark=$3
-  if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$unwanted"; then
+  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then
     bad "$what (a panel opened: \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
   else ok "$what"; fi
@@ -200,7 +204,7 @@ never_draws() {
 # and three dispatchers ago.
 draws_since() {
   local what=$1 wanted=$2 mark=$3
-  if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$wanted"; then ok "$what"
+  if grep -qF -- "$wanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then ok "$what"
   else
     bad "$what (no frame since said \"$wanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
@@ -214,7 +218,7 @@ draws_since() {
 # there.
 _since_says() {
   local mark=$1 want=$2
-  tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$want"
+  grep -qF -- "$want" < <(tail -n "+$((mark + 1))" "$BOARD_LOG")
 }
 draws_since_waited() {
   local what=$1 want=$2 mark=$3 secs=${4:-20}
@@ -231,7 +235,7 @@ draws_since_waited() {
 # the panel helper's vaguer to fit them both.
 draws_since_not() {
   local what=$1 unwanted=$2 mark=$3
-  if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$unwanted"; then
+  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then
     bad "$what (the board drew \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
   else ok "$what"; fi
@@ -830,8 +834,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   MARK=$(wc -l < "$BOARD_LOG")
   press r
   next_frame 3
-  if tail -n "+$((MARK + 1))" "$BOARD_LOG" | grep -qF -- "] pick"; then
-    tail -n "+$((MARK + 1))" "$BOARD_LOG" | grep -qF -- "resume gate-edit" && SAW_PICKER=gate-edit
+  if grep -qF -- "] pick" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG"); then
+    grep -qF -- "resume gate-edit" < <(tail -n "+$((MARK + 1))" "$BOARD_LOG") && SAW_PICKER=gate-edit
     press $'\r'
     next_frame 3
   fi

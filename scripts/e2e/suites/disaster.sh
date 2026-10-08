@@ -374,7 +374,7 @@ else
 fi
 screen_stop
 
-if ! tail -n +"$((BEFORE_LINES + 1))" "$BOARD_LOG" | grep -qa '  ! '; then
+if ! grep -qa '  ! ' < <(tail -n +"$((BEFORE_LINES + 1))" "$BOARD_LOG"); then
   ok "and no problem line reaches the board's own output"
 else
   bad "and no problem line reaches the board's own output"
@@ -471,7 +471,7 @@ BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
 screen_start "$BOARD_LOG"
 screen_board
 poll_until 15 screen_drew_since "$BEFORE" "slots"
-if tail -n +"$((BEFORE + 1))" "$BOARD_LOG" | grep -qaF "not considered by the slots pool"; then
+if grep -qaF "not considered by the slots pool" < <(tail -n +"$((BEFORE + 1))" "$BOARD_LOG"); then
   bad "no board frame carries the retired warning (model unflagged)"
   tail -n +"$((BEFORE + 1))" "$BOARD_LOG" | sed 's/^/        /'
 else

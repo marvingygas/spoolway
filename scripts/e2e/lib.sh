@@ -473,7 +473,7 @@ screen_frames() { grep -aoF $'\x1b[?2026h\x1b[H' "$E2E_SCREEN_LOG" 2>/dev/null |
 
 # What the screen has drawn since line `mark` of its log says `want`.
 screen_drew_since() {
-  tail -n "+$(($1 + 1))" "$E2E_SCREEN_LOG" | grep -qaF -- "$2"
+  grep -qaF -- "$2" < <(tail -n "+$(($1 + 1))" "$E2E_SCREEN_LOG")
 }
 
 # Onto the dispatch tab, one `←` from the queue tab the screen opens on, and
