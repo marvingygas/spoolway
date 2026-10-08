@@ -1183,31 +1183,6 @@ impl Pipeline {
         Some(next.id.as_str())
     }
 
-    /// Every step still ahead of `from`, following `on_pass` link by link
-    /// until nothing more runs. Where [`Pipeline::next_running_step`] answers
-    /// one hop, this is the whole walk — what the board's RECENT ticker draws
-    /// as the chain following the step a task just arrived at.
-    ///
-    /// Only `on_pass`: a step's `on_fail` is a different question, and one
-    /// this never had to answer either, since a chain drawn forward from a
-    /// pass is read the same way whichever step it starts from. Guarded
-    /// against a cycle — no shipped pipeline has one, but this walks whatever
-    /// a task file and a pipeline document say right now, and a malformed
-    /// pair must end the walk rather than loop forever.
-    pub fn pass_chain(&self, from: &str) -> Vec<&str> {
-        let mut chain = Vec::new();
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut current = from;
-        while let Some(next) = self.next_running_step(current) {
-            if !seen.insert(next) {
-                break;
-            }
-            chain.push(next);
-            current = next;
-        }
-        chain
-    }
-
     /// A step's raw position in this pipeline's own step list, counting from
     /// zero at the entry step. There is no override — a project that wants a
     /// different order writes its steps in that order.

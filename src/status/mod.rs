@@ -39,7 +39,7 @@ pub use view::{banner, plain_table};
 // out a second time — see `screen::key_hint` — and bare `spoolway`'s tab strip
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
-    AMBER, RecentEvent, Style, Verdict, boxed, clamp_rows, footer, group_totals, masthead,
+    AMBER, Move, RecentEvent, Style, boxed, clamp_rows, footer, group_totals, masthead,
     pane_height, pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel,
     spool_frame, table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
@@ -2279,20 +2279,17 @@ fn build(
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
 
-    // The ticker sees the queue move: a stage that changed. A task entering
-    // the queue is already a new row on the table above, and one archiving
-    // just dims in place there — neither is a lane reporting anything, so
-    // neither earns a line here too.
+    // The ticker sees the queue move: a stage that changed, or a task that
+    // left the queue finished. A task entering the queue is already a new row
+    // on the table above, so it earns no line here too.
     let now = chrono::Local::now().format("%H:%M").to_string();
     let mut current: BTreeMap<String, String> = BTreeMap::new();
     for task in &tasks {
         current.insert(task.id().to_string(), task.stage().to_string());
     }
     for (id, stage) in &current {
-        // Names the step behind the move, not the one arrived at: `stage` is
-        // where the destination decides pass or fail, but `was` is the step
-        // that actually reported — see `arrival_event`. Clipped by `ticker`
-        // itself, the same as every other recent line, so a long id or step
+        // Names both the step the task left and the one it moved to — see
+        // `arrival_event`. Clipped by `ticker` itself, so a long id or step
         // name ends in `…` rather than wrapping.
         if let Some(was) = memory.stages.get(id)
             && was != stage
@@ -2305,6 +2302,15 @@ fn build(
             // back to tell a task that just handed off, with no lane up for
             // it yet, apart from one genuinely out of workers.
             memory.arrived.insert(id.clone(), Instant::now());
+        }
+    }
+    // Only for a task the last reading had and this one does not, so the
+    // archive file is opened once per task that leaves, not once per reading.
+    for (id, was) in &memory.stages {
+        if !current.contains_key(id)
+            && let Some(event) = finished_event(&now, id, was, &repo.archive_dir())
+        {
+            push_recent(&mut memory.recent, event);
         }
     }
     memory.stages = current;
@@ -4152,20 +4158,19 @@ fn forget_dead_live_sessions(live: &HashSet<String>) {
 
 /// A RECENT event for a task that just moved from `was` to `stage`.
 ///
-/// `paused` and `blocked` are not steps a pipeline declares — they are
-/// dispatcher states no `on_pass`/`on_fail` ever names, so the step worth
-/// naming and scoring is not `was` but the *real* step behind the wait:
-/// `paused_at`, the gate that passed; `parked_from`, the step a person
-/// interrupted; or `blocked_from`, the step the task stopped on and will
-/// return to — the three fields `spoolway resume` reads to tell one stop
-/// from the other. Everywhere else, `was` is the step that reported, and its
-/// own [`Step::destination`] against `stage` is what tells a pass from a
-/// fail — see [`Verdict`].
+/// The move is classified here, once, because which kind it is depends on
+/// the pipeline the task is on at the moment it arrives; [`view::sentence`]
+/// only words the result. The checks run in order, and the first that
+/// matches wins:
 ///
-/// Both the step name and the position are worked out here, once, because
-/// they are facts about the pipeline the task is on at the moment it
-/// arrives; [`view::ticker`] only turns the result into a line, against the pane
-/// and the block around it.
+/// - into `paused`, whatever the road there — named by `was`, or by nothing
+///   for a task that was still on `queued`;
+/// - out of `queued`, `paused` or `blocked`, none of which is a step whose
+///   routes could explain the move;
+/// - onto `was`'s own `on_pass` or `on_fail`, read off
+///   [`Step::destination`] — so a step that declares no `on_fail` still
+///   reads as failed into `blocked`;
+/// - anything else, named plainly as a step left.
 ///
 /// [`Step::destination`]: crate::pipeline::Step::destination
 fn arrival_event(
@@ -4176,71 +4181,69 @@ fn arrival_event(
     tasks: &[crate::task::Task],
     pipelines: &Pipelines,
 ) -> RecentEvent {
+    use crate::pipeline::{BLOCKED, PAUSED, QUEUED};
+
     let task = tasks.iter().find(|t| t.id() == id);
     let pipeline = task.and_then(|t| pipelines.for_task(t).ok());
+    let from = was.to_string();
+    let to = stage.to_string();
 
-    let (named, verdict) = match stage {
-        // `paused_at` names a gate; `parked_from` names a person's own
-        // interrupt (see the two fields' own comments in `src/task.rs`).
-        // Never both set, so falling back to the second whenever the first
-        // is absent picks up the step a `p`-park actually left — the common
-        // case now that `p` works from every state, not the rare one it was
-        // while `paused_at` alone was ever worth reading here.
-        crate::pipeline::PAUSED => (
-            task.and_then(|t| {
-                t.front
-                    .paused_at
-                    .clone()
-                    .or_else(|| t.front.parked_from.clone())
-            }),
-            Verdict::Paused,
-        ),
-        crate::pipeline::BLOCKED => (
-            task.and_then(|t| t.front.blocked_from.clone()),
-            Verdict::Blocked,
-        ),
-        _ => {
-            let verdict = match pipeline.and_then(|p| p.step(was)) {
-                Some(step) if step.destination(Outcome::Pass) == Some(stage) => Verdict::Pass,
-                Some(step) if step.destination(Outcome::Fail) == Some(stage) => Verdict::Fail,
-                _ => Verdict::None,
-            };
-            (Some(was.to_string()), verdict)
-        }
+    let change = match (was, stage) {
+        (QUEUED, PAUSED) => Move::Stopped { from: None },
+        (_, PAUSED) => Move::Stopped { from: Some(from) },
+        (QUEUED, _) => Move::Started { to },
+        (PAUSED, _) => Move::Resumed { to },
+        (BLOCKED, _) => Move::Unblocked { to },
+        _ => match pipeline.and_then(|p| p.step(was)) {
+            Some(step) if step.destination(Outcome::Pass) == Some(stage) => {
+                Move::Passed { from, to }
+            }
+            Some(step) if step.destination(Outcome::Fail) == Some(stage) => {
+                Move::Failed { from, to }
+            }
+            _ => Move::Left { from, to },
+        },
     };
-
-    // Falls back to the stage itself when there is no step to name — a
-    // task `p`-parked before it ever started is the real case that reaches
-    // this: it was on `queued`, which `park` never records into
-    // `parked_from` because no pipeline declares it as a step, so there is
-    // no step here to name or score, only the bare word `paused` and a `—`
-    // for its position.
-    let step = named.clone().unwrap_or_else(|| stage.to_string());
-    // The named step's own position in its pipeline's walk: its index plus
-    // one — the steps up to and including it — over that plus the length of
-    // `pass_chain` from it — the steps still ahead. `None` wherever the
-    // named step or its pipeline can't be resolved, which `ticker` draws as
-    // `—` rather than a wrong number.
-    let position = named.zip(pipeline).and_then(|(step, pipeline)| {
-        let numerator = pipeline.steps.iter().position(|s| s.id == step)? + 1;
-        let denominator = numerator + pipeline.pass_chain(&step).len();
-        Some((numerator, denominator))
-    });
 
     RecentEvent::Arrival {
         at: now.to_string(),
         id: id.to_string(),
-        step,
-        verdict,
-        position,
+        change,
     }
+}
+
+/// A RECENT event for a task the last reading had and this one does not, or
+/// `None` when its leaving is no news.
+///
+/// A task leaves the queue three ways: it finishes and is archived, a person
+/// takes it out with `u`, or its file is deleted. Only the first earns a
+/// line, and only when the archive holds the task with stage `done` — a task
+/// archived on any other stage did not finish. `was` is the step the board
+/// last saw it on. One the board already saw on `done` has had its line, and
+/// would otherwise read as having passed `done` itself.
+fn finished_event(now: &str, id: &str, was: &str, archive_dir: &Path) -> Option<RecentEvent> {
+    use crate::pipeline::DONE;
+
+    if was == DONE {
+        return None;
+    }
+    let archived = crate::task::Task::load(&archive_dir.join(format!("{id}.md"))).ok()?;
+    (archived.stage() == DONE).then(|| RecentEvent::Arrival {
+        at: now.to_string(),
+        id: id.to_string(),
+        change: Move::Passed {
+            from: was.to_string(),
+            to: DONE.to_string(),
+        },
+    })
 }
 
 /// Pushes one event onto the ticker's memory, keeping it to [`RECENT`] long.
 ///
-/// An arrival first drops any earlier arrival for the same task already
-/// sitting in `recent`: two moves of the same task inside the window are one
-/// row, not two, and the later move is the one worth a task's single slot.
+/// Kept oldest first; [`view::ticker`] draws it newest on top. An arrival
+/// first drops any earlier arrival for the same task already sitting in
+/// `recent`: two moves of the same task inside the window are one row, not
+/// two, and the later move is the one worth a task's single slot.
 /// Dropping it before the ring-buffer trim below also means a coalesced
 /// arrival never itself evicts another task's news just because a task
 /// bounced between steps.
@@ -4298,7 +4301,7 @@ pub fn run_start(repo: &Repo) -> Option<String> {
 mod tests {
     use super::*;
     use crate::status::testutil::*;
-    use crate::status::view::{GUTTER, OSC8, RecentEvent, ST, Verdict, ticker};
+    use crate::status::view::{GUTTER, Move, OSC8, RecentEvent, ST, ticker};
 
     // ---- Reader: coalescing and shutdown ----
 
@@ -6183,7 +6186,7 @@ mod tests {
 
     /// Keeps only [`RECENT`] of them, oldest first out — each its own task, so
     /// this is the plain ring-buffer trim rather than the coalescing
-    /// [`two_moves_of_the_same_task_coalesce_into_one_row_at_the_bottom`]
+    /// [`two_moves_of_the_same_task_coalesce_into_one_row_on_top`]
     /// covers.
     #[test]
     fn the_ticker_keeps_only_the_newest_transitions() {
@@ -6194,37 +6197,37 @@ mod tests {
                 RecentEvent::Arrival {
                     at: "10:00".into(),
                     id: format!("task-{i}"),
-                    step: format!("line {i}"),
-                    verdict: Verdict::None,
-                    position: None,
+                    change: Move::Started {
+                        to: format!("line {i}"),
+                    },
                 },
             );
         }
         assert_eq!(recent.len(), RECENT);
         assert!(matches!(
             recent.front().unwrap(),
-            RecentEvent::Arrival { step, .. } if step == "line 4"
+            RecentEvent::Arrival { change: Move::Started { to }, .. } if to == "line 4"
         ));
         assert!(matches!(
             recent.back().unwrap(),
-            RecentEvent::Arrival { step, .. } if step == "line 9"
+            RecentEvent::Arrival { change: Move::Started { to }, .. } if to == "line 9"
         ));
     }
 
     /// Two moves of the same task inside the window are one row, not two: the
-    /// later move replaces the earlier one, and it sits at the bottom of the
-    /// block — the newest news, where a reader's eye already goes.
+    /// later move replaces the earlier one, and it sits on top of the block —
+    /// the newest news, drawn first.
     #[test]
-    fn two_moves_of_the_same_task_coalesce_into_one_row_at_the_bottom() {
+    fn two_moves_of_the_same_task_coalesce_into_one_row_on_top() {
         let mut recent = VecDeque::new();
         push_recent(
             &mut recent,
             RecentEvent::Arrival {
                 at: "14:20".into(),
                 id: "other-task".into(),
-                step: "review".into(),
-                verdict: Verdict::None,
-                position: None,
+                change: Move::Started {
+                    to: "review".into(),
+                },
             },
         );
         push_recent(
@@ -6232,9 +6235,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:21".into(),
                 id: "gate-board".into(),
-                step: "task".into(),
-                verdict: Verdict::None,
-                position: None,
+                change: Move::Started { to: "task".into() },
             },
         );
         push_recent(
@@ -6242,9 +6243,9 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:22".into(),
                 id: "gate-board".into(),
-                step: "checks".into(),
-                verdict: Verdict::None,
-                position: None,
+                change: Move::Started {
+                    to: "checks".into(),
+                },
             },
         );
 
@@ -6267,19 +6268,16 @@ mod tests {
             .lines()
             .position(|l| l.contains("gate-board"))
             .unwrap();
-        assert!(
-            gate_row > other_row,
-            "the later move sits at the bottom: {block}"
-        );
+        assert!(gate_row < other_row, "the later move sits on top: {block}");
     }
 
-    /// Neither end of a task's life on the board is a step change: entering
-    /// the queue is already a new row on the table, and archiving just dims
-    /// one in place there, so pushing either into the ticker too would only
-    /// repeat what the table already says. A real step change still reaches
-    /// it, so this is not just the ticker going silent altogether.
+    /// Entering the queue is not a step change: it is already a new row on
+    /// the table, so a line in the ticker too would only repeat it. Nor is a
+    /// task file simply taken away, with nothing in the archive to say it
+    /// finished. A real step change still reaches the ticker, so this is not
+    /// just the ticker going silent altogether.
     #[test]
-    fn a_task_entering_the_queue_or_archiving_pushes_no_ticker_entry() {
+    fn a_task_entering_the_queue_or_vanishing_pushes_no_ticker_entry() {
         let (repo, _root_guard) = fixture("queue-and-archive-silent");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "steady", &[], Some("implement"), Some("steady"));
@@ -6337,9 +6335,8 @@ mod tests {
             "a real step change still reaches the ticker"
         );
 
-        // "newcomer" archives: its task file leaves the queue directory the
-        // same way the archive step leaves it, taken out from under the
-        // board rather than moved through a stage this board would see.
+        // "newcomer"'s file is deleted: it leaves the queue with no archived
+        // copy behind it.
         std::fs::remove_file(repo.queue_dir().join("newcomer.md")).unwrap();
         let before = board.recent.len();
         board
@@ -6355,8 +6352,122 @@ mod tests {
         assert_eq!(
             board.recent.len(),
             before,
-            "a task archiving pushes no ticker entry"
+            "a task file deleted with no archived copy pushes no ticker entry"
         );
+    }
+
+    /// One reading of `board` over `repo`, for the tests below that drive a
+    /// task through its moves and read what the ticker kept.
+    fn read_once(board: &mut Board, repo: &Repo, pipelines: &Pipelines) {
+        board
+            .frame(
+                repo,
+                pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
+    }
+
+    /// The ticker's lines as drawn, newest first, with no colour in them.
+    fn drawn(board: &Board) -> String {
+        strip(&ticker(&board.recent, 120, 10))
+    }
+
+    /// `task`'s file moved out of the queue into the archive on `stage`, the
+    /// same rename the teardown makes once a task is finished.
+    fn archive_on(repo: &Repo, id: &str, stage: &str) {
+        let mut task = repo.task(id).unwrap();
+        task.set_stage(stage, None);
+        task.save().unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(
+            repo.queue_dir().join(format!("{id}.md")),
+            repo.archive_dir().join(format!("{id}.md")),
+        )
+        .unwrap();
+    }
+
+    /// A task that leaves the queue into the archive as `done` gets a line
+    /// naming the step the board last saw it on, even when the board never
+    /// saw it reach `done` itself.
+    #[test]
+    fn a_task_archived_as_done_reads_passed_its_last_step_moved_to_done() {
+        let (repo, _root_guard) = fixture("recent-finished");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], Some("handover"));
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        archive_on(&repo, "board-tabs", crate::pipeline::DONE);
+        read_once(&mut board, &repo, &pipelines);
+
+        let block = drawn(&board);
+        assert!(
+            block.contains("board-tabs   passed handover, moved to done"),
+            "{block}"
+        );
+    }
+
+    /// A finished task's move onto `done` is drawn once. The board that saw
+    /// it on `done` before it was archived has already said so, and the
+    /// archived copy must not add `passed done`.
+    #[test]
+    fn a_task_seen_on_done_before_archiving_keeps_its_one_line() {
+        let (repo, _root_guard) = fixture("recent-finished-seen-done");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], Some("handover"));
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        let mut task = repo.task("board-tabs").unwrap();
+        task.set_stage(crate::pipeline::DONE, None);
+        task.save().unwrap();
+        read_once(&mut board, &repo, &pipelines);
+        archive_on(&repo, "board-tabs", crate::pipeline::DONE);
+        read_once(&mut board, &repo, &pipelines);
+
+        let block = drawn(&board);
+        assert!(
+            block.contains("board-tabs   passed handover, moved to done"),
+            "{block}"
+        );
+        assert!(!block.contains("passed done"), "{block}");
+    }
+
+    /// A task taken out with `u` goes back to the pending directory, not the
+    /// archive, so it did not finish and gets no line.
+    #[test]
+    fn a_task_taken_out_with_u_gets_no_line() {
+        let (repo, _root_guard) = fixture("recent-unqueued");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], None);
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        unqueue_task(&repo, "board-tabs").unwrap();
+        assert!(!repo.queue_dir().join("board-tabs.md").exists());
+        read_once(&mut board, &repo, &pipelines);
+
+        assert!(board.recent.is_empty(), "{}", drawn(&board));
+    }
+
+    /// The archive holding a task is not enough: one archived on any stage
+    /// but `done` did not finish, and gets no line.
+    #[test]
+    fn a_task_archived_on_another_stage_gets_no_line() {
+        let (repo, _root_guard) = fixture("recent-archived-blocked");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "board-tabs", &[], Some("handover"));
+
+        let mut board = Board::for_test();
+        read_once(&mut board, &repo, &pipelines);
+        archive_on(&repo, "board-tabs", crate::pipeline::BLOCKED);
+        read_once(&mut board, &repo, &pipelines);
+
+        assert!(board.recent.is_empty(), "{}", drawn(&board));
     }
 
     // ---- board-resume: cursor, resume key, forward-looking ticker ----

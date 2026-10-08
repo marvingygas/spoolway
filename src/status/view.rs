@@ -116,14 +116,11 @@ const GREEN: &str = "\x1b[32m";
 
 pub(super) const AMBER: &str = "\x1b[33m";
 
-const RED: &str = "\x1b[31m";
-
 // The colour of a stop that is not a verdict: `Blocked`, and `Unknown`, a
-// task on a step its pipeline does not have. Apart from `RED`: a block is a
-// task waiting on a person, the same *kind* of stop `Paused` is, and red stays for a verdict
-// that came back bad — `Verdict::Fail` and `Verdict::Blocked` in the
-// ticker, which no state on this board shares. Orange rather than amber
-// too, so a block and a `Paused` row never read as the same colour from
+// task on a step its pipeline does not have. Not red: a block is a task
+// waiting on a person, the same *kind* of stop `Paused` is, and red reads as
+// something gone wrong rather than something to look at. Orange rather than
+// amber too, so a block and a `Paused` row never read as the same colour from
 // across a room.
 const ORANGE: &str = "\x1b[38;5;208m";
 
@@ -183,76 +180,43 @@ impl State {
 }
 
 /// One thing the RECENT ticker witnessed, kept as data rather than a
-/// finished line — so the width, the coalescing and the colour are all
-/// decided in [`ticker`], against the pane and the rest of the block, and not
-/// at the moment the move was first seen.
+/// finished line — so the width, the order and the clip are all decided in
+/// [`ticker`], against the pane and the rest of the block, and not at the
+/// moment the move was first seen.
 #[derive(Clone)]
 pub(crate) enum RecentEvent {
-    /// A task's move, read backwards off the step that reported it rather
-    /// than forwards off the step it arrived at — see [`arrival_event`].
+    /// A task's move, classified once by [`arrival_event`] from the task
+    /// file and pipeline as they stood when the board saw it, and worded by
+    /// [`sentence`].
     Arrival {
         at: String,
         id: String,
-        /// The step that reported: `was`, the step the task moved from, for
-        /// an ordinary route — or `paused_at`, `parked_from` (whichever is
-        /// set) or `blocked_from` when the arrival itself is
-        /// `paused`/`blocked`, since none of those is a step any pipeline
-        /// declares.
-        step: String,
-        verdict: Verdict,
-        /// The named step's own position in its pipeline's walk: its index
-        /// plus one, over that plus the length of `pass_chain` from it.
-        /// `None` where the pipeline can't be read — [`ticker`] draws
-        /// [`NOTHING`] in its place.
-        position: Option<(usize, usize)>,
+        change: Move,
     },
 }
 
-/// How a RECENT line's move classifies, read off [`Step::destination`] for
-/// the step that reported rather than the one arrived at — see
-/// [`arrival_event`]. `None` is a move nothing here explains: a spent loop
-/// budget parking the task on `blocked`, or any other jump that is not the
-/// reporting step's own `on_pass` or `on_fail`. Drawn with no verdict word at
-/// all rather than a guess.
-///
-/// [`Step::destination`]: crate::pipeline::Step::destination
-#[derive(Clone, Copy)]
-pub(crate) enum Verdict {
-    Pass,
-    Fail,
-    Paused,
-    Blocked,
-    None,
-}
-
-impl Verdict {
-    /// The token this verdict draws. `Paused` and `Blocked` are taken
-    /// verbatim from [`State::word`] — the board must never have two spellings
-    /// of the same state — while `Pass` and `Fail` are this ticker's own,
-    /// since the table draws neither.
-    fn word(self) -> &'static str {
-        match self {
-            Verdict::Pass => "✓ pass",
-            Verdict::Fail => "✗ fail",
-            Verdict::Paused => State::Paused.word(),
-            Verdict::Blocked => State::Blocked.word(),
-            Verdict::None => "",
-        }
-    }
-
-    /// The colour this verdict's token carries — the rest of the line stays
-    /// dim regardless. Taken from the same palette [`State::dot`] draws with:
-    /// green for a pass, the colour `running` uses; red for a fail or a
-    /// block, the colour `blocked` uses; amber for a pause, the colour
-    /// `paused` uses.
-    fn colour(self) -> &'static str {
-        match self {
-            Verdict::Pass => GREEN,
-            Verdict::Fail | Verdict::Blocked => RED,
-            Verdict::Paused => AMBER,
-            Verdict::None => "",
-        }
-    }
+/// What a task did to move, and between which steps. Each variant is one
+/// fixed sentence — see [`sentence`], the only place any of them is worded.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Move {
+    /// The task left `queued` for its first step.
+    Started { to: String },
+    /// `to` is `from`'s own `on_pass`, or `done` for a task the archive
+    /// holds as finished.
+    Passed { from: String, to: String },
+    /// `to` is `from`'s own `on_fail` — `blocked` when it declares none.
+    Failed { from: String, to: String },
+    /// Any move into `paused`. `None` is a task stopped while still on
+    /// `queued`, which has no step to name.
+    Stopped { from: Option<String> },
+    /// The task was on `paused`.
+    Resumed { to: String },
+    /// The task was on `blocked`.
+    Unblocked { to: String },
+    /// Nothing above explains the move — a spent loop budget, or any other
+    /// jump that is not the step's own `on_pass` or `on_fail`. Named plainly
+    /// rather than guessed at.
+    Left { from: String, to: String },
 }
 
 /// [`BoardMode::ConfirmPause`]'s panel, `p`'s own: one abort, so the body
@@ -1255,8 +1219,8 @@ pub(super) fn table(
         }
         // Compose the visible line as plain text first — this is the string a
         // width measurement or a clip would act on, the same compose-then-
-        // colour order the rest of this function keeps (see the note above
-        // `arrivals` in `ticker`). The band itself is never clipped: its full
+        // colour order the rest of this function keeps, and `ticker` too.
+        // The band itself is never clipped: its full
         // name shows at every pane width, see
         // `a_narrow_pane_sheds_columns_and_clips_ids_before_a_row_wraps`.
         let plain = format!("{lead}▌{group}");
@@ -1800,80 +1764,62 @@ pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -
         return String::new();
     }
 
+    // `recent` keeps the oldest move first; the newest is drawn on top, so
+    // the rows a short pane cannot hold come off the bottom of the block.
     let shown = (rows - 2).min(recent.len());
-    let events: Vec<&RecentEvent> = recent.iter().skip(recent.len() - shown).collect();
+    let events: Vec<&RecentEvent> = recent.iter().rev().take(shown).collect();
 
-    // Every column sized to the rows about to be drawn, not to a fixed guess
-    // — the same reason the table's own STATE column is only as wide as the
-    // states actually on the board (see
+    // The id column sized to the rows about to be drawn, not to a fixed
+    // guess — the same reason the table's own STATE column is only as wide
+    // as the states actually on the board (see
     // `the_state_column_is_only_as_wide_as_the_states_on_the_board`).
-    let arrivals = || {
-        events.iter().map(|e| {
-            let RecentEvent::Arrival {
-                id, step, verdict, ..
-            } = e;
-            (id, step, verdict)
-        })
-    };
-    let id_width = arrivals()
-        .map(|(id, _, _)| id.chars().count())
-        .max()
-        .unwrap_or(0);
-    let step_width = arrivals()
-        .map(|(_, step, _)| step.chars().count())
-        .max()
-        .unwrap_or(0);
-    let verdict_width = arrivals()
-        .map(|(_, _, verdict)| verdict.word().chars().count())
+    let id_width = events
+        .iter()
+        .map(|RecentEvent::Arrival { id, .. }| id.chars().count())
         .max()
         .unwrap_or(0);
 
     let mut block = format!("\n {DIM}RECENT{RESET}\n");
-    for event in events {
-        // Formatting happens here, against the pane this frame has, rather
-        // than at the moment the event was seen — the whole point of storing
-        // an event instead of a finished line.
-        let RecentEvent::Arrival {
-            at,
-            id,
-            step,
-            verdict,
-            position,
-        } = event;
-        let position = match position {
-            Some((n, d)) => format!("{n}/{d}"),
-            None => NOTHING.to_string(),
-        };
-        let word = verdict.word();
-        // A `Verdict::None` row pads to the same empty-width column
-        // as every other row, so its position still lines up — the
-        // acceptance is "no verdict word", not "no verdict column".
-        let plain = format!(
-            "{at}{GUTTER}{id:<id_width$}{GUTTER}{step:<step_width$}{GUTTER}\
-             {word:<verdict_width$}{GUTTER}{position}"
-        );
-        // Cut to the pane before any colour goes in: `clip` counts
-        // characters to decide what to keep, and an escape code
-        // counted as visible width would clip the line short of
-        // where it actually wraps.
+    for RecentEvent::Arrival { at, id, change } in events {
+        let plain = recent_line(at, id, id_width, &sentence(change));
+        // Cut to the pane, less the one leading column, so a sentence too
+        // long for it ends in `…` rather than wrapping onto the next row.
         let plain = clip(&plain, pane.saturating_sub(1));
-        // The rest of the line stays dim; only the verdict token
-        // switches colour, found by its own text — safe since it is
-        // the only place that exact token appears in the line. Absent
-        // when clipping has cut it away on an impossibly narrow pane,
-        // in which case there is nothing left worth colouring.
-        let entry = match plain.find(word).filter(|_| !word.is_empty()) {
-            Some(at_word) => {
-                let (before, rest) = plain.split_at(at_word);
-                let after = &rest[word.len()..];
-                let colour = verdict.colour();
-                format!(" {DIM}{before}{RESET}{colour}{word}{RESET}{DIM}{after}{RESET}\n")
-            }
-            None => format!(" {DIM}{plain}{RESET}\n"),
-        };
-        block.push_str(&entry);
+        block.push_str(&format!(" {DIM}{plain}{RESET}\n"));
     }
     block
+}
+
+/// One RECENT line before it is clipped and dimmed: the time, the id padded
+/// to `id_width`, then the sentence. Apart from [`ticker`] so a test can lay
+/// out a sentence [`sentence`] does not draw yet against the same columns.
+fn recent_line(at: &str, id: &str, id_width: usize, sentence: &str) -> String {
+    format!("{at}{GUTTER}{id:<id_width$}{GUTTER}{sentence}")
+}
+
+/// The sentence a RECENT line says about one move. Every word the ticker
+/// prints about a move is written here and nowhere else, so two kinds of
+/// move can never drift into two phrasings of the same thing. Each sentence
+/// names what happened on which step first and where the task went last,
+/// always as `moved to <step>`.
+pub(crate) fn sentence(change: &Move) -> String {
+    match change {
+        Move::Started { to } => format!("started, moved to {to}"),
+        Move::Passed { from, to } => format!("passed {from}, moved to {to}"),
+        Move::Failed { from, to } => format!("failed {from}, moved to {to}"),
+        Move::Stopped { from: Some(from) } => {
+            format!("stopped on {from}, moved to {}", crate::pipeline::PAUSED)
+        }
+        Move::Stopped { from: None } => {
+            format!(
+                "stopped before starting, moved to {}",
+                crate::pipeline::PAUSED
+            )
+        }
+        Move::Resumed { to } => format!("resumed, moved to {to}"),
+        Move::Unblocked { to } => format!("unblocked, moved to {to}"),
+        Move::Left { from, to } => format!("left {from}, moved to {to}"),
+    }
 }
 
 /// `frame` cut to the rows a pane of `height` can hold without scrolling.
@@ -1967,7 +1913,11 @@ pub(crate) fn human_secs(total: i64) -> String {
 mod tests {
     use super::*;
     use crate::status::testutil::*;
-    use crate::status::{Row, State, arrival_event, done_rows, push_recent, rows};
+
+    /// What no state on this board may draw in — see
+    /// [`blocked_is_orange_prompt_is_amber_and_no_other_state_changed_colour`].
+    const RED: &str = "\x1b[31m";
+    use crate::status::{Row, State, arrival_event, done_rows, rows};
 
     /// `Blocked` reads apart from every other stop: orange, its own colour
     /// — a block is a task waiting on a person, the same kind of stop
@@ -3858,350 +3808,192 @@ mod tests {
         }
     }
 
-    /// Every column is sized to the rows actually being drawn, the way the
-    /// table's own STATE column is — so an id or a step name shorter than
-    /// its neighbour is padded out, and the verdict token and the position
-    /// after it start in the same place on both rows, not wherever that
-    /// row's own text happened to end.
-    #[test]
-    fn two_rows_of_different_widths_line_up_their_verdict_and_position() {
-        let (repo, _root_guard) = fixture("verdict-alignment");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "task-a", &[], None);
-        let mut short = repo.task("task-a").unwrap();
-        short.front.paused_at = Some("review".into());
-        short.set_stage(crate::pipeline::PAUSED, None);
-        short.save().unwrap();
-
-        // A different group from `task-a`: a group is one chain now, and
-        // these two have no dependency between them.
-        add_to(&repo, "task-bravo-long", &[], None, Some("other"));
-        let mut long = repo.task("task-bravo-long").unwrap();
-        long.front.blocked_from = Some("implement".into());
-        long.set_stage(crate::pipeline::BLOCKED, None);
-        long.save().unwrap();
-
+    /// The sentence the ticker says about `id` moving from `was` to `stage`,
+    /// read off a task in `default`'s pipeline exactly as the board reads it.
+    fn sentence_for(name: &str, was: &str, stage: &str) -> String {
+        let (repo, _root_guard) = fixture(name);
+        add(&repo, "gate-board", &[], Some(stage));
         let tasks = repo.tasks().unwrap();
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "task-a",
-                "handover",
-                crate::pipeline::PAUSED,
-                &tasks,
-                &pipelines,
-            ),
+        let RecentEvent::Arrival { change, .. } = arrival_event(
+            "14:22",
+            "gate-board",
+            was,
+            stage,
+            &tasks,
+            &Pipelines::builtin(),
         );
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:23",
-                "task-bravo-long",
-                "handover",
-                crate::pipeline::BLOCKED,
-                &tasks,
-                &pipelines,
-            ),
-        );
+        sentence(&change)
+    }
 
-        let block = strip(&ticker(&recent, 120, 5));
-        let short_line = block.lines().find(|l| l.contains("task-a")).unwrap();
-        let long_line = block
-            .lines()
-            .find(|l| l.contains("task-bravo-long"))
-            .unwrap();
+    #[test]
+    fn leaving_queued_reads_started() {
         assert_eq!(
-            short_line.find('●'),
-            long_line.find('●'),
-            "the verdict token should start in the same column on both rows: {short_line:?} / {long_line:?}"
+            sentence_for("sentence-started", "queued", "implement"),
+            "started, moved to implement"
         );
+    }
+
+    /// `implement`'s own `on_pass` is `review`.
+    #[test]
+    fn a_move_onto_on_pass_reads_passed() {
         assert_eq!(
-            short_line.find("2/4"),
-            long_line.find("1/4"),
-            "the position should start in the same column on both rows: {short_line:?} / {long_line:?}"
+            sentence_for("sentence-passed", "implement", "review"),
+            "passed implement, moved to review"
         );
     }
 
-    /// A move whose destination is the reporting step's own `on_pass` draws
-    /// `✓ pass` in green, naming `was` — the step that reported — rather than
-    /// `stage`, the step arrived at. `default`'s own `implement` routes its
-    /// pass to `review`, so this is exactly that move.
+    /// `review`'s own `on_fail` sends a task back to `implement`.
     #[test]
-    fn a_move_on_the_reporting_steps_on_pass_draws_a_green_pass() {
-        let (repo, _root_guard) = fixture("verdict-pass");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], Some("review"));
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "gate-board",
-                "implement",
-                "review",
-                &tasks,
-                &pipelines,
-            ),
+    fn a_move_onto_on_fail_reads_failed() {
+        assert_eq!(
+            sentence_for("sentence-failed", "review", "implement"),
+            "failed review, moved to implement"
         );
+    }
+
+    /// `implement` declares no `on_fail`, so its failure lands on `blocked`.
+    #[test]
+    fn a_failure_into_blocked_reads_failed() {
+        assert_eq!(
+            sentence_for("sentence-failed-blocked", "implement", "blocked"),
+            "failed implement, moved to blocked"
+        );
+    }
+
+    #[test]
+    fn a_move_from_a_step_into_paused_reads_stopped_on_it() {
+        assert_eq!(
+            sentence_for("sentence-stopped", "review", "paused"),
+            "stopped on review, moved to paused"
+        );
+    }
+
+    #[test]
+    fn a_move_from_queued_into_paused_reads_stopped_before_starting() {
+        assert_eq!(
+            sentence_for("sentence-stopped-queued", "queued", "paused"),
+            "stopped before starting, moved to paused"
+        );
+    }
+
+    #[test]
+    fn leaving_paused_reads_resumed() {
+        assert_eq!(
+            sentence_for("sentence-resumed", "paused", "implement"),
+            "resumed, moved to implement"
+        );
+    }
+
+    #[test]
+    fn leaving_blocked_reads_unblocked() {
+        assert_eq!(
+            sentence_for("sentence-unblocked", "blocked", "review"),
+            "unblocked, moved to review"
+        );
+    }
+
+    /// A finished task's line — built by `finished_event` from the archive,
+    /// not by `arrival_event`, since the queue no longer holds the task.
+    #[test]
+    fn a_finished_task_reads_passed_its_last_step_moved_to_done() {
+        assert_eq!(
+            sentence(&Move::Passed {
+                from: "handover".into(),
+                to: crate::pipeline::DONE.into(),
+            }),
+            "passed handover, moved to done"
+        );
+    }
+
+    /// `implement` routes to `review` on a pass and `blocked` on a failure;
+    /// `handover` is neither, so the move is named without a guess.
+    #[test]
+    fn a_move_matching_no_route_reads_left() {
+        assert_eq!(
+            sentence_for("sentence-left", "implement", "handover"),
+            "left implement, moved to handover"
+        );
+    }
+
+    /// A line is the time, the id and the sentence, and nothing else: no
+    /// verdict glyph, no position fraction, and no colour but the dim the
+    /// whole line is drawn in.
+    #[test]
+    fn a_recent_line_is_time_id_and_sentence_all_dim() {
+        let recent = VecDeque::from([RecentEvent::Arrival {
+            at: "09:41".into(),
+            id: "board-tabs".into(),
+            change: Move::Passed {
+                from: "review-spec".into(),
+                to: "review-code".into(),
+            },
+        }]);
         let raw = ticker(&recent, 120, 5);
-        assert!(raw.contains(&format!("{GREEN}✓ pass{RESET}")), "{raw}");
-        let block = strip(&raw);
-        // implement is the first step (index 0) of three still ahead of it —
-        // review, document, handover — so 0 + 1 over 1 + 3.
-        assert!(
-            block.contains("14:22   gate-board   implement   ✓ pass   1/4"),
-            "{block}"
+        assert_eq!(
+            raw,
+            format!(
+                "\n {DIM}RECENT{RESET}\n {DIM}09:41   board-tabs   passed review-spec, moved to review-code{RESET}\n"
+            )
         );
     }
 
-    /// A move whose destination is the reporting step's own `on_fail` draws
-    /// `✗ fail` in red, still naming the step that reported. `review`'s own
-    /// `on_fail` sends a task back to `implement` — a real step, not
-    /// `blocked` — which is exactly what tells this apart from a block.
+    /// The newest move is drawn on top and the times read downward from it.
+    /// Ids are padded to the longest one on screen, so every sentence
+    /// starts in the same column.
     #[test]
-    fn a_move_on_the_reporting_steps_on_fail_draws_a_red_fail() {
-        let (repo, _root_guard) = fixture("verdict-fail");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], Some("implement"));
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "gate-board",
-                "review",
-                "implement",
-                &tasks,
-                &pipelines,
-            ),
-        );
-        let raw = ticker(&recent, 120, 5);
-        assert!(raw.contains(&format!("{RED}✗ fail{RESET}")), "{raw}");
-        let block = strip(&raw);
-        // review is index 1, with document, handover (2) still ahead:
-        // 1 + 1 over 2 + 2.
-        assert!(
-            block.contains("14:22   gate-board   review   ✗ fail   2/4"),
-            "{block}"
-        );
-    }
-
-    /// `paused` is not a step any pipeline declares, so the step worth
-    /// naming is the one behind the wait — `paused_at`, the gate that just
-    /// passed — not `was`. The word and the amber both come straight off
-    /// `State::Paused`, so the two can never read differently.
-    #[test]
-    fn arriving_at_paused_draws_the_word_and_colour_state_uses_naming_the_gate() {
-        let (repo, _root_guard) = fixture("verdict-paused");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
-        let mut task = repo.task("gate-board").unwrap();
-        task.front.paused_at = Some("implement".into());
-        task.set_stage(crate::pipeline::PAUSED, None);
-        task.save().unwrap();
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "gate-board",
-                "handover", // `was` is ignored for paused/blocked
-                crate::pipeline::PAUSED,
-                &tasks,
-                &pipelines,
-            ),
-        );
-        let raw = ticker(&recent, 120, 5);
-        assert_eq!(State::Paused.word(), "● paused");
-        assert!(
-            raw.contains(&format!("{AMBER}{}{RESET}", State::Paused.word())),
-            "{raw}"
-        );
-        let block = strip(&raw);
-        assert!(
-            block.contains("14:22   gate-board   implement   ● paused   1/4"),
-            "{block}"
-        );
-    }
-
-    /// A `p`-park carries no `paused_at` at all, only `parked_from` — the
-    /// line still has to name a step and a position rather than fall back to
-    /// the bare word `paused`, so this reads `parked_from` whenever
-    /// `paused_at` is absent.
-    #[test]
-    fn arriving_at_paused_falls_back_to_parked_from_when_there_is_no_gate() {
-        let (repo, _root_guard) = fixture("verdict-paused-parked-from");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "billing", &[], None);
-        let mut task = repo.task("billing").unwrap();
-        task.front.parked_from = Some("handover".into());
-        task.set_stage(crate::pipeline::PAUSED, None);
-        task.save().unwrap();
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "09:44",
-                "billing",
-                "handover", // `was` is ignored for paused/blocked
-                crate::pipeline::PAUSED,
-                &tasks,
-                &pipelines,
-            ),
-        );
-        let raw = ticker(&recent, 120, 5);
-        let block = strip(&raw);
-        // handover is index 3, the last step, with nothing still ahead:
-        // 3 + 1 over 4 + 0.
-        assert!(
-            block.contains("09:44   billing   handover   ● paused   4/4"),
-            "{block}"
-        );
-    }
-
-    /// Same for a blocked task, naming `blocked_from` — the step it stopped
-    /// on and will resume at — in the same red `State::Blocked` already
-    /// draws.
-    #[test]
-    fn arriving_at_blocked_draws_the_word_and_colour_state_uses_naming_the_stop() {
-        let (repo, _root_guard) = fixture("verdict-blocked");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "wall", &[], None);
-        let mut task = repo.task("wall").unwrap();
-        task.front.blocked_from = Some("review".into());
-        task.set_stage(crate::pipeline::BLOCKED, None);
-        task.save().unwrap();
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "wall",
-                "handover",
-                crate::pipeline::BLOCKED,
-                &tasks,
-                &pipelines,
-            ),
-        );
-        let raw = ticker(&recent, 120, 5);
-        assert_eq!(State::Blocked.word(), "● blocked");
-        assert!(
-            raw.contains(&format!("{RED}{}{RESET}", State::Blocked.word())),
-            "{raw}"
-        );
-        let block = strip(&raw);
-        assert!(
-            block.contains("14:22   wall   review   ● blocked   2/4"),
-            "{block}"
-        );
-    }
-
-    /// A move that lands on neither the reporting step's `on_pass` nor its
-    /// `on_fail` — a spent loop budget, or any other jump — is not a guess:
-    /// it draws dim, naming the step, with no verdict word at all.
-    #[test]
-    fn a_move_matching_neither_route_draws_dim_with_no_verdict_word() {
-        let (repo, _root_guard) = fixture("verdict-neither");
-        let pipelines = Pipelines::builtin();
-        // `implement`'s own routes are `review` (pass) and `blocked` (fail);
-        // `handover` is neither, so this move is not explained by either.
-        add(&repo, "gate-board", &[], Some("handover"));
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "gate-board",
-                "implement",
-                "handover",
-                &tasks,
-                &pipelines,
-            ),
-        );
+    fn the_newest_line_is_on_top_and_ids_pad_to_the_longest() {
+        let recent = VecDeque::from([
+            RecentEvent::Arrival {
+                at: "09:02".into(),
+                id: "auth-retry".into(),
+                change: Move::Started {
+                    to: "implement".into(),
+                },
+            },
+            RecentEvent::Arrival {
+                at: "10:05".into(),
+                id: "lane-boot".into(),
+                change: Move::Failed {
+                    from: "review-code".into(),
+                    to: "fix-code-review".into(),
+                },
+            },
+        ]);
         let block = strip(&ticker(&recent, 120, 5));
-        assert!(
-            block.contains("14:22   gate-board   implement      1/4"),
-            "{block}"
-        );
-        assert!(
-            !block.contains('✓') && !block.contains('✗') && !block.contains('●'),
-            "{block}"
+        assert_eq!(
+            block,
+            "\n RECENT\n \
+             10:05   lane-boot    failed review-code, moved to fix-code-review\n \
+             09:02   auth-retry   started, moved to implement\n"
         );
     }
 
-    /// The position is read off the named step's pipeline, not off the move
-    /// itself — so a task whose pipeline names something that does not exist
-    /// draws `—` in its place, verdict and step name unaffected.
+    /// The longest sentence the full catalogue of moves can say, with a
+    /// 12-character id, still fits a 100-column pane, leading column and
+    /// all.
     #[test]
-    fn a_task_whose_pipeline_cannot_be_read_draws_a_dash_for_its_position() {
-        let (repo, _root_guard) = fixture("verdict-unreadable-pipeline");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], None);
-        let mut task = repo.task("gate-board").unwrap();
-        task.front.pipeline = Some("no-such-pipeline".into());
-        task.front.paused_at = Some("implement".into());
-        task.set_stage(crate::pipeline::PAUSED, None);
-        task.save().unwrap();
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "gate-board",
-                "handover",
-                crate::pipeline::PAUSED,
-                &tasks,
-                &pipelines,
-            ),
-        );
-        let block = strip(&ticker(&recent, 120, 5));
+    fn the_longest_sentence_with_a_twelve_character_id_fits_100_columns() {
+        let longest = "failed review-code, moved to blocked (loop limit on fix-code-review)";
+        let line = format!(" {}", recent_line("14:26", "twelve-chars", 12, longest));
         assert!(
-            block.contains("14:22   gate-board   implement   ● paused   —"),
-            "{block}"
+            line.chars().count() <= 100,
+            "{} columns: {line}",
+            line.chars().count()
         );
     }
 
-    /// The ticker clips an arrival line too long for the pane — cut to the
-    /// room the frame has left, ending in `…` — and the clip is taken before
-    /// any colour goes in, so a cut mid-token still leaves the escape codes
-    /// balanced rather than corrupting the rest of the frame.
+    /// The ticker clips a line too long for the pane — cut to the room the
+    /// frame has left, ending in `…` — rather than letting it wrap.
     #[test]
     fn a_recent_line_too_long_for_the_pane_ends_in_an_ellipsis() {
-        let (repo, _root_guard) = fixture("verdict-too-long");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "gate-board", &[], Some("review"));
-        let tasks = repo.tasks().unwrap();
-
-        let mut recent = VecDeque::new();
-        push_recent(
-            &mut recent,
-            arrival_event(
-                "14:22",
-                "gate-board",
-                "implement",
-                "review",
-                &tasks,
-                &pipelines,
-            ),
-        );
-        // The whole line — id, step, verdict token and position — already
-        // runs past 30 columns; a pane this narrow has to cut it.
+        let recent = VecDeque::from([RecentEvent::Arrival {
+            at: "14:22".into(),
+            id: "gate-board".into(),
+            change: Move::Passed {
+                from: "implement".into(),
+                to: "review".into(),
+            },
+        }]);
         let drawn = strip(&ticker(&recent, 30, 5));
         let line = drawn
             .lines()
