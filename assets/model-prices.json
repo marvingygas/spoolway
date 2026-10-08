@@ -3344,7 +3344,7 @@
       "output": 1.44
     },
     "bedrock/ap-northeast-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3389,7 +3389,7 @@
       "output": 1.44
     },
     "bedrock/ap-south-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3414,7 +3414,7 @@
       "output": 1.41
     },
     "bedrock/ap-southeast-2/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.31,
       "output": 1.24
     },
@@ -3434,7 +3434,7 @@
       "output": 1.44
     },
     "bedrock/ap-southeast-3/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3479,7 +3479,7 @@
       "output": 1.44
     },
     "bedrock/eu-central-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3499,7 +3499,7 @@
       "output": 1.44
     },
     "bedrock/eu-north-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3514,7 +3514,7 @@
       "output": 1.44
     },
     "bedrock/eu-south-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3539,7 +3539,7 @@
       "output": 1.44
     },
     "bedrock/eu-west-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3569,7 +3569,7 @@
       "output": 1.86
     },
     "bedrock/eu-west-2/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.47,
       "output": 1.86
     },
@@ -3641,7 +3641,7 @@
       "output": 1.44
     },
     "bedrock/sa-east-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.36,
       "output": 1.44
     },
@@ -3701,7 +3701,7 @@
       "output": 1.2
     },
     "bedrock/us-east-1/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.3,
       "output": 1.2
     },
@@ -3751,7 +3751,7 @@
       "output": 1.2
     },
     "bedrock/us-east-2/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.3,
       "output": 1.2
     },
@@ -4114,7 +4114,7 @@
       "output": 1.2
     },
     "bedrock/us-west-2/minimax.minimax-m2.5": {
-      "context_window": 1000000,
+      "context_window": 196000,
       "input": 0.3,
       "output": 1.2
     },
@@ -6189,7 +6189,7 @@
       "output": 5.4
     },
     "deepseek.v3-v1:0": {
-      "context_window": 163840,
+      "context_window": 128000,
       "input": 0.58,
       "output": 1.68
     },
@@ -10286,12 +10286,12 @@
       "output": 6.0
     },
     "mistral.voxtral-mini-3b-2507": {
-      "context_window": 128000,
+      "context_window": 32768,
       "input": 0.04,
       "output": 0.04
     },
     "mistral.voxtral-small-24b-2507": {
-      "context_window": 128000,
+      "context_window": 32768,
       "input": 0.1,
       "output": 0.3
     },
@@ -10440,13 +10440,13 @@
       "cache_read": 0.05
     },
     "mistral/mistral-large-4": {
-      "context_window": 524288,
+      "context_window": 1048576,
       "input": 0.68,
       "output": 2.09,
       "cache_read": 0.068
     },
     "mistral/mistral-large-4-0": {
-      "context_window": 524288,
+      "context_window": 1048576,
       "input": 0.68,
       "output": 2.09,
       "cache_read": 0.068
@@ -12221,6 +12221,21 @@
         "cache_write_1h": 1.0
       }
     },
+    "openrouter/anthropic/claude-haiku-5.5:batch": {
+      "context_window": 1000000,
+      "input": 0.05,
+      "output": 0.25,
+      "cache_read": 0.005,
+      "cache_write_5m": 0.0625,
+      "cache_write_1h": 0.1,
+      "above_100k_tokens": {
+        "input": 0.25,
+        "output": 1.25,
+        "cache_read": 0.025,
+        "cache_write_5m": 0.3125,
+        "cache_write_1h": 0.5
+      }
+    },
     "openrouter/anthropic/claude-opus-4.1": {
       "context_window": 200000,
       "input": 15.0,
@@ -12417,7 +12432,7 @@
       "context_window": 1000000,
       "input": 1.0,
       "output": 5.0,
-      "cache_read": 0.1,
+      "cache_read": 0.05,
       "cache_write_5m": 1.25,
       "cache_write_1h": 2.0
     },
@@ -13242,7 +13257,7 @@
       "cache_read": 0.025
     },
     "openrouter/mistralai/mistral-large-4-0": {
-      "context_window": 524288,
+      "context_window": 1048576,
       "input": 0.68,
       "output": 2.09,
       "cache_read": 0.07
@@ -15210,12 +15225,19 @@
       "cache_write_1h": 20.0
     },
     "openrouter/~anthropic/claude-haiku-latest": {
-      "context_window": 200000,
-      "input": 1.0,
-      "output": 5.0,
-      "cache_read": 0.1,
-      "cache_write_5m": 1.25,
-      "cache_write_1h": 2.0
+      "context_window": 1000000,
+      "input": 0.1,
+      "output": 0.5,
+      "cache_read": 0.01,
+      "cache_write_5m": 0.125,
+      "cache_write_1h": 0.2,
+      "above_100k_tokens": {
+        "input": 0.5,
+        "output": 2.5,
+        "cache_read": 0.05,
+        "cache_write_5m": 0.625,
+        "cache_write_1h": 1.0
+      }
     },
     "openrouter/~anthropic/claude-opus-latest": {
       "context_window": 1000000,
@@ -15229,7 +15251,7 @@
       "context_window": 1000000,
       "input": 2.0,
       "output": 10.0,
-      "cache_read": 0.2,
+      "cache_read": 0.1,
       "cache_write_5m": 2.5,
       "cache_write_1h": 4.0
     },
@@ -15312,12 +15334,12 @@
       "context_window": 1050000,
       "input": 2.0,
       "output": 10.0,
-      "cache_read": 0.2,
+      "cache_read": 0.1,
       "cache_write_5m": 2.5,
       "above_272k_tokens": {
         "input": 4.0,
         "output": 15.0,
-        "cache_read": 0.4,
+        "cache_read": 0.2,
         "cache_write_5m": 5.0
       }
     },
