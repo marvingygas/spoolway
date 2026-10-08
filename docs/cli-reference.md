@@ -633,7 +633,7 @@ See [Gates](pipelines.md#gates).
 
 Start the step a task is on over. The step's conversation is discarded, and the step is briefed from scratch even where it declares `session: true`. Nothing in the worktree is touched.
 
-The command writes the task first, then ends the lane on the step it restarts. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. A lane that is working or waiting on a prompt is interrupted, and every lane is stopped, whichever terminal backend runs it. A blocked task owns its unblocker lane, so that is the lane it ends. The task goes back to the same step with `attempts` at zero and `restart: <step>` set. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
+The command writes the task first, then ends the lane on the step it restarts. A blocked task owns its unblocker lane, so that lane is ended too. A lane that is working or waiting on a prompt is interrupted first, and each is stopped, whichever terminal backend runs it. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. The task goes back to the same step with `attempts` at zero and `restart: <step>` set. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
 
 A `paused` task restarts the step it was parked or gated on. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
 
