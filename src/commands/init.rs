@@ -2113,6 +2113,7 @@ mod tests {
         run_init(&root, &confirmed()).expect("init");
         let home = root.join(".home");
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -2392,6 +2393,7 @@ mod tests {
         std::fs::write(&hook, mine).unwrap();
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             config: Config::load(&root).unwrap(),
             home: root.join(".home"),

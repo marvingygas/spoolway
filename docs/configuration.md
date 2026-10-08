@@ -29,6 +29,45 @@ created on first write.
 Run `config set` from the main checkout. The dispatcher reads the project's own config, so in
 a linked worktree the command refuses and prints the `-C` form to run instead.
 
+### What `config set` checks
+
+`config set` checks the value's type. It also runs the checks of `spoolway doctor` that read only
+the config and the hook files. It treats the result in one of two ways.
+
+| Value | Result |
+|---|---|
+| One that can never be right | The command refuses, names the values that are allowed, and saves nothing. |
+| One that names something not set up yet | The command saves the value and prints a warning on stderr. `spoolway doctor` fails until the missing piece is added. |
+
+These two keys are refused:
+
+| Key | Refused when | Allowed |
+|---|---|---|
+| `dispatch.backend` | The value is not `herdr` or `headless`, such as `tmux` or `zellij` | `herdr`, `headless` |
+| `issue_tracking.hook` | The value is not a bare filename | A bare filename in `.spoolway/hooks/`, or blank |
+
+Warnings come from the same checks `doctor` runs. They cover only the keys you set:
+
+| Key set | Warned when |
+|---|---|
+| `unattended.blocked_agent` | The name has no profile in `[agents]` |
+| `unattended.*` | `unattended.enabled` is on and `unattended.blocked_model` is blank |
+| `issue_tracking.*` | Any issue-tracking check of `doctor` fails, such as a missing hook script or a blank `project_key` beside a hook |
+
+A warning does not fail the command, so a script can set keys one after another.
+
+```
+$ spoolway config set dispatch.backend tmux
+spoolway: dispatch.backend: `tmux` is not a backend — use herdr or headless
+
+$ spoolway config set unattended.blocked_agent ghost
+unattended.blocked_agent = ghost
+warning: no agent `ghost` in [agents] yet — `spoolway doctor` fails until one is added
+```
+
+The checks on `issue_tracking.*` look for `acli` and `jq` on `PATH`. They also run
+`<tool> --version` for each tool a hook declares.
+
 ## Runtime state
 
 This section describes repo mode, where the checkout itself holds the tracked files. A
@@ -50,14 +89,24 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 | Case | What happens |
 |---|---|
 | The home already records this checkout | The command runs. |
-| The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. |
-| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. |
+| The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. Commands started together in a fresh clone agree on one home. |
+| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. A moved checkout, or a moved superproject, finds its queue this way. |
+| `.git/spoolway-label` is missing, and a home's `project.toml` records this id | The label is read from that home and written back. |
+| `.git/spoolway-label` is missing, and no home records this id | The command refuses, names `.git/spoolway-id` and tells you to delete it and run `spoolway init`. |
 | Anything else | The command refuses, naming both files by absolute path. |
+
+A home is always named with the clone's own id. A command that finds no id for the checkout
+refuses and tells you to run `spoolway init`.
+
+The update notice that most commands print looks up the project without writing. It stamps
+nothing and creates no home. `spoolway init` writes the stamp and the record together, after
+its last question. A cancelled `init` leaves `.git` and `~/.spoolway/` as they were.
 
 A third file, `.git/spoolway-root`, sits beside the id stamp in the same common git directory.
 It records the checkout's own absolute path. Unlike the id, which is minted once, it is
 rewritten each time the checkout is stamped: by `spoolway init`, and by the first command that
-binds an unstamped checkout. It exists for one case that neither the id stamp nor an ordinary
+binds an unstamped checkout. It is also rewritten when a moved checkout's record is rewritten.
+It exists for one case that neither the id stamp nor an ordinary
 `git rev-parse` answers: a `--separate-git-dir` clone or a submodule. There the common git
 directory need not sit inside the checkout, so its parent is not a reliable way back to it.
 

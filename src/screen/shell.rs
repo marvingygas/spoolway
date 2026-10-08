@@ -1459,7 +1459,7 @@ mod tests {
         std::fs::write(
             dir.join("kept.yml"),
             "steps:\n  - id: build\n    agent: pi\n    prompt: kept-prompt\n    model: m\n    \
-             on_pass: finish\n  - id: finish\n    end: true\n",
+             on_pass: finish\n  - id: finish\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let prompt = crate::prompt::directory_form(&repo, "kept-prompt");
@@ -1491,7 +1491,7 @@ mod tests {
         std::fs::write(
             dir.join("added.yml"),
             "steps:\n  - id: build\n    agent: pi\n    prompt: added-prompt\n    model: m\n    \
-             on_pass: finish\n  - id: finish\n    end: true\n",
+             on_pass: finish\n  - id: finish\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
 
@@ -1516,7 +1516,7 @@ mod tests {
         std::fs::write(
             dir.join("another.yml"),
             "steps:\n  - id: build\n    agent: pi\n    prompt: another-prompt\n    model: m\n    \
-             on_pass: finish\n  - id: finish\n    end: true\n",
+             on_pass: finish\n  - id: finish\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines = Pipelines::load_quietly(&repo.root, &repo.config).unwrap();

@@ -42,29 +42,41 @@ pub enum Removed {
 /// whose file holds nothing of ours, is [`Removed::Absent`] and is left
 /// untouched.
 pub fn remove(root: &Path, dry_run: bool) -> Result<Removed> {
+    let (removed, rewritten) = without_block(root)?;
+    if let (false, Some(text)) = (dry_run, rewritten) {
+        write_atomic(&file(root), &text)?;
+    }
+    Ok(removed)
+}
+
+/// What [`remove`] would do, without doing it: the verdict, and for
+/// [`Removed::Gone`] the whole `.gitignore` as it should read afterwards.
+///
+/// `sync` plans every write before making any, so it needs the text without
+/// the write.
+pub fn without_block(root: &Path) -> Result<(Removed, Option<String>)> {
     let path = file(root);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Removed::Absent),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Removed::Absent, None));
+        }
         Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
     };
 
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let (first, last) = match bounds(&lines) {
-        None => return Ok(Removed::Absent),
-        Some(Err(())) => return Ok(Removed::Unterminated),
+        None => return Ok((Removed::Absent, None)),
+        Some(Err(())) => return Ok((Removed::Unterminated, None)),
         Some(Ok(span)) => span,
     };
 
     lines.drain(first..=last);
-    if !dry_run {
-        let mut out = lines.join("\n");
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        write_atomic(&path, &out)?;
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
     }
-    Ok(Removed::Gone)
+    Ok((Removed::Gone, Some(out)))
 }
 
 /// Our block's first and last line, `Err` when only the start marker is there.

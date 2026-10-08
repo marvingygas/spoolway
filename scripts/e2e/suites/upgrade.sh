@@ -193,6 +193,22 @@ byte_for_byte_outside_block() {
     cmp <(tail_from_marker "$before" "$END_MARKER") <(tail_from_marker "$after" "$END_MARKER")
 }
 
+# snapshot <out>
+#
+# One `<sha256>  <path>` line per file in the working directory, `.git`
+# excluded, sorted by path. Run from the project root.
+snapshot() {
+  find . -name .git -prune -o -type f -print | LC_ALL=C sort | xargs sha256sum >"$1"
+}
+
+# changed_on_disk <before> <after>
+#
+# The paths whose line differs between two snapshots — changed, added or
+# removed — one `./path` per line, sorted.
+changed_on_disk() {
+  diff "$1" "$2" | awk '/^[<>] /{print $3}' | LC_ALL=C sort -u
+}
+
 # stage <version>
 #
 # A fresh repo with that version's own fixture laid over it, registered
@@ -302,7 +318,37 @@ else
   bad "and it says so exactly once (said it $HERDR_NOTES times)"
 fi
 
-must "spoolway sync runs against the 0.6.0 project" "$SPOOLWAY" sync
+# The dry run first, then the real run, each against a snapshot of every file in
+# the project. Nothing here is mocked: the project is the one 0.6.0 itself
+# scaffolded, so this is where the dry run's list is held against the files a
+# real run changes, and where a run that writes nothing is shown to have
+# written nothing.
+snapshot "$WORK/0.6.0/before.sums"
+must "spoolway sync --dry-run runs against the 0.6.0 project" \
+  bash -c '"$1" sync --dry-run >"$2"' _ "$SPOOLWAY" "$WORK/0.6.0/dry.out"
+snapshot "$WORK/0.6.0/after-dry.sums"
+works "a dry run changes no file in the 0.6.0 project" \
+  cmp "$WORK/0.6.0/before.sums" "$WORK/0.6.0/after-dry.sums"
+
+must "spoolway sync runs against the 0.6.0 project" \
+  bash -c '"$1" sync >"$2"' _ "$SPOOLWAY" "$WORK/0.6.0/real.out"
+snapshot "$WORK/0.6.0/after.sums"
+
+# What the dry run says it would change, what the real run says it did, and
+# what actually differs on disk: one list, three times over. Paths under `~`
+# are the agent's user folder, outside the project, which the snapshot cannot
+# see.
+changed_on_disk "$WORK/0.6.0/before.sums" "$WORK/0.6.0/after.sums" >"$WORK/0.6.0/disk.list"
+awk '/^would (write|remove) /{print "./" $3}' "$WORK/0.6.0/dry.out" | grep -v '^\./~' \
+  | sort -u >"$WORK/0.6.0/dry.list"
+awk '/^(wrote|removed) /{print "./" $2}' "$WORK/0.6.0/real.out" | grep -v '^\./~' \
+  | sort -u >"$WORK/0.6.0/real.list"
+works "the 0.6.0 sync has something to change, so the lists below mean something" \
+  test -s "$WORK/0.6.0/dry.list"
+works "the dry run listed the files the real run reported, file for file" \
+  cmp "$WORK/0.6.0/dry.list" "$WORK/0.6.0/real.list"
+works "and the real run changed on disk exactly the files it reported" \
+  cmp "$WORK/0.6.0/real.list" "$WORK/0.6.0/disk.list"
 
 lacks "sync dropped the retired herdr_mode key, and its header row with it" \
   "herdr_mode" .spoolway/config.toml
@@ -339,6 +385,49 @@ byte_for_byte_outside_block \
 says "the 0.6.0 project's pipelines load clean after the sync" \
   "names no model" \
   "$SPOOLWAY" pipeline check
+
+# A project whose own pipeline still ends a step with `end: true` — a shape this
+# release stopped loading — is named by `sync`, by file and step, with the line
+# that replaces it. `sync` never edits a step, so the file is left as written
+# and removed here, before the queue below needs every pipeline to load.
+printf 'steps:\n  - id: a\n    run: "true"\n    on_pass: halt\n  - id: halt\n    end: true\n' \
+  > .spoolway/pipelines/retired.yml
+says "sync names a pipeline file that still uses end:" \
+  "retired.yml" \
+  "$SPOOLWAY" sync
+says "and the step in it, with on_pass: done as the replacement" \
+  "step \`halt\` sets end: true, which is gone — use on_pass: done" \
+  "$SPOOLWAY" sync
+must "the retired pipeline is removed again" rm .spoolway/pipelines/retired.yml
+
+# A write that cannot be made stops the sync before the first one. The tracking
+# templates sit in a directory nothing can be removed from, and `config.toml`
+# is behind, so a sync that wrote as it went would rewrite the config and
+# then fail on the template. Skipped as root, which can remove from a
+# read-only directory and so has no failure to provoke.
+if [ "$(id -u)" -eq 0 ]; then
+  printf '  \033[33mnote\033[0m  %s\n' \
+    "running as root, which ignores directory permissions — the unwritable-file case is skipped"
+else
+  TRACKING=".spoolway/templates/tracking"
+  mkdir -p "$TRACKING"
+  : >"$TRACKING/epic.md"
+  sed -i 1d .spoolway/config.toml
+  chmod 555 "$TRACKING"
+  snapshot "$WORK/0.6.0/before-locked.sums"
+  refuses "sync refuses when a file it must remove cannot be removed" \
+    "cannot remove $TRACKING/epic.md" \
+    "$SPOOLWAY" sync
+  says "and says nothing was written" \
+    "nothing was written" \
+    "$SPOOLWAY" sync
+  snapshot "$WORK/0.6.0/after-locked.sums"
+  works "and wrote nothing, config.toml included" \
+    cmp "$WORK/0.6.0/before-locked.sums" "$WORK/0.6.0/after-locked.sums"
+  chmod 755 "$TRACKING"
+  must "the unwritable template is cleared again" rm -r "$TRACKING"
+  must "and the config is brought forward again" "$SPOOLWAY" sync
+fi
 
 # And the queue itself still runs: a task queues against the upgraded
 # project's own `default` pipeline, and the queue screen finds it there —

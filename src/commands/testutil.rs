@@ -23,6 +23,7 @@ pub fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
     let home = root.join(".home");
     (
         Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),

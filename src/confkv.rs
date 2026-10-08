@@ -692,6 +692,48 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
     Ok(config)
 }
 
+/// Refuse a value a person typed that can never be right, naming what is
+/// allowed — for `spoolway config set` only.
+///
+/// Not part of [`set`], which the override layer also loads through: that
+/// layer has to keep accepting what the loader accepts, such as a
+/// `dispatch.backend = "tmux"` that has always loaded as herdr. Typed text is
+/// the one place a value saved as a different one than typed can be stopped.
+pub fn check_typed(key: &str, input: &str) -> Result<()> {
+    // Deserialising accepts the retired `tmux` and would save `herdr`, a
+    // different value from the one typed.
+    if key == "dispatch.backend" {
+        crate::config::Backend::parse_typed(input).with_context(|| key.to_string())?;
+    }
+    // A hook that is not a bare filename can never run, whatever else is set
+    // later, so it is refused rather than left for `doctor` to fail.
+    if key == "issue_tracking.hook"
+        && let Some(problem) = crate::tracking::not_bare_filename_problem(input)
+    {
+        bail!("{key}: it {problem}");
+    }
+    Ok(())
+}
+
+/// What `doctor` would fail on because of the agent `key` just named, for a
+/// value that is valid but not yet usable.
+///
+/// These are warnings rather than refusals: a script sets keys in sequence, so
+/// `unattended.blocked_agent` may name an agent the next command adds. Each
+/// line comes from `Config::agent`, the lookup `doctor`'s agent rows make. The
+/// other file-based checks are run by [`crate::commands::doctor::failures_after_set`].
+pub fn warnings(config: &Config, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if key == "unattended.blocked_agent" && config.agent(&config.unattended.blocked_agent).is_err()
+    {
+        out.push(format!(
+            "no agent `{}` in [agents] yet — `spoolway doctor` fails until one is added",
+            config.unattended.blocked_agent
+        ));
+    }
+    out
+}
+
 /// The parts of a dotted key, as they address it in the file.
 ///
 /// Almost always `key.split('.')`, and the exception is why this exists: a
@@ -1207,6 +1249,58 @@ mod tests {
         // Durations are validated by the real deserialiser, not by this module.
         assert!(set(&config, "dispatch.lane_quiet", "every so often").is_err());
         assert!(set(&config, "dispatch.lane_quiet", "5m").is_ok());
+    }
+
+    #[test]
+    fn a_backend_that_cannot_be_saved_as_typed_is_refused_naming_the_allowed_ones() {
+        let config = Config::default();
+
+        for typed in ["tmux", "zellij"] {
+            let err = format!("{:#}", check_typed("dispatch.backend", typed).unwrap_err());
+            assert!(
+                err.contains("not a backend — use herdr or headless"),
+                "{err}"
+            );
+        }
+        check_typed("dispatch.backend", "headless").unwrap();
+        // `set` itself still accepts what the loader does, so the override
+        // layer's `tmux` keeps loading, as herdr.
+        let updated = set(&config, "dispatch.backend", "tmux").unwrap();
+        assert_eq!(get(&updated, "dispatch.backend").unwrap(), "herdr");
+        let updated = set(&config, "dispatch.backend", "headless").unwrap();
+        assert_eq!(get(&updated, "dispatch.backend").unwrap(), "headless");
+    }
+
+    #[test]
+    fn a_hook_that_can_never_run_is_refused_and_a_bare_one_saved() {
+        let config = Config::default();
+
+        let err = format!(
+            "{:#}",
+            check_typed("issue_tracking.hook", "../evil.sh").unwrap_err()
+        );
+        assert!(err.contains("not a bare filename"), "{err}");
+        check_typed("issue_tracking.hook", "record.sh").unwrap();
+        check_typed("issue_tracking.hook", "").unwrap();
+        let updated = set(&config, "issue_tracking.hook", "record.sh").unwrap();
+        assert_eq!(get(&updated, "issue_tracking.hook").unwrap(), "record.sh");
+    }
+
+    #[test]
+    fn a_blocked_agent_not_yet_defined_is_saved_with_a_warning() {
+        let config = Config::default();
+
+        let updated = set(&config, "unattended.blocked_agent", "ghost").unwrap();
+        assert_eq!(get(&updated, "unattended.blocked_agent").unwrap(), "ghost");
+        let found = warnings(&updated, "unattended.blocked_agent");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("no agent `ghost` in [agents] yet"));
+        assert!(found[0].contains("`spoolway doctor` fails until one is added"));
+
+        // A defined agent, and an unrelated key, are both silent.
+        let defined = set(&config, "unattended.blocked_agent", "claude").unwrap();
+        assert!(warnings(&defined, "unattended.blocked_agent").is_empty());
+        assert!(warnings(&updated, "housekeeping.retention_days").is_empty());
     }
 
     /// `dispatch.interval` is gone, not merely undocumented: this project no

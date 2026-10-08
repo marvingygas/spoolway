@@ -629,6 +629,11 @@ struct Spend {
 /// answers "what would still bring it back to life" — the two things a
 /// person needs the dispatcher resident to keep asking. Empty wherever no
 /// job is enabled, which is when this draws nothing at all.
+///
+/// `changed_pipelines` is every pipeline file edited since the running
+/// dispatcher started — see [`crate::pipeline_snapshot`]. Named on a
+/// `pipelines` line under the slots, since the run keeps routing on what it
+/// loaded and an edit waits for a restart. Empty, and no line, otherwise.
 pub(super) fn footer(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -636,6 +641,7 @@ pub(super) fn footer(
     model_used: &BTreeMap<&str, usize>,
     agent_model: &BTreeMap<&str, Vec<&str>>,
     jobs: &[crate::jobs::ActiveJob],
+    changed_pipelines: &[String],
 ) -> Vec<String> {
     // Which profiles this project could actually start a lane on. Config
     // ships a profile per agent kind spoolway can drive, so a project that
@@ -758,6 +764,14 @@ pub(super) fn footer(
             )
         })
         .collect();
+
+    // A person who edited a pipeline mid-run would otherwise watch the run
+    // ignore the edit with nothing saying why. Two spaces after the label,
+    // not `GUTTER`: this line shares no column with the slots lines above
+    // it, so the wider gutter would have nothing to line up with.
+    if let Some(notice) = crate::pipeline_snapshot::restart_notice(changed_pipelines, "this run") {
+        lines.push(format!("{BOLD}pipelines{RESET}  {notice}"));
+    }
 
     // One line, only when something has actually failed — absent entirely
     // otherwise, the same as every other figure this footer only prints when
@@ -3081,6 +3095,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -3094,6 +3109,44 @@ mod tests {
         // `concurrency`, so the ceiling is what zero has always meant.
         assert!(line("pi").contains("slots 1/\u{221e}"), "{lines:#?}");
         assert!(!lines.iter().any(|l| l.starts_with("codex")), "{lines:#?}");
+    }
+
+    /// A pipeline edited mid-run is named under the slots, with the restart
+    /// that applies it — and no line at all while nothing is waiting.
+    #[test]
+    fn a_pipeline_edited_mid_run_is_named_with_the_restart_it_waits_on() {
+        let (repo, _root_guard) = fixture("footer-changed-pipelines");
+        let pipelines = Pipelines::builtin();
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        used.insert("claude", 1);
+        let draw = |changed: &[String]| -> Vec<String> {
+            footer(
+                &repo,
+                &pipelines,
+                &used,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                changed,
+            )
+            .iter()
+            .map(|l| strip(l))
+            .collect()
+        };
+
+        assert!(
+            !draw(&[]).iter().any(|l| l.starts_with("pipelines")),
+            "{:#?}",
+            draw(&[])
+        );
+
+        let lines = draw(&["t.yml".to_string()]);
+        assert_eq!(
+            lines.last().unwrap(),
+            "pipelines  t.yml changed since this run started — restart the dispatcher to use it",
+            "{lines:#?}"
+        );
+        assert!(lines[0].starts_with("claude"), "{lines:#?}");
     }
 
     /// A capped profile no step names is off the board, and a live lane puts
@@ -3123,6 +3176,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -3143,6 +3197,7 @@ mod tests {
             &used,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
             &[],
         )
         .iter()
@@ -3166,6 +3221,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
             &[],
         )
         .iter()
@@ -3193,6 +3249,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
             &[],
         )
         .iter()
@@ -3233,10 +3290,18 @@ mod tests {
         agent_model.insert("pi", vec!["small-local"]);
 
         let pipelines = Pipelines::builtin();
-        let lines: Vec<String> = footer(&repo, &pipelines, &used, &model_used, &agent_model, &[])
-            .iter()
-            .map(|l| strip(l))
-            .collect();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &model_used,
+            &agent_model,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
 
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
         // `pi` draws one line: its own figure (1 live lane against no cap of
@@ -3279,10 +3344,18 @@ mod tests {
         agent_model.insert("pi", vec!["Ornith-1.5-35B-A3B"]);
 
         let pipelines = Pipelines::builtin();
-        let lines: Vec<String> = footer(&repo, &pipelines, &used, &model_used, &agent_model, &[])
-            .iter()
-            .map(|l| strip(l))
-            .collect();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &model_used,
+            &agent_model,
+            &[],
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
 
         let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
         assert_eq!(pi_lines.len(), 1, "{lines:#?}");
@@ -3332,6 +3405,7 @@ mod tests {
             &BTreeMap::new(),
             &model_used,
             &agent_model,
+            &[],
             &[],
         )
         .iter()
@@ -3395,6 +3469,7 @@ mod tests {
             &model_used,
             &agent_model,
             &[],
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -3446,6 +3521,7 @@ mod tests {
             &model_used,
             &agent_model,
             &[],
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -3483,6 +3559,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -3510,6 +3587,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -3558,6 +3636,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
+            &[],
         )
         .iter()
         .map(|l| strip(l))

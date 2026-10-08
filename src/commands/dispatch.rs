@@ -215,6 +215,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         Err(err) => return Err(err),
     };
 
+    // What this run loaded, written down the moment the lock is ours, so a
+    // lane's `report` — and `resume` and `queue add` — routes on the same
+    // graph this dispatcher does rather than on files edited since. See
+    // `crate::pipeline_snapshot`. Before any lane exists, so no lane of
+    // this run can report ahead of it.
+    crate::pipeline_snapshot::write(repo, pipelines).context("refusing to start")?;
+
     // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
     crate::usage::registry::register(&repo.root);
@@ -325,7 +332,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             return Ok(0);
         }
 
-        // A task file leaves the queue only when its terminal step archives it,
+        // A task file leaves the queue only when its task reaches `done`,
         // so an empty queue means every task is finished — including any queued
         // from another plan's worktree while this loop was running, since they
         // all arrive in this one queue. A blocked or paused task stays in the
@@ -1549,7 +1556,7 @@ mod tests {
     /// project whose pipeline never reaches `spoolway stack`.
     fn single_step_pipelines() -> Pipelines {
         let pipeline: Pipeline =
-            serde_norway::from_str("steps:\n  - id: a\n    end: true\n").unwrap();
+            serde_norway::from_str("steps:\n  - id: a\n    run: x\n    on_pass: done\n").unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
         Pipelines {
@@ -1728,6 +1735,7 @@ mod tests {
         crate::repo::run(&dir, "git", &["init", "-q", "--bare"]).unwrap();
         (
             Repo {
+                borrowed: false,
                 root: dir.to_path_buf(),
                 checkout: dir.to_path_buf(),
                 config: Config::default(),
@@ -1767,6 +1775,7 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
+            borrowed: false,
             root: main.clone(),
             checkout: release.clone(),
             config: Config::default(),

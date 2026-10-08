@@ -42,6 +42,12 @@ shares one queue and one dispatcher.
 
 A command reads `.spoolway/` from the checkout it runs in. When that differs from the main
 checkout, the command prints a [`checkout:` line](cli-reference.md#the-checkout-line) first.
+A linked worktree on a branch with no `.spoolway/` reads the main checkout's instead, and the
+line names the main checkout. `spoolway sync` refuses to write a setup into such a worktree.
+
+There is one project per clone, and its `.spoolway/` sits at the top of the repo. A
+`.spoolway/` anywhere below the top is refused by name, and the refusal says where the setup
+belongs. Spoolway does not move or delete it for you.
 
 ## Home mode
 
@@ -157,8 +163,7 @@ samples. Edit them, or replace them with the flow your team runs. See
 ## Step
 
 A step is one node of a pipeline. Its keys say what it is: `agent:` runs a prompt on a model,
-`run:` runs a command, `end: true` finishes the task. The step id is written into the task's
-`stage:` field.
+`run:` runs a command. The step id is written into the task's `stage:` field.
 
 Four stages belong to the dispatcher. No step may be named `queued`, `done` or `paused`.
 Every pipeline gets a `blocked` step from `[unattended]` unless it declares its own. See
@@ -189,7 +194,7 @@ A lane that has reported stays open, idle, in its own pane until the task is don
 ## Worker slot
 
 Each agent profile declares a `concurrency`: how many of its lanes run at once. A step with
-`slot: false` takes no slot. Command steps and terminal steps take none.
+`slot: false` takes no slot. Command steps take none.
 
 ## Prompt
 

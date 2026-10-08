@@ -699,12 +699,43 @@ pub fn route_key(from: &str, to: &str) -> String {
     format!("{from}->{to}")
 }
 
+/// The step a task was moved onto and has not yet been saved at, shared by
+/// reference so [`Task::save`], which takes `&self`, can use it up.
+///
+/// A mutex rather than a `Cell` because a `Task` sits in a `static` in
+/// `archive_index`, which needs it to be `Sync`.
+#[derive(Debug, Default)]
+pub(crate) struct Arrival(std::sync::Mutex<Option<String>>);
+
+impl Arrival {
+    fn set(&self, step: &str) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(step.to_string());
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl Clone for Arrival {
+    fn clone(&self) -> Self {
+        Arrival(std::sync::Mutex::new(
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        ))
+    }
+}
+
 /// A task file as loaded from disk: typed frontmatter plus the untouched body.
 #[derive(Debug, Clone)]
 pub struct Task {
     pub path: PathBuf,
     pub front: Frontmatter,
     pub body: String,
+    /// The step [`Task::set_stage`] moved this task onto since the last
+    /// [`Task::save`], which is where an arrival at a command step starts
+    /// that step's run from nothing. Never loaded from disk, so a pass that
+    /// only reads the queue cannot set it.
+    pub(crate) arrived_at: Arrival,
 }
 
 impl Task {
@@ -901,7 +932,12 @@ impl Task {
             );
         }
 
-        Ok(Task { path, front, body })
+        Ok(Task {
+            path,
+            front,
+            body,
+            arrived_at: Default::default(),
+        })
     }
 
     /// Serialise back to the on-disk form.
@@ -910,10 +946,52 @@ impl Task {
         Ok(format!("---\n{yaml}---\n{}", self.body))
     }
 
+    /// Write the task file. If [`Task::set_stage`] moved it onto a step since
+    /// the last save, that step's old command run is cleared first.
+    ///
+    /// The clearing lives in the write, not in the dispatcher, because a task
+    /// reaches a command step by many roads: a dispatcher pass, a lane's
+    /// `spoolway report`, a resume from the board. All of them save through
+    /// here, so none can leave the old exit code for the next visit to route
+    /// on. A task only *loaded* never clears anything, which is why a
+    /// restarted dispatcher still adopts the run it left behind.
+    ///
+    /// The run goes before the file is written. A failed write then leaves a
+    /// task that is still where it was with a step's run missing, which costs
+    /// one re-run. The other order could leave a task on the step with the old
+    /// code still beside it.
     pub fn save(&self) -> Result<()> {
+        if let Some(step) = self.arrived_at.take() {
+            self.clear_old_run(&step)?;
+        }
         let rendered = self.render()?;
         write_atomic(&self.path, &rendered)
             .with_context(|| format!("writing task file {}", self.path.display()))
+    }
+
+    /// Stop and forget whatever run `step` left for this task, if the task
+    /// file sits in a project's queue and so has a `commands/` beside it.
+    fn clear_old_run(&self, step: &str) -> Result<()> {
+        let Some(home) = self
+            .path
+            .parent()
+            .filter(|queue| {
+                queue
+                    .file_name()
+                    .is_some_and(|n| n == crate::config::QUEUE_DIR)
+            })
+            .and_then(Path::parent)
+        else {
+            return Ok(());
+        };
+        let dir = home.join(crate::command_step::RUN_DIR);
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        let key = crate::command_step::Runs::key(step, self.id());
+        crate::command_step::Runs::new(&dir)
+            .begin_visit(&key)
+            .with_context(|| format!("clearing the old run of `{step}` for {}", self.id()))
     }
 
     /// Move to a new step, bank one round on the route this arrival took, and
@@ -947,6 +1025,9 @@ impl Task {
         // around, having inherited a count nothing had reset.
         self.front.launch_failures.remove(stage);
         self.front.launch_busy_since.remove(stage);
+        // A new visit to `stage`: the next `save` clears its old run. See
+        // [`Task::save`].
+        self.arrived_at.set(stage);
 
         let line = match message {
             Some(m) if !m.trim().is_empty() => {

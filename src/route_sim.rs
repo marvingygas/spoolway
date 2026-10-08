@@ -2,6 +2,16 @@
 //! `spoolway report` now goes through — proving dynamically what
 //! [`crate::pipeline::Pipeline::check_bounded_loops`] only proves on paper.
 //!
+//! A task reaches a step five ways, and [`crate::commands::route`] is only the
+//! first: a lane's report. The dispatcher also moves one when a step is
+//! walked past (`skip:`, `first:`, `last:`), when a lane fails to launch, when
+//! its pane stays busy, and when a background command fails late. Every one of
+//! them lands through [`crate::commands::apply_loop_budget`]. This walk takes
+//! the walk-past and the failed launch or busy pane as moves of their own. A
+//! late background failure is not one: it fires once per run of its step, so
+//! it can only repeat by arriving at that step again, and the edge that
+//! carries it from there is the step's own `on_fail`, already walked.
+//!
 //! `check_bounded_loops` shows that a pipeline's own graph always has a way
 //! out. It does not touch the counters that actually gate a loop at
 //! runtime — `rounds`, banked one lap at a time in [`crate::task::Task::
@@ -28,7 +38,7 @@
 #[cfg(test)]
 mod tests {
     use crate::commands::route;
-    use crate::pipeline::{Outcome, Pipeline, Pipelines, StepKind};
+    use crate::pipeline::{Outcome, Pipeline, Pipelines};
     use crate::task::Task;
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -64,7 +74,7 @@ mod tests {
 
     /// A pipeline shape built to already satisfy [`Pipeline::validate`]'s
     /// rules — a forward chain of 2 to 5 steps, with the occasional bounded
-    /// back edge, gate, terminal step and declared `blocked` step folded in —
+    /// back edge, gate and declared `blocked` step folded in —
     /// rather than a purely random document filtered down to the rare one
     /// that parses. The rules that keep it valid by construction:
     ///
@@ -139,7 +149,7 @@ mod tests {
         }
 
         if out.contains("on_pass: term") {
-            out += "  - id: term\n    end: true\n";
+            out += "  - id: term\n    run: \"true\"\n    on_pass: done\n";
         }
 
         // Always declared, never left to a coin flip: every real project's
@@ -203,8 +213,7 @@ mod tests {
     }
 
     /// Whether a task arriving at `stage` stops there for this walk's own
-    /// purposes: `done`, `paused`, `blocked`, or any declared
-    /// [`StepKind::Terminal`] step — exactly the reserved and declared
+    /// purposes: `done`, `paused` or `blocked` — exactly the reserved
     /// resting states this project's own routing recognises, and nothing
     /// wider. A stage that is none of these and not a step this pipeline
     /// declares either is not "resting" — see [`walk`]'s own check for what
@@ -230,16 +239,10 @@ mod tests {
     /// it would any other arrival — without this walk also having to prove
     /// that a lane bouncing off `blocked` forever eventually gives up, which
     /// routing alone was never the thing bounding.
-    fn is_resting(pipeline: &Pipeline, stage: &str) -> bool {
-        if stage == crate::pipeline::DONE
+    fn is_resting(stage: &str) -> bool {
+        stage == crate::pipeline::DONE
             || stage == crate::pipeline::PAUSED
             || stage == crate::pipeline::BLOCKED
-        {
-            return true;
-        }
-        pipeline
-            .step(stage)
-            .is_some_and(|step| step.kind() == StepKind::Terminal)
     }
 
     /// Property 2 and 3 together: a keyed count map that only ever grows —
@@ -332,7 +335,7 @@ mod tests {
                     {
                         keys.insert(destination.to_string());
                     }
-                    if !is_resting(pipeline, destination) {
+                    if !is_resting(destination) {
                         pending.push(destination);
                     }
                 }
@@ -405,7 +408,28 @@ mod tests {
         for &outcome in outcomes_at(current) {
             let (branch, destination) = step_once(ctx, task, current, outcome, path)?;
 
-            if is_resting(ctx.pipeline, &destination) {
+            if is_resting(&destination) {
+                path.pop();
+                continue;
+            }
+
+            if depth + 1 >= ctx.cap {
+                return Err(format!(
+                    "still running after {} lane(s), never reaching a terminal step: {}",
+                    ctx.cap,
+                    path.join(" | ")
+                ));
+            }
+
+            walk(ctx, &branch, &destination, depth + 1, path, seen)?;
+            path.pop();
+        }
+
+        for (label, destination) in dispatcher_moves(ctx.pipeline, current) {
+            let (branch, destination) =
+                step_dispatched(ctx, task, current, label, destination, path)?;
+
+            if is_resting(&destination) {
                 path.pop();
                 continue;
             }
@@ -504,7 +528,7 @@ mod tests {
         }
 
         let destination = routed.destination;
-        if !is_resting(ctx.pipeline, &destination) && ctx.pipeline.step(&destination).is_none() {
+        if !is_resting(&destination) && ctx.pipeline.step(&destination).is_none() {
             // Neither a resting stage nor a step this pipeline declares —
             // `route` (or this walk's own fixtures) sent the task somewhere
             // nothing can run it further from and nothing recognises as a
@@ -518,6 +542,68 @@ mod tests {
             ));
         }
 
+        Ok((branch, destination))
+    }
+
+    /// The moves the dispatcher makes on a task sitting on `current` that no
+    /// lane reported, each with the destination it proposes before the
+    /// `loop:` check. `on_pass` is where a walk-past goes; `on_fail`, or
+    /// `blocked` when there is none, is where a failed launch or a busy pane
+    /// that never cleared goes.
+    fn dispatcher_moves(pipeline: &Pipeline, current: &str) -> Vec<(&'static str, String)> {
+        let Some(step) = pipeline.step(current) else {
+            return Vec::new();
+        };
+        let mut moves = Vec::new();
+        if let Some(on_pass) = &step.on_pass {
+            moves.push(("walk-past", on_pass.clone()));
+        }
+        moves.push((
+            "launch failure",
+            step.on_fail
+                .clone()
+                .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string()),
+        ));
+        moves
+    }
+
+    /// [`step_once`] for a move [`dispatcher_moves`] proposes: the `loop:`
+    /// check and the arrival it banks are the ones the dispatcher makes, and
+    /// the same two checks on the counts and on the destination follow.
+    fn step_dispatched(
+        ctx: &Walk,
+        task: &Task,
+        current: &str,
+        label: &str,
+        proposed: String,
+        path: &mut Vec<String>,
+    ) -> Result<(Task, String), String> {
+        let mut branch = task.clone();
+        let arrivals_before = branch.front.arrivals.clone();
+        let destination = crate::commands::apply_loop_budget(
+            ctx.pipeline,
+            &mut branch,
+            current,
+            proposed,
+            ctx.unattended,
+        );
+        branch.set_stage(&destination, None);
+        path.push(format!("{current} --{label}--> {destination}"));
+
+        if !rounds_only_rise(&arrivals_before, &branch.front.arrivals) {
+            return Err(format!(
+                "`arrivals` lost a count on the last hop of {}: {arrivals_before:?} -> {:?}",
+                path.join(" | "),
+                branch.front.arrivals
+            ));
+        }
+        if !is_resting(&destination) && ctx.pipeline.step(&destination).is_none() {
+            return Err(format!(
+                "the last hop of {} lands on `{destination}`, neither a resting stage nor a \
+                 step this pipeline declares",
+                path.join(" | ")
+            ));
+        }
         Ok((branch, destination))
     }
 
@@ -564,7 +650,7 @@ mod tests {
                     step_once(ctx, &task, crate::pipeline::BLOCKED, outcome, &mut path)
                         .map_err(|e| format!("blocked_from `{origin}`: {e}"))?;
 
-                if is_resting(ctx.pipeline, &destination) {
+                if is_resting(&destination) {
                     continue;
                 }
 

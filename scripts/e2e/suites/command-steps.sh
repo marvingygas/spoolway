@@ -1312,8 +1312,8 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
   printf '    on_pass: tick-check-landed\n'
   printf '    on_fail: blocked\n'
   printf '\n  - id: tick-check-landed\n'
-  printf '    description: A dead end, so nothing drifts on its own while the reap has its say.\n'
-  printf '    end: true\n'
+  printf '    description: Holds the task, so nothing finishes it while the reap has its say.\n'
+  printf '    run: sleep 600\n    on_pass: done\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: tick-check/" .spoolway/pipelines/default.yml
 works "a background step for the tick check checks out" "$SPOOLWAY" pipeline check
@@ -1328,9 +1328,9 @@ must "a task behind the tick-check step queues" \
 # background command, the reap that reads its exit) has to happen inside
 # that one span. The worst-case alignment against the ten-second probe still
 # needs two of its passes to get `tick-check` started at all — settling
-# `implement`, then starting the background run and moving on to the dead
-# end — so this cannot be timed against zero. What it is timed against is
-# the *third* pass a run with no wake would need, to notice the
+# `implement`, then starting the background run and moving on to the step
+# that holds the task — so this cannot be timed against zero. What it is
+# timed against is the *third* pass a run with no wake would need, to notice the
 # meanwhile-finished exit code on its own: thirty seconds, worst case,
 # against this cap's twenty-five.
 if drive tick-check blocked 150; then
@@ -1379,7 +1379,8 @@ lacks "and the dispatcher never took it for an interrupted run" \
 # the task is. If the task is on a blocking command at that moment, the pull
 # used to leave that command's run files on disk, and the next visit to the
 # step routed on them without running the command at all. Now the pull stops
-# the run and forgets it, so the command runs on every visit. The command
+# the run, and arriving back at the step clears whatever run files are left,
+# so the command runs on every visit. The command
 # sleeps past the background step's one-second failure, which is the
 # still-running half; the file it appends to counts how often it really ran.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
@@ -1415,6 +1416,101 @@ if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c)" -eq 2 ]; then
   ok "and the task arrived at it twice"
 else
   bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/pulled.md pull-c) time(s))"
+fi
+
+# ------------------------------------------------------------- a second visit runs again
+# Arriving at a command step starts it from nothing, whichever road the task
+# took in. Here the road is the ordinary one: `visit-d` fails once and sends the
+# task back through the agent step to `visit-c`, which must run its command a
+# second time rather than route on the code the first visit left. The file the
+# command appends to counts how often it really ran.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+VISIT_MARK="$LIVE/visit-d.mark"
+VISIT_RAN="$LIVE/visit-c.txt"
+rm -f "$VISIT_MARK" "$VISIT_RAN"
+{
+  printf '\n  - id: visit-c\n'
+  printf '    description: Counts its own runs, once per visit.\n'
+  printf '    run: echo ran >> %s\n' "$VISIT_RAN"
+  printf '    headless: true\n'
+  printf '    on_pass: visit-d\n    on_fail: implement\n'
+  printf '\n  - id: visit-d\n'
+  printf '    description: Fails the first time and passes after that.\n'
+  printf '    run: if [ -f %s ]; then exit 0; fi; touch %s; exit 1\n' "$VISIT_MARK" "$VISIT_MARK"
+  printf '    headless: true\n'
+  printf '    on_pass: review\n    on_fail: implement\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: visit-c/" .spoolway/pipelines/default.yml
+works "a command step revisited through the agent step checks out" "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/visited.md" visited "$BODY" "group: visited"
+must "a task for the second-visit case queues" "$SPOOLWAY" queue add --from "$LIVE/visited.md"
+if drive visited gone 240; then ok "a task sent back to a command step still reaches the end"
+else bad "a task sent back to a command step still reaches the end (at \`$(stage_of visited)\`)"; fi
+if [ "$(wc -l < "$VISIT_RAN" 2>/dev/null || echo 0)" -eq 2 ]; then
+  ok "the command ran again on the second visit rather than routing on the first visit's code"
+else
+  bad "the command ran again on the second visit rather than routing on the first visit's code \
+($(wc -l < "$VISIT_RAN" 2>/dev/null || echo 0) run(s) in $VISIT_RAN, wanted 2)"
+fi
+if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/visited.md visit-c)" -eq 2 ]; then
+  ok "and the task arrived at it twice"
+else
+  bad "and the task arrived at it twice ($(arrivals $SPOOLWAY_PROJECT_HOME/archive/visited.md visit-c) time(s))"
+fi
+
+# ------------------------------------------------------------- a walk-past stops at the limit
+# `loop:` limits arrivals "by any route", and a step a task's `skip:` names is
+# walked past without a lane. Two steps that both are, passing to each other,
+# are the shape that once ran 56 arrivals at a step with `loop: 2` in half a
+# minute: the walk-past never asked the step it landed on whether it was spent.
+cat > .spoolway/pipelines/default.yml <<'YAML'
+steps:
+  - id: walk-a
+    description: Bounded, and reached again by every lap of the walk-past below.
+    run: "true"
+    loop: 2
+    on_pass: walk-b
+  - id: walk-b
+    description: Hands the task straight back to walk-a.
+    run: "true"
+    on_pass: walk-a
+    on_fail: done
+YAML
+works "a pipeline whose only loop is a walk-past checks out" "$SPOOLWAY" pipeline check
+
+# The dispatcher the last case left up would take `walked` the moment it is
+# queued, and run `walk-a` as a command before the `skip:` below lands on it.
+# `drive` starts a fresh one once the file is ready.
+dispatcher_stop
+task_doc "$LIVE/walked.md" walked "$BODY" "group: walked"
+must "a task for the walk-past case queues" "$SPOOLWAY" queue add --from "$LIVE/walked.md"
+# `queue add` empties `skip:` on every task it queues, so it is written onto the
+# queued file afterwards, before the dispatcher is up to read it.
+sed -i '0,/^group: walked$/s//group: walked\nskip: [walk-a, walk-b]/' \
+  "$SPOOLWAY_PROJECT_HOME/queue/walked.md"
+has "the queued task carries the skip: list" "skip: [walk-a, walk-b]" \
+  "$SPOOLWAY_PROJECT_HOME/queue/walked.md"
+if drive walked blocked 120; then
+  ok "a walk-past that would circle forever stops the task at the limit"
+else
+  bad "a walk-past that would circle forever stops the task at the limit (at \`$(stage_of walked)\`)"
+fi
+has "the steps were walked past rather than run" "does not run for this task (skip)" \
+  "$E2E_DISPATCH_LOG"
+if [ -e "$SPOOLWAY_PROJECT_HOME/commands/walked · walk-a.log" ]; then
+  bad "no command ran for a walked-past step (found walked · walk-a.log)"
+else
+  ok "no command ran for a walked-past step"
+fi
+has "and the block names the step and the arrival it refused" \
+  "\`walk-b\` may not send this to \`walk-a\` a 3rd time — \`walk-a\` has \`loop: 2\`" \
+  $SPOOLWAY_PROJECT_HOME/queue/walked.md
+if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/queue/walked.md walk-a)" -eq 2 ]; then
+  ok "walk-a was arrived at exactly its limit of times"
+else
+  bad "walk-a was arrived at exactly its limit of times (arrived \
+$(arrivals $SPOOLWAY_PROJECT_HOME/queue/walked.md walk-a) time(s), wanted 2)"
 fi
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml

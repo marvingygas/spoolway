@@ -26,7 +26,8 @@ in. When that checkout is a linked worktree, they print one line first naming it
 checkout: ~/.spoolway/worktrees/checkout-line (task/checkout-line)
 ```
 
-In the main checkout nothing extra is printed. Under `--json` the same line is one JSON
+In the main checkout nothing extra is printed. A linked worktree whose branch has no
+`.spoolway/` reads the main checkout's setup, and the line names the main checkout. Under `--json` the same line is one JSON
 object:
 
 ```
@@ -201,6 +202,10 @@ spoolway queue add --from <PATH> --base <BRANCH>
 | `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
+While a dispatcher runs, a task whose `pipeline:` that dispatcher did not load is refused, and
+the message says to restart the dispatcher. See [Editing a pipeline while it
+runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
 A task that sets neither its own `base:` nor `--base` is refused by name and nothing is
 written. A `base:` that exists only on `origin` is accepted; the worktree is cut from
 `origin/<base>` later, with no local branch made for it. A base on neither is refused, naming
@@ -299,7 +304,7 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
+Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered. While a dispatcher runs, it routes on the pipelines that dispatcher loaded at start.
 
 A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
@@ -615,7 +620,10 @@ These tasks are refused, each with a message that names the reason and what to d
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
 | Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
 
-A task on a step the pipeline no longer defines, or on a step that ends the pipeline, can still be resumed.
+A task on a step the pipeline no longer defines can still be resumed.
+
+While a dispatcher runs, the destination comes from the pipelines it loaded at start. See
+[Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 ```
 spoolway resume <task>
@@ -728,7 +736,7 @@ $ spoolway pipeline show --json
 ```
 
 `source` and `file` read the same as [`pipeline list
---json`](#spoolway-pipeline-list---json). `kind` is `"agent"`, `"command"` or `"terminal"`.
+--json`](#spoolway-pipeline-list---json). `kind` is `"agent"` or `"command"`.
 `loop` is `null` for a step with no `loop:` limit; `timeout_seconds` is `null` for an agent
 step.
 
@@ -745,6 +753,10 @@ $ spoolway pipeline check
 
 A missing or overlong `description:` is a warning, not a failure. So is a step that no route
 from the first step reaches.
+
+While a dispatcher runs, the check first prints a line naming each pipeline file edited since
+it started. That line is not a failure. See [Editing a pipeline while it
+runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
@@ -1057,7 +1069,7 @@ spoolway config edit
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
 | `path` | Print every place this project's setup lives: the setup folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
-| `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree |
+| `set <key> <value>` | Write one value into the project's file. Refused inside a linked worktree. Refuses a value that can never be right, such as an unknown `dispatch.backend`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. See [Configuration](configuration.md#what-config-set-checks) |
 | `edit` | Open the file in `$EDITOR` and validate it on save |
 
 `path` also runs in a checkout no project claims. There it prints `mode: null`, no project paths,
@@ -1155,6 +1167,16 @@ Run from a linked worktree, the directory it resolves to is the main checkout th
 cut from, never the worktree itself — `init` never writes into a worktree or binds it as its own
 project. When the main checkout cannot be found this way, `init` refuses and says to run it in
 the main checkout, or to pass `-C <main checkout>`.
+
+A project has one setup, at the top of the repo. `init` writes it there, from whichever folder of
+the checkout it runs in. When the top has no setup and a `.spoolway/` sits in a folder below it, `init` writes
+nothing and refuses, naming that folder and where the setup belongs:
+
+```
+$ spoolway init
+~/work/mono/vendor/.spoolway is not at the top of the repo.
+  A project's setup lives at ~/work/mono/.spoolway — move it there, or remove it.
+```
 
 `Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
 default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
@@ -1304,7 +1326,9 @@ Bring forward the files spoolway writes, without touching what you wrote. Prompt
 skeletons are never touched.
 
 It writes the checkout it runs in. In a linked worktree that is the worktree's own files, not
-the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one.
+the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one. In a
+linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
+the main checkout.
 
 ```
 spoolway sync --dry-run
@@ -1324,6 +1348,12 @@ straight away with no panel.
 
 See [Keeping a project's files current](installation.md#keeping-a-projects-files-current) for
 the panel itself.
+
+`sync` checks that it can make every write and removal before it makes the first. If any check
+fails, it writes nothing, names each file it cannot change, and exits with an error. If a write
+fails part-way, the error lists every file already changed. The dry run prints the same list a
+real run acts on. See [Keeping a project's files current](installation.md#keeping-a-projects-files-current)
+for the messages.
 
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
@@ -1479,6 +1509,9 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
 
 A report from a `queued` or `paused` task is refused, because no lane works at either state. The refusal names the next action: `spoolway resume <task>` for a paused task, and waiting for the dispatcher for a queued one.
+
+While a dispatcher runs, the route comes from the pipelines it loaded at start. See [Editing a
+pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 See [Gates](pipelines.md#gates).
 

@@ -66,7 +66,7 @@ impl<'a> Dispatcher<'a> {
         record
     }
 
-    /// A task reached a terminal step that cleans up: bank whatever its lanes
+    /// A task reached `done`: bank whatever its lanes
     /// spent, tear down its worktree and branch, and move its file out of the
     /// active queue.
     pub(crate) fn clean_up(

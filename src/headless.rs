@@ -47,9 +47,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::mux::{
-    Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree, worktree_root,
-};
+use crate::mux::{Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree};
 
 /// Where lane records live, under the project's home directory — see
 /// [`crate::repo::Repo::headless_dir`]. The logs are in [`LOGS_DIR`] inside it.
@@ -134,12 +132,14 @@ struct Record {
 impl Headless {
     /// `lane_dir` is where lane records live, and holds the `logs/` folder —
     /// [`crate::repo::Repo::headless_dir`] for every real caller.
-    pub fn new(root: &Path, lane_dir: PathBuf) -> Result<Headless> {
-        Ok(Headless {
+    /// `home` is [`crate::repo::Repo::home`], the project's home as already
+    /// settled: dispatched checkouts are cut under it.
+    pub fn new(root: &Path, home: &Path, lane_dir: PathBuf) -> Headless {
+        Headless {
             root: root.to_path_buf(),
-            worktree_root: worktree_root(root)?,
+            worktree_root: home.join(crate::mux::WORKTREES_DIR),
             lanes_dir: lane_dir,
-        })
+        }
     }
 
     fn lane_dir(&self) -> PathBuf {
@@ -1056,17 +1056,10 @@ mod tests {
             let bin = root.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
 
-            // No `dispatch.worktree_root` left to point this at the scratch
-            // root directly — the worktree root now always falls out of
-            // `project_home`, which reads `$HOME`. Standing this thread's
-            // `HOME` on the scratch root for just the `new` call keeps this
-            // fixture's worktrees under its own directory and away from
-            // every other test's, the same way `mux`'s own home-mode test
-            // does.
-            let mux = crate::platform::test_home::with_home(&root, || {
-                Headless::new(&root, root.join(LANE_DIR))
-            })
-            .unwrap();
+            // The scratch root stands in for the project's home, so this
+            // fixture's worktrees land under its own directory and away from
+            // every other test's.
+            let mux = Headless::new(&root, &root, root.join(LANE_DIR));
 
             Fixture { mux, root, bin }
         }
@@ -1638,14 +1631,15 @@ mod tests {
     #[test]
     fn worktrees_are_cut_outside_the_project() {
         let root = Path::new("/home/x/dev/myproject");
-        let default = worktree_root(root).unwrap();
+        let home = Path::new("/home/x/.spoolway/myproject-k7f2q9");
+        let default = Headless::new(root, home, home.join(LANE_DIR)).worktree_root;
         assert!(
             !default.starts_with(root),
             "worktrees landed inside the checkout: {}",
             default.display()
         );
         assert!(
-            default.ends_with("myproject/worktrees"),
+            default.ends_with("myproject-k7f2q9/worktrees"),
             "{}",
             default.display()
         );

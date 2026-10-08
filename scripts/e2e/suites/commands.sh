@@ -1235,6 +1235,34 @@ works "the aged queue entry did not — queue/ is never swept, whatever its age"
 must "retention restored to its default" "$SPOOLWAY" config set housekeeping.retention_days 30
 rm -f "$OLD_QUEUED"
 
+# ------------------------------------------------------ config set checks
+# `config set` runs the file-based checks `doctor` runs. A value that can
+# never be right is refused, and one naming something not set up yet is saved
+# with a warning, so a script can set keys in the order it likes.
+BEFORE_BACKEND=$("$SPOOLWAY" config get dispatch.backend)
+refuses "config set refuses a backend that does not exist, naming the allowed ones" \
+  "not a backend — use herdr or headless" "$SPOOLWAY" config set dispatch.backend tmux
+works "and the backend is still what it was" \
+  test "$("$SPOOLWAY" config get dispatch.backend)" = "$BEFORE_BACKEND"
+
+BEFORE_AGENT=$("$SPOOLWAY" config get unattended.blocked_agent)
+says "config set saves an agent not in [agents] yet, with a warning" \
+  'warning: no agent `ghost` in [agents] yet — `spoolway doctor` fails until one is added' \
+  "$SPOOLWAY" config set unattended.blocked_agent ghost
+works "and the value saved is the one typed" \
+  test "$("$SPOOLWAY" config get unattended.blocked_agent)" = "ghost"
+refuses "and doctor fails on it, as warned" 'no agent profile `ghost`' \
+  "$SPOOLWAY" doctor --no-live
+must "blocked agent restored" "$SPOOLWAY" config set unattended.blocked_agent "$BEFORE_AGENT"
+
+refuses "config set refuses a hook that can never run, as doctor fails it" \
+  "not a bare filename" "$SPOOLWAY" config set issue_tracking.hook ../evil.sh
+BEFORE_HOOK=$("$SPOOLWAY" config get issue_tracking.hook)
+says "config set warns on a hook script that is not there yet" \
+  'fails its check "`issue_tracking.hook` script exists"' \
+  "$SPOOLWAY" config set issue_tracking.hook nosuch.sh
+must "hook restored" "$SPOOLWAY" config set issue_tracking.hook "$BEFORE_HOOK"
+
 # ------------------------------------------------------------- sync notice
 # `Run spoolway sync to apply the last update.`: the line `main.rs` prints in
 # front of a project command once this checkout's stamp no longer matches

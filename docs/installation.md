@@ -80,7 +80,8 @@ spoolway init
 It opens by printing the project directory it resolved — check the path is the one you meant,
 especially when `init` was reached from a keybinding rather than typed where you were standing.
 At a terminal it then goes straight to its first open question. Press Ctrl-C there to stop a
-wrong run: nothing is written until every question is answered. A run whose flags answer every
+wrong run: nothing is written until every question is answered. That includes the id in `.git`
+and the home under `~/.spoolway/`. A run whose flags answer every
 question writes right after printing the path. Without a terminal, `init` writes
 nothing and exits 0 unless you pass `--yes`, so a script or CI runner passes `--yes`.
 
@@ -381,7 +382,9 @@ spoolway sync               # apply it
 
 `sync` brings a project's own files forward. It needs a project, and lands its writes on the
 checkout it runs in. In a linked worktree that is the worktree's own tracked files, and the
-[`checkout:` line](cli-reference.md#the-checkout-line) names it first.
+[`checkout:` line](cli-reference.md#the-checkout-line) names it first. A linked worktree whose
+branch has no `.spoolway/` reads the main checkout's setup, so `sync` refuses there and names
+the main checkout.
 
 What `sync` replaces, file by file:
 
@@ -402,6 +405,26 @@ removed. See [Home mode](concepts.md#home-mode).
 A `config.toml` that `sync` cannot read fails the whole command, naming the file and pointing
 at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
 edit` instead.
+
+`sync` works out every write and removal first. It then checks that it can make each one, and
+only then writes. If any check fails, it writes nothing. It prints one line for each file it
+cannot change, then says nothing was written:
+
+```
+cannot remove .spoolway/templates/tracking/epic.md: Permission denied
+nothing was written — fix what each line names and run sync again
+```
+
+If a write fails after the first file is changed, `sync` stops. It names the file that failed
+and lists every file it had already changed. It does not undo those changes.
+
+```
+could not write .spoolway/pipelines/default.yml: <the operating system's error>
+already changed, and not undone:
+  .spoolway/config.toml
+```
+
+`--dry-run` prints the list a real run would act on, file for file.
 
 `sync` never merges. A key block you edited by hand is replaced with the shipped one, and the
 report says so. A skill file has no such block: sync always rewrites it to match the shipped

@@ -78,7 +78,8 @@ pub fn config_get(repo: &Repo, key: &str, json: bool) -> Result<()> {
 
 /// Write one key into the project's own config.
 ///
-/// Refuses inside a linked worktree. The dispatcher only ever reads
+/// Refuses inside a linked worktree, including one that carries no
+/// `.spoolway/` and reads the main checkout's. The dispatcher only ever reads
 /// `repo.root`'s `config.toml`, never a worktree's own copy — so a write here
 /// would sit in a file nothing reads until the branch merges, silently. `-C`
 /// is the way around it, already built in, so the refusal names the exact
@@ -86,16 +87,26 @@ pub fn config_get(repo: &Repo, key: &str, json: bool) -> Result<()> {
 /// main checkout `checkout` and `root` are the same directory, so nothing
 /// here changes for it.
 pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
-    if repo.checkout != repo.root {
+    if repo.in_linked_worktree() {
         bail!(
             "the dispatcher reads the project's config, not this worktree's.\n  spoolway -C {} \
              config set {key} {value}",
             repo.root.display()
         );
     }
+    crate::confkv::check_typed(key, value)?;
     let updated = crate::confkv::set(&repo.config, key, value)?;
     updated.save_key(&repo.root, key)?;
     println!("{key} = {}", crate::confkv::get(&updated, key)?);
+    for warning in crate::confkv::warnings(&updated, key) {
+        eprintln!("warning: {warning}");
+    }
+    // The file-based checks `doctor` runs, on the config just saved. These
+    // are warnings, never refusals: a script sets keys in sequence, and the
+    // next command may be the one that makes the check pass.
+    for failure in super::doctor::failures_after_set(repo, &updated, key) {
+        eprintln!("warning: {failure}");
+    }
     Ok(())
 }
 
@@ -587,6 +598,7 @@ mod tests {
             std::fs::create_dir_all(clone.config_dir()).unwrap();
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),

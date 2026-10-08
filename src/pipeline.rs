@@ -270,8 +270,7 @@ const BLOCKED_DESCRIPTION: &str = "Staffed only in an unattended run. Reads why 
 /// What the dispatcher does when a task sits on a step.
 ///
 /// Derived from the keys the step carries rather than declared: `agent:` runs a
-/// prompt, `run:` runs a command, `end: true` finishes the task. The keys
-/// already partitioned perfectly, and a `kind:` beside them was a second
+/// prompt, `run:` runs a command. The keys already partitioned perfectly, and a `kind:` beside them was a second
 /// declaration the file had to keep consistent with itself — along with every
 /// "you said kind X but wrote keys for Y" error that consistency check existed
 /// to produce.
@@ -279,8 +278,6 @@ const BLOCKED_DESCRIPTION: &str = "Staffed only in an unattended run. Reads why 
 pub enum StepKind {
     /// Run an agent with a prompt, and route on the outcome it reports.
     Agent,
-    /// The task stops here. Nothing is scheduled for it again.
-    Terminal,
     /// Run one command line in the task's worktree, and route on what it exits
     /// with. No agent, no model, no worker slot — a build, a test run, a deploy
     /// script, anything a shell can start.
@@ -300,7 +297,6 @@ impl StepKind {
     pub fn as_str(self) -> &'static str {
         match self {
             StepKind::Agent => "agent",
-            StepKind::Terminal => "terminal",
             StepKind::Command => "command",
         }
     }
@@ -314,12 +310,10 @@ pub struct Step {
     /// `stage:` field, so renaming a step renames the stage.
     pub id: String,
 
-    /// The task stops here. Nothing is scheduled for it again.
-    ///
-    /// A step with no `agent:`, no `run:` and no transitions *is* structurally
-    /// terminal, so this could be inferred too. It is not, on purpose: a
-    /// mistyped `agnet: local` would then silently become an ending rather than
-    /// an error, and endings are worth declaring.
+    /// The retired `end: true`, kept only so a file still carrying it parses
+    /// and [`Pipeline::validate`] can refuse it by name, with the line that
+    /// replaces it — `on_pass: done` — rather than serde's own "unknown field".
+    /// Nothing reads it for any other purpose.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub end: bool,
 
@@ -677,7 +671,7 @@ pub struct Step {
     pub serial: bool,
 
     /// Retired: used to tear the task's worktree and branch down, and archive
-    /// its file, on arrival at a declared terminal step — reaching the
+    /// its file, on arrival at a step that carried `end: true` — reaching the
     /// reserved `done` stage does this unconditionally now, at
     /// [`crate::dispatch::Dispatcher::clean_up`], so there was no second value
     /// this key ever chose between. Kept only so a file still naming it
@@ -904,13 +898,8 @@ fn is_default_pipeline_version(value: &str) -> bool {
 impl Step {
     /// What this step is, read off the keys it carries.
     ///
-    /// `end: true` wins over everything: a step declaring the task stops here
-    /// and also naming an agent is refused by [`Pipeline::validate`], and until
-    /// it is, an ending is the safer reading.
     pub fn kind(&self) -> StepKind {
-        if self.end {
-            StepKind::Terminal
-        } else if self.run.is_some() {
+        if self.run.is_some() {
             StepKind::Command
         } else {
             StepKind::Agent
@@ -1084,7 +1073,7 @@ impl Pipeline {
 }
 
 // ---------------------------------------------------------------------------
-// The four retired shapes' own messages, each written once: `validate` and
+// The six retired shapes' own messages, each written once: `validate` and
 // `refuse_retired_step_keys` bail on the first with these, and
 // `Pipeline::retired_shape_problems` collects every one — the same wording
 // either way, since `scripts/e2e/suites/upgrade.sh` greps these exact
@@ -1116,6 +1105,29 @@ fn loop_map_message(step_id: &str, by_route: &BTreeMap<String, u32>) -> String {
 /// meaning is deleting the line, not `loop: 1`, so the message says so.
 fn loop_zero_message(step_id: &str) -> String {
     format!("step `{step_id}` has loop: 0 — a loop is 1 or more; delete `loop:` for no limit")
+}
+
+/// A step still declaring the retired `end: true`. `on_pass: done` finishes a
+/// task just as well, so the replacement is a line on the step before it.
+fn end_message(step_id: &str) -> String {
+    // `blocked` is the one step `on_pass: done` cannot be written on: it
+    // refuses `on_pass:` itself, because where its pass goes is read from the
+    // step the task blocked on. The replacement there is to delete the key.
+    if step_id == BLOCKED {
+        return "step `blocked` sets end: true, which is gone — a pass sends the task on \
+                from the step it blocked on, and anything else parks it on `paused`; \
+                delete `end:`"
+            .to_string();
+    }
+    format!("step `{step_id}` sets end: true, which is gone — use on_pass: done")
+}
+
+/// A step routing its pass to `blocked`. `blocked` is a stage a task is
+/// parked on, and an unattended run staffs it with a lane instead of a
+/// person, so a pass written to land there strands the task. `gate: true`
+/// holds the same pass for a person and keeps where it was headed.
+fn on_pass_blocked_message(step_id: &str) -> String {
+    format!("step `{step_id}` has on_pass: blocked — use gate: true to stop for a person")
 }
 
 /// A step still declaring the retired `on_loop_max:`.
@@ -1289,6 +1301,19 @@ impl Pipeline {
             }
         }
 
+        // `end: true` is refused ahead of the per-kind checks below because a
+        // bare `end: true` step would otherwise be read as an agent step and
+        // told it "names no `agent:` and no `run:`", which says nothing about
+        // the line that replaces it. Each message names that replacement.
+        for step in &self.steps {
+            if step.end {
+                bail!(end_message(&step.id));
+            }
+            if step.on_pass.as_deref() == Some(BLOCKED) {
+                bail!(on_pass_blocked_message(&step.id));
+            }
+        }
+
         // A transition may name a declared step or either reserved terminal.
         let known = |id: &str| id == DONE || id == BLOCKED || self.steps.iter().any(|s| s.id == id);
 
@@ -1337,13 +1362,6 @@ impl Pipeline {
                          the task just carries on from the step it blocked on; delete `gate:`"
                     );
                 }
-                if step.end {
-                    bail!(
-                        "step `blocked` declares `end: true` — it always sends the task on from \
-                         the step it blocked on, or back to `blocked`, never stops it; \
-                         delete `end:`"
-                    );
-                }
                 // The five keys above route or gate the step, which `blocked` never does. These
                 // three are not wrong the way those are — a command, a slot opt-out and a loop
                 // bound all mean something on an ordinary step — but `blocked` is materialised
@@ -1381,7 +1399,8 @@ impl Pipeline {
                     if step.agent.is_none() {
                         bail!(
                             "step `{}` names no `agent:` and no `run:` — a step that runs \
-                             nothing and does not `end:` is one whose keys were mistyped",
+                             nothing is one whose keys were mistyped; a task finishes with \
+                             `on_pass: done` on the step before, not a step of its own",
                             step.id
                         );
                     }
@@ -1389,22 +1408,6 @@ impl Pipeline {
                         bail!(
                             "step `{}` runs an agent but has no on_pass — a task reaching it \
                              would never leave",
-                            step.id
-                        );
-                    }
-                }
-                StepKind::Terminal => {
-                    if step.on_pass.is_some() || step.on_fail.is_some() {
-                        bail!(
-                            "step `{}` declares `end: true` and a transition — a task that \
-                             stops here goes nowhere",
-                            step.id
-                        );
-                    }
-                    if step.agent.is_some() || step.run.is_some() {
-                        bail!(
-                            "step `{}` declares `end: true` and names something to run — \
-                             a task that stops here runs nothing",
                             step.id
                         );
                     }
@@ -1455,19 +1458,7 @@ impl Pipeline {
                 }
             }
 
-            // `gate` is not a lane's key: a command step's exit is its
-            // report, and the dispatcher holds a passing one the same way an
-            // agent's. Only an ending has nothing left to hold.
-            if kind == StepKind::Terminal && step.gate {
-                bail!(
-                    "step `{}` ends the task but declares `gate` — nothing comes after it to \
-                     hold; delete `gate:`",
-                    step.id
-                );
-            }
-
-            // Everything below is a lane's, and neither a command step nor an
-            // ending starts one.
+            // Everything below is a lane's, and a command step starts none.
             if kind != StepKind::Agent {
                 for (key, set) in [
                     ("prompt", step.prompt.is_some()),
@@ -1535,7 +1526,7 @@ impl Pipeline {
             // Only a command step's run is something a pass starts and can
             // therefore hold back; an agent step's lane has no such turn to
             // wait for. Named apart from the `kind != Command` refusals
-            // above, whose wording is for an ending as much as a lane.
+            // above, whose wording is for a lane.
             if step.serial && kind == StepKind::Agent {
                 bail!(
                     "step `{}` declares `serial:` but is an agent step — only a command step's \
@@ -1606,13 +1597,7 @@ impl Pipeline {
         // forever with nothing ever finishing it. `done` and `blocked` are
         // always reachable — every unrouted failure falls to `blocked` — so
         // what this actually catches is a loop with no passing way out.
-        let mut terminals: HashSet<&str> = [DONE, BLOCKED].into_iter().collect();
-        terminals.extend(
-            self.steps
-                .iter()
-                .filter(|s| s.kind() == StepKind::Terminal)
-                .map(|s| s.id.as_str()),
-        );
+        let terminals: HashSet<&str> = [DONE, BLOCKED].into_iter().collect();
 
         for step in &self.steps {
             if !self.reaches_terminal(&step.id, &terminals) {
@@ -1638,10 +1623,10 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Every occurrence of the four retired step shapes this pipeline's own
+    /// Every occurrence of the six retired step shapes this pipeline's own
     /// steps carry — `on_loop_max:`, an `on_fail:` naming its own step,
-    /// `loop:` written as the old per-route map, and `loop: 0`, which 0.7 ran
-    /// as no limit — each named by its step,
+    /// `loop:` written as the old per-route map, `loop: 0`, which 0.7 ran
+    /// as no limit, `end: true`, and `on_pass: blocked` — each named by its step,
     /// collected without stopping at the first the way [`Self::validate`]
     /// must.
     ///
@@ -1649,7 +1634,7 @@ impl Pipeline {
     /// the whole list in one pass rather than one refusal per run, and for
     /// `crate::sync`, which refuses a file carrying one rather than report an
     /// upgrade done over a pipeline that no longer loads. Scoped to
-    /// exactly these four shapes rather than
+    /// exactly these six shapes rather than
     /// every way `validate` can refuse a pipeline: the rest of `validate`'s
     /// checks stay bail-at-the-first, which is what every other caller
     /// wants from a pipeline that genuinely cannot run.
@@ -1672,6 +1657,12 @@ impl Pipeline {
             }
             if step.r#loop == Loop::Bare(0) {
                 problems.push(loop_zero_message(&step.id));
+            }
+            if step.end {
+                problems.push(end_message(&step.id));
+            }
+            if step.on_pass.as_deref() == Some(BLOCKED) {
+                problems.push(on_pass_blocked_message(&step.id));
             }
         }
         problems
@@ -1912,11 +1903,7 @@ impl Pipeline {
         if let Some(target) = step.on_pass.as_deref() {
             out.push(target);
         }
-        match step.on_fail.as_deref() {
-            Some(target) => out.push(target),
-            None if step.kind() != StepKind::Terminal => out.push(BLOCKED),
-            None => {}
-        }
+        out.push(step.on_fail.as_deref().unwrap_or(BLOCKED));
         out
     }
 
@@ -1958,7 +1945,7 @@ impl Pipeline {
                     stack.push(next.to_string());
                 }
                 // An unrouted failure always goes to `blocked`.
-                if step.on_fail.is_none() && step.kind() != StepKind::Terminal {
+                if step.on_fail.is_none() {
                     stack.push(BLOCKED.to_string());
                 }
             }
@@ -2190,8 +2177,8 @@ impl Pipelines {
     /// check`, the status screen, none of which is the one place that
     /// should have to know a second source exists.
     pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), true, true)
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Pipelines::load_impl(root, config, overrides.as_deref(), true, true)
     }
 
     /// [`Pipelines::load`], but an override that no longer fits is not
@@ -2199,8 +2186,8 @@ impl Pipelines {
     /// alternate screen: a line written there lands between two frames and is
     /// painted over before anyone can read it.
     pub fn load_quietly(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), true, false)
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Pipelines::load_impl(root, config, overrides.as_deref(), true, false)
     }
 
     /// [`Pipelines::load`], with no patch layer applied — for a caller that
@@ -2222,7 +2209,9 @@ impl Pipelines {
         if !crate::local::is_repo_mode(root) {
             return Ok(None);
         }
-        let local = crate::local::dir_for(root)?;
+        let Some(local) = crate::local::dir_if_identified(root)? else {
+            return Ok(None);
+        };
         let dir = crate::local::pipelines_dir(&local);
         let Some(files) = read_pipeline_dir(&dir)? else {
             return Ok(None);
@@ -2249,8 +2238,8 @@ impl Pipelines {
     /// against, so only these two opt into this; a file that is there but
     /// fails to parse is still a real problem and still fails here.
     pub fn load_or_empty(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), false, true)
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Pipelines::load_impl(root, config, overrides.as_deref(), false, true)
     }
 
     /// One source: the directory. A missing directory and an empty one now
@@ -2836,7 +2825,7 @@ mod tests {
              steps:\n  \
              - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
                on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(pipeline.version, "1.10");
@@ -2854,7 +2843,7 @@ mod tests {
                on_pass: b\n    on_fail: blocked\n  \
              - id: b\n    agent: pi\n    prompt: implementer\n    model: m\n    \
                on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
 
@@ -2879,7 +2868,7 @@ mod tests {
             "steps:\n  \
              - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
                gate: true\n    on_pass: z\n    on_fail: blocked\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(with_key.redundant_on_fail_warnings().len(), 1);
@@ -2890,7 +2879,7 @@ mod tests {
             "steps:\n  \
              - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
                gate: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(without_key.redundant_on_fail_warnings().len(), 0);
@@ -2935,7 +2924,7 @@ mod tests {
         let pipeline = Pipeline::parse(
             "solo",
             "steps:\n  - id: verify\n    agent: a\n    prompt: p\n    model: m\n    \
-             gate: true\n    on_pass: z\n  - id: z\n    end: true\n",
+             gate: true\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let warnings = pipeline.gate_warnings();
@@ -2954,7 +2943,7 @@ mod tests {
             "solo",
             "steps:\n  - id: verify\n    agent: a\n    prompt: p\n    model: m\n    \
              gate: true\n    on_pass: z\n    on_fail: fix\n  - id: fix\n    agent: a\n    \
-             prompt: p\n    model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+             prompt: p\n    model: m\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert!(pipeline.gate_warnings().is_empty());
@@ -2965,7 +2954,8 @@ mod tests {
     /// warning, not a problem `validate` refuses.
     #[test]
     fn a_pipeline_with_no_description_is_warned_about_by_name() {
-        let pipeline = Pipeline::parse("solo", "steps:\n  - id: z\n    end: true\n").unwrap();
+        let pipeline =
+            Pipeline::parse("solo", "steps:\n  - id: z\n    run: x\n    on_pass: done\n").unwrap();
         let warnings = pipeline.description_warnings();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("`solo`"), "{}", warnings[0]);
@@ -2980,7 +2970,7 @@ mod tests {
         let long = "x".repeat(401);
         let pipeline = Pipeline::parse(
             "solo",
-            &format!("description: {long}\nsteps:\n  - id: z\n    end: true\n"),
+            &format!("description: {long}\nsteps:\n  - id: z\n    run: x\n    on_pass: done\n"),
         )
         .unwrap();
         let warnings = pipeline.description_warnings();
@@ -3006,7 +2996,9 @@ mod tests {
         );
         let pipeline = Pipeline::parse(
             "solo",
-            &format!("description: {description}\nsteps:\n  - id: z\n    end: true\n"),
+            &format!(
+                "description: {description}\nsteps:\n  - id: z\n    run: x\n    on_pass: done\n"
+            ),
         )
         .unwrap();
         assert!(pipeline.description_warnings().is_empty());
@@ -3018,7 +3010,7 @@ mod tests {
     fn a_pipeline_with_a_short_description_is_not_warned_about() {
         let pipeline = Pipeline::parse(
             "solo",
-            "description: A pipeline for a test.\nsteps:\n  - id: z\n    end: true\n",
+            "description: A pipeline for a test.\nsteps:\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert!(pipeline.description_warnings().is_empty());
@@ -3038,7 +3030,6 @@ mod tests {
     /// stack` calls `gh pr view` first, so re-running `handover` from
     /// `blocked` is safe and there is no second, LLM-run escalation step to
     /// fall back to any more.
-    // covers: step.end — a terminal step is where a pipeline stops, and every route has to reach one
     #[test]
     fn both_pipelines_end_at_document_then_handover() {
         for name in ["default", "bugfix"] {
@@ -3113,7 +3104,6 @@ mod tests {
             "description",
             "agent",
             "run",
-            "end",
             "prompt",
             "model",
             "effort",
@@ -3140,16 +3130,15 @@ mod tests {
     /// A file still naming the retired `cleanup:` parses, the same way
     /// `blocked_on_write:` does — 0.1.0's shipped pipelines told projects to
     /// write it beside `end: true`, and reaching `done` already does what it
-    /// used to opt a declared terminal into. It is ignored, and gone on the
+    /// used to opt a terminal step into. It is ignored, and gone on the
     /// next save.
     #[test]
     fn the_retired_cleanup_key_parses_and_drops() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
-             - id: z\n    end: true\n    cleanup: true\n",
+             - id: z\n    run: x\n    on_pass: done\n    cleanup: true\n",
         )
         .expect("a pipeline naming the retired cleanup key must still parse");
-        assert!(pipeline.step("z").unwrap().end);
         let rendered = serde_norway::to_string(&pipeline).unwrap();
         assert!(!rendered.contains("cleanup"), "{rendered}");
     }
@@ -3215,7 +3204,7 @@ mod tests {
     fn headless_is_refused_on_a_step_that_runs_no_command() {
         let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    headless: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         assert!(err.to_string().contains("step `a`"), "{err}");
@@ -3228,7 +3217,7 @@ mod tests {
     fn a_pipeline_may_declare_blocked_as_a_step() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
-             - id: z\n    end: true\n  \
+             - id: z\n    run: x\n    on_pass: done\n  \
              - id: blocked\n    agent: pi\n    session: true\n",
         )
         .unwrap();
@@ -3250,21 +3239,21 @@ mod tests {
         }
     }
 
-    /// Each of the four keys `blocked` routes itself with is refused by name,
-    /// with a message that says what actually decides it.
+    /// Each of the keys `blocked` routes itself with is refused by name, with
+    /// a message that says what to do instead of it.
     #[test]
     fn blocked_refuses_the_keys_it_routes_itself_with() {
         let cases: &[(&str, &str)] = &[
             ("on_pass: z\n", "on_pass"),
             ("on_fail: z\n", "on_fail"),
             ("gate: true\n", "gate"),
-            ("end: true\n", "end"),
+            ("end: true\n", "delete `end:`"),
         ];
         for (key, message) in cases {
             let err = parse(&format!(
                 "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
                  - id: blocked\n    agent: pi\n    {key}  \
-                 - id: z\n    end: true\n"
+                 - id: z\n    run: x\n    on_pass: done\n"
             ))
             .unwrap_err();
             assert!(err.to_string().contains(message), "{message}: {err}");
@@ -3283,7 +3272,7 @@ mod tests {
         for (keys, key) in cases {
             let err = parse(&format!(
                 "steps:\n  - id: a\n    agent: pi\n    {keys}  \
-                 - id: z\n    end: true\n"
+                 - id: z\n    run: x\n    on_pass: done\n"
             ))
             .unwrap_err();
             let message = err.to_string();
@@ -3322,7 +3311,7 @@ mod tests {
     fn one_step_pipeline(id: &str, extra: &str) -> BTreeMap<String, Pipeline> {
         let yaml = format!(
             "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
-             - id: z\n    end: true\n{extra}"
+             - id: z\n    run: x\n    on_pass: done\n{extra}"
         );
         BTreeMap::from([(id.to_string(), parse_unchecked(id, &yaml).unwrap())])
     }
@@ -3451,7 +3440,7 @@ mod tests {
             "blocked_on_write:\n  - pipeline-only/**\nsteps:\n  \
              - id: a\n    agent: pi\n    blocked_on_write:\n      - step-only/**\n    \
              on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .expect("a pipeline naming the retired key must still parse");
         assert!(pipeline.step("a").is_some());
@@ -3466,12 +3455,12 @@ mod tests {
     fn a_step_id_that_escapes_its_directory_is_refused() {
         let escaping = parse(
             "steps:\n  - id: ../../pwn\n    run: make\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         );
         assert!(escaping.is_err(), "`../../pwn` was accepted as a step id");
 
         // The empty id it used to be the only shape refused, still refused.
-        assert!(parse("steps:\n  - id: \"\"\n    end: true\n").is_err());
+        assert!(parse("steps:\n  - id: \"\"\n    run: x\n    on_pass: done\n").is_err());
     }
 
     /// The shape a command step is written in, and the whole of what it needs:
@@ -3480,7 +3469,7 @@ mod tests {
     fn accepts_a_command_step() {
         let pipeline = parse(
             "steps:\n  - id: a\n    run: cargo test\n    \
-             on_pass: z\n    on_fail: z\n  - id: z\n    end: true\n",
+             on_pass: z\n    on_fail: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let step = pipeline.step("a").unwrap();
@@ -3497,7 +3486,7 @@ mod tests {
     fn a_command_step_is_bounded_whether_it_says_so_or_not() {
         let pipeline = parse(
             "steps:\n  - id: a\n    run: make\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(
@@ -3507,7 +3496,7 @@ mod tests {
 
         let pinned = parse(
             "steps:\n  - id: a\n    run: make\n    \
-             timeout: 2h\n    on_pass: z\n  - id: z\n    end: true\n",
+             timeout: 2h\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(
@@ -3523,7 +3512,7 @@ mod tests {
     fn rejects_a_zero_timeout() {
         let err = parse(
             "steps:\n  - id: a\n    run: make\n    \
-             timeout: 0s\n    on_pass: z\n  - id: z\n    end: true\n",
+             timeout: 0s\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         assert!(err.to_string().contains("as soon as it started"), "{err}");
@@ -3535,13 +3524,13 @@ mod tests {
     fn rejects_a_timeout_on_a_step_that_runs_no_command() {
         let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    timeout: 5m\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         assert!(err.to_string().contains("declares `timeout:`"), "{err}");
     }
 
-    /// A step that names nothing to run and does not `end:` is a step whose
+    /// A step that names nothing to run is a step whose
     /// keys were mistyped, and there is one error for it rather than one per
     /// kind it might have meant to be. That collapse is what dropping `kind:`
     /// bought: the keys are the discriminator, so there is nothing left to be
@@ -3550,7 +3539,7 @@ mod tests {
     fn rejects_a_step_that_names_nothing_to_run() {
         let err = parse(
             "steps:\n  - id: a\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         assert!(err.to_string().contains("no `run:`"), "{err}");
@@ -3564,7 +3553,7 @@ mod tests {
     fn rejects_a_step_that_names_both_a_command_and_an_agent() {
         let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    run: cargo test\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         let message = err.to_string();
@@ -3588,7 +3577,7 @@ mod tests {
         ] {
             let yaml = format!(
                 "steps:\n  - id: a\n    run: make\n\
-                 {line}    on_pass: z\n  - id: z\n    end: true\n"
+                 {line}    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n"
             );
             let err = parse(&yaml).unwrap_err();
             assert!(
@@ -3599,33 +3588,22 @@ mod tests {
     }
 
     /// `gate:` is not a lane's key: a command step's exit is its report, so
-    /// `gate: true` loads there and the dispatcher holds a passing exit. An
-    /// ending has nothing to hold, and a background step has no exit to wait
-    /// for, so both still refuse it.
+    /// `gate: true` loads there and the dispatcher holds a passing exit. A
+    /// background step has no exit to wait for, so it still refuses it.
     #[test]
-    fn gate_loads_on_a_command_step_and_is_refused_on_an_ending() {
+    fn gate_loads_on_a_command_step_and_is_refused_on_a_background_one() {
         let pipeline = parse(
             "steps:\n  - id: a\n    run: make\n    gate: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .expect("a gated command step loads");
         assert!(pipeline.step("a").unwrap().gate);
-
-        let err = parse(
-            "steps:\n  - id: a\n    run: make\n    on_pass: z\n  \
-             - id: z\n    end: true\n    gate: true\n",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("step `z` ends the task"), "{err}");
-        assert!(err.contains("delete `gate:`"), "{err}");
-        assert!(!err.contains("lane's"), "{err}");
 
         // A background step passes when it starts, so there is no exit for
         // the gate to hold.
         let err = parse(
             "steps:\n  - id: a\n    run: make\n    background: true\n    gate: true\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err()
         .to_string();
@@ -3648,17 +3626,14 @@ mod tests {
     /// other kind is refused it.
     #[test]
     fn rejects_last_on_a_step_that_runs_no_command() {
-        for kind in [
+        let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    model: m\n    last: true\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
-            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: z\n  \
-             - id: z\n    end: true\n    last: true\n",
-        ] {
-            let err = parse(kind).unwrap_err();
-            let message = err.to_string();
-            assert!(message.contains("`last:`"), "{message}");
-            assert!(message.contains("runs no command"), "{message}");
-        }
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`last:`"), "{message}");
+        assert!(message.contains("runs no command"), "{message}");
     }
 
     /// `first:` runs a command step for a chain's declared root and walks
@@ -3666,17 +3641,14 @@ mod tests {
     /// refused wherever `last:` is: a lane nobody started reports nothing.
     #[test]
     fn rejects_first_on_a_step_that_runs_no_command() {
-        for kind in [
+        let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    model: m\n    first: true\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
-            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: z\n  \
-             - id: z\n    end: true\n    first: true\n",
-        ] {
-            let err = parse(kind).unwrap_err();
-            let message = err.to_string();
-            assert!(message.contains("`first:`"), "{message}");
-            assert!(message.contains("runs no command"), "{message}");
-        }
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`first:`"), "{message}");
+        assert!(message.contains("runs no command"), "{message}");
     }
 
     /// `first:` and `last:` ask opposite questions about the same chain, so a
@@ -3686,7 +3658,7 @@ mod tests {
     fn rejects_a_command_step_that_declares_both_first_and_last() {
         let err = parse(
             "steps:\n  - id: a\n    run: make\n    first: true\n    last: true\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         let message = err.to_string();
@@ -3700,7 +3672,7 @@ mod tests {
     fn first_parses_and_defaults_to_false() {
         let pipeline = parse(
             "steps:\n  - id: a\n    run: make\n    first: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert!(pipeline.step("a").unwrap().first);
@@ -3719,7 +3691,7 @@ mod tests {
     fn serial_parses_and_defaults_to_false() {
         let pipeline = parse(
             "steps:\n  - id: a\n    run: make\n    serial: true\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert!(pipeline.step("a").unwrap().serial);
@@ -3739,7 +3711,7 @@ mod tests {
     fn rejects_serial_on_an_agent_step() {
         let err = parse(
             "steps:\n  - id: review\n    agent: pi\n    model: m\n    serial: true\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -3763,7 +3735,7 @@ mod tests {
         ] {
             let yaml = format!(
                 "steps:\n  - id: a\n    agent: pi\n    model: m\n\
-                 {line}    on_pass: z\n  - id: z\n    end: true\n"
+                 {line}    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n"
             );
             let err = parse(&yaml).unwrap_err();
             assert!(
@@ -3780,7 +3752,7 @@ mod tests {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    session: true\n    on_pass: b\n  \
              - id: b\n    agent: pi\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert!(pipeline.step("a").unwrap().session);
@@ -3804,7 +3776,7 @@ mod tests {
     fn session_false_parses_as_the_default() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    session: false\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert!(!pipeline.step("a").unwrap().session);
@@ -3819,7 +3791,7 @@ mod tests {
         for bad in ["60%", "60", "abc"] {
             let yaml = format!(
                 "steps:\n  - id: a\n    agent: pi\n    session: {bad}\n    on_pass: z\n  \
-                 - id: z\n    end: true\n"
+                 - id: z\n    run: x\n    on_pass: done\n"
             );
             let err = match parse(&yaml) {
                 Err(err) => err,
@@ -3844,7 +3816,7 @@ mod tests {
              on_pass: z\n    on_fail: fix\n  \
              - id: fix\n    agent: pi\n    prompt: worker\n    session: true\n    \
              on_pass: review\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         let message = err.to_string();
@@ -3863,7 +3835,7 @@ mod tests {
              on_pass: fix\n  \
              - id: fix\n    agent: pi\n    prompt: implementer\n    session: true\n    \
              on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
     }
@@ -3874,7 +3846,7 @@ mod tests {
     fn skills_parses_a_comma_separated_line_into_one_name_each() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    skills: code-review, spoolway-doctor\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(
@@ -3891,7 +3863,7 @@ mod tests {
     fn skills_strips_a_leading_slash() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    skills: /code-review, /spoolway-doctor\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(
@@ -3907,7 +3879,7 @@ mod tests {
     fn skills_trims_surrounding_whitespace() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    skills: \"  code-review ,  spoolway-doctor  \"\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(
@@ -3924,7 +3896,7 @@ mod tests {
     fn skills_drops_empty_items() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    skills: \"code-review, , spoolway-doctor,\"\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         assert_eq!(
@@ -3941,7 +3913,7 @@ mod tests {
     fn skills_refuses_a_name_holding_whitespace() {
         let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    skills: \"code review\"\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
+             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         let message = err.to_string();
@@ -3955,7 +3927,7 @@ mod tests {
     #[test]
     fn skills_absent_serializes_without_the_key() {
         let pipeline =
-            parse("steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  - id: z\n    end: true\n")
+            parse("steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n")
                 .unwrap();
         assert!(pipeline.step("a").unwrap().skills.is_empty());
         let rendered = serde_norway::to_string(&pipeline).unwrap();
@@ -3965,7 +3937,7 @@ mod tests {
     #[test]
     fn rejects_a_transition_to_an_unknown_step() {
         let err = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: nowhere\n  - id: b\n    end: true\n",
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: nowhere\n  - id: b\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown step `nowhere`"));
@@ -3994,7 +3966,7 @@ mod tests {
     #[test]
     fn rejects_a_loop_nothing_bounds() {
         let err = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    on_pass: z\n    on_fail: a\n  - id: z\n    end: true\n",
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    on_pass: z\n    on_fail: a\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err();
         let message = err.to_string();
@@ -4003,13 +3975,26 @@ mod tests {
         assert!(message.contains("`b`"), "{message}");
     }
 
+    /// A background step passes the moment it starts and its late failure moves
+    /// the task to `on_fail` only once, so a pipeline whose `on_fail` leads
+    /// somewhere that never comes back is not a loop and must keep loading.
+    #[test]
+    fn a_background_step_with_an_on_fail_that_never_returns_is_no_loop() {
+        parse(
+            "steps:\n  - id: build\n    run: make\n    background: true\n    on_pass: write\n    \
+             on_fail: fix\n  - id: write\n    agent: pi\n    on_pass: done\n  \
+             - id: fix\n    agent: pi\n    on_pass: done\n",
+        )
+        .unwrap();
+    }
+
     /// One bounded route is enough for the whole cycle: it escalates, its
     /// exit leaves, and the task leaves too. Demanding one on every route
     /// would refuse the pipeline we ship.
     #[test]
     fn accepts_a_loop_bounded_anywhere_along_it() {
         parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    loop: 2\n    on_pass: z\n    on_fail: a\n  - id: z\n    end: true\n",
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    loop: 2\n    on_pass: z\n    on_fail: a\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
     }
@@ -4038,7 +4023,7 @@ mod tests {
     #[test]
     fn rejects_the_retired_loop_map_form_by_name() {
         let err = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    loop:\n      a: 2\n    on_pass: a\n    on_fail: a\n  - id: z\n    end: true\n",
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    loop:\n      a: 2\n    on_pass: a\n    on_fail: a\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err()
         .to_string();
@@ -4055,7 +4040,7 @@ mod tests {
     fn the_retired_max_rounds_key_is_refused_by_name() {
         let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    max_rounds: 2\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err()
         .to_string();
@@ -4067,7 +4052,7 @@ mod tests {
     fn the_retired_max_new_sessions_key_is_refused_by_name() {
         let err = parse(
             "steps:\n  - id: a\n    agent: pi\n    max_new_sessions: 2\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err()
         .to_string();
@@ -4089,7 +4074,7 @@ mod tests {
             "steps:\n  - id: implement\n    agent: pi\n    loop: 2\n    on_pass: review\n  \
              - id: review\n    agent: pi\n    \
              on_loop_max: blocked\n    on_pass: z\n    on_fail: implement\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap_err()
         .to_string();
@@ -4110,7 +4095,7 @@ mod tests {
         let raw = "steps:\n  \
                     - id: a\n    agent: pi\n    on_pass: b\n    on_fail: a\n  \
                     - id: b\n    agent: pi\n    loop:\n      a: 1\n    on_pass: z\n    on_fail: a\n  \
-                    - id: z\n    end: true\n    on_loop_max: blocked\n  \
+                    - id: z\n    run: x\n    on_pass: done\n    on_loop_max: blocked\n  \
                     - id: w\n    agent: pi\n    loop: 0\n    on_pass: done\n";
         let pipeline: Pipeline = serde_norway::from_str(raw).unwrap();
         let problems = pipeline.retired_shape_problems();
@@ -4139,6 +4124,32 @@ mod tests {
             "{problems:?}"
         );
         assert_eq!(problems.len(), 4, "{problems:?}");
+    }
+
+    /// `end: true` and `on_pass: blocked` are refused by name, and the error
+    /// says which line replaces each. `retired_shape_problems` words them the
+    /// same way, since `pipeline check` and `sync` print those lines.
+    #[test]
+    fn end_and_a_pass_to_blocked_are_refused_naming_the_replacement() {
+        let end = "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: halt\n  \
+                   - id: halt\n    end: true\n";
+        let err = parse(end).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "step `halt` sets end: true, which is gone — use on_pass: done"
+        );
+
+        let blocked = "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: blocked\n";
+        let err = parse(blocked).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "step `a` has on_pass: blocked — use gate: true to stop for a person"
+        );
+
+        for raw in [end, blocked] {
+            let pipeline: Pipeline = serde_norway::from_str(raw).unwrap();
+            assert_eq!(pipeline.retired_shape_problems().len(), 1, "{raw}");
+        }
     }
 
     /// `Pipelines::refusals` across a whole directory, not one pipeline: two
@@ -4210,7 +4221,7 @@ mod tests {
             dir.join("default.yml"),
             "steps:\n  \
              - id: implement\n    agent: pi\n    on_pass: implement\n  \
-             - id: z\n    end: true\n",
+             - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
 
@@ -4304,7 +4315,7 @@ mod tests {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    loop: 2\n    on_pass: b\n    on_fail: b\n  \
              - id: b\n    agent: pi\n    \
-             on_pass: a\n    on_fail: z\n  - id: z\n    end: true\n",
+             on_pass: a\n    on_fail: z\n  - id: z\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         for id in ["a", "b", "z"] {
@@ -4361,6 +4372,7 @@ mod tests {
         let home = crate::scratch::root(&format!("pipeline-override-{name}-home"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
+        crate::scratch::stamped(&root);
         write_tracked_impl(&root);
 
         let result = crate::platform::test_home::with_home(&home, || f(&root));
@@ -4804,7 +4816,7 @@ mod tests {
                 "steps:\n  \
                  - id: implement\n    agent: pi\n    model: base-model\n    effort: low\n    \
                  on_pass: review\n  \
-                 - id: review\n    agent: pi\n    model: base-model\n    on_pass: blocked\n  \
+                 - id: review\n    agent: pi\n    model: base-model\n    on_pass: done\n  \
                  - id: blocked\n",
             )
             .unwrap();
@@ -5115,6 +5127,7 @@ mod tests {
         let home = crate::scratch::root("pipeline-private-e2e-home");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
+        crate::scratch::stamped(&root);
 
         // A tracked pipeline with its own prompt present, so `pipeline
         // check` has nothing tracked to complain about.
@@ -5160,6 +5173,7 @@ mod tests {
             );
 
             let repo = crate::repo::Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

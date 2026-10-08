@@ -191,8 +191,6 @@ struct RouteStep {
     gate_at: bool,
     on_pass: Option<String>,
     on_fail: Option<String>,
-    /// A terminal step: the task stops here, with no route onward.
-    ends: bool,
 }
 
 fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
@@ -213,21 +211,13 @@ fn route_view(task: &Task, pipelines: &Pipelines) -> Result<RouteView> {
         .steps
         .iter()
         .filter(|step| step.id != crate::pipeline::BLOCKED)
-        .map(|step| {
-            let ends = step.kind() == StepKind::Terminal;
-            RouteStep {
-                id: step.id.clone(),
-                description: step.description.clone(),
-                gate: step.gate,
-                gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
-                on_pass: (!ends)
-                    .then(|| step.destination(Outcome::Pass).map(str::to_string))
-                    .flatten(),
-                on_fail: (!ends)
-                    .then(|| step.destination(Outcome::Fail).map(str::to_string))
-                    .flatten(),
-                ends,
-            }
+        .map(|step| RouteStep {
+            id: step.id.clone(),
+            description: step.description.clone(),
+            gate: step.gate,
+            gate_at: task.front.gate_at.as_deref() == Some(step.id.as_str()),
+            on_pass: step.destination(Outcome::Pass).map(str::to_string),
+            on_fail: step.destination(Outcome::Fail).map(str::to_string),
         })
         .collect();
     Ok(RouteView {
@@ -341,14 +331,11 @@ fn render_route(route: &RouteView) -> String {
             false => out.push_str(&wrapped(&prefix, &about, ROUTE_WRAP).join("\n")),
         }
         out.push('\n');
-        let routes = match (step.ends, &step.on_pass, &step.on_fail) {
-            (true, _, _) => "the task ends here".to_string(),
-            (false, pass, fail) => format!(
-                "pass → {} · fail → {}",
-                pass.as_deref().unwrap_or("—"),
-                fail.as_deref().unwrap_or("—")
-            ),
-        };
+        let routes = format!(
+            "pass → {} · fail → {}",
+            step.on_pass.as_deref().unwrap_or("—"),
+            step.on_fail.as_deref().unwrap_or("—")
+        );
         out.push_str(&format!("{indent}{routes}\n"));
     }
     out.push('\n');
@@ -427,13 +414,59 @@ pub fn queue_add(
     }
     refuse_from_lane("the queue is mutated", in_lane)?;
 
-    let base = args.base.as_deref();
+    let tasks = gather_tasks(&args.from)?;
+    queue_add_gathered(repo, pipelines, args, &tasks)
+}
+
+/// [`queue_add`], while a dispatcher runs: routed on the pipelines that
+/// dispatcher loaded rather than on the files — see
+/// [`crate::pipeline_snapshot`].
+///
+/// A task naming a pipeline the dispatcher never loaded is refused, with the
+/// restart that would load it. Queued anyway, it would sit on a pipeline no
+/// pass can route until somebody restarted the run, with nothing saying why.
+/// Only the pipelines the submitted tasks name are decoded; a task whose
+/// front matter will not parse names none, and is refused by
+/// [`validate_batch`] in its own words.
+pub fn queue_add_on(
+    repo: &Repo,
+    loaded: &crate::pipeline_snapshot::LoadedPipelines,
+    args: &QueueAddArgs,
+    in_lane: bool,
+) -> Result<()> {
+    if args.from.is_empty() {
+        // No task to route: the skeleton lists every pipeline a task queued
+        // now could actually run on, which is every one the dispatcher has.
+        return print_skeleton_task(repo, &loaded.pipelines(&loaded.names())?);
+    }
+    refuse_from_lane("the queue is mutated", in_lane)?;
 
     let tasks = gather_tasks(&args.from)?;
+    let named: Vec<String> = tasks
+        .iter()
+        .filter_map(|(name, raw)| {
+            parse_submission(name, raw, args.base.as_deref())
+                .ok()?
+                .front
+                .pipeline
+        })
+        .collect();
+    let named: Vec<&str> = named.iter().map(String::as_str).collect();
+    queue_add_gathered(repo, &loaded.pipelines(&named)?, args, &tasks)
+}
+
+/// Everything [`queue_add`] and [`queue_add_on`] do once `--from` is read.
+fn queue_add_gathered(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    args: &QueueAddArgs,
+    tasks: &[(String, String)],
+) -> Result<()> {
+    let base = args.base.as_deref();
     if args.dry_run {
-        return queue_add_dry_run(repo, pipelines, base, &tasks);
+        return queue_add_dry_run(repo, pipelines, base, tasks);
     }
-    queue_add_tasks(repo, pipelines, base, &tasks)
+    queue_add_tasks(repo, pipelines, base, tasks)
 }
 
 /// `--dry-run`: everything `queue add` decides, said out loud, and nothing
@@ -1094,7 +1127,12 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     }
 
     let path = std::path::PathBuf::from(format!("{}.md", front.id));
-    Ok(Task { path, front, body })
+    Ok(Task {
+        path,
+        front,
+        body,
+        arrived_at: Default::default(),
+    })
 }
 
 /// Parse and validate every task as one set: a `depends_on` naming a
@@ -8189,6 +8227,42 @@ mod tests {
     /// to exist, not to say anything in particular.
     const BODY: &str = "## Goal\n\nDo the thing.\n";
 
+    /// While a dispatcher runs, `queue add` routes on the pipelines it
+    /// loaded: a task on one of them is queued, and a task on a pipeline
+    /// added since is refused with the restart that would load it.
+    #[test]
+    fn queue_add_on_a_running_dispatcher_refuses_a_pipeline_it_never_loaded() {
+        let (repo, _root) = fixture("queue-add-on-snapshot");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        let loaded = crate::pipeline_snapshot::LoadedPipelines::live(&repo).unwrap();
+
+        let submit = |id: &str, pipeline: &str| {
+            let path = repo.root.join(format!(".{id}-doc.md"));
+            std::fs::write(
+                &path,
+                format!(
+                    "---\nid: {id}\ntitle: {id}\ngroup: demo\npipeline: {pipeline}\n---\n{BODY}"
+                ),
+            )
+            .unwrap();
+            let args = QueueAddArgs {
+                from: vec![path.display().to_string()],
+                base: Some("plan/demo".to_string()),
+                dry_run: false,
+            };
+            queue_add_on(&repo, &loaded, &args, false)
+        };
+
+        let err = submit("added", "added").unwrap_err().to_string();
+        assert!(err.contains("pipeline `added`"), "{err}");
+        assert!(err.contains("restart the dispatcher"), "{err}");
+        assert!(repo.task("added").is_err());
+
+        submit("known", "default").unwrap();
+        assert_eq!(repo.task("known").unwrap().stage(), crate::pipeline::QUEUED);
+    }
+
     /// `queue list --json` reports `paused` for a gate-held row, key first
     /// in `next` and `resumable: true` — and, distinctly, `prompt` for a
     /// live lane herdr reads a permission prompt off: not resumable, and
@@ -8723,6 +8797,7 @@ mod tests {
         let mut off = crate::config::Config::default();
         off.housekeeping.archive_retention_days = 0;
         let repo_off = Repo {
+            borrowed: false,
             config: off,
             ..repo.clone()
         };

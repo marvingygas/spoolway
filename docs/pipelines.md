@@ -55,6 +55,9 @@ steps:
 - Every step runs for every task, in order. There is no condition key. A step that should only
   run sometimes belongs in a second pipeline file.
 - A lane reads the pipelines on its own branch. See [Project](concepts.md#project).
+- While a dispatcher runs, `report`, `resume` and `queue add` route on the pipelines it loaded
+  at start. An edit to a pipeline file is used after the dispatcher restarts. See [Editing a
+  pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 - Keys on a step can also be set from outside the checkout. See [The overrides
   layer](configuration.md#the-overrides-layer).
 - `default` and `bugfix` ship as samples. Edit them, cut steps, or replace them. See
@@ -77,7 +80,6 @@ steps:
 | `description` | none | One line, shown by `spoolway pipeline show`. |
 | `agent` | none | A profile from `config.toml`. Makes this an agent step. |
 | `run` | none | A shell command line. Makes this a command step. |
-| `end` | `false` | `true` makes this a terminal step. The task stops here. |
 | `prompt` | the step id | The prompt file the step runs. |
 | `model` | none | The model. Required on every agent step. |
 | `effort` | none | Passed to the agent kind's effort flag. Blank sends no flag. See [Effort](agents.md#effort). |
@@ -100,7 +102,7 @@ The same table is at the top of every pipeline file, between `# >>> spoolway >>>
 never written to.
 
 There is no `kind:` key. A step with `agent:` runs a prompt on a model. A step with `run:` runs
-a command, and its exit code is the outcome. A step with `end: true` stops the task.
+a command, and its exit code is the outcome. A step finishes the task with `on_pass: done`. A step stops the task for a person with `gate: true`.
 
 Steps further down the file are scheduled first. A task on `document` gets a slot before a
 task on `implement`.
@@ -162,6 +164,10 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 ```
 
 - A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- Every way a task reaches a step counts as an arrival: a lane's report, a command's exit code,
+  a walk-past by `skip:`, `first:` or `last:`, a lane that cannot start or whose pane stays
+  busy, and a background command that fails after the task moved on. A walk-past counts one
+  arrival at the step it lands on, and none at the step it skips.
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
@@ -180,9 +186,10 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 
 `spoolway pipeline check` proves a pipeline's graph has a way out. A `cargo test` in
 `src/route_sim.rs` proves the counters that walk that graph agree with it. It routes every
-outcome at every step, to a bounded depth, over the shipped pipelines, the tracked
-`.spoolway/pipelines` files, and pipelines it generates that pass `spoolway pipeline check`.
-Each path it walks must reach a terminal step, keep every `loop` count rising, and start no
+outcome at every step, and the walk-past and the failed launch or busy pane, to a bounded
+depth. It runs over the shipped pipelines, the tracked `.spoolway/pipelines` files, and
+pipelines it generates that pass `spoolway pipeline check`.
+Each path it walks must reach `done` or `blocked`, keep every `loop` count rising, and start no
 more lanes than a stated bound.
 
 ## Unattended runs
@@ -286,6 +293,13 @@ A build, a test suite, a formatter or a deploy script is a command step.
   passes when it starts, so it has no exit to hold, and `gate` is refused there.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
+- Every arrival at a command step runs the command in full. The move onto the step stops any old
+  run still going and deletes its exit code, pid and kill count. The log stays. This holds for
+  every way a task reaches the step, including a lane's report and a resume.
+- A dispatcher restart is not an arrival. The restarted dispatcher adopts the run it finds on
+  the step, or routes on the exit code that run wrote.
+- A run killed without writing an exit code runs again. A run killed three times in a row
+  blocks the task. The task's `## Status Log` names the run's log.
 - A late background failure can move a task off a command step. That stops the step's running
   command and deletes its run files, including an exit code it already wrote. The next visit
   runs the command again.
@@ -390,6 +404,7 @@ flowchart LR
 ### `skip:` — walking past a step
 
 A task's own `skip:` field walks the named steps to their `on_pass` without starting a lane.
+The step it lands on spends its `loop:` budget. A task over that limit lands on `blocked`.
 The queue screen's `t` trial picker writes it, so a trial arm never opens a pull request. See
 [Runs](eval.md#runs).
 

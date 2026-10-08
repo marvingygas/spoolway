@@ -94,6 +94,11 @@ const MAX_LAUNCHES: u32 = 1;
 /// rule out a one-off blip without leaving a broken tab retried forever.
 const MAX_LAUNCH_FAILURES: u32 = 3;
 
+/// How many runs of one command step may be killed in a row, each without an
+/// exit code, before the task is blocked instead of running it again. See the
+/// `Interrupted` arm of [`Dispatcher::run_command`].
+const MAX_COMMAND_KILLS: u32 = 3;
+
 /// How long a step tolerates its pane refusing `agent start` with
 /// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before treating the wait as
 /// [`MAX_LAUNCH_FAILURES`]'s own ceiling does: routed to `step.on_fail`, or
@@ -530,7 +535,9 @@ pub struct Dispatcher<'a> {
     /// its destination comes from *starting* the run, in the `Fresh` arm,
     /// not from reading it finished, and by the time a caller looked again
     /// the run could easily have finished on its own in the background.
-    /// Only the arm that actually consumed a code for routing may set this.
+    /// Only an arm that routes the task on a finished run may set this: the
+    /// `Exited` arm, and the `Interrupted` arm once a run has been killed
+    /// often enough to block the task.
     pending_command_forget: Option<String>,
 }
 
@@ -1074,7 +1081,7 @@ impl<'a> Dispatcher<'a> {
     /// the dispatcher's own reserved ones, handled entirely by
     /// [`Dispatcher::route_reserved_stage`]; its step may fall through to
     /// `on_pass` without starting a lane, decided by [`fall_through`]; or
-    /// what is left settles on the spot (a terminal or command step) or
+    /// what is left settles on the spot (a command step) or
     /// becomes a raw [`Candidate`] (an agent step with nothing already
     /// running in its pane). Neither of the first two is sorted or gated
     /// yet — see [`Dispatcher::rank_candidates`] for that.
@@ -1238,6 +1245,18 @@ impl<'a> Dispatcher<'a> {
                     }
                     FallThrough::Stuck => continue 'tasks,
                     FallThrough::To { destination, why } => {
+                        // The walk-past lands on `destination`, so it is that
+                        // step's `loop:` it spends, not the skipped step's.
+                        let destination = crate::commands::apply_loop_budget(
+                            &pipeline,
+                            &mut tasks[index],
+                            &this_step.id,
+                            destination,
+                            self.unattended,
+                        );
+                        if destination == crate::pipeline::BLOCKED {
+                            crate::commands::set_blocked_from(&mut tasks[index], &this_step.id);
+                        }
                         report.actions.push(format!(
                             "{}: `{}` does not run for this task ({why}) — moving to \
                              `{destination}`",
@@ -1268,12 +1287,6 @@ impl<'a> Dispatcher<'a> {
                 .map(|(_, _, lane)| *lane);
 
             match step.kind() {
-                // A declared terminal step (`end: true`) that is not the
-                // reserved `done` stage does nothing on arrival — reaching
-                // `done` is the only thing that tears a checkout down, at
-                // `route_reserved_stage` below. The task simply stops here.
-                StepKind::Terminal => {}
-
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
                     // Every other task on this same pipeline, for a `serial:`
@@ -1843,7 +1856,7 @@ impl<'a> Dispatcher<'a> {
                 TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             // Reaching `done` is what tears the worktree down. It used
-            // to be a `cleanup: true` on a declared terminal, which
+            // to be a `cleanup: true` on an `end: true` step, which
             // every shipped pipeline wrote identically — a key whose
             // only correct value was the one it always had.
             // Every lane the task has run, finished ones included: each has a
@@ -4039,11 +4052,30 @@ impl<'a> Dispatcher<'a> {
             None => self.note_launch_failure(task, step, "start", &err, report),
         };
         if let Some(destination) = destination {
-            // Final as computed — nothing downstream of this arm redirects
-            // it further, unlike a command step's own destination, which
-            // still has `apply_loop_budget` ahead of it — so this is the one
-            // caller that can print where the task is going and be sure it
-            // is right.
+            // A failed start is a move like any other, so `on_fail` is
+            // bound by its target's `loop:` the same way a lane's report is.
+            let destination = match self.pipelines.for_task(task) {
+                Ok(pipeline) => crate::commands::apply_loop_budget(
+                    pipeline,
+                    task,
+                    &step.id,
+                    destination,
+                    self.unattended,
+                ),
+                Err(err) => {
+                    // The task was launched from this pipeline, so this is a
+                    // pipeline that went missing mid-pass. Say so, and let the
+                    // failure route as it was, rather than strand the task.
+                    report.problems.push(format!(
+                        "{}: `{}`'s loop limit was not checked: {err:#}",
+                        task.id(),
+                        step.id
+                    ));
+                    destination
+                }
+            };
+            // Final as computed, so this is the one caller that can print
+            // where the task is going and be sure it is right.
             report.actions.push(format!(
                 "{}: `{}` could not be started — moving to `{destination}`",
                 task.id(),
@@ -4255,12 +4287,38 @@ impl<'a> Dispatcher<'a> {
                 // turn re-diagnosing a failure that never happened, and a
                 // second one costs the task its loop budget.
                 //
-                // Nothing counts the re-runs. A command that reaches this arm
-                // twice was `SIGKILL`ed twice, and the thing doing the killing
-                // is a dispatcher shutting down or the machine going down —
-                // neither of which is a loop this could break out of by
-                // escalating instead.
-                runs.forget(&key)?;
+                // The count is kept on disk beside the run, so it survives a
+                // restart between kills. Three in a row is no longer a
+                // shutdown or a machine going down: something kills this
+                // command every time it starts, and running it again would go
+                // on forever. That blocks the task, naming the log, rather
+                // than routing down `on_fail`, because no verdict exists to
+                // route on. An exit code from any run resets the count.
+                let kills = runs.note_kill(&key)?;
+                if kills >= MAX_COMMAND_KILLS {
+                    // Left on disk, like an `Exited` run: the caller forgets
+                    // it once the move to `blocked` has landed. Forgotten any
+                    // earlier, a block that could not be placed this pass (no
+                    // free slot at a staffed `blocked` step, or a dropped
+                    // write) would leave the task here with no count, and the
+                    // next pass would run the command again for good.
+                    self.pending_command_forget = Some(key.clone());
+                    if let Some(pane) = runs.pane(&key) {
+                        let _ = self.mux.close_pane(&pane);
+                        runs.forget_pane(&key);
+                    }
+                    task.log_status(&format!(
+                        "`{}` was killed {kills} times in a row without an exit code — see {}",
+                        step.id,
+                        runs.log_path(&key).display()
+                    ));
+                    report.actions.push(format!(
+                        "{id}: `{}` was killed {kills} times in a row — moving to `blocked`",
+                        step.id
+                    ));
+                    return Ok(Some((crate::pipeline::BLOCKED.to_string(), Outcome::Fail)));
+                }
+                runs.discard(&key)?;
                 // Closed rather than left standing: the run is about to be
                 // started again from `Fresh`, which would only replace it
                 // anyway, and a killed multiplexer is the one case a pane
@@ -4502,10 +4560,11 @@ impl<'a> Dispatcher<'a> {
     ///
     /// A reroute is the one time this does touch that run: the task is being
     /// pulled off its current step, so the command on that step is stopped
-    /// and its run files forgotten before the task moves. Left alone, its
-    /// exit code would sit on disk and the next visit to the step would route
-    /// on it without running anything. Stopping before the move is persisted
-    /// is safe: if the write is dropped, the background step's exit code is
+    /// and its run files forgotten before the task moves. Left alone, a
+    /// blocking command would run on after the task has gone, and this sweep
+    /// would later read its leftover non-zero code off a step the task is no
+    /// longer on, and pull the task back off its new step. Stopping before
+    /// the move is persisted is safe: if the write is dropped, the background step's exit code is
     /// still on disk and pulls the task off again on the retry, so the
     /// stopped command would have been abandoned anyway.
     ///
@@ -4588,11 +4647,22 @@ impl<'a> Dispatcher<'a> {
                     let Some(destination) = step.on_fail.clone() else {
                         continue;
                     };
+                    // The failure pulls the task off the step it is on, so
+                    // it is a move like any other and answers to the
+                    // `loop:` of the step it lands on.
+                    let current = task.stage().to_string();
+                    let destination = crate::commands::apply_loop_budget(
+                        pipeline,
+                        task,
+                        &current,
+                        destination,
+                        self.unattended,
+                    );
                     // Read once and cleared — by the caller, once the move
                     // is on disk — the same discipline `run_command`'s own
-                    // `Exited` arm keeps: without it a step that comes back
-                    // round to `step_id` later would read this stale code
-                    // and route on it again with nothing new having run.
+                    // `Exited` arm keeps. This step's task has already left
+                    // it, so a code left in place would be read here again on
+                    // every later pass and reroute the task each time.
                     report.actions.push(format!(
                         "{}: `{step_id}` (background) exited {code} — moving to `{destination}`",
                         task.id()
@@ -4607,9 +4677,8 @@ impl<'a> Dispatcher<'a> {
                     }
                     // The task is leaving the step it is on, so whatever
                     // command that step has running is stopped and its run
-                    // files forgotten. Left alone, its exit code would sit on
-                    // disk and the next visit to the step would route on it
-                    // without running the command. A no-op for a step with no
+                    // files forgotten, so a blocking command does not run on
+                    // after the task has gone. A no-op for a step with no
                     // run.
                     runs.stop(&crate::command_step::Runs::key(task.stage(), task.id()));
                     task.set_stage(&destination, None);
@@ -6483,10 +6552,10 @@ mod tests {
         /// Whether `leave_shared_workspace` fails, as a herdr whose workspace
         /// list cannot be read does.
         shared_lookup_fails: bool,
-        /// Whether `create_workspace` cuts a real worktree with git, under the
-        /// run's worktree root, instead of answering with the one stand-in
-        /// path every other test shares.
-        cuts_real_worktrees: bool,
+        /// The run's worktree root, when `create_workspace` cuts a real
+        /// worktree with git under it instead of answering with the one
+        /// stand-in path every other test shares.
+        cuts_real_worktrees: Option<PathBuf>,
         /// What `read` answers for a lane, mutated by `prompt` the way a real
         /// pane's screen is: typing a message into it changes what is on it.
         /// Absent for a lane nothing has prompted, which is most of them —
@@ -6536,7 +6605,7 @@ mod tests {
                 boot_delay: Duration::ZERO,
                 resident: true,
                 shared_workspace: None,
-                cuts_real_worktrees: false,
+                cuts_real_worktrees: None,
                 shared_lookup_fails: false,
                 screen: Mutex::new(HashMap::new()),
                 forgotten: Mutex::new(HashSet::new()),
@@ -6569,10 +6638,10 @@ mod tests {
             self.shared_lookup_fails = true;
             self
         }
-        /// A backend whose `create_workspace` really cuts the worktree with git,
-        /// for a test about what the worktree contains.
-        fn cutting_real_worktrees(mut self) -> FakeMux {
-            self.cuts_real_worktrees = true;
+        /// A backend whose `create_workspace` really cuts the worktree with git
+        /// under `root`, for a test about what the worktree contains.
+        fn cutting_real_worktrees(mut self, root: PathBuf) -> FakeMux {
+            self.cuts_real_worktrees = Some(root);
             self
         }
         /// A backend whose lanes do not survive between turns — what
@@ -6747,8 +6816,8 @@ mod tests {
             _label: &str,
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
-            if self.cuts_real_worktrees {
-                let path = crate::mux::worktree_root(cwd)?.join(crate::mux::branch_slug(branch));
+            if let Some(root) = &self.cuts_real_worktrees {
+                let path = root.join(crate::mux::branch_slug(branch));
                 crate::mux::cut_worktree(cwd, &path, branch, base)?;
                 return Ok(Workspace {
                     workspace_id: "w9".into(),
@@ -7315,23 +7384,21 @@ mod tests {
         let home = root.join(".home");
 
         // The one thing `home` above does *not* answer for on its own.
-        // `dispatch.worktree_root` is retired — there is no longer a config
-        // key to point at a scratch sibling directly — so a worktree is cut
-        // wherever `crate::mux::worktree_root` resolves `project_home` to,
-        // and that falls back to `~/.spoolway/<basename>/` in the *real*
-        // home the moment nothing has stamped an id into this fixture's
-        // `.git` (nothing here calls `spoolway init`). A fixture root's
-        // basename carries a fresh process id every run, so that fallback
-        // could never reuse or clean what the last run left: it put one
-        // directory per run in the developer's home and kept it there.
-        // Pinning `$HOME` to a scratch directory for the rest of this
-        // thread — this fixture's own, never restored — is what stops it;
-        // see `crate::platform::test_home::pin`'s own doc for why that is
-        // safe here. `no_fixture_cuts_a_worktree_in_the_real_home` fails if
-        // this line goes away.
+        // Whatever still resolves `project_home` off the checkout's path
+        // rather than reading `home` — a test that stamps this fixture, the
+        // registry — lands under `~/.spoolway/<label>-<id>/` in the *real*
+        // home. A fixture root's basename carries a fresh process id every
+        // run, so each run would put a directory of its own in the
+        // developer's home and keep it there. Pinning `$HOME` to a scratch
+        // directory for the rest of this thread — this fixture's own, never
+        // restored — is what stops it; see `crate::platform::test_home::pin`'s
+        // own doc for why that is safe here.
+        // `no_fixture_cuts_a_worktree_in_the_real_home` fails if this line
+        // goes away.
         crate::platform::test_home::pin(&sibling(&root, "home"));
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -7426,6 +7493,7 @@ mod tests {
             path: path.clone(),
             front,
             body: "## Goal\ndemo\n".into(),
+            arrived_at: Default::default(),
         };
         task.save().unwrap();
         path
@@ -8441,6 +8509,133 @@ mod tests {
         assert_eq!(task.stage(), "document");
     }
 
+    /// Walking past a step is a move between steps like a lane's report, so
+    /// the step it lands on answers to its `loop:`. Two steps that both
+    /// `skip:` names and that pass to each other would otherwise trade the
+    /// task back and forth for as many passes as anyone cared to run.
+    #[test]
+    fn a_walk_past_lands_on_blocked_once_the_step_it_reaches_is_spent() {
+        let (repo, _root_guard) = fixture("skip-loop-limit");
+        let yaml = "steps:\n  \
+             - id: a\n    run: true\n    loop: 2\n    on_pass: b\n  \
+             - id: b\n    run: true\n    on_pass: a\n    on_fail: z\n  \
+             - id: z\n    run: x\n    on_pass: done\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let path = add_task_with(&repo, "demo", "a", |f| {
+            f.skip = vec!["a".into(), "b".into()];
+        });
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..4 {
+            run_pass_with(&repo, &mux, &pipelines);
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.rounds_at("a"), 2, "{:?}", task.front.arrivals);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("b"));
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains("`b` may not send this to `a` a 3rd time — `a` has `loop: 2`"),
+            "{log}"
+        );
+    }
+
+    /// A pipeline of `steps` as `default`, over the shipped ones.
+    fn pipelines_of(yaml: &str) -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        pipelines
+    }
+
+    /// A lane that cannot be started falls back to `on_fail` after its third
+    /// try, and that move answers to the `loop:` of the step it lands on. `b`
+    /// has already had its one arrival, so `a` is sent to `blocked` instead.
+    #[test]
+    fn a_failed_launch_may_not_land_on_a_spent_step() {
+        let (repo, _root_guard) = fixture("launch-failure-loop-limit");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: z\n    on_fail: b\n  \
+             - id: b\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             loop: 1\n    on_pass: z\n  \
+             - id: z\n    run: x\n    on_pass: done\n",
+        );
+        let path = add_task_with(&repo, "demo", "a", |f| {
+            f.arrivals.insert("b".into(), 1);
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        let home = crate::scratch::root("launch-failure-loop-limit-home");
+
+        for _ in 0..3 {
+            with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("a"));
+        assert!(
+            task.body
+                .contains("`a` may not send this to `b` a 2nd time — `b` has `loop: 1`"),
+            "{}",
+            task.body
+        );
+    }
+
+    /// A background command that fails after its task has moved on pulls the
+    /// task to its `on_fail`, and that move answers to the `loop:` of the step
+    /// it lands on as well: `f` is spent, so the task goes to `blocked`, with
+    /// `blocked_from` naming the step it was pulled off.
+    #[test]
+    fn a_late_background_failure_may_not_land_on_a_spent_step() {
+        let (repo, _root_guard) = fixture("background-failure-loop-limit");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: bg\n    run: exit 1\n    background: true\n    on_pass: w\n    on_fail: f\n  \
+             - id: w\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: z\n  \
+             - id: f\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             loop: 1\n    on_pass: z\n  \
+             - id: z\n    run: x\n    on_pass: done\n",
+        );
+        let worktree = repo.root.join("wt-demo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let path = add_task_with(&repo, "demo", "bg", |f| {
+            f.arrivals.insert("f".into(), 1);
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree);
+        });
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(reload(&path).stage(), "w", "the task walked away from bg");
+
+        drive(&repo, &pipelines, &mux, &path, crate::pipeline::BLOCKED);
+
+        let task = reload(&path);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("w"));
+        assert!(
+            task.body
+                .contains("`w` may not send this to `f` a 2nd time — `f` has `loop: 1`"),
+            "{}",
+            task.body
+        );
+    }
+
     /// A `skip:` tail walks itself all the way to `done` in the pass that
     /// first reaches it — one dispatch pass, not one per skipped step —
     /// because the stage is re-examined right after each fall-through instead
@@ -8470,7 +8665,7 @@ mod tests {
     fn last_pipelines() -> Pipelines {
         let yaml = "steps:\n  \
              - id: suite\n    run: true\n    last: true\n    on_pass: closeout\n  \
-             - id: closeout\n    end: true\n";
+             - id: closeout\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert("default".into(), pipeline);
@@ -8492,7 +8687,7 @@ mod tests {
              \x20   on_pass: document\n  \
              - id: document\n    agent: pi\n    prompt: implementer\n    model: test-model\n\
              \x20   on_pass: handover\n  \
-             - id: handover\n    end: true\n",
+             - id: handover\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let long = crate::pipeline::Pipeline::parse(
@@ -8508,7 +8703,7 @@ mod tests {
              \x20   on_pass: e\n  \
              - id: e\n    agent: pi\n    prompt: implementer\n    model: test-model\n\
              \x20   on_pass: f\n  \
-             - id: f\n    end: true\n",
+             - id: f\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let mut pipelines = Pipelines::builtin();
@@ -8684,7 +8879,7 @@ mod tests {
     fn first_pipelines() -> Pipelines {
         let yaml = "steps:\n  \
              - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
-             - id: work\n    end: true\n";
+             - id: work\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert("default".into(), pipeline);
@@ -13985,7 +14180,7 @@ mod tests {
                model: test-model\n    on_pass: fix\n  \
              - id: fix\n    agent: pi\n    prompt: implementer\n    \
                model: test-model\n    session: true\n    on_pass: closeout\n  \
-             - id: closeout\n    end: true\n";
+             - id: closeout\n    run: x\n    on_pass: done\n";
         let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert("default".into(), pipeline);
@@ -15822,12 +16017,15 @@ mod tests {
     /// No fixture in this module may cut a worktree inside the person's own
     /// home directory.
     ///
-    /// It used to. `crate::mux::worktree_root` falls back to
-    /// `~/.spoolway/<basename>/worktrees` when a config names no root, and a
+    /// It used to. The worktree root fell back to
+    /// `~/.spoolway/<basename>/worktrees` when a config named no root, and a
     /// fixture root's basename carries a fresh process id every run — so the
     /// fallback pointed somewhere new each time and no run could ever reuse or
     /// clean what the last one made. Two tests here reached that path and left
     /// 945 directories in one developer's home before anybody looked.
+    ///
+    /// The cut is asked of the checkout's own stamped id here, the way a real
+    /// project's is, rather than of the fixture's hand-set `home`.
     ///
     /// `fixture` pins `$HOME` to a scratch directory of its own now, for the
     /// rest of this test's thread — see `crate::platform::test_home::pin`.
@@ -15836,7 +16034,10 @@ mod tests {
     #[test]
     fn no_fixture_cuts_a_worktree_in_the_real_home() {
         let (repo, _root_guard) = fixture("home-leak-guard");
-        let cut = crate::mux::worktree_root(&repo.root).unwrap();
+        crate::repo::stamped_id(&repo.root).unwrap();
+        let cut = crate::mux::project_home(&repo.root)
+            .unwrap()
+            .join(crate::mux::WORKTREES_DIR);
 
         // The literal `$HOME` this process was actually started with, not
         // `crate::mux::home()` — that reads back the very pin this test is
@@ -15879,8 +16080,8 @@ mod tests {
         // sibling this lands in, and
         // `no_fixture_cuts_a_worktree_in_the_real_home` is what keeps it out
         // of the real `~/.spoolway/`.
-        let worktree = crate::mux::worktree_root(&repo.root)
-            .unwrap()
+        let worktree = repo
+            .worktree_root()
             .join(crate::mux::branch_slug("task/second"));
         let _ = std::fs::remove_dir_all(&worktree);
 
@@ -15902,7 +16103,7 @@ mod tests {
         }));
         // A real cut, with git, rather than `FakeMux`'s stand-in workspace —
         // the point here is what the worktree actually contains.
-        let mux = FakeMux::new(vec![]).cutting_real_worktrees();
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
 
         ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
@@ -15943,8 +16144,8 @@ mod tests {
     #[test]
     fn a_dependency_that_cannot_be_found_fails_by_name_not_at_the_worktree_cut() {
         let (repo, _root_guard) = fixture("dep-not-found");
-        let worktree = crate::mux::worktree_root(&repo.root)
-            .unwrap()
+        let worktree = repo
+            .worktree_root()
             .join(crate::mux::branch_slug("task/second"));
         let _ = std::fs::remove_dir_all(&worktree);
 
@@ -15953,7 +16154,7 @@ mod tests {
         let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
             f.depends_on = vec!["first".into()];
         }));
-        let mux = FakeMux::new(vec![]).cutting_real_worktrees();
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
 
         let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
             .expect_err("an unresolvable dependency must not silently reach the worktree cut");
@@ -15978,8 +16179,8 @@ mod tests {
     #[test]
     fn a_task_that_sets_starts_from_is_cut_from_it_not_its_dependency() {
         let (repo, _root_guard) = fixture("cut-from-own-starts-from");
-        let worktree = crate::mux::worktree_root(&repo.root)
-            .unwrap()
+        let worktree = repo
+            .worktree_root()
             .join(crate::mux::branch_slug("task/second"));
         let _ = std::fs::remove_dir_all(&worktree);
 
@@ -15997,7 +16198,7 @@ mod tests {
             f.depends_on = vec!["first".into()];
             f.starts_from = Some("elsewhere".into());
         }));
-        let mux = FakeMux::new(vec![]).cutting_real_worktrees();
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
 
         ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
@@ -17050,6 +17251,170 @@ mod tests {
         );
     }
 
+    /// The rule the arrival clears: a code left on disk by any earlier visit
+    /// must not route this one. The code is planted by hand and the task is
+    /// moved by `set_stage` and `save` alone, the way a lane's report or a
+    /// resume from the board moves it, so the dispatcher's own cleanup after
+    /// an exited run has no part in it.
+    #[test]
+    fn arriving_at_a_command_step_clears_a_code_an_earlier_visit_left() {
+        let (repo, _root_guard) = fixture("command-arrival-clears");
+        let path = add_task_with_worktree(&repo, "demo", "review");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("echo ran >> count.txt", false);
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::write(repo.commands_dir().join(format!("{key}.exit")), "0").unwrap();
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+
+        // A pass that only reads the queue leaves it alone, which is what lets
+        // a restarted dispatcher adopt a run it left behind.
+        let _ = reload(&path);
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+
+        let mut moved = reload(&path);
+        moved.set_stage("implement", None);
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(0),
+            "the move is not the write"
+        );
+        moved.save().unwrap();
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+        let worktree = reload(&path).front.worktree_path.clone().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("count.txt"))
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "the command must run on this visit rather than route on the old code"
+        );
+    }
+
+    /// Three kills in a row block the task and the block names the log; two
+    /// do not, and each is run again.
+    #[test]
+    fn a_command_killed_three_times_in_a_row_blocks_the_task() {
+        let (repo, _root_guard) = fixture("command-killed-thrice");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("sleep 60", false);
+        for step in &mut pipelines.pipelines.get_mut("default").unwrap().steps {
+            if step.id == "implement" {
+                step.headless = true;
+            }
+        }
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+
+        for kill in 1..=3 {
+            let started = std::time::Instant::now();
+            let pid = loop {
+                Dispatcher::new(&repo, &pipelines, &mux)
+                    .pass(&mut || {})
+                    .unwrap();
+                if let Some(pid) = runs.read_pid(&key) {
+                    break pid;
+                }
+                assert!(started.elapsed() < Duration::from_secs(20), "never started");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            // The syscall, not `kill(1)`: procps 4.0.4 as Ubuntu 24.04 ships
+            // it reads `-9 -1234` as an unknown option `-1`, and answers with
+            // `kill(-1, SIGKILL)` — every process this user owns, the CI
+            // runner included. See `headless::signal_group`.
+            // SAFETY: takes no pointers; a wrong pid earns ESRCH or EPERM.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            let killed = std::time::Instant::now();
+            while crate::headless::alive(pid) {
+                assert!(
+                    killed.elapsed() < Duration::from_secs(20),
+                    "kill {kill} never landed"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+            match kill {
+                3 => assert_eq!(reload(&path).stage(), "blocked"),
+                _ => assert_eq!(reload(&path).stage(), "implement", "kill {kill}"),
+            }
+        }
+
+        let task = reload(&path);
+        let log = runs.log_path(&key).display().to_string();
+        assert!(
+            task.section("## Status Log")
+                .unwrap()
+                .lines()
+                .any(|l| l.contains("killed 3 times") && l.contains(&log)),
+            "the block must name the log: {:?}",
+            task.section("## Status Log")
+        );
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+    }
+
+    /// The block is not final until its move lands. A pass that returns the
+    /// `blocked` destination but cannot place it must leave the kill count on
+    /// disk, so the next pass reads the same run and blocks again rather than
+    /// running the command a fourth time from a count of zero.
+    #[test]
+    fn a_block_that_did_not_land_is_reached_again_on_the_next_pass() {
+        let (repo, _root_guard) = fixture("command-block-retried");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("sleep 60", false);
+        let step = pipelines.pipelines["default"]
+            .steps
+            .iter()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .clone();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        // The pid of a child that has already been waited on: dead, and so
+        // read as a run killed without an exit code. A made-up number could
+        // belong to a live process.
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        std::fs::write(
+            repo.commands_dir().join(format!("{key}.pid")),
+            dead_pid.to_string(),
+        )
+        .unwrap();
+        runs.note_kill(&key).unwrap();
+        runs.note_kill(&key).unwrap();
+
+        for pass in 1..=2 {
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+            let mut task = reload(&path);
+            let mut report = Report::default();
+            let routed = dispatcher
+                .run_command(&mut task, &step, &[], &mut report)
+                .unwrap();
+            assert_eq!(
+                routed.map(|(to, _)| to).as_deref(),
+                Some("blocked"),
+                "pass {pass}"
+            );
+            assert_eq!(
+                dispatcher.pending_command_forget.as_deref(),
+                Some(key.as_str()),
+                "the caller must be handed the run to forget once the move lands"
+            );
+            // The move never landed: nothing was saved, and the run is as it was.
+        }
+        assert_eq!(reload(&path).stage(), "implement");
+    }
+
     /// A third way a destination can "land": `finish_launch_bookkeeping`
     /// writes its own stage move and persists it before `boot_prompt` ever
     /// prompts the lane `boot_start_lane` just started — so a `mux.prompt`
@@ -17577,7 +17942,7 @@ mod tests {
             "steps:\n  \
              - id: implement\n    run: exit 0\n    headless: true\n    gate: true\n    \
                on_pass: finish\n  \
-             - id: finish\n    end: true\n",
+             - id: finish\n    run: x\n    on_pass: done\n",
         )
         .unwrap();
         let pipelines =
@@ -18256,9 +18621,11 @@ mod tests {
         assert_eq!(reload(&path).stage(), "review");
 
         // The destination could not be placed: the task is back on the
-        // step, and the run it started is still going behind it.
+        // step, and the run it started is still going behind it. Put back
+        // without an arrival, since a real arrival would stop that run — a
+        // pass that fails to place a destination never moves the task at all.
         let mut task = reload(&path);
-        task.set_stage("implement", None);
+        task.set_stage_unbanked("implement", "put back");
         task.save().unwrap();
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("implement", "demo");

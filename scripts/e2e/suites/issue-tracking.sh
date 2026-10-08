@@ -126,8 +126,12 @@ says "doctor names both keys and the two ways out" \
 must "project_key is restored" \
   "$SPOOLWAY" config set issue_tracking.project_key acme/app
 
-must "hook is set to a path rather than a bare name" \
-  "$SPOOLWAY" config set issue_tracking.hook "../record.sh"
+# `config set` refuses a hook that is not a bare filename (`commands.sh`
+# covers that), so the only way one reaches `doctor` is a config.toml edited
+# by hand, and that is how it is written here.
+must "hook is set to a path by editing config.toml by hand" \
+  sed -i 's|^hook = "record.sh"$|hook = "../record.sh"|' .spoolway/config.toml
+has "and the hand edit landed" 'hook = "../record.sh"' .spoolway/config.toml
 says "doctor refuses a hook name that is not a bare filename" \
   "which is not a bare filename" \
   "$SPOOLWAY" doctor

@@ -429,18 +429,69 @@ impl Runs {
 
     /// Forget a finished run's bookkeeping, keeping its log.
     ///
-    /// Called once the exit code has been routed on: without it a task that
-    /// comes back round to the same step would read the last arrival's code and
-    /// route on it without running anything.
+    /// Called once the exit code has been routed on. A task arriving at the
+    /// step again starts clean anyway — see [`Runs::begin_visit`] — so this is
+    /// not what keeps a revisit from routing on an old code. It matters for a
+    /// task that has left the step: [`crate::dispatch::Dispatcher`] rereads
+    /// the leftover code of a step the task is no longer on and reroutes the
+    /// task down that step's `on_fail`, on every pass, until it is gone.
     ///
-    /// That sentence describes a real failure rather than a hypothetical one,
-    /// which is why this answers with a result instead of swallowing one. The
-    /// next arrival does not necessarily start a run: a dispatch pass reads
-    /// the state first, so a code left lying here is routed on before
-    /// [`Runs::prepare`] is ever reached and gets a chance to refuse. Forget
-    /// has to have actually forgotten.
+    /// That is why this answers with a result instead of swallowing one:
+    /// forget has to have actually forgotten.
     pub fn forget(&self, key: &str) -> Result<()> {
+        self.files.clear(key)?;
+        self.clear_kills(key)
+    }
+
+    /// Start a visit to this step from nothing: stop any run still going and
+    /// drop its pid, its exit code and its kill count. The log stays.
+    ///
+    /// Called by the write that moves a task onto the step — see
+    /// [`crate::task::Task::save`] — and by nothing that merely reads the
+    /// queue, since a restarted dispatcher must adopt the run it left behind.
+    /// An error means the old code may still be on disk, so the move must not
+    /// go ahead as if the step were clean.
+    pub fn begin_visit(&self, key: &str) -> Result<()> {
+        if let Some(pid) = self.read_pid(key) {
+            crate::headless::kill_group(pid);
+        }
+        self.forget(key)
+    }
+
+    /// Drop a killed run's pid and exit code but keep its kill count, so the
+    /// run that replaces it still knows how many came before it.
+    pub fn discard(&self, key: &str) -> Result<()> {
         self.files.clear(key)
+    }
+
+    /// Where the count of runs killed in a row is kept. A file of its own,
+    /// because the count has to outlive the run files that
+    /// [`Runs::discard`] clears and a dispatcher restart between kills.
+    fn kills_path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.kills"))
+    }
+
+    /// Count one more run of this key killed without an exit code, and answer
+    /// the new total. [`Runs::forget`] and [`Runs::begin_visit`] reset it.
+    pub fn note_kill(&self, key: &str) -> Result<u32> {
+        let seen = std::fs::read_to_string(self.kills_path(key))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let total = seen + 1;
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(self.kills_path(key), total.to_string())
+            .with_context(|| format!("writing {}", self.kills_path(key).display()))?;
+        Ok(total)
+    }
+
+    fn clear_kills(&self, key: &str) -> Result<()> {
+        match std::fs::remove_file(self.kills_path(key)) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                Err(err).with_context(|| format!("removing {}", self.kills_path(key).display()))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Every run belonging to one task, whatever step started it.
@@ -876,9 +927,8 @@ mod tests {
         );
     }
 
-    /// A task that comes back round to the same step must run it again. Reading
-    /// the last arrival's exit code would route the second visit on the first
-    /// one's result, having run nothing at all.
+    /// Forgetting a finished run leaves the step with nothing started and the
+    /// log kept, whether the run is then read again or a new one begins.
     #[test]
     fn a_forgotten_run_is_fresh_again() {
         let f = Fixture::new("forget");
@@ -1020,6 +1070,35 @@ mod tests {
             "the command survived its run being stopped"
         );
         assert_eq!(f.runs.state("bench-demo"), RunState::Fresh);
+    }
+
+    /// A visit starts from nothing: the old code, pid and kill count go, the
+    /// command under the old pid is stopped, and the log stays.
+    #[test]
+    fn beginning_a_visit_clears_the_old_run_and_its_kill_count() {
+        let f = Fixture::new("begin-visit");
+        let pid = f.start("bench-demo", "sleep 60");
+        assert_eq!(f.runs.note_kill("bench-demo").unwrap(), 1);
+        assert_eq!(f.runs.note_kill("bench-demo").unwrap(), 2);
+
+        f.runs.begin_visit("bench-demo").unwrap();
+        assert!(!crate::headless::alive(pid), "the old run kept going");
+        assert_eq!(f.runs.state("bench-demo"), RunState::Fresh);
+        assert!(f.runs.log_path("bench-demo").exists());
+        assert_eq!(f.runs.note_kill("bench-demo").unwrap(), 1);
+        f.runs.begin_visit("never-ran").unwrap();
+    }
+
+    /// Discarding a killed run keeps the count; forgetting an answered one
+    /// resets it.
+    #[test]
+    fn a_kill_count_survives_discarding_but_not_forgetting() {
+        let f = Fixture::new("kill-count");
+        f.runs.note_kill("bench-demo").unwrap();
+        f.runs.discard("bench-demo").unwrap();
+        assert_eq!(f.runs.note_kill("bench-demo").unwrap(), 2);
+        f.runs.forget("bench-demo").unwrap();
+        assert_eq!(f.runs.note_kill("bench-demo").unwrap(), 1);
     }
 
     /// A `run:` line that backgrounds a server and returns leaves that server

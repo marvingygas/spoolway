@@ -109,6 +109,22 @@ pub(crate) fn is_bare_filename(name: &str) -> bool {
     )
 }
 
+/// Why `hook` can never run, or `None` when it is blank or a bare filename.
+///
+/// What `spoolway doctor` fails on and what `spoolway config set` refuses, so
+/// the two say the same thing. The text starts at the verb, for each caller to
+/// put its own subject in front of.
+pub(crate) fn not_bare_filename_problem(hook: &str) -> Option<String> {
+    let hook = hook.trim();
+    (!hook.is_empty() && !is_bare_filename(hook)).then(|| {
+        format!(
+            "names `{hook}`, which is not a bare filename — a hook only ever runs a script \
+             inside .spoolway/hooks/, so this can never run. Use a bare name, or clear hook to \
+             switch issue tracking off."
+        )
+    })
+}
+
 /// What one synchronous `open` hook call came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenResult {
@@ -857,6 +873,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".spoolway/hooks")).unwrap();
         (
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -943,6 +960,7 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             front,
             body: String::new(),
+            arrived_at: Default::default(),
         }
     }
 

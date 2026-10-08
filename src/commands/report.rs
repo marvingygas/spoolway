@@ -756,11 +756,14 @@ pub fn route(
 /// times its own limit, and let a hand `spoolway resume --stage` reach a
 /// spent step by a route no counter was watching.
 ///
-/// Shared by [`report`], where a lane's own account of itself proposes
-/// `destination`, and the dispatcher's command-step routing, where a `run:`
-/// step's exit code does — a spent loop stops circling the same way whichever
-/// kind of step is asking, and a mechanical gate failing back to the agent
-/// step behind it is exactly the second case.
+/// Every move that lands a task on a step goes through here, so no road
+/// round the limit is left. [`report`] asks it for a lane's own account of
+/// itself, and the dispatcher asks it for the other four: a `run:` step's
+/// exit code (a mechanical gate failing back to the agent step behind it is
+/// exactly that case), a step walked past by `skip:`, `first:` or `last:`, a
+/// lane that could not be started or whose pane never came free, and a
+/// background command that failed after its task had moved on. A walk-past
+/// is counted at the step it lands on, never the one it skips.
 ///
 /// What it counts is laps, not conversations: a step with `session: true` may
 /// be re-prompted as often as its session survives, with an optional separate
@@ -900,7 +903,7 @@ impl AutoCommit {
 }
 
 /// The one git verb spoolway runs of its own accord: commit the lane's worktree
-/// when its step settles, so that a cleanup terminal cannot delete work
+/// when its step settles, so that reaching `done` cannot delete work
 /// that was never recorded anywhere.
 ///
 /// Called from both ends of a step — `spoolway report`, which is how a lane that
@@ -1454,11 +1457,14 @@ impl ResumeRoad {
 /// then a park, then a hook pause on `done`, then [`resume_target`], whose
 /// `queued` answer is a task that never started.
 ///
-/// Where a gate goes is read out of the pipeline *now*, from the step recorded
-/// in `paused_at`, rather than out of anything the pass wrote down. A pipeline
-/// edited while a task sat on `paused` should route the task the way the file
-/// says today; a destination frozen at report time would send it somewhere the
-/// project has since stopped meaning.
+/// Where a gate goes is read out of `pipelines` at resume time, from the step
+/// recorded in `paused_at`, rather than out of anything the pass wrote down.
+/// `pipelines` is the graph the resuming command routes on: the running
+/// dispatcher's own copy while one runs — see [`crate::pipeline_snapshot`] —
+/// and the files otherwise. So a pipeline edited while a task sat on `paused`
+/// routes it the edited way once no dispatcher is running, or once the
+/// running one restarts; until then the edit waits, since a step it added is
+/// one that dispatcher could never start.
 pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
     if let Some(gated) = task.front.paused_at.clone() {
         let pipeline = pipelines.for_task(task)?;
@@ -1645,18 +1651,14 @@ fn resume_checked(
 /// Resuming a running task rewinds it, and its lane's own later report is then
 /// refused. Resuming a queued task with `--stage` would skip the steps in front
 /// of the one named. A stage no pipeline defines is left resumable: a pipeline
-/// edited while a task sat on a removed step must still be rescued by hand. So
-/// is a task on a terminal step (`end: true`), which has finished and runs
-/// nothing; `--stage` may still revive it.
+/// edited while a task sat on a removed step must still be rescued by hand.
 fn refuse_if_not_stopped(task: &Task, pipelines: &Pipelines) -> Result<()> {
     let stage = task.stage();
     let running = stage != crate::pipeline::BLOCKED
         && stage != crate::pipeline::PAUSED
-        && pipelines.for_task(task).is_ok_and(|pipeline| {
-            pipeline
-                .step(stage)
-                .is_some_and(|step| step.kind() != crate::pipeline::StepKind::Terminal)
-        });
+        && pipelines
+            .for_task(task)
+            .is_ok_and(|pipeline| pipeline.step(stage).is_some());
     if stage == crate::pipeline::QUEUED {
         bail!(
             "task `{}` is {stage}, not stopped — it starts on its own when the dispatcher \
@@ -1938,15 +1940,11 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
         );
     };
     match declared.kind() {
-        crate::pipeline::StepKind::Terminal => bail!(
-            "task `{id}` is on `{step}`, which has finished — there is no step left to start \
-             over. To run a step again, use `spoolway resume {id} --stage <step>`."
-        ),
         crate::pipeline::StepKind::Command => bail!(
             "task `{id}` is on `{step}`, which runs a command and holds no conversation — \
              run `spoolway resume {id}` to run it again."
         ),
-        _ => Ok(step),
+        crate::pipeline::StepKind::Agent => Ok(step),
     }
 }
 
@@ -4511,7 +4509,7 @@ mod tests {
              - id: work\n    agent: pi\n    \
              on_pass: ship\n    on_fail: retry\n  \
              - id: retry\n    agent: pi\n    loop: {limit}\n    on_pass: work\n  \
-             - id: ship\n    end: true\n"
+             - id: ship\n    run: x\n    on_pass: done\n"
         );
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
@@ -4794,24 +4792,22 @@ mod tests {
         assert_eq!(queued(&repo, "child").stage(), crate::pipeline::BLOCKED);
     }
 
-    /// A task on a stage no pipeline defines, or on a terminal step, is not
-    /// running anything: a pipeline edited under it, or a finished task, must
-    /// still be reachable by hand.
+    /// A task on a stage no pipeline defines is not running anything: a
+    /// pipeline edited under it must still be reachable by hand.
     #[test]
-    fn a_task_on_an_unknown_or_terminal_stage_stays_resumable() {
+    fn a_task_on_an_unknown_stage_stays_resumable() {
         clear_lane_env();
         let pipelines = looping_pipelines(2);
-        for (id, stage) in [("gone", "removed-step"), ("finished", "ship")] {
-            let (repo, _root_guard) = fixture(&format!("resume-unknown-terminal-{id}"));
-            add(&repo, id, &[]);
-            let mut task = queued(&repo, id);
-            task.set_stage_unbanked(stage, "test setup");
-            task.save().unwrap();
+        let (id, stage) = ("gone", "removed-step");
+        let (repo, _root_guard) = fixture(&format!("resume-unknown-stage-{id}"));
+        add(&repo, id, &[]);
+        let mut task = queued(&repo, id);
+        task.set_stage_unbanked(stage, "test setup");
+        task.save().unwrap();
 
-            resume(&repo, &pipelines, &resume_args(id, Some("work")), None)
-                .unwrap_or_else(|e| panic!("`{id}` on `{stage}` must resume: {e:#}"));
-            assert_eq!(queued(&repo, id).stage(), "work");
-        }
+        resume(&repo, &pipelines, &resume_args(id, Some("work")), None)
+            .unwrap_or_else(|e| panic!("`{id}` on `{stage}` must resume: {e:#}"));
+        assert_eq!(queued(&repo, id).stage(), "work");
     }
 
     /// A dependency that is neither queued nor archived is unknown, which
@@ -5912,7 +5908,7 @@ mod tests {
         task.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
         task.save().unwrap();
 
-        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
         headless
             .start_lane(
                 &crate::mux::LaneSpec {
@@ -5963,7 +5959,7 @@ mod tests {
         task.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
         task.save().unwrap();
 
-        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
         for step in ["implement", "review"] {
             headless
                 .start_lane(
@@ -6077,7 +6073,7 @@ mod tests {
 
         // The lane that blocked, exactly as it survives a report: settled in
         // its pane, never yet freed by a pass.
-        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
         headless
             .start_lane(
                 &crate::mux::LaneSpec {
