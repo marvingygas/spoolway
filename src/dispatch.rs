@@ -585,6 +585,13 @@ struct Candidate {
     /// route on it without running the command again. See the ordering
     /// note in `run_command`'s own `Exited` arm.
     command_forget: Option<String>,
+    /// What a move onto this step walked past, for the arrival line the
+    /// launch writes. A move onto an agent step does not write the stage: the
+    /// launch does, once a slot is free. Logging the note on its own line now
+    /// would leave the Status Log with it followed by a bare arrival line,
+    /// where a move is one line. Rebuilt every pass and never saved, so a
+    /// launch that fails and retries cannot leave a stale note behind.
+    walked_past: Option<String>,
 }
 
 impl Candidate {
@@ -655,6 +662,14 @@ enum FallThrough {
 /// Whether `step` falls through to `on_pass` for `task` without starting a
 /// lane, and why.
 ///
+/// A report, a command step's exit, a resume, a cleared block and a start off
+/// `queued` land past hidden steps before they write the stage (see
+/// [`land_past_hidden`]). The moves that write their raw destination still
+/// come here: a failed lane start's `on_fail`, a background command's late
+/// `on_fail`, an `Unpark`, and `escalate`'s unattended self-resume. So does a
+/// task parked on a step that became hidden afterwards — one waiting its
+/// `serial:` turn when a dependent was queued above it, say.
+///
 /// A step named in the task's own `skip:` list does not run for it. It is
 /// not skipped in the routing sense — the task arrives here and leaves by
 /// `on_pass` exactly as a passing lane would have sent it — it just does not
@@ -699,23 +714,145 @@ fn fall_through(step: &Step, task: &Task, dependents: usize) -> FallThrough {
     };
     match step.on_pass.clone() {
         None => FallThrough::Stuck,
-        Some(destination) => FallThrough::To { destination, why },
+        Some(destination) => FallThrough::To {
+            destination,
+            why: why.why(),
+        },
+    }
+}
+
+/// Why a step does not run for a task: the three rules [`walk_past`] tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hidden {
+    /// The task's own `skip:` names the step.
+    Skip,
+    /// A `last:` step, and something open above the task in its group.
+    NotLast,
+    /// A `first:` step, and the task is not its chain's root.
+    NotRoot,
+}
+
+impl Hidden {
+    /// The short form the Status Log and the dispatcher's action line carry,
+    /// in parentheses.
+    pub(crate) fn why(self) -> &'static str {
+        match self {
+            Hidden::Skip => "skip",
+            Hidden::NotLast => "not last in its chain",
+            Hidden::NotRoot => "not first in its chain",
+        }
+    }
+
+    /// The rule as the end of a sentence about a step that "does not run for"
+    /// a task, for the refusal `spoolway resume --stage` gives.
+    pub(crate) fn refusal(self) -> &'static str {
+        match self {
+            Hidden::Skip => "its own skip: names it",
+            Hidden::NotLast => "it is not last in its chain",
+            Hidden::NotRoot => "it is not the root of its chain",
+        }
     }
 }
 
 /// Why `step` does not run for `task`, or `None` when it does — the three
-/// tests [`fall_through`]'s own doc explains. `dependents` is
-/// [`same_group_dependents`]'s count.
-fn walk_past(step: &Step, task: &Task, dependents: usize) -> Option<&'static str> {
+/// tests [`fall_through`]'s own doc explains, and the one place they are
+/// asked. `dependents` is [`same_group_dependents`]'s count.
+pub(crate) fn walk_past(step: &Step, task: &Task, dependents: usize) -> Option<Hidden> {
     if task.front.skip.iter().any(|named| named == &step.id) {
-        Some("skip")
+        Some(Hidden::Skip)
     } else if step.last && dependents > 0 {
-        Some("not last in its chain")
+        Some(Hidden::NotLast)
     } else if step.first && !task.front.depends_on.is_empty() {
-        Some("not first in its chain")
+        Some(Hidden::NotRoot)
     } else {
         None
     }
+}
+
+/// Where a move ends up once it has followed `on_pass` past every step the
+/// task does not run, and the steps it passed on the way.
+pub(crate) struct Landing {
+    /// The step the task is written onto.
+    pub(crate) destination: String,
+    /// Each step passed over, in order, with the rule that hid it.
+    pub(crate) passed: Vec<(String, Hidden)>,
+}
+
+impl Landing {
+    /// The Status Log wording for the steps passed, or `None` when the move
+    /// passed nothing: ``walked past `suite` (not last in its chain)``.
+    pub(crate) fn note(&self) -> Option<String> {
+        if self.passed.is_empty() {
+            return None;
+        }
+        let steps: Vec<String> = self
+            .passed
+            .iter()
+            .map(|(id, why)| format!("`{id}` ({})", why.why()))
+            .collect();
+        Some(format!("walked past {}", steps.join(", ")))
+    }
+}
+
+/// `carried` — whatever message a move already has — followed by `note`, so
+/// the Status Log line for the step landed on keeps both. Shared by every
+/// move that lands past a hidden step, so they join the two the same way.
+pub(crate) fn with_walk_note(carried: Option<&str>, note: Option<String>) -> Option<String> {
+    let carried = carried.map(str::trim).filter(|m| !m.is_empty());
+    match (carried, note) {
+        (Some(carried), Some(note)) => Some(format!("{carried} — {note}")),
+        (Some(carried), None) => Some(carried.to_string()),
+        (None, note) => note,
+    }
+}
+
+/// Follow `on_pass` from `destination` past every step `task` walks past, and
+/// land on the first one it runs.
+///
+/// A move that wrote the hidden step as the task's stage would leave the task
+/// file naming a step that never runs, until the dispatcher's own
+/// [`fall_through`] moved it on at its next tick; and the hidden step would
+/// spend a `loop:` arrival it never used. So every move that writes a stage
+/// from a route resolves its destination through here first.
+///
+/// A name that is not a step (`blocked`, `paused`, `done`, `queued`) lands as
+/// it is. A hidden step with no `on_pass` is where the task lands, as it is
+/// when the dispatcher finds it there. The walk stops after as many hops as
+/// the pipeline has steps, so wiring that cycles through hidden steps cannot
+/// loop here; it lands on wherever the last hop reached.
+pub(crate) fn land_past_hidden(
+    pipeline: &Pipeline,
+    task: &Task,
+    destination: String,
+    dependents: usize,
+) -> Landing {
+    let mut landing = Landing {
+        destination,
+        passed: Vec::new(),
+    };
+    for _ in 0..pipeline.steps.len() {
+        let Some(step) = pipeline.step(&landing.destination) else {
+            break;
+        };
+        let Some(why) = walk_past(step, task, dependents) else {
+            break;
+        };
+        let Some(next) = step.on_pass.clone() else {
+            break;
+        };
+        landing.passed.push((step.id.clone(), why));
+        landing.destination = next;
+    }
+    landing
+}
+
+/// [`same_group_dependents`] for a caller that has only the repository: it
+/// reads the open queue and builds the graph itself. For `spoolway report` and
+/// `spoolway resume`, which run outside the dispatcher's pass.
+pub(crate) fn queue_dependents(repo: &Repo, task: &Task) -> Result<usize> {
+    let tasks = repo.tasks()?;
+    let graph = Graph::build(&tasks, &repo.archive_dir());
+    Ok(same_group_dependents(repo, &tasks, &graph, task))
 }
 
 /// How many open tasks above `task` in `graph` share its bare group — the
@@ -1209,12 +1346,16 @@ impl<'a> Dispatcher<'a> {
             for _ in 0..=pipeline.steps.len() {
                 let stage = tasks[index].stage().to_string();
 
+                // Read before `tasks[index]` is borrowed mutably: a task
+                // leaving `queued` onto a `last:` entry step needs it.
+                let dependents = same_group_dependents(self.repo, tasks, graph, &tasks[index]);
                 match self.route_reserved_stage(
                     &mut tasks[index],
                     index,
                     &stage,
                     &pipeline,
                     graph,
+                    dependents,
                     owned,
                     kept,
                     &mut candidates,
@@ -1366,6 +1507,20 @@ impl<'a> Dispatcher<'a> {
                     let launch_failed = tasks[index].front.launch_failures.get(&step.id)
                         == Some(&MAX_LAUNCH_FAILURES);
 
+                    // A route that leads onto a step this task walks past
+                    // follows `on_pass` to the first step it runs, so the
+                    // task is never written onto the hidden one — see
+                    // [`land_past_hidden`]. Its `loop:` below is then the
+                    // landing step's, and the hidden step spends none.
+                    let landing = land_past_hidden(
+                        &pipeline,
+                        &tasks[index],
+                        destination,
+                        same_group_dependents(self.repo, tasks, graph, &tasks[index]),
+                    );
+                    let walked_past = landing.note();
+                    let destination = landing.destination;
+
                     // A command step's own `on_fail` is a route like any
                     // other, and a mechanical gate's whole point is to fail
                     // back to the step behind it — so that move is bound by
@@ -1441,22 +1596,36 @@ impl<'a> Dispatcher<'a> {
                     // like any other work, and everything else is a stage
                     // change with nothing to wait for.
                     match self.queues_for_a_slot(&pipeline, &destination) {
-                        true => candidates.push(Candidate {
-                            task_index: index,
-                            priority: pipeline.priority(&destination),
-                            pipeline_len: pipeline.steps.len(),
-                            step_id: destination,
-                            // Filled in once, below, after every candidate
-                            // this pass could possibly field is collected —
-                            // see the gate tier comment ahead of the sort.
-                            gated: false,
-                            group_open: graph.group_open(&id),
-                            dependents: graph.dependents(&id),
-                            pipeline: pipeline.name.clone(),
-                            command_forget,
-                        }),
+                        true => {
+                            // The stage is written when the lane starts, so
+                            // the walk-past rides along until then.
+                            let walked_past =
+                                walked_past.filter(|_| destination != crate::pipeline::PAUSED);
+                            candidates.push(Candidate {
+                                task_index: index,
+                                priority: pipeline.priority(&destination),
+                                pipeline_len: pipeline.steps.len(),
+                                step_id: destination,
+                                // Filled in once, below, after every candidate
+                                // this pass could possibly field is collected —
+                                // see the gate tier comment ahead of the sort.
+                                gated: false,
+                                group_open: graph.group_open(&id),
+                                dependents: graph.dependents(&id),
+                                pipeline: pipeline.name.clone(),
+                                command_forget,
+                                walked_past,
+                            });
+                        }
                         false => {
-                            tasks[index].set_stage(&destination, pause_note);
+                            // A gate hold lands on `paused`, which walked
+                            // past nothing; the resume that lets it go
+                            // resolves its own destination.
+                            let message = match destination == crate::pipeline::PAUSED {
+                                true => pause_note.map(str::to_string),
+                                false => with_walk_note(pause_note, walked_past),
+                            };
+                            tasks[index].set_stage(&destination, message.as_deref());
                             // `persist` answers `false` when something —
                             // a `spoolway report`, a `p`/`r`/`u` on the
                             // board — landed mid-pass and dropped this
@@ -1674,6 +1843,7 @@ impl<'a> Dispatcher<'a> {
                                 dependents: graph.dependents(&id),
                                 pipeline: pipeline.name.clone(),
                                 command_forget: None,
+                                walked_past: None,
                             })
                         }
                     }
@@ -1718,6 +1888,7 @@ impl<'a> Dispatcher<'a> {
         stage: &str,
         pipeline: &Pipeline,
         graph: &Graph,
+        dependents: usize,
         owned: &[(String, String, &Lane)],
         kept: &[(String, String, &Lane)],
         candidates: &mut Vec<Candidate>,
@@ -1814,7 +1985,25 @@ impl<'a> Dispatcher<'a> {
                     }
                     TrackingGate::Pending => return Ok(Routed::NextTask),
                 }
-                let next = pipeline.entry().to_string();
+                // An entry step this task walks past is never written as its
+                // stage: it starts on the first step it does run. That step
+                // spends the `loop:` arrival; the hidden one spends none.
+                let landing =
+                    land_past_hidden(pipeline, task, pipeline.entry().to_string(), dependents);
+                let walked_past = landing.note();
+                let mut next = landing.destination;
+                if walked_past.is_some() {
+                    next = crate::commands::apply_loop_budget(
+                        pipeline,
+                        task,
+                        crate::pipeline::QUEUED,
+                        next,
+                        self.unattended,
+                    );
+                    if next == crate::pipeline::BLOCKED {
+                        crate::commands::set_blocked_from(task, crate::pipeline::QUEUED);
+                    }
+                }
                 // The same two shapes the Command arm routes into, and
                 // for the same reason: only a step that runs an agent
                 // has to queue for a slot. Everything else is a stage
@@ -1824,23 +2013,26 @@ impl<'a> Dispatcher<'a> {
                 // why a `run:` entry used to be dropped there in
                 // silence and leave its task in `queued` forever.
                 match pipeline.step(&next).map(|s| s.kind()) {
-                    Some(StepKind::Agent) => candidates.push(Candidate {
-                        task_index,
-                        priority: pipeline.priority(&next),
-                        pipeline_len: pipeline.steps.len(),
-                        step_id: next,
-                        // Filled in once, below, after every
-                        // candidate this pass could possibly field is
-                        // collected — see the gate tier comment ahead
-                        // of the sort.
-                        gated: false,
-                        group_open: graph.group_open(&id),
-                        dependents: graph.dependents(&id),
-                        pipeline: pipeline.name.clone(),
-                        command_forget: None,
-                    }),
+                    Some(StepKind::Agent) => {
+                        candidates.push(Candidate {
+                            task_index,
+                            priority: pipeline.priority(&next),
+                            pipeline_len: pipeline.steps.len(),
+                            step_id: next,
+                            // Filled in once, below, after every
+                            // candidate this pass could possibly field is
+                            // collected — see the gate tier comment ahead
+                            // of the sort.
+                            gated: false,
+                            group_open: graph.group_open(&id),
+                            dependents: graph.dependents(&id),
+                            pipeline: pipeline.name.clone(),
+                            command_forget: None,
+                            walked_past,
+                        });
+                    }
                     _ => {
-                        task.set_stage(&next, None);
+                        task.set_stage(&next, walked_past.as_deref());
                         self.persist(task)?;
                         // Round the inner loop rather than the outer
                         // one, so the command runs on the pass this
@@ -3973,6 +4165,7 @@ impl<'a> Dispatcher<'a> {
                         &pending[i].step,
                         &mut self.file_seen,
                         &pending[i].boot,
+                        pending[i].candidate.walked_past.as_deref(),
                     )?;
                     pending[i].persisted = Some(persisted);
                     ready.push(i);
@@ -5585,11 +5778,12 @@ fn finish_launch_bookkeeping(
     step: &Step,
     file_seen: &mut HashMap<String, u64>,
     boot: &Boot,
+    walked_past: Option<&str>,
 ) -> Result<bool> {
     // Only record a transition when this is genuinely a new step. A retry of
     // the same step arrived by the route that is already recorded.
     if task.stage() != step.id {
-        task.set_stage(&step.id, None);
+        task.set_stage(&step.id, walked_past);
     }
     // Spent, whether or not a session was found to continue: a resume that
     // could not find one has still had its go, and leaving the flag set would
@@ -8675,6 +8869,158 @@ mod tests {
             log.contains("`b` may not send this to `a` a 3rd time — `a` has `loop: 2`"),
             "{log}"
         );
+    }
+
+    /// A task leaving `queued` onto an entry step it walks past starts on the
+    /// first step it runs: the hidden entry is never its stage, and the
+    /// Status Log names it on the arrival.
+    #[test]
+    fn a_task_starting_off_queued_is_written_past_a_hidden_entry() {
+        let (repo, _root_guard) = fixture("start-past-hidden-entry");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    run: true\n    on_pass: b\n  \
+             - id: b\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |f| {
+            f.skip = vec!["a".into()];
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "b");
+        assert_eq!(task.rounds_at("a"), 0, "{:?}", task.front.arrivals);
+        assert!(
+            task.body.contains("→ `b`: walked past `a` (skip)"),
+            "{}",
+            task.body
+        );
+        assert!(!task.body.contains("→ `a`"), "{}", task.body);
+        assert_eq!(task.body.matches("→ `b`").count(), 1, "{}", task.body);
+    }
+
+    /// A command step's exit routes past a hidden next step. The task file
+    /// never names the hidden step, and the dispatcher's own fall-through
+    /// action line — kept for a task already sitting on a hidden step — is
+    /// not what reports it.
+    #[test]
+    fn a_command_exit_is_written_past_a_hidden_step() {
+        let (repo, _root_guard) = fixture("exit-past-hidden-step");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    run: true\n    on_pass: b\n  \
+             - id: b\n    run: true\n    on_pass: c\n  \
+             - id: c\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        let path = add_task_with(&repo, "demo", "a", |f| {
+            f.skip = vec!["b".into()];
+        });
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..2 {
+            let report = run_pass_with(&repo, &mux, &pipelines);
+            assert!(
+                !report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains("does not run for")),
+                "{:?}",
+                report.actions
+            );
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "c");
+        assert_eq!(task.rounds_at("b"), 0, "{:?}", task.front.arrivals);
+        assert!(
+            task.body.contains("→ `c`: walked past `b` (skip)"),
+            "{}",
+            task.body
+        );
+        assert!(!task.body.contains("→ `b`"), "{}", task.body);
+        assert_eq!(task.body.matches("→ `c`").count(), 1, "{}", task.body);
+    }
+
+    /// The same for a `first:` entry step: a task that declares a dependency
+    /// is not the chain's root, so it leaves `queued` onto the step after
+    /// `setup`. One Status Log line carries the note, and `setup` is never
+    /// written as its stage.
+    #[test]
+    fn a_task_below_the_root_starts_past_a_first_entry_step() {
+        let (repo, _root_guard) = fixture("start-past-first-entry");
+        // The branch the dependency's work lived on, which a task starts from.
+        crate::repo::run(&repo.root, "git", &["branch", "task/root"]).unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("root.md"),
+            "---\nid: root\ntitle: root, done\ngroup: stack\nstage: done\n---\n## Goal\n",
+        )
+        .unwrap();
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
+             - id: work\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        let path = add_task_with(&repo, "next", crate::pipeline::QUEUED, |f| {
+            f.group = Some("stack".into());
+            f.depends_on = vec!["root".into()];
+        });
+
+        run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "work");
+        assert_eq!(task.rounds_at("setup"), 0, "{:?}", task.front.arrivals);
+        assert!(
+            task.body
+                .contains("→ `work`: walked past `setup` (not first in its chain)"),
+            "{}",
+            task.body
+        );
+        assert!(!task.body.contains("→ `setup`"), "{}", task.body);
+        assert_eq!(task.body.matches("→ `work`").count(), 1, "{}", task.body);
+    }
+
+    /// The same for a `last:` step reached by a command's exit: a task with an
+    /// open dependent in its group is not last, so the exit lands past
+    /// `suite`, and `suite` is never written as its stage.
+    #[test]
+    fn a_command_exit_lands_past_a_last_step_while_something_is_open_above() {
+        let (repo, _root_guard) = fixture("exit-past-last-step");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: a\n    run: true\n    on_pass: suite\n  \
+             - id: suite\n    run: true\n    last: true\n    on_pass: doc\n  \
+             - id: doc\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        let path = add_task_with(&repo, "base", "a", |f| f.group = Some("stack".into()));
+        add_task_with(&repo, "top", crate::pipeline::QUEUED, |f| {
+            f.group = Some("stack".into());
+            f.depends_on = vec!["base".into()];
+        });
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..2 {
+            run_pass_with(&repo, &mux, &pipelines);
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "doc");
+        assert_eq!(task.rounds_at("suite"), 0, "{:?}", task.front.arrivals);
+        assert!(
+            task.body
+                .contains("→ `doc`: walked past `suite` (not last in its chain)"),
+            "{}",
+            task.body
+        );
+        assert!(!task.body.contains("→ `suite`"), "{}", task.body);
+        assert_eq!(task.body.matches("→ `doc`").count(), 1, "{}", task.body);
     }
 
     /// A pipeline of `steps` as `default`, over the shipped ones.

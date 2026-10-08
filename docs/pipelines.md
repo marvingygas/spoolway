@@ -337,6 +337,30 @@ naming an archived dependency is still not the root. Any other task walks past t
 its `on_pass`. In a fan, every independent root runs it. `first:` is allowed on command
 steps only, and is refused together with `last:` on the same step.
 
+### Steps a task walks past
+
+A step is hidden for a task when its own `skip:` names it, when it is a `last:` step and
+something in the task's group is still open above it, or when it is a `first:` step and the
+task is not its chain's root. These moves follow `on_pass` past hidden steps and write the
+first step the task runs as its stage: a lane's report, a command step's exit,
+`spoolway resume`, a cleared block, and a task's start off `queued`. The walk stops after as
+many hops as the pipeline has steps. A hidden step with no `on_pass` is where the task lands.
+
+The step the task lands on spends one `loop:` arrival, and the hidden steps spend none. The
+task's `## Status Log` names each hidden step in order, with its rule, on the line for the
+step it landed on, after any message the move carries:
+
+```
+- 2026-10-08 14:09 → `document`: walked past `suite` (not last in its chain)
+```
+
+The dispatcher also walks a task past a hidden step it finds the task sitting on. These tasks
+reach it:
+
+- A task that was waiting its `serial:` turn when a dependent was queued above it.
+- A task sent to a step by a failed lane start's `on_fail`, a background command's late
+  `on_fail`, a resume of a parked task, or an unattended self-resume after an escalation.
+
 ### `serial:` — one run of the step at a time
 
 ```yaml

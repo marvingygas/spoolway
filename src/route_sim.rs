@@ -503,6 +503,8 @@ mod tests {
             outcome,
             ctx.unattended,
             None,
+            // The walk's tasks have no dependents, so no `last:` step is hidden.
+            0,
         )
         .map_err(|e| format!("route() itself refused `{current}` --{outcome}-->: {e:#}"))?;
         branch.set_stage(&routed.destination, None);

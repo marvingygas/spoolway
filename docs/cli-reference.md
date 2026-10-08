@@ -619,8 +619,11 @@ These tasks are refused, each with a message that names the reason and what to d
 | On `blocked`, resumed by its own lane | Always | Only a person resumes it |
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
 | Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
+| Names a step the task walks past | With `--stage` | Nothing is resumed. The message names the rule: `it is not last in its chain`, `it is not the root of its chain`, or `its own skip: names it` |
 
 A task on a step the pipeline no longer defines can still be resumed.
+
+A resume that sends the task to another step lands on the first step the task runs. When that destination is one the task [walks past](pipelines.md#steps-a-task-walks-past), the task lands on the step after it, and its `## Status Log` names the step passed. `--stage` refuses such a step instead: `` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. Nothing was resumed. ``
 
 While a dispatcher runs, the destination comes from the pipelines it loaded at start. See
 [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).

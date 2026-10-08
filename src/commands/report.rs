@@ -197,6 +197,7 @@ pub fn report(
     // `docs/concepts.md`'s Reach section.
     let unattended = repo.unattended();
 
+    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
     let routed = route(
         &mut task,
         pipeline,
@@ -204,6 +205,7 @@ pub fn report(
         outcome,
         unattended,
         args.stage.as_deref(),
+        dependents,
     )?;
     let mut destination = routed.destination;
     let gated = routed.gated;
@@ -262,10 +264,11 @@ pub fn report(
         blocked: destination == crate::pipeline::BLOCKED,
     });
 
-    task.set_stage(
-        &destination,
+    let arrival = crate::dispatch::with_walk_note(
         pause_note.as_deref().or(args.message.as_deref()),
+        routed.walked_past,
     );
+    task.set_stage(&destination, arrival.as_deref());
     // The line `set_stage` just wrote is spoolway's own arrival note, credited
     // to no step, the same as every other arrival. A gate is the one road
     // where that note replaces the lane's own `-m` rather than carrying it —
@@ -374,6 +377,11 @@ pub struct Routed {
     /// already that step's own and needs no further naming. [`report`]'s
     /// final message adds the clause this names; nothing else reads it.
     pub gated_at: Option<String>,
+    /// The Status Log wording for the hidden steps this move followed
+    /// `on_pass` past on its way to `destination`, if it passed any — see
+    /// [`crate::dispatch::land_past_hidden`]. [`report`] puts it on the
+    /// arrival line, after any message the move carries.
+    pub walked_past: Option<String>,
 }
 
 /// The routing decision, lifted out of [`report`] so a test can walk every
@@ -389,6 +397,12 @@ pub struct Routed {
 /// decision and moves with it — only the parts of [`report`] that need a
 /// real repository (committing the worktree, saving the file, firing the
 /// tracking hook) stay behind.
+///
+/// `dependents` is how many open tasks above this one in its group hold a
+/// `last:` step back ([`crate::dispatch::same_group_dependents`]). Routing has
+/// no repository to count them in, so the caller does. The destination is
+/// followed past every step this task does not run, before the `loop:` check,
+/// so it is the step the task lands on that spends the arrival.
 pub fn route(
     task: &mut Task,
     pipeline: &Pipeline,
@@ -396,6 +410,7 @@ pub fn route(
     outcome: Outcome,
     unattended: bool,
     stage: Option<&str>,
+    dependents: usize,
 ) -> Result<Routed> {
     // `queued` and `paused` are held states no lane works at, so a report
     // filed from one has no step to settle. Said outright: the step lookup
@@ -430,6 +445,7 @@ pub fn route(
     // the branch below.
     let paused_from_blocked = current == crate::pipeline::BLOCKED && outcome != Outcome::Pass;
     let mut gated_at = None;
+    let mut walked_past = None;
 
     let mut destination = if current == crate::pipeline::BLOCKED && outcome == Outcome::Pass {
         // Where this task actually stopped, read once before anything below
@@ -557,6 +573,11 @@ pub fn route(
             }
             None => cleared_block_target(task, pipeline, true),
         };
+        // The unblocker's destination is a move like any other, so it lands
+        // past the steps this task does not run.
+        let landing = crate::dispatch::land_past_hidden(pipeline, task, target, dependents);
+        walked_past = landing.note();
+        let target = landing.destination;
         // Leaving `blocked` starts every `loop:` count again, ahead of the
         // budget check below: a spent limit is what sent the task here, and
         // the unblocker's pass is its answer, so the step it lands on must
@@ -598,9 +619,16 @@ pub fn route(
         task.front.paused_at = Some(origin);
         crate::pipeline::PAUSED.to_string()
     } else {
-        step.destination(outcome)
-            .unwrap_or(crate::pipeline::BLOCKED)
-            .to_string()
+        let landing = crate::dispatch::land_past_hidden(
+            pipeline,
+            task,
+            step.destination(outcome)
+                .unwrap_or(crate::pipeline::BLOCKED)
+                .to_string(),
+            dependents,
+        );
+        walked_past = landing.note();
+        landing.destination
     };
 
     destination = apply_loop_budget(pipeline, task, current, destination, unattended);
@@ -670,6 +698,9 @@ pub fn route(
         task.front.paused_at = Some(current.to_string());
         task.front.paused_by = Some(kind.as_str().to_string());
         destination = crate::pipeline::PAUSED.to_string();
+        // Held where it is: the resume that lets it go lands past hidden
+        // steps itself, so nothing was walked past here.
+        walked_past = None;
         pause_note = Some(match kind {
             Gate::Schedule => "held by this task's own schedule".to_string(),
             Gate::Step => "held by this step's own gate".to_string(),
@@ -727,8 +758,10 @@ pub fn route(
         // limit whose exit is `blocked` in exactly this configuration, rather
         // than handing the task a wall it can only walk into again.
         resume_at(task, &target);
-        destination = target.clone();
-        resumed = Some(target);
+        let landing = crate::dispatch::land_past_hidden(pipeline, task, target, dependents);
+        walked_past = landing.note();
+        destination = landing.destination.clone();
+        resumed = Some(landing.destination);
     }
 
     Ok(Routed {
@@ -738,6 +771,7 @@ pub fn route(
         resumed,
         paused_from_blocked,
         gated_at,
+        walked_past,
     })
 }
 
@@ -760,10 +794,11 @@ pub fn route(
 /// round the limit is left. [`report`] asks it for a lane's own account of
 /// itself, and the dispatcher asks it for the other four: a `run:` step's
 /// exit code (a mechanical gate failing back to the agent step behind it is
-/// exactly that case), a step walked past by `skip:`, `first:` or `last:`, a
-/// lane that could not be started or whose pane never came free, and a
-/// background command that failed after its task had moved on. A walk-past
-/// is counted at the step it lands on, never the one it skips.
+/// exactly that case), a task found sitting on a step walked past by `skip:`,
+/// `first:` or `last:`, a lane that could not be started or whose pane never
+/// came free, and a background command that failed after its task had moved
+/// on. A walk-past is counted at the step it lands on, never the one it
+/// skips: a route follows `on_pass` past hidden steps before asking.
 ///
 /// What it counts is laps, not conversations: a step with `session: true` may
 /// be re-prompted as often as its session survives, with an optional separate
@@ -1598,7 +1633,7 @@ fn resume_checked(
              that is a person's to decide."
         );
     }
-    let task = repo.task(&args.task)?;
+    let mut task = repo.task(&args.task)?;
     // The lane on `blocked` is working on its own task's block; clearing it
     // would answer its own question for it. It may unblock others only.
     if from_blocked && crate::platform::env_var(TASK_ENV).is_ok_and(|own| own == args.task) {
@@ -1629,7 +1664,20 @@ fn resume_checked(
     // always takes the ordinary road onto the step it names.
     let road = match &args.stage {
         Some(stage) => {
-            pipelines.for_task(&task)?.require_step(stage)?;
+            let pipeline = pipelines.for_task(&task)?;
+            let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+            // A step the task walks past is never written as its stage, so
+            // naming one by hand is refused rather than accepted and walked
+            // past on the next tick.
+            if let Some(why) =
+                crate::dispatch::walk_past(pipeline.require_step(stage)?, &task, dependents)
+            {
+                bail!(
+                    "`{stage}` does not run for `{}`: {}. Nothing was resumed.",
+                    task.front.id,
+                    why.refusal()
+                );
+            }
             ResumeRoad::Step(stage.clone())
         }
         None => resume_road(&task, pipelines)?,
@@ -1640,9 +1688,54 @@ fn resume_checked(
             caught,
             cleared_block,
             destination,
-        } => past_the_gate(task, args, &gated, caught, cleared_block, destination),
+        } => {
+            // Only the roads that land on a step need the pipeline: a parked
+            // task or one paused by a failed done hook resumes without it,
+            // even when its pipeline is no longer defined.
+            let pipeline = pipelines.for_task(&task)?;
+            let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+            let landing =
+                crate::dispatch::land_past_hidden(pipeline, &task, destination, dependents);
+            let (destination, walked_past) =
+                land_resume(repo, pipeline, &mut task, &gated, landing);
+            past_the_gate(
+                task,
+                args,
+                &gated,
+                caught,
+                cleared_block,
+                destination,
+                walked_past,
+            )
+        }
         road => back_onto_its_step(repo, pipelines, task, args, road),
     }
+}
+
+/// Land a resume on `landing.destination`, spending the landing step's
+/// `loop:` when the move walked past anything.
+///
+/// A resume that passed nothing writes its target exactly as it always has:
+/// it refunds nothing and checks nothing. One that walked past a hidden step
+/// is the move the dispatcher's fall-through used to make a tick later, and
+/// that one answered to the landing step's `loop:`, so it still does.
+fn land_resume(
+    repo: &Repo,
+    pipeline: &Pipeline,
+    task: &mut Task,
+    from: &str,
+    landing: crate::dispatch::Landing,
+) -> (String, Option<String>) {
+    let note = landing.note();
+    if note.is_none() {
+        return (landing.destination, None);
+    }
+    let destination =
+        apply_loop_budget(pipeline, task, from, landing.destination, repo.unattended());
+    if destination == crate::pipeline::BLOCKED {
+        set_blocked_from(task, from);
+    }
+    (destination, note)
 }
 
 /// Refuse a task that is not stopped: one waiting in the queue, or one whose
@@ -1751,7 +1844,17 @@ fn back_onto_its_step(
         return Ok(());
     }
 
-    let target = road.destination().to_string();
+    // Lands past the steps this task does not run. `queued` is not a step,
+    // so a task that never started lands as it is.
+    let pipeline = pipelines.for_task(&task)?;
+    let dependents = crate::dispatch::queue_dependents(repo, &task)?;
+    let landing = crate::dispatch::land_past_hidden(
+        pipeline,
+        &task,
+        road.destination().to_string(),
+        dependents,
+    );
+    let target = landing.destination.clone();
 
     // A park off `queued` itself lands here too — `park` records no
     // `parked_from` for it — and it is the same kind of round trip as
@@ -1780,6 +1883,10 @@ fn back_onto_its_step(
     if task.front.stage == crate::pipeline::BLOCKED {
         task.reset_loop_counts();
     }
+    // After that reset, so a walk-past from `blocked` meets the landing
+    // step's `loop:` with its counts started again.
+    let current = task.stage().to_string();
+    let (target, walked_past) = land_resume(repo, pipeline, &mut task, &current, landing);
     resume_at(&mut task, &target);
     // Whatever gate it was waiting on, it is not waiting on it here any more.
     task.front.paused_at = None;
@@ -1790,7 +1897,8 @@ fn back_onto_its_step(
     // `finish_launch_bookkeeping` would read that retry as a continued park rather than what it is.
     task.front.parked_from = None;
     task.front.escalated = false;
-    task.set_stage(&target, Some(&message));
+    let arrival = crate::dispatch::with_walk_note(Some(&message), walked_past);
+    task.set_stage(&target, arrival.as_deref());
     task.save()?;
 
     free_stale_lanes(repo, pipelines, &task);
@@ -2132,6 +2240,7 @@ fn past_the_gate(
     caught: Option<Caught>,
     cleared_block: bool,
     destination: String,
+    walked_past: Option<String>,
 ) -> Result<()> {
     if cleared_block {
         resume_at(&mut task, &destination);
@@ -2155,14 +2264,16 @@ fn past_the_gate(
 
     task.front.paused_at = None;
     task.front.paused_by = None;
-    task.set_stage(&destination, Some(&note));
+    let arrival = crate::dispatch::with_walk_note(Some(&note), walked_past);
+    task.set_stage(&destination, arrival.as_deref());
     task.save()?;
 
-    // `destination` always equals `gated` here — `cleared_block_target` with
-    // `takes_over: false` hands the task straight back to the step it
-    // blocked on — so the plain `{gated} --pass--> {destination}` phrasing
-    // below would print a step arrowing to itself, reading like a pass that
-    // ran and landed nowhere rather than a block being cleared.
+    // A cleared block usually lands on `gated` itself, and the plain
+    // `{gated} --resume--> {destination}` phrasing below would then print a
+    // step arrowing to itself, reading like a pass that ran and landed
+    // nowhere rather than a block being cleared. When the task walks past
+    // `gated`, `destination` is a later step; the Status Log names the walk,
+    // and this line still says only that the block was cleared.
     if cleared_block {
         println!("{}: {gated}: block cleared by hand", args.task);
     } else {
@@ -3515,6 +3626,7 @@ mod tests {
             Outcome::Pass,
             false,
             None,
+            0,
         )
         .err()
         .expect("a report from queued is refused");
@@ -3531,6 +3643,7 @@ mod tests {
             Outcome::Pass,
             false,
             None,
+            0,
         )
         .err()
         .expect("a report from paused is refused");
@@ -6530,5 +6643,373 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("lane's own environment"), "{err}");
+    }
+
+    /// A pipeline `work → mid → after → done`, with `mid` a command step (the
+    /// only kind `first:` and `last:` allow) given the `extra` keys that can
+    /// hide it, `after` limited to `loop: 1`, and a staffed `blocked`.
+    fn walk_past_pipeline(extra: &str) -> Pipeline {
+        let yaml = format!(
+            "steps:\n  \
+             - id: work\n    agent: pi\n    on_pass: mid\n  \
+             - id: mid\n    run: 'true'\n    {extra}\n    on_pass: after\n  \
+             - id: after\n    agent: pi\n    loop: 1\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n"
+        );
+        Pipeline::parse("default", &yaml).unwrap()
+    }
+
+    /// Route a `--pass` from `work` for a task the `hide` closure sets up, and
+    /// return the task with what `route` decided.
+    fn pass_from_work(
+        name: &str,
+        pipeline: &Pipeline,
+        dependents: usize,
+        hide: impl FnOnce(&mut Task),
+    ) -> (Task, Routed) {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture(name);
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.set_stage("work", None);
+        hide(&mut task);
+        let routed = route(
+            &mut task,
+            pipeline,
+            "work",
+            Outcome::Pass,
+            false,
+            None,
+            dependents,
+        )
+        .unwrap();
+        (task, routed)
+    }
+
+    /// Each of the three rules that hide a step sends a pass past it, onto the
+    /// step the task runs, and says which rule did it.
+    #[test]
+    fn a_pass_lands_past_a_step_the_task_walks_past() {
+        let (_, skipped) = pass_from_work("route-skip", &walk_past_pipeline(""), 0, |t| {
+            t.front.skip = vec!["mid".into()]
+        });
+        assert_eq!(skipped.destination, "after");
+        assert_eq!(
+            skipped.walked_past.as_deref(),
+            Some("walked past `mid` (skip)")
+        );
+
+        let (_, not_root) =
+            pass_from_work("route-first", &walk_past_pipeline("first: true"), 0, |t| {
+                t.front.depends_on = vec!["parent".into()]
+            });
+        assert_eq!(not_root.destination, "after");
+        assert_eq!(
+            not_root.walked_past.as_deref(),
+            Some("walked past `mid` (not first in its chain)")
+        );
+
+        let (_, not_last) =
+            pass_from_work("route-last", &walk_past_pipeline("last: true"), 1, |_| {});
+        assert_eq!(not_last.destination, "after");
+        assert_eq!(
+            not_last.walked_past.as_deref(),
+            Some("walked past `mid` (not last in its chain)")
+        );
+    }
+
+    /// A step that runs for the task is not walked past, and says nothing.
+    #[test]
+    fn a_pass_onto_a_step_the_task_runs_names_nothing() {
+        let (_, routed) =
+            pass_from_work("route-runs", &walk_past_pipeline("last: true"), 0, |_| {});
+        assert_eq!(routed.destination, "mid");
+        assert_eq!(routed.walked_past, None);
+    }
+
+    /// The arrival line the report writes keeps the lane's own message and
+    /// names the hidden step after it, and the task file never names the
+    /// hidden step as a stage.
+    #[test]
+    fn the_report_writes_the_landing_step_and_names_the_hidden_one_after_the_message() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("report-walk-past");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .insert("default".into(), walk_past_pipeline(""));
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.front.skip = vec!["mid".into()];
+        task.set_stage("work", None);
+        task.save().unwrap();
+
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("demo".into()),
+                stage: None,
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("all green".into()),
+                handoff: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "demo");
+        assert_eq!(task.stage(), "after");
+        assert_eq!(task.rounds_at("mid"), 0, "{:?}", task.front.arrivals);
+        assert_eq!(task.rounds_at("after"), 1, "{:?}", task.front.arrivals);
+        assert!(
+            task.body
+                .contains("→ `after`: all green — walked past `mid` (skip)"),
+            "{}",
+            task.body
+        );
+        assert!(!task.body.contains("→ `mid`"), "{}", task.body);
+    }
+
+    /// The step landed on spends the `loop:`, so one already spent sends the
+    /// task to `blocked` — and the walked-past step is named all the same.
+    #[test]
+    fn a_landing_step_with_its_loop_spent_sends_the_task_to_blocked() {
+        let (task, routed) = pass_from_work("route-spent", &walk_past_pipeline(""), 0, |t| {
+            t.front.skip = vec!["mid".into()];
+            t.front.arrivals.insert("after".into(), 1);
+        });
+        assert_eq!(routed.destination, crate::pipeline::BLOCKED);
+        assert_eq!(
+            routed.walked_past.as_deref(),
+            Some("walked past `mid` (skip)")
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("work"));
+    }
+
+    /// An unblocker's pass is carried one step past where the task stopped,
+    /// and that step is walked past too when it is hidden.
+    #[test]
+    fn a_cleared_block_lands_past_a_hidden_step() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("route-cleared-block");
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.set_stage("work", None);
+        task.front.skip = vec!["mid".into()];
+        task.front.blocked_from = Some("work".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        let routed = route(
+            &mut task,
+            &walk_past_pipeline(""),
+            crate::pipeline::BLOCKED,
+            Outcome::Pass,
+            false,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(routed.destination, "after");
+        assert_eq!(
+            routed.walked_past.as_deref(),
+            Some("walked past `mid` (skip)")
+        );
+    }
+
+    /// Several hidden steps in a row are all named, in the order passed.
+    #[test]
+    fn every_hidden_step_in_a_row_is_named_in_order() {
+        let yaml = "steps:\n  \
+             - id: work\n    agent: pi\n    on_pass: one\n  \
+             - id: one\n    agent: pi\n    on_pass: two\n  \
+             - id: two\n    agent: pi\n    on_pass: three\n  \
+             - id: three\n    agent: pi\n    on_pass: done\n";
+        let pipeline = Pipeline::parse("default", yaml).unwrap();
+        let (_, routed) = pass_from_work("route-several", &pipeline, 0, |t| {
+            t.front.skip = vec!["one".into(), "two".into()]
+        });
+        assert_eq!(routed.destination, "three");
+        assert_eq!(
+            routed.walked_past.as_deref(),
+            Some("walked past `one` (skip), `two` (skip)")
+        );
+    }
+
+    /// Hidden steps wired in a cycle stop after one hop per step in the
+    /// pipeline, and a hidden step with no `on_pass` is where the task lands.
+    #[test]
+    fn the_walk_is_bounded_and_a_hidden_step_with_no_way_on_is_where_it_lands() {
+        let task = {
+            clear_lane_env();
+            let (repo, _root_guard) = fixture("walk-bounded");
+            add(&repo, "demo", &[]);
+            let mut task = queued(&repo, "demo");
+            task.front.skip = vec!["a".into(), "b".into(), "end".into()];
+            task
+        };
+        let cycle = Pipeline::parse(
+            "default",
+            "steps:\n  - id: a\n    agent: pi\n    loop: 5\n    on_pass: b\n  \
+             - id: b\n    agent: pi\n    on_pass: a\n",
+        )
+        .unwrap();
+        let landing = crate::dispatch::land_past_hidden(&cycle, &task, "a".into(), 0);
+        assert_eq!(landing.passed.len(), cycle.steps.len());
+
+        // A pipeline refuses to parse a step with no `on_pass`, so the dead
+        // end is made by taking it away afterwards.
+        let mut dead_end = Pipeline::parse(
+            "default",
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: end\n  \
+             - id: end\n    agent: pi\n    on_pass: done\n",
+        )
+        .unwrap();
+        dead_end.steps[1].on_pass = None;
+        let landing = crate::dispatch::land_past_hidden(&dead_end, &task, "a".into(), 0);
+        assert_eq!(landing.destination, "end");
+        assert_eq!(landing.passed.len(), 1);
+    }
+
+    /// `spoolway resume --stage` on a step the task walks past moves nothing
+    /// and names the rule.
+    #[test]
+    fn resume_stage_refuses_a_step_the_task_walks_past() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-stage-hidden");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .insert("default".into(), walk_past_pipeline("last: true"));
+        add(&repo, "demo", &[]);
+        add(&repo, "above", &["demo"]);
+        let mut task = queued(&repo, "demo");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        task.save().unwrap();
+
+        let err = resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: Some("mid".into()),
+                message: None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "`mid` does not run for `demo`: it is not last in its chain. Nothing was resumed."
+        );
+        assert_eq!(queued(&repo, "demo").stage(), crate::pipeline::BLOCKED);
+
+        let mut task = queued(&repo, "demo");
+        task.front.skip = vec!["after".into()];
+        task.save().unwrap();
+        let err = resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: Some("after".into()),
+                message: None,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "`after` does not run for `demo`: its own skip: names it. Nothing was resumed."
+        );
+        assert_eq!(
+            crate::dispatch::Hidden::NotRoot.refusal(),
+            "it is not the root of its chain"
+        );
+    }
+
+    /// A plain resume whose target the task walks past lands on the step it
+    /// runs, and the Status Log names the one passed.
+    #[test]
+    fn a_resume_lands_past_a_step_the_task_walks_past() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-walks-past");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .insert("default".into(), walk_past_pipeline(""));
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.front.skip = vec!["mid".into()];
+        task.front.blocked_from = Some("mid".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "demo");
+        assert_eq!(task.stage(), "after");
+        assert!(
+            task.body
+                .contains("→ `after`: unblocked by hand — walked past `mid` (skip)"),
+            "{}",
+            task.body
+        );
+        assert!(!task.body.contains("→ `mid`"), "{}", task.body);
+    }
+
+    /// A gate answered by a resume that walks past a hidden step answers to
+    /// the landing step's `loop:`: with that spent, the task goes to
+    /// `blocked` rather than onto the step again.
+    #[test]
+    fn a_gate_resume_onto_a_landing_step_with_its_loop_spent_blocks() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-gate-spent");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .insert("default".into(), walk_past_pipeline(""));
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.set_stage("work", None);
+        task.front.skip = vec!["mid".into()];
+        task.front.arrivals.insert("after".into(), 1);
+        task.front.paused_at = Some("work".into());
+        task.front.paused_by = Some("schedule".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "demo");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(
+            task.body.contains("walked past `mid` (skip)"),
+            "{}",
+            task.body
+        );
     }
 }

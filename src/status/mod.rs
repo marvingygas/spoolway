@@ -6943,7 +6943,8 @@ mod tests {
         let current = task.stage().to_string();
         let pipeline = pipelines.for_task(&task).unwrap().clone();
         let routed =
-            crate::commands::route(&mut task, &pipeline, &current, outcome, false, None).unwrap();
+            crate::commands::route(&mut task, &pipeline, &current, outcome, false, None, 0)
+                .unwrap();
         task.front.last_report = Some(crate::task::LastReport {
             step: current,
             outcome: outcome.as_str().to_string(),
