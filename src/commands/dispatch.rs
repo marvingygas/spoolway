@@ -1828,6 +1828,7 @@ mod tests {
         crate::repo::run(&dir, "git", &["init", "-q", "--bare"]).unwrap();
         (
             Repo {
+                borrowed: false,
                 root: dir.to_path_buf(),
                 checkout: dir.to_path_buf(),
                 config: Config::default(),
@@ -1868,6 +1869,7 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
+            borrowed: false,
             root: main.clone(),
             checkout: release.clone(),
             config: Config::default(),

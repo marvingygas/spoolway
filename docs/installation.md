@@ -382,7 +382,9 @@ spoolway sync               # apply it
 
 `sync` brings a project's own files forward. It needs a project, and lands its writes on the
 checkout it runs in. In a linked worktree that is the worktree's own tracked files, and the
-[`checkout:` line](cli-reference.md#the-checkout-line) names it first.
+[`checkout:` line](cli-reference.md#the-checkout-line) names it first. A linked worktree whose
+branch has no `.spoolway/` reads the main checkout's setup, so `sync` refuses there and names
+the main checkout.
 
 What `sync` replaces, file by file:
 

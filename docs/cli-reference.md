@@ -26,7 +26,8 @@ in. When that checkout is a linked worktree, they print one line first naming it
 checkout: ~/.spoolway/worktrees/checkout-line (task/checkout-line)
 ```
 
-In the main checkout nothing extra is printed. Under `--json` the same line is one JSON
+In the main checkout nothing extra is printed. A linked worktree whose branch has no
+`.spoolway/` reads the main checkout's setup, and the line names the main checkout. Under `--json` the same line is one JSON
 object:
 
 ```
@@ -1114,6 +1115,16 @@ cut from, never the worktree itself — `init` never writes into a worktree or b
 project. When the main checkout cannot be found this way, `init` refuses and says to run it in
 the main checkout, or to pass `-C <main checkout>`.
 
+A project has one setup, at the top of the repo. `init` writes it there, from whichever folder of
+the checkout it runs in. When the top has no setup and a `.spoolway/` sits in a folder below it, `init` writes
+nothing and refuses, naming that folder and where the setup belongs:
+
+```
+$ spoolway init
+~/work/mono/vendor/.spoolway is not at the top of the repo.
+  A project's setup lives at ~/work/mono/.spoolway — move it there, or remove it.
+```
+
 `Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
 default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
 `home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
@@ -1262,7 +1273,9 @@ Bring forward the files spoolway writes, without touching what you wrote. Prompt
 skeletons are never touched.
 
 It writes the checkout it runs in. In a linked worktree that is the worktree's own files, not
-the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one.
+the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one. In a
+linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
+the main checkout.
 
 ```
 spoolway sync --dry-run

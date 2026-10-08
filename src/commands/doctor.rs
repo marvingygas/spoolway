@@ -2747,6 +2747,7 @@ mod tests {
         std::fs::create_dir_all(&checkout).unwrap();
         (
             Repo {
+                borrowed: false,
                 root: checkout.to_path_buf(),
                 home: checkout.join(".home"),
                 checkout: checkout.to_path_buf(),
@@ -3664,6 +3665,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -3722,6 +3724,7 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -3762,6 +3765,7 @@ mod tests {
         std::fs::create_dir_all(broken.join("config")).unwrap();
         std::fs::write(broken.join(crate::repo::BINDING_FILE), "garbage = [\n").unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -3804,6 +3808,7 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -3835,6 +3840,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -3869,6 +3875,7 @@ mod tests {
         let home = root.join(".home");
         assert!(!home.exists());
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -3906,6 +3913,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -4034,6 +4042,7 @@ mod tests {
         std::fs::create_dir_all(state.join("logs")).unwrap();
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),

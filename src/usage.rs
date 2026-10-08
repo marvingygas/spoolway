@@ -5349,6 +5349,7 @@ mod tests {
         let home = root.join("home");
         (
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

@@ -43,6 +43,11 @@ const TITLE: &str = "update installed";
 /// to write, remove or refuse — see the
 /// module doc for why the two questions are asked in that order.
 fn behind(repo: &Repo) -> Result<bool> {
+    // A worktree reading the main checkout's setup cannot run the `sync` the
+    // notice would point at: it refuses there. The main checkout shows it.
+    if repo.borrowed {
+        return Ok(false);
+    }
     if !crate::sync::stamp_behind(&repo.home, &repo.checkout) {
         return Ok(false);
     }
@@ -156,6 +161,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         (
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -200,6 +206,16 @@ mod tests {
         );
         assert!(!Config::path_in(&repo.checkout).exists());
         assert_eq!(stamp(&repo), before);
+    }
+
+    /// A worktree reading the main checkout's setup cannot run `sync`, so it
+    /// is not sent there by a notice.
+    #[test]
+    fn a_borrowed_worktree_gets_no_notice() {
+        let (mut repo, _root_guard) = fixture("notify-borrowed");
+        make_stale(&repo);
+        repo.borrowed = true;
+        assert_eq!(notified(&repo, false, false, true), "");
     }
 
     /// `--json`, a lane and a stderr that is no terminal each print nothing,

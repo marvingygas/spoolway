@@ -17,13 +17,21 @@ use crate::task::{self, Task};
 pub struct Repo {
     pub root: PathBuf,
     /// The checkout `root` was discovered from — the linked worktree itself
-    /// when a lane runs in one, `root` again in the main checkout. `root`
+    /// when a lane runs in one that carries its own `.spoolway/`, `root`
+    /// again in the main checkout and in a worktree that carries none (see
+    /// [`Repo::borrowed`]). `root`
     /// still names the one project every command's queue, lane state and
     /// lock agree on; `checkout` is where the tracked control plane —
     /// pipelines, prompts, task skeletons — is actually read from, so a
     /// lane validates its own branch's files rather than the main
     /// checkout's. See [`Repo::prompts_dir`] and friends.
     pub checkout: PathBuf,
+    /// Whether `checkout` is the main checkout only because the linked
+    /// worktree the command ran in carries no `.spoolway/` of its own. Its
+    /// setup is then the main checkout's, read as it is there, and there is
+    /// no setup of this worktree's for a command to write — see
+    /// [`Repo::checkout_note`] and `sync::run`.
+    pub borrowed: bool,
     pub config: Config,
     /// `~/.spoolway/<label>-<id>/` — where every runtime file this project's
     /// spoolway writes actually lives, `<label>` and `<id>` being
@@ -52,7 +60,7 @@ impl Repo {
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
-        let checkout = checkout_for(&start, &root, main.as_deref());
+        let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         // Checked here, once, rather than in every accessor that creates a
         // directory under a home on demand: `bind` is what decides which
         // `~/.spoolway/<name>/` this checkout is allowed to write into,
@@ -68,6 +76,7 @@ impl Repo {
         let home = bind(&root)?;
         let config = Config::load(&root)?;
         Ok(Repo {
+            borrowed,
             root,
             checkout,
             config,
@@ -129,7 +138,7 @@ impl Repo {
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
-        let checkout = checkout_for(&start, &root, main.as_deref());
+        let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         let (home, home_error) = bind_lenient(&root, mode);
         // `Config::load` reads the overrides layer out of the home that
         // `home_error` above just failed to settle, so calling it the
@@ -147,6 +156,7 @@ impl Repo {
         match loaded {
             Ok(config) => Ok((
                 Repo {
+                    borrowed,
                     root,
                     checkout,
                     config,
@@ -157,6 +167,7 @@ impl Repo {
             )),
             Err(err) => Ok((
                 Repo {
+                    borrowed,
                     root,
                     checkout,
                     config: Config::default(),
@@ -173,6 +184,11 @@ impl Repo {
     /// own answer for it — both callers resolve each once and share them with
     /// [`checkout_of`], so this makes no `git rev-parse` call that a caller
     /// has not already paid for.
+    ///
+    /// The root is the top of the repo: one project per clone. The main
+    /// checkout's setup wins when it has one, so a linked worktree on a
+    /// branch with none reads it. A `.spoolway/` found anywhere else below
+    /// the top is refused by name rather than taken as a second root.
     fn root(start: &Path, main: Option<&Path>) -> Result<PathBuf> {
         if let Some(main) = main.filter(|dir| crate::config::setup_dir_in(dir).is_dir()) {
             return Ok(main.to_path_buf());
@@ -194,6 +210,12 @@ impl Repo {
             .filter(|dir| *dir != state_root && crate::config::setup_dir_in(dir) != state_root)
             .find(|dir| crate::config::setup_dir_in(dir).is_dir());
         if let Some(dir) = found {
+            // One project per clone, at the top of the repo. A setup found
+            // further down would be a second root for the same clone, with
+            // its own queue and an id stamped over the first one's.
+            if let Some(top) = top.as_deref().filter(|top| dir != *top) {
+                bail!("{}", not_at_the_top(dir, top));
+            }
             return Ok(dir.to_path_buf());
         }
 
@@ -375,7 +397,7 @@ impl Repo {
         let mut path: Option<PathBuf> = None;
         for line in listing.lines() {
             if let Some(rest) = line.strip_prefix("worktree ") {
-                path = Some(PathBuf::from(rest.trim()));
+                path = Some(PathBuf::from(rest));
             } else if let Some(reference) = line.strip_prefix("branch ")
                 && reference.trim() == wanted
             {
@@ -751,16 +773,28 @@ impl Repo {
         branch_at(&self.root)
     }
 
+    /// Whether the command ran in a linked worktree, whether that worktree
+    /// carries its own `.spoolway/` (`checkout` differs from `root`) or
+    /// borrows the main checkout's. The writers that must land in the file
+    /// the dispatcher reads refuse on it.
+    pub fn in_linked_worktree(&self) -> bool {
+        self.checkout != self.root || self.borrowed
+    }
+
     /// The `checkout:` fact a command that reads the tracked control plane
     /// prints above its own output — `None` when `checkout` and `root` name
     /// the same directory, which is the common case: almost every command
     /// runs in the main checkout, where saying so would only be noise.
     ///
-    /// Built once, here, so the line and its `--json` twin ([`CheckoutNote`])
-    /// always agree — both are read off the same [`branch_at`] call rather
-    /// than each call site asking git again.
+    /// The exception is a [`borrowed`](Repo::borrowed) checkout: it is the
+    /// main checkout, but the command ran in a linked worktree, and the
+    /// line is what tells a reader whose setup they are looking at.
+    ///
+    /// Built once, here, so the line and its `--json` twin
+    /// ([`CheckoutNote`]) always agree — both are read off the same
+    /// [`branch_at`] call rather than each call site asking git again.
     pub fn checkout_note(&self) -> Result<Option<CheckoutNote>> {
-        if self.checkout == self.root {
+        if !self.in_linked_worktree() {
             return Ok(None);
         }
         Ok(Some(CheckoutNote {
@@ -852,12 +886,17 @@ pub(crate) fn main_checkout(dir: &Path) -> Option<PathBuf> {
         .and_then(|common| recorded_or_parent(&common))
 }
 
-/// The checkout a common git directory belongs to: the common directory's
-/// own parent, verified, or whatever [`stamped_id`] recorded there when the
-/// parent is not it, or the workspace clone entry sharing this common
-/// directory (see [`listed_checkout_of`]). `None` when none of the three
-/// holds — a fresh `--separate-git-dir` clone or submodule nothing has
-/// stamped or listed yet.
+/// The checkout a common git directory belongs to: whatever [`stamped_id`]
+/// recorded there when it differs from the common directory's parent and
+/// still resolves to this git directory, else the parent, verified, else the
+/// workspace clone entry sharing this common directory (see
+/// [`listed_checkout_of`]). `None` when none of the three holds — a fresh
+/// `--separate-git-dir` clone or submodule nothing has stamped or listed yet.
+///
+/// The recorded path comes first because a git directory named `.git`
+/// (`gitdirs/foo/.git`) makes git read its parent as a checkout of the same
+/// repository, so the parent verifies for the wrong folder. When the record
+/// equals the parent, the ordinary layout, nothing extra is asked of git.
 ///
 /// The parent is right for the ordinary layout, where `.git` sits directly
 /// inside the checkout — but *verified*, not assumed, by asking what
@@ -887,12 +926,25 @@ pub(crate) fn main_checkout(dir: &Path) -> Option<PathBuf> {
 /// all — `main_checkout`'s own callers, and [`crate::main::init_root`],
 /// already treat that case correctly.
 fn recorded_or_parent(common: &Path) -> Option<PathBuf> {
+    // A `--separate-git-dir` checkout whose git directory is itself named
+    // `.git` (`gitdirs/foo/.git`) makes git see `gitdirs/foo` as a checkout
+    // of this same repository, so the parent check below passes for the
+    // wrong folder. A recorded path that differs from the parent and still
+    // resolves to this git directory is the real checkout, and wins. When it
+    // equals the parent, the ordinary layout, nothing extra is asked of git.
+    let recorded = read_recorded_root(common);
+    if let Some(recorded) = recorded.as_ref().filter(|recorded| {
+        Some(recorded.as_path()) != common.parent()
+            && common_git_dir(recorded).ok().flatten().as_deref() == Some(common)
+    }) {
+        return Some(recorded.clone());
+    }
     if let Some(parent) = common.parent()
         && common_git_dir(parent).ok().flatten().as_deref() == Some(common)
     {
         return Some(parent.to_path_buf());
     }
-    read_recorded_root(common).or_else(|| listed_checkout_of(common))
+    recorded.or_else(|| listed_checkout_of(common))
 }
 
 /// The checkout a workspace's `project.toml` lists whose common git
@@ -932,7 +984,7 @@ pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
     let ask = |flag: &str| {
         run(dir, "git", &["rev-parse", "--path-format=absolute", flag])
             .ok()
-            .and_then(|out| PathBuf::from(out.trim()).canonical().ok())
+            .and_then(|out| git_path(&out).canonical().ok())
     };
     match (ask("--git-dir"), ask("--git-common-dir")) {
         (Some(own), Some(common)) => own != common,
@@ -946,7 +998,7 @@ pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
 /// falls back to).
 fn read_recorded_root(common: &Path) -> Option<PathBuf> {
     let raw = std::fs::read_to_string(common.join(ROOT_FILE)).ok()?;
-    let path = PathBuf::from(raw.trim());
+    let path = git_path(&raw);
     path.is_dir().then_some(path)
 }
 
@@ -993,7 +1045,7 @@ fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
             return Err(err);
         }
     };
-    let common = PathBuf::from(common.trim());
+    let common = git_path(&common);
     // A bare repo has no checkout to speak of — a real fact about it, not a
     // failure to resolve one. Asked of git directly, not guessed from the
     // common directory's name: a `--separate-git-dir` clone can name its
@@ -3531,11 +3583,12 @@ pub fn git_dir(worktree: &Path) -> Result<PathBuf> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .with_context(|| format!("resolving the git directory for {}", worktree.display()))?;
-    Ok(PathBuf::from(out.trim()))
+    Ok(git_path(&out))
 }
 
-/// The checkout `start` itself sits in — the linked worktree when `start` is
-/// inside one, `root` otherwise.
+/// The checkout `start` itself sits in, and whether it is borrowed — the
+/// linked worktree when `start` is inside one that carries its own
+/// `.spoolway/`, `root` otherwise.
 ///
 /// `start` is inside a linked worktree exactly when it is not inside `main`
 /// (`main_checkout`'s answer for it): a linked worktree is a sibling of the
@@ -3545,21 +3598,25 @@ pub fn git_dir(worktree: &Path) -> Result<PathBuf> {
 /// `start` carrying a `.git` — a file there, pointing back at the main
 /// checkout's git dir, where the main checkout's own `.git` is a directory.
 ///
-/// Every other case is the main checkout itself, so `root` already names it
-/// — including the case a naive `.git`-ancestor walk from `start` gets
-/// wrong: a project whose `.spoolway/` sits below the checkout's own top
-/// (`root` found via the ancestor search in [`Repo::root`], not through git
-/// at all) still has its single `.git` higher up, at the checkout's real
-/// top, which is not `root` and would be the wrong answer to hand back as
-/// `checkout`.
-fn checkout_of(start: &Path, root: &Path, main: Option<&Path>) -> PathBuf {
+/// A worktree on a branch with no `.spoolway/` has no setup of its own to
+/// read, and `root` has one. The answer is then `root` with `true`, so
+/// every command reads the main checkout's setup and says so, rather than
+/// finding nothing where the worktree's setup would be.
+///
+/// Every other case is the main checkout itself, so `root` already names it.
+fn checkout_of(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool) {
     match main {
-        Some(main) if !start.starts_with(main) => start
-            .ancestors()
-            .find(|dir| dir.join(".git").exists())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| root.to_path_buf()),
-        _ => root.to_path_buf(),
+        Some(main) if !start.starts_with(main) => {
+            let worktree = start.ancestors().find(|dir| dir.join(".git").exists());
+            match worktree {
+                Some(dir) if crate::config::tracked_setup_dir_in(dir).is_dir() => {
+                    (dir.to_path_buf(), false)
+                }
+                Some(_) => (root.to_path_buf(), true),
+                None => (root.to_path_buf(), false),
+            }
+        }
+        _ => (root.to_path_buf(), false),
     }
 }
 
@@ -3577,9 +3634,9 @@ fn checkout_of(start: &Path, root: &Path, main: Option<&Path>) -> PathBuf {
 /// [`workspace_clone`]'s own doc for why `root`, not `start` or the
 /// worktree path `checkout_of` might otherwise answer, is what a clone
 /// entry's own `root` is matched against.
-fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> PathBuf {
+fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool) {
     if workspace_clone(root).is_some() {
-        return root.to_path_buf();
+        return (root.to_path_buf(), false);
     }
     checkout_of(start, root, main)
 }
@@ -3752,11 +3809,90 @@ pub(crate) fn repo_mode_queued_tasks(root: &Path) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// A path git printed on a line of its own, minus the line ending and nothing
+/// else. `trim()` also took a trailing space that belongs to the folder's
+/// name, so a repo at `/work/app ` was read as `/work/app` — a different
+/// folder, or none — and the clone's id was stamped into the wrong place.
+fn git_path(out: &str) -> PathBuf {
+    let line = out.strip_suffix('\n').unwrap_or(out);
+    PathBuf::from(line.strip_suffix('\r').unwrap_or(line))
+}
+
+/// The refusal for a `.spoolway/` that sits below the top of the repo: it
+/// names that folder and where the setup belongs. Spoolway moves and deletes
+/// nothing of the person's, so both ways out are theirs to take.
+fn not_at_the_top(nested: &Path, top: &Path) -> String {
+    format!(
+        "{} is not at the top of the repo.\n  A project's setup lives at {} — move it there, \
+         or remove it.",
+        crate::config::tracked_setup_dir_in(nested).display(),
+        crate::config::tracked_setup_dir_in(top).display(),
+    )
+}
+
+/// Refuse a repo whose top is `top` when it holds no setup of its own and a
+/// `.spoolway/` sits below it, so `init` never sets up a second project
+/// beside one it would later report as a second checkout of the same clone.
+///
+/// A top that already has its setup is left alone, in the checkout or in the
+/// workspace that lists it ([`crate::config::setup_dir_in`]): [`Repo::root`]
+/// lets it win over anything nested, so re-running `init` there is safe, and
+/// a repo that tracks a `.spoolway/` in a test fixture would otherwise never
+/// be able to. A home-mode clone writes nothing into the checkout, so the
+/// advice to move a setup to the top would be wrong for it.
+///
+/// Asked of git rather than walked on disk: the tracked files and the
+/// untracked ones that are not ignored are the folders a person would
+/// commit, and a dependency folder or build output holding a `.spoolway`
+/// of its own is not theirs. Answers the first such folder in git's order.
+/// A `git` failure is an error, not an empty answer: a corrupt index would
+/// otherwise read as "nothing nested" and `init` would write regardless.
+pub fn refuse_nested_setup(top: &Path) -> Result<()> {
+    if crate::config::setup_dir_in(top).is_dir() {
+        return Ok(());
+    }
+    let listing = run(
+        top,
+        "git",
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ":(glob)**/.spoolway/**",
+        ],
+    )
+    .with_context(|| format!("looking for a `.spoolway/` below {}", top.display()))?;
+    let state_dir = crate::config::STATE_DIR;
+    for file in listing.split('\0') {
+        let path = Path::new(file);
+        let Some(at) = path
+            .components()
+            .position(|part| part.as_os_str() == state_dir)
+        else {
+            continue;
+        };
+        if at > 0 {
+            let nested = top.join(path.components().take(at).collect::<PathBuf>());
+            // Spoolway's own state directory is not a project's setup, even
+            // when `$HOME` sits inside the repo — the same exclusion
+            // [`Repo::root`]'s walk makes.
+            if nested.join(state_dir) == global_state_root() {
+                continue;
+            }
+            bail!("{}", not_at_the_top(&nested, top));
+        }
+    }
+    Ok(())
+}
+
 fn git_toplevel(dir: &Path) -> Result<PathBuf> {
     let out = run(dir, "git", &["rev-parse", "--show-toplevel"])?;
     // The same spelling rule as `main_checkout`: git's answer, in the form
     // `canonicalize` would give, so paths derived from either compare equal.
-    let top = PathBuf::from(out.trim());
+    let top = git_path(&out);
     top.canonical()
         .with_context(|| format!("resolving {}", top.display()))
 }
@@ -3780,8 +3916,11 @@ pub fn toplevel_raw(cwd: &Path) -> Result<PathBuf> {
         );
     }
     let mut bytes = output.stdout;
-    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+    if bytes.last() == Some(&b'\n') {
         bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
     }
     #[cfg(unix)]
     {
@@ -4704,33 +4843,6 @@ mod tests {
         assert!(repo.remote_branch_exists("task/gh-412-checkout"));
     }
 
-    /// The trap `checkout_of` used to fall into: a git repo whose single
-    /// `.git` sits above a `.spoolway/` planted in a subdirectory of it.
-    /// `root` is found by `Repo::root`'s ancestor search, not through git —
-    /// and a `checkout` computed by naively walking up `start` for the
-    /// nearest `.git` would land one level higher, outside the very project
-    /// `root` names.
-    #[test]
-    fn a_spoolway_project_nested_below_its_gits_own_top_reads_checkout_as_root() {
-        let base = crate::scratch::root("repo-test-nested-state");
-        let _ = std::fs::remove_dir_all(&base);
-        let sub = base.join("sub");
-        std::fs::create_dir_all(sub.join(crate::config::STATE_DIR)).unwrap();
-        git(&base, &["init", "-q", "-b", "work"]);
-
-        let (repo, _home) = discover_registered(&sub).unwrap();
-        assert_eq!(
-            repo.root.canonical().unwrap(),
-            sub.canonical().unwrap(),
-            "root is found via the .spoolway ancestor search here, not through git"
-        );
-        assert_eq!(
-            repo.checkout, repo.root,
-            "checkout must not land at the git top above root — there is no \
-             linked worktree here, only one checkout, and root already names it"
-        );
-    }
-
     /// A workspace holds this checkout's repository when any of its clone
     /// entries shares this checkout's root commit — not only the first. A
     /// `git clone` of a local checkout agrees on the root commit even though
@@ -4858,6 +4970,7 @@ mod tests {
         let base = crate::scratch::root("repo-test-byproduct-dirs");
         let _ = std::fs::remove_dir_all(&base);
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config: crate::config::Config::default(),
@@ -4950,6 +5063,177 @@ mod tests {
         assert!(
             !home.join(crate::config::STATE_DIR).exists(),
             "no state directory may be created for a repository that is not a project"
+        );
+    }
+
+    /// A `.spoolway/` below the top of the repo is not a project of its own:
+    /// the walk up from inside it used to take it for the root, a second one
+    /// for the same clone. It is refused by name, with the place the setup
+    /// belongs, and nothing is created for it.
+    #[test]
+    fn a_setup_below_the_top_of_the_repo_is_refused_by_name() {
+        let base = crate::scratch::root("repo-test-nested-setup");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        let nested = work.join("vendor").join(crate::config::STATE_DIR);
+        std::fs::create_dir_all(nested.join("deeper")).unwrap();
+        std::fs::write(nested.join("config.toml"), "").unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+
+        let (home, _home_guard) = scratch_home("nested-setup");
+        let inside = work.join("vendor").join("src");
+        std::fs::create_dir_all(&inside).unwrap();
+        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&inside))
+            .expect_err("a setup below the top of the repo is not a root");
+        let said = format!("{err:#}");
+        let top = work.canonical().unwrap();
+        assert!(
+            said.contains(&format!("{}", top.join("vendor/.spoolway").display()))
+                && said.contains("is not at the top of the repo")
+                && said.contains(&format!("{}", top.join(".spoolway").display())),
+            "{said}"
+        );
+        assert!(
+            !home.join(crate::config::STATE_DIR).exists(),
+            "no state directory may be created for the refused setup"
+        );
+
+        // `init` asks for the same fact before it writes, from the top.
+        let said = format!("{:#}", refuse_nested_setup(&top).unwrap_err());
+        assert!(
+            said.contains("vendor/.spoolway is not at the top"),
+            "{said}"
+        );
+        // A top-level setup alone is the ordinary project.
+        let plain = base.join("plain");
+        std::fs::create_dir_all(plain.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(plain.join(crate::config::STATE_DIR).join("config.toml"), "").unwrap();
+        git(&plain, &["init", "-q", "-b", "main"]);
+        refuse_nested_setup(&plain.canonical().unwrap()).unwrap();
+    }
+
+    /// A linked worktree on a branch that carries no `.spoolway/` reads the
+    /// main checkout's setup. The `checkout:` line names the main checkout,
+    /// because that is whose setup was read, and `borrowed` is what `sync`
+    /// refuses on.
+    #[test]
+    fn a_worktree_with_no_setup_reads_the_main_checkouts_and_says_so() {
+        let (_origin, work, _base_guard) = fixture("borrowed");
+        let wt = work.parent().unwrap().join("bare-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/bare",
+                wt.to_str().unwrap(),
+            ],
+        );
+        git(&wt, &["rm", "-q", "-r", crate::config::STATE_DIR]);
+        git(&wt, &["commit", "-q", "-m", "drop the setup"]);
+
+        let (repo, _home) = discover_registered_as(&work, &wt).unwrap();
+        assert!(repo.borrowed);
+        assert_eq!(repo.root.canonical().unwrap(), work.canonical().unwrap());
+        assert_eq!(repo.checkout, repo.root);
+        let note = repo
+            .checkout_note()
+            .unwrap()
+            .expect("the main checkout's setup was read, and the line says so");
+        assert_eq!(note.path.canonical().unwrap(), work.canonical().unwrap());
+        assert_eq!(note.branch, "plan/x");
+
+        git(
+            &work,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+    }
+
+    /// A `--separate-git-dir` whose directory is itself named `.git` makes
+    /// git read the folder above it as a checkout too. Both the main checkout
+    /// and its linked worktrees must still resolve to the checkout `init`
+    /// recorded.
+    #[test]
+    fn a_separate_git_dir_named_dot_git_still_resolves_to_the_checkout() {
+        let base = crate::scratch::root("repo-test-separate-dot-git");
+        let _ = std::fs::remove_dir_all(&base);
+        let git_dir = base.join("gitdirs").join("foo").join(".git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("f.txt"), "x").unwrap();
+        git(&work, &["add", "f.txt"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+        let wt = base.join("wt");
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "b", wt.to_str().unwrap()],
+        );
+        stamped_id(&work.canonical().unwrap()).unwrap(); // stands in for `spoolway init`
+
+        for from in [&work, &wt] {
+            assert_eq!(
+                main_checkout(from).unwrap().canonical().unwrap(),
+                work.canonical().unwrap(),
+                "from {from:?}"
+            );
+        }
+    }
+
+    /// A home-mode clone keeps its setup in a workspace, so a `.spoolway/`
+    /// tracked below its top is not a reason to refuse `init` again.
+    #[test]
+    fn a_listed_clone_may_keep_a_setup_below_its_top() {
+        let base = crate::scratch::root("repo-test-nested-home-mode");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(work.join("fixtures").join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(work.join("fixtures/.spoolway/config.toml"), "").unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        let top = work.canonical().unwrap();
+        let fake_home = base.join("realhome");
+
+        crate::platform::test_home::with_home(&fake_home, || {
+            refuse_nested_setup(&top).expect_err("no setup of its own yet");
+            let clone = create_workspace(&top).unwrap();
+            std::fs::create_dir_all(clone.config_dir()).unwrap();
+            refuse_nested_setup(&top).expect("the workspace's setup is the top's");
+        });
+    }
+
+    /// A folder name ending in a space is part of the name. Trimming git's
+    /// answer took it off, so the repo was read as a folder that does not
+    /// exist.
+    #[test]
+    fn a_trailing_space_in_the_repo_path_is_kept() {
+        assert_eq!(git_path("/work/app \n"), PathBuf::from("/work/app "));
+        assert_eq!(git_path("/work/app \r\n"), PathBuf::from("/work/app "));
+        assert_eq!(git_path("/work/app"), PathBuf::from("/work/app"));
+
+        let base = crate::scratch::root("repo-test-trailing-space");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("app ");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        assert_eq!(toplevel_raw(&work).unwrap(), work.canonical().unwrap());
+        assert_eq!(git_toplevel(&work).unwrap(), work.canonical().unwrap());
+        assert_eq!(
+            common_git_dir(&work).unwrap().unwrap(),
+            work.join(".git").canonical().unwrap()
         );
     }
 

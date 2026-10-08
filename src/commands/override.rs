@@ -63,7 +63,7 @@ fn at_root(repo: &Repo) -> Repo {
 /// dispatcher reads `repo.root`'s files, never a worktree's own copy, so a
 /// promote here would sit in a file nothing reads until the branch merges.
 fn refuse_in_worktree(repo: &Repo, target: &str) -> Result<()> {
-    if repo.checkout != repo.root {
+    if repo.in_linked_worktree() {
         bail!(
             "the dispatcher reads the project's tracked files, not this worktree's.\n  spoolway \
              -C {} override promote {target}",
@@ -725,6 +725,7 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let config = Config::default();
             let repo = Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

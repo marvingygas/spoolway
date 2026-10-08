@@ -7752,6 +7752,7 @@ mod tests {
         crate::platform::test_home::pin(&sibling(&root, "home"));
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,

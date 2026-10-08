@@ -225,6 +225,7 @@ mod tests {
         )
         .unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),

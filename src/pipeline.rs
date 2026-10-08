@@ -5173,6 +5173,7 @@ mod tests {
             );
 
             let repo = crate::repo::Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

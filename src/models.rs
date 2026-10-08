@@ -764,6 +764,7 @@ mod tests {
     fn vendor_success_reports_only_the_written_path() {
         let checkout = crate::scratch::root("models-vendor-report");
         let repo = Repo {
+            borrowed: false,
             root: checkout.to_path_buf(),
             checkout: checkout.to_path_buf(),
             config: Default::default(),

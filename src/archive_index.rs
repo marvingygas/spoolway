@@ -552,6 +552,7 @@ mod tests {
         let base = root(name);
         let _ = std::fs::remove_dir_all(&base);
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config: crate::config::Config::default(),

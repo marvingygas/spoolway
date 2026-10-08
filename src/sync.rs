@@ -29,7 +29,10 @@
 //! land on that branch — where it is reviewed and merged — rather than on
 //! whatever the main checkout happens to have out. `config set` and
 //! `override promote` keep the opposite rule and refuse outright in a linked
-//! worktree; this command does not.
+//! worktree; this command does not — except in a worktree whose branch has no
+//! `.spoolway/` at all. Its setup is the main checkout's, so there is no
+//! branch copy to refresh, and writing one would start a setup the branch
+//! never had. That case is refused, naming the main checkout.
 //!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a
@@ -56,7 +59,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::SyncArgs;
 use crate::repo::Repo;
@@ -183,6 +186,16 @@ fn closing_line(dry_run: bool, nothing_to_do: bool, refused: bool) -> &'static s
 }
 
 pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
+    if repo.borrowed {
+        bail!(
+            "this linked worktree has no `.spoolway/` on its branch, so it reads the setup of {} \
+             — `sync` would start a second setup in the worktree\n  run `spoolway sync` in {} \
+             instead",
+            repo.checkout.display(),
+            repo.checkout.display(),
+        );
+    }
+
     if !args.replace.is_empty() {
         return replace(repo, args);
     }
@@ -1896,6 +1909,7 @@ mod tests {
         let home = root.join(".home");
         (
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
@@ -1903,6 +1917,27 @@ mod tests {
             },
             root,
         )
+    }
+
+    /// A linked worktree whose branch has no `.spoolway/` reads the main
+    /// checkout's setup. `sync` there would write a setup the branch never
+    /// had, so it refuses, names the main checkout, and writes nothing.
+    #[test]
+    fn sync_refuses_in_a_worktree_that_borrows_the_main_checkouts_setup() {
+        let (mut repo, root) = fixture("borrowed");
+        repo.borrowed = true;
+
+        let err = run(&repo, &args(), false).expect_err("a borrowed setup is not this worktree's");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("no `.spoolway/` on its branch")
+                && said.contains(&root.display().to_string()),
+            "{said}"
+        );
+        assert!(
+            !root.join(".spoolway/config.toml").exists(),
+            "nothing may be written before the refusal"
+        );
     }
 
     fn args() -> SyncArgs {
@@ -2788,6 +2823,7 @@ mod tests {
         std::fs::create_dir_all(&checkout).unwrap();
         let home = root.join(".home");
         let repo = Repo {
+            borrowed: false,
             checkout: checkout.clone(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -2825,6 +2861,7 @@ mod tests {
         std::fs::create_dir_all(checkout.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let home = root.join(".home");
         let repo = Repo {
+            borrowed: false,
             checkout: checkout.clone(),
             root: root.to_path_buf(),
             config: Config::default(),

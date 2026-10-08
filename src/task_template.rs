@@ -179,6 +179,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let home = root.join(".home");
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -198,6 +199,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -223,6 +225,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("impl-strict.md"), "the tracked skeleton\n").unwrap();
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -260,6 +263,7 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -297,6 +301,7 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -345,6 +350,7 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),

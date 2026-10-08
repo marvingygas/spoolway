@@ -42,6 +42,12 @@ shares one queue and one dispatcher.
 
 A command reads `.spoolway/` from the checkout it runs in. When that differs from the main
 checkout, the command prints a [`checkout:` line](cli-reference.md#the-checkout-line) first.
+A linked worktree on a branch with no `.spoolway/` reads the main checkout's instead, and the
+line names the main checkout. `spoolway sync` refuses to write a setup into such a worktree.
+
+There is one project per clone, and its `.spoolway/` sits at the top of the repo. A
+`.spoolway/` anywhere below the top is refused by name, and the refusal says where the setup
+belongs. Spoolway does not move or delete it for you.
 
 ## Home mode
 

@@ -857,6 +857,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".spoolway/hooks")).unwrap();
         (
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),

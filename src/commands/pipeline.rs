@@ -1786,7 +1786,7 @@ fn print_moved(repo: &Repo, json: bool, moved: &[Moved]) -> Result<()> {
 /// mode, where [`crate::local::is_repo_mode`] is false because the whole
 /// setup is already private and there is nothing to promote into.
 pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
-    if repo.checkout != repo.root {
+    if repo.in_linked_worktree() {
         bail!(
             "the dispatcher reads the project's tracked files, not this worktree's.\n  spoolway \
              -C {} pipeline promote {name}",
@@ -2098,6 +2098,7 @@ mod tests {
         let home = root.join(".home");
         (
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
@@ -3301,6 +3302,7 @@ mod tests {
 
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -3353,6 +3355,7 @@ mod tests {
             )
             .expect("init");
             Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -3540,6 +3543,7 @@ mod tests {
         config.agents.insert("flaky".into(), flaky);
         let home = root.join(".home");
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -3572,6 +3576,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3607,6 +3612,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3653,6 +3659,7 @@ mod tests {
         .unwrap();
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3702,6 +3709,7 @@ mod tests {
         config.agents.remove("pi");
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3817,6 +3825,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3851,6 +3860,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3892,6 +3902,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -3931,6 +3942,7 @@ mod tests {
         config.agents.insert("flaky".into(), flaky);
         let home = root.join(".home");
         let repo = Repo {
+            borrowed: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -3968,6 +3980,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -4009,6 +4022,7 @@ mod tests {
         init_at(&root);
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -4192,6 +4206,7 @@ mod tests {
         std::fs::write(Pipelines::file_in(&root, "default"), &text).unwrap();
 
         let repo = Repo {
+            borrowed: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -4267,6 +4282,7 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let config = Config::default();
             let repo = Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

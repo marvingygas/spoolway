@@ -78,7 +78,8 @@ pub fn config_get(repo: &Repo, key: &str, json: bool) -> Result<()> {
 
 /// Write one key into the project's own config.
 ///
-/// Refuses inside a linked worktree. The dispatcher only ever reads
+/// Refuses inside a linked worktree, including one that carries no
+/// `.spoolway/` and reads the main checkout's. The dispatcher only ever reads
 /// `repo.root`'s `config.toml`, never a worktree's own copy — so a write here
 /// would sit in a file nothing reads until the branch merges, silently. `-C`
 /// is the way around it, already built in, so the refusal names the exact
@@ -86,7 +87,7 @@ pub fn config_get(repo: &Repo, key: &str, json: bool) -> Result<()> {
 /// main checkout `checkout` and `root` are the same directory, so nothing
 /// here changes for it.
 pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
-    if repo.checkout != repo.root {
+    if repo.in_linked_worktree() {
         bail!(
             "the dispatcher reads the project's config, not this worktree's.\n  spoolway -C {} \
              config set {key} {value}",
@@ -587,6 +588,7 @@ mod tests {
             std::fs::create_dir_all(clone.config_dir()).unwrap();
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
+                borrowed: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),

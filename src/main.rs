@@ -240,10 +240,12 @@ fn run() -> Result<()> {
         // Every read below is against `repo.checkout`, not `repo.root`: a
         // command answers about the file actually in front of it. `set` and
         // `override promote` are the exceptions that write `repo.root`, and
-        // refuse first if a linked worktree's `checkout` differs from it.
+        // refuse first in a linked worktree, whether it has a setup of its
+        // own (`checkout` differs from `root`) or reads the main checkout's.
         // `sync`, further down, writes too, but against `repo.checkout` —
         // see its own module doc — so it stays in step with every read here
-        // rather than joining `set`'s exception. `update` writes no project
+        // rather than joining `set`'s exception, and refuses only in a
+        // worktree that reads the main checkout's setup. `update` writes no project
         // file at all any more, and is handled above, before a project is
         // even discovered.
         Command::Config(ConfigCommand::Contract) => {
@@ -687,39 +689,52 @@ fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
 /// `cwd` is a linked worktree of one, the git toplevel if there is one,
 /// otherwise here.
 ///
-/// `repo::main_checkout` first, ahead of `toplevel_raw`: a linked
-/// worktree's own `git rev-parse --show-toplevel` answers with the
+/// A linked worktree's own `git rev-parse --show-toplevel` answers with the
 /// worktree itself, which is never where `init` should write — it would
 /// set up a second, ignored project there and still stamp the shared
-/// `.git`. `main_checkout` answers `Some` of the checkout itself for every
-/// ordinary repository too, not only a linked worktree's, so `toplevel_raw`
-/// is reached only for a non-git folder or a checkout `main_checkout`
-/// cannot yet resolve — a fresh `--separate-git-dir` clone or submodule
-/// nothing has stamped or listed in a workspace.
+/// `.git`. So a linked worktree asks `repo::main_checkout`, and every other
+/// checkout, whatever the layout of its git directory, takes the toplevel
+/// git reports for it.
 ///
-/// From the main checkout of such a clone, `toplevel_raw` answers the
-/// checkout itself, which is right. From a linked worktree of one it
-/// answers the worktree, and git has no way to name the main checkout
-/// either (`git worktree list` gives the git directory in its place), so
-/// that case is refused: setting up the worktree would register a path the
-/// main checkout and every other worktree never find again.
+/// A linked worktree of a `--separate-git-dir` clone that nothing has
+/// stamped or listed is refused: git has no way to name the main checkout
+/// (`git worktree list` gives the git directory in its place), and setting
+/// up the worktree would register a path the main checkout and every other
+/// worktree never find again.
+///
+/// A repo whose top has no setup yet and that carries a `.spoolway/` below
+/// it is refused too, by `repo::refuse_nested_setup`.
 fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
-    if let Some(main) = repo::main_checkout(cwd) {
-        return Ok(main);
-    }
-    if repo::is_linked_worktree(cwd) {
-        anyhow::bail!(
-            "{} is a linked worktree, and spoolway cannot tell which checkout it was cut from, \
-             because its git directory sits outside that checkout\n  run `spoolway init` in \
-             the main checkout first, or pass `-C <main checkout>` — every worktree finds the \
-             project from there afterwards",
-            cwd.display()
-        );
-    }
-    match repo::toplevel_raw(cwd) {
-        Ok(top) => Ok(top),
-        Err(_) => Ok(cwd.to_path_buf()),
-    }
+    let top = if repo::is_linked_worktree(cwd) {
+        let Some(main) = repo::main_checkout(cwd) else {
+            anyhow::bail!(
+                "{} is a linked worktree, and spoolway cannot tell which checkout it was cut from, \
+                 because its git directory sits outside that checkout\n  run `spoolway init` in \
+                 the main checkout first, or pass `-C <main checkout>` — every worktree finds \
+                 the project from there afterwards",
+                cwd.display()
+            );
+        };
+        main
+    } else {
+        // A main checkout is the top git reports for it, whatever layout its
+        // git directory has. Asking `main_checkout` first sent `init` in a
+        // `--separate-git-dir` checkout to whichever folder an earlier stamp
+        // had recorded for the shared git directory — the original, when the
+        // checkout was a copy of it — and wrote the setup there.
+        match repo::toplevel_raw(cwd) {
+            Ok(top) => top,
+            // Not a repository: there is no top to be below, so `init` goes
+            // on in the folder it was run in.
+            Err(_) => return Ok(cwd.to_path_buf()),
+        }
+    };
+    // One project per clone, at the top of the repo. A setup further down
+    // would be a second project for the same clone, so `init` refuses to add
+    // a first one beside it — from a linked worktree as much as from the
+    // main checkout.
+    repo::refuse_nested_setup(&top)?;
+    Ok(top)
 }
 
 #[cfg(test)]
@@ -889,5 +904,92 @@ mod tests {
             said.contains("linked worktree") && said.contains("main checkout"),
             "the refusal says to run init in the main checkout: {said}"
         );
+    }
+
+    /// A copy of a `--separate-git-dir` checkout shares the original's git
+    /// directory, so the path an earlier `init` recorded there names the
+    /// original. `init` in the copy must still write into the copy.
+    #[test]
+    fn init_root_in_a_copied_separate_git_dir_checkout_is_the_copy() {
+        let base = crate::scratch::root("init-root-separate-git-dir-copy");
+        let _ = std::fs::remove_dir_all(&base);
+        let git_dir = base.join("repos").join("foo.git");
+        std::fs::create_dir_all(git_dir.parent().unwrap()).unwrap();
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--separate-git-dir={}", git_dir.display()),
+                work.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(
+            git_dir.join("spoolway-root"),
+            work.canonical().unwrap().display().to_string(),
+        )
+        .unwrap();
+        let copy = base.join("copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(
+            copy.join(".git"),
+            std::fs::read_to_string(work.join(".git")).unwrap(),
+        )
+        .unwrap();
+
+        let root = init_root(&copy).unwrap();
+        assert_eq!(root.canonical().unwrap(), copy.canonical().unwrap());
+    }
+
+    /// One project per clone: a repo with a `.spoolway/` below its top is
+    /// refused before `init` writes a second one beside it.
+    #[test]
+    fn init_root_refuses_a_repo_with_a_setup_below_its_top() {
+        let base = crate::scratch::root("init-root-nested-setup");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(work.join("vendor").join(".spoolway")).unwrap();
+        std::fs::write(work.join("vendor/.spoolway/config.toml"), "").unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+
+        let err = init_root(&work).expect_err("a nested setup is not a place to add a second one");
+        assert!(
+            format!("{err:#}").contains("vendor/.spoolway is not at the top of the repo"),
+            "{err:#}"
+        );
+    }
+
+    /// The refusal holds from a linked worktree too, and a top that already
+    /// has its setup is not refused for a `.spoolway/` kept below it, such as
+    /// a fixture.
+    #[test]
+    fn init_root_refuses_nested_setups_from_a_worktree_but_not_beside_a_top_one() {
+        let base = crate::scratch::root("init-root-nested-worktree");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(work.join("vendor").join(".spoolway")).unwrap();
+        std::fs::write(work.join("vendor/.spoolway/config.toml"), "").unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "x"]);
+        let wt = base.join("wt");
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "b", wt.to_str().unwrap()],
+        );
+
+        let err = init_root(&wt).expect_err("a worktree is no way around the refusal");
+        assert!(
+            format!("{err:#}").contains("vendor/.spoolway is not at the top of the repo"),
+            "{err:#}"
+        );
+
+        std::fs::create_dir_all(work.join(".spoolway")).unwrap();
+        init_root(&work).expect("a top that has its setup may run init again");
     }
 }

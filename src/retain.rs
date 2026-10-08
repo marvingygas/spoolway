@@ -308,6 +308,7 @@ mod tests {
         config.housekeeping.retention_days = 0;
         config.housekeeping.archive_retention_days = 0;
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -348,6 +349,7 @@ mod tests {
         config.housekeeping.retention_days = 30;
         assert_eq!(config.housekeeping.archive_retention_days, 0);
         let mut repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -385,6 +387,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.retention_days = 30;
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -452,6 +455,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.archive_retention_days = 30;
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -502,6 +506,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.retention_days = 30;
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -566,6 +571,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.housekeeping.retention_days = 1;
         let repo = Repo {
+            borrowed: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,

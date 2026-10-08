@@ -145,12 +145,14 @@ mod tests {
     fn a_renamed_checkout_keeps_the_same_log_file() {
         let home = crate::scratch::root("problem-log-home-k7f2q9");
         let before = Repo {
+            borrowed: false,
             root: crate::scratch::root("problem-log-before").to_path_buf(),
             checkout: crate::scratch::root("problem-log-before").to_path_buf(),
             config: Config::default(),
             home: home.to_path_buf(),
         };
         let after = Repo {
+            borrowed: false,
             root: crate::scratch::root("problem-log-after-renamed").to_path_buf(),
             checkout: crate::scratch::root("problem-log-after-renamed").to_path_buf(),
             config: Config::default(),
@@ -211,6 +213,7 @@ mod tests {
     fn a_fixtures_problem_log_stays_under_the_fixtures_own_scratch_home() {
         let fixture_root = crate::scratch::root("problem-log-leak-home");
         let repo = Repo {
+            borrowed: false,
             root: fixture_root.to_path_buf(),
             checkout: fixture_root.to_path_buf(),
             config: Config::default(),

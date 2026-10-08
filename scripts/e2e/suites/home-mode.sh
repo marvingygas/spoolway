@@ -23,6 +23,8 @@
 # The last sections are about the clone's id rather than home mode as such, and
 # run in repo mode: a superproject moved on disk, an `init` cancelled at its
 # first question, and several first commands started at once in a fresh clone.
+# After them come two about where the project's root sits: a `.spoolway/` below
+# the top of the repo, and a linked worktree whose branch has none.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -387,5 +389,50 @@ for round in 1 2 3; do
   rm -rf "$HOME"/.spoolway/par-clone-* "$LIVE"/par.*.rc "$LIVE"/par.*.out
   cd "$LIVE" || exit 2
 done
+
+# ------------------------------------------- the root is the repo top
+# One project per clone, and its `.spoolway/` is at the top of the repo. A
+# setup tracked further down is refused by name, from inside it and by `init`
+# at the top, rather than taken for a second project of the same clone.
+NEST="$LIVE/nested"
+mkdir -p "$NEST/vendor/src"
+must "a repo with a setup below its top" git -C "$NEST" init -q -b main
+mkdir -p "$NEST/vendor/.spoolway"
+printf '[dispatch]\n' > "$NEST/vendor/.spoolway/config.toml"
+must "the nested setup is tracked" git -C "$NEST" add -A
+must "the nested setup is tracked" git -C "$NEST" "${GIT_ID[@]}" commit -qm "vendored setup"
+cd "$NEST/vendor/src" || exit 2
+refuses "a command inside a nested setup names it" "vendor/.spoolway is not at the top of the repo" \
+  "$SPOOLWAY" queue list
+cd "$NEST" || exit 2
+refuses "init at the top refuses a nested setup too" "vendor/.spoolway is not at the top of the repo" \
+  "$SPOOLWAY" init --yes --provider claude --tracker none </dev/null
+refuses "the refusal says where the setup belongs" "A project's setup lives at $(pwd -P)/.spoolway" \
+  "$SPOOLWAY" init --yes --provider claude --tracker none </dev/null
+if [ -e "$NEST/.spoolway" ]; then bad "the refused init wrote nothing"; else ok "the refused init wrote nothing"; fi
+cd "$LIVE" || exit 2
+
+# A lane's worktree normally carries the branch's own `.spoolway/`. One cut on
+# a branch without it reads the main checkout's setup instead: the `checkout:`
+# line names the main checkout, and `sync` refuses to start a setup there.
+BARE="$LIVE/bare-branch"
+mkdir -p "$BARE"
+must "a project to cut a worktree from" git -C "$BARE" init -q -b main
+cd "$BARE" || exit 2
+must "the project is set up" "$SPOOLWAY" init --yes --provider claude --tracker none </dev/null
+must "the setup is committed" git add -A
+must "the setup is committed" git "${GIT_ID[@]}" commit -qm "set up"
+must "a worktree on a branch" git worktree add -q -b no-setup "$LIVE/bare-wt" HEAD
+must "the branch drops its setup" git -C "$LIVE/bare-wt" rm -rq .spoolway
+must "the branch drops its setup" git -C "$LIVE/bare-wt" "${GIT_ID[@]}" commit -qm "no setup here"
+cd "$LIVE/bare-wt" || exit 2
+says "the worktree reads the main checkout's setup" "setup:     $(cd "$BARE" && pwd -P)/.spoolway" \
+  "$SPOOLWAY" config path
+says "the checkout line names the main checkout" "checkout: $(cd "$BARE" && pwd -P) (main)" \
+  "$SPOOLWAY" config path
+refuses "sync will not write a setup into the worktree" "no \`.spoolway/\` on its branch" \
+  "$SPOOLWAY" sync
+if [ -e "$LIVE/bare-wt/.spoolway" ]; then bad "the refused sync wrote nothing"; else ok "the refused sync wrote nothing"; fi
+cd "$LIVE" || exit 2
 
 finish
