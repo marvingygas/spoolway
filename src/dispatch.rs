@@ -17103,10 +17103,18 @@ mod tests {
                 assert!(started.elapsed() < Duration::from_secs(20), "never started");
                 std::thread::sleep(Duration::from_millis(50));
             };
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &format!("-{pid}")])
-                .status();
+            // The syscall, not `kill(1)`: procps 4.0.4 as Ubuntu 24.04 ships
+            // it reads `-9 -1234` as an unknown option `-1`, and answers with
+            // `kill(-1, SIGKILL)` — every process this user owns, the CI
+            // runner included. See `headless::signal_group`.
+            // SAFETY: takes no pointers; a wrong pid earns ESRCH or EPERM.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            let killed = std::time::Instant::now();
             while crate::headless::alive(pid) {
+                assert!(
+                    killed.elapsed() < Duration::from_secs(20),
+                    "kill {kill} never landed"
+                );
                 std::thread::sleep(Duration::from_millis(20));
             }
             Dispatcher::new(&repo, &pipelines, &mux)
