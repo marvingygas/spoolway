@@ -537,7 +537,7 @@ pub struct DispatchConfig {
 
     /// Retired: where a dispatched task's worktree was cut, when it held a
     /// path. Every worktree now lands under the project's own home, with no
-    /// way to move it — see [`crate::mux::worktree_root`]. Kept only so an
+    /// way to move it — see [`crate::repo::Repo::worktree_root`]. Kept only so an
     /// existing config still parses; dropped unconditionally on the next
     /// save. A non-blank value earns a note on every ordinary
     /// [`Config::load`] (see `load_with_notices`), and `spoolway sync` and
@@ -1468,8 +1468,8 @@ impl Config {
     /// dotted key — see [`crate::overrides`]. See [`Self::path_in`] for
     /// which directory a caller should hand it.
     pub fn load(root: &Path) -> Result<Config> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Config::load_impl(root, Some(&overrides))
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Config::load_impl(root, overrides.as_deref())
     }
 
     /// [`Config::load`], with no patch layer applied — for a caller that
@@ -3360,6 +3360,7 @@ mod tests {
         let home = crate::scratch::root(&format!("config-override-{name}-home"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
+        crate::scratch::stamped(&root);
         std::fs::create_dir_all(root.join(STATE_DIR)).unwrap();
         std::fs::write(Config::path_in(&root), tracked).unwrap();
 
@@ -3368,6 +3369,28 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&home).ok();
         result
+    }
+
+    /// A checkout with no id has no overrides layer, and loading its config
+    /// reads the tracked file alone instead of refusing: the first command in
+    /// a fresh clone reads its config before anything has stamped it.
+    #[test]
+    fn a_checkout_with_no_id_loads_its_tracked_config_alone() {
+        let root = crate::scratch::root("config-no-id");
+        let home = crate::scratch::root("config-no-id-home");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+        crate::scratch::git_init(&root, &["-q"]);
+        std::fs::write(
+            Config::path_in(&root),
+            "[unattended]\nblocked_agent = \"tracked\"\n",
+        )
+        .unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            let config = Config::load(&root).unwrap();
+            assert_eq!(config.unattended.blocked_agent, "tracked");
+            assert!(!crate::mux::state_root().exists());
+        });
     }
 
     /// `overrides/config.toml` merges onto the tracked file by dotted key —

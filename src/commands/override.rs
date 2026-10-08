@@ -709,6 +709,7 @@ mod tests {
         let fake_home = crate::scratch::root(&format!("override-cmd-{name}-home"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&fake_home);
+        crate::scratch::stamped(&root);
         std::fs::create_dir_all(root.join(".spoolway/pipelines")).unwrap();
         std::fs::write(root.join(".spoolway/pipelines/demo.yml"), DEMO_PIPELINE).unwrap();
         std::fs::create_dir_all(root.join(".spoolway/prompts/reviewer")).unwrap();

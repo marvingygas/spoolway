@@ -53,7 +53,6 @@ impl Repo {
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
         let checkout = checkout_for(&start, &root, main.as_deref());
-        let config = Config::load(&root)?;
         // Checked here, once, rather than in every accessor that creates a
         // directory under a home on demand: `bind` is what decides which
         // `~/.spoolway/<name>/` this checkout is allowed to write into,
@@ -62,7 +61,12 @@ impl Repo {
         // the same fact as a finding through `discover_lenient`'s
         // `bind_lenient`, and a test fixture that sets `home` by hand never
         // comes through here.
+        //
+        // Ahead of the config, which reads the overrides layer out of this
+        // same home: a first command on a fresh clone has no home until
+        // `bind` makes one.
         let home = bind(&root)?;
+        let config = Config::load(&root)?;
         Ok(Repo {
             root,
             checkout,
@@ -90,9 +94,10 @@ impl Repo {
     /// — a permissions problem or a corrupt repository resolving it must
     /// not stop discovery either — through
     /// [`crate::mux::project_home_lenient`]. The two errors are not
-    /// independent in one direction: `Config::load` resolves the overrides
-    /// layer through the same call `project_home_lenient` just failed, so a
-    /// broken home is read here with `Config::load_tracked` instead,
+    /// independent in one direction: `Config::load` reads the overrides
+    /// layer out of the home that just failed to resolve, and can fail for
+    /// the same reason, so a broken home is read here with
+    /// `Config::load_tracked` instead,
     /// keeping `config_error` a fact about the tracked file alone rather
     /// than a second name for the same failure. A broken config with a
     /// perfectly good home is the ordinary, independent case this still
@@ -100,18 +105,37 @@ impl Repo {
     pub fn discover_lenient(
         start: &Path,
     ) -> Result<(Repo, Option<anyhow::Error>, Option<anyhow::Error>)> {
+        Repo::discover_lenient_as(start, Bind::Settle)
+    }
+
+    /// [`Repo::discover_lenient`] that only reads: it never stamps a `.git`,
+    /// records a move or creates a home, and a project that would need any
+    /// of those comes back with the refusal in its `home_error` instead. For
+    /// the lookup every command runs first, to decide on the update notice —
+    /// before `spoolway init` has asked its first question, and so before
+    /// anything may be written.
+    pub fn discover_lenient_read_only(
+        start: &Path,
+    ) -> Result<(Repo, Option<anyhow::Error>, Option<anyhow::Error>)> {
+        Repo::discover_lenient_as(start, Bind::Peek)
+    }
+
+    fn discover_lenient_as(
+        start: &Path,
+        mode: Bind,
+    ) -> Result<(Repo, Option<anyhow::Error>, Option<anyhow::Error>)> {
         let start = start
             .canonical()
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
         let checkout = checkout_for(&start, &root, main.as_deref());
-        let (home, home_error) = bind_lenient(&root);
-        // `Config::load` resolves the overrides layer through
-        // `crate::mux::project_home` — the same call `home_error` above
-        // just failed — so calling it the ordinary way here would fail
-        // again for the identical reason and report one real problem
-        // (a broken home) as two (a broken home *and* a broken config).
+        let (home, home_error) = bind_lenient(&root, mode);
+        // `Config::load` reads the overrides layer out of the home that
+        // `home_error` above just failed to settle, so calling it the
+        // ordinary way here could fail again for the identical reason and
+        // report one real problem (a broken home) as two (a broken home
+        // *and* a broken config).
         // Read the tracked file alone when that has already happened; only
         // when the home resolved is a config failure worth telling apart
         // from it at all.
@@ -387,6 +411,14 @@ impl Repo {
         &self.home
     }
 
+    /// Where this project's dispatched checkouts are cut: `worktrees/` under
+    /// [`Repo::home`], for both backends and every layout. Read off the home
+    /// this `Repo` already settled on, so it is never worked out a second time
+    /// from the checkout's path.
+    pub fn worktree_root(&self) -> PathBuf {
+        self.home.join(crate::mux::WORKTREES_DIR)
+    }
+
     /// A subdirectory of [`Repo::home`], created silently if it is missing.
     fn home_subdir(&self, name: &str) -> PathBuf {
         let dir = self.home().join(name);
@@ -451,7 +483,7 @@ impl Repo {
     /// `housekeeping.archive_retention_days`, which defaults to keeping them.
     /// The one place that split is written down as code — see
     /// [`crate::retain`]'s own doc for why `queue_dir`, `pending_dir`,
-    /// `crate::mux::worktree_root` and `plans/` are never in this list.
+    /// `Repo::worktree_root` and `plans/` are never in this list.
     ///
     /// [`Repo::system_prompts_dir`] is here and [`Repo::prompts_dir`] is
     /// deliberately not. They read alike and mean opposite things: the first
@@ -1063,8 +1095,8 @@ const ID_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// again is idempotent.
 ///
 /// `Ok(None)` only when `dir` has no git repository behind it at all: that
-/// is the one case [`crate::commands::init::init`] turns into a refusal
-/// rather than falling back to a basename-keyed home. Two callers reach
+/// is the one case [`crate::commands::init::init`] turns into a refusal,
+/// since no home can be named for it. Two callers reach
 /// this now — `init` itself, and [`bind_unstamped`], which mints the same
 /// way when a command finds a checkout that carries no stamp and nothing
 /// else records it (acceptance criterion 7 of the `binding-record` task).
@@ -1094,19 +1126,25 @@ pub fn stamped_id(dir: &Path) -> Result<Option<(String, bool)>> {
     let checkout = dir
         .canonical()
         .with_context(|| format!("resolving {}", dir.display()))?;
-    let (id, minted) = read_or_mint(&common.join(ID_FILE), is_valid_id, generate_id)?;
-    // Established alongside the id, not read back until later: `stamped_id`
-    // is the one call that is allowed to write at all, so this is where the
-    // label this project's home will carry forever gets fixed too.
+    // Written before the id, so a reader that sees the id always sees the
+    // label with it. The other order leaves a gap between the two file
+    // writes in which a racing command reads an id with no label and
+    // refuses a clone that is about to be complete.
+    //
+    // `stamped_id` is the one call that is allowed to write at all, so this
+    // is also where the label this project's home will carry forever gets
+    // fixed.
+    //
     // `sanitize_label` rather than the raw basename: a Unix checkout can be
     // named anything but `/` and NUL, and a name `is_valid_label` refuses
     // (a raw `\`, say) must not be committed unchanged — `read_or_mint`
     // would write it, `project_identity` would then refuse to read it back,
-    // and every caller would silently fall back to the basename despite a
-    // file calling itself the stamp sitting right there in `.git`.
+    // and every caller would read the clone as having no usable label despite
+    // a file calling itself the stamp sitting right there in `.git`.
     read_or_mint(&common.join(LABEL_FILE), is_valid_label, || {
         sanitize_label(&crate::mux::project_label(&checkout))
     })?;
+    let (id, minted) = read_or_mint(&common.join(ID_FILE), is_valid_id, generate_id)?;
     // Recorded fresh on every call, unlike the id and label above: this is
     // a locator, not an identity, and it is the only way a later call made
     // from a linked worktree — whose own `--git-common-dir` points at this
@@ -1126,44 +1164,76 @@ pub(crate) fn id_file_path(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(common_git_dir(dir)?.map(|common| common.join(ID_FILE)))
 }
 
-/// The three facts [`crate::mux::project_home`] keys a project's home on:
-/// the checkout its stamp lives in — the main checkout, whichever of its
-/// branches, subdirectories or linked worktrees `dir` names — the label
-/// frozen the moment it was first stamped, and the id stamped alongside it.
+/// What a checkout's own `.git` says about the clone's identity, as far as
+/// [`crate::mux::project_home`] can use it. The checkout's path is not part
+/// of the answer: a home is named for the label and the id alone, so a
+/// moved superproject, whose recorded root no longer exists, still has one.
+pub(crate) enum Identity {
+    /// `dir` has no git repository behind it at all.
+    NoRepository,
+    /// A repository, but no usable `spoolway-id` in it.
+    Unstamped,
+    /// A usable id, but no usable `spoolway-label` beside it.
+    Unlabelled { id: String },
+    /// The label frozen the moment the clone was first stamped, and its id.
+    Stamped { label: String, id: String },
+}
+
+/// Read what `dir`'s common git directory says about the clone's identity.
 ///
-/// Read-only, unlike [`stamped_id`]: `Ok(None)` both when `dir` has no git
-/// repository behind it, and when it does but nothing has stamped it yet —
-/// `project_home` falls back to `dir`'s own current basename either way,
-/// matching what every caller always got before this stamp existed. This
-/// function itself never *creates* a stamp merely by being asked about
-/// one — `Repo::root`'s own "is this checkout registered under a different
-/// name" nicety, `usage::registry` and every other plain lookup all read
-/// through here (or through [`crate::mux::project_home`], which calls it)
-/// and mint nothing, so running any of them against an unrelated git
-/// repository never silently writes into its `.git`. `Repo::discover` is
-/// the one deliberate exception: it goes through [`bind`] instead, which
-/// mints a stamp on purpose for a checkout carrying no id and nothing
-/// recording it (acceptance criterion 7 of `binding-record`) — a choice
-/// `bind` makes explicitly, never a side effect of calling this.
-pub fn project_identity(dir: &Path) -> Result<Option<(PathBuf, String, String)>> {
+/// Read-only, unlike [`stamped_id`]: it never creates a stamp merely by being
+/// asked about one, so `Repo::root`'s "is this checkout registered under a
+/// different name" nicety, `usage::registry` and every other plain lookup
+/// mint nothing — running any of them against an unrelated git repository
+/// never silently writes into its `.git`. `Repo::discover` is the one
+/// deliberate exception: it goes through [`bind`] instead, which mints a
+/// stamp on purpose for a checkout carrying no id and nothing recording it
+/// (acceptance criterion 7 of `binding-record`) — a choice `bind` makes
+/// explicitly, never a side effect of calling this.
+///
+/// Answers `Unlabelled` rather than `Unstamped` when only the label is
+/// missing or unusable, because the id still names the clone's own home —
+/// [`recovered_label`] finds the folder name again from that home's record.
+pub(crate) fn project_identity(dir: &Path) -> Result<Identity> {
     let Some(common) = common_git_dir(dir)? else {
-        return Ok(None);
-    };
-    // `recorded_or_parent` only fails to resolve a checkout that has never
-    // been stamped — the same checkout `peek` below would answer `None` for
-    // anyway, since `stamped_id` always writes the recorded path alongside
-    // the id and label in the one call that writes either. Folded into the
-    // same "nothing stamped here yet" answer rather than guessed past.
-    let Some(checkout) = recorded_or_parent(&common) else {
-        return Ok(None);
+        return Ok(Identity::NoRepository);
     };
     let Some(id) = peek(&common.join(ID_FILE), is_valid_id)? else {
-        return Ok(None);
+        return Ok(Identity::Unstamped);
     };
-    let Some(label) = peek(&common.join(LABEL_FILE), is_valid_label)? else {
-        return Ok(None);
-    };
-    Ok(Some((checkout, label, id)))
+    Ok(match peek(&common.join(LABEL_FILE), is_valid_label)? {
+        Some(label) => Identity::Stamped { label, id },
+        None => Identity::Unlabelled { id },
+    })
+}
+
+/// The label the home holding `id` is named with, read off the one folder
+/// under `~/.spoolway/` whose own `project.toml` records this same id and
+/// whose name is `<label>-<id>`. How a clone whose `.git/spoolway-label` is
+/// gone finds its home again.
+///
+/// Only a record that names this id counts: a folder name alone is not
+/// trusted, because another project's home can be named anything. Two such
+/// folders answer `None` rather than a guess at which one is this clone's.
+pub(crate) fn recovered_label(id: &str) -> Option<String> {
+    let suffix = format!("-{id}");
+    let mut found = std::fs::read_dir(crate::mux::state_root())
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| {
+            read_binding(&entry.path())
+                .ok()
+                .flatten()
+                .is_some_and(|binding| binding.id == id)
+        })
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let label = name.strip_suffix(&suffix)?.to_string();
+            is_valid_label(&label).then_some(label)
+        });
+    let label = found.next()?;
+    found.next().is_none().then_some(label)
 }
 
 /// The file a project's home holds recording which checkout it belongs to,
@@ -1242,10 +1312,9 @@ fn write_binding(home: &Path, binding: &Binding) -> Result<()> {
 
 /// How a checkout's own stamp read, for [`bind`] to react to each
 /// differently. [`peek`] alone collapses "missing" and "wrong format" into
-/// one `None`, which is right for [`project_identity`]'s silent basename
-/// fallback but wrong here: a wrong-format stamp is a fact worth its own
-/// refusal (acceptance criterion 5), not read the same as nothing stamped
-/// at all.
+/// one `None`, which is right for [`project_identity`]'s read-only answer
+/// but wrong here: a wrong-format stamp is a fact worth its own refusal
+/// (acceptance criterion 5), not read the same as nothing stamped at all.
 enum Stamp {
     None,
     Invalid(String),
@@ -1300,7 +1369,32 @@ fn read_stamp(root: &Path) -> Result<Stamp> {
 /// first, with nobody told — [`workspace_clone_lenient`] keeps that bail.
 /// Every broken file it reports back is noted, once, before this falls
 /// through to treating `root` as unlisted.
+///
+/// Besides the seven states, a stamp whose label file is gone is written back
+/// ([`heal_label`]) from the one home whose own record holds the id, and a
+/// moved checkout's `spoolway-root` is rewritten with its record. Every one of
+/// these writes — and the mint of a checkout with no stamp at all — is
+/// skipped by [`Bind::Peek`], see [`bind_as`].
 pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
+    bind_as(root, Bind::Settle)
+}
+
+/// Whether a [`bind`] may write: settle a moved checkout's record, rebuild a
+/// lost label, or mint a stamp and a home for a checkout with neither.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bind {
+    /// What every command that needs a home does: write what the state calls
+    /// for, then answer with the home.
+    Settle,
+    /// Only reads, and reports what `Settle` would have written as the
+    /// refusal it leaves in its place. For a lookup that runs before the
+    /// command knows it needs a home — the update notice ahead of
+    /// `spoolway init`'s first question — which must leave `.git` and
+    /// `~/.spoolway` exactly as it found them.
+    Peek,
+}
+
+fn bind_as(root: &Path, mode: Bind) -> Result<PathBuf> {
     let (clone, broken, skipped) = workspace_clone_lenient(root)?;
     for record_path in &skipped {
         let line = format!(
@@ -1354,13 +1448,7 @@ pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
             // instead — by `root`, not by `raw` — the same scan
             // [`home_recording`] does for criterion 6. When nothing under
             // `~/.spoolway/` records this checkout by path either, there is
-            // no *real* second file to name — but the criterion still
-            // wants an absolute path, not only prose, so this names the
-            // one place a project.toml for this exact checkout would sit
-            // absent any stamp at all: the plain-basename home
-            // `crate::mux::project_home` already falls back to whenever
-            // nothing else settles it, built from `root`'s own basename,
-            // never from the untrusted `raw` id.
+            // no second file to name, and none is invented.
             // Whether deleting the stamp alone is enough to let a plain
             // `spoolway init` mint a fresh one: it is, only when nothing
             // under `~/.spoolway/` records this exact path already. When
@@ -1378,18 +1466,13 @@ pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
                         Some(record_path.display().to_string()),
                     )
                 }
-                None => {
-                    let fallback = crate::mux::state_root()
-                        .join(crate::mux::project_label(root))
-                        .join(BINDING_FILE);
-                    (
-                        format!(
-                            "{} (does not exist — nothing records this checkout)",
-                            fallback.display()
-                        ),
-                        None,
-                    )
-                }
+                None => (
+                    format!(
+                        "nothing under {} records this checkout",
+                        crate::mux::state_root().display()
+                    ),
+                    None,
+                ),
             };
             let remedy = match &second_file {
                 Some(record_path) => format!(
@@ -1409,18 +1492,18 @@ pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
                 record_line,
             );
         }
-        Stamp::Valid(id) => bind_stamped(root, &id),
-        Stamp::None => bind_unstamped(root),
+        Stamp::Valid(id) => bind_stamped(root, &id, mode),
+        Stamp::None => bind_unstamped(root, mode),
     }
 }
 
 /// [`bind`], tolerant of its own failure — the one caller allowed to be:
 /// [`Repo::discover_lenient`], for the same reason
 /// [`crate::mux::project_home_lenient`] exists. Falls back to that same
-/// basename-keyed guess for `home` on failure, paired with the real error
-/// — never silently, the way an ordinary caller of [`bind`] would be.
-fn bind_lenient(root: &Path) -> (PathBuf, Option<anyhow::Error>) {
-    match bind(root) {
+/// placeholder for `home` on failure, paired with the real error — never
+/// silently, the way an ordinary caller of [`bind`] would be.
+fn bind_lenient(root: &Path, mode: Bind) -> (PathBuf, Option<anyhow::Error>) {
+    match bind_as(root, mode) {
         Ok(home) => (home, None),
         Err(err) => {
             let (home, _) = crate::mux::project_home_lenient(root);
@@ -1431,13 +1514,16 @@ fn bind_lenient(root: &Path) -> (PathBuf, Option<anyhow::Error>) {
 
 /// `bind`'s branch for a checkout carrying a valid stamp — acceptance
 /// criteria 1 through 4 of `binding-record`.
-fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
+fn bind_stamped(root: &Path, id: &str, mode: Bind) -> Result<PathBuf> {
+    if mode == Bind::Settle {
+        heal_label(root, id)?;
+    }
     let home = crate::mux::project_home(root)?;
     let record_path = home.join(BINDING_FILE);
     // Already known to exist and parse: `read_stamp` just read it.
     let stamp_path = id_file_path(root)?.expect("a valid stamp was just read");
 
-    let binding = match read_binding(&home) {
+    let binding = match read_binding_after_a_racing_mint(root, &home, mode) {
         Ok(Some(binding)) => binding,
         Ok(None) => {
             // Criterion 4: a valid stamp, but no home records it at all —
@@ -1534,6 +1620,9 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
         _ => {}
     }
 
+    if mode == Bind::Peek {
+        return Ok(home);
+    }
     write_binding(
         &home,
         &Binding {
@@ -1542,6 +1631,12 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
             root_commit: root_commit(root),
         },
     )?;
+    // The same move left `spoolway-root` naming a folder that is gone, which
+    // is what a linked worktree reads to find this checkout. Rewritten with
+    // the record so the two cannot disagree about where the clone is.
+    if let Some(common) = common_git_dir(root)? {
+        crate::task::write_atomic(&common.join(ROOT_FILE), root.display().to_string())?;
+    }
     println!(
         "spoolway: {} now records {} (was {})",
         record_path.display(),
@@ -1549,6 +1644,53 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
         binding.root.display(),
     );
     Ok(home)
+}
+
+/// The advisory lock held while a clone's stamp and its home's record are
+/// written, and while a reader that found the one without the other waits to
+/// see whether a writer is between them. It sits in the common git directory,
+/// beside the stamp it protects, because the home it would otherwise sit in
+/// may not exist yet.
+fn mint_lock_path(common: &Path) -> PathBuf {
+    common.join(format!("{ID_FILE}.lock"))
+}
+
+/// [`read_binding`] for a home that [`bind_stamped`] found a stamp for.
+///
+/// A missing record is not yet an error: a first command that raced this one
+/// may have written the stamp and not the record. Reading the stamp is not
+/// atomic with it, so a miss waits on [`mint_lock_path`] — which the writer
+/// holds across both files — and reads again, instead of reporting "no home
+/// holds the id" about a home that is a few milliseconds from existing. A
+/// `Peek` takes no lock, because taking one would write into `.git`.
+fn read_binding_after_a_racing_mint(
+    root: &Path,
+    home: &Path,
+    mode: Bind,
+) -> Result<Option<Binding>> {
+    let first = read_binding(home)?;
+    if first.is_some() || mode == Bind::Peek {
+        return Ok(first);
+    }
+    let Some(common) = common_git_dir(root)? else {
+        return Ok(None);
+    };
+    let _lock = crate::lock::WorkspaceLock::acquire(&mint_lock_path(&common))?;
+    read_binding(home)
+}
+
+/// Write back a lost `.git/spoolway-label`, from the one home whose own
+/// `project.toml` records this clone's id. Does nothing when the label is
+/// there, and when no such home exists — the refusal [`crate::mux::project_home`]
+/// then gives names what is missing.
+fn heal_label(root: &Path, id: &str) -> Result<()> {
+    if !matches!(project_identity(root)?, Identity::Unlabelled { .. }) {
+        return Ok(());
+    }
+    let (Some(label), Some(common)) = (recovered_label(id), common_git_dir(root)?) else {
+        return Ok(());
+    };
+    crate::task::write_atomic(&common.join(LABEL_FILE), label)
 }
 
 /// The home under `~/.spoolway/` whose `project.toml` already names `root`
@@ -1985,8 +2127,16 @@ fn stale_workspace_clones(start: &Path) -> Vec<String> {
 
 /// `bind`'s branch for a checkout carrying no stamp at all — acceptance
 /// criteria 6 and 7 of `binding-record`.
-fn bind_unstamped(root: &Path) -> Result<PathBuf> {
+fn bind_unstamped(root: &Path, mode: Bind) -> Result<PathBuf> {
     if let Some(home) = home_recording(root) {
+        // The stamp was read as missing a moment ago. A command that raced
+        // this one may have completed its whole mint since — stamp and record
+        // both — and a record that names this checkout beside a stamp that
+        // now exists is no criterion 6, it is the settled state. Read again
+        // before refusing.
+        if !matches!(read_stamp(root)?, Stamp::None) {
+            return bind_as(root, mode);
+        }
         // Criterion 6: some home already names this exact checkout, but the
         // checkout itself carries no id to confirm it with — the stamp was
         // deleted or never made it into this clone. Refused rather than
@@ -2050,20 +2200,42 @@ fn bind_unstamped(root: &Path) -> Result<PathBuf> {
     // Criterion 7: nothing records this checkout anywhere, and it carries
     // no stamp of its own — there is nothing to guess, so it binds itself,
     // the same mint `spoolway init` has always done, just no longer gated
-    // on someone having run `init` first.
-    let Some((id, _minted)) = stamped_id(root)? else {
+    // on someone having run `init` first. Not for a `Peek`, which has only
+    // the refusal `project_home` gives a checkout with no id.
+    if mode == Bind::Peek {
+        return crate::mux::project_home(root);
+    }
+    let Some(common) = common_git_dir(root)? else {
         return Err(no_checkout_error(root));
     };
-    let home = crate::mux::project_home(root)?;
-    write_binding(
-        &home,
-        &Binding {
-            id,
-            root: root.to_path_buf(),
-            root_commit: root_commit(root),
-        },
-    )?;
-    Ok(home)
+    {
+        // The stamp and the record are written under one lock, and the stamp
+        // is read again once it is held. Without it, about one in five
+        // parallel first commands on a fresh clone read the stamp the
+        // first had just written, found no record beside it and failed with
+        // "no home holds the id". With it, a command that loses the race
+        // settles against what the winner wrote, whether it loses before
+        // this point, at the check above, or here.
+        let _lock = crate::lock::WorkspaceLock::acquire(&mint_lock_path(&common))?;
+        if matches!(read_stamp(root)?, Stamp::None) {
+            let Some((id, _minted)) = stamped_id(root)? else {
+                return Err(no_checkout_error(root));
+            };
+            let home = crate::mux::project_home(root)?;
+            write_binding(
+                &home,
+                &Binding {
+                    id,
+                    root: root.to_path_buf(),
+                    root_commit: root_commit(root),
+                },
+            )?;
+            return Ok(home);
+        }
+    }
+    // A command that raced this one stamped the clone first, so there is
+    // nothing left to mint: settle against what it wrote.
+    bind_as(root, mode)
 }
 
 /// Whether a worktree cut under `home` is genuinely in use right now — the
@@ -2997,7 +3169,7 @@ pub(crate) fn move_clone(
     // once `from_home` is renamed away, nothing can list what
     // used to be under it any more. With `dispatch.worktree_root` retired,
     // `worktrees/` under the clone's own folder is the only place a worktree
-    // is ever cut — see `crate::mux::worktree_root` — so every one of them
+    // is ever cut — see `Repo::worktree_root` — so every one of them
     // moves with it. An idle worktree is not refused above — only a live
     // process working in one is — so there can be real ones here to carry
     // across and repair.
@@ -3150,7 +3322,7 @@ pub(crate) fn require_git_repository(root: &Path) -> Result<()> {
 /// repository with no working tree and so nothing to stamp or list, or
 /// nothing under git at all. `git init` is the fix for the second and would
 /// do nothing for the first.
-fn no_checkout_error(root: &Path) -> anyhow::Error {
+pub(crate) fn no_checkout_error(root: &Path) -> anyhow::Error {
     let bare = run(root, "git", &["rev-parse", "--is-bare-repository"])
         .is_ok_and(|out| out.trim() == "true");
     if bare {
@@ -3559,8 +3731,13 @@ pub(crate) fn default_branch_tracking_spoolway(dir: &Path) -> Option<(String, bo
 /// does not parse counts under its file name: a refusal over a task that
 /// might be one is cheaper than leaving it behind unseen.
 pub(crate) fn repo_mode_queued_tasks(root: &Path) -> Result<Vec<String>> {
-    let Some((_checkout, label, id)) = project_identity(root)? else {
-        return Ok(Vec::new());
+    let (label, id) = match project_identity(root)? {
+        Identity::Stamped { label, id } => (label, id),
+        Identity::Unlabelled { id } => match recovered_label(&id) {
+            Some(label) => (label, id),
+            None => return Ok(Vec::new()),
+        },
+        Identity::NoRepository | Identity::Unstamped => return Ok(Vec::new()),
     };
     let queue = crate::mux::home_of(&label, &id).join(crate::config::QUEUE_DIR);
     let (tasks, problems) = crate::task::load_dir(&queue)?;
@@ -5146,6 +5323,234 @@ mod tests {
         assert!(work.join(".git").join("spoolway-id").is_file());
     }
 
+    /// A clone with no id has no repo-mode home, so a switch to home mode has
+    /// no queue to strand: the lookup answers an empty list, not a folder
+    /// named after the checkout.
+    #[test]
+    fn a_checkout_with_no_id_has_no_queued_tasks_to_strand() {
+        let work = bind_fixture("queued-no-id");
+        let (home, _home_guard) = scratch_home("queued-no-id");
+        crate::platform::test_home::with_home(&home, || {
+            assert!(repo_mode_queued_tasks(&work).unwrap().is_empty());
+            assert!(!crate::mux::state_root().exists());
+        });
+    }
+
+    /// A read-only bind on a clone nothing has stamped refuses and writes
+    /// nothing, in `.git` or under `~/.spoolway`: it is what the update-notice
+    /// lookup runs before `init` has asked its first question, so a cancelled
+    /// `init` must leave both as they were.
+    #[test]
+    fn a_read_only_bind_on_a_fresh_clone_writes_nothing() {
+        let work = bind_fixture("peek-fresh");
+        std::fs::create_dir_all(work.join(crate::config::STATE_DIR)).unwrap();
+        let (home, _home_guard) = scratch_home("peek-fresh");
+        crate::platform::test_home::with_home(&home, || {
+            let err = bind_as(&work, Bind::Peek).unwrap_err().to_string();
+            assert!(err.contains("no spoolway id"), "{err}");
+            assert!(err.contains("`spoolway init`"), "{err}");
+            assert!(!crate::mux::state_root().exists());
+            let (_repo, _config_error, home_error) =
+                Repo::discover_lenient_read_only(&work).unwrap();
+            assert!(home_error.is_some());
+            assert!(!crate::mux::state_root().exists());
+        });
+        let stamped: Vec<_> = std::fs::read_dir(work.join(".git"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("spoolway-"))
+            .collect();
+        assert!(stamped.is_empty(), "{stamped:?}");
+    }
+
+    /// The same read-only bind on a moved checkout answers with the home the
+    /// record names and leaves the record, and the stale root beside it,
+    /// alone. Only a command that needs the home settles the move.
+    #[test]
+    fn a_read_only_bind_on_a_moved_checkout_finds_the_home_and_rewrites_nothing() {
+        let work = bind_fixture("peek-moved");
+        let (home, _home_guard) = scratch_home("peek-moved");
+        crate::platform::test_home::with_home(&home, || {
+            let bound = bind(&work).unwrap();
+            let moved = work.with_file_name(format!(
+                "{}-moved",
+                work.file_name().unwrap().to_string_lossy()
+            ));
+            std::fs::rename(&*work, &moved).unwrap();
+            let moved = moved.canonical().unwrap();
+            let record_before = std::fs::read_to_string(bound.join(BINDING_FILE)).unwrap();
+
+            assert_eq!(bind_as(&moved, Bind::Peek).unwrap(), bound);
+            assert_eq!(
+                std::fs::read_to_string(bound.join(BINDING_FILE)).unwrap(),
+                record_before
+            );
+            std::fs::rename(&moved, &*work).unwrap();
+        });
+    }
+
+    /// A moved checkout finds its own home — whose queue is in it — and the
+    /// record is rewritten to name where it is now, together with the
+    /// `spoolway-root` a linked worktree reads, when the id still matches. The
+    /// fallback this replaces looked for the basename's folder, which holds
+    /// no id and no queue.
+    #[test]
+    fn a_moved_checkout_finds_its_home_and_the_record_follows_it() {
+        let work = bind_fixture("moved");
+        let (home, _home_guard) = scratch_home("moved");
+        crate::platform::test_home::with_home(&home, || {
+            let bound = bind(&work).unwrap();
+            std::fs::create_dir_all(bound.join("queue")).unwrap();
+            std::fs::write(bound.join("queue").join("t.md"), "---\nid: t\n---\n").unwrap();
+            let moved = work.with_file_name(format!(
+                "{}-moved",
+                work.file_name().unwrap().to_string_lossy()
+            ));
+            std::fs::rename(&*work, &moved).unwrap();
+            let moved = moved.canonical().unwrap();
+
+            let found = bind(&moved).unwrap();
+            assert_eq!(found, bound, "the moved clone keeps the home it had");
+            assert!(found.join("queue").join("t.md").is_file());
+            let record = read_binding(&found).unwrap().unwrap();
+            assert_eq!(record.root, moved);
+            assert_eq!(
+                std::fs::read_to_string(moved.join(".git").join(ROOT_FILE)).unwrap(),
+                moved.display().to_string()
+            );
+            std::fs::rename(&moved, &*work).unwrap();
+        });
+    }
+
+    /// A missing `.git/spoolway-label` is written back from the home whose
+    /// own record holds this clone's id, so the next command finds the same
+    /// home with nothing recovered by hand.
+    #[test]
+    fn a_missing_label_is_rebuilt_from_the_home_recording_the_id() {
+        let work = bind_fixture("label-rebuild");
+        let (home, _home_guard) = scratch_home("label-rebuild");
+        crate::platform::test_home::with_home(&home, || {
+            let bound = bind(&work).unwrap();
+            let label_path = work.join(".git").join(LABEL_FILE);
+            let label = std::fs::read_to_string(&label_path).unwrap();
+            std::fs::remove_file(&label_path).unwrap();
+
+            assert_eq!(bind(&work).unwrap(), bound);
+            assert_eq!(std::fs::read_to_string(&label_path).unwrap(), label);
+        });
+    }
+
+    /// A missing label with no home recording the id is not guessed at from
+    /// the checkout's name: the bind refuses, and names the label file.
+    #[test]
+    fn a_missing_label_with_no_home_recording_the_id_refuses() {
+        let work = bind_fixture("label-nowhere");
+        let (home, _home_guard) = scratch_home("label-nowhere");
+        crate::platform::test_home::with_home(&home, || {
+            let bound = bind(&work).unwrap();
+            std::fs::remove_file(work.join(".git").join(LABEL_FILE)).unwrap();
+            std::fs::remove_dir_all(&bound).unwrap();
+
+            let err = bind(&work).unwrap_err().to_string();
+            assert!(err.contains("spoolway-label"), "{err}");
+            assert!(
+                !work.join(".git").join(LABEL_FILE).exists(),
+                "nothing was invented"
+            );
+        });
+    }
+
+    /// `stamped_id` writes the label before the id, so a reader that sees the
+    /// id never finds the label missing. Checked by making the label write
+    /// fail: the id must not exist afterwards. Written the other way round,
+    /// the id would already be down when the label failed.
+    #[test]
+    fn stamped_id_writes_the_label_before_the_id() {
+        let work = bind_fixture("label-first");
+        let common = common_git_dir(&work).unwrap().unwrap();
+        std::fs::create_dir(common.join(LABEL_FILE)).unwrap();
+
+        assert!(stamped_id(&work).is_err());
+        assert!(
+            !common.join(ID_FILE).exists(),
+            "the id was written before the label"
+        );
+    }
+
+    /// A reader that finds no stamp while a minter holds the mint lock waits
+    /// for the minter and returns its home, instead of minting a second
+    /// stamp or refusing the clone. The minter is played by the test thread,
+    /// which holds the lock across its writes. The write order inside
+    /// `stamped_id` is covered by `stamped_id_writes_the_label_before_the_id`.
+    #[test]
+    fn a_reader_with_no_stamp_waits_for_a_minter_holding_the_lock() {
+        let work = bind_fixture("half-mint");
+        let (home, _home_guard) = scratch_home("half-mint");
+        crate::platform::test_home::with_home(&home, || {
+            let common = common_git_dir(&work).unwrap().unwrap();
+            let lock = crate::lock::WorkspaceLock::acquire(&mint_lock_path(&common)).unwrap();
+            // The label is down and nothing else is, as in the middle of a
+            // mint: `stamped_id` writes it before the id, so no reader sees
+            // an id without one.
+            let label = sanitize_label(&crate::mux::project_label(&work));
+            std::fs::write(common.join(LABEL_FILE), &label).unwrap();
+
+            let result = std::thread::scope(|scope| {
+                let reader =
+                    scope.spawn(|| crate::platform::test_home::with_home(&home, || bind(&work)));
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::fs::write(common.join(ID_FILE), "abc123").unwrap();
+                write_binding(
+                    &crate::mux::home_of(&label, "abc123"),
+                    &Binding {
+                        id: "abc123".to_string(),
+                        root: work.canonical().unwrap(),
+                        root_commit: None,
+                    },
+                )
+                .unwrap();
+                drop(lock);
+                reader.join().unwrap()
+            });
+            let bound = result.expect("the reader waits for the mint instead of refusing");
+            assert!(bound.ends_with(format!("{label}-abc123")));
+        });
+    }
+
+    /// Several first commands on a fresh clone, started together, all land on
+    /// one home. Each used to be able to read the stamp another had just
+    /// written and fail with "no home holds the id" before that one had
+    /// written the record; the stamp and the record are written under one
+    /// lock now, and a reader that finds the first without the second waits
+    /// for it.
+    #[test]
+    fn parallel_first_commands_on_a_fresh_clone_agree_on_one_home() {
+        let work = bind_fixture("parallel-first");
+        let (home, _home_guard) = scratch_home("parallel-first");
+        let barrier = std::sync::Barrier::new(8);
+        let homes: Vec<Result<PathBuf>> = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        crate::platform::test_home::with_home(&home, || {
+                            barrier.wait();
+                            bind(&work)
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let homes: Vec<PathBuf> = homes
+            .into_iter()
+            .map(|home| home.expect("no first command may fail"))
+            .collect();
+        assert!(homes.windows(2).all(|pair| pair[0] == pair[1]), "{homes:?}");
+        assert!(homes[0].join(BINDING_FILE).is_file());
+    }
+
     /// `all_workspaces` bails outright on the first workspace `project.toml`
     /// it cannot parse, and `bind` asks it before checking whether `root` is
     /// even listed anywhere — so one unrelated workspace file broken by a
@@ -5381,9 +5786,8 @@ mod tests {
     /// directory itself is read-only, standing in for a permissions problem
     /// or a full disk — must not read the same as "no git repository at
     /// all": that would send `spoolway init` to refuse for a reason that
-    /// is not true, and a caller resolving a home would silently fall back
-    /// to a basename-keyed one instead of reporting that something is
-    /// actually wrong.
+    /// is not true, and a caller resolving a home would be told the clone
+    /// has no id instead of that something is actually wrong.
     #[test]
     fn a_write_failure_is_an_error_not_an_absent_stamp() {
         use std::os::unix::fs::PermissionsExt;
@@ -5469,8 +5873,9 @@ mod tests {
         crate::scratch::git_init(&work, &["-q", "-b", "main"]);
         stamped_id(&work).unwrap(); // stands in for `spoolway init`
 
-        let (checkout, label, id) = project_identity(&work).unwrap().unwrap();
-        assert_eq!(checkout, work.canonical().unwrap());
+        let Identity::Stamped { label, id } = project_identity(&work).unwrap() else {
+            panic!("a stamped clone reads back as stamped");
+        };
         assert_eq!(label, crate::mux::project_label(&work));
 
         // Renamed with nothing under `~/.spoolway/` ever created for it.
@@ -5478,7 +5883,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&renamed);
         std::fs::rename(&work, &renamed).unwrap();
 
-        let (_checkout, label_after, id_after) = project_identity(&renamed).unwrap().unwrap();
+        let Identity::Stamped {
+            label: label_after,
+            id: id_after,
+        } = project_identity(&renamed).unwrap()
+        else {
+            panic!("a renamed clone reads back as stamped");
+        };
         assert_eq!(label_after, label, "the label must not follow the rename");
         assert_eq!(id_after, id);
     }
@@ -5500,7 +5911,10 @@ mod tests {
         for escape in ["/tmp/victim", "../../victim", "..", ".", "a/b", "a\\b"] {
             std::fs::write(&label_path, escape).unwrap();
             assert!(
-                project_identity(&work).unwrap().is_none(),
+                matches!(
+                    project_identity(&work).unwrap(),
+                    Identity::Unlabelled { .. }
+                ),
                 "`{escape}` was accepted as a safe label"
             );
         }
@@ -5552,9 +5966,13 @@ mod tests {
         let (id, minted) = stamped_id(&weird).unwrap().unwrap();
         assert!(minted, "the first call must be the one that mints");
 
-        let (_checkout, label, id_again) = project_identity(&weird)
-            .unwrap()
-            .unwrap_or_else(|| panic!("an unsafe basename must still resolve to a real identity"));
+        let Identity::Stamped {
+            label,
+            id: id_again,
+        } = project_identity(&weird).unwrap()
+        else {
+            panic!("an unsafe basename must still resolve to a real identity");
+        };
         assert_eq!(id_again, id);
         assert!(
             is_valid_label(&label),

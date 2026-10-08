@@ -80,7 +80,8 @@ spoolway init
 It opens by printing the project directory it resolved — check the path is the one you meant,
 especially when `init` was reached from a keybinding rather than typed where you were standing.
 At a terminal it then goes straight to its first open question. Press Ctrl-C there to stop a
-wrong run: nothing is written until every question is answered. A run whose flags answer every
+wrong run: nothing is written until every question is answered. That includes the id in `.git`
+and the home under `~/.spoolway/`. A run whose flags answer every
 question writes right after printing the path. Without a terminal, `init` writes
 nothing and exits 0 unless you pass `--yes`, so a script or CI runner passes `--yes`.
 

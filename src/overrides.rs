@@ -210,14 +210,21 @@ const WARNINGS_ACK_FILE: &str = "warnings-ack";
 /// checkout the same way [`crate::repo::Repo::discover`] does before keying
 /// [`crate::mux::project_home`] off it: a lane running the merge from
 /// inside its own worktree has to land on the identical directory a command
-/// run from the main checkout does, with nothing copied in. A path with no
-/// git repository behind it at all — a bare fixture directory, most of the
-/// unit tests below `Pipelines::load` and `Config::load` — resolves to
-/// itself instead; the directory this then names is simply never on disk,
-/// which reads exactly like a project that has overridden nothing.
+/// run from the main checkout does, with nothing copied in. Refuses a
+/// checkout with no id, as [`crate::mux::project_home`] does; a reader that
+/// can do without the layer uses [`dir_if_identified`].
 pub(crate) fn dir_for(root: &Path) -> Result<PathBuf> {
     let main = crate::repo::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
     Ok(crate::mux::project_home(&main)?.join(crate::config::OVERRIDES_DIR))
+}
+
+/// [`dir_for`], but `Ok(None)` for a checkout with no git repository or no
+/// stamp. That is a project nothing has stamped or given a home yet, which
+/// has overridden nothing, so `Config::load` and `Pipelines::load` read it as "no layer"
+/// rather than refusing to read the tracked files.
+pub(crate) fn dir_if_identified(root: &Path) -> Result<Option<PathBuf>> {
+    let main = crate::repo::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
+    Ok(crate::mux::identified_home(&main)?.map(|home| home.join(crate::config::OVERRIDES_DIR)))
 }
 
 /// The shape `overrides/pipelines/<name>.yml` is allowed to take: `steps:`
@@ -1025,6 +1032,22 @@ fn promote_config_table(
 mod tests {
     use super::*;
 
+    /// A checkout with no id has no home, so no overrides layer: the lookup
+    /// that must have one refuses it, and the one a config or pipeline load
+    /// uses reads `None`, so those still read the tracked files.
+    #[test]
+    fn a_checkout_with_no_id_has_no_overrides_layer() {
+        let root = crate::scratch::root("overrides-no-id");
+        let home = crate::scratch::root("overrides-no-id-home");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-q"]);
+        crate::platform::test_home::with_home(&home, || {
+            assert!(dir_for(&root).is_err());
+            assert_eq!(dir_if_identified(&root).unwrap(), None);
+            assert!(!crate::mux::state_root().exists());
+        });
+    }
+
     /// The Mockup's own stderr line, built from `target` and `reason`.
     #[test]
     fn ignored_notice_reads_as_the_mockup_shows_it() {
@@ -1495,6 +1518,7 @@ agent: pi
         let root = crate::scratch::root("overrides-promote-config");
         let home = crate::scratch::root("overrides-promote-config-home");
         let _ = std::fs::remove_dir_all(&root);
+        crate::scratch::stamped(&root);
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
         std::fs::write(
             Config::path_in(&root),
@@ -1502,9 +1526,8 @@ agent: pi
         )
         .unwrap();
 
-        // `dir_for` -> `mux::project_home` resolves under `~/.spoolway` for a
-        // bare fixture directory with no git repository behind it — a real
-        // `$HOME`, unswapped, sends this test's own fixture there. See
+        // `dir_for` -> `mux::project_home` resolves under `~/.spoolway` — a
+        // real `$HOME`, unswapped, sends this test's own fixture there. See
         // issue #188.
         crate::platform::test_home::with_home(&home, || {
             let overrides = dir_for(&root).unwrap();

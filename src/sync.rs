@@ -2573,6 +2573,7 @@ mod tests {
     #[test]
     fn a_config_override_never_leaks_into_the_tracked_file_and_a_retired_key_drops_from_it() {
         let (repo, _root_guard) = fixture("config-override-no-leak");
+        crate::scratch::stamped(&repo.root);
         let home = crate::scratch::root("sync-config-override-no-leak-home");
         let _ = std::fs::remove_dir_all(&home);
 
@@ -2631,6 +2632,7 @@ mod tests {
     #[test]
     fn an_override_only_worktree_root_names_the_folder_and_its_queued_tasks() {
         let (repo, _root_guard) = fixture("config-override-worktree-root");
+        crate::scratch::stamped(&repo.root);
         let home = crate::scratch::root("sync-config-override-worktree-root-home");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::write(
@@ -2680,6 +2682,7 @@ mod tests {
     #[test]
     fn a_dry_run_reports_a_retired_override_key_without_dropping_it() {
         let (repo, _root_guard) = fixture("config-override-dry-run");
+        crate::scratch::stamped(&repo.root);
         let home = crate::scratch::root("sync-config-override-dry-run-home");
         let _ = std::fs::remove_dir_all(&home);
 
@@ -2730,6 +2733,7 @@ mod tests {
     #[test]
     fn a_typo_in_the_override_is_left_in_the_layer_not_deleted() {
         let (repo, _root_guard) = fixture("config-override-typo");
+        crate::scratch::stamped(&repo.root);
         let home = crate::scratch::root("sync-config-override-typo-home");
         let _ = std::fs::remove_dir_all(&home);
 

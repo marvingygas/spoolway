@@ -5646,7 +5646,7 @@ mod tests {
         task.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
         task.save().unwrap();
 
-        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
         headless
             .start_lane(
                 &crate::mux::LaneSpec {
@@ -5752,7 +5752,7 @@ mod tests {
 
         // The lane that blocked, exactly as it survives a report: settled in
         // its pane, never yet freed by a pass.
-        let headless = crate::headless::Headless::new(&repo.root, repo.headless_dir()).unwrap();
+        let headless = crate::headless::Headless::new(&repo.root, &repo.home, repo.headless_dir());
         headless
             .start_lane(
                 &crate::mux::LaneSpec {

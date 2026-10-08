@@ -50,14 +50,24 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 | Case | What happens |
 |---|---|
 | The home already records this checkout | The command runs. |
-| The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. |
-| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. |
+| The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. Commands started together in a fresh clone agree on one home. |
+| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. A moved checkout, or a moved superproject, finds its queue this way. |
+| `.git/spoolway-label` is missing, and a home's `project.toml` records this id | The label is read from that home and written back. |
+| `.git/spoolway-label` is missing, and no home records this id | The command refuses, names `.git/spoolway-id` and tells you to delete it and run `spoolway init`. |
 | Anything else | The command refuses, naming both files by absolute path. |
+
+A home is always named with the clone's own id. A command that finds no id for the checkout
+refuses and tells you to run `spoolway init`.
+
+The update notice that most commands print looks up the project without writing. It stamps
+nothing and creates no home. `spoolway init` writes the stamp and the record together, after
+its last question. A cancelled `init` leaves `.git` and `~/.spoolway/` as they were.
 
 A third file, `.git/spoolway-root`, sits beside the id stamp in the same common git directory.
 It records the checkout's own absolute path. Unlike the id, which is minted once, it is
 rewritten each time the checkout is stamped: by `spoolway init`, and by the first command that
-binds an unstamped checkout. It exists for one case that neither the id stamp nor an ordinary
+binds an unstamped checkout. It is also rewritten when a moved checkout's record is rewritten.
+It exists for one case that neither the id stamp nor an ordinary
 `git rev-parse` answers: a `--separate-git-dir` clone or a submodule. There the common git
 directory need not sit inside the checkout, so its parent is not a reliable way back to it.
 

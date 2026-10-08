@@ -2177,8 +2177,8 @@ impl Pipelines {
     /// check`, the status screen, none of which is the one place that
     /// should have to know a second source exists.
     pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), true, true)
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Pipelines::load_impl(root, config, overrides.as_deref(), true, true)
     }
 
     /// [`Pipelines::load`], but an override that no longer fits is not
@@ -2186,8 +2186,8 @@ impl Pipelines {
     /// alternate screen: a line written there lands between two frames and is
     /// painted over before anyone can read it.
     pub fn load_quietly(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), true, false)
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Pipelines::load_impl(root, config, overrides.as_deref(), true, false)
     }
 
     /// [`Pipelines::load`], with no patch layer applied — for a caller that
@@ -2209,7 +2209,9 @@ impl Pipelines {
         if !crate::local::is_repo_mode(root) {
             return Ok(None);
         }
-        let local = crate::local::dir_for(root)?;
+        let Some(local) = crate::local::dir_if_identified(root)? else {
+            return Ok(None);
+        };
         let dir = crate::local::pipelines_dir(&local);
         let Some(files) = read_pipeline_dir(&dir)? else {
             return Ok(None);
@@ -2236,8 +2238,8 @@ impl Pipelines {
     /// against, so only these two opt into this; a file that is there but
     /// fails to parse is still a real problem and still fails here.
     pub fn load_or_empty(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root)?;
-        Pipelines::load_impl(root, config, Some(&overrides), false, true)
+        let overrides = crate::overrides::dir_if_identified(root)?;
+        Pipelines::load_impl(root, config, overrides.as_deref(), false, true)
     }
 
     /// One source: the directory. A missing directory and an empty one now
@@ -4370,6 +4372,7 @@ mod tests {
         let home = crate::scratch::root(&format!("pipeline-override-{name}-home"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
+        crate::scratch::stamped(&root);
         write_tracked_impl(&root);
 
         let result = crate::platform::test_home::with_home(&home, || f(&root));
@@ -5124,6 +5127,7 @@ mod tests {
         let home = crate::scratch::root("pipeline-private-e2e-home");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&home);
+        crate::scratch::stamped(&root);
 
         // A tracked pipeline with its own prompt present, so `pipeline
         // check` has nothing tracked to complain about.

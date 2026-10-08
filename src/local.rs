@@ -45,6 +45,13 @@ pub(crate) fn dir_for(root: &Path) -> Result<PathBuf> {
     Ok(crate::mux::project_home(&main)?.join(LOCAL_DIR))
 }
 
+/// [`dir_for`], but `Ok(None)` for a checkout with no git repository or no
+/// stamp: it has no home yet, so it has no private layer to read.
+pub(crate) fn dir_if_identified(root: &Path) -> Result<Option<PathBuf>> {
+    let main = crate::repo::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
+    Ok(crate::mux::identified_home(&main)?.map(|home| home.join(LOCAL_DIR)))
+}
+
 /// `local/pipelines/` — one file per private pipeline, the same shape as the
 /// tracked `.spoolway/pipelines/`.
 pub(crate) fn pipelines_dir(local: &Path) -> PathBuf {
@@ -105,6 +112,22 @@ pub(crate) fn refuse_unless_plain_name(label: &str, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checkout with no id has no home, so no private layer: the lookup that
+    /// must have one refuses it, and the one that can do without reads
+    /// `None` rather than a folder named after the checkout.
+    #[test]
+    fn a_checkout_with_no_id_has_no_private_layer() {
+        let root = crate::scratch::root("local-no-id");
+        let home = crate::scratch::root("local-no-id-home");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-q"]);
+        crate::platform::test_home::with_home(&home, || {
+            assert!(dir_for(&root).is_err());
+            assert_eq!(dir_if_identified(&root).unwrap(), None);
+            assert!(!crate::mux::state_root().exists());
+        });
+    }
 
     /// A plain, ordinary name is the only shape `pipeline copy` and `prompt
     /// copy` may ever write — everything a name could do to escape the

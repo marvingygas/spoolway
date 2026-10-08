@@ -385,8 +385,8 @@ pub fn doctor(
     // a real answer, and every check past this point either reads it
     // directly (`repo.tasks()`, `repo.archive_dir()`, `repo.lock_file()`
     // all create their directory on demand) or reads it indirectly through
-    // `Config::load`/`Pipelines::load`, which both resolve the overrides
-    // layer through the exact call that just failed. Running any of them
+    // `Config::load`/`Pipelines::load`, which both read the overrides layer
+    // out of the home that just failed to settle. Running any of them
     // would recreate the silent wrong-directory write id-keying this
     // project's home exists to prevent, or misreport this one failure as a
     // config or pipeline problem it is not.
@@ -505,9 +505,9 @@ pub fn doctor(
 /// Nothing below this reads `repo.home`, directly or otherwise:
 /// `repo.tasks()`, `repo.archive_dir()` and `repo.lock_file()` all create
 /// their directory the moment they are asked, and `Config::load`/
-/// `Pipelines::load` both resolve the overrides layer through
-/// `crate::mux::project_home` — the very call that just failed, which would
-/// report this project's own perfectly good tracked files as broken.
+/// `Pipelines::load` both read the overrides layer out of the home that just
+/// failed to settle, which could report this project's own perfectly good
+/// tracked files as broken.
 /// [`home_unavailable_findings`] reads the tracked files alone, through
 /// `Config::load_tracked`/`Pipelines::load_tracked`, which need no home at
 /// all.
@@ -3274,7 +3274,7 @@ mod tests {
         let root = crate::scratch::root(&format!("doctor-live-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let mux = crate::headless::Headless::new(&root, root.to_path_buf()).unwrap();
+        let mux = crate::headless::Headless::new(&root, &root, root.to_path_buf());
         (mux, root)
     }
 
@@ -3895,10 +3895,10 @@ mod tests {
     }
 
     /// A broken home must not cascade into a false config/pipeline failure:
-    /// `Config::load`/`Pipelines::load` both resolve the overrides layer
-    /// through `crate::mux::project_home`, the exact call that just failed,
-    /// so reaching for them again here would report this project's own
-    /// perfectly good tracked files as broken. The tracked-only loaders
+    /// `Config::load`/`Pipelines::load` both read the overrides layer out of
+    /// the home that just failed to settle, so reaching for them again here
+    /// could report this project's own perfectly good tracked files as
+    /// broken. The tracked-only loaders
     /// read the one thing still answerable without a home.
     #[test]
     fn a_home_resolution_failure_does_not_cascade_into_config_or_pipeline_failures() {

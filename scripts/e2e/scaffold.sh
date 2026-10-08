@@ -101,9 +101,10 @@ FORGE="$DIR-forge"
 #
 # A home is `<label>-<id>` now, `<id>` read out of `$DIR/.git/spoolway-id` —
 # read here, before anything below can delete `$DIR` and the stamp with it.
-# A `$DIR` that was never `init`ed (the very first run) has no stamp yet;
-# `project_home`'s own pre-stamp fallback is the bare label, so this falls
-# back the same way.
+# A `$DIR` that was never `init`ed (the very first run) has no stamp yet, and
+# so no home: `project_home` refuses a clone with no id rather than fall back
+# to the bare label. The bare-label path below names nothing that exists then,
+# and every teardown step checks for it before removing it.
 project_home() {
   local id
   if [ -f "$DIR/.git/spoolway-id" ] && id=$(cat "$DIR/.git/spoolway-id" 2>/dev/null) \

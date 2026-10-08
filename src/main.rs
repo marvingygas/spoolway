@@ -660,7 +660,9 @@ fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
         return None;
     }
 
-    let enabled = Repo::discover_lenient(cwd)
+    // Read-only: this runs before `init` has asked anything, and a
+    // cancelled `init` must leave `.git` and `~/.spoolway` as they were.
+    let enabled = Repo::discover_lenient_read_only(cwd)
         .map(|(repo, _, _)| repo.config.housekeeping.update_check)
         .unwrap_or(true);
 

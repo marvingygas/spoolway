@@ -19,6 +19,10 @@
 # answers is unit-tested in src/commands/init.rs. The lane pass above it still builds its workspace
 # by hand, by moving an ordinary setup out of the checkout, because the
 # harness's fixture helpers rewrite a checkout's own `.spoolway/` in place.
+#
+# The last sections are about the clone's id rather than home mode as such, and
+# run in repo mode: a superproject moved on disk, an `init` cancelled at its
+# first question, and several first commands started at once in a fresh clone.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -267,5 +271,121 @@ if grep -qxF "Moved to workspace $NAME2." <<<"$out" \
 else bad "the move back says where it went and which workspace it left empty"; sed 's/^/        /' <<<"$out"; fi
 if [ -d "$WS3/config" ]; then ok "the emptied workspace is kept"; else bad "the emptied workspace is kept"; fi
 has "the first clone is listed back in its workspace" "root = \"$(pwd -P)\"" "$WS2/project.toml"
+
+# ------------------------------------------- a moved superproject
+# A project that is a submodule keeps its id in the superproject's
+# `.git/modules/`, and records where its checkout is beside it. Moving the
+# superproject leaves that record naming a folder that is gone. The clone is
+# still the same one, so the command run from its new place must find the home
+# it had, queue and all, and rewrite the record, rather than look in a folder
+# named after the checkout and advise deleting a stamp that was fine.
+GIT_ID=(-c user.email=spoolway@example.invalid -c user.name="spoolway tests")
+SUB_ORIGIN="$LIVE/sub-origin"
+mkdir -p "$SUB_ORIGIN"
+must "the submodule's origin" git -C "$SUB_ORIGIN" init -q -b main
+must "the submodule's origin" git -C "$SUB_ORIGIN" "${GIT_ID[@]}" commit -q --allow-empty -m seed
+SUPER="$LIVE/super"
+mkdir -p "$SUPER"
+must "the superproject" git -C "$SUPER" init -q -b main
+must "the superproject holds the project as a submodule" \
+  git -C "$SUPER" -c protocol.file.allow=always submodule add -q "$SUB_ORIGIN" sub
+must "the superproject holds the project as a submodule" git -C "$SUPER" "${GIT_ID[@]}" commit -qm sub
+cd "$SUPER/sub" || exit 2
+must "init sets the submodule up" "$SPOOLWAY" init --yes --provider claude --tracker none </dev/null
+SUB_HOME=$(ls -d "$HOME"/.spoolway/sub-*/ | head -1)
+SUB_HOME=${SUB_HOME%/}
+mkdir -p "$SUB_HOME/queue"
+task_doc "$SUB_HOME/queue/m1.md" m1 "$BODY" "stage: queued"
+
+cd "$LIVE" || exit 2
+must "the superproject moves" mv "$SUPER" "$LIVE/super-moved"
+cd "$LIVE/super-moved/sub" || exit 2
+MOVED=$(pwd -P)
+out=$("$SPOOLWAY" queue list 2>&1)
+if grep -qF "$SUB_HOME/project.toml now records $MOVED" <<<"$out"; then
+  ok "a moved superproject records the move"
+else bad "a moved superproject records the move"; sed 's/^/        /' <<<"$out"; fi
+if grep -qF "m1" <<<"$out"; then ok "the moved project finds the queue it had"
+else bad "the moved project finds the queue it had"; sed 's/^/        /' <<<"$out"; fi
+if grep -qF "no home holds the id" <<<"$out"; then bad "the moved project is not refused for want of a home"
+else ok "the moved project is not refused for want of a home"; fi
+has "the record names the checkout where it is now" "root = \"$MOVED\"" "$SUB_HOME/project.toml"
+if [ "$(ls -d "$HOME"/.spoolway/sub-*/ | wc -l)" -eq 1 ]; then ok "no second home is made for the moved checkout"
+else bad "no second home is made for the moved checkout"; ls -A "$HOME/.spoolway" | sed 's/^/        /'; fi
+
+# --------------------------------------------------- a cancelled init
+# `init` asks every question before it writes anything, and the lookup every
+# command runs first, to decide on the update notice, only reads. So a run
+# stopped at its first question leaves `.git` and
+# `~/.spoolway` exactly as they were. Run under a pseudo-terminal, since a
+# silent run never reaches a question at all.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  CANCEL="$LIVE/cancelled"
+  mkdir -p "$CANCEL"
+  must "the repo init is cancelled in" git -C "$CANCEL" init -q -b main
+  must "the repo init is cancelled in" git -C "$CANCEL" "${GIT_ID[@]}" commit -q --allow-empty -m seed
+  cd "$CANCEL" || exit 2
+  ls -A .git > "$LIVE/cancelled.git-before"
+  ls -A "$HOME/.spoolway" > "$LIVE/cancelled.home-before"
+  # Stopped once its first question is on screen, however long that takes,
+  # with a cap so a hung run cannot hold the suite. Killing the wrapper takes
+  # the question's session down with it, which is what an interrupt at the
+  # prompt would end in.
+  script -qec "$SPOOLWAY init" /dev/null </dev/null >"$LIVE/cancelled.out" 2>&1 &
+  init_pid=$!
+  for _ in $(seq 1 300); do
+    grep -qF "Where should this project's setup live" "$LIVE/cancelled.out" 2>/dev/null && break
+    sleep 0.1
+  done
+  kill -INT "$init_pid" 2>/dev/null
+  sleep 0.5
+  kill -TERM "$init_pid" 2>/dev/null
+  wait "$init_pid" 2>/dev/null
+  has "the cancelled init got as far as its first question" "Where should this project's setup live" \
+    "$LIVE/cancelled.out"
+  if ls -A .git | diff -q "$LIVE/cancelled.git-before" - >/dev/null && [ -z "$(find .git -iname '*spoolway*')" ]; then
+    ok "a cancelled init leaves .git as it was"
+  else bad "a cancelled init leaves .git as it was"; find .git -iname '*spoolway*' | sed 's/^/        /'; fi
+  if ls -A "$HOME/.spoolway" | diff -q "$LIVE/cancelled.home-before" - >/dev/null; then
+    ok "a cancelled init leaves ~/.spoolway as it was"
+  else bad "a cancelled init leaves ~/.spoolway as it was"; ls -A "$HOME/.spoolway" | sed 's/^/        /'; fi
+else
+  echo "  skip  a cancelled init (no pseudo-terminal wrapper on this machine)"
+fi
+
+# ----------------------------------------- parallel first commands
+# A fresh clone of a project that tracks its own `.spoolway/` has no id and no
+# home. Several commands started at once in it must settle on one home between
+# them: the stamp and the home's record are written together, under one lock,
+# and a command that finds the stamp without the record waits for it rather
+# than failing with "no home holds the id".
+PAR_ORIGIN="$LIVE/par-origin"
+mkdir -p "$PAR_ORIGIN"
+must "the project to clone" git -C "$PAR_ORIGIN" init -q -b main
+cd "$PAR_ORIGIN" || exit 2
+must "the project to clone is set up" "$SPOOLWAY" init --yes --provider claude --tracker none </dev/null
+must "the project to clone is committed" git add -A
+must "the project to clone is committed" git "${GIT_ID[@]}" commit -qm "set up"
+PAR="$LIVE/par-clone"
+for round in 1 2 3; do
+  rm -rf "$PAR"
+  before_homes=$(ls "$HOME/.spoolway" | grep -c '^par-clone-' || true)
+  must "a fresh clone" git clone -q "$PAR_ORIGIN" "$PAR"
+  cd "$PAR" || exit 2
+  pids=()
+  for n in 1 2 3 4 5 6; do
+    ("$SPOOLWAY" queue list >"$LIVE/par.$n.out" 2>&1; echo $? >"$LIVE/par.$n.rc") &
+    pids+=($!)
+  done
+  wait "${pids[@]}"
+  failed=$(cat "$LIVE"/par.*.rc | grep -vc '^0$' || true)
+  if [ "$failed" -eq 0 ]; then ok "round $round: six parallel first commands all succeed"
+  else bad "round $round: six parallel first commands all succeed ($failed failed)"; cat "$LIVE"/par.*.out | sed 's/^/        /'; fi
+  homes=$(ls "$HOME/.spoolway" | grep -c '^par-clone-' || true)
+  if [ "$((homes - before_homes))" -eq 1 ]; then ok "round $round: they agree on one home"
+  else bad "round $round: they agree on one home ($((homes - before_homes)) made)"; ls -A "$HOME/.spoolway" | sed 's/^/        /'; fi
+  rm -rf "$HOME"/.spoolway/par-clone-* "$LIVE"/par.*.rc "$LIVE"/par.*.out
+  cd "$LIVE" || exit 2
+done
 
 finish

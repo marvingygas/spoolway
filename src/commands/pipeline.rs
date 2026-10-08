@@ -4255,6 +4255,7 @@ mod tests {
         let fake_home = crate::scratch::root(&format!("pipeline-override-{name}-home"));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&fake_home);
+        crate::scratch::stamped(&root);
         std::fs::create_dir_all(root.join(".spoolway/pipelines")).unwrap();
         std::fs::write(
             root.join(format!(".spoolway/pipelines/{pipeline}.yml")),

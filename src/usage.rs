@@ -2511,7 +2511,7 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
 
 /// Catch every session that ran inside a watched directory, or inside one of
 /// this project's own worktrees — see [`crate::config::Config::watch_roots`]
-/// and [`crate::mux::worktree_root`] — up to its transcript, the same job
+/// and [`crate::repo::Repo::worktree_root`] — up to its transcript, the same job
 /// [`sweep`] does for a settled lane above, over a population that never
 /// dispatched at all.
 ///
@@ -2572,7 +2572,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
     // covers) is still found this way, even once removed: this is a string
     // prefix test against the transcript's own recorded `cwd`, never a check
     // that the directory still exists.
-    let wt_root = crate::mux::worktree_root(&repo.root).ok();
+    let wt_root = repo.worktree_root();
 
     let mut lane_sessions: HashSet<&str> = HashSet::new();
     // The most recent line of each hand session in a task's worktree — the
@@ -2747,10 +2747,8 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             // way it has no task or step of its own, so it is banked on the
             // project root's own row — the directory table has no row for a
             // worktree by itself, only for what watches it.
-            let under_project_worktrees = wt_root
-                .as_ref()
-                .is_some_and(|root| !root.as_os_str().is_empty() && cwd.starts_with(root))
-                || matching_root(&cwd, &extra_worktrees).is_some();
+            let under_project_worktrees =
+                cwd.starts_with(&wt_root) || matching_root(&cwd, &extra_worktrees).is_some();
             let root = match matching_root(&cwd, &roots) {
                 Some(root) => Some(root),
                 None if under_project_worktrees => roots.first().cloned(),
@@ -2802,9 +2800,7 @@ fn task_worktree_roots(repo: &Repo) -> Vec<(PathBuf, String)> {
                 out.push((recorded, task.id().to_string()));
                 continue;
             }
-            let Ok(root) = crate::mux::worktree_root(&repo.root) else {
-                continue;
-            };
+            let root = repo.worktree_root();
             let branch = task
                 .front
                 .branch
@@ -4906,6 +4902,7 @@ mod tests {
         crate::platform::set_test_env("XDG_STATE_HOME", &home);
 
         let live = home.join("live");
+        crate::scratch::stamped(&live);
         std::fs::create_dir_all(live.join(crate::config::STATE_DIR)).unwrap();
         let gone = home.join("gone");
 
@@ -4944,6 +4941,7 @@ mod tests {
         crate::platform::set_test_env("XDG_STATE_HOME", &home);
 
         let live = home.join("live");
+        crate::scratch::stamped(&live);
         std::fs::create_dir_all(live.join(crate::config::STATE_DIR)).unwrap();
         let gone = home.join("gone");
 
@@ -4987,6 +4985,7 @@ mod tests {
         crate::platform::set_test_env("XDG_STATE_HOME", &home);
 
         let live = home.join("live");
+        crate::scratch::stamped(&live);
         std::fs::create_dir_all(live.join(crate::config::STATE_DIR)).unwrap();
         let path = registry::path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -4999,6 +4998,68 @@ mod tests {
             vec![live.clone()],
             "an old-shape registry must still list its projects"
         );
+
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// An old-shape registry that names a checkout with no id drops that root
+    /// rather than keying it on a folder named after the checkout, and keeps
+    /// the root that has one.
+    #[test]
+    fn an_old_schema_registry_drops_a_root_with_no_id() {
+        let _guard = registry_env_lock();
+        let home = crate::scratch::root("registry-old-schema-no-id");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &home);
+
+        let live = home.join("live");
+        crate::scratch::stamped(&live);
+        std::fs::create_dir_all(live.join(crate::config::STATE_DIR)).unwrap();
+        let bare = home.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        crate::scratch::git_init(&bare, &["-q"]);
+        let path = registry::path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string(&vec![bare.clone(), live.clone()]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(registry::list(), vec![live.clone()]);
+
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A checkout with no id has no home to key a registry entry on, so it is
+    /// not registered, and its own ledger reads as empty: neither invents a
+    /// folder from the checkout's name.
+    #[test]
+    fn a_checkout_with_no_id_is_neither_registered_nor_read() {
+        let _guard = registry_env_lock();
+        let home = crate::scratch::root("registry-no-id");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &home);
+
+        let bare = home.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        crate::scratch::git_init(&bare, &["-q"]);
+
+        registry::register(&bare);
+        assert!(registry::list().is_empty());
+        assert!(read_project(&bare).is_empty());
 
         match previous {
             Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
@@ -6554,9 +6615,7 @@ mod tests {
 
         let home = crate::scratch::root("dir-sweep-wt-root-orphan");
         std::fs::create_dir_all(&home).unwrap();
-        let wt_root = crate::platform::test_home::with_home(&home, || {
-            crate::mux::worktree_root(&repo.root).expect("a worktree root")
-        });
+        let wt_root = repo.worktree_root();
         // No task recorded this directory — it stands for one already
         // deleted, or cut before this project used the current naming.
         let orphan = wt_root.join("gone-task-worktree");
@@ -7054,7 +7113,7 @@ mod tests {
         archive(&repo, "bare", "group: g\nbranch: task/proj-bare\n");
         archive(&repo, "doomed", "group: g\nworktree_path: /w/doomed\n");
 
-        let root = crate::mux::worktree_root(&repo.root).unwrap();
+        let root = repo.worktree_root();
         let expected = |ids: &[&str]| -> Vec<(PathBuf, String)> {
             let mut out = Vec::new();
             for id in ids {

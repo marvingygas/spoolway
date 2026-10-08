@@ -362,6 +362,23 @@ pub(crate) fn git_init(root: &Path, args: &[&str]) {
     }
 }
 
+/// Make `root` a git repository carrying a spoolway id, the way `spoolway init`
+/// leaves a clone, so [`crate::mux::project_home`] has a home to name for it.
+///
+/// A fixture directory that is no repository has no home at all: the lookup
+/// refuses it rather than inventing a folder from its basename. A test that
+/// writes into the project's home — overrides, the private layer — calls this
+/// first. It writes only into the repository's `.git`, so the `HOME` a test has
+/// pinned does not matter to it.
+#[cfg(test)]
+pub(crate) fn stamped(root: &Path) {
+    std::fs::create_dir_all(root).unwrap();
+    git_init(root, &["-q", "-b", "main"]);
+    crate::repo::stamped_id(root)
+        .unwrap()
+        .expect("a git repository stamps an id");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
