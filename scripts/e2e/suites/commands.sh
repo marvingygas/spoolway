@@ -98,8 +98,12 @@ cat >"$PRICE_FIXTURE" <<'JSON'
     "mode": "chat",
     "input_cost_per_token": 0.0000001,
     "output_cost_per_token": 0.0000005,
+    "cache_read_input_token_cost": 0.00000002,
+    "cache_creation_input_token_cost": 0.000000125,
     "input_cost_per_token_above_100k_tokens": 0.0000005,
     "output_cost_per_token_above_100k_tokens": 0.0000025,
+    "cache_read_input_token_cost_above_100k_tokens": 0.0000001,
+    "cache_creation_input_token_cost_above_100k_tokens": 0.000000625,
     "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 0.000001,
     "input_cost_per_token_above_200k_tokens": 0.000009
   },
@@ -119,7 +123,8 @@ works "the refreshed machine-wide table is valid JSON" \
 # per million like the base rates, the one-hour cache write included.
 works "a tiered row reaches the refreshed table as its lowest tier" \
   jq -e '.models["fake-tiered"] | .input == 0.1
-    and .above_100k_tokens == {"input": 0.5, "output": 2.5, "cache_write_1h": 1}
+    and .above_100k_tokens == {"input": 0.5, "output": 2.5, "cache_read": 0.1,
+      "cache_write_5m": 0.625, "cache_write_1h": 1}
     and (has("above_200k_tokens") | not)' \
   "$HOME/.spoolway/model-prices.json"
 MODELS_OUT="$LIVE/models-refreshed.out"
@@ -142,6 +147,22 @@ else
   bad "models draws a tiered model's higher rates on an indented row under it"
   sed 's/^/        /' "$LIVE/models-tiered.out"
 fi
+# `eval` re-prices the four class columns from the ledger line's own split:
+# `tier_tokens` at the tier's rates, the rest at the base rates, both from the
+# refreshed table above. The ledger is put back after.
+LEDGER="$SPOOLWAY_PROJECT_HOME/usage.jsonl"
+LEDGER_HAD=0
+if [ -e "$LEDGER" ]; then LEDGER_HAD=1; cp "$LEDGER" "$LIVE/usage.jsonl.keep"; fi
+printf '%s\n' '{"ts":"2026-10-09T09:12:40+00:00","task":"tiered-eval","step":"implement","pipeline":"tiered","agent":"pi","kind":"pi","model":"fake-tiered","session":"tiered-eval-s1","turns":2,"tokens":{"input":1000000,"output":1000000,"cache_read":2000000,"cache_write_5m":1000000},"tier_tokens":{"input":400000,"output":200000,"cache_read":1000000,"cache_write_5m":500000},"cost_usd":1.5}' >>"$LEDGER"
+# in: 0.6M x $0.10 + 0.4M x $0.50; out: 0.8M x $0.50 + 0.2M x $2.50;
+# cache read: 1M x $0.02 + 1M x $0.10; cache write: 0.5M x $0.125 + 0.5M x $0.625.
+works "eval prices a line's tier_tokens at the tier's rates in the four class columns" \
+  bash -c '"$0" eval --by pipeline --pipeline tiered --json | jq -e "
+    def near(a; b): ((a - b) | fabs) < 1e-9;
+    .total | near(.in_usd; 0.26) and near(.out_usd; 0.9)
+      and near(.cache_read_usd; 0.12) and near(.cache_write_usd; 0.375)
+      and .cost_usd == 1.5"' "$SPOOLWAY"
+if [ "$LEDGER_HAD" = 1 ]; then cp "$LIVE/usage.jsonl.keep" "$LEDGER"; else rm -f "$LEDGER"; fi
 REFRESHED_GENERATED=$(jq -r '.generated' "$HOME/.spoolway/model-prices.json")
 MODELS_FOOTER=$(tail -n 1 "$MODELS_OUT")
 MODELS_FOOTER_PATTERN="^Prices generated ${REFRESHED_GENERATED}, [0-9]+ days ago\\. Refresh with "

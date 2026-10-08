@@ -6747,6 +6747,7 @@ mod tests {
     fn a_reported_cost_is_taken_at_its_word_less_whatever_is_banked() {
         let ledger = [banked("login", "implement", "s1", Some(1.5))];
         let harvest = |cost: f64| crate::usage::Harvest {
+            tier_tokens: Default::default(),
             model: "claude-sonnet-5".into(),
             tokens: crate::usage::Tokens::default(),
             turns: 1,
@@ -6773,6 +6774,7 @@ mod tests {
         let mut entry = banked("login", "implement", "s1", Some(15.0));
         entry.tokens.output = 1_000_000;
         let harvest = crate::usage::Harvest {
+            tier_tokens: Default::default(),
             model: "claude-sonnet-5".into(),
             tokens: crate::usage::Tokens {
                 output: 1_500_000,
@@ -6803,6 +6805,7 @@ mod tests {
     #[test]
     fn a_harvest_with_no_cost_shows_no_cost() {
         let harvest = crate::usage::Harvest {
+            tier_tokens: Default::default(),
             model: "claude-sonnet-5".into(),
             tokens: crate::usage::Tokens {
                 output: 1_000_000,

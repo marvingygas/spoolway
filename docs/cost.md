@@ -156,8 +156,12 @@ threshold when its `input + cache_read + cache_write` is more than the threshold
 turn is charged whole at the tier's rates, output included. Every other turn is charged at the
 base rates. A model with no tier is charged at the base rates for every turn.
 
-A lane that has been banked before adds only the cost it has not banked yet. The `COST` column
-of the dispatch board shows the same figure for a running step.
+A ledger line also carries `tier_tokens`: the part of its `tokens` that came from over-threshold
+turns, in the same shape as `tokens`. It is left out of the line when it is zero. A line with no
+`tier_tokens` has no split, and `spoolway eval` prices all of it at the base rates.
+
+A lane that has been banked before adds only the cost, `tokens` and `tier_tokens` it has not
+banked yet. The `COST` column of the dispatch board shows the same cost for a running step.
 
 A lane with a turn whose model has no price banks no cost at all. The cost is left out, not
 set to zero.

@@ -105,6 +105,16 @@ impl Tokens {
     pub fn is_zero(&self) -> bool {
         self.total() == 0
     }
+
+    /// `self` limited, class by class, to what `whole` holds.
+    ///
+    /// A ledger line's `tier_tokens` is a part of its `tokens`. The split is
+    /// recomputed over a whole transcript against today's price table, so
+    /// when an earlier line banked none of it, or banked it under another
+    /// threshold, the difference alone can exceed the line's own delta.
+    pub fn within(&self, whole: &Tokens) -> Tokens {
+        self.since(&self.since(whole))
+    }
 }
 
 /// One finished lane, as written to the ledger.
@@ -152,6 +162,12 @@ pub struct Entry {
     #[serde(default)]
     pub turns: u32,
     pub tokens: Tokens,
+    /// The part of `tokens` that came from turns over their model's price
+    /// threshold, which `spoolway eval` prices at the tier's rates. Left out of
+    /// the line when it is zero, so an untiered lane's line keeps its shape,
+    /// and a line written before the field reads as all base-rate.
+    #[serde(default, skip_serializing_if = "Tokens::is_zero")]
+    pub tier_tokens: Tokens,
     /// Absent when nothing could price this model — never estimated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
@@ -684,17 +700,21 @@ impl ModelPrice {
     /// threshold has not passed it, and the output is charged at the tier's
     /// rate too, because providers bill the whole request at the higher price.
     pub(crate) fn apply_turn(&self, tokens: &Tokens) -> f64 {
-        let prompt = tokens.input + tokens.cache_read + tokens.cache_write();
-        match self.tier {
-            Some(tier) if prompt > tier.above_k * 1000 => tier.rates.apply(tokens),
-            _ => self.apply(tokens),
+        match self.tier_reached(tokens) {
+            Some(tier) => tier.rates.apply(tokens),
+            None => self.apply(tokens),
         }
     }
 
-    /// What `tokens` cost at the base rates. Crate-visible so `spoolway eval`
-    /// can price one token class at a time through the same rates — see
-    /// `eval::ClassCost` — rather than repeat them.
-    pub(crate) fn apply(&self, tokens: &Tokens) -> f64 {
+    /// The tier one request's prompt passed, if this model has one and the
+    /// prompt went over its threshold.
+    pub(crate) fn tier_reached(&self, tokens: &Tokens) -> Option<PriceTier> {
+        let prompt = tokens.input + tokens.cache_read + tokens.cache_write();
+        self.tier.filter(|tier| prompt > tier.above_k * 1000)
+    }
+
+    /// What `tokens` cost at the base rates.
+    fn apply(&self, tokens: &Tokens) -> f64 {
         self.rates().apply(tokens)
     }
 }
@@ -1003,6 +1023,9 @@ pub fn ambient_sessions() -> Vec<(&'static str, String)> {
 pub struct Harvest {
     pub model: String,
     pub tokens: Tokens,
+    /// The part of `tokens` that came from turns over their model's price
+    /// threshold — see [`Entry::tier_tokens`].
+    pub tier_tokens: Tokens,
     pub turns: u32,
     /// The sum of every turn's cost: the agent's own figure for a turn that
     /// reports one, trusted over the price map because a local lane's honest
@@ -1308,6 +1331,7 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
     };
 
     let mut tokens = Tokens::default();
+    let mut tier_tokens = Tokens::default();
     let mut model = String::new();
     let mut turns = 0u32;
     let mut context = 0u64;
@@ -1391,6 +1415,12 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         let entry = *resolved
             .entry(turn.model.clone())
             .or_insert_with(|| crate::models::resolve(prices, &turn.model).price);
+        // Banked whatever pays for the turn: `spoolway eval` re-prices the
+        // token classes from today's table, so the split must not depend on
+        // whether the agent reported its own cost.
+        if entry.is_some_and(|price| price.tier_reached(&turn.tokens).is_some()) {
+            tier_tokens.add(&turn.tokens);
+        }
         match turn.cost.or_else(|| Some(entry?.apply_turn(&turn.tokens))) {
             Some(cost) => spent += cost,
             None => any_unpriced = true,
@@ -1405,6 +1435,7 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         total: Some(Harvest {
             model,
             tokens,
+            tier_tokens,
             turns,
             ctx_peak,
             cost_usd: (!any_unpriced).then_some(spent),
@@ -2560,6 +2591,7 @@ fn bank_lane_from(
 struct Delta {
     model: String,
     tokens: Tokens,
+    tier_tokens: Tokens,
     turns: u32,
     cost_usd: Option<f64>,
 }
@@ -2571,11 +2603,13 @@ struct Delta {
 /// stays absent here.
 fn banked_delta(session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<Delta> {
     let mut banked = Tokens::default();
+    let mut banked_tier = Tokens::default();
     let mut banked_cost = 0.0f64;
     let mut banked_turns = 0u32;
     for entry in ledger {
         if entry.session == session {
             banked.add(&entry.tokens);
+            banked_tier.add(&entry.tier_tokens);
             banked_cost += entry.cost_usd.unwrap_or(0.0);
             banked_turns += entry.turns;
         }
@@ -2593,6 +2627,9 @@ fn banked_delta(session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<De
     Some(Delta {
         model,
         tokens,
+        // Saturating like `tokens`, for the same truncated-transcript reason,
+        // and limited to this line's own `tokens`: see [`Tokens::within`].
+        tier_tokens: harvest.tier_tokens.since(&banked_tier).within(&tokens),
         turns: harvest.turns.saturating_sub(banked_turns),
         cost_usd,
     })
@@ -2654,6 +2691,7 @@ fn bank_lane_at(
         wall_s: 0,
         turns: delta.turns,
         tokens: delta.tokens,
+        tier_tokens: delta.tier_tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
         // Carried from the line this sweep continues rather than read fresh
@@ -3363,6 +3401,7 @@ fn bank_dir_session(
         wall_s: 0,
         turns: delta.turns,
         tokens: delta.tokens,
+        tier_tokens: delta.tier_tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
         pipeline_version: String::new(),
@@ -4656,6 +4695,106 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// The split `spoolway eval` re-prices from: only the turn over the
+    /// threshold lands in `tier_tokens`, and the second bank subtracts it.
+    #[test]
+    fn the_harvest_banks_the_turns_over_the_threshold_and_a_second_bank_subtracts_them() {
+        let session = "0198e2c0-2222-4000-8000-000000000031";
+        let home = home_with("claude", session, TIERED_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+
+        let over = Tokens {
+            input: 50_000,
+            output: 200,
+            cache_read: 100_000,
+            ..Tokens::default()
+        };
+        assert_eq!(harvest.tier_tokens, over);
+
+        let mut banked = entry_for(session, &harvest);
+        assert_eq!(banked.tier_tokens, over);
+        let line = serde_json::to_string(&banked).unwrap();
+        assert!(line.contains("\"tier_tokens\""), "{line}");
+
+        // Nothing new: the whole split is already banked.
+        assert!(banked_delta(session, std::slice::from_ref(&banked), &harvest).is_none());
+
+        // One token more, none of it over the threshold: the split stays put.
+        let mut more = Harvest {
+            tokens: Tokens {
+                input: harvest.tokens.input + 1,
+                ..harvest.tokens
+            },
+            ..harvest
+        };
+        let delta = banked_delta(session, std::slice::from_ref(&banked), &more).unwrap();
+        assert!(delta.tier_tokens.is_zero());
+
+        // A split larger than the harvest's saturates at zero.
+        banked.tier_tokens.input += 10;
+        more.tier_tokens = over;
+        let delta = banked_delta(session, &[banked], &more).unwrap();
+        assert_eq!(delta.tier_tokens.input, 0);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Nothing banked a split before, so the harvest's whole share is new;
+    /// the line still cannot claim more than the tokens it carries.
+    #[test]
+    fn a_delta_limits_its_split_to_its_own_tokens() {
+        let session = "0198e2c0-2222-4000-8000-000000000033";
+        let home = home_with("claude", session, TIERED_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+        let earlier = Entry {
+            tokens: Tokens {
+                input: 50_000,
+                cache_read: 100_000,
+                output: 200,
+                ..Tokens::default()
+            },
+            tier_tokens: Tokens::default(),
+            turns: 1,
+            ..entry_for(session, &harvest)
+        };
+
+        let delta = banked_delta(session, &[earlier], &harvest).expect("a first turn is new");
+        assert_eq!(delta.tokens.input, 1_000);
+        assert_eq!(delta.tier_tokens, delta.tier_tokens.within(&delta.tokens));
+        assert_eq!(delta.tier_tokens.input, 1_000);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// An untiered lane's line is byte-for-byte the shape it always was.
+    #[test]
+    fn an_untiered_line_is_written_without_tier_tokens() {
+        let session = "0198e2c0-2222-4000-8000-000000000032";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let harvest = harvest_file("claude", &path, &prices()).expect("nothing harvested");
+        assert!(harvest.tier_tokens.is_zero());
+        let line = serde_json::to_string(&entry_for(session, &harvest)).unwrap();
+        assert!(!line.contains("tier_tokens"), "{line}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The ledger line `bank_dir_session` would write for `harvest`.
+    fn entry_for(session: &str, harvest: &Harvest) -> Entry {
+        let (repo, _, _root_guard) = fixture("tier-tokens-entry");
+        bank_dir_session(
+            &repo,
+            "claude",
+            session,
+            "/work",
+            chrono::Utc::now(),
+            &[],
+            harvest,
+        )
+        .expect("a line")
+    }
+
     /// A prompt of exactly the threshold is not over it.
     #[test]
     fn a_turn_exactly_at_the_threshold_stays_at_the_base_rates() {
@@ -4889,6 +5028,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         let entry = Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-04T06:14:15+00:00".into(),
             task: "login".into(),
             plan: Some("auth".into()),
@@ -4957,6 +5097,7 @@ mod tests {
 
     fn minimal_entry(task: &str) -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: chrono::Utc::now().to_rfc3339(),
             task: task.to_string(),
             plan: None,
@@ -5796,6 +5937,7 @@ mod tests {
     /// everything else is the quietest value that parses.
     fn plain_entry() -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-04T06:14:15+00:00".into(),
             task: String::new(),
             plan: None,
@@ -5831,6 +5973,7 @@ mod tests {
     fn bank_lane_appends_only_a_lanes_unbanked_delta() {
         let (repo, _, _root_guard) = fixture("bank-lane");
         let harvest = |input, output, turns| Harvest {
+            tier_tokens: Default::default(),
             model: "claude-opus-5".to_string(),
             tokens: Tokens {
                 input,
@@ -6173,6 +6316,16 @@ mod tests {
         turn(1, 1_000, 0, 100) + &turn(2, 50_000, 100_000, 200)
     }
 
+    /// The second turn of [`tiered_transcript_in`], the one over the threshold.
+    fn tiered_split() -> Tokens {
+        Tokens {
+            input: 50_000,
+            output: 200,
+            cache_read: 100_000,
+            ..Tokens::default()
+        }
+    }
+
     /// What [`tiered_transcript_in`] costs under [`tiered_prices`]: the first
     /// turn at the base rates, the second at the tier's.
     fn tiered_cost() -> f64 {
@@ -6205,6 +6358,7 @@ mod tests {
 
         let cost = line.cost_usd.expect("a priced lane has a cost");
         assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(line.tier_tokens, tiered_split());
     }
 
     /// The headless interrupt's `bank_lane` reads the transcript itself, so it
@@ -6224,6 +6378,7 @@ mod tests {
 
         let cost = line.cost_usd.expect("a priced lane has a cost");
         assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(line.tier_tokens, tiered_split());
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -7324,6 +7479,7 @@ mod tests {
         assert!(!appended[0].is_lane());
         let cost = appended[0].cost_usd.expect("a priced session has a cost");
         assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(appended[0].tier_tokens, tiered_split());
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -7362,6 +7518,7 @@ mod tests {
         assert_eq!(appended[0].task, "wt-tiered");
         let cost = appended[0].cost_usd.expect("a priced session has a cost");
         assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(appended[0].tier_tokens, tiered_split());
 
         std::fs::remove_dir_all(&home).ok();
     }

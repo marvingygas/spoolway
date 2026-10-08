@@ -551,6 +551,8 @@ pub struct Dispatcher<'a> {
 #[derive(Debug, Clone, Default)]
 struct BankedTotals {
     tokens: crate::usage::Tokens,
+    /// The part of `tokens` already banked as over a price threshold.
+    tier_tokens: crate::usage::Tokens,
     turns: u32,
     cost_usd: f64,
 }
@@ -2808,6 +2810,11 @@ impl<'a> Dispatcher<'a> {
             .entry(record.session.clone())
             .or_default();
         let tokens = harvest.tokens.since(&banked.tokens);
+        // Limited to this line's own `tokens`: see [`crate::usage::Tokens::within`].
+        let tier_tokens = harvest
+            .tier_tokens
+            .since(&banked.tier_tokens)
+            .within(&tokens);
         let banked_cost = banked.cost_usd;
         let banked_turns = banked.turns;
         // A kept lane is banked when its step moves on and again when its pane
@@ -2859,6 +2866,7 @@ impl<'a> Dispatcher<'a> {
             wall_s: record.busy_s,
             turns: harvest.turns.saturating_sub(banked_turns),
             tokens,
+            tier_tokens,
             cost_usd,
             // The transcript's own peak, not a delta against what was already
             // banked — a peak from an earlier lane of a carried session is
@@ -2895,6 +2903,7 @@ impl<'a> Dispatcher<'a> {
             .entry(record.session.clone())
             .or_default();
         banked.tokens.add(&entry.tokens);
+        banked.tier_tokens.add(&entry.tier_tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
         appended
@@ -6781,6 +6790,7 @@ fn banked_totals(ledger: &[crate::usage::Entry]) -> HashMap<String, BankedTotals
         }
         let banked = totals.entry(entry.session.clone()).or_default();
         banked.tokens.add(&entry.tokens);
+        banked.tier_tokens.add(&entry.tier_tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
     }
@@ -11180,6 +11190,16 @@ mod tests {
     /// takes, and answer the one line it appended. `earlier` is any transcript
     /// records that come before the two tiered requests.
     fn bank_claude_lane_through_a_pass(name: &str, earlier: &str) -> crate::usage::Entry {
+        bank_claude_lane_after(name, earlier, None)
+    }
+
+    /// [`bank_claude_lane_through_a_pass`] for a session the ledger already
+    /// holds `seeded` for — a resumed lane — answering the line this pass adds.
+    fn bank_claude_lane_after(
+        name: &str,
+        earlier: &str,
+        seeded: Option<(crate::usage::Tokens, crate::usage::Tokens)>,
+    ) -> crate::usage::Entry {
         let (mut repo, _root_guard) = fixture(name);
         repo.config.dispatch.keep_finished_lanes = false;
         repo.config.models.insert(
@@ -11219,6 +11239,14 @@ mod tests {
             },
         );
         save_lane_records(&repo, &records).unwrap();
+        if let Some((tokens, tier_tokens)) = seeded {
+            let mut before =
+                crate::status::testutil::banked("demo", "implement", session, Some(0.0));
+            before.tokens = tokens;
+            before.tier_tokens = tier_tokens;
+            before.turns = 1;
+            crate::usage::append(&repo, &before).unwrap();
+        }
 
         let home = crate::scratch::root(&format!("dispatch-{name}-home"));
         let dir = home.join(".claude/projects/-home-someone-work");
@@ -11252,9 +11280,12 @@ mod tests {
         });
 
         let banked = crate::usage::read(&repo).unwrap();
-        let mut lines = banked.into_iter().filter(|e| e.session == session);
-        let line = lines.next().expect("the lane was not banked");
-        assert!(lines.next().is_none(), "banked once");
+        let mut lines: Vec<_> = banked
+            .into_iter()
+            .filter(|e| e.session == session)
+            .collect();
+        let line = lines.pop().expect("the lane was not banked");
+        assert_eq!(lines.len(), usize::from(seeded.is_some()), "banked once");
         line
     }
 
@@ -11269,6 +11300,49 @@ mod tests {
             + (50_000.0 * 2.0 + 200.0 * 20.0 + 100_000.0 * 0.2) / 1e6;
         let cost = line.cost_usd.expect("a priced lane has a cost");
         assert!((cost - expected).abs() < 1e-12, "{cost} vs {expected}");
+        assert_eq!(line.tier_tokens, second_request());
+    }
+
+    /// The second request of [`bank_claude_lane_after`]'s transcript, the one
+    /// over the threshold.
+    fn second_request() -> crate::usage::Tokens {
+        crate::usage::Tokens {
+            input: 50_000,
+            output: 200,
+            cache_read: 100_000,
+            ..Default::default()
+        }
+    }
+
+    /// A resumed session subtracts the split its earlier line already banked,
+    /// the way it subtracts `tokens`.
+    #[test]
+    fn a_carried_session_subtracts_the_tier_tokens_already_banked() {
+        let line = bank_claude_lane_after(
+            "bank-tiered-carried",
+            "",
+            Some((second_request(), second_request())),
+        );
+
+        assert_eq!(line.tokens.input, 1_000, "only the first request is new");
+        assert!(line.tier_tokens.is_zero(), "{:?}", line.tier_tokens);
+    }
+
+    /// An earlier line with no split (written before the field, or under a
+    /// table without a tier) must not make the next line bank the whole
+    /// transcript's share: a line's split is never more than its own tokens.
+    #[test]
+    fn a_carried_session_never_banks_more_tier_tokens_than_tokens() {
+        let line = bank_claude_lane_after(
+            "bank-tiered-unsplit",
+            "",
+            Some((second_request(), crate::usage::Tokens::default())),
+        );
+
+        assert_eq!(line.tokens.input, 1_000);
+        assert_eq!(line.tier_tokens, line.tier_tokens.within(&line.tokens));
+        assert!(line.tier_tokens.input <= line.tokens.input);
+        assert!(line.tier_tokens.cache_read <= line.tokens.cache_read);
     }
 
     /// One request on a model nothing prices makes the lane's cost unknown,
@@ -13861,6 +13935,7 @@ mod tests {
         crate::usage::append(
             &repo,
             &crate::usage::Entry {
+                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: "demo".to_string(),
                 plan: None,
@@ -14564,6 +14639,7 @@ mod tests {
         crate::usage::append(
             repo,
             &crate::usage::Entry {
+                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: task.to_string(),
                 plan: None,
@@ -14599,6 +14675,7 @@ mod tests {
         crate::usage::append(
             repo,
             &crate::usage::Entry {
+                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: task.to_string(),
                 plan: None,
@@ -14681,6 +14758,7 @@ mod tests {
         crate::usage::append(
             &repo,
             &crate::usage::Entry {
+                tier_tokens: Default::default(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 task: "demo".to_string(),
                 plan: None,

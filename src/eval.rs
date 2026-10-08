@@ -490,7 +490,8 @@ impl Metrics {
 /// for its whole lane and no split by class. So the four need not add up to
 /// `USD`, which is what the lane cost when it settled — under that day's
 /// price table, or the agent's own report where it banks one, as pi does.
-/// Resolved the way banking resolves a price, through
+/// A line's `tier_tokens` are priced at the tier's rates, the rest at the base
+/// rates. Resolved the way banking resolves a price, through
 /// [`crate::models::resolve`].
 #[derive(Default, Clone, Copy)]
 struct ClassCost {
@@ -526,7 +527,7 @@ impl ClassCost {
                 .entry(entry.model.as_str())
                 .or_insert_with(|| crate::models::resolve(models, &entry.model).price);
             match price {
-                Some(price) => out.add(&price, &entry.tokens),
+                Some(price) => out.add(&price, &entry.tokens, &entry.tier_tokens),
                 None => out.unpriced += 1,
             }
         }
@@ -534,24 +535,41 @@ impl ClassCost {
     }
 
     /// `tokens` priced at `price`, one class at a time through
-    /// [`ModelPrice::apply`] so each column uses the rates banking does.
-    fn add(&mut self, price: &ModelPrice, tokens: &Tokens) {
-        let only = |class: Tokens| price.apply(&class);
-        self.input += only(Tokens {
-            input: tokens.input,
+    /// [`crate::usage::Rates::apply`], so each column uses the rates banking does.
+    ///
+    /// `tier_tokens` is the part of `tokens` the ledger line banked as coming
+    /// from turns over the threshold. It is priced at the model's tier rates,
+    /// and the rest at the base rates. A line with no split, or a model with
+    /// no tier today, prices all of `tokens` at the base rates. The split is
+    /// clamped to `tokens`, so a hand-edited line cannot price a class twice.
+    fn add(&mut self, price: &ModelPrice, tokens: &Tokens, tier_tokens: &Tokens) {
+        let base_rates = price.rates();
+        let (base, tier, tier_rates) = match price.tier {
+            Some(tier) => (
+                tokens.since(tier_tokens),
+                tier_tokens.within(tokens),
+                tier.rates,
+            ),
+            None => (*tokens, Tokens::default(), base_rates),
+        };
+        let priced = |class: fn(&Tokens) -> Tokens| {
+            base_rates.apply(&class(&base)) + tier_rates.apply(&class(&tier))
+        };
+        self.input += priced(|t| Tokens {
+            input: t.input,
             ..Tokens::default()
         });
-        self.output += only(Tokens {
-            output: tokens.output,
+        self.output += priced(|t| Tokens {
+            output: t.output,
             ..Tokens::default()
         });
-        self.cache_read += only(Tokens {
-            cache_read: tokens.cache_read,
+        self.cache_read += priced(|t| Tokens {
+            cache_read: t.cache_read,
             ..Tokens::default()
         });
-        self.cache_write += only(Tokens {
-            cache_write_5m: tokens.cache_write_5m,
-            cache_write_1h: tokens.cache_write_1h,
+        self.cache_write += priced(|t| Tokens {
+            cache_write_5m: t.cache_write_5m,
+            cache_write_1h: t.cache_write_1h,
             ..Tokens::default()
         });
     }
@@ -5527,6 +5545,7 @@ mod tests {
 
     fn lane(task: &str, step: &str, round: u32, outcome: Option<&str>) -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-04T07:00:00+00:00".into(),
             task: task.into(),
             plan: None,
@@ -6261,6 +6280,63 @@ mod tests {
         assert_eq!(ClassCost::of([&e], &models).cache_write, 4.0 + 2.0);
     }
 
+    /// `tier_tokens` are priced at the tier's rates and the rest at the base
+    /// rates; a line without the split, or a model with no tier, prices at
+    /// the base rate as it always did.
+    #[test]
+    fn the_class_columns_price_tier_tokens_at_the_tiers_rates() {
+        let mut models = priced_models(100_000);
+        let sized = models.get_mut("sized").unwrap();
+        sized.tier = Some(crate::usage::PriceTier {
+            above_k: 100,
+            rates: crate::usage::Rates {
+                input: 6.0,
+                output: 30.0,
+                cache_read: 0.6,
+                cache_write_5m: 7.5,
+                cache_write_1h: 0.0,
+            },
+        });
+        let mut e = lane("t", "implement", 1, Some("pass"));
+        e.model = "sized".into();
+        e.tokens = Tokens {
+            input: 3_000_000,
+            output: 2_000_000,
+            cache_read: 4_000_000,
+            cache_write_5m: 2_000_000,
+            ..Tokens::default()
+        };
+        let untiered = ClassCost::of([&e], &models);
+        assert_eq!(untiered.input, 9.0);
+
+        e.tier_tokens = Tokens {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 2_000_000,
+            cache_write_5m: 1_000_000,
+            ..Tokens::default()
+        };
+        let cost = ClassCost::of([&e], &models);
+        assert!((cost.input - (2.0 * 3.0 + 6.0)).abs() < 1e-9);
+        assert!((cost.output - (15.0 + 30.0)).abs() < 1e-9);
+        assert!((cost.cache_read - (2.0 * 0.3 + 2.0 * 0.6)).abs() < 1e-9);
+        assert!((cost.cache_write - (3.75 + 7.5)).abs() < 1e-9);
+
+        // A split larger than the line's tokens prices no more than the line.
+        let mut hand_edited = e.clone();
+        hand_edited.tier_tokens.input = 9_000_000;
+        let clamped = ClassCost::of([&hand_edited], &models);
+        assert!(
+            (clamped.input - 3.0 * 6.0).abs() < 1e-9,
+            "{}",
+            clamped.input
+        );
+
+        // A model with no tier today prices the whole line at the base rate.
+        models.get_mut("sized").unwrap().tier = None;
+        assert_eq!(ClassCost::of([&e], &models).input, untiered.input);
+    }
+
     /// A row whose every lane has no price today draws its four class
     /// cells blank, never `0.00`; a priced row beside it draws its own, and
     /// the `Total` line sums what could be priced.
@@ -6655,6 +6731,7 @@ mod tests {
     /// `pipeline_version` — see `Entry::dir`.
     fn dir_line(dir: &str, session: &str, ts: &str, cost: f64) -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: ts.into(),
             task: String::new(),
             plan: None,
@@ -7342,6 +7419,7 @@ mod screen_tests {
         crate::usage::append(
             repo,
             &Entry {
+                tier_tokens: Default::default(),
                 ts: ts.to_string(),
                 task: task.to_string(),
                 plan: None,
@@ -7440,6 +7518,7 @@ mod screen_tests {
         crate::usage::append(
             &repo,
             &Entry {
+                tier_tokens: Default::default(),
                 ts: "2026-08-01T09:30:00+00:00".into(),
                 task: String::new(),
                 plan: None,
@@ -8009,6 +8088,7 @@ mod screen_tests {
 
     fn tests_entry(task: &str, step: &str) -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-04T07:00:00+00:00".into(),
             task: task.into(),
             plan: None,
@@ -8408,6 +8488,7 @@ mod screen_tests {
         crate::usage::append(
             repo,
             &Entry {
+                tier_tokens: Default::default(),
                 ts: ts.to_string(),
                 task: String::new(),
                 plan: None,
@@ -8982,6 +9063,7 @@ mod screen_tests {
     /// for a test to adjust before it banks or loads it.
     fn lane_entry(task: &str, step: &str) -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-01T09:00:00+00:00".into(),
             task: task.into(),
             plan: None,
