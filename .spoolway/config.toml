@@ -2,7 +2,6 @@
 #
 # Key                                   Values               Default                                                 Meaning
 # dispatch.backend                      herdr, headless      herdr                                                   Where lanes run: a real pane you can watch. `headless` is spoolway's own test backend, refused unless SPOOLWAY_TEST_BACKEND is set.
-# dispatch.herdr_mode                   grouped, split       split                                                   How a herdr run is laid out: a pane per task in its project's shared tab, or a row of its own per task.
 # dispatch.lane_quiet                   <duration>           15m                                                     How long a lane may say nothing before the dispatcher reminds it to report. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets.
 # dispatch.auto_commit                  true, false          true                                                    Whether spoolway commits a lane's leftover work when its step settles.
 # dispatch.priority                     group, any           group                                                   Whether a free slot is filled from every ready task, or from the group already landing first.
@@ -35,14 +34,13 @@
 # models.<glob>.cache_read              <USD per 1M tokens>  0                                                       Cost per million cached tokens read.
 # models.<glob>.cache_write_5m          <USD per 1M tokens>  0                                                       Cost per million tokens written to a 5-minute cache.
 # models.<glob>.cache_write_1h          <USD per 1M tokens>  0                                                       Cost per million tokens written to a 1-hour cache.
-# models.<glob>.session_reuse_idle      <duration>           (unset)                                                 How long a carried session may sit before it is refused rather than resumed. Never set it on a local model.
+# models.<glob>.prompt_cache_ttl        <duration>           5m (none if local)                                      How long a session's prompt cache is trusted to stay warm. A resume past it opens a fresh session. "0" turns it off.
 # models.<glob>.slots                   <n>                  0                                                       How many lanes this model may run at once, replacing its profile's `concurrency`; 0 leaves the profile in charge.
 # models.<glob>.exclusive               true, false          false                                                   Whether this model refuses to run alongside a different `exclusive` one — one set of weights on the card at a time.
-# models.<glob>.local                   true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` or `exclusive` silences doctor's note that it should probably say so; it changes nothing else.
+# models.<glob>.local                   true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` or `exclusive` silences doctor's note that it should probably say so. It also removes the 5m `prompt_cache_ttl` default from this model.
 
 [dispatch]
 backend = "herdr"
-herdr_mode = "split"
 lane_quiet = "15m"
 auto_commit = true
 

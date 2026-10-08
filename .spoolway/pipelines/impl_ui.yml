@@ -16,8 +16,6 @@
 #   description       <one line>         Shown by `spoolway pipeline show`.
 #   agent             <profile>          Profile from config.toml. Makes an agent step.
 #   run               <command>          Shell line in the worktree. Makes a command step.
-#   end               true               Makes a terminal step: the task stops here.
-#                     false <default>    Not an ending.
 #   prompt            <name>             Prompt this step runs.
 #                                        Absent: the step id.
 #   model             <name>             Model this step runs. Required on an agent step.
