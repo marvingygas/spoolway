@@ -23,6 +23,14 @@
 //! a project wrote in any of them, and `spoolway pipeline check` is what
 //! catches a command name that has fallen behind the CLI.
 //!
+//! Nothing is written while the files are being read. Each step below only
+//! records what it would write or remove, and [`scan`] checks that every one
+//! of them can be made before it makes the first. A file that cannot is
+//! named and the sync writes nothing, because a failure halfway leaves some
+//! files new and some old, and a `config.toml` this binary rewrote is one an
+//! older teammate's spoolway cannot read. A dry run stops after the planning,
+//! so it reports exactly what a real run would do.
+//!
 //! Everything below writes `repo.checkout`, never `repo.root`: the control
 //! plane this command refreshes is tracked, so a lane running in a linked
 //! worktree has its own branch's copies, and a sync taken there has to
@@ -574,11 +582,230 @@ pub(crate) fn migration_notes(outcomes: &[Outcome]) -> BTreeMap<&str, Vec<(&str,
 /// and out of date, which is a different thing to advise about.
 pub const MISSING: &str = "was missing";
 
-/// Every file spoolway owns here, and what would happen to it.
+/// One write or removal a sync has worked out, not yet made.
+///
+/// Every file step above only reads the project and records one of these, so
+/// the whole set is known before any of it happens. That is what lets [`check`]
+/// refuse a sync that could not finish, and lets a dry run and a real run
+/// print the same list: they are the same plan, and only the real run goes on
+/// to [`apply`] it.
+enum Act {
+    /// The whole new contents of a file, through [`write_atomic`].
+    Write {
+        path: PathBuf,
+        shown: String,
+        contents: String,
+    },
+    /// A retired template file.
+    RemoveFile { path: PathBuf, shown: String },
+    /// A retired skill directory, and everything in it.
+    RemoveDir { path: PathBuf, shown: String },
+    /// A directory a move may have emptied, removed only if it is empty.
+    /// Never checked and never listed: `remove_dir` refusing it means a
+    /// project's own files are in it, which is the outcome wanted.
+    Tidy(PathBuf),
+}
+
+impl Act {
+    fn write(path: PathBuf, shown: &str, contents: impl Into<String>) -> Act {
+        Act::Write {
+            path,
+            shown: shown.to_string(),
+            contents: contents.into(),
+        }
+    }
+    fn remove_file(path: PathBuf, shown: &str) -> Act {
+        Act::RemoveFile {
+            path,
+            shown: shown.to_string(),
+        }
+    }
+    fn remove_dir(path: PathBuf, shown: &str) -> Act {
+        Act::RemoveDir {
+            path,
+            shown: shown.to_string(),
+        }
+    }
+
+    /// The path as the report names it; `None` for a [`Act::Tidy`], which the
+    /// report never names.
+    fn shown(&self) -> Option<&str> {
+        match self {
+            Act::Write { shown, .. }
+            | Act::RemoveFile { shown, .. }
+            | Act::RemoveDir { shown, .. } => Some(shown),
+            Act::Tidy(_) => None,
+        }
+    }
+}
+
+/// An `io::Error` as a person reads it: without the `(os error 13)` tail the
+/// platform adds to its own wording.
+fn plain(err: &std::io::Error) -> String {
+    let text = err.to_string();
+    match text.split_once(" (os error") {
+        Some((head, _)) => head.to_string(),
+        None => text,
+    }
+}
+
+/// Whether a new file can be created in `dir`, found by creating one and
+/// taking it away again. Permission bits cannot answer this: root ignores
+/// them, and an access list or a read-only mount says no with them set.
+///
+/// A probe left behind by a sync killed mid-check must not make the next one
+/// refuse, and a process id is reused, so a name already taken is skipped for
+/// the next one rather than reported as a failure.
+fn can_create_in(dir: &Path) -> std::io::Result<()> {
+    let pid = std::process::id();
+    for attempt in 0.. {
+        let probe = dir.join(format!(".spoolway-probe-{pid}-{attempt}"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                return Ok(());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => {}
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("the loop returns on every path")
+}
+
+/// Whether `path` can be created, or replaced, without making anything that
+/// stays: the nearest directory that exists must take a new file. The write
+/// goes through a temporary file beside its target and a rename, so that is
+/// the permission it needs, whatever the target's own mode is.
+fn can_write(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Err(std::io::Error::other("is a directory"));
+    }
+    let mut dir = path.parent().unwrap_or_else(|| Path::new("."));
+    while !dir.exists() {
+        match dir.parent() {
+            Some(up) => dir = up,
+            None => break,
+        }
+    }
+    if !dir.is_dir() {
+        return Err(std::io::Error::other("a parent of it is not a directory"));
+    }
+    can_create_in(dir)
+}
+
+/// Whether `path` can be removed: its parent must take a change, and for a
+/// directory so must every directory under it, since each loses entries.
+fn can_remove(path: &Path, tree: bool) -> std::io::Result<()> {
+    can_create_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    if !tree {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            can_remove(&entry.path(), true)?;
+        }
+    }
+    can_create_in(path)
+}
+
+/// Every action in `acts` that cannot be made, as one line each.
+///
+/// Fails the whole sync, before the first write, naming each file: a failure
+/// halfway leaves a project with some files new and some old, and a
+/// `config.toml` rewritten by this binary is one an older teammate's cannot
+/// read back.
+fn check(acts: &[Act]) -> Result<()> {
+    let mut lines = Vec::new();
+    for act in acts {
+        let (verb, shown, result) = match act {
+            Act::Write { path, shown, .. } => ("write", shown, can_write(path)),
+            Act::RemoveFile { path, shown } => ("remove", shown, can_remove(path, false)),
+            Act::RemoveDir { path, shown } => ("remove", shown, can_remove(path, true)),
+            Act::Tidy(_) => continue,
+        };
+        if let Err(err) = result {
+            lines.push(format!("cannot {verb} {shown}: {}", plain(&err)));
+        }
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{}\nnothing was written — fix what each line names and run sync again",
+        lines.join("\n")
+    )
+}
+
+/// Make every action in `acts`, in order.
+///
+/// [`check`] has already said each can be made, but a file can still change
+/// between that and now. A failure here stops the sync and lists every file
+/// already changed, since nothing is rolled back and the project is part-way.
+fn apply(acts: Vec<Act>) -> Result<()> {
+    let mut changed: Vec<String> = Vec::new();
+    for act in acts {
+        let result = match &act {
+            Act::Write { path, contents, .. } => write_atomic(path, contents),
+            Act::RemoveFile { path, .. } => {
+                std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))
+            }
+            Act::RemoveDir { path, .. } => std::fs::remove_dir_all(path)
+                .with_context(|| format!("removing {}", path.display())),
+            Act::Tidy(path) => {
+                let _ = std::fs::remove_dir(path);
+                Ok(())
+            }
+        };
+        if let Err(err) = result {
+            let listed = match changed.is_empty() {
+                true => "nothing else was changed".to_string(),
+                false => format!(
+                    "already changed, and not undone:\n  {}",
+                    changed.join("\n  ")
+                ),
+            };
+            let failed = match &act {
+                Act::Write { shown, .. } => format!("could not write {shown}"),
+                Act::RemoveFile { shown, .. } | Act::RemoveDir { shown, .. } => {
+                    format!("could not remove {shown}")
+                }
+                Act::Tidy(_) => unreachable!("tidying a directory never fails"),
+            };
+            bail!("{failed}: {err:#}\n{listed}");
+        }
+        if let Some(shown) = act.shown() {
+            changed.push(shown.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Every file spoolway owns here, and what would happen to it — and, unless
+/// `args.dry_run`, doing it.
 ///
 /// Split out from [`run`] so that `spoolway doctor` and the "Run spoolway
 /// sync" notice can ask the same question without printing anything.
+///
+/// Every write and removal is worked out first, by files that only read; the
+/// real run then checks all of them can be made, and only then makes any. A
+/// dry run stops after working them out, so it reports the very list a real
+/// run would act on.
 pub fn scan(repo: &Repo, args: &SyncArgs) -> Result<Vec<Outcome>> {
+    let (outcomes, acts) = plan(repo)?;
+    if !args.dry_run {
+        check(&acts)?;
+        apply(acts)?;
+    }
+    Ok(outcomes)
+}
+
+/// What a sync would report and what it would write, with nothing written.
+fn plan(repo: &Repo) -> Result<(Vec<Outcome>, Vec<Act>)> {
     // Mirrors `commands::init`'s own `home_mode` (see `src/commands/init.rs`,
     // and `Command::Install` in `src/main.rs`, which keys the same question
     // off `repo.root` for the same reason): home mode promises nothing is
@@ -594,14 +821,15 @@ pub fn scan(repo: &Repo, args: &SyncArgs) -> Result<Vec<Outcome>> {
     // that need telling.
     let home_mode = crate::repo::workspace_clone(&repo.root).is_some();
     let mut outcomes = Vec::new();
-    ignores(repo, args, home_mode, &mut outcomes)?;
-    config(repo, args, &mut outcomes)?;
-    templates(repo, args, &mut outcomes)?;
-    skills(repo, args, home_mode, &mut outcomes)?;
-    retired_skills(repo, args, home_mode, &mut outcomes)?;
-    retired_templates(repo, args, &mut outcomes)?;
-    pipelines(repo, args, &mut outcomes)?;
-    Ok(outcomes)
+    let mut acts = Vec::new();
+    ignores(repo, home_mode, &mut outcomes, &mut acts)?;
+    config(repo, &mut outcomes, &mut acts)?;
+    templates(repo, &mut outcomes, &mut acts)?;
+    skills(repo, home_mode, &mut outcomes, &mut acts)?;
+    retired_skills(repo, home_mode, &mut outcomes, &mut acts)?;
+    retired_templates(repo, &mut outcomes, &mut acts)?;
+    pipelines(repo, &mut outcomes, &mut acts)?;
+    Ok((outcomes, acts))
 }
 
 /// Spoolway's own block, still standing in a project set up before runtime
@@ -617,9 +845,9 @@ pub fn scan(repo: &Repo, args: &SyncArgs) -> Result<Vec<Outcome>> {
 /// file (`src/commands/init.rs`).
 fn ignores(
     repo: &Repo,
-    args: &SyncArgs,
     home_mode: bool,
     outcomes: &mut Vec<Outcome>,
+    acts: &mut Vec<Act>,
 ) -> Result<()> {
     use crate::gitignore::Removed;
 
@@ -628,10 +856,19 @@ fn ignores(
     }
 
     let shown = crate::platform::relative(&repo.checkout, &crate::gitignore::file(&repo.checkout));
-    match crate::gitignore::remove(&repo.checkout, args.dry_run)? {
-        Removed::Gone => outcomes.push(Outcome::wrote(&shown, "spoolway's old block removed")),
-        Removed::Absent => {}
-        Removed::Unterminated => outcomes.push(Outcome::blocked(
+    match crate::gitignore::without_block(&repo.checkout)? {
+        (Removed::Gone, text) => {
+            if let Some(text) = text {
+                acts.push(Act::write(
+                    crate::gitignore::file(&repo.checkout),
+                    &shown,
+                    text,
+                ));
+            }
+            outcomes.push(Outcome::wrote(&shown, "spoolway's old block removed"))
+        }
+        (Removed::Absent, _) => {}
+        (Removed::Unterminated, _) => outcomes.push(Outcome::blocked(
             &shown,
             format!(
                 "spoolway's block starts with `{}` and never ends — restore the `{}` marker, \
@@ -726,7 +963,7 @@ fn worktree_root_outcome(repo: &Repo, shown: &str, old: &str) -> Outcome {
 /// `overrides/config.toml` too, the same way a retired key vanishes from the
 /// tracked file, so it stops reprinting "override ignored" forever with no
 /// way to clear on its own.
-fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Result<()> {
     let path = crate::config::Config::path_in(&repo.checkout);
     let shown = crate::platform::relative(&repo.checkout, &path);
 
@@ -739,9 +976,11 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             // values, not this one's — the same reason `templates` below
             // seeds a missing skeleton from `skeleton.shipped` rather than
             // from anything read out of the main checkout.
-            if !args.dry_run {
-                crate::config::Config::default().save(&repo.checkout)?;
-            }
+            acts.push(Act::write(
+                path.clone(),
+                &shown,
+                crate::config::Config::default().render()?,
+            ));
             outcomes.push(Outcome::wrote(&shown, MISSING));
             return Ok(());
         }
@@ -793,16 +1032,13 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
     // and a linked worktree's `repo.home` may not even point at the same
     // project's state — see `crate::overrides::dir_for`'s own doc.
     //
-    // Computed here regardless of `args.dry_run` — a dry run has to say what
-    // it would drop, the same as every other outcome this function reports —
-    // but written to disk only when `!args.dry_run`, the same guard the
-    // tracked file's own write gets below. Unconditional before this fix,
-    // `spoolway sync --dry-run` rewrote the private layer and then printed
-    // "Dry run: nothing was written" over it.
+    // Only planned here, like the tracked file's own write below: a dry run
+    // has to say what it would drop, and a layer rewritten before the plan
+    // was checked is a file changed that a failed check never mentions.
     if let Ok(overrides_dir) = crate::overrides::dir_for(&repo.checkout) {
         let dropped = crate::overrides::retired_config_patch_keys(&overrides_dir, &current)?;
         if !dropped.is_empty() {
-            // Read before the write below removes it. A `worktree_root` set
+            // Read before the write removes it. A `worktree_root` set
             // only here is dropped just the same, and the folder it named
             // and the tasks still under it are said the same way.
             let old_worktree_root = dropped
@@ -814,13 +1050,13 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                         .and_then(|raw| worktree_root_in(&raw))
                 })
                 .flatten();
-            if !args.dry_run {
-                crate::overrides::write_dropped_config_patch_keys(&overrides_dir, &dropped)?;
-            }
-            let shown_override = crate::platform::relative(
-                &repo.checkout,
-                &crate::overrides::config_patch_path(&overrides_dir),
-            );
+            let override_path = crate::overrides::config_patch_path(&overrides_dir);
+            let shown_override = crate::platform::relative(&repo.checkout, &override_path);
+            acts.push(Act::write(
+                override_path,
+                &shown_override,
+                crate::overrides::config_patch_without(&overrides_dir, &dropped)?,
+            ));
             outcomes.push(Outcome::migrated(
                 &shown_override,
                 format!(
@@ -961,9 +1197,7 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
         outcomes.push(Outcome::wrote(&shown, "relaid out"));
     }
 
-    if !args.dry_run {
-        write_atomic(&path, &rewritten)?;
-    }
+    acts.push(Act::write(path, &shown, rewritten));
     Ok(())
 }
 
@@ -975,7 +1209,7 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
 /// something parses, and a restyled skeleton whose block predates a schema
 /// change writes pages that are quietly short of a field. So the block is kept
 /// current and the styling around it is never read. See [`crate::skeleton`].
-fn templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+fn templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Result<()> {
     for skeleton in crate::skeleton::skeletons() {
         let path = repo.checkout.join(skeleton.path);
         let shown = crate::platform::relative(&repo.checkout, &path);
@@ -983,9 +1217,7 @@ fn templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
         let on_disk = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                if !args.dry_run {
-                    write_atomic(&path, skeleton.shipped)?;
-                }
+                acts.push(Act::write(path.clone(), &shown, skeleton.shipped));
                 outcomes.push(Outcome::wrote(&shown, MISSING));
                 continue;
             }
@@ -1003,7 +1235,7 @@ fn templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
             BlockState::Current => outcomes.push(Outcome::Kept),
 
             BlockState::Stale => {
-                write_block(&path, &shown, &on_disk, &skeleton, args, outcomes, "block")?;
+                write_block(&path, &shown, &on_disk, &skeleton, outcomes, acts, "block")?;
             }
 
             // The project changed the part a machine reads. Their styling is
@@ -1036,17 +1268,15 @@ fn write_block(
     shown: &str,
     on_disk: &str,
     skeleton: &crate::skeleton::Skeleton,
-    args: &SyncArgs,
     outcomes: &mut Vec<Outcome>,
+    acts: &mut Vec<Act>,
     note: &str,
 ) -> Result<()> {
     let Some(next) = skeleton.region.replace(on_disk, skeleton.block()) else {
         outcomes.push(Outcome::blocked(shown, "its block moved while we read it"));
         return Ok(());
     };
-    if !args.dry_run {
-        write_atomic(path, &next)?;
-    }
+    acts.push(Act::write(path.to_path_buf(), shown, next));
     outcomes.push(Outcome::wrote(shown, note));
     Ok(())
 }
@@ -1355,8 +1585,8 @@ fn user_skills() -> Vec<(PathBuf, Vec<crate::install::Planned>)> {
 fn refresh(
     planned: Vec<crate::install::Planned>,
     shown: impl Fn(&Path) -> String,
-    args: &SyncArgs,
     outcomes: &mut Vec<Outcome>,
+    acts: &mut Vec<Act>,
 ) -> Result<()> {
     for planned in planned {
         let detail = match std::fs::read_to_string(&planned.path) {
@@ -1367,10 +1597,9 @@ fn refresh(
             Ok(_) => "rewritten",
             Err(_) => "added",
         };
-        if !args.dry_run {
-            write_atomic(&planned.path, planned.contents)?;
-        }
-        outcomes.push(Outcome::wrote(shown(&planned.path), detail));
+        let shown = shown(&planned.path);
+        acts.push(Act::write(planned.path, &shown, planned.contents));
+        outcomes.push(Outcome::wrote(shown, detail));
     }
     Ok(())
 }
@@ -1410,9 +1639,9 @@ fn refresh(
 /// project keeps its skills.
 fn skills(
     repo: &Repo,
-    args: &SyncArgs,
     home_mode: bool,
     outcomes: &mut Vec<Outcome>,
+    acts: &mut Vec<Act>,
 ) -> Result<()> {
     for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
         if home_mode {
@@ -1429,8 +1658,8 @@ fn skills(
         refresh(
             planned,
             |path| crate::platform::relative(&repo.checkout, path),
-            args,
             outcomes,
+            acts,
         )?;
 
         if migrate_codex {
@@ -1459,10 +1688,7 @@ fn skills(
                     continue;
                 }
                 let shown = crate::platform::relative(&repo.checkout, &stale);
-                if !args.dry_run {
-                    std::fs::remove_dir_all(&stale)
-                        .with_context(|| format!("removing {}", stale.display()))?;
-                }
+                acts.push(Act::remove_dir(stale, &shown));
                 outcomes.push(Outcome::removed(
                     &shown,
                     format!(
@@ -1474,10 +1700,8 @@ fn skills(
             // The old root, and `.codex/` above it, go too once the move
             // has emptied them — `remove_dir` refuses a directory holding
             // anything, so a project's own files there are never at risk.
-            if !args.dry_run {
-                let _ = std::fs::remove_dir(&old_codex_root);
-                let _ = std::fs::remove_dir(repo.checkout.join(".codex"));
-            }
+            acts.push(Act::Tidy(old_codex_root));
+            acts.push(Act::Tidy(repo.checkout.join(".codex")));
         }
     }
     // The user-level copies too, the same way: a home-mode project keeps its
@@ -1485,7 +1709,7 @@ fn skills(
     // a repo-mode one would otherwise keep whichever release they last
     // installed. Named with `~`, since they sit outside the checkout.
     for (_, planned) in user_skills() {
-        refresh(planned, crate::repo::shorten_home, args, outcomes)?;
+        refresh(planned, crate::repo::shorten_home, outcomes, acts)?;
     }
     Ok(())
 }
@@ -1506,9 +1730,9 @@ fn skills(
 /// the same as the project-level half of [`skills`].
 fn retired_skills(
     repo: &Repo,
-    args: &SyncArgs,
     home_mode: bool,
     outcomes: &mut Vec<Outcome>,
+    acts: &mut Vec<Act>,
 ) -> Result<()> {
     if home_mode {
         return Ok(());
@@ -1532,10 +1756,7 @@ fn retired_skills(
             } else {
                 crate::repo::shorten_home(&stale)
             };
-            if !args.dry_run {
-                std::fs::remove_dir_all(&stale)
-                    .with_context(|| format!("removing {}", stale.display()))?;
-            }
+            acts.push(Act::remove_dir(stale, &shown));
             outcomes.push(Outcome::removed(&shown, *why));
         }
     }
@@ -1548,16 +1769,14 @@ fn retired_skills(
 /// directory. A file under that directory the project wrote itself is named
 /// by neither list nor by anything `init` still places, so it is never
 /// touched.
-fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+fn retired_templates(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Result<()> {
     for (name, why) in crate::install::RETIRED_TEMPLATES {
         let path = crate::config::under_setup(&repo.setup_dir(), name);
         if !path.is_file() {
             continue;
         }
         let shown = crate::platform::relative(&repo.checkout, &path);
-        if !args.dry_run {
-            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        }
+        acts.push(Act::remove_file(path, &shown));
         outcomes.push(Outcome::removed(&shown, *why));
     }
     Ok(())
@@ -1588,7 +1807,7 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 /// One check reads every file, markers or not: a step shape this release
 /// refuses to load — see [`crate::pipeline::Pipeline::retired_shape_problems`]
 /// — refuses the file, naming the step and the edit. Nothing is written to it.
-fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Result<()> {
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
     // and a lane running in a linked worktree brings its own branch's copies
@@ -1722,8 +1941,8 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
             }
         }
 
-        if changed && !args.dry_run {
-            write_atomic(&path, &on_disk)?;
+        if changed {
+            acts.push(Act::write(path, &shown, on_disk));
         }
     }
     Ok(())
@@ -1899,6 +2118,59 @@ pub(crate) fn remove_skill_stamp(home: &Path) {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    // The file steps only plan their writes now. Each shim below runs one step
+    // the way `scan` does — plan it, then make the plan unless `args` is a dry
+    // run — so a test can still ask what that one step leaves on disk.
+    fn finish(args: &SyncArgs, acts: Vec<Act>) -> Result<()> {
+        match args.dry_run {
+            true => Ok(()),
+            false => {
+                check(&acts)?;
+                apply(acts)
+            }
+        }
+    }
+    fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+        let mut acts = Vec::new();
+        super::config(repo, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
+    fn templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+        let mut acts = Vec::new();
+        super::templates(repo, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
+    fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+        let mut acts = Vec::new();
+        super::pipelines(repo, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
+    fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+        let mut acts = Vec::new();
+        super::retired_templates(repo, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
+    fn skills(
+        repo: &Repo,
+        args: &SyncArgs,
+        home_mode: bool,
+        outcomes: &mut Vec<Outcome>,
+    ) -> Result<()> {
+        let mut acts = Vec::new();
+        super::skills(repo, home_mode, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
+    fn retired_skills(
+        repo: &Repo,
+        args: &SyncArgs,
+        home_mode: bool,
+        outcomes: &mut Vec<Outcome>,
+    ) -> Result<()> {
+        let mut acts = Vec::new();
+        super::retired_skills(repo, home_mode, outcomes, &mut acts)?;
+        finish(args, acts)
+    }
 
     fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let root = crate::scratch::root(&format!("sync-{name}"));
@@ -4199,6 +4471,173 @@ mod tests {
             }),
             "{lines:?}"
         );
+    }
+
+    /// A project with a missing `config.toml` and a retired template in a
+    /// directory nothing can be removed from. Returns the directory, locked.
+    #[cfg(unix)]
+    fn project_with_a_template_that_cannot_be_removed(
+        name: &str,
+    ) -> (Repo, PathBuf, PathBuf, crate::scratch::ScratchRoot) {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, guard) = fixture(name);
+        let dir = repo.checkout.join(".spoolway/templates/tracking");
+        std::fs::create_dir_all(&dir).unwrap();
+        let epic = dir.join("epic.md");
+        std::fs::write(&epic, "").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        (repo, dir, epic, guard)
+    }
+
+    /// Root, or a mount that ignores the mode, can remove from a directory
+    /// marked read-only, and then there is no failure to provoke.
+    #[cfg(unix)]
+    fn locked_dir_still_takes_files(dir: &Path) -> bool {
+        can_create_in(dir).is_ok()
+    }
+
+    /// One file that cannot be removed stops the whole sync before it writes
+    /// anything, and the error names that file and says nothing was written.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_removed_stops_the_sync_before_any_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, dir, epic, _guard) =
+            project_with_a_template_that_cannot_be_removed("check-before-write");
+        if locked_dir_still_takes_files(&dir) {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let result = scan(&repo, &args());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let said = format!(
+            "{:#}",
+            result.err().expect("an unremovable file fails the sync")
+        );
+        assert!(
+            said.contains("cannot remove .spoolway/templates/tracking/epic.md: Permission denied"),
+            "{said}"
+        );
+        assert!(said.contains("nothing was written"), "{said}");
+        assert!(epic.exists(), "the file it could not remove is still there");
+        assert!(
+            !Config::path_in(&repo.checkout).exists(),
+            "config.toml would have been written first; the check has to come before it"
+        );
+    }
+
+    /// A probe a killed sync left behind, under the name the next process id
+    /// would pick, is stepped over rather than reported as a failure.
+    #[test]
+    fn a_stale_probe_file_does_not_stop_the_check() {
+        let (repo, _guard) = fixture("stale-probe");
+        let stale = repo
+            .checkout
+            .join(format!(".spoolway-probe-{}-0", std::process::id()));
+        std::fs::write(&stale, "").unwrap();
+
+        can_create_in(&repo.checkout).expect("a taken probe name is skipped");
+
+        assert!(stale.exists(), "the stray file is left for its owner");
+    }
+
+    /// A write that fails after others succeeded lists every file already
+    /// changed, in the order they were changed, and says they are not undone.
+    #[test]
+    fn a_write_that_fails_part_way_lists_every_file_already_changed() {
+        let (repo, _guard) = fixture("apply-part-way");
+        let first = repo.checkout.join("first.txt");
+        let second = repo.checkout.join("second.txt");
+        let blocker = repo.checkout.join("blocker");
+        std::fs::write(&blocker, "a file where a directory is needed\n").unwrap();
+        let acts = vec![
+            Act::write(first.clone(), "first.txt", "one\n"),
+            Act::write(second.clone(), "second.txt", "two\n"),
+            Act::write(blocker.join("third.txt"), "blocker/third.txt", "three\n"),
+            Act::write(repo.checkout.join("fourth.txt"), "fourth.txt", "four\n"),
+        ];
+
+        let said = format!(
+            "{:#}",
+            apply(acts).expect_err("the third write cannot be made")
+        );
+
+        assert!(said.contains("blocker/third.txt"), "{said}");
+        assert!(
+            said.contains("already changed, and not undone:\n  first.txt\n  second.txt"),
+            "{said}"
+        );
+        assert!(first.exists() && second.exists());
+        assert!(
+            !repo.checkout.join("fourth.txt").exists(),
+            "a failure stops the run; it does not go on to the next file"
+        );
+    }
+
+    /// A failure on the very first change says so, rather than listing none.
+    #[test]
+    fn a_first_write_that_fails_says_nothing_else_was_changed() {
+        let (repo, _guard) = fixture("apply-first");
+        let blocker = repo.checkout.join("blocker");
+        std::fs::write(&blocker, "x\n").unwrap();
+
+        let said = format!(
+            "{:#}",
+            apply(vec![Act::write(
+                blocker.join("a.txt"),
+                "blocker/a.txt",
+                "a\n"
+            )])
+            .expect_err("the parent is a file")
+        );
+
+        assert!(said.contains("nothing else was changed"), "{said}");
+    }
+
+    /// The dry run and the real run read one plan: the same files come out of
+    /// both, and they are exactly the files the plan acts on.
+    #[test]
+    fn the_dry_run_lists_the_files_the_real_run_changes() {
+        let (repo, _guard) = fixture("dry-matches-real");
+        let dir = repo.checkout.join(".spoolway/templates");
+        std::fs::write(dir.join("task-log.md"), "stale\n").unwrap();
+        std::fs::write(dir.join("pull-request.md"), "stale\n").unwrap();
+
+        let dry = SyncArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        let listed = |outcomes: &[Outcome]| {
+            let (wrote, removed) = dedup_paths(outcomes);
+            let mut all: Vec<String> = wrote.iter().map(|p| format!("write {p}")).collect();
+            all.extend(removed.iter().map(|(p, _)| format!("remove {p}")));
+            all
+        };
+        let (_, acts) = plan(&repo).unwrap();
+        let mut acted: Vec<String> = acts
+            .iter()
+            .filter_map(|act| act.shown().map(str::to_string))
+            .collect();
+
+        let before = listed(&scan(&repo, &dry).unwrap());
+        assert!(
+            dir.join("task-log.md").exists(),
+            "a dry run removes nothing"
+        );
+        let after = listed(&scan(&repo, &args()).unwrap());
+
+        assert!(!before.is_empty(), "the project is behind on purpose");
+        assert_eq!(before, after);
+        let mut named: Vec<String> = before
+            .iter()
+            .map(|line| line.split_once(' ').unwrap().1.to_string())
+            .collect();
+        named.sort();
+        acted.sort();
+        assert_eq!(named, acted, "the report names exactly the plan's files");
+        assert!(!dir.join("task-log.md").exists());
     }
 
     /// A dry run reports every removal without deleting anything — the same

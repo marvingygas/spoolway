@@ -413,7 +413,7 @@ pub(crate) fn apply_config_patch(
 /// Every leaf key `overrides/config.toml` holds that this binary has retired
 /// — on [`crate::config::is_retired_key`]'s own list, not merely mistyped —
 /// sorted. Nothing on disk is touched; see
-/// [`write_dropped_config_patch_keys`] for the half that is.
+/// [`config_patch_without`] for the text the layer should hold afterwards.
 ///
 /// `spoolway sync`'s own config step calls this right after it rebuilds the
 /// tracked file from `tracked` alone (never from a patched copy — see
@@ -442,23 +442,19 @@ pub(crate) fn retired_config_patch_keys(overrides: &Path, tracked: &Config) -> R
     Ok(retired)
 }
 
-/// Remove each of `keys` (as [`retired_config_patch_keys`] found them) from
-/// `overrides/config.toml`, in place, leaving every other key in the layer
-/// untouched. A no-op on an empty `keys`, so a caller never has to guard the
-/// call itself.
-pub(crate) fn write_dropped_config_patch_keys(overrides: &Path, keys: &[String]) -> Result<()> {
-    if keys.is_empty() {
-        return Ok(());
-    }
+/// `overrides/config.toml` as it should read once each of `keys` (as
+/// [`retired_config_patch_keys`] found them) is removed from it, leaving every
+/// other key in the layer untouched. Nothing on disk is touched: `sync` plans
+/// this write with the rest of its writes and makes it afterwards.
+pub(crate) fn config_patch_without(overrides: &Path, keys: &[String]) -> Result<String> {
     let path = config_patch_path(overrides);
-    let raw =
+    let mut doc =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let mut doc = raw;
     for key in keys {
         let parts: Vec<&str> = key.split('.').collect();
         doc = crate::confdoc::remove(&doc, &parts)?;
     }
-    crate::task::write_atomic(&path, &doc).with_context(|| format!("writing {}", path.display()))
+    Ok(doc)
 }
 
 fn apply_config_table(

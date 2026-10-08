@@ -1296,6 +1296,12 @@ straight away with no panel.
 See [Keeping a project's files current](installation.md#keeping-a-projects-files-current) for
 the panel itself.
 
+`sync` checks that it can make every write and removal before it makes the first. If any check
+fails, it writes nothing, names each file it cannot change, and exits with an error. If a write
+fails part-way, the error lists every file already changed. The dry run prints the same list a
+real run acts on. See [Keeping a project's files current](installation.md#keeping-a-projects-files-current)
+for the messages.
+
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
 

@@ -406,6 +406,26 @@ A `config.toml` that `sync` cannot read fails the whole command, naming the file
 at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
 edit` instead.
 
+`sync` works out every write and removal first. It then checks that it can make each one, and
+only then writes. If any check fails, it writes nothing. It prints one line for each file it
+cannot change, then says nothing was written:
+
+```
+cannot remove .spoolway/templates/tracking/epic.md: Permission denied
+nothing was written — fix what each line names and run sync again
+```
+
+If a write fails after the first file is changed, `sync` stops. It names the file that failed
+and lists every file it had already changed. It does not undo those changes.
+
+```
+could not write .spoolway/pipelines/default.yml: <the operating system's error>
+already changed, and not undone:
+  .spoolway/config.toml
+```
+
+`--dry-run` prints the list a real run would act on, file for file.
+
 `sync` never merges. A key block you edited by hand is replaced with the shipped one, and the
 report says so. A skill file has no such block: sync always rewrites it to match the shipped
 copy.
