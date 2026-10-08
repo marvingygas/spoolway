@@ -131,10 +131,46 @@ prompt_cache_ttl = "1h"
 | `prompt_cache_ttl` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Defaults to `5m`, and to no limit on a `local` model. `"0"` turns it off. |
 | `slots`, `local` | See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is) |
 
+A model can carry one higher tier: the rates a request pays once its prompt passes a
+threshold. The tier is a sub-table named `above_<N>k_tokens`, the way litellm names it, and
+holds the same five rate keys in USD per 1M tokens:
+
+```toml
+[models."claude-haiku-5-5".above_100k_tokens]
+input = 0.50
+output = 2.50
+cache_read = 0.05
+cache_write_5m = 0.625
+cache_write_1h = 1.00
+```
+
+A sub-table whose name does not read as `above_<N>k_tokens` is refused when the config loads,
+and so is a second tier on the same model. A tier rate left out is unset, as on the base entry,
+and a missing `cache_write_1h` falls back to the tier's `cache_write_5m`. `spoolway models`
+shows a tier's rates on an indented row under its model.
+
+### How a lane is priced
+
+spoolway prices each turn of a transcript on its own and adds up the costs. A turn is over the
+threshold when its `input + cache_read + cache_write` is more than the threshold. An over-threshold
+turn is charged whole at the tier's rates, output included. Every other turn is charged at the
+base rates. A model with no tier is charged at the base rates for every turn.
+
+A ledger line also carries `tier_tokens`: the part of its `tokens` that came from over-threshold
+turns, in the same shape as `tokens`. It is left out of the line when it is zero. A line with no
+`tier_tokens` has no split, and `spoolway eval` prices all of it at the base rates.
+
+A lane that has been banked before adds only the cost, `tokens` and `tier_tokens` it has not
+banked yet. The `COST` column of the dispatch board shows the same cost for a running step.
+
+A lane with a turn whose model has no price banks no cost at all. The cost is left out, not
+set to zero.
+
 Set a price from the command line:
 
 ```
 spoolway config set models.'<model-glob>'.input <usd per 1M>
+spoolway config set models.'<model-glob>'.above_100k_tokens.input <usd per 1M>
 ```
 
 A model is priced from the first table that knows it:
@@ -149,12 +185,52 @@ A model in none of them has an unknown cost, not a free one. `spoolway models` l
 model the pipelines name, its window, its rates, which table answered, and how old that table
 is. `spoolway doctor` notes a table older than `housekeeping.price_max_age_days`.
 
-The built-in table is litellm's `model_prices_and_context_window.json` (MIT), cut down to the
-fields above. `spoolway models refresh --vendor` fetches the upstream file with curl and
-rewrites `assets/model-prices.json` for review and commit.
+A tiered model's higher rates print on an indented row under it:
 
-`pi` prices its own transcripts and reports zero for a local model. Claude Code records no
-cost, so the price table answers for it.
+```
+MODEL                 WINDOW        IN       OUT   CACHE R  CACHE W5M  CACHE W1H  ...
+claude-haiku-5-5       1.00M     $0.10     $0.50     $0.01      $0.12      $0.20  ...
+  above 100k tokens              $0.50     $2.50     $0.05      $0.62      $1.00
+```
+
+`spoolway models --json` carries the same rates in a `tier` object on a tiered model, with the
+threshold as `above_tokens`.
+
+The built-in table is litellm's `model_prices_and_context_window.json` (MIT), cut down to the
+fields above. litellm's `*_above_<N>k_tokens` fields become the tier, including the one-hour
+cache write. A model with more than one threshold keeps its lowest. Batch, priority, fast-mode
+and US-only rates are not read, so a lane that uses them is priced at the standard rates.
+
+`spoolway models refresh` fetches the upstream file with curl and writes the table only after
+every check below passes. The built-in URL must use HTTPS and may be at most 32 MB. A URL set
+in `SPOOLWAY_MODEL_PRICES_URL` is not held to either limit, so it can point at a `file://`
+fixture.
+
+| Check | Result |
+|---|---|
+| A rate is negative or above $100,000 per million tokens | The row is dropped and named on the `refused` line. |
+| A window is above 100M tokens | The row is dropped and named on the `refused` line. |
+| The refresh keeps fewer than half the rows of the table it replaces | Nothing is written. The error names both counts and the source URL. |
+
+```
+$ spoolway models refresh
+  fetched  raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+  wrote    ~/.spoolway/model-prices.json
+  models   3229 priced chat rows kept, 4120 other rows dropped
+  changed  12 added, 31 repriced, 3186 unchanged, 2 dropped
+  tiered   274 rows carry a higher tier
+  refused  1 rows out of range: example-model
+```
+
+The `refused` line appears only when a row was dropped.
+
+`spoolway models refresh --vendor` rewrites `assets/model-prices.json` for review and commit.
+It prints the written path, and the `refused` line when a row was dropped.
+Every [release](releasing.md) runs it in the `prepare` step, and the release pull request
+carries the diff.
+
+`pi` prices its own transcripts and reports zero for a local model. Claude Code and codex
+record no cost, so the price table answers for them, one turn at a time.
 
 ## The version a lane ran under
 

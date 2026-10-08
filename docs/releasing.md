@@ -10,7 +10,7 @@ flowchart LR
 
 | Step | What it does |
 |---|---|
-| `prepare` | An agent. It runs the local gate and fixes anything red, walks an upgrade from the last release, picks the version, writes the changelog section, and opens one `release/v<version>` pull request with the release commit last. |
+| `prepare` | An agent. It runs the local gate and fixes anything red, walks an upgrade from the last release, refreshes the vendored model price table, picks the version, writes the changelog section, and opens one `release/v<version>` pull request with the release commit last. |
 | `ship` | `scripts/release-ship.sh`. Waits for the pull request's checks, rehearses the release workflow on its head, merges it by rebase, tags the release commit, watches the tag's workflow publish it, and runs `scripts/release-verify.sh`. |
 | `fixture` | `scripts/release-fixture.sh`. Scaffolds the released version's upgrade fixture from its own tag and opens its pull request with auto-merge on. |
 
@@ -55,11 +55,13 @@ cargo build --release --locked
 ```
 
 The release commit changes only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` and
-`herdr-plugin.toml`, plus `docs/migrations.md` when the release carries migration work. Its subject
+`herdr-plugin.toml`, plus `docs/migrations.md` when the release carries migration work and
+`assets/model-prices.json` when the price refresh changed it. Its subject
 is `chore(release): v<version>`. `herdr-plugin.toml` carries its own `version`, so it is bumped by
 hand with `Cargo.toml`. `verify.yml` fails when the two disagree.
 
 ```sh
+cargo run --release --quiet -- models refresh --vendor   # refreshes assets/model-prices.json
 cargo check --offline                              # refreshes the lock entry
 cargo test --locked release_notes::tests
 cargo build --release --locked && ./target/release/spoolway whats-new

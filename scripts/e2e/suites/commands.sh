@@ -94,6 +94,19 @@ cat >"$PRICE_FIXTURE" <<'JSON'
     "input_cost_per_token": 0.000001,
     "output_cost_per_token": 0.000002
   },
+  "fake-tiered": {
+    "mode": "chat",
+    "input_cost_per_token": 0.0000001,
+    "output_cost_per_token": 0.0000005,
+    "cache_read_input_token_cost": 0.00000002,
+    "cache_creation_input_token_cost": 0.000000125,
+    "input_cost_per_token_above_100k_tokens": 0.0000005,
+    "output_cost_per_token_above_100k_tokens": 0.0000025,
+    "cache_read_input_token_cost_above_100k_tokens": 0.0000001,
+    "cache_creation_input_token_cost_above_100k_tokens": 0.000000625,
+    "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 0.000001,
+    "input_cost_per_token_above_200k_tokens": 0.000009
+  },
   "not-chat": {
     "mode": "embedding",
     "input_cost_per_token": 0.000001,
@@ -101,11 +114,52 @@ cat >"$PRICE_FIXTURE" <<'JSON'
   }
 }
 JSON
+# A refresh that keeps fewer than half the rows of the table it replaces writes
+# nothing, and the first refresh here replaces the built-in table's thousands.
+# Filler chat rows, as many as the built-in table holds, lift the fixture past
+# half of it, so the checks below are about the rows and not about a fixture
+# too small to be a price map. The count follows the shipped table because
+# every release refreshes it, and a fixed count would one day fall below half.
+BUILTIN_ROWS=$(jq '.models | length' "$HERE/../../../assets/model-prices.json")
+jq --argjson n "$BUILTIN_ROWS" '. + ([range(0; $n) | {key: "filler-\(.)", value: {mode: "chat",
+  input_cost_per_token: 0.000001, output_cost_per_token: 0.000002}}] | from_entries)' \
+  "$PRICE_FIXTURE" >"$PRICE_FIXTURE.full"
+mv "$PRICE_FIXTURE.full" "$PRICE_FIXTURE"
 must "models refresh fetches and distils a local fixture through curl" \
   env SPOOLWAY_MODEL_PRICES_URL="file://$PRICE_FIXTURE" "$SPOOLWAY" models refresh
 works "the refreshed machine-wide table is valid JSON" \
   jq -e '.source and .license == "MIT" and .generated and .models["fake-local"].input == 1' \
   "$HOME/.spoolway/model-prices.json"
+# The lowest of the row's two thresholds is the one kept, converted to USD
+# per million like the base rates, the one-hour cache write included.
+works "a tiered row reaches the refreshed table as its lowest tier" \
+  jq -e '.models["fake-tiered"] | .input == 0.1
+    and .above_100k_tokens == {"input": 0.5, "output": 2.5, "cache_read": 0.1,
+      "cache_write_5m": 0.625, "cache_write_1h": 1}
+    and (has("above_200k_tokens") | not)' \
+  "$HOME/.spoolway/model-prices.json"
+# One row priced past $100,000 per million is dropped and named, and the rest
+# of the table is still written.
+jq '. + {"fake-pricey": {mode: "chat", input_cost_per_token: 1,
+  output_cost_per_token: 0.000002}}' "$PRICE_FIXTURE" >"$LIVE/model-prices-pricey.json"
+says "a refresh names a row whose rate is out of range" \
+  "refused  1 rows out of range: fake-pricey" \
+  env SPOOLWAY_MODEL_PRICES_URL="file://$LIVE/model-prices-pricey.json" "$SPOOLWAY" models refresh
+works "the out-of-range row is absent and the rest of the table is written" \
+  jq -e '(.models | has("fake-pricey") | not) and .models["fake-local"].input == 1' \
+  "$HOME/.spoolway/model-prices.json"
+# A fixture with too few rows is refused whole, naming both counts and the
+# source, and the table written above stays exactly as it was.
+TABLE_BEFORE=$(cat "$HOME/.spoolway/model-prices.json")
+jq '{"fake-local": .["fake-local"]}' "$PRICE_FIXTURE" >"$LIVE/model-prices-few.json"
+refuses "a refresh keeping fewer than half the replaced rows writes nothing" \
+  "model-prices-few.json kept 1 priced rows, fewer than half of the $((BUILTIN_ROWS + 2))" \
+  env SPOOLWAY_MODEL_PRICES_URL="file://$LIVE/model-prices-few.json" "$SPOOLWAY" models refresh
+if [ "$(cat "$HOME/.spoolway/model-prices.json")" = "$TABLE_BEFORE" ]; then
+  ok "the refused refresh left the last table untouched"
+else
+  bad "the refused refresh left the last table untouched"
+fi
 MODELS_OUT="$LIVE/models-refreshed.out"
 "$SPOOLWAY" models >"$MODELS_OUT"
 if grep -qE '^fake-local[[:space:]].*[[:space:]]refreshed[[:space:]]' "$MODELS_OUT"; then
@@ -114,6 +168,34 @@ else
   bad "models reads the new row back with SOURCE refreshed"
   sed 's/^/        /' "$MODELS_OUT"
 fi
+# The tier is drawn on an indented row under its model, so a step has to name
+# the tiered model for the table to show it. The pipeline is put back after.
+cp .spoolway/pipelines/default.yml "$LIVE/default.yml.keep"
+set_step_of default implement model fake-tiered
+"$SPOOLWAY" models >"$LIVE/models-tiered.out"
+cp "$LIVE/default.yml.keep" .spoolway/pipelines/default.yml
+if grep -qE '^ +above 100k tokens +\$0\.50 +\$2\.50 ' "$LIVE/models-tiered.out"; then
+  ok "models draws a tiered model's higher rates on an indented row under it"
+else
+  bad "models draws a tiered model's higher rates on an indented row under it"
+  sed 's/^/        /' "$LIVE/models-tiered.out"
+fi
+# `eval` re-prices the four class columns from the ledger line's own split:
+# `tier_tokens` at the tier's rates, the rest at the base rates, both from the
+# refreshed table above. The ledger is put back after.
+LEDGER="$SPOOLWAY_PROJECT_HOME/usage.jsonl"
+LEDGER_HAD=0
+if [ -e "$LEDGER" ]; then LEDGER_HAD=1; cp "$LEDGER" "$LIVE/usage.jsonl.keep"; fi
+printf '%s\n' '{"ts":"2026-10-09T09:12:40+00:00","task":"tiered-eval","step":"implement","pipeline":"tiered","agent":"pi","kind":"pi","model":"fake-tiered","session":"tiered-eval-s1","turns":2,"tokens":{"input":1000000,"output":1000000,"cache_read":2000000,"cache_write_5m":1000000},"tier_tokens":{"input":400000,"output":200000,"cache_read":1000000,"cache_write_5m":500000},"cost_usd":1.5}' >>"$LEDGER"
+# in: 0.6M x $0.10 + 0.4M x $0.50; out: 0.8M x $0.50 + 0.2M x $2.50;
+# cache read: 1M x $0.02 + 1M x $0.10; cache write: 0.5M x $0.125 + 0.5M x $0.625.
+works "eval prices a line's tier_tokens at the tier's rates in the four class columns" \
+  bash -c '"$0" eval --by pipeline --pipeline tiered --json | jq -e "
+    def near(a; b): ((a - b) | fabs) < 1e-9;
+    .total | near(.in_usd; 0.26) and near(.out_usd; 0.9)
+      and near(.cache_read_usd; 0.12) and near(.cache_write_usd; 0.375)
+      and .cost_usd == 1.5"' "$SPOOLWAY"
+if [ "$LEDGER_HAD" = 1 ]; then cp "$LIVE/usage.jsonl.keep" "$LEDGER"; else rm -f "$LEDGER"; fi
 REFRESHED_GENERATED=$(jq -r '.generated' "$HOME/.spoolway/model-prices.json")
 MODELS_FOOTER=$(tail -n 1 "$MODELS_OUT")
 MODELS_FOOTER_PATTERN="^Prices generated ${REFRESHED_GENERATED}, [0-9]+ days ago\\. Refresh with "

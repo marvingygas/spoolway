@@ -4221,7 +4221,6 @@ fn cost_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<f6
 /// Both figures subtract the same banked total, so OUT and COST on a row are
 /// one reading of one step rather than two windows onto it.
 fn live_spend(
-    repo: &Repo,
     ledger: &[crate::usage::Entry],
     session: &str,
     harvest: &crate::usage::Harvest,
@@ -4235,13 +4234,10 @@ fn live_spend(
         }
     }
     let unbanked = harvest.tokens.since(&banked);
-    // Prices are linear in tokens, so pricing the delta is the same as
-    // differencing two priced totals — and it stays right when the agent
-    // reports its own cost instead.
-    let cost = match harvest.cost_usd {
-        Some(total) => Some((total - banked_cost).max(0.0)),
-        None => crate::usage::price(&repo.config.models, &harvest.model, &unbanked),
-    };
+    // The harvest priced each turn at its own tier, so what is left is the
+    // part not banked before. Absent when some turn had no price, as the
+    // ledger line banked for it will be.
+    let cost = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
     (unbanked.output, cost)
 }
 
@@ -4323,8 +4319,8 @@ fn live_session(
         return cached.reading;
     }
     cached.mtime = mtime;
-    cached.reading = crate::usage::live_of(&kind, &path).map(|live| {
-        let (output, cost) = live_spend(repo, ledger, &session, &live.harvest);
+    cached.reading = crate::usage::live_of(&kind, &path, &repo.config.models).map(|live| {
+        let (output, cost) = live_spend(ledger, &session, &live.harvest);
         Reading {
             context: live.context,
             output,
@@ -6745,12 +6741,13 @@ mod tests {
 
     /// A lane whose transcript reports its own cost — a local worker, or any
     /// agent that prices itself — is trusted over the price map, and what it
-    /// has already been banked for comes off just the same.
+    /// has already been banked for comes off just the same. A cost the price
+    /// table gave the harvest turn by turn is subtracted the same way.
     #[test]
     fn a_reported_cost_is_taken_at_its_word_less_whatever_is_banked() {
-        let (repo, _root_guard) = fixture("live-cost-reported");
         let ledger = [banked("login", "implement", "s1", Some(1.5))];
         let harvest = |cost: f64| crate::usage::Harvest {
+            tier_tokens: Default::default(),
             model: "claude-sonnet-5".into(),
             tokens: crate::usage::Tokens::default(),
             turns: 1,
@@ -6758,67 +6755,70 @@ mod tests {
             ctx_peak: 0,
         };
 
-        assert_eq!(live_spend(&repo, &ledger, "s1", &harvest(4.0)).1, Some(2.5));
+        assert_eq!(live_spend(&ledger, "s1", &harvest(4.0)).1, Some(2.5));
         // A transcript that reads lower than the ledger is a torn read, not a
         // refund: nothing here ever hands back a negative.
-        assert_eq!(live_spend(&repo, &ledger, "s1", &harvest(0.5)).1, Some(0.0));
+        assert_eq!(live_spend(&ledger, "s1", &harvest(0.5)).1, Some(0.0));
         // A session nothing has banked keeps the whole of its own reading.
-        assert_eq!(live_spend(&repo, &ledger, "s9", &harvest(4.0)).1, Some(4.0));
+        assert_eq!(live_spend(&ledger, "s9", &harvest(4.0)).1, Some(4.0));
     }
 
     /// The reason the subtraction is there at all: a step resumed on the
     /// session its predecessor ran under reads a transcript that already holds
-    /// the predecessor's turns, and pricing the whole of it would put that
+    /// the predecessor's turns, and showing the whole of it would put that
     /// step's bill on this one's row.
     #[test]
     fn a_reused_session_is_priced_from_what_it_has_spent_since_it_was_banked() {
-        let (mut repo, _root_guard) = fixture("live-cost-reuse");
-        repo.config.models = std::collections::BTreeMap::from([(
-            "claude-*".to_string(),
-            crate::usage::ModelPrice {
-                context_window: 200_000,
-                input: 3.0,
-                output: 15.0,
-                cache_read: 0.3,
-                cache_write_5m: 3.75,
-                cache_write_1h: 6.0,
-                prompt_cache_ttl: None,
-                slots: 0,
-                retired_exclusive: None,
-                local: false,
-            },
-        )]);
-
-        // The previous step banked 1M output against this session; the
-        // transcript, cumulative, now reads 1.5M.
-        let mut entry = banked("login", "implement", "s1", None);
+        // The previous step banked 1M output ($15) against this session; the
+        // transcript, cumulative, now reads 1.5M, priced turn by turn to $22.50.
+        let mut entry = banked("login", "implement", "s1", Some(15.0));
         entry.tokens.output = 1_000_000;
         let harvest = crate::usage::Harvest {
+            tier_tokens: Default::default(),
             model: "claude-sonnet-5".into(),
             tokens: crate::usage::Tokens {
                 output: 1_500_000,
                 ..Default::default()
             },
             turns: 4,
-            // Claude Code records no cost, so the price map answers.
-            cost_usd: None,
+            cost_usd: Some(22.5),
             ctx_peak: 0,
         };
 
         // The half-million this step has produced, at $15/M — not $22.50. OUT
         // is that same half-million, off the same subtraction: the two figures
         // beside each other on a row are one reading of one step.
-        let (out, cost) = live_spend(&repo, &[entry], "s1", &harvest);
-        let cost = cost.expect("nothing priced");
+        let (out, cost) = live_spend(&[entry], "s1", &harvest);
         assert_eq!(out, 500_000);
-        assert!((cost - 7.5).abs() < 1e-9, "{cost}");
+        assert_eq!(cost, Some(7.5));
 
         // And a fresh session, which is what a step ordinarily gets, is read
         // in full: its delta is its total.
-        let (out, cost) = live_spend(&repo, &[], "s2", &harvest);
-        let cost = cost.expect("nothing priced");
+        let (out, cost) = live_spend(&[], "s2", &harvest);
         assert_eq!(out, 1_500_000);
-        assert!((cost - 22.5).abs() < 1e-9, "{cost}");
+        assert_eq!(cost, Some(22.5));
+    }
+
+    /// A harvest with no cost has a turn nothing prices. The row shows no
+    /// cost, as the ledger line banked for it will, rather than pricing the
+    /// summed tokens at the last turn's model.
+    #[test]
+    fn a_harvest_with_no_cost_shows_no_cost() {
+        let harvest = crate::usage::Harvest {
+            tier_tokens: Default::default(),
+            model: "claude-sonnet-5".into(),
+            tokens: crate::usage::Tokens {
+                output: 1_000_000,
+                ..Default::default()
+            },
+            turns: 2,
+            cost_usd: None,
+            ctx_peak: 0,
+        };
+
+        let (out, cost) = live_spend(&[], "s1", &harvest);
+        assert_eq!(out, 1_000_000);
+        assert_eq!(cost, None);
     }
 
     /// The STATE column is sized to the board, not to the widest word there

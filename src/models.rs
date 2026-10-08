@@ -4,7 +4,8 @@
 //! and it is empty by default: spoolway does not know what you run. Behind
 //! it sit two tables nobody has to write — a refreshed copy of litellm's price
 //! map under `~/.spoolway/`, then the copy vendored into the binary. Both are
-//! distilled to the six numbers [`crate::usage::ModelPrice`] holds. [`resolve`]
+//! distilled to the six numbers [`crate::usage::ModelPrice`] holds, plus one
+//! higher tier's rates where litellm prices one. [`resolve`]
 //! is the one place that order is applied: a project's own glob first, each
 //! price table by exact name after that, and nothing last.
 //!
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::cli::ModelsRefreshArgs;
 use crate::pipeline::{Pipelines, StepKind};
 use crate::repo::Repo;
-use crate::usage::ModelPrice;
+use crate::usage::{ModelPrice, PriceTier, Rates};
 
 /// The sentinel older scaffolds and the annotated generation template use to
 /// instruct a person to name a local model.
@@ -61,6 +62,17 @@ const SOURCE_LICENSE: &str = "MIT";
 /// `SPOOLWAY_GH` for the stack command, the override changes the external
 /// input without giving the command a second implementation.
 const SOURCE_URL_ENV: &str = "SPOOLWAY_MODEL_PRICES_URL";
+/// The most a rate may be, in USD per million tokens. litellm's highest row
+/// today is under $10,000, so a rate past this is a corrupted or hostile
+/// value, and pricing a lane with it would bury every real cost beside it.
+const MAX_RATE: f64 = 100_000.0;
+/// The largest window a row may carry, in tokens. The window decides when a
+/// lane resumes a session, so a bad value changes dispatch, not only cost.
+/// The largest real window today is about a tenth of this.
+const MAX_WINDOW: usize = 100_000_000;
+/// The most a built-in-URL fetch may download. The upstream file is about
+/// 3 MB, so this stops a swapped or runaway response without touching a real one.
+const MAX_FILESIZE: &str = "32M";
 
 /// Distill litellm's raw, provider-wide price map into the rows spoolway uses.
 ///
@@ -90,6 +102,7 @@ pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<Str
                     cache_write_1h: optional_rate(
                         row.get("cache_creation_input_token_cost_above_1hr"),
                     ),
+                    tier: lowest_tier(row),
                     ..Default::default()
                 },
             ))
@@ -97,27 +110,125 @@ pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<Str
         .collect()
 }
 
+/// Split distilled rows into the ones spoolway may trust and the names of the
+/// ones it refuses: a rate that is negative or above [`MAX_RATE`], or a window
+/// above [`MAX_WINDOW`]. A refused row is dropped rather than clamped, because
+/// a clamped value would still be a price nobody published.
+fn refuse_out_of_range(
+    models: BTreeMap<String, ModelPrice>,
+) -> (BTreeMap<String, ModelPrice>, Vec<String>) {
+    let mut refused = Vec::new();
+    let kept = models
+        .into_iter()
+        .filter(|(name, price)| {
+            let in_range = price.context_window <= MAX_WINDOW
+                && rates_in_range(&price.rates())
+                && price.tier.as_ref().is_none_or(|t| rates_in_range(&t.rates));
+            if !in_range {
+                refused.push(name.clone());
+            }
+            in_range
+        })
+        .collect();
+    (kept, refused)
+}
+
+fn rates_in_range(rates: &Rates) -> bool {
+    [
+        rates.input,
+        rates.output,
+        rates.cache_read,
+        rates.cache_write_5m,
+        rates.cache_write_1h,
+    ]
+    .iter()
+    .all(|rate| (0.0..=MAX_RATE).contains(rate))
+}
+
+/// Which of a tier's [`Rates`] one litellm field fills.
+type RateField = fn(&mut Rates) -> &mut f64;
+
+/// litellm's per-token field for each rate, as it is spelled before a tier's
+/// `_above_<N>k_tokens` suffix. Batch, priority, fast-mode and regional
+/// fields carry further suffixes or other names, so they match none of these
+/// and stay unread.
+const TIER_FIELDS: [(&str, RateField); 5] = [
+    ("input_cost_per_token", |r| &mut r.input),
+    ("output_cost_per_token", |r| &mut r.output),
+    ("cache_read_input_token_cost", |r| &mut r.cache_read),
+    ("cache_creation_input_token_cost", |r| &mut r.cache_write_5m),
+    ("cache_creation_input_token_cost_above_1hr", |r| {
+        &mut r.cache_write_1h
+    }),
+];
+
+/// The row's lowest-threshold tier, read from its `*_above_<N>k_tokens`
+/// fields and converted to USD per million, or `None` when it has no tier.
+///
+/// A row with more than one threshold keeps its lowest: spoolway prices one
+/// tier per model, and the lowest is the one a growing prompt reaches first.
+/// The one-hour field's own `_above_1hr` never reads as a threshold, because
+/// [`PriceTier::threshold_in`] takes digits only.
+fn lowest_tier(row: &serde_json::Map<String, serde_json::Value>) -> Option<PriceTier> {
+    let mut tiers: BTreeMap<u64, Rates> = BTreeMap::new();
+    for (key, value) in row {
+        let Some(rate) = finite_number(value) else {
+            continue;
+        };
+        for (base, field) in TIER_FIELDS {
+            let Some(above_k) = key
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix('_'))
+                .and_then(PriceTier::threshold_in)
+            else {
+                continue;
+            };
+            *field(tiers.entry(above_k).or_default()) = per_million(rate);
+        }
+    }
+    let (above_k, rates) = tiers.into_iter().next()?;
+    Some(PriceTier { above_k, rates })
+}
+
 /// Fetch and replace the machine-wide or vendored price table.
 ///
-/// Every fallible operation through parsing the response happens before the
-/// destination is opened. In particular, a missing curl, an HTTP failure, or
-/// invalid JSON cannot truncate the last usable table.
+/// Every fallible operation through checking the rows happens before the
+/// destination is opened. In particular, a missing curl, an HTTP failure,
+/// invalid JSON, or a response that keeps fewer than half the rows of the
+/// table it replaces cannot truncate the last usable table.
 pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
     let target = refresh_target(repo, args.vendor)?;
-    let source_url = std::env::var(SOURCE_URL_ENV).unwrap_or_else(|_| SOURCE_URL.to_string());
-    let response = fetch(&source_url, args.vendor)?;
+    let override_url = std::env::var(SOURCE_URL_ENV).ok();
+    let source_url = override_url.as_deref().unwrap_or(SOURCE_URL);
+    // Only the built-in URL is held to HTTPS and a size cap. The override is
+    // the offline suite's seam to a `file://` fixture, and whoever can set it
+    // can already run code.
+    let response = fetch(source_url, override_url.is_none(), args.vendor)?;
     if !args.vendor {
-        println!("  fetched  {}", display_url(&source_url));
+        println!("  fetched  {}", display_url(source_url));
     }
 
     let raw: BTreeMap<String, serde_json::Value> = serde_json::from_slice(&response)
         .with_context(|| format!("parsing litellm's price response from {source_url}"))?;
     let raw_count = raw.len();
-    let models = distill(&raw);
+    let (models, refused) = refuse_out_of_range(distill(&raw));
     // The machine-wide layer may not exist yet. In that case the active table
     // it is replacing is the built-in one, so reporting every current model as
     // newly added would hide the small upstream delta a refresh is for.
     let old = existing_models(&target).unwrap_or_else(|| builtin().clone());
+    // A truncated or swapped file keeps few rows. Half is far below any real
+    // upstream churn, so only a broken response trips it.
+    if models.len() * 2 < old.len() {
+        bail!(
+            "refusing to write: {source_url} kept {} priced rows, fewer than half of the {} in \
+             the table it would replace\n{} is unchanged\n\
+             check the source (or SPOOLWAY_MODEL_PRICES_URL when it is set); a model can be priced in the \
+             meantime with `spoolway config set models.'<model-glob>'.input <usd per 1M>`",
+            models.len(),
+            old.len(),
+            report_path(repo, &target, args.vendor)
+        );
+    }
     let changes = Changes::between(&old, &models);
     let file = BuiltinFile {
         source: SOURCE_PAGE.to_string(),
@@ -134,8 +245,9 @@ pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
         repo,
         &target,
         args.vendor,
-        file.models.len(),
-        raw_count - file.models.len(),
+        &file.models,
+        raw_count - file.models.len() - refused.len(),
+        &refused,
         &changes,
     ) {
         println!("{line}");
@@ -154,9 +266,20 @@ fn refresh_target(repo: &Repo, vendor: bool) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn fetch(source_url: &str, vendor: bool) -> Result<Vec<u8>> {
+/// The arguments curl runs with. `builtin` is true for the compiled-in URL,
+/// which alone is limited to HTTPS (a redirect included) and [`MAX_FILESIZE`].
+fn curl_args(source_url: &str, builtin: bool) -> Vec<&str> {
+    let mut args = vec!["-fsSL", "--max-time", "30"];
+    if builtin {
+        args.extend(["--proto", "=https", "--max-filesize", MAX_FILESIZE]);
+    }
+    args.push(source_url);
+    args
+}
+
+fn fetch(source_url: &str, builtin: bool, vendor: bool) -> Result<Vec<u8>> {
     let output = match Command::new("curl")
-        .args(["-fsSL", "--max-time", "30", source_url])
+        .args(curl_args(source_url, builtin))
         .output()
     {
         Ok(output) => output,
@@ -224,24 +347,49 @@ fn success_lines(
     repo: &Repo,
     target: &Path,
     vendor: bool,
-    kept: usize,
+    models: &BTreeMap<String, ModelPrice>,
     dropped_rows: usize,
+    refused: &[String],
     changes: &Changes,
 ) -> Vec<String> {
     let wrote = format!("  wrote    {}", report_path(repo, target, vendor));
     if vendor {
         // Vendoring is deliberately quiet enough to paste into release work:
-        // the one path changed is the whole report drawn by the command.
-        return vec![wrote];
+        // the one path changed is the whole report, plus the refused rows when
+        // there are any, because a release should not drop a model unseen.
+        let mut lines = vec![wrote];
+        if !refused.is_empty() {
+            lines.push(refused_line(refused));
+        }
+        return lines;
     }
-    vec![
+    let mut lines = vec![
         wrote,
-        format!("  models   {kept} priced chat rows kept, {dropped_rows} other rows dropped"),
+        format!(
+            "  models   {} priced chat rows kept, {dropped_rows} other rows dropped",
+            models.len()
+        ),
         format!(
             "  changed  {} added, {} repriced, {} unchanged, {} dropped",
             changes.added, changes.repriced, changes.unchanged, changes.dropped
         ),
-    ]
+        format!(
+            "  tiered   {} rows carry a higher tier",
+            models.values().filter(|price| price.tier.is_some()).count()
+        ),
+    ];
+    if !refused.is_empty() {
+        lines.push(refused_line(refused));
+    }
+    lines
+}
+
+fn refused_line(refused: &[String]) -> String {
+    format!(
+        "  refused  {} rows out of range: {}",
+        refused.len(),
+        refused.join(", ")
+    )
 }
 
 #[derive(Default)]
@@ -516,6 +664,26 @@ struct Row<'a> {
     slots: Option<u32>,
     source: &'static str,
     steps: &'a [&'a str],
+    /// Left out for an untiered model, so its JSON reads as it always has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<TierRow>,
+}
+
+/// A tiered model's higher rates, drawn on an indented row under it.
+#[derive(Serialize)]
+struct TierRow {
+    above_tokens: u64,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write_5m: f64,
+    cache_write_1h: f64,
+}
+
+impl TierRow {
+    fn label(&self) -> String {
+        format!("  above {}k tokens", self.above_tokens / 1000)
+    }
 }
 
 /// `spoolway models`: every model this project's pipelines name, with what it
@@ -540,6 +708,14 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
                     .and_then(|p| (p.slots > 0).then_some(p.slots)),
                 source: resolved.source.label(),
                 steps,
+                tier: resolved.price.and_then(|p| p.tier).map(|tier| TierRow {
+                    above_tokens: tier.above_k * 1000,
+                    input: tier.rates.input,
+                    output: tier.rates.output,
+                    cache_read: tier.rates.cache_read,
+                    cache_write_5m: tier.rates.cache_write_5m,
+                    cache_write_1h: tier.rates.cache_write_1h,
+                }),
             }
         })
         .collect();
@@ -555,9 +731,17 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // A tier's label spans the model and window columns, which stay blank
+    // under it, so a table of short model names widens to fit the label.
+    const WINDOW_SPAN: usize = 2 + 9;
     let width = rows
         .iter()
         .map(|r| r.model.len())
+        .chain(
+            rows.iter()
+                .filter_map(|r| r.tier.as_ref())
+                .map(|tier| tier.label().len().saturating_sub(WINDOW_SPAN)),
+        )
         .max()
         .unwrap_or(5)
         .max("MODEL".len());
@@ -584,6 +768,18 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
             row.source,
             row.steps.join(", "),
         );
+        if let Some(tier) = &row.tier {
+            println!(
+                "{:<span$}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
+                tier.label(),
+                crate::fmt::money(Some(tier.input)),
+                crate::fmt::money(Some(tier.output)),
+                crate::fmt::money(Some(tier.cache_read)),
+                crate::fmt::money(Some(tier.cache_write_5m)),
+                crate::fmt::money(Some(tier.cache_write_1h)),
+                span = width + WINDOW_SPAN,
+            );
+        }
     }
 
     let unknown: Vec<&str> = rows
@@ -748,6 +944,99 @@ mod tests {
         assert_eq!(changes.dropped, 1);
     }
 
+    fn priced(input: f64, window: usize) -> ModelPrice {
+        ModelPrice {
+            context_window: window,
+            input,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn out_of_range_rows_are_refused_and_named() {
+        let tier = |output| {
+            Some(PriceTier {
+                above_k: 200,
+                rates: Rates {
+                    output,
+                    ..Default::default()
+                },
+            })
+        };
+        let models = BTreeMap::from([
+            ("fine".to_string(), priced(100_000.0, 100_000_000)),
+            ("negative".to_string(), priced(-0.5, 0)),
+            ("pricey".to_string(), priced(100_000.01, 0)),
+            ("wide".to_string(), priced(1.0, 100_000_001)),
+            (
+                "tier-pricey".to_string(),
+                ModelPrice {
+                    tier: tier(200_000.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tier-fine".to_string(),
+                ModelPrice {
+                    tier: tier(5.0),
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let (kept, refused) = refuse_out_of_range(models);
+
+        assert_eq!(kept.keys().collect::<Vec<_>>(), ["fine", "tier-fine"]);
+        assert_eq!(refused, ["negative", "pricey", "tier-pricey", "wide"]);
+    }
+
+    #[test]
+    fn only_the_builtin_url_is_held_to_https_and_a_size_cap() {
+        let builtin = curl_args(SOURCE_URL, true);
+        assert!(builtin.windows(2).any(|w| w == ["--proto", "=https"]));
+        assert!(builtin.windows(2).any(|w| w == ["--max-filesize", "32M"]));
+        let overridden = curl_args("file:///tmp/prices.json", false);
+        assert!(!overridden.contains(&"--proto"));
+        assert!(!overridden.contains(&"--max-filesize"));
+        assert_eq!(overridden.last(), Some(&"file:///tmp/prices.json"));
+    }
+
+    #[test]
+    fn success_names_tiered_and_refused_rows() {
+        let checkout = crate::scratch::root("models-refresh-report");
+        let repo = Repo {
+            borrowed: false,
+            root: checkout.to_path_buf(),
+            checkout: checkout.to_path_buf(),
+            config: Default::default(),
+            home: checkout.join("state"),
+        };
+        let tiered = ModelPrice {
+            tier: Some(PriceTier {
+                above_k: 100,
+                rates: Rates::default(),
+            }),
+            ..Default::default()
+        };
+        let models = BTreeMap::from([
+            ("a".to_string(), tiered),
+            ("b".to_string(), ModelPrice::default()),
+        ]);
+        let refused = ["x".to_string(), "y".to_string()];
+        let lines = success_lines(
+            &repo,
+            &checkout.join("out.json"),
+            false,
+            &models,
+            3,
+            &refused,
+            &Changes::default(),
+        );
+
+        assert_eq!(lines[3], "  tiered   1 rows carry a higher tier");
+        assert_eq!(lines[4], "  refused  2 rows out of range: x, y");
+    }
+
     #[test]
     fn vendor_success_reports_only_the_written_path() {
         let checkout = crate::scratch::root("models-vendor-report");
@@ -762,8 +1051,9 @@ mod tests {
             &repo,
             &checkout.join("assets/model-prices.json"),
             true,
-            12,
+            &BTreeMap::new(),
             3,
+            &[],
             &Changes {
                 added: 1,
                 repriced: 2,
@@ -773,6 +1063,36 @@ mod tests {
         );
 
         assert_eq!(lines, ["  wrote    assets/model-prices.json"]);
+    }
+
+    #[test]
+    fn vendor_success_names_refused_rows() {
+        let checkout = crate::scratch::root("models-vendor-refused");
+        let repo = Repo {
+            borrowed: false,
+            root: checkout.to_path_buf(),
+            checkout: checkout.to_path_buf(),
+            config: Default::default(),
+            home: checkout.join("state"),
+        };
+        let refused = ["x".to_string(), "y".to_string()];
+        let lines = success_lines(
+            &repo,
+            &checkout.join("assets/model-prices.json"),
+            true,
+            &BTreeMap::new(),
+            0,
+            &refused,
+            &Changes::default(),
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "  wrote    assets/model-prices.json",
+                "  refused  2 rows out of range: x, y"
+            ]
+        );
     }
 
     #[test]
@@ -1131,5 +1451,73 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn litellm_tier_fields_become_one_tier_at_the_lowest_threshold() {
+        let raw: BTreeMap<String, serde_json::Value> = serde_json::from_value(serde_json::json!({
+            "tiered": {
+                "mode": "chat",
+                "input_cost_per_token": 0.0000001,
+                "output_cost_per_token": 0.0000005,
+                "input_cost_per_token_above_100k_tokens": 0.0000005,
+                "output_cost_per_token_above_100k_tokens": 0.0000025,
+                "cache_read_input_token_cost_above_100k_tokens": 0.00000005,
+                "cache_creation_input_token_cost_above_100k_tokens": 0.000000625,
+                "cache_creation_input_token_cost_above_1hr_above_100k_tokens": 0.000001,
+                "input_cost_per_token_above_100k_tokens_priority": 0.000009,
+                "input_cost_per_token_batches": 0.000009
+            },
+            "two-thresholds": {
+                "mode": "chat",
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+                "input_cost_per_token_above_256k_tokens": 0.000004,
+                "input_cost_per_token_above_128k_tokens": 0.000003,
+                "output_cost_per_token_above_128k_tokens": 0.000006
+            },
+            "untiered": {
+                "mode": "chat",
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+                "cache_creation_input_token_cost_above_1hr": 0.000002
+            }
+        }))
+        .unwrap();
+
+        let table = distill(&raw);
+        assert_eq!(
+            table["tiered"].tier,
+            Some(PriceTier {
+                above_k: 100,
+                rates: Rates {
+                    input: 0.5,
+                    output: 2.5,
+                    cache_read: 0.05,
+                    cache_write_5m: 0.625,
+                    cache_write_1h: 1.0,
+                },
+            })
+        );
+        assert_eq!(
+            table["two-thresholds"].tier,
+            Some(PriceTier {
+                above_k: 128,
+                rates: Rates {
+                    input: 3.0,
+                    output: 6.0,
+                    ..Rates::default()
+                },
+            })
+        );
+        assert_eq!(table["untiered"].tier, None);
+    }
+
+    /// The vendored table carries Haiku 5.5's tier, so a build prices it
+    /// without a refresh.
+    #[test]
+    fn the_vendored_table_carries_haiku_5_5_with_its_tier() {
+        let haiku = builtin()["claude-haiku-5-5"];
+        assert_eq!(haiku.tier.map(|tier| tier.above_k), Some(100));
     }
 }

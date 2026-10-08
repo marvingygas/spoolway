@@ -454,10 +454,8 @@ pub(crate) fn config_patch_without(overrides: &Path, keys: &[String]) -> Result<
         // The glob of a `models.<glob>.<field>` key may hold a dot, and
         // splitting on every one would look for a table that is not there and
         // leave the retired key in the layer.
-        let parts: Vec<&str> = match crate::confkv::split_models_key(key) {
-            Some(parts) => parts.to_vec(),
-            None => key.split('.').collect(),
-        };
+        let parts: Vec<&str> =
+            crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
         doc = crate::confdoc::remove(&doc, &parts)?;
     }
     Ok(doc)

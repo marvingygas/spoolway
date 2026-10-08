@@ -105,6 +105,16 @@ impl Tokens {
     pub fn is_zero(&self) -> bool {
         self.total() == 0
     }
+
+    /// `self` limited, class by class, to what `whole` holds.
+    ///
+    /// A ledger line's `tier_tokens` is a part of its `tokens`. The split is
+    /// recomputed over a whole transcript against today's price table, so
+    /// when an earlier line banked none of it, or banked it under another
+    /// threshold, the difference alone can exceed the line's own delta.
+    pub fn within(&self, whole: &Tokens) -> Tokens {
+        self.since(&self.since(whole))
+    }
 }
 
 /// One finished lane, as written to the ledger.
@@ -152,6 +162,12 @@ pub struct Entry {
     #[serde(default)]
     pub turns: u32,
     pub tokens: Tokens,
+    /// The part of `tokens` that came from turns over their model's price
+    /// threshold, which `spoolway eval` prices at the tier's rates. Left out of
+    /// the line when it is zero, so an untiered lane's line keeps its shape,
+    /// and a line written before the field reads as all base-rate.
+    #[serde(default, skip_serializing_if = "Tokens::is_zero")]
+    pub tier_tokens: Tokens,
     /// Absent when nothing could price this model — never estimated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
@@ -296,7 +312,13 @@ impl Entry {
 /// rather than one apiece because both are true of the model itself, not of
 /// a launch profile — `agents.*.context_window` and `[pricing]` used to be
 /// two places disagreeing about that.
+///
+/// Serialised by hand around a derived core — see the `Serialize` and
+/// `Deserialize` impls below — because one key is not a field: a tier
+/// sub-table carries its threshold in its own name, which no derive can
+/// spell.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelPrice {
     /// What one session gets to work in, in tokens. Already final: spoolway
@@ -397,6 +419,178 @@ pub struct ModelPrice {
     /// `slots` model that has not set this rather than assuming either way.
     #[serde(skip_serializing_if = "not_local")]
     pub local: bool,
+
+    /// The rates a request is charged once its prompt passes a threshold,
+    /// written as the sub-table `[models."<glob>".above_<N>k_tokens]`.
+    ///
+    /// One tier at most: litellm lists a second threshold for a handful of
+    /// models, and [`crate::models::distill`] keeps only the lowest. Skipped
+    /// by the derive because its key is not a fixed name; the hand-written
+    /// impls below read and write it.
+    #[serde(skip)]
+    pub tier: Option<PriceTier>,
+}
+
+/// The five rates of one price, in USD per 1M tokens: a model's base rates,
+/// or the rates of its higher tier.
+///
+/// A tier's sub-table holds exactly these keys, so it refuses any other the
+/// way the base entry does. A rate left out is zero, which is unset, the same
+/// as on the base entry — and [`Rates::apply`] gives both the same one-hour
+/// fallback, since the base entry prices through it too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rates {
+    /// USD per 1M input tokens.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub input: f64,
+    /// USD per 1M output tokens.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub output: f64,
+    /// USD per 1M tokens read from the prompt cache.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub cache_read: f64,
+    /// USD per 1M tokens written to a five-minute cache.
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub cache_write_5m: f64,
+    /// USD per 1M tokens written to a one-hour cache. Zero falls back to the
+    /// five-minute rate; see [`Rates::apply`].
+    #[serde(skip_serializing_if = "unset_rate")]
+    pub cache_write_1h: f64,
+}
+
+impl Rates {
+    /// What `tokens` cost at these rates.
+    ///
+    /// A one-hour rate left at zero falls back to the five-minute rate rather
+    /// than pricing an hour cache at nothing — a config that predates the
+    /// split, or a tier that left the rate out, under-reports rather than
+    /// silently dropping a whole class of spend.
+    pub(crate) fn apply(&self, tokens: &Tokens) -> f64 {
+        let per = |n: u64, rate: f64| (n as f64) * rate / 1_000_000.0;
+        let hourly = match self.cache_write_1h {
+            0.0 => self.cache_write_5m,
+            rate => rate,
+        };
+        per(tokens.input, self.input)
+            + per(tokens.output, self.output)
+            + per(tokens.cache_read, self.cache_read)
+            + per(tokens.cache_write_5m, self.cache_write_5m)
+            + per(tokens.cache_write_1h, hourly)
+    }
+}
+
+/// A model's one higher price tier: the rates a request pays once its prompt
+/// passes `above_k` thousand tokens.
+///
+/// Named the way litellm names it — `input_cost_per_token_above_100k_tokens`
+/// becomes the sub-table `above_100k_tokens` — so the threshold lives in the
+/// key, and all three price tables share one shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceTier {
+    /// The threshold in thousands of tokens: the `100` of `above_100k_tokens`.
+    pub above_k: u64,
+    pub rates: Rates,
+}
+
+impl PriceTier {
+    /// The sub-table name this tier is written under.
+    pub fn key(&self) -> String {
+        format!("above_{}k_tokens", self.above_k)
+    }
+
+    /// The threshold a sub-table name carries, or `None` if the name does not
+    /// read as `above_<N>k_tokens`.
+    ///
+    /// Strict, so a name that loads always writes back as itself: digits
+    /// only, no leading zero, and not zero itself, since a tier above no
+    /// tokens at all is the base price under another name.
+    pub fn threshold_in(key: &str) -> Option<u64> {
+        let digits = key.strip_prefix("above_")?.strip_suffix("k_tokens")?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if digits.starts_with('0') {
+            return None;
+        }
+        digits.parse().ok()
+    }
+}
+
+/// Every table-valued key of an entry is a tier attempt, since every field
+/// [`ModelPrice`] has is a scalar. So a misspelt sub-table such as
+/// `above_100K_token` is refused by its own name rather than sliding past as
+/// an unknown field nobody reads, and a second tier is refused rather than
+/// one of the two silently winning. What is left is handed to the derived
+/// reader, which still refuses an unknown scalar.
+///
+/// Read through `toml::Value` because both `config.toml` and the JSON price
+/// tables arrive here, and the split has to see the keys before the derive
+/// does.
+impl<'de> Deserialize<'de> for ModelPrice {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let toml::Value::Table(mut table) = toml::Value::deserialize(deserializer)? else {
+            return Err(D::Error::custom("a model entry must be a table"));
+        };
+        let nested: Vec<String> = table
+            .iter()
+            .filter(|(_, value)| value.is_table())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut tier: Option<PriceTier> = None;
+        for key in nested {
+            let Some(value) = table.remove(&key) else {
+                continue;
+            };
+            let Some(above_k) = PriceTier::threshold_in(&key) else {
+                return Err(D::Error::custom(format!(
+                    "`{key}` is not a price tier: a tier is named `above_<N>k_tokens`, \
+                     such as `above_100k_tokens`"
+                )));
+            };
+            if let Some(first) = tier {
+                return Err(D::Error::custom(format!(
+                    "`{key}`: a model carries one price tier, and this one already has `{}`; \
+                     remove one of the two sub-tables, and keep the lower threshold if both \
+                     are wanted, as `models refresh` does",
+                    first.key()
+                )));
+            }
+            let rates =
+                Rates::deserialize(value).map_err(|e| D::Error::custom(format!("`{key}`: {e}")))?;
+            tier = Some(PriceTier { above_k, rates });
+        }
+        let mut price =
+            ModelPrice::deserialize(toml::Value::Table(table)).map_err(D::Error::custom)?;
+        price.tier = tier;
+        Ok(price)
+    }
+}
+
+/// The derived fields, then the tier under its own name. Flattened so the
+/// tier is a sibling of the rates, and last so a TOML writer can put the
+/// sub-table after the entry's own keys.
+impl Serialize for ModelPrice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Written {
+            #[serde(flatten, with = "ModelPrice")]
+            fields: ModelPrice,
+            #[serde(flatten)]
+            tier: BTreeMap<String, Rates>,
+        }
+        Written {
+            fields: *self,
+            tier: self
+                .tier
+                .iter()
+                .map(|tier| (tier.key(), tier.rates))
+                .collect(),
+        }
+        .serialize(serializer)
+    }
 }
 
 /// A zero in `[models]` is *unset*, and unset is written by leaving the key
@@ -462,23 +656,54 @@ impl ModelPrice {
             slots: 1,
             retired_exclusive: None,
             local: true,
+            tier: Some(PriceTier {
+                above_k: 1,
+                rates: Rates {
+                    input: 1.0,
+                    output: 1.0,
+                    cache_read: 1.0,
+                    cache_write_5m: 1.0,
+                    cache_write_1h: 1.0,
+                },
+            }),
         }
     }
 
-    /// What `tokens` cost at this price. Crate-visible so `spoolway eval` can
-    /// price one token class at a time through the same rates — see
-    /// `eval::ClassCost` — rather than repeat them.
-    pub(crate) fn apply(&self, tokens: &Tokens) -> f64 {
-        let per = |n: u64, rate: f64| (n as f64) * rate / 1_000_000.0;
-        let hourly = match self.cache_write_1h {
-            0.0 => self.cache_write_5m,
-            rate => rate,
-        };
-        per(tokens.input, self.input)
-            + per(tokens.output, self.output)
-            + per(tokens.cache_read, self.cache_read)
-            + per(tokens.cache_write_5m, self.cache_write_5m)
-            + per(tokens.cache_write_1h, hourly)
+    /// The base rates, in the shape a tier's rates take.
+    pub fn rates(&self) -> Rates {
+        Rates {
+            input: self.input,
+            output: self.output,
+            cache_read: self.cache_read,
+            cache_write_5m: self.cache_write_5m,
+            cache_write_1h: self.cache_write_1h,
+        }
+    }
+
+    /// What one request cost: all of it at the tier's rates when its prompt
+    /// passed the tier's threshold, at the base rates otherwise.
+    ///
+    /// The prompt is `input + cache_read + cache_write`, the same reading
+    /// [`last_turn`] takes of a request's size. A prompt of exactly the
+    /// threshold has not passed it, and the output is charged at the tier's
+    /// rate too, because providers bill the whole request at the higher price.
+    pub(crate) fn apply_turn(&self, tokens: &Tokens) -> f64 {
+        match self.tier_reached(tokens) {
+            Some(tier) => tier.rates.apply(tokens),
+            None => self.apply(tokens),
+        }
+    }
+
+    /// The tier one request's prompt passed, if this model has one and the
+    /// prompt went over its threshold.
+    pub(crate) fn tier_reached(&self, tokens: &Tokens) -> Option<PriceTier> {
+        let prompt = tokens.input + tokens.cache_read + tokens.cache_write();
+        self.tier.filter(|tier| prompt > tier.above_k * 1000)
+    }
+
+    /// What `tokens` cost at the base rates.
+    fn apply(&self, tokens: &Tokens) -> f64 {
+        self.rates().apply(tokens)
     }
 }
 
@@ -490,6 +715,11 @@ impl ModelPrice {
 /// than zero is deliberate: a model in none has an unknown cost, not a free
 /// one, and `spoolway eval` says which models those are instead of quietly
 /// under-reporting a total.
+///
+/// Prices a summed token count at the base rates, which no banking path does
+/// any more: [`read_transcript`] prices each turn alone. Kept for the tests
+/// that compare against the summed figure.
+#[cfg(test)]
 pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens) -> Option<f64> {
     crate::models::resolve(prices, model)
         .price
@@ -781,9 +1011,16 @@ pub fn ambient_sessions() -> Vec<(&'static str, String)> {
 pub struct Harvest {
     pub model: String,
     pub tokens: Tokens,
+    /// The part of `tokens` that came from turns over their model's price
+    /// threshold — see [`Entry::tier_tokens`].
+    pub tier_tokens: Tokens,
     pub turns: u32,
-    /// Cost the agent reported itself. Trusted over the price map when present:
-    /// a local lane's honest zero is a fact spoolway should not have to be told.
+    /// The sum of every turn's cost: the agent's own figure for a turn that
+    /// reports one, trusted over the price map because a local lane's honest
+    /// zero is a fact spoolway should not have to be told, and the price
+    /// map's rate for the tier that turn's prompt reached for a turn that does
+    /// not. `None` when any turn has neither, since a partial sum would read as
+    /// a complete one.
     pub cost_usd: Option<f64>,
     /// The largest single-turn context reading seen anywhere in the
     /// transcript — the same figure [`last_turn`] takes of the *last* turn,
@@ -799,8 +1036,12 @@ pub struct Harvest {
 /// Absence is not an error. A lane may have failed before its first turn, or
 /// the project's `args` may not pass `{session_id}` through at all — neither is
 /// worth failing a dispatch pass over, and both simply produce no ledger line.
-pub fn harvest(kind: &str, session: &str) -> Option<Harvest> {
-    harvest_file(kind, &session_file(kind, session)?)
+pub fn harvest(
+    kind: &str,
+    session: &str,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Option<Harvest> {
+    harvest_file(kind, &session_file(kind, session)?, prices)
 }
 
 /// The last assistant turn a transcript records, in whichever of the two
@@ -868,8 +1109,8 @@ pub struct Live {
 /// banked once by id for the reason [`read_transcript`] does it — Claude Code
 /// writes an assistant line per content block and repeats that request's usage
 /// verbatim on each, so counting every line roughly doubles the output.
-pub fn live_of(kind: &str, path: &Path) -> Option<Live> {
-    let transcript = read_transcript(kind, path);
+pub fn live_of(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Live> {
+    let transcript = read_transcript(kind, path, prices);
     Some(Live {
         context: transcript.context,
         harvest: transcript.total?,
@@ -1047,8 +1288,8 @@ pub fn touched_at(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-fn harvest_file(kind: &str, path: &Path) -> Option<Harvest> {
-    read_transcript(kind, path).total
+fn harvest_file(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Harvest> {
+    read_transcript(kind, path, prices).total
 }
 
 /// A transcript read once, totalled and sized.
@@ -1066,8 +1307,9 @@ struct Transcript {
     context: u64,
 }
 
-/// The totals of one transcript, deduped by request.
-fn read_transcript(kind: &str, path: &Path) -> Transcript {
+/// The totals of one transcript, deduped by request, with its cost summed
+/// turn by turn against `prices` — the project's `[models]` table.
+fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Transcript {
     let none = Transcript {
         total: None,
         context: 0,
@@ -1077,6 +1319,7 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
     };
 
     let mut tokens = Tokens::default();
+    let mut tier_tokens = Tokens::default();
     let mut model = String::new();
     let mut turns = 0u32;
     let mut context = 0u64;
@@ -1085,8 +1328,11 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
     // that compacted after peaking close to its window from one that never
     // did. See [`Harvest::ctx_peak`].
     let mut ctx_peak = 0u64;
-    let mut reported = 0.0f64;
-    let mut any_cost = false;
+    let mut spent = 0.0f64;
+    // Set by a turn that neither reports a cost nor has a price, which makes
+    // the lane's cost unknown rather than the sum of the turns that did.
+    let mut any_unpriced = false;
+    let mut resolved: HashMap<String, Option<ModelPrice>> = HashMap::new();
     // One request, several records: Claude Code writes an assistant line per
     // content block — text, thinking, each tool call — and repeats that
     // request's usage verbatim on every one of them. In a real transcript half
@@ -1147,9 +1393,25 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
         if !turn.model.is_empty() {
             model = turn.model.clone();
         }
-        if let Some(cost) = turn.cost {
-            reported += cost;
-            any_cost = true;
+        // Priced one turn at a time because a tier depends on a single
+        // request's prompt, which the summed tokens cannot show. The agent's
+        // own figure wins over the table, as it always has.
+        //
+        // Resolved once per distinct model: a lookup for a model with no
+        // `[models]` row reads the refreshed price file from disk, and a
+        // transcript has hundreds of turns on one or two models.
+        let entry = *resolved
+            .entry(turn.model.clone())
+            .or_insert_with(|| crate::models::resolve(prices, &turn.model).price);
+        // Banked whatever pays for the turn: `spoolway eval` re-prices the
+        // token classes from today's table, so the split must not depend on
+        // whether the agent reported its own cost.
+        if entry.is_some_and(|price| price.tier_reached(&turn.tokens).is_some()) {
+            tier_tokens.add(&turn.tokens);
+        }
+        match turn.cost.or_else(|| Some(entry?.apply_turn(&turn.tokens))) {
+            Some(cost) => spent += cost,
+            None => any_unpriced = true,
         }
     }
 
@@ -1161,9 +1423,10 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
         total: Some(Harvest {
             model,
             tokens,
+            tier_tokens,
             turns,
             ctx_peak,
-            cost_usd: any_cost.then_some(reported),
+            cost_usd: (!any_unpriced).then_some(spent),
         }),
         context,
     }
@@ -2286,7 +2549,7 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    let harvest = harvest(kind, session)?;
+    let harvest = harvest(kind, session, &repo.config.models)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
@@ -2316,22 +2579,25 @@ fn bank_lane_from(
 struct Delta {
     model: String,
     tokens: Tokens,
+    tier_tokens: Tokens,
     turns: u32,
     cost_usd: Option<f64>,
 }
 
 /// The delta itself: every line in `ledger` naming `session` is summed and
-/// subtracted from `harvest`'s own totals, and `cost_usd` is either the
-/// harvest's own reported cost minus what was already banked of it, or —
-/// when the agent reports no cost of its own — the delta priced fresh from
-/// this project's `[models]` table.
-fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<Delta> {
+/// subtracted from `harvest`'s own totals, and `cost_usd` is the harvest's
+/// cost minus what was already banked of it, floored at zero. The harvest has
+/// priced every turn already — see [`read_transcript`] — so a cost it lacks
+/// stays absent here.
+fn banked_delta(session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<Delta> {
     let mut banked = Tokens::default();
+    let mut banked_tier = Tokens::default();
     let mut banked_cost = 0.0f64;
     let mut banked_turns = 0u32;
     for entry in ledger {
         if entry.session == session {
             banked.add(&entry.tokens);
+            banked_tier.add(&entry.tier_tokens);
             banked_cost += entry.cost_usd.unwrap_or(0.0);
             banked_turns += entry.turns;
         }
@@ -2342,13 +2608,16 @@ fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest)
         return None;
     }
     let model = harvest.model.clone();
-    let cost_usd = match harvest.cost_usd {
-        Some(total) => Some((total - banked_cost).max(0.0)),
-        None => price(&repo.config.models, &model, &tokens),
-    };
+    // The harvest's cost already covers every turn, each priced at its own
+    // tier, so it is absent only when some turn had no price. Pricing the
+    // delta here would hide that turn behind the last turn's model.
+    let cost_usd = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
     Some(Delta {
         model,
         tokens,
+        // Saturating like `tokens`, for the same truncated-transcript reason,
+        // and limited to this line's own `tokens`: see [`Tokens::within`].
+        tier_tokens: harvest.tier_tokens.since(&banked_tier).within(&tokens),
         turns: harvest.turns.saturating_sub(banked_turns),
         cost_usd,
     })
@@ -2395,7 +2664,7 @@ fn bank_lane_at(
     ledger: &[Entry],
     harvest: &Harvest,
 ) -> Option<Entry> {
-    let delta = banked_delta(repo, session, ledger, harvest)?;
+    let delta = banked_delta(session, ledger, harvest)?;
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: task.to_string(),
@@ -2410,6 +2679,7 @@ fn bank_lane_at(
         wall_s: 0,
         turns: delta.turns,
         tokens: delta.tokens,
+        tier_tokens: delta.tier_tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
         // Carried from the line this sweep continues rather than read fresh
@@ -2482,7 +2752,7 @@ fn catch_up_settled_lane_at(
         return None;
     }
 
-    let harvest = harvest_file(kind, path)?;
+    let harvest = harvest_file(kind, path, &repo.config.models)?;
     // The lane's most recent line, whose columns the catch-up line inherits.
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
@@ -2710,7 +2980,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             // worktree is never a `dir` line's root (see this function's own
             // doc), so there is nothing new to classify here.
             if let Some((_, dir)) = known {
-                let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models) else {
                     continue;
                 };
                 if let Some(entry) = bank_dir_session(
@@ -2737,7 +3007,8 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             // reaches this line on every sweep. See this function's own doc.
             if let Some(parent) = parent_of_transcript(&path) {
                 if let Some(carry) = hand_lines.get(&parent) {
-                    let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                    let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models)
+                    else {
                         continue;
                     };
                     if let Some(entry) = bank_lane_at(
@@ -2778,7 +3049,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                     // at least one line.
                     continue;
                 };
-                let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models) else {
                     continue;
                 };
                 // Marked here, on the carry, since the task's own line it
@@ -2822,7 +3093,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                 continue;
             };
 
-            let Some(harvest) = harvest_file(adapter.kind, &path) else {
+            let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models) else {
                 continue;
             };
             if let Some(entry) = bank_dir_session(
@@ -3103,7 +3374,7 @@ fn bank_dir_session(
     ledger: &[Entry],
     harvest: &Harvest,
 ) -> Option<Entry> {
-    let delta = banked_delta(repo, session, ledger, harvest)?;
+    let delta = banked_delta(session, ledger, harvest)?;
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: String::new(),
@@ -3118,6 +3389,7 @@ fn bank_dir_session(
         wall_s: 0,
         turns: delta.turns,
         tokens: delta.tokens,
+        tier_tokens: delta.tier_tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
         pipeline_version: String::new(),
@@ -3582,6 +3854,7 @@ mod tests {
                     slots: 0,
                     retired_exclusive: None,
                     local: false,
+                    tier: None,
                 },
             ),
             (
@@ -3597,6 +3870,7 @@ mod tests {
                     slots: 0,
                     retired_exclusive: None,
                     local: false,
+                    tier: None,
                 },
             ),
         ])
@@ -3706,6 +3980,7 @@ mod tests {
                 slots: 0,
                 retired_exclusive: None,
                 local: false,
+                tier: None,
             },
         )]);
         let hour = Tokens {
@@ -4061,7 +4336,7 @@ mod tests {
         let home = home_with("pi", session, PI_TRANSCRIPT);
 
         let path = session_file_in(&home, "pi", session).expect("transcript not found");
-        let harvest = harvest_file("pi", &path).expect("nothing harvested");
+        let harvest = harvest_file("pi", &path, &BTreeMap::new()).expect("nothing harvested");
 
         assert_eq!(harvest.model, "Qwen3.6-35B-A3B");
         assert_eq!(harvest.turns, 2, "the user turn must not count");
@@ -4146,7 +4421,7 @@ mod tests {
         let home = home_with("codex", session, CODEX_TRANSCRIPT);
 
         let path = session_file_in(&home, "codex", session).expect("transcript not found");
-        let harvest = harvest_file("codex", &path).expect("nothing harvested");
+        let harvest = harvest_file("codex", &path, &BTreeMap::new()).expect("nothing harvested");
 
         assert_eq!(harvest.turns, 2, "one `token_count` per turn, and no more");
         // Turn two reported 9,723 input of which 9,705 was cached: 18 fresh.
@@ -4210,7 +4485,10 @@ mod tests {
                 .ends_with(&format!("-{session}.jsonl"))),
             "the id ends the filename, and that is what matched"
         );
-        assert_eq!(harvest_file("codex", &path).map(|h| h.turns), Some(2));
+        assert_eq!(
+            harvest_file("codex", &path, &BTreeMap::new()).map(|h| h.turns),
+            Some(2)
+        );
 
         // `CODEX_HOME` moves the tree for this lookup exactly as it moves it
         // for codex — a person who relocates their codex home keeps being
@@ -4251,7 +4529,7 @@ mod tests {
         // it arrived cached or fresh — not the 19,353 the two turns sum to.
         assert_eq!(last_turn_size_at("codex", &path), Some(9723));
 
-        let live = live_of("codex", &path).expect("no live reading");
+        let live = live_of("codex", &path, &BTreeMap::new()).expect("no live reading");
         assert_eq!(live.context, 9723);
         assert_eq!(live.harvest.tokens.output, 76 + 42);
 
@@ -4330,7 +4608,7 @@ mod tests {
         let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
 
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
-        let harvest = harvest_file("claude", &path).expect("nothing harvested");
+        let harvest = harvest_file("claude", &path, &prices()).expect("nothing harvested");
 
         // req_1 spans two records and is banked once.
         assert_eq!(harvest.turns, 2);
@@ -4339,11 +4617,220 @@ mod tests {
         assert_eq!(harvest.tokens.cache_read, 42609);
         // req_2 is the fullest point: 2 fresh + 42609 read back from cache.
         // Claude Code records no cost, so the price map is what answers.
-        assert_eq!(harvest.cost_usd, None);
-
-        let cost = price(&prices(), &harvest.model, &harvest.tokens).expect("no price matched");
+        let cost = harvest.cost_usd.expect("no price matched");
         let expected = (4.0 * 5.0 + 784.0 * 25.0 + 42609.0 * 0.5 + 23511.0 * 6.25) / 1e6;
         assert!((cost - expected).abs() < 1e-9, "{cost} vs {expected}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// One request under the threshold and one over it, for a model that prices
+    /// a tier at 100k tokens. Turn one is 1k in and 100 out; turn two is 150k
+    /// of prompt (50k fresh, 100k cached) and 200 out.
+    const TIERED_TRANSCRIPT: &str = r#"{"type":"assistant","requestId":"req_1","uuid":"b","timestamp":"2026-08-04T06:14:20.000Z","message":{"model":"claude-tiered","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","requestId":"req_2","uuid":"d","timestamp":"2026-08-04T06:14:44.000Z","message":{"model":"claude-tiered","usage":{"input_tokens":50000,"output_tokens":200,"cache_read_input_tokens":100000,"cache_creation_input_tokens":0}}}
+"#;
+
+    /// A price table whose `claude-tiered` charges double from 100k prompt
+    /// tokens up, on every class.
+    fn tiered_prices() -> BTreeMap<String, ModelPrice> {
+        let base = Rates {
+            input: 1.0,
+            output: 10.0,
+            cache_read: 0.1,
+            ..Rates::default()
+        };
+        let over = Rates {
+            input: 2.0,
+            output: 20.0,
+            cache_read: 0.2,
+            ..Rates::default()
+        };
+        BTreeMap::from([(
+            "claude-tiered".to_string(),
+            ModelPrice {
+                input: base.input,
+                output: base.output,
+                cache_read: base.cache_read,
+                tier: Some(PriceTier {
+                    above_k: 100,
+                    rates: over,
+                }),
+                ..ModelPrice::default()
+            },
+        )])
+    }
+
+    /// The tier depends on one request's prompt, which a summed delta cannot
+    /// show, so each turn is priced alone and only the costs are added.
+    #[test]
+    fn a_turn_over_the_threshold_is_charged_whole_at_the_tier_rates() {
+        let session = "0198e2c0-2222-4000-8000-000000000021";
+        let home = home_with("claude", session, TIERED_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+
+        let first = (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6;
+        let second = (50_000.0 * 2.0 + 200.0 * 20.0 + 100_000.0 * 0.2) / 1e6;
+        let cost = harvest.cost_usd.expect("a priced lane has a cost");
+        assert!(
+            (cost - (first + second)).abs() < 1e-12,
+            "{cost} vs {}",
+            first + second
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The split `spoolway eval` re-prices from: only the turn over the
+    /// threshold lands in `tier_tokens`, and the second bank subtracts it.
+    #[test]
+    fn the_harvest_banks_the_turns_over_the_threshold_and_a_second_bank_subtracts_them() {
+        let session = "0198e2c0-2222-4000-8000-000000000031";
+        let home = home_with("claude", session, TIERED_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+
+        let over = Tokens {
+            input: 50_000,
+            output: 200,
+            cache_read: 100_000,
+            ..Tokens::default()
+        };
+        assert_eq!(harvest.tier_tokens, over);
+
+        let mut banked = entry_for(session, &harvest);
+        assert_eq!(banked.tier_tokens, over);
+        let line = serde_json::to_string(&banked).unwrap();
+        assert!(line.contains("\"tier_tokens\""), "{line}");
+
+        // Nothing new: the whole split is already banked.
+        assert!(banked_delta(session, std::slice::from_ref(&banked), &harvest).is_none());
+
+        // One token more, none of it over the threshold: the split stays put.
+        let mut more = Harvest {
+            tokens: Tokens {
+                input: harvest.tokens.input + 1,
+                ..harvest.tokens
+            },
+            ..harvest
+        };
+        let delta = banked_delta(session, std::slice::from_ref(&banked), &more).unwrap();
+        assert!(delta.tier_tokens.is_zero());
+
+        // A split larger than the harvest's saturates at zero.
+        banked.tier_tokens.input += 10;
+        more.tier_tokens = over;
+        let delta = banked_delta(session, &[banked], &more).unwrap();
+        assert_eq!(delta.tier_tokens.input, 0);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Nothing banked a split before, so the harvest's whole share is new;
+    /// the line still cannot claim more than the tokens it carries.
+    #[test]
+    fn a_delta_limits_its_split_to_its_own_tokens() {
+        let session = "0198e2c0-2222-4000-8000-000000000033";
+        let home = home_with("claude", session, TIERED_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+        let earlier = Entry {
+            tokens: Tokens {
+                input: 50_000,
+                cache_read: 100_000,
+                output: 200,
+                ..Tokens::default()
+            },
+            tier_tokens: Tokens::default(),
+            turns: 1,
+            ..entry_for(session, &harvest)
+        };
+
+        let delta = banked_delta(session, &[earlier], &harvest).expect("a first turn is new");
+        assert_eq!(delta.tokens.input, 1_000);
+        assert_eq!(delta.tier_tokens, delta.tier_tokens.within(&delta.tokens));
+        assert_eq!(delta.tier_tokens.input, 1_000);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// An untiered lane's line is byte-for-byte the shape it always was.
+    #[test]
+    fn an_untiered_line_is_written_without_tier_tokens() {
+        let session = "0198e2c0-2222-4000-8000-000000000032";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+        let harvest = harvest_file("claude", &path, &prices()).expect("nothing harvested");
+        assert!(harvest.tier_tokens.is_zero());
+        let line = serde_json::to_string(&entry_for(session, &harvest)).unwrap();
+        assert!(!line.contains("tier_tokens"), "{line}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The ledger line `bank_dir_session` would write for `harvest`.
+    fn entry_for(session: &str, harvest: &Harvest) -> Entry {
+        let (repo, _, _root_guard) = fixture("tier-tokens-entry");
+        bank_dir_session(
+            &repo,
+            "claude",
+            session,
+            "/work",
+            chrono::Utc::now(),
+            &[],
+            harvest,
+        )
+        .expect("a line")
+    }
+
+    /// A prompt of exactly the threshold is not over it.
+    #[test]
+    fn a_turn_exactly_at_the_threshold_stays_at_the_base_rates() {
+        let session = "0198e2c0-2222-4000-8000-000000000022";
+        let transcript = r#"{"type":"assistant","requestId":"req_1","uuid":"b","message":{"model":"claude-tiered","usage":{"input_tokens":100000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+"#;
+        let home = home_with("claude", session, transcript);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+
+        let expected = (100_000.0 * 1.0 + 100.0 * 10.0) / 1e6;
+        assert!((harvest.cost_usd.unwrap() - expected).abs() < 1e-12);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A model with no tier costs what pricing the summed tokens always gave.
+    #[test]
+    fn an_untiered_model_banks_the_same_cost_as_pricing_the_summed_tokens() {
+        let session = "0198e2c0-2222-4000-8000-000000000023";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &prices()).expect("nothing harvested");
+
+        let summed = price(&prices(), &harvest.model, &harvest.tokens).expect("no price matched");
+        let cost = harvest.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - summed).abs() < 1e-9, "{cost} vs {summed}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// One turn with no price makes the lane's cost unknown. Summing only the
+    /// priced turns would bank a figure that reads as complete.
+    #[test]
+    fn a_turn_whose_model_has_no_price_leaves_the_cost_absent() {
+        let session = "0198e2c0-2222-4000-8000-000000000024";
+        let transcript = format!(
+            "{TIERED_TRANSCRIPT}{}",
+            r#"{"type":"assistant","requestId":"req_3","uuid":"e","message":{"model":"mystery-model","usage":{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+"#
+        );
+        let home = home_with("claude", session, &transcript);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+        assert_eq!(harvest.cost_usd, None);
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -4366,7 +4853,7 @@ mod tests {
 "#;
         let home = home_with("claude", session, transcript);
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
-        let harvest = harvest_file("claude", &path).expect("nothing harvested");
+        let harvest = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing harvested");
 
         assert_eq!(
             harvest.turns, 2,
@@ -4390,7 +4877,7 @@ mod tests {
         );
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
 
-        let harvest = harvest_file("claude", &path).expect("nothing harvested");
+        let harvest = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing harvested");
         assert_eq!(
             harvest.model, "claude-opus-5",
             "the synthetic turn must not overwrite the real model"
@@ -4449,7 +4936,7 @@ mod tests {
         // `ctx_peak` must disagree, or this is not testing anything.
         assert_eq!(last_turn_size_at("pi", &path), Some(100));
 
-        let harvest = harvest_file("pi", &path).expect("nothing harvested");
+        let harvest = harvest_file("pi", &path, &BTreeMap::new()).expect("nothing harvested");
         assert_eq!(harvest.ctx_peak, 90000);
 
         std::fs::remove_dir_all(&home).ok();
@@ -4466,14 +4953,14 @@ mod tests {
         let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
 
-        let live = live_of("claude", &path).expect("nothing read");
+        let live = live_of("claude", &path, &BTreeMap::new()).expect("nothing read");
 
         // The same last turn `last_turn_size_at` sizes, and the same totals
         // `harvest_file` banks — one read rather than two.
         assert_eq!(live.context, 2 + 42609 + 2169);
         assert_eq!(live.harvest.tokens.output, 268 + 516);
 
-        let banked = harvest_file("claude", &path).expect("nothing harvested");
+        let banked = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing harvested");
         assert_eq!(
             live.harvest.tokens.output, banked.tokens.output,
             "the board and the ledger must agree about one transcript"
@@ -4511,7 +4998,14 @@ mod tests {
         let home = crate::scratch::root("usage-empty");
         std::fs::create_dir_all(&home).unwrap();
         assert!(session_file_in(&home, "pi", "0198e2c0-3333-4000-8000-000000000003").is_none());
-        assert!(harvest("nushell", "0198e2c0-3333-4000-8000-000000000003").is_none());
+        assert!(
+            harvest(
+                "nushell",
+                "0198e2c0-3333-4000-8000-000000000003",
+                &BTreeMap::new()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -4522,6 +5016,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         let entry = Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-04T06:14:15+00:00".into(),
             task: "login".into(),
             plan: Some("auth".into()),
@@ -4590,6 +5085,7 @@ mod tests {
 
     fn minimal_entry(task: &str) -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: chrono::Utc::now().to_rfc3339(),
             task: task.to_string(),
             plan: None,
@@ -5429,6 +5925,7 @@ mod tests {
     /// everything else is the quietest value that parses.
     fn plain_entry() -> Entry {
         Entry {
+            tier_tokens: Default::default(),
             ts: "2026-08-04T06:14:15+00:00".into(),
             task: String::new(),
             plan: None,
@@ -5464,6 +5961,7 @@ mod tests {
     fn bank_lane_appends_only_a_lanes_unbanked_delta() {
         let (repo, _, _root_guard) = fixture("bank-lane");
         let harvest = |input, output, turns| Harvest {
+            tier_tokens: Default::default(),
             model: "claude-opus-5".to_string(),
             tokens: Tokens {
                 input,
@@ -5778,6 +6276,199 @@ mod tests {
         assert_eq!(line.trial.as_deref(), Some("t9"));
         assert_eq!(line.trial_group.as_deref(), Some("demo-group"));
         assert_eq!(line.outcome, None, "late turns were never judged");
+    }
+
+    /// The two requests of [`TIERED_TRANSCRIPT`], stamped with a working
+    /// directory so the directory and worktree sweeps can place them.
+    fn tiered_transcript_in(cwd: &Path) -> String {
+        let cwd = cwd.to_string_lossy();
+        let turn = |n: u32, input: u64, cache_read: u64, output: u64| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "assistant",
+                    "requestId": format!("req-{n}"),
+                    "timestamp": format!("2026-08-04T07:00:0{n}.000Z"),
+                    "cwd": cwd,
+                    "message": {
+                        "model": "claude-tiered",
+                        "usage": {
+                            "input_tokens": input,
+                            "output_tokens": output,
+                            "cache_read_input_tokens": cache_read,
+                        },
+                    },
+                })
+            )
+        };
+        turn(1, 1_000, 0, 100) + &turn(2, 50_000, 100_000, 200)
+    }
+
+    /// The second turn of [`tiered_transcript_in`], the one over the threshold.
+    fn tiered_split() -> Tokens {
+        Tokens {
+            input: 50_000,
+            output: 200,
+            cache_read: 100_000,
+            ..Tokens::default()
+        }
+    }
+
+    /// What [`tiered_transcript_in`] costs under [`tiered_prices`]: the first
+    /// turn at the base rates, the second at the tier's.
+    fn tiered_cost() -> f64 {
+        (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6
+            + (50_000.0 * 2.0 + 200.0 * 20.0 + 100_000.0 * 0.2) / 1e6
+    }
+
+    /// The settled-lane catch-up passes the project's `[models]` to the reader.
+    /// Pricing the summed delta at the base rates would bank the first turn's
+    /// rates for the second, which crossed the threshold.
+    #[test]
+    fn a_settled_lane_catch_up_prices_each_turn_at_its_own_tier() {
+        let (mut repo, path, _root_guard) = fixture("settled-lane-tiered");
+        repo.config.models = tiered_prices();
+        std::fs::write(&path, tiered_transcript_in(Path::new("/work"))).unwrap();
+        append(
+            &repo,
+            &Entry {
+                ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+                task: "demo".into(),
+                step: "implement".into(),
+                session: "s".into(),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("the catch-up line");
+
+        let cost = line.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(line.tier_tokens, tiered_split());
+    }
+
+    /// The headless interrupt's `bank_lane` reads the transcript itself, so it
+    /// needs the project's `[models]` as well.
+    #[test]
+    fn bank_lane_prices_each_turn_at_its_own_tier() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut repo, _, _root_guard) = fixture("bank-lane-tiered");
+        repo.config.models = tiered_prices();
+        let session = "0198e2c0-9999-4000-8000-000000000031";
+        let home = home_with("claude", session, &tiered_transcript_in(Path::new("/work")));
+
+        let line = crate::platform::test_home::with_home(&home, || {
+            bank_lane(&repo, "claude", session, "demo", "implement")
+        })
+        .expect("a banked line");
+
+        let cost = line.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(line.tier_tokens, tiered_split());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A session banked twice banks only what it had not banked before: the
+    /// new total minus the banked cost, never below zero.
+    #[test]
+    fn a_session_banked_twice_banks_only_the_cost_not_banked_before() {
+        let (mut repo, _, _root_guard) = fixture("bank-twice-tiered");
+        repo.config.models = tiered_prices();
+        let dir = crate::scratch::root("bank-twice-tiered-files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.jsonl");
+        let both = dir.join("both.jsonl");
+        let whole = tiered_transcript_in(Path::new("/work"));
+        let first_line = whole.lines().next().unwrap();
+        std::fs::write(&first, format!("{first_line}\n")).unwrap();
+        std::fs::write(&both, &whole).unwrap();
+
+        let harvest = |path: &Path| harvest_file("claude", path, &repo.config.models).unwrap();
+        let one = bank_lane_from(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now(),
+            &harvest(&first),
+        )
+        .expect("a first bank");
+        let two = bank_lane_from(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now(),
+            &harvest(&both),
+        )
+        .expect("a second bank");
+
+        let base_turn = (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6;
+        assert!((one.cost_usd.unwrap() - base_turn).abs() < 1e-12);
+        assert!((two.cost_usd.unwrap() - (tiered_cost() - base_turn)).abs() < 1e-12);
+        assert!(
+            (one.cost_usd.unwrap() + two.cost_usd.unwrap() - tiered_cost()).abs() < 1e-12,
+            "the two lines total the transcript"
+        );
+
+        // A later total below what the ledger already holds is floored.
+        let whole = harvest(&both);
+        let ledger = read(&repo).unwrap();
+        let delta = banked_delta(
+            "s",
+            &ledger,
+            &Harvest {
+                tokens: Tokens {
+                    input: whole.tokens.input + 1,
+                    ..whole.tokens
+                },
+                cost_usd: Some(0.0),
+                ..whole
+            },
+        )
+        .expect("one token more than banked");
+        assert_eq!(delta.cost_usd, Some(0.0));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A turn with no price makes the lane's cost unknown even when the last
+    /// turn's model is priced; pricing the delta at that last model would bank
+    /// a figure that hides the unpriced turn.
+    #[test]
+    fn a_lane_with_an_unpriced_turn_banks_no_cost() {
+        let (mut repo, _, _root_guard) = fixture("bank-unpriced-turn");
+        repo.config.models = tiered_prices();
+        let dir = crate::scratch::root("bank-unpriced-turn-files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let unpriced = r#"{"type":"assistant","requestId":"req-0","message":{"model":"mystery-model","usage":{"input_tokens":10,"output_tokens":10}}}"#;
+        std::fs::write(
+            &path,
+            format!("{unpriced}\n{}", tiered_transcript_in(Path::new("/work"))),
+        )
+        .unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+        assert_eq!(harvest.model, "claude-tiered", "the last turn is priced");
+
+        let line = bank_lane_from(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now(),
+            &harvest,
+        )
+        .expect("a banked line");
+        assert_eq!(line.cost_usd, None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A settled lane whose transcript has not moved since its last banked line
@@ -6758,6 +7449,68 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// The directory sweep hands the project's `[models]` to the reader: a hand
+    /// session in the project root is banked as a directory line whose second
+    /// turn is priced at the tier.
+    #[test]
+    fn the_directory_sweep_prices_each_turn_at_its_own_tier() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut repo, root, _root_guard) = dir_fixture("dir-sweep-tiered");
+        repo.config.models = tiered_prices();
+        let session = "0198e2c0-bbbb-4000-8000-00000000f001";
+        let home = claude_home_with("dir-sweep-tiered", session, &tiered_transcript_in(&root));
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+
+        assert_eq!(appended.len(), 1, "one directory line");
+        assert!(!appended[0].is_lane());
+        let cost = appended[0].cost_usd.expect("a priced session has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(appended[0].tier_tokens, tiered_split());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The worktree sweep hands it over too: a hand session in a task's
+    /// worktree is banked on that task, its second turn priced at the tier.
+    #[test]
+    fn the_worktree_sweep_prices_each_turn_at_its_own_tier() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut repo, root, _root_guard) = dir_fixture("wt-sweep-tiered");
+        repo.config.models = tiered_prices();
+        let worktree = root.join("nonexistent-task-worktree");
+        write_task(&repo.queue_dir(), "wt-tiered", "review", &worktree);
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T06:00:00+00:00".into(),
+                task: "wt-tiered".into(),
+                step: "implement".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: "sL".into(),
+                run: Some("r1".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+        let session = "0198e2c0-bbbb-4000-8000-00000000f002";
+        let home = claude_home_with("wt-sweep-tiered", session, &tiered_transcript_in(&worktree));
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+
+        assert_eq!(appended.len(), 1, "one banked line for the hand session");
+        assert_eq!(appended[0].task, "wt-tiered");
+        let cost = appended[0].cost_usd.expect("a priced session has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+        assert_eq!(appended[0].tier_tokens, tiered_split());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// A lane's own subagent transcript sits under that lane's own worktree,
     /// exactly the way a hand session's transcript does — but its parent
     /// session is a lane, so it must never be banked as a hand session of
@@ -7256,5 +8009,126 @@ mod tests {
         assert_eq!(task_worktree_roots(&repo), expected(&["bare", "kept"]));
         lose_index(&repo);
         assert_eq!(task_worktree_roots(&repo), expected(&["bare", "kept"]));
+    }
+
+    /// The haiku entry as a project writes it, tier included.
+    const TIERED_ENTRY: &str = r#"
+[models."claude-haiku-5-5"]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write_5m = 0.125
+cache_write_1h = 0.20
+
+[models."claude-haiku-5-5".above_100k_tokens]
+input = 0.50
+output = 2.50
+cache_read = 0.05
+cache_write_5m = 0.625
+"#;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct Models {
+        models: BTreeMap<String, ModelPrice>,
+    }
+
+    #[test]
+    fn a_tier_sub_table_loads_beside_the_base_rates() {
+        let parsed: Models = toml::from_str(TIERED_ENTRY).unwrap();
+        let price = parsed.models["claude-haiku-5-5"];
+        assert_eq!(price.input, 0.10);
+        let tier = price.tier.expect("the sub-table is the tier");
+        assert_eq!(tier.above_k, 100);
+        assert_eq!(
+            tier.rates,
+            Rates {
+                input: 0.50,
+                output: 2.50,
+                cache_read: 0.05,
+                cache_write_5m: 0.625,
+                cache_write_1h: 0.0,
+            }
+        );
+    }
+
+    /// The tier leaves out `cache_write_1h`, so an hour write prices at the
+    /// tier's own five-minute rate — the base entry's fallback, not zero.
+    #[test]
+    fn a_tier_rate_left_out_falls_back_like_the_base_entry() {
+        let parsed: Models = toml::from_str(TIERED_ENTRY).unwrap();
+        let tier = parsed.models["claude-haiku-5-5"].tier.unwrap();
+        let hour = Tokens {
+            cache_write_1h: 1_000_000,
+            ..Tokens::default()
+        };
+        assert_eq!(tier.rates.apply(&hour), 0.625);
+    }
+
+    #[test]
+    fn a_tier_round_trips_through_toml_and_json() {
+        let parsed: Models = toml::from_str(TIERED_ENTRY).unwrap();
+
+        let toml_text = toml::to_string(&parsed).unwrap();
+        assert!(
+            toml_text.contains("[models.claude-haiku-5-5.above_100k_tokens]"),
+            "{toml_text}"
+        );
+        let again: Models = toml::from_str(&toml_text).unwrap();
+        assert_eq!(again.models, parsed.models);
+
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            json["models"]["claude-haiku-5-5"]["above_100k_tokens"]["input"],
+            0.5
+        );
+        let again: Models = serde_json::from_value(json).unwrap();
+        assert_eq!(again.models, parsed.models);
+    }
+
+    /// An untiered entry writes no tier key at all, so tables written before
+    /// tiers existed read and write exactly as they did.
+    #[test]
+    fn an_untiered_entry_writes_no_tier_key() {
+        let price = ModelPrice {
+            input: 1.0,
+            ..ModelPrice::default()
+        };
+        assert_eq!(serde_json::to_string(&price).unwrap(), r#"{"input":1.0}"#);
+    }
+
+    #[test]
+    fn a_sub_table_not_named_as_a_tier_is_refused_by_name() {
+        for name in [
+            "above_100K_token",
+            "above_100k",
+            "above_k_tokens",
+            "above_0k_tokens",
+            "above_0100k_tokens",
+            "tier",
+        ] {
+            let text = format!("[models.m]\ninput = 1.0\n\n[models.m.{name}]\ninput = 2.0\n");
+            let err = toml::from_str::<Models>(&text).unwrap_err().to_string();
+            assert!(err.contains(&format!("`{name}`")), "{name}: {err}");
+            assert!(err.contains("above_<N>k_tokens"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_second_tier_and_an_unknown_tier_rate_are_refused() {
+        let two = "[models.m.above_100k_tokens]\ninput = 1.0\n\n\
+                   [models.m.above_200k_tokens]\ninput = 2.0\n";
+        let err = toml::from_str::<Models>(two).unwrap_err().to_string();
+        assert!(err.contains("one price tier"), "{err}");
+        assert!(err.contains("remove one of the two sub-tables"), "{err}");
+
+        let typo = "[models.m.above_100k_tokens]\ninptu = 1.0\n";
+        let err = toml::from_str::<Models>(typo).unwrap_err().to_string();
+        assert!(err.contains("`above_100k_tokens`"), "{err}");
+        assert!(err.contains("inptu"), "{err}");
+
+        // An unknown scalar on the base entry is still refused as before.
+        let typo = "[models.m]\ninptu = 1.0\n";
+        let err = toml::from_str::<Models>(typo).unwrap_err().to_string();
+        assert!(err.contains("inptu"), "{err}");
     }
 }

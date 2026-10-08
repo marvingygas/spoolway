@@ -18,21 +18,28 @@ pull request whose changelog section is ready to publish is the whole of your jo
    `sync`, `sync` again, `pipeline check`. A command that claims success over a project that no
    longer loads, or a message that names the wrong fix, is a defect: fix it as in step 2. Every edit
    the project's owner has to make is a migration item. Delete what you built.
-4. Pick the version. If the task names one, use it. Otherwise apply the runbook's version rule to
+4. Refresh the price table with this branch's own build, never an installed `spoolway`, which may
+   be older and read litellm without the tier fields: `cargo run --release --quiet -- models refresh
+   --vendor`. A litellm that cannot be reached is a failure, not a reason to ship the old table
+   unannounced. Read the diff of `assets/model-prices.json` like any other: rows dropped or repriced
+   by large factors are defects, fixed as in step 2.
+5. Pick the version. If the task names one, use it. Otherwise apply the runbook's version rule to
    the diff since the last tag, judging by changed behaviour, not commit prefixes.
-5. Write the new `CHANGELOG.md` section to the contract, newest first, matching the previous
+6. Write the new `CHANGELOG.md` section to the contract, newest first, matching the previous
    section's voice. Ground every claim in the diff and merged pull requests since the last tag, with
    pull-request numbers. Every migration item gets a bullet under
    `### Breaking changes and migration`, and a section in `docs/migrations.md` written the way the
-   guide already reads. No contributor credits.
-6. Bump the version in `Cargo.toml` and `herdr-plugin.toml`, then run `cargo check --offline` to
+   guide already reads. When the price table changed, one bullet in the section for platform and
+   packaging work says the bundled model price table was refreshed from litellm, with no
+   pull-request number. When it did not change, say nothing about it. No contributor credits.
+7. Bump the version in `Cargo.toml` and `herdr-plugin.toml`, then run `cargo check --offline` to
    refresh `Cargo.lock`. Run `cargo test --locked release_notes::tests`, the whole local gate again,
    and the release binary's `whats-new`, which must print the new section.
-7. Commit only those files, plus `docs/migrations.md` when it changed, as
-   `chore(release): v<version>`. It is the last commit on the branch.
-8. Push to `release/v<version>` and open one pull request against `main`, or update the one already
+8. Commit only those files, plus `docs/migrations.md` and `assets/model-prices.json` when they
+   changed, as `chore(release): v<version>`. It is the last commit on the branch.
+9. Push to `release/v<version>` and open one pull request against `main`, or update the one already
    open. Wait for its checks and fix anything red on the same branch.
-9. Pass with the version, the reason for the bump, the pull request's number and the migration items.
+10. Pass with the version, the reason for the bump, the pull request's number and the migration items.
 
 ## Never
 
