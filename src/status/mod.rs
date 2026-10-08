@@ -866,15 +866,17 @@ impl Board {
                 // one of them down the ordinary road onto that step instead.
                 let resumed = match row.next {
                     true => resume_task(repo, pipelines, &picker.id),
-                    false => crate::commands::resume_held_row(
-                        repo,
-                        pipelines,
-                        &crate::cli::ResumeArgs {
-                            task: picker.id.clone(),
-                            stage: Some(row.step.clone()),
-                            message: None,
-                        },
-                    ),
+                    false => routed_for(repo, pipelines, &picker.id).and_then(|routed| {
+                        crate::commands::resume_held_row(
+                            repo,
+                            &routed,
+                            &crate::cli::ResumeArgs {
+                                task: picker.id.clone(),
+                                stage: Some(row.step.clone()),
+                                message: None,
+                            },
+                        )
+                    }),
                 };
                 // The dispatch loop drops an `Err` out of `on_key` without a
                 // word, so a refused pick would close the picker and leave
@@ -1036,26 +1038,28 @@ impl Board {
                 // the task is on now, so a step that is no longer the one
                 // the panel named is refused here rather than restarted
                 // unseen.
-                let now = repo
-                    .task(&confirm.id)
-                    .and_then(|task| restartable_step(&task, pipelines));
-                let restarted = match now {
-                    Ok(step) if step == confirm.step => crate::commands::restart(
-                        repo,
-                        pipelines,
-                        &crate::cli::RestartArgs {
-                            task: confirm.id.clone(),
-                            message: None,
-                        },
-                        None,
-                    ),
-                    Ok(step) => Err(anyhow::anyhow!(
-                        "task `{}` moved to `{step}` since this panel opened — press esc and \
-                         `s` again to restart the step it is on now.",
-                        confirm.id
-                    )),
-                    Err(err) => Err(err),
-                };
+                let restarted = routed_for(repo, pipelines, &confirm.id).and_then(|routed| {
+                    let now = repo
+                        .task(&confirm.id)
+                        .and_then(|task| restartable_step(&task, &routed));
+                    match now {
+                        Ok(step) if step == confirm.step => crate::commands::restart(
+                            repo,
+                            &routed,
+                            &crate::cli::RestartArgs {
+                                task: confirm.id.clone(),
+                                message: None,
+                            },
+                            None,
+                        ),
+                        Ok(step) => Err(anyhow::anyhow!(
+                            "task `{}` moved to `{step}` since this panel opened — press esc \
+                             and `s` again to restart the step it is on now.",
+                            confirm.id
+                        )),
+                        Err(err) => Err(err),
+                    }
+                });
                 // The dispatch loop drops an `Err` out of `on_key` without a
                 // word, so a refused restart would close the panel and look
                 // like it happened. It stays open with the refusal in it.
@@ -1700,17 +1704,32 @@ fn park_under_lock(repo: &Repo, id: &str, by_stop: bool) -> Result<()> {
 /// fresh a moment before, so it knows the task is there, and racing a
 /// second process that archived or removed it since is not this key's to
 /// report.
+/// The pipelines a key that moves task `id` routes on.
+///
+/// `pipelines` is the board's own, read from the files when the screen
+/// opened. While a dispatcher runs, the task goes where that dispatcher's
+/// copy says instead, the same as `spoolway resume` and `spoolway restart` —
+/// or a pipeline edited since would send it to a step the run never loaded.
+/// See `crate::pipeline_snapshot::for_task`.
+fn routed_for<'a>(
+    repo: &Repo,
+    pipelines: &'a Pipelines,
+    id: &str,
+) -> Result<std::borrow::Cow<'a, Pipelines>> {
+    Ok(
+        match crate::pipeline_snapshot::for_task(repo, Some(id)).transpose()? {
+            Some(routed) => std::borrow::Cow::Owned(routed),
+            None => std::borrow::Cow::Borrowed(pipelines),
+        },
+    )
+}
+
 pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
     if repo.task(id).is_err() {
         return Ok(());
     }
-    // `pipelines` is the board's own, read from the files when the screen
-    // opened. While a dispatcher runs, the task goes where that dispatcher's
-    // copy says instead, the same as `spoolway resume` — or a pipeline
-    // edited since would send it to a step the run never loaded. See
-    // `crate::pipeline_snapshot::for_task`.
-    let routed = crate::pipeline_snapshot::for_task(repo, Some(id)).transpose()?;
-    let pipelines = routed.as_ref().unwrap_or(pipelines);
+    let routed = routed_for(repo, pipelines, id)?;
+    let pipelines = &*routed;
     // `paused_at` is a gate passed, waiting to be sent on past it;
     // `parked_from` is a person's own interrupt, and `blocked_from` is a
     // real block — all three waiting to be sent back to where they stopped.
@@ -7345,6 +7364,35 @@ mod tests {
             assert_eq!(task.stage(), crate::pipeline::PAUSED, "{id}");
             assert!(!task.front.parked_by_stop, "{id}");
         }
+    }
+
+    /// The picker's reroute and the `s` restart route on what `routed_for`
+    /// hands them: the running dispatcher's copy while one is up, the board's
+    /// own otherwise — so a pipeline file broken since the run started fails
+    /// neither key.
+    #[test]
+    fn a_key_moving_a_task_routes_on_the_running_dispatchers_pipelines() {
+        let (repo, _root_guard) = fixture("routed-for-snapshot");
+        add(&repo, "t1", &[], Some("implement"));
+        // The board's graph: the files, with the pipeline renamed since the
+        // run started.
+        let mut board = Pipelines::builtin();
+        let default = board.pipelines.remove("default").unwrap();
+        board.pipelines.insert("edited".into(), default);
+
+        assert!(
+            routed_for(&repo, &board, "t1")
+                .unwrap()
+                .names()
+                .contains(&"edited")
+        );
+
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        assert_eq!(
+            routed_for(&repo, &board, "t1").unwrap().names(),
+            vec!["default"]
+        );
     }
 
     /// `r` on a gate sends the task where the running dispatcher's copy of

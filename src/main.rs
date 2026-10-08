@@ -365,8 +365,8 @@ fn run() -> Result<()> {
             // committed yet. The control-plane readers below load the
             // checkout's own copy instead — that is what they are for.
             //
-            // While a dispatcher runs, `report`, `resume`, `queue resume`
-            // and `queue add` route on the copy it loaded instead of this — see
+            // While a dispatcher runs, `report`, `resume`, `restart`, `queue
+            // resume` and `queue add` route on the copy it loaded instead of this — see
             // `routing_for_task` and `crate::pipeline_snapshot`.
             //
             // Read here, but not *demanded* here: the failure is handed to
@@ -434,7 +434,8 @@ fn run() -> Result<()> {
                 }
                 Command::Restart(args) => {
                     let from_step = std::env::var(dispatch::ENV_STEP).ok();
-                    commands::restart(&repo, routing(&graph)?, args, from_step.as_deref())
+                    let routed = routing_for_task(&repo, &graph, Some(&args.task))?;
+                    commands::restart(&repo, &routed, args, from_step.as_deref())
                 }
                 Command::Lane(args) => {
                     let mux = mux::backend(&repo)?;

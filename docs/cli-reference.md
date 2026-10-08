@@ -676,6 +676,9 @@ The session line reads `abandoned, already banked` when the usage ledger already
 
 The board's `s` key does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
 
+While a dispatcher runs, the step is checked against the pipelines it loaded at start. See
+[Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
 See [A step that carries its own session](dispatcher.md#a-step-that-carries-its-own-session).
 
 ### `spoolway task edit <task>`

@@ -357,7 +357,8 @@ While a dispatcher is running, these commands route a task on that copy and not 
 
 - `spoolway report`
 - `spoolway resume` and `spoolway queue resume`
-- the `r` and `R` keys on the board
+- `spoolway restart`
+- the `r` picker and the `s` key on the board
 - `spoolway queue add`
 
 Each reads only the pipeline its own task names. With no dispatcher running, they read the
