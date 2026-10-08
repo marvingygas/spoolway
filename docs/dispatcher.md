@@ -201,6 +201,30 @@ When the group has an issue behind it, the group name is a link to that issue. A
 first task stacks onto another group's own last task reads `▌<group>  after <group>`. See
 [Stacking one group on another](tasks.md#stacking-one-group-on-another).
 
+### The empty board
+
+With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`.
+
+```
+Good afternoon, Marvin.
+Nothing queued
+```
+
+The greeting follows the local hour and ends in a full stop.
+
+| Local time | Greeting |
+|---|---|
+| 05:00 to 11:59 | `Good morning` |
+| 12:00 to 17:59 | `Good afternoon` |
+| 18:00 to 21:59 | `Good evening` |
+| 22:00 to 04:59 | `Working late` |
+
+The greeting adds a comma and the first word of `git config user.name` for the board's repo. With no git, no name set or a blank value, it reads `Good afternoon.` instead. The board reads the name once, when it opens.
+
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the job ledger, the `pipelines` notice, the hook failure line and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
+
+`RECENT` shows under `Nothing queued`, after two blank rows, only while no dispatcher is running. The wordmark, the two lines and `RECENT` are centred together. On a short pane `RECENT` loses its oldest lines first. A pane too short for the wordmark drops it, along with `RECENT`, and keeps the two lines.
+
 ### Columns
 
 | Column | What it shows |
@@ -368,7 +392,7 @@ The panel opens for a task that `spoolway restart` accepts. A queued, done or ho
 
 ### Footer
 
-One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
+A board with at least one task ends with a footer. One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
 its own figure appended after the profile's, model name then `<live>/<cap>`, so a profile
 running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line
 `issue_tracking: N hook failures — see tracking/` appears while any hook

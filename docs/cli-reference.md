@@ -114,7 +114,7 @@ it has stopped, next to a count of the steps still working (`3 steps finishing`,
 finishing` for one, left out once none are). `r`, `p`, `s` and `u`/`U` work whether or not a
 child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
-A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
+A child the tab started stays up on an empty queue and the board shows its greeting and `Nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
 a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`. Ending before
 its first pass, including under the `Starting dispatcher` popup, shows that reason there instead.

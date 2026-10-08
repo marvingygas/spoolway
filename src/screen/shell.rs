@@ -1030,7 +1030,8 @@ mod tests {
 
     // The e2e suite's own gesture, at unit level: the screen opens on the
     // queue tab under the strip, and `←` from there draws the board with no
-    // dispatcher behind it, offering `enter` to start one.
+    // dispatcher behind it, offering `enter` to start one. The queue is
+    // empty, so `enter` and `q` are the only keys on the line.
     #[test]
     fn host_opens_on_the_queue_tab_and_left_reaches_the_board() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-left");
@@ -1045,11 +1046,9 @@ mod tests {
         assert!(last.contains("dispatcher stopped"), "{last}");
         assert!(last.contains("┌─ dispatch ─"), "{last}");
         assert!(!last.contains("─ groups"), "{last}");
+        assert!(last.contains("Nothing queued"), "{last}");
         assert!(
-            last.contains(
-                "[enter] start dispatching   [o] open task   [p] pause task   \
-                 [r] resume   [s] restart   [u/U] unqueue / all   [q] quit"
-            ),
+            last.contains("\n [enter] start dispatching   [q] quit\n"),
             "{last}"
         );
     }

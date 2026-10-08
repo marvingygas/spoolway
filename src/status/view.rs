@@ -681,11 +681,12 @@ struct Spend {
 ///
 /// `jobs` is `crate::jobs::active_jobs_cached`'s own answer, already ordered
 /// by next firing — every enabled job gets one row under the whole slots
-/// block, on every board whether the queue is empty or busy: the slot
-/// figures above answer "what is spoolway running right now", and the ledger
-/// answers "what would still bring it back to life" — the two things a
-/// person needs the dispatcher resident to keep asking. Empty wherever no
-/// job is enabled, which is when this draws nothing at all.
+/// block, on every board with a row on it: the slot figures above answer
+/// "what is spoolway running right now", and the ledger answers "what would
+/// still bring it back to life" — the two things a person needs the
+/// dispatcher resident to keep asking. Empty wherever no job is enabled,
+/// which is when this draws nothing at all. An empty board draws no footer
+/// at all — see `paint_empty` in the parent module.
 ///
 /// `changed_pipelines` is every pipeline file edited since the running
 /// dispatcher started — see [`crate::pipeline_snapshot`]. Named on a
@@ -1694,16 +1695,134 @@ pub(super) fn board_masthead(header: &str, pane: usize, frame: usize) -> String 
         let pad = " ".repeat(pane - 1 - first_width - header_width - 1);
         block.push_str(&format!(" {BOLD}{first}{RESET}{pad}{DIM}{header}{RESET}\n"));
     } else {
-        // Both margins come off the room: the header never touches either
-        // edge, clipped or not.
-        let header = clip(header, pane.saturating_sub(2));
-        let pad = " ".repeat(pane.saturating_sub(header.chars().count() + 1));
-        block.push_str(&format!("{pad}{DIM}{header}{RESET}\n"));
+        block.push_str(&board_header(header, pane));
     }
     for line in lines {
         block.push_str(&format!(" {BOLD}{line}{RESET}\n"));
     }
     block
+}
+
+/// The run's header alone on a row, right-aligned to a pane `pane` columns
+/// wide and ending one column short of its right edge — where
+/// [`board_masthead`] puts it beside the lockup's first line. A row of its
+/// own above the lockup when the two do not fit side by side, and the empty
+/// board's whole top row, since [`greeting_screen`] draws its lockup lower
+/// down.
+pub(super) fn board_header(header: &str, pane: usize) -> String {
+    // Both margins come off the room: the header never touches either edge,
+    // clipped or not.
+    let header = clip(header, pane.saturating_sub(2));
+    let pad = " ".repeat(pane.saturating_sub(header.chars().count() + 1));
+    format!("{pad}{DIM}{header}{RESET}\n")
+}
+
+/// What an empty board says under its lockup: hello by the local clock's
+/// `hour`, and by `name` when there is one — `Good morning, Marvin.`, or
+/// `Good morning.` without a name, so the sentence still ends right.
+///
+/// Takes the hour and the name as plain arguments so every band is tested
+/// without the wall clock or the machine's git config. `name` is the first
+/// word of git's `user.name` — see [`first_name`].
+pub(super) fn greeting(hour: u32, name: Option<&str>) -> String {
+    let hello = match hour {
+        5..=11 => "Good morning",
+        12..=17 => "Good afternoon",
+        18..=21 => "Good evening",
+        // 22:00 to 04:59, both sides of midnight.
+        _ => "Working late",
+    };
+    match name {
+        Some(name) => format!("{hello}, {name}."),
+        None => format!("{hello}."),
+    }
+}
+
+/// The first whitespace-separated word of a git `user.name`, for
+/// [`greeting`]. `None` for a value with no word in it at all, so an empty
+/// or blank setting greets nobody rather than an empty name.
+pub(super) fn first_name(user_name: &str) -> Option<String> {
+    user_name.split_whitespace().next().map(str::to_string)
+}
+
+/// The rows of the lockup, the blank row under it and the two lines under
+/// that — the least an empty board's centred block takes with its art.
+const GREETING_BLOCK_ROWS: usize = 5 + 1 + 2;
+
+/// The empty board under its header: the lockup on frame 0, a blank row,
+/// `greeting` in bold and `Nothing queued` dim, each centred across a pane
+/// `pane` columns wide.
+///
+/// `recent` is drawn under the two lines by [`ticker`], two blank rows down
+/// and at the frame's usual left margin, and the whole group is centred down
+/// `region`: the rows between the header and the key line. The block comes
+/// first and RECENT gets what is left of `region`, so a short pane loses
+/// RECENT's oldest lines first, and below [`GREETING_BLOCK_ROWS`] the lockup
+/// goes and the two lines stay alone, with no RECENT under them. A pane too narrow for the lockup drops it
+/// too, as [`masthead`] does. `region` is `None` with no terminal to measure:
+/// the block then starts one blank row under the header, RECENT is kept
+/// whole, and one blank row closes it.
+///
+/// Returns exactly `region` rows when it is known and the group fits, so the
+/// key line lands on the pane's own bottom.
+pub(super) fn greeting_screen(
+    greeting: &str,
+    recent: &VecDeque<RecentEvent>,
+    pane: usize,
+    region: Option<usize>,
+) -> String {
+    let lockup = &LOCKUP[0];
+    let lockup_width = lockup.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let room = region.unwrap_or(usize::MAX);
+    // The margin included, as in `masthead`: a lockup flush against the
+    // right edge is one column from wrapping.
+    let tall_enough = room >= GREETING_BLOCK_ROWS;
+    let with_logo = lockup_width < pane && tall_enough;
+
+    let mut group = String::new();
+    if with_logo {
+        let left = " ".repeat((pane - lockup_width) / 2);
+        for line in lockup {
+            group.push_str(&format!("{left}{BOLD}{line}{RESET}\n"));
+        }
+        group.push('\n');
+    }
+    for (paint, text) in [(BOLD, greeting), (DIM, "Nothing queued")] {
+        // Clipped like the header, one column clear of either edge, so a long
+        // first name ends in `…` rather than wrapping off the centre.
+        let text = clip(text, pane.saturating_sub(2));
+        let left = " ".repeat(pane.saturating_sub(text.chars().count()) / 2);
+        group.push_str(&format!("{left}{paint}{text}{RESET}\n"));
+    }
+
+    // `ticker` opens on a blank row of its own; this is the second of the
+    // two between `Nothing queued` and the `RECENT` heading, so it comes off
+    // the rows the ticker is handed and is drawn only when the ticker is.
+    //
+    // A pane too short for the lockup has no rows for RECENT either. Counted
+    // against the two lines alone, a region of 6 or 7 rows would draw RECENT
+    // that a region of 8 to 11 has no room for, so shrinking the pane would
+    // bring it back after the lockup went.
+    let ticker_rows = match region {
+        None => recent.len() + 2,
+        Some(_) if !tall_enough => 0,
+        Some(region) => region
+            .saturating_sub(group.lines().count())
+            .saturating_sub(1),
+    };
+    let recent = ticker(recent, pane, ticker_rows);
+    if !recent.is_empty() {
+        group.push('\n');
+        group.push_str(&recent);
+    }
+
+    let Some(region) = region else {
+        return format!("\n{group}\n");
+    };
+    let rows = group.lines().count();
+    let top = region.saturating_sub(rows) / 2;
+    let bottom = region.saturating_sub(rows + top);
+    format!("{}{group}{}", "\n".repeat(top), "\n".repeat(bottom))
 }
 
 /// The lockup with one line of prose beside it, for a command that introduces
@@ -3274,6 +3393,193 @@ mod tests {
             assert!(block.trim_end().ends_with('…'), "{block}");
             assert!(block.lines().all(|l| l.chars().count() <= 24), "{block}");
         }
+    }
+
+    /// Every band of the greeting at both of its edges, with and without a
+    /// name: the name drops with its comma, and the full stop stays.
+    #[test]
+    fn the_greeting_reads_the_hour_into_four_bands() {
+        for (hour, hello) in [
+            (4, "Working late"),
+            (5, "Good morning"),
+            (11, "Good morning"),
+            (12, "Good afternoon"),
+            (17, "Good afternoon"),
+            (18, "Good evening"),
+            (21, "Good evening"),
+            (22, "Working late"),
+            (23, "Working late"),
+            (0, "Working late"),
+        ] {
+            assert_eq!(greeting(hour, Some("Marvin")), format!("{hello}, Marvin."));
+            assert_eq!(greeting(hour, None), format!("{hello}."));
+        }
+    }
+
+    /// The name is git's `user.name` up to its first whitespace, and a value
+    /// with no word in it is no name at all.
+    #[test]
+    fn the_greeting_takes_the_first_word_of_the_git_name() {
+        assert_eq!(first_name("Marvin Gygas\n").as_deref(), Some("Marvin"));
+        assert_eq!(first_name("  Ada\tLovelace").as_deref(), Some("Ada"));
+        assert_eq!(first_name("Plato").as_deref(), Some("Plato"));
+        assert_eq!(first_name(""), None);
+        assert_eq!(first_name("  \n"), None);
+    }
+
+    /// The lines of `block` with their trailing spaces gone, for comparing a block against
+    /// a mockup drawn without them.
+    fn trimmed(block: &str) -> Vec<String> {
+        strip_ansi(block)
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .collect()
+    }
+
+    /// The empty board inside the dispatch tab's 96-column box, 19 rows under
+    /// the header: the lockup, a blank row, the greeting and `Nothing
+    /// queued`, centred both ways, row for row as the mockup draws it.
+    #[test]
+    fn an_empty_board_centres_its_greeting_as_drawn() {
+        let block = greeting_screen("Good afternoon, Marvin.", &VecDeque::new(), 96, Some(19));
+        let mut expected = vec![String::new(); 5];
+        expected.extend(
+            [
+                "                                                     █",
+                "                         ▀█▀██▀   ▄▄▄ ▄▄▄   ▄▄   ▄▄  █  ▄   ▄  ▄▄  ▄  ▄",
+                "                          █▀▄█   ▀▄▄  █  █ █  █ █  █ █  █ ▄ █  ▄▄█ █  █",
+                "                         ▄██▄█▄  ▄▄▄▀ █▀▀  ▀▄▄▀ ▀▄▄▀ █▄ █▀ ▀█ ▀▄▄█  ▀▀█",
+                "                                      █                            ▄▄▄▀",
+                "",
+                "                                    Good afternoon, Marvin.",
+                "                                         Nothing queued",
+            ]
+            .map(String::from),
+        );
+        expected.extend(vec![String::new(); 6]);
+        assert_eq!(trimmed(&block), expected, "{block}");
+        // Bold over dim, the lockup on frame 0.
+        assert!(block.contains(&format!("{BOLD}Good afternoon, Marvin.{RESET}")));
+        assert!(block.contains(&format!("{DIM}Nothing queued{RESET}")));
+        assert!(block.contains(LOCKUP[0][1]), "{block}");
+    }
+
+    /// RECENT sits two blank rows under `Nothing queued`, at the frame's left
+    /// margin, and the logo, the two lines and RECENT centre down the pane
+    /// as one group — the mockup of a stopped dispatcher, row for row.
+    #[test]
+    fn recent_centres_with_the_greeting_as_one_group() {
+        let recent: VecDeque<RecentEvent> = [("15:12", "cart-totals"), ("15:41", "cart-discounts")]
+            .into_iter()
+            .map(|(at, id)| RecentEvent::Arrival {
+                at: at.to_string(),
+                id: id.to_string(),
+                change: Move::Passed {
+                    from: "review".to_string(),
+                    to: "done".to_string(),
+                    cause: None,
+                },
+            })
+            .collect();
+        let block = greeting_screen("Good afternoon, Marvin.", &recent, 96, Some(19));
+        let rows = trimmed(&block);
+        assert_eq!(rows.len(), 19, "{block}");
+        assert!(rows[..3].iter().all(String::is_empty), "{block}");
+        assert_eq!(rows[3].trim(), "█", "{block}");
+        assert_eq!(rows[9].trim(), "Good afternoon, Marvin.", "{block}");
+        assert_eq!(rows[10].trim(), "Nothing queued", "{block}");
+        assert_eq!(&rows[11..13], ["", ""], "{block}");
+        assert_eq!(rows[13], " RECENT", "{block}");
+        assert_eq!(
+            rows[14], " 15:41   cart-discounts   passed review, moved to done",
+            "{block}"
+        );
+        assert_eq!(
+            rows[15], " 15:12   cart-totals      passed review, moved to done",
+            "{block}"
+        );
+        assert!(rows[16..].iter().all(String::is_empty), "{block}");
+    }
+
+    /// A short pane keeps the block whole and takes RECENT's oldest lines
+    /// first; below the block's eight rows the lockup goes and the two lines
+    /// stay.
+    #[test]
+    fn a_short_pane_gives_up_recent_then_the_lockup() {
+        let recent = arrivals(3);
+        // Eight rows for the block, two blank, the heading and two arrivals.
+        let block = greeting_screen("Good morning.", &recent, 96, Some(13));
+        let rows = trimmed(&block);
+        assert_eq!(rows.len(), 13, "{block}");
+        assert_eq!(rows[0].trim(), "█", "{block}");
+        assert_eq!(rows[10], " RECENT", "{block}");
+        assert!(rows[11].contains("task-2"), "the newest stays — {block}");
+        assert!(rows[12].contains("task-1"), "{block}");
+        assert!(!block.contains("task-0"), "the oldest goes first — {block}");
+
+        // No room for RECENT at all: the block alone, still centred.
+        let block = greeting_screen("Good morning.", &recent, 96, Some(10));
+        let rows = trimmed(&block);
+        assert_eq!(rows.len(), 10, "{block}");
+        assert_eq!(rows[1].trim(), "█", "{block}");
+        assert!(!block.contains("RECENT"), "{block}");
+
+        // One row short of the block: the art goes, the two lines stay, and
+        // RECENT does not come back into the rows the art gave up.
+        for region in [6, 7] {
+            let block = greeting_screen("Good morning.", &recent, 96, Some(region));
+            let rows = trimmed(&block);
+            assert!(!block.contains(LOCKUP[0][1]), "{block}");
+            assert!(!block.contains("RECENT"), "{block}");
+            assert!(!block.contains("task-"), "{block}");
+            assert_eq!(rows.len(), region, "{block}");
+            assert_eq!(rows[(region - 2) / 2].trim(), "Good morning.", "{block}");
+            assert_eq!(
+                rows[(region - 2) / 2 + 1].trim(),
+                "Nothing queued",
+                "{block}"
+            );
+        }
+    }
+
+    /// With no pane height to centre in, the block starts one blank row under
+    /// the header and RECENT is kept whole.
+    #[test]
+    fn with_no_height_the_greeting_starts_one_row_down() {
+        let block = greeting_screen("Working late.", &arrivals(9), 120, None);
+        let rows = trimmed(&block);
+        assert_eq!(rows[0], "", "{block}");
+        assert_eq!(rows[1].trim(), "█", "{block}");
+        assert_eq!(rows[7].trim(), "Working late.", "{block}");
+        assert_eq!(rows[8].trim(), "Nothing queued", "{block}");
+        assert_eq!(
+            (0..9)
+                .filter(|i| block.contains(&format!("task-{i}")))
+                .count(),
+            9
+        );
+    }
+
+    /// A pane too narrow for the lockup keeps the two lines, and a greeting
+    /// too long for the pane is clipped with `…` rather than wrapped.
+    #[test]
+    fn a_narrow_pane_drops_the_lockup_and_clips_the_greeting() {
+        let block = greeting_screen("Good morning, Bartholomew.", &VecDeque::new(), 20, None);
+        assert!(!block.contains(LOCKUP[0][1]), "{block}");
+        let rows = trimmed(&block);
+        assert_eq!(rows[1], " Good morning, Bar…", "{block}");
+        assert_eq!(rows[2], "   Nothing queued", "{block}");
+        assert!(rows.iter().all(|row| row.chars().count() < 20), "{block}");
+    }
+
+    /// The empty board's header row is the busy board's, right-aligned one
+    /// column short of the pane's right edge.
+    #[test]
+    fn the_header_alone_sits_in_the_top_right_corner() {
+        let header = "dispatcher stopped · v0.7.1";
+        let row = strip_ansi(&board_header(header, 96));
+        assert_eq!(row.trim_end_matches('\n').chars().count(), 95, "{row}");
+        assert!(row.trim_end_matches('\n').ends_with(header), "{row}");
     }
 
     /// The spool's index is the wall clock alone: whole seconds flip it, and

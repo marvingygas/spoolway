@@ -124,7 +124,12 @@ has "enter asks the warnings gate first, as a popup" "─ before dispatching " "
 has "whose keys read as drawn" "[enter] start dispatching   [esc] back   [x] hide until these change" "$RUN.plain"
 has "the header names the child's pid while it runs" "dispatcher running · pid " "$RUN.plain"
 has "and enter is offered to stop it" "[enter] stop dispatching" "$RUN.plain"
-has "and it stays up on an empty queue" "nothing queued" "$RUN.plain"
+has "and it stays up on an empty queue" "Nothing queued" "$RUN.plain"
+if grep -qaE "Good (morning|afternoon|evening)|Working late" "$RUN.plain"; then
+  ok "the empty board greets the person"
+else
+  bad "the empty board greets the person (no greeting in $RUN.plain)"
+fi
 has "enter over it asks how to stop, as a popup" "┌─ stop dispatching " "$RUN.plain"
 has "saying no new steps will start" "No new steps will be started." "$RUN.plain"
 has "offering enter to let running steps finish" "[enter] let running steps finish" "$RUN.plain"
