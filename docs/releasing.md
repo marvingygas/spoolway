@@ -9,7 +9,8 @@ fixture.
 flowchart LR
   R[ready] -->|red| X[fix] --> M[review] --> W1[a person merges] --> R
   R -->|green| U[upgrade] -->|defect| X
-  U -->|clean| S[version suggestion] -->|gate: approve or override| A[preflight] --> B[notes]
+  U -->|clean| S[version suggestion] -->|gate: approve or override| A[preflight] --> PR[prices] --> B[notes]
+  PR -->|fail| X
   B --> C[candidate PR] --> N[review] --> W2[a person merges] --> P[publish]
   P --> E[rehearsal + tag] --> V[released] --> Z[fixture PR] --> Q[review] --> W3[a person merges] --> D[done]
   P -.->|fail| RC[recover]
@@ -23,13 +24,14 @@ flowchart LR
 | `anchor` | `scripts/release-anchor.sh`. Records the base commit and the run name in `.release-run/` in the worktree. Every later step that needs either reads it from there. |
 | `ready` | Runs the whole local gate and a fresh nightly CI run on the candidate. Verifies only — it never edits. |
 | `upgrade` | Sets a project up with the last release, upgrades it to this `main`, and walks it until it runs. A defect goes to `fix`; every edit the project's owner had to make goes forward to `notes`. Verifies only — it never edits. |
-| `fix` | Repairs a release blocker, from `ready`, `upgrade` or `preflight`, in one pull request and drives its checks green. Product code included. |
+| `fix` | Repairs a release blocker, from `ready`, `upgrade`, `preflight` or `prices`, in one pull request and drives its checks green. Product code included. |
 | `review-fix` | Independently reviews the repair, corrects the same branch if needed, and reports the pull request and its merge method for a person. |
 | `await-fix` | Waits for a person to merge the repair on GitHub, then returns to `ready`. |
 | `version` | Recommends the next version, explains the bump, and waits for a person to approve or override it. |
 | `preflight` | Checks `main` is clean and green, accepts the version gate's choice, and validates that exact version. |
+| `prices` | `cargo run --release --quiet -- models refresh --vendor`, after resetting the worktree to the current `origin/main`, which `candidate` requires to be the `main` that `preflight` froze. Refreshes the vendored litellm price table with this checkout's own build, so the release pull request carries the diff for review. A command step; a failed refresh goes to `fix`. |
 | `notes` | Writes and validates the one changelog section used by the binary and release page, and the migration guide's section for this upgrade when there is migration work. |
-| `candidate` | Builds the exact release commit and opens its pull request. |
+| `candidate` | Builds the exact release commit and opens its pull request. It copies the refreshed price table from the task worktree into that commit. |
 | `review-release` | Independently reviews that exact commit and reports it for a person to merge by rebase. |
 | `await-release` | Waits for a person to merge the release candidate, then runs `publish`. |
 | `publish` | `scripts/release-publish.sh`. Rehearses the merged release commit, tags it, and checks the tag's own workflow run. A command step, so it never asks auto mode to push a tag. |
@@ -122,7 +124,8 @@ cargo build --release --locked
 ```
 
 Release commit. Only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` and `herdr-plugin.toml`
-change, plus `docs/migrations.md` when the release carries migration work, with subject
+change, plus `docs/migrations.md` when the release carries migration work and
+`assets/model-prices.json` when `prices` refreshed it, with subject
 `chore(release): v<version>`. `herdr-plugin.toml` carries its own
 `version` and is not stamped at build time, so it is bumped by hand with `Cargo.toml`:
 `verify.yml`'s `test` job fails the release rehearsal when the two disagree, and

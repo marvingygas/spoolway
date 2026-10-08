@@ -114,6 +114,17 @@ cat >"$PRICE_FIXTURE" <<'JSON'
   }
 }
 JSON
+# A refresh that keeps fewer than half the rows of the table it replaces writes
+# nothing, and the first refresh here replaces the built-in table's thousands.
+# Filler chat rows, as many as the built-in table holds, lift the fixture past
+# half of it, so the checks below are about the rows and not about a fixture
+# too small to be a price map. The count follows the shipped table because
+# every release refreshes it, and a fixed count would one day fall below half.
+BUILTIN_ROWS=$(jq '.models | length' "$HERE/../../../assets/model-prices.json")
+jq --argjson n "$BUILTIN_ROWS" '. + ([range(0; $n) | {key: "filler-\(.)", value: {mode: "chat",
+  input_cost_per_token: 0.000001, output_cost_per_token: 0.000002}}] | from_entries)' \
+  "$PRICE_FIXTURE" >"$PRICE_FIXTURE.full"
+mv "$PRICE_FIXTURE.full" "$PRICE_FIXTURE"
 must "models refresh fetches and distils a local fixture through curl" \
   env SPOOLWAY_MODEL_PRICES_URL="file://$PRICE_FIXTURE" "$SPOOLWAY" models refresh
 works "the refreshed machine-wide table is valid JSON" \
@@ -127,6 +138,28 @@ works "a tiered row reaches the refreshed table as its lowest tier" \
       "cache_write_5m": 0.625, "cache_write_1h": 1}
     and (has("above_200k_tokens") | not)' \
   "$HOME/.spoolway/model-prices.json"
+# One row priced past $100,000 per million is dropped and named, and the rest
+# of the table is still written.
+jq '. + {"fake-pricey": {mode: "chat", input_cost_per_token: 1,
+  output_cost_per_token: 0.000002}}' "$PRICE_FIXTURE" >"$LIVE/model-prices-pricey.json"
+says "a refresh names a row whose rate is out of range" \
+  "refused  1 rows out of range: fake-pricey" \
+  env SPOOLWAY_MODEL_PRICES_URL="file://$LIVE/model-prices-pricey.json" "$SPOOLWAY" models refresh
+works "the out-of-range row is absent and the rest of the table is written" \
+  jq -e '(.models | has("fake-pricey") | not) and .models["fake-local"].input == 1' \
+  "$HOME/.spoolway/model-prices.json"
+# A fixture with too few rows is refused whole, naming both counts and the
+# source, and the table written above stays exactly as it was.
+TABLE_BEFORE=$(cat "$HOME/.spoolway/model-prices.json")
+jq '{"fake-local": .["fake-local"]}' "$PRICE_FIXTURE" >"$LIVE/model-prices-few.json"
+refuses "a refresh keeping fewer than half the replaced rows writes nothing" \
+  "model-prices-few.json kept 1 priced rows, fewer than half of the $((BUILTIN_ROWS + 2))" \
+  env SPOOLWAY_MODEL_PRICES_URL="file://$LIVE/model-prices-few.json" "$SPOOLWAY" models refresh
+if [ "$(cat "$HOME/.spoolway/model-prices.json")" = "$TABLE_BEFORE" ]; then
+  ok "the refused refresh left the last table untouched"
+else
+  bad "the refused refresh left the last table untouched"
+fi
 MODELS_OUT="$LIVE/models-refreshed.out"
 "$SPOOLWAY" models >"$MODELS_OUT"
 if grep -qE '^fake-local[[:space:]].*[[:space:]]refreshed[[:space:]]' "$MODELS_OUT"; then

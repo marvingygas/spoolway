@@ -47,8 +47,8 @@ steps:
     on_pass: version
     on_fail: fix
 
-  # Four, not three: `ready`, `upgrade` and `preflight` all send defects here,
-  # and `review-fix` sends its findings back.
+  # Five, not three: `ready`, `upgrade`, `preflight` and `prices` all send
+  # defects here, and `review-fix` sends its findings back.
   - id: fix
     description: Repair every release blocker in one pull request and drive its checks green.
     agent: claude
@@ -56,7 +56,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop: 4
+    loop: 5
     on_pass: review-fix
 
   - id: review-fix
@@ -98,6 +98,29 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
+    on_pass: prices
+    on_fail: fix
+
+  # A command step, so no lane spends a turn on it. This worktree stays at the
+  # anchor commit while `fix` rounds merge into main, so it is first reset to
+  # `origin/main` as fetched now, which `candidate` requires to equal the main
+  # `preflight` froze and otherwise sends back. A reset rather than a
+  # fast-forward: once the dispatcher has committed an earlier round's table onto
+  # this branch, a fast-forward fails after main moves, and when main did not
+  # move it leaves the refresh rewriting bytes already committed, so git sees no
+  # change. Without the move, `cargo run` would build old code, a repair for a
+  # failure here could never reach it, and `candidate` would copy a table that
+  # reverts what a merged fix carried. `cargo run` uses this checkout's own build, never an installed
+  # spoolway that may be older and read litellm without the tier fields. A
+  # litellm that cannot be reached fails to `fix`, which reports it, rather than
+  # shipping a stale table unannounced. The refreshed `assets/model-prices.json`
+  # stays in this worktree: `notes` announces it, and `candidate` copies it into
+  # the release commit, so the release pull request carries its diff for review.
+  # Both compare it with the source checkout's copy, not `git status`, because
+  # the dispatcher commits lane work onto this branch.
+  - id: prices
+    description: Refresh the vendored litellm price table with this checkout's own build.
+    run: git fetch --quiet origin main && git reset --hard --quiet origin/main && cargo run --release --quiet -- models refresh --vendor
     on_pass: notes
     on_fail: fix
 

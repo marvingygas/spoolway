@@ -44,6 +44,11 @@ and do not wait for a person to approve it.
 3. Every migration item the upgrade walk recorded appears as a bullet under
    `### Breaking changes and migration`. An item the walk did not record, but the diff shows, is
    added too.
+   The `prices` step before you refreshes `assets/model-prices.json` in this worktree. Run
+   `cmp assets/model-prices.json <source checkout>/assets/model-prices.json` (not `git status`, because
+   the dispatcher commits lane work onto the task branch): when the files differ, write one bullet in the
+   section for platform and packaging work saying the bundled model price table was refreshed from
+   litellm, and carry no pull-request number for it. When it did not change, write nothing about it.
 4. When the section carries migration work, write `migrations.md` in the same scratch directory:
    the whole of `docs/migrations.md` as it should read once this release lands. Add one
    `## <previous minor>.x to <this minor>.x` section above the newest existing one, in the guide's

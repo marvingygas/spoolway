@@ -201,8 +201,33 @@ fields above. litellm's `*_above_<N>k_tokens` fields become the tier, including 
 cache write. A model with more than one threshold keeps its lowest. Batch, priority, fast-mode
 and US-only rates are not read, so a lane that uses them is priced at the standard rates.
 
-`spoolway models refresh --vendor` fetches the upstream file with curl and rewrites
-`assets/model-prices.json` for review and commit.
+`spoolway models refresh` fetches the upstream file with curl and writes the table only after
+every check below passes. The built-in URL must use HTTPS and may be at most 32 MB. A URL set
+in `SPOOLWAY_MODEL_PRICES_URL` is not held to either limit, so it can point at a `file://`
+fixture.
+
+| Check | Result |
+|---|---|
+| A rate is negative or above $100,000 per million tokens | The row is dropped and named on the `refused` line. |
+| A window is above 100M tokens | The row is dropped and named on the `refused` line. |
+| The refresh keeps fewer than half the rows of the table it replaces | Nothing is written. The error names both counts and the source URL. |
+
+```
+$ spoolway models refresh
+  fetched  raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+  wrote    ~/.spoolway/model-prices.json
+  models   3229 priced chat rows kept, 4120 other rows dropped
+  changed  12 added, 31 repriced, 3186 unchanged, 2 dropped
+  tiered   274 rows carry a higher tier
+  refused  1 rows out of range: example-model
+```
+
+The `refused` line appears only when a row was dropped.
+
+`spoolway models refresh --vendor` rewrites `assets/model-prices.json` for review and commit.
+It prints the written path, and the `refused` line when a row was dropped.
+Every [release](releasing.md) runs it in the `prices` step, and the release pull request
+carries the diff.
 
 `pi` prices its own transcripts and reports zero for a local model. Claude Code and codex
 record no cost, so the price table answers for them, one turn at a time.

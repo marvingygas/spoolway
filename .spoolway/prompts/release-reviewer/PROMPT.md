@@ -24,8 +24,10 @@ sound diff are what you approve; they are not permission to press the button you
    `origin/main` when it is behind, then review the resulting diff and fresh checks again.
 5. A release-candidate pull request is different: it changes exactly `Cargo.toml`, `Cargo.lock`,
    `CHANGELOG.md` and `herdr-plugin.toml`, plus `docs/migrations.md` when the notes lane wrote a
-   scratch `migrations.md`, and its commit's parent must remain the source SHA recorded by
-   preflight. If `main` moved, do not rebase it. Close that stale pull request, delete only its
+   scratch `migrations.md`, and `assets/model-prices.json` when the `prices` step refreshed it. Its
+   commit's parent must remain the source SHA recorded by preflight. Read the price table's diff
+   like any other: rows dropped or repriced by large factors, and a changelog that announces a
+   refresh the commit does not carry or the reverse, are findings. If `main` moved, do not rebase it. Close that stale pull request, delete only its
    release branch after proving the commit remains recoverable in the closed pull request, clear
    scratch `release-notes.md` and `migrations.md`, and return the finding for a fresh version
    decision, preflight and notes pass.

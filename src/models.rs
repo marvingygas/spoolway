@@ -62,6 +62,17 @@ const SOURCE_LICENSE: &str = "MIT";
 /// `SPOOLWAY_GH` for the stack command, the override changes the external
 /// input without giving the command a second implementation.
 const SOURCE_URL_ENV: &str = "SPOOLWAY_MODEL_PRICES_URL";
+/// The most a rate may be, in USD per million tokens. litellm's highest row
+/// today is under $10,000, so a rate past this is a corrupted or hostile
+/// value, and pricing a lane with it would bury every real cost beside it.
+const MAX_RATE: f64 = 100_000.0;
+/// The largest window a row may carry, in tokens. The window decides when a
+/// lane resumes a session, so a bad value changes dispatch, not only cost.
+/// The largest real window today is about a tenth of this.
+const MAX_WINDOW: usize = 100_000_000;
+/// The most a built-in-URL fetch may download. The upstream file is about
+/// 3 MB, so this stops a swapped or runaway response without touching a real one.
+const MAX_FILESIZE: &str = "32M";
 
 /// Distill litellm's raw, provider-wide price map into the rows spoolway uses.
 ///
@@ -97,6 +108,41 @@ pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<Str
             ))
         })
         .collect()
+}
+
+/// Split distilled rows into the ones spoolway may trust and the names of the
+/// ones it refuses: a rate that is negative or above [`MAX_RATE`], or a window
+/// above [`MAX_WINDOW`]. A refused row is dropped rather than clamped, because
+/// a clamped value would still be a price nobody published.
+fn refuse_out_of_range(
+    models: BTreeMap<String, ModelPrice>,
+) -> (BTreeMap<String, ModelPrice>, Vec<String>) {
+    let mut refused = Vec::new();
+    let kept = models
+        .into_iter()
+        .filter(|(name, price)| {
+            let in_range = price.context_window <= MAX_WINDOW
+                && rates_in_range(&price.rates())
+                && price.tier.as_ref().is_none_or(|t| rates_in_range(&t.rates));
+            if !in_range {
+                refused.push(name.clone());
+            }
+            in_range
+        })
+        .collect();
+    (kept, refused)
+}
+
+fn rates_in_range(rates: &Rates) -> bool {
+    [
+        rates.input,
+        rates.output,
+        rates.cache_read,
+        rates.cache_write_5m,
+        rates.cache_write_1h,
+    ]
+    .iter()
+    .all(|rate| (0.0..=MAX_RATE).contains(rate))
 }
 
 /// Which of a tier's [`Rates`] one litellm field fills.
@@ -146,25 +192,43 @@ fn lowest_tier(row: &serde_json::Map<String, serde_json::Value>) -> Option<Price
 
 /// Fetch and replace the machine-wide or vendored price table.
 ///
-/// Every fallible operation through parsing the response happens before the
-/// destination is opened. In particular, a missing curl, an HTTP failure, or
-/// invalid JSON cannot truncate the last usable table.
+/// Every fallible operation through checking the rows happens before the
+/// destination is opened. In particular, a missing curl, an HTTP failure,
+/// invalid JSON, or a response that keeps fewer than half the rows of the
+/// table it replaces cannot truncate the last usable table.
 pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
     let target = refresh_target(repo, args.vendor)?;
-    let source_url = std::env::var(SOURCE_URL_ENV).unwrap_or_else(|_| SOURCE_URL.to_string());
-    let response = fetch(&source_url, args.vendor)?;
+    let override_url = std::env::var(SOURCE_URL_ENV).ok();
+    let source_url = override_url.as_deref().unwrap_or(SOURCE_URL);
+    // Only the built-in URL is held to HTTPS and a size cap. The override is
+    // the offline suite's seam to a `file://` fixture, and whoever can set it
+    // can already run code.
+    let response = fetch(source_url, override_url.is_none(), args.vendor)?;
     if !args.vendor {
-        println!("  fetched  {}", display_url(&source_url));
+        println!("  fetched  {}", display_url(source_url));
     }
 
     let raw: BTreeMap<String, serde_json::Value> = serde_json::from_slice(&response)
         .with_context(|| format!("parsing litellm's price response from {source_url}"))?;
     let raw_count = raw.len();
-    let models = distill(&raw);
+    let (models, refused) = refuse_out_of_range(distill(&raw));
     // The machine-wide layer may not exist yet. In that case the active table
     // it is replacing is the built-in one, so reporting every current model as
     // newly added would hide the small upstream delta a refresh is for.
     let old = existing_models(&target).unwrap_or_else(|| builtin().clone());
+    // A truncated or swapped file keeps few rows. Half is far below any real
+    // upstream churn, so only a broken response trips it.
+    if models.len() * 2 < old.len() {
+        bail!(
+            "refusing to write: {source_url} kept {} priced rows, fewer than half of the {} in \
+             the table it would replace\n{} is unchanged\n\
+             check the source (or SPOOLWAY_MODEL_PRICES_URL when it is set); a model can be priced in the \
+             meantime with `spoolway config set models.'<model-glob>'.input <usd per 1M>`",
+            models.len(),
+            old.len(),
+            report_path(repo, &target, args.vendor)
+        );
+    }
     let changes = Changes::between(&old, &models);
     let file = BuiltinFile {
         source: SOURCE_PAGE.to_string(),
@@ -181,8 +245,9 @@ pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
         repo,
         &target,
         args.vendor,
-        file.models.len(),
-        raw_count - file.models.len(),
+        &file.models,
+        raw_count - file.models.len() - refused.len(),
+        &refused,
         &changes,
     ) {
         println!("{line}");
@@ -201,9 +266,20 @@ fn refresh_target(repo: &Repo, vendor: bool) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn fetch(source_url: &str, vendor: bool) -> Result<Vec<u8>> {
+/// The arguments curl runs with. `builtin` is true for the compiled-in URL,
+/// which alone is limited to HTTPS (a redirect included) and [`MAX_FILESIZE`].
+fn curl_args(source_url: &str, builtin: bool) -> Vec<&str> {
+    let mut args = vec!["-fsSL", "--max-time", "30"];
+    if builtin {
+        args.extend(["--proto", "=https", "--max-filesize", MAX_FILESIZE]);
+    }
+    args.push(source_url);
+    args
+}
+
+fn fetch(source_url: &str, builtin: bool, vendor: bool) -> Result<Vec<u8>> {
     let output = match Command::new("curl")
-        .args(["-fsSL", "--max-time", "30", source_url])
+        .args(curl_args(source_url, builtin))
         .output()
     {
         Ok(output) => output,
@@ -271,24 +347,49 @@ fn success_lines(
     repo: &Repo,
     target: &Path,
     vendor: bool,
-    kept: usize,
+    models: &BTreeMap<String, ModelPrice>,
     dropped_rows: usize,
+    refused: &[String],
     changes: &Changes,
 ) -> Vec<String> {
     let wrote = format!("  wrote    {}", report_path(repo, target, vendor));
     if vendor {
         // Vendoring is deliberately quiet enough to paste into release work:
-        // the one path changed is the whole report drawn by the command.
-        return vec![wrote];
+        // the one path changed is the whole report, plus the refused rows when
+        // there are any, because a release should not drop a model unseen.
+        let mut lines = vec![wrote];
+        if !refused.is_empty() {
+            lines.push(refused_line(refused));
+        }
+        return lines;
     }
-    vec![
+    let mut lines = vec![
         wrote,
-        format!("  models   {kept} priced chat rows kept, {dropped_rows} other rows dropped"),
+        format!(
+            "  models   {} priced chat rows kept, {dropped_rows} other rows dropped",
+            models.len()
+        ),
         format!(
             "  changed  {} added, {} repriced, {} unchanged, {} dropped",
             changes.added, changes.repriced, changes.unchanged, changes.dropped
         ),
-    ]
+        format!(
+            "  tiered   {} rows carry a higher tier",
+            models.values().filter(|price| price.tier.is_some()).count()
+        ),
+    ];
+    if !refused.is_empty() {
+        lines.push(refused_line(refused));
+    }
+    lines
+}
+
+fn refused_line(refused: &[String]) -> String {
+    format!(
+        "  refused  {} rows out of range: {}",
+        refused.len(),
+        refused.join(", ")
+    )
 }
 
 #[derive(Default)]
@@ -855,6 +956,99 @@ mod tests {
         assert_eq!(changes.dropped, 1);
     }
 
+    fn priced(input: f64, window: usize) -> ModelPrice {
+        ModelPrice {
+            context_window: window,
+            input,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn out_of_range_rows_are_refused_and_named() {
+        let tier = |output| {
+            Some(PriceTier {
+                above_k: 200,
+                rates: Rates {
+                    output,
+                    ..Default::default()
+                },
+            })
+        };
+        let models = BTreeMap::from([
+            ("fine".to_string(), priced(100_000.0, 100_000_000)),
+            ("negative".to_string(), priced(-0.5, 0)),
+            ("pricey".to_string(), priced(100_000.01, 0)),
+            ("wide".to_string(), priced(1.0, 100_000_001)),
+            (
+                "tier-pricey".to_string(),
+                ModelPrice {
+                    tier: tier(200_000.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tier-fine".to_string(),
+                ModelPrice {
+                    tier: tier(5.0),
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let (kept, refused) = refuse_out_of_range(models);
+
+        assert_eq!(kept.keys().collect::<Vec<_>>(), ["fine", "tier-fine"]);
+        assert_eq!(refused, ["negative", "pricey", "tier-pricey", "wide"]);
+    }
+
+    #[test]
+    fn only_the_builtin_url_is_held_to_https_and_a_size_cap() {
+        let builtin = curl_args(SOURCE_URL, true);
+        assert!(builtin.windows(2).any(|w| w == ["--proto", "=https"]));
+        assert!(builtin.windows(2).any(|w| w == ["--max-filesize", "32M"]));
+        let overridden = curl_args("file:///tmp/prices.json", false);
+        assert!(!overridden.contains(&"--proto"));
+        assert!(!overridden.contains(&"--max-filesize"));
+        assert_eq!(overridden.last(), Some(&"file:///tmp/prices.json"));
+    }
+
+    #[test]
+    fn success_names_tiered_and_refused_rows() {
+        let checkout = crate::scratch::root("models-refresh-report");
+        let repo = Repo {
+            borrowed: false,
+            root: checkout.to_path_buf(),
+            checkout: checkout.to_path_buf(),
+            config: Default::default(),
+            home: checkout.join("state"),
+        };
+        let tiered = ModelPrice {
+            tier: Some(PriceTier {
+                above_k: 100,
+                rates: Rates::default(),
+            }),
+            ..Default::default()
+        };
+        let models = BTreeMap::from([
+            ("a".to_string(), tiered),
+            ("b".to_string(), ModelPrice::default()),
+        ]);
+        let refused = ["x".to_string(), "y".to_string()];
+        let lines = success_lines(
+            &repo,
+            &checkout.join("out.json"),
+            false,
+            &models,
+            3,
+            &refused,
+            &Changes::default(),
+        );
+
+        assert_eq!(lines[3], "  tiered   1 rows carry a higher tier");
+        assert_eq!(lines[4], "  refused  2 rows out of range: x, y");
+    }
+
     #[test]
     fn vendor_success_reports_only_the_written_path() {
         let checkout = crate::scratch::root("models-vendor-report");
@@ -869,8 +1063,9 @@ mod tests {
             &repo,
             &checkout.join("assets/model-prices.json"),
             true,
-            12,
+            &BTreeMap::new(),
             3,
+            &[],
             &Changes {
                 added: 1,
                 repriced: 2,
@@ -880,6 +1075,36 @@ mod tests {
         );
 
         assert_eq!(lines, ["  wrote    assets/model-prices.json"]);
+    }
+
+    #[test]
+    fn vendor_success_names_refused_rows() {
+        let checkout = crate::scratch::root("models-vendor-refused");
+        let repo = Repo {
+            borrowed: false,
+            root: checkout.to_path_buf(),
+            checkout: checkout.to_path_buf(),
+            config: Default::default(),
+            home: checkout.join("state"),
+        };
+        let refused = ["x".to_string(), "y".to_string()];
+        let lines = success_lines(
+            &repo,
+            &checkout.join("assets/model-prices.json"),
+            true,
+            &BTreeMap::new(),
+            0,
+            &refused,
+            &Changes::default(),
+        );
+
+        assert_eq!(
+            lines,
+            [
+                "  wrote    assets/model-prices.json",
+                "  refused  2 rows out of range: x, y"
+            ]
+        );
     }
 
     #[test]
