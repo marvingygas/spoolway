@@ -1145,7 +1145,7 @@ $ spoolway override promote impl && git diff --stat
 
 ### `spoolway models`
 
-Print every model this project's pipelines name, with its window, prices, `SLOTS`, `EXCL`
+Print every model this project's pipelines name, with its window, prices, `SLOTS`
 and which price table answered. A model in no table is `unknown`.
 
 ```

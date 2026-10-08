@@ -514,7 +514,6 @@ struct Row<'a> {
     cache_write_5m: Option<f64>,
     cache_write_1h: Option<f64>,
     slots: Option<u32>,
-    exclusive: bool,
     source: &'static str,
     steps: &'a [&'a str],
 }
@@ -539,7 +538,6 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
                 slots: resolved
                     .price
                     .and_then(|p| (p.slots > 0).then_some(p.slots)),
-                exclusive: resolved.price.is_some_and(|p| p.exclusive),
                 source: resolved.source.label(),
                 steps,
             }
@@ -565,21 +563,12 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
         .max("MODEL".len());
 
     println!(
-        "{:<width$}  {:>9}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>5}  {:>4}  {:<9}  STEPS",
-        "MODEL",
-        "WINDOW",
-        "IN",
-        "OUT",
-        "CACHE R",
-        "CACHE W5M",
-        "CACHE W1H",
-        "SLOTS",
-        "EXCL",
-        "SOURCE"
+        "{:<width$}  {:>9}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>5}  {:<9}  STEPS",
+        "MODEL", "WINDOW", "IN", "OUT", "CACHE R", "CACHE W5M", "CACHE W1H", "SLOTS", "SOURCE"
     );
     for row in &rows {
         println!(
-            "{:<width$}  {:>9}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>5}  {:>4}  {:<9}  {}",
+            "{:<width$}  {:>9}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>5}  {:<9}  {}",
             row.model,
             row.window
                 .map(|w| crate::fmt::tokens_human(w as u64))
@@ -592,7 +581,6 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
             row.slots
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "—".into()),
-            if row.exclusive { "yes" } else { "—" },
             row.source,
             row.steps.join(", "),
         );
@@ -1019,7 +1007,6 @@ mod tests {
             ModelPrice {
                 context_window: 100_096,
                 slots: 3,
-                exclusive: true,
                 local: true,
                 ..Default::default()
             },

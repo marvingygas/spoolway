@@ -406,8 +406,8 @@ pub struct Step {
     /// Whether running this step consumes one of the agent profile's
     /// concurrency slots. Cheap steps (a cloud review) can opt out.
     ///
-    /// The profile's budget, and nothing else. A model's own `slots` and its
-    /// `exclusive` are not opt-out-able here: `[agents.<profile>] concurrency`
+    /// The profile's budget, and nothing else. A model's own `slots` is not
+    /// opt-out-able here: `[agents.<profile>] concurrency`
     /// is a number about a harness, chosen for politeness, while
     /// `[models.<glob>] slots` is a number about a machine — how many of these
     /// weights the card actually serves at once. A step that talked its way

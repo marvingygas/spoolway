@@ -301,18 +301,11 @@ pub const REFERENCE: &[Reference] = &[
                     profile's `concurrency`; 0 leaves the profile in charge.",
     },
     Reference {
-        key: "models.<glob>.exclusive",
-        values: "true, false",
-        default: "false",
-        sentence: "Whether this model refuses to run alongside a different \
-                    `exclusive` one — one set of weights on the card at a time.",
-    },
-    Reference {
         key: "models.<glob>.local",
         values: "true, false",
         default: "false",
         sentence: "Whether this model runs on hardware you own. Setting it on a model that \
-                    carries `slots` or `exclusive` silences doctor's note that it should \
+                    carries `slots` silences doctor's note that it should \
                     probably say so. It also removes the 5m `prompt_cache_ttl` default from \
                     this model.",
     },
@@ -758,18 +751,27 @@ pub fn parts<'a>(config: &Config, key: &'a str) -> Vec<&'a str> {
     models_key(config, key).unwrap_or_else(|| key.split('.').collect())
 }
 
-/// Split `models.<model glob>.<field>` into its three parts, or `None` if this
-/// is not a models key.
+/// Split `models.<model glob>.<field>` into `[models, glob, field]`, or `None`
+/// if this is not a models key. Does not check that the field exists.
 ///
 /// Split from both ends rather than on every dot, because a model glob is a
 /// name from someone else's catalogue and quite reasonably contains one:
-/// `models.gpt-4.1-*.input` is three parts, not four.
-fn models_key<'a>(config: &Config, key: &'a str) -> Option<Vec<&'a str>> {
+/// `models.gpt-4.1-*.input` is three parts, not four. Every caller that
+/// addresses a models row by a dotted key goes through here, so how such a
+/// key is split changes in one place.
+pub(crate) fn split_models_key(key: &str) -> Option<[&str; 3]> {
     let rest = key.strip_prefix("models.")?;
     let (glob, field) = rest.rsplit_once('.')?;
     if glob.is_empty() {
         return None;
     }
+    Some(["models", glob, field])
+}
+
+/// [`split_models_key`], for a key whose field `ModelPrice` actually has.
+fn models_key<'a>(config: &Config, key: &'a str) -> Option<Vec<&'a str>> {
+    let parts = split_models_key(key)?;
+    let field = parts[2];
     // Only fields ModelPrice actually has, so a misspelt one is still refused.
     // Against `probe` rather than `default`: a default is all zeros now, and a
     // zero is omitted from the serialised form, so a default would name no
@@ -777,7 +779,7 @@ fn models_key<'a>(config: &Config, key: &'a str) -> Option<Vec<&'a str>> {
     let known = Value::try_from(crate::usage::ModelPrice::probe()).ok()?;
     let _ = config;
     known.get(field)?;
-    Some(vec!["models", glob, field])
+    Some(parts.to_vec())
 }
 
 /// The profile name in `agents.<profile>.concurrency`, or `None` if this is
@@ -1262,18 +1264,18 @@ mod tests {
         assert_eq!(updated.models["claude-opus-5"].context_window, 1_000_000);
     }
 
-    /// A model's slot budget, its exclusivity and its `local` flag are set the
-    /// same way as any other `[models]` field — on a glob nothing has written
-    /// yet — and each reads back the value that its absence stands for.
+    /// A model's slot budget and its `local` flag are set the same way as any
+    /// other `[models]` field — on a glob nothing has written yet — and each
+    /// reads back the value that its absence stands for. The retired
+    /// `exclusive` is no longer a field that can be set.
     #[test]
-    fn a_models_slots_exclusive_and_local_fields_can_be_set() {
+    fn a_models_slots_and_local_fields_can_be_set() {
         let config = Config::default();
 
         let updated = set(&config, "models.my-local-*.slots", "3").unwrap();
         assert_eq!(updated.models["my-local-*"].slots, 3);
 
-        let updated = set(&updated, "models.my-local-*.exclusive", "true").unwrap();
-        assert!(updated.models["my-local-*"].exclusive);
+        assert!(set(&updated, "models.my-local-*.exclusive", "true").is_err());
 
         // Registered, so it is readable before it has ever been written…
         assert_eq!(get(&config, "models.my-local-*.local").unwrap(), "false");

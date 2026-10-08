@@ -1380,9 +1380,12 @@ fn leftover_placeholder(rendered: &str) -> Option<String> {
 
 /// Every key this binary has retired that a config it still upgrades from
 /// could hold, as `(table, key)`. `*` stands for any `[agents.<name>]`
-/// profile. These are the `skip_serializing` fields kept above only so an
-/// old file still parses (each under every spelling serde accepts for it),
-/// plus the two [`strip_hard_retired_keys`] removes before the parse.
+/// profile, or for any `[models."<glob>"]` row under `models.*`, which
+/// [`is_retired_key`] matches by its last segment alone because a glob may
+/// hold dots. These are the `skip_serializing` fields kept on the config
+/// structs (in `src/usage.rs` for a models row) only so an old file still
+/// parses (each under every spelling serde accepts for it), plus the two
+/// [`strip_hard_retired_keys`] removes before the parse.
 ///
 /// [`crate::overrides::retired_config_patch_keys`] drops only keys on this
 /// list from a private override. It used to treat every key the config did
@@ -1415,12 +1418,21 @@ const RETIRED_KEYS: &[(&str, &str)] = &[
     ("agents.*", "quota_ceiling"),
     ("agents.*", "session_reuse_uncached"),
     ("agents.*", "env"),
+    ("models.*", "exclusive"),
 ];
 
 /// Whether `dotted` (`dispatch.worktree_root`, `agents.claude.env.FOO`)
 /// names a key on [`RETIRED_KEYS`], or a leaf inside one such as an entry of
 /// a retired `env` table.
 pub(crate) fn is_retired_key(dotted: &str) -> bool {
+    // A model glob may hold a dot of its own
+    // (`models.*Ornith-1.5-35B-A3B.exclusive`), so a models row is matched by
+    // its last segment alone, split the way every models key is.
+    if let Some([_, _, field]) = crate::confkv::split_models_key(dotted) {
+        return RETIRED_KEYS
+            .iter()
+            .any(|(table, key)| *table == "models.*" && *key == field);
+    }
     let parts: Vec<&str> = dotted.split('.').collect();
     RETIRED_KEYS.iter().any(|(table, key)| {
         let pattern: Vec<&str> = table.split('.').chain(std::iter::once(*key)).collect();
@@ -2871,6 +2883,8 @@ mod tests {
         assert!(!is_retired_key("dispatch.lane_quiet"));
         assert!(!is_retired_key("agents.claude"));
         assert!(!is_retired_key("models.opus.context_window"));
+        assert!(is_retired_key("models.my-local-*.exclusive"));
+        assert!(is_retired_key("models.*Ornith-1.5-35B-A3B.exclusive"));
     }
 
     /// `dispatch.worktree_root` is only soft-retired — the field still
@@ -3304,14 +3318,13 @@ mod tests {
     }
 
     /// `local` marks a model as running on hardware you own. It defaults to
-    /// false, is left out of the file at that value the way `slots` and
-    /// `exclusive` are, and comes back as it went in when it is set.
+    /// false, is left out of the file at that value the way `slots` is, and
+    /// comes back as it went in when it is set.
     #[test]
     fn a_models_local_flag_round_trips_and_is_omitted_when_false() {
         let raw = "[models.\"*Ornith-1.5-35B-A3B\"]\n\
                     context_window = 100096\n\
                     slots = 3\n\
-                    exclusive = true\n\
                     local = true\n";
         let config: Config = toml::from_str(raw).expect("a [models] entry with local must parse");
         assert!(config.models["*Ornith-1.5-35B-A3B"].local);
@@ -3324,6 +3337,24 @@ mod tests {
         let plain: Config = toml::from_str("[models.\"cloud-*\"]\ninput = 5.0\n").unwrap();
         assert!(!plain.models["cloud-*"].local);
         assert!(!toml::to_string(&plain).unwrap().contains("local ="));
+    }
+
+    /// `models.<glob>.exclusive` is retired: a config that still sets it
+    /// loads, the key is never written back, and it is on the retired list
+    /// that `spoolway sync` drops from a private override.
+    #[test]
+    fn a_models_retired_exclusive_parses_and_is_not_written_back() {
+        let raw = "[models.\"*Ornith-1.5-35B-A3B\"]\n\
+                    slots = 3\n\
+                    exclusive = true\n\
+                    local = true\n";
+        let config: Config = toml::from_str(raw).expect("a retired exclusive must still parse");
+        assert_eq!(config.models["*Ornith-1.5-35B-A3B"].slots, 3);
+
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(!rendered.contains("exclusive"), "{rendered}");
+        assert!(rendered.contains("slots = 3"), "{rendered}");
+        assert!(is_retired_key("models.*Ornith-1.5-35B-A3B.exclusive"));
     }
 
     /// `agents.*.model` and `agents.*.context_window` are two more retired

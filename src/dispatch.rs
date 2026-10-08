@@ -3646,11 +3646,10 @@ impl<'a> Dispatcher<'a> {
 
     /// Start as many lanes as each candidate's cap allows — a resolved
     /// model's own `slots` when it has any, its profile's `concurrency`
-    /// otherwise — and refuse a candidate whose model is `exclusive` while a
-    /// live lane runs a different `exclusive` model.
+    /// otherwise.
     ///
-    /// A model's `slots` and its `exclusive` hold whatever the step's `slot:`
-    /// says; only the profile's `concurrency` can be opted out of. The two are
+    /// A model's `slots` holds whatever the step's `slot:` says; only the
+    /// profile's `concurrency` can be opted out of. The two are
     /// different axes: one is how much of the machine a set of weights takes,
     /// the other is how many lanes of a harness it is polite to run.
     ///
@@ -3699,18 +3698,6 @@ impl<'a> Dispatcher<'a> {
                 *model_in_flight.entry(model.to_string()).or_insert(0) += 1;
             }
         }
-
-        // Which live model, if any, is `exclusive`. At most one is ever let
-        // in by the check below, so the first one found is the resident.
-        let mut resident_exclusive: Option<String> = model_in_flight
-            .iter()
-            .filter(|(_, running)| **running > 0)
-            .find(|(model, _)| {
-                crate::models::resolve(&self.repo.config.models, model)
-                    .price
-                    .is_some_and(|p| p.exclusive)
-            })
-            .map(|(model, _)| model.clone());
 
         // Every candidate whose prep succeeded this pass, in rank order —
         // what the two rounds of threads below boot, and what the bookkeeping
@@ -3912,24 +3899,9 @@ impl<'a> Dispatcher<'a> {
             let model_name = resolve_model(&step);
             let model_price = crate::models::resolve(&self.repo.config.models, &model_name).price;
 
-            // Exclusivity is checked whatever `step.slot` says: it is a
-            // statement about what the server behind the model can hold, not
-            // about the profile's own slot budget.
-            if model_price.is_some_and(|p| p.exclusive)
-                && let Some(resident) = &resident_exclusive
-                && resident != &model_name
-            {
-                report.actions.push(format!(
-                    "{}: waiting for `{resident}` to finish — `{model_name}` is exclusive",
-                    tasks[candidate.task_index].id()
-                ));
-                continue;
-            }
-
-            // A model's `slots` is checked whatever `step.slot` says, for the
-            // same reason exclusivity is: the two describe what the machine
-            // behind the model can hold at once, and a step cannot opt out of
-            // physics. `slot: false` is a statement about the *profile's*
+            // A model's `slots` is checked whatever `step.slot` says: it
+            // describes what the machine behind the model can hold at once,
+            // and a step cannot opt out of physics. `slot: false` is a statement about the *profile's*
             // budget — "this cloud review is cheap, don't let it hold a lane
             // back" — and a harness's politeness and a card's memory are not
             // the same axis. A step that opted out of the first used to opt
@@ -4066,9 +4038,6 @@ impl<'a> Dispatcher<'a> {
                     // as this restructuring finds it rather than chased.
                     *in_flight.entry(agent_name.clone()).or_insert(0) += 1;
                     *model_in_flight.entry(model_name.clone()).or_insert(0) += 1;
-                    if model_price.is_some_and(|p| p.exclusive) {
-                        resident_exclusive.get_or_insert(model_name.clone());
-                    }
                     // The new pane exists, so the old one can go: it was
                     // banked above. A returning step's own old pane has to
                     // free its agent name before the new lane takes it. With
@@ -4621,8 +4590,7 @@ impl<'a> Dispatcher<'a> {
                 // before anything is opened or written, so a waiting task
                 // has no pane, no run files and no timeout clock of its own
                 // yet — it stays `Fresh`, and the first pass after the run
-                // ahead exits starts it. The same refusal the `exclusive`
-                // model check makes in `start_lanes`, and worded like it.
+                // ahead exits starts it.
                 if let Some(holder) =
                     runs.serial_holder(&step.id, serial_peers.iter().map(String::as_str))
                 {
@@ -6558,8 +6526,8 @@ fn exceeds_percent(window: usize, pct: u8, size: u64) -> bool {
     size > (window as u64) * (pct as u64) / 100
 }
 
-/// Whether a lane holds a slot: the one rule behind a profile's `concurrency`,
-/// a model's `slots` and a model's `exclusive`, called by both
+/// Whether a lane holds a slot: the one rule behind a profile's `concurrency`
+/// and a model's `slots`, called by both
 /// `Dispatcher::start_lanes` and the board's footer so the two cannot disagree.
 ///
 /// A lane counts only while its task's stage is the lane's own step, from the
@@ -10730,54 +10698,6 @@ mod tests {
         );
     }
 
-    /// Exclusivity has the same blind spot and the same fix: the resident is
-    /// whichever exclusive model has a lane, not whichever has a lane that
-    /// happens to be mid-turn. Weights are on the card from the moment the
-    /// lane opens, and a second set of them arriving is the swap this flag
-    /// exists to prevent.
-    #[test]
-    fn an_idle_lane_is_still_the_resident_exclusive_model() {
-        let (mut repo, _root_guard) = fixture("exclusive-idle");
-        for model in ["your-local-model", "other-local-model"] {
-            repo.config.models.insert(
-                model.to_string(),
-                crate::usage::ModelPrice {
-                    exclusive: true,
-                    ..Default::default()
-                },
-            );
-        }
-
-        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
-        pipeline
-            .steps
-            .iter_mut()
-            .find(|s| s.id == "document")
-            .unwrap()
-            .model = Some("other-local-model".to_string());
-        let mut pipelines = Pipelines::builtin();
-        pipelines.pipelines.insert("default".into(), pipeline);
-
-        add_task_with(&repo, "busy", "implement", |f| {
-            f.workspace_id = Some("w1".into());
-            f.pane_id = Some("w1:p1".into());
-        });
-        add_task(&repo, "waiting", "document");
-
-        let mux = FakeMux::new(vec![lane(&repo, "busy · implement", LaneStatus::Idle)]);
-        let report = run_pass_with(&repo, &mux, &pipelines);
-
-        assert!(mux.did("start").is_empty(), "no lane should have started");
-        assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a.contains("your-local-model") && a.contains("exclusive")),
-            "the wait must name the resident model: {:?}",
-            report.actions
-        );
-    }
-
     /// `slot: false` buys a step out of its profile's `concurrency` — a cheap
     /// cloud review not worth holding a lane back — and out of nothing else. A
     /// model's `slots` is how many of these weights the machine serves at
@@ -10815,27 +10735,17 @@ mod tests {
         );
     }
 
-    /// Two models both carrying `exclusive = true` never run at once, however
-    /// many slots either has and whatever the waiting step's own `slot:`
-    /// says — the resident model is named in the wait.
-    // covers: models.<glob>.exclusive — one set of weights on the card at a time
+    /// `exclusive` is retired: two models a config still marks with it are
+    /// ordinary models, and a step on the second starts beside a live lane on
+    /// the first.
     #[test]
-    fn two_exclusive_models_never_run_in_the_same_pass() {
-        let (mut repo, _root_guard) = fixture("exclusive");
-        repo.config.models.insert(
-            "model-a".to_string(),
-            crate::usage::ModelPrice {
-                exclusive: true,
-                ..Default::default()
-            },
-        );
-        repo.config.models.insert(
-            "model-b".to_string(),
-            crate::usage::ModelPrice {
-                exclusive: true,
-                ..Default::default()
-            },
-        );
+    fn a_retired_exclusive_flag_holds_no_step_back() {
+        let (mut repo, _root_guard) = fixture("retired-exclusive");
+        repo.config.models = toml::from_str::<crate::config::Config>(
+            "[models.model-a]\nexclusive = true\n[models.model-b]\nexclusive = true\n",
+        )
+        .unwrap()
+        .models;
 
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         for (id, model) in [("implement", "model-a"), ("document", "model-b")] {
@@ -10860,13 +10770,10 @@ mod tests {
             .pass(&mut || {})
             .unwrap();
 
-        assert!(mux.did("start").is_empty(), "no lane should have started");
+        assert_eq!(mux.did("start").len(), 1, "{:?}", report.actions);
         assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a.contains("model-a") && a.contains("exclusive")),
-            "the wait must name the resident model: {:?}",
+            !report.actions.iter().any(|a| a.contains("exclusive")),
+            "{:?}",
             report.actions
         );
     }

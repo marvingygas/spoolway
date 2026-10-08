@@ -6784,7 +6784,7 @@ mod tests {
                 cache_write_1h: 6.0,
                 prompt_cache_ttl: None,
                 slots: 0,
-                exclusive: false,
+                retired_exclusive: None,
                 local: false,
             },
         )]);

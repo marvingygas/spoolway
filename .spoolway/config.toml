@@ -37,8 +37,7 @@
 # models.<glob>.cache_write_1h          <USD per 1M tokens>  0                                                       Cost per million tokens written to a 1-hour cache.
 # models.<glob>.prompt_cache_ttl        <duration>           5m (none if local)                                      How long a session's prompt cache is trusted to stay warm. A resume past it opens a fresh session. "0" turns it off.
 # models.<glob>.slots                   <n>                  0                                                       How many lanes this model may run at once, replacing its profile's `concurrency`; 0 leaves the profile in charge.
-# models.<glob>.exclusive               true, false          false                                                   Whether this model refuses to run alongside a different `exclusive` one — one set of weights on the card at a time.
-# models.<glob>.local                   true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` or `exclusive` silences doctor's note that it should probably say so. It also removes the 5m `prompt_cache_ttl` default from this model.
+# models.<glob>.local                   true, false          false                                                   Whether this model runs on hardware you own. Setting it on a model that carries `slots` silences doctor's note that it should probably say so. It also removes the 5m `prompt_cache_ttl` default from this model.
 
 [dispatch]
 backend = "herdr"
@@ -94,5 +93,4 @@ session_blocked_ctx = 0
 [models."Ornith-1.5-35B-A3B"]
 context_window = 100096
 slots = 2
-exclusive = true
 local = true

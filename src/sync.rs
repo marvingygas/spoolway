@@ -3222,6 +3222,48 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// `models.<glob>.exclusive` is retired: `spoolway sync` drops it from the
+    /// tracked file, and from the private layer too, even under a glob that
+    /// holds a dot of its own.
+    #[test]
+    fn a_retired_models_exclusive_key_is_dropped_from_the_file_and_the_layer() {
+        let (repo, _root_guard) = fixture("config-retired-model-exclusive");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-retired-model-exclusive-home");
+        let _ = std::fs::remove_dir_all(&home);
+
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "[models.\"*Ornith-1.5-35B-A3B\"]\nslots = 3\nexclusive = true\nlocal = true\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                crate::overrides::config_patch_path(&overrides),
+                "[models.\"*Ornith-1.5-35B-A3B\"]\nexclusive = true\nslots = 2\n",
+            )
+            .unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+
+            let after = std::fs::read_to_string(&path).unwrap();
+            assert!(!after.contains("exclusive"), "{after}");
+            assert!(after.contains("slots = 3"), "{after}");
+
+            let layer =
+                std::fs::read_to_string(crate::overrides::config_patch_path(&overrides)).unwrap();
+            assert!(!layer.contains("exclusive"), "{layer}");
+            assert!(layer.contains("slots = 2"), "{layer}");
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// A `worktree_root` set only in the private override layer is dropped
     /// too, and must be reported the way one dropped from `config.toml` is:
     /// the folder it named, and the queued tasks still under it.

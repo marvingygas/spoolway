@@ -29,7 +29,7 @@
 #                     false <default>    Opens a fresh conversation every visit.
 #   slot              true <default>     Consumes one of the profile's slots.
 #                     false              Runs without taking one. A model's own
-#                                        `slots` and `exclusive` apply either way.
+#                                        `slots` applies either way.
 #   gate              true               Holds the pass on `paused` for a person.
 #                     false <default>    The pass is acted on at once.
 #   on_pass           <step id>          Where a pass goes.
