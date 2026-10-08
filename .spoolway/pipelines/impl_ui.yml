@@ -59,7 +59,8 @@
 # <<< spoolway <<<
 
 # 1.1: one review split into `review-spec` and `review-code`, each with its own fixer.
-version: 1.1
+# 1.2: the gated `look` step removed; `review-code` passes straight to `e2e`.
+version: 1.2
 
 description: >-
   Feature work that changes something a person looks at, with a step that
@@ -115,7 +116,7 @@ steps:
     effort: high
     session: true
     loop: 4
-    on_pass: look
+    on_pass: e2e
     on_fail: fix-code-review
 
   - id: fix-code-review
@@ -127,16 +128,6 @@ steps:
     session: true
     loop: 2
     on_pass: review-code
-
-  - id: look
-    description: Open the changed screen, drive it, and read back what it actually renders.
-    agent: claude
-    prompt: looker
-    model: claude-sonnet-5-5
-    effort: medium
-    gate: true
-    on_pass: e2e
-    on_fail: implement
 
   - id: e2e
     description: >-
