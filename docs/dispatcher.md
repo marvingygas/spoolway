@@ -247,7 +247,53 @@ stateDiagram-v2
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
 
-`RECENT` lists the last task moves. Errors from a pass go to `~/.spoolway/logs/<project>.log`.
+Errors from a pass go to `~/.spoolway/logs/<project>.log`.
+
+### Recent moves
+
+`RECENT` lists the last task moves, newest first. Each line is the time, the task id and one sentence. The sentence names what happened on a step, then where the task went. A move into `paused` or `blocked` ends with the cause in brackets.
+
+```
+14:22  fix-login   passed implement, moved to paused (gate)
+14:19  fix-login   failed look, moved to blocked (loop limit on implement)
+14:12  add-export  could not launch implement, moved to blocked (3 attempts)
+```
+
+The board reads the cause from the task file. When the file does not say which road the task took, the line has no cause. A cause counts only when the file names the step the task left.
+
+| Sentence | Meaning |
+|---|---|
+| `started, moved to <b>` | The task left `queued` for its first step. |
+| `passed <a>, moved to <b>` | Step `<a>` passed, or a command step exited zero. |
+| `failed <a>, moved to <b>` | Step `<a>` failed, or a command step exited non-zero. |
+| `skipped <a>, moved to <b>` | The task passed over `<a>` without running it, or `<a>` sent no report. |
+| `failed <a> in the background, moved to <b>` | A background command step `<a>` exited non-zero after the task had moved on. |
+| `resumed, moved to <b>` | The task left `paused`. |
+| `unblocked, moved to <b>` | The task left `blocked`. |
+| `unblocked by its lane, moved to <b>` | The `blocked` lane reported a pass. |
+| `left <a>, moved to <b>` | The task file does not say how it left `<a>`. |
+
+A task that stops names the cause in brackets.
+
+| Sentence | Cause |
+|---|---|
+| `passed <a>, moved to paused (gate)` | The step has `gate: true`. |
+| `passed <a>, moved to paused (scheduled)` | A scheduled pause took effect at `<a>`. |
+| `passed <a>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero. |
+| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero. |
+| `stopped on <a>, moved to paused (manually)` | A person pressed `p` on the board, or Escape in the lane's pane. |
+| `stopped before starting, moved to paused (manually)` | A person paused the task before it started. |
+| `stopped on <a>, moved to paused (dispatching stopped)` | The dispatch tab's stop popup parked the task. |
+| `stopped on <a>, moved to paused (escalated)` | The dispatcher gave up on the lane. |
+| `stopped before starting, moved to paused (branch <name> missing)` | The branch the task starts from does not exist. |
+| `reported a pause on blocked, moved to paused` | The `blocked` lane reported a pause. |
+| `stopped on blocked, moved to paused (escalated)` | The dispatcher gave up on the `blocked` lane. |
+| `reported a block on <a>, moved to blocked` | The lane for `<a>` reported a block. |
+| `passed <a>, moved to blocked (loop limit on <b>)` | Step `<b>` has used up its `loop:`. The same cause follows `failed <a>` and `skipped <a>`. |
+| `could not launch <a>, moved to <b> (3 attempts)` | The launch was refused three times in a row. |
+| `could not launch <a>, moved to <b> (lane died at launch)` | The lane started and left nothing behind. |
+| `could not launch <a>, moved to <b>` | The launch failed and the task file does not say why. |
+| `passed <a>, moved to blocked (uncommitted work)` | The last step passed, and the worktree held work that could not be committed. |
 
 ### Keys
 

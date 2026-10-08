@@ -116,12 +116,11 @@ const GREEN: &str = "\x1b[32m";
 
 pub(super) const AMBER: &str = "\x1b[33m";
 
-// The colour of a stop that is not a verdict: `Blocked`, and `Unknown`, a
-// task on a step its pipeline does not have. Not red: a block is a task
-// waiting on a person, the same *kind* of stop `Paused` is, and red reads as
-// something gone wrong rather than something to look at. Orange rather than
-// amber too, so a block and a `Paused` row never read as the same colour from
-// across a room.
+// The colour of `Blocked`, and of `Unknown`, a task on a step its pipeline
+// does not have. Not red: a block is a task waiting on a person, the same
+// *kind* of stop `Paused` is, and red reads as something gone wrong rather
+// than something to look at. Orange rather than amber too, so a block and a
+// `Paused` row never read as the same colour from across a room.
 const ORANGE: &str = "\x1b[38;5;208m";
 
 /// The two halves of an OSC 8 terminal hyperlink: `OSC8 <url> ST <label> OSC8
@@ -185,9 +184,9 @@ impl State {
 /// moment the move was first seen.
 #[derive(Clone)]
 pub(crate) enum RecentEvent {
-    /// A task's move, classified once by [`arrival_event`] from the task
-    /// file and pipeline as they stood when the board saw it, and worded by
-    /// [`sentence`].
+    /// A task's move, classified once by `classify` in the parent module
+    /// from the task file and pipeline as they stood when the board saw it,
+    /// and worded by [`sentence`].
     Arrival {
         at: String,
         id: String,
@@ -201,22 +200,115 @@ pub(crate) enum RecentEvent {
 pub(crate) enum Move {
     /// The task left `queued` for its first step.
     Started { to: String },
-    /// `to` is `from`'s own `on_pass`, or `done` for a task the archive
-    /// holds as finished.
-    Passed { from: String, to: String },
-    /// `to` is `from`'s own `on_fail` — `blocked` when it declares none.
-    Failed { from: String, to: String },
-    /// Any move into `paused`. `None` is a task stopped while still on
+    /// `from` reported a pass — or, for a command step, which reports
+    /// nothing, exited into its own `on_pass`. `to` is `done` for a task the
+    /// archive holds as finished.
+    Passed {
+        from: String,
+        to: String,
+        cause: Option<Cause>,
+    },
+    /// `from` reported a failure, or a command step exited into its own
+    /// `on_fail` — `blocked` when it declares none.
+    Failed {
+        from: String,
+        to: String,
+        cause: Option<Cause>,
+    },
+    /// `from` was walked past without running: named by the task's own
+    /// `skip:`, a `first:` or `last:` step out of place in its chain, or an
+    /// agent step that sent no report before it moved on down its `on_pass`.
+    Skipped {
+        from: String,
+        to: String,
+        cause: Option<Cause>,
+    },
+    /// `from`, a `background: true` command step the task had already walked
+    /// past, exited non-zero and pulled the task down its `on_fail`.
+    FailedInBackground { from: String, to: String },
+    /// `from`'s lane said so itself, with `--block` or `--pause`.
+    Reported {
+        what: Reported,
+        from: String,
+        to: String,
+        cause: Option<Cause>,
+    },
+    /// `from`'s lane never got going: refused at launch, or gone before it
+    /// reported anything.
+    CouldNotLaunch {
+        from: String,
+        to: String,
+        cause: Option<Cause>,
+    },
+    /// Any other move into `paused`. `None` is a task stopped while still on
     /// `queued`, which has no step to name.
-    Stopped { from: Option<String> },
+    Stopped {
+        from: Option<String>,
+        cause: Option<Cause>,
+    },
     /// The task was on `paused`.
     Resumed { to: String },
-    /// The task was on `blocked`.
-    Unblocked { to: String },
-    /// Nothing above explains the move — a spent loop budget, or any other
-    /// jump that is not the step's own `on_pass` or `on_fail`. Named plainly
-    /// rather than guessed at.
+    /// The task was on `blocked`. `by_lane` when the report that moved it
+    /// came from a lane working `blocked` itself, rather than a person's
+    /// resume.
+    Unblocked { to: String, by_lane: bool },
+    /// Nothing above explains the move. Named plainly rather than guessed at.
     Left { from: String, to: String },
+}
+
+/// What a lane reported on its way out, for [`Move::Reported`] — the two
+/// outcomes that are neither a pass nor a fail.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Reported {
+    Block,
+    Pause,
+}
+
+/// Why a task stopped, when the route alone does not say: the part of a
+/// sentence drawn in brackets after `moved to <step>`. Each is read from a
+/// field the task file already carries — see `classify` in the parent module.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Cause {
+    /// The step's own `gate: true` held its pass.
+    Gate,
+    /// The task's own `gate_at` held the step's outcome.
+    Scheduled,
+    /// An issue-tracking hook exited non-zero.
+    HookFailed,
+    /// A person parked it: the board's `p`, or an Escape in the pane.
+    Manually,
+    /// The dispatch tab's stop popup parked it.
+    DispatchingStopped,
+    /// The dispatcher gave up on the lane.
+    Escalated,
+    /// The branch the task starts from does not exist.
+    BranchMissing(String),
+    /// The step the move would have reached had spent its `loop:`.
+    LoopLimit(String),
+    /// The launch was refused this many times in a row.
+    Attempts(u32),
+    /// The lane was launched and left nothing behind.
+    LaneDiedAtLaunch,
+    /// A pass into `done` found work in the worktree it could not commit.
+    UncommittedWork,
+}
+
+impl Cause {
+    fn words(&self) -> String {
+        match self {
+            Cause::Gate => "gate".into(),
+            Cause::Scheduled => "scheduled".into(),
+            Cause::HookFailed => "hook failed".into(),
+            Cause::Manually => "manually".into(),
+            Cause::DispatchingStopped => "dispatching stopped".into(),
+            Cause::Escalated => "escalated".into(),
+            Cause::BranchMissing(branch) => format!("branch {branch} missing"),
+            Cause::LoopLimit(step) => format!("loop limit on {step}"),
+            Cause::Attempts(n) => format!("{n} attempts"),
+            Cause::LaneDiedAtLaunch => "lane died at launch".into(),
+            Cause::UncommittedWork => "uncommitted work".into(),
+        }
+    }
 }
 
 /// [`BoardMode::ConfirmPause`]'s panel, `p`'s own: one abort, so the body
@@ -1801,24 +1893,65 @@ fn recent_line(at: &str, id: &str, id_width: usize, sentence: &str) -> String {
 /// prints about a move is written here and nowhere else, so two kinds of
 /// move can never drift into two phrasings of the same thing. Each sentence
 /// names what happened on which step first and where the task went last,
-/// always as `moved to <step>`.
+/// always as `moved to <step>`, then the cause in brackets when there is one.
 pub(crate) fn sentence(change: &Move) -> String {
-    match change {
-        Move::Started { to } => format!("started, moved to {to}"),
-        Move::Passed { from, to } => format!("passed {from}, moved to {to}"),
-        Move::Failed { from, to } => format!("failed {from}, moved to {to}"),
-        Move::Stopped { from: Some(from) } => {
-            format!("stopped on {from}, moved to {}", crate::pipeline::PAUSED)
+    use crate::pipeline::PAUSED;
+
+    let (said, cause) = match change {
+        Move::Started { to } => (format!("started, moved to {to}"), None),
+        Move::Passed { from, to, cause } => {
+            (format!("passed {from}, moved to {to}"), cause.as_ref())
         }
-        Move::Stopped { from: None } => {
-            format!(
-                "stopped before starting, moved to {}",
-                crate::pipeline::PAUSED
+        Move::Failed { from, to, cause } => {
+            (format!("failed {from}, moved to {to}"), cause.as_ref())
+        }
+        Move::Skipped { from, to, cause } => {
+            (format!("skipped {from}, moved to {to}"), cause.as_ref())
+        }
+        Move::FailedInBackground { from, to } => (
+            format!("failed {from} in the background, moved to {to}"),
+            None,
+        ),
+        Move::Reported {
+            what,
+            from,
+            to,
+            cause,
+        } => {
+            let what = match what {
+                Reported::Block => "block",
+                Reported::Pause => "pause",
+            };
+            (
+                format!("reported a {what} on {from}, moved to {to}"),
+                cause.as_ref(),
             )
         }
-        Move::Resumed { to } => format!("resumed, moved to {to}"),
-        Move::Unblocked { to } => format!("unblocked, moved to {to}"),
-        Move::Left { from, to } => format!("left {from}, moved to {to}"),
+        Move::CouldNotLaunch { from, to, cause } => (
+            format!("could not launch {from}, moved to {to}"),
+            cause.as_ref(),
+        ),
+        Move::Stopped {
+            from: Some(from),
+            cause,
+        } => (
+            format!("stopped on {from}, moved to {PAUSED}"),
+            cause.as_ref(),
+        ),
+        Move::Stopped { from: None, cause } => (
+            format!("stopped before starting, moved to {PAUSED}"),
+            cause.as_ref(),
+        ),
+        Move::Resumed { to } => (format!("resumed, moved to {to}"), None),
+        Move::Unblocked { to, by_lane: false } => (format!("unblocked, moved to {to}"), None),
+        Move::Unblocked { to, by_lane: true } => {
+            (format!("unblocked by its lane, moved to {to}"), None)
+        }
+        Move::Left { from, to } => (format!("left {from}, moved to {to}"), None),
+    };
+    match cause {
+        Some(cause) => format!("{said} ({})", cause.words()),
+        None => said,
     }
 }
 
@@ -1913,11 +2046,11 @@ pub(crate) fn human_secs(total: i64) -> String {
 mod tests {
     use super::*;
     use crate::status::testutil::*;
+    use crate::status::{Row, State, done_rows, rows};
 
     /// What no state on this board may draw in — see
     /// [`blocked_is_orange_prompt_is_amber_and_no_other_state_changed_colour`].
     const RED: &str = "\x1b[31m";
-    use crate::status::{Row, State, arrival_event, done_rows, rows};
 
     /// `Blocked` reads apart from every other stop: orange, its own colour
     /// — a block is a task waiting on a person, the same kind of stop
@@ -3808,90 +3941,6 @@ mod tests {
         }
     }
 
-    /// The sentence the ticker says about `id` moving from `was` to `stage`,
-    /// read off a task in `default`'s pipeline exactly as the board reads it.
-    fn sentence_for(name: &str, was: &str, stage: &str) -> String {
-        let (repo, _root_guard) = fixture(name);
-        add(&repo, "gate-board", &[], Some(stage));
-        let tasks = repo.tasks().unwrap();
-        let RecentEvent::Arrival { change, .. } = arrival_event(
-            "14:22",
-            "gate-board",
-            was,
-            stage,
-            &tasks,
-            &Pipelines::builtin(),
-        );
-        sentence(&change)
-    }
-
-    #[test]
-    fn leaving_queued_reads_started() {
-        assert_eq!(
-            sentence_for("sentence-started", "queued", "implement"),
-            "started, moved to implement"
-        );
-    }
-
-    /// `implement`'s own `on_pass` is `review`.
-    #[test]
-    fn a_move_onto_on_pass_reads_passed() {
-        assert_eq!(
-            sentence_for("sentence-passed", "implement", "review"),
-            "passed implement, moved to review"
-        );
-    }
-
-    /// `review`'s own `on_fail` sends a task back to `implement`.
-    #[test]
-    fn a_move_onto_on_fail_reads_failed() {
-        assert_eq!(
-            sentence_for("sentence-failed", "review", "implement"),
-            "failed review, moved to implement"
-        );
-    }
-
-    /// `implement` declares no `on_fail`, so its failure lands on `blocked`.
-    #[test]
-    fn a_failure_into_blocked_reads_failed() {
-        assert_eq!(
-            sentence_for("sentence-failed-blocked", "implement", "blocked"),
-            "failed implement, moved to blocked"
-        );
-    }
-
-    #[test]
-    fn a_move_from_a_step_into_paused_reads_stopped_on_it() {
-        assert_eq!(
-            sentence_for("sentence-stopped", "review", "paused"),
-            "stopped on review, moved to paused"
-        );
-    }
-
-    #[test]
-    fn a_move_from_queued_into_paused_reads_stopped_before_starting() {
-        assert_eq!(
-            sentence_for("sentence-stopped-queued", "queued", "paused"),
-            "stopped before starting, moved to paused"
-        );
-    }
-
-    #[test]
-    fn leaving_paused_reads_resumed() {
-        assert_eq!(
-            sentence_for("sentence-resumed", "paused", "implement"),
-            "resumed, moved to implement"
-        );
-    }
-
-    #[test]
-    fn leaving_blocked_reads_unblocked() {
-        assert_eq!(
-            sentence_for("sentence-unblocked", "blocked", "review"),
-            "unblocked, moved to review"
-        );
-    }
-
     /// A finished task's line — built by `finished_event` from the archive,
     /// not by `arrival_event`, since the queue no longer holds the task.
     #[test]
@@ -3900,18 +3949,9 @@ mod tests {
             sentence(&Move::Passed {
                 from: "handover".into(),
                 to: crate::pipeline::DONE.into(),
+                cause: None,
             }),
             "passed handover, moved to done"
-        );
-    }
-
-    /// `implement` routes to `review` on a pass and `blocked` on a failure;
-    /// `handover` is neither, so the move is named without a guess.
-    #[test]
-    fn a_move_matching_no_route_reads_left() {
-        assert_eq!(
-            sentence_for("sentence-left", "implement", "handover"),
-            "left implement, moved to handover"
         );
     }
 
@@ -3926,6 +3966,7 @@ mod tests {
             change: Move::Passed {
                 from: "review-spec".into(),
                 to: "review-code".into(),
+                cause: None,
             },
         }]);
         let raw = ticker(&recent, 120, 5);
@@ -3956,6 +3997,7 @@ mod tests {
                 change: Move::Failed {
                     from: "review-code".into(),
                     to: "fix-code-review".into(),
+                    cause: None,
                 },
             },
         ]);
@@ -3992,6 +4034,7 @@ mod tests {
             change: Move::Passed {
                 from: "implement".into(),
                 to: "review".into(),
+                cause: None,
             },
         }]);
         let drawn = strip(&ticker(&recent, 30, 5));

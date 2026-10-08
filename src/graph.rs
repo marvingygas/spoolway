@@ -231,7 +231,7 @@ impl Graph {
     }
 
     /// Same walk as [`Self::dependents`], counting only ids `keep` accepts —
-    /// [`crate::dispatch::fall_through`]'s own use, restricted to this
+    /// [`crate::dispatch::same_group_dependents`]'s own use, restricted to this
     /// task's own group: once a dependent falls outside it, whatever it in
     /// turn holds up is another group's business, not this task's `last:`
     /// step.
