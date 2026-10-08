@@ -676,6 +676,21 @@ impl ModelPrice {
         }
     }
 
+    /// What one request cost: all of it at the tier's rates when its prompt
+    /// passed the tier's threshold, at the base rates otherwise.
+    ///
+    /// The prompt is `input + cache_read + cache_write`, the same reading
+    /// [`last_turn`] takes of a request's size. A prompt of exactly the
+    /// threshold has not passed it, and the output is charged at the tier's
+    /// rate too, because providers bill the whole request at the higher price.
+    pub(crate) fn apply_turn(&self, tokens: &Tokens) -> f64 {
+        let prompt = tokens.input + tokens.cache_read + tokens.cache_write();
+        match self.tier {
+            Some(tier) if prompt > tier.above_k * 1000 => tier.rates.apply(tokens),
+            _ => self.apply(tokens),
+        }
+    }
+
     /// What `tokens` cost at the base rates. Crate-visible so `spoolway eval`
     /// can price one token class at a time through the same rates — see
     /// `eval::ClassCost` — rather than repeat them.
@@ -692,6 +707,11 @@ impl ModelPrice {
 /// than zero is deliberate: a model in none has an unknown cost, not a free
 /// one, and `spoolway eval` says which models those are instead of quietly
 /// under-reporting a total.
+///
+/// Prices a summed token count at the base rates, which no banking path does
+/// any more: [`read_transcript`] prices each turn alone. Kept for the tests
+/// that compare against the summed figure.
+#[cfg(test)]
 pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens) -> Option<f64> {
     crate::models::resolve(prices, model)
         .price
@@ -984,8 +1004,12 @@ pub struct Harvest {
     pub model: String,
     pub tokens: Tokens,
     pub turns: u32,
-    /// Cost the agent reported itself. Trusted over the price map when present:
-    /// a local lane's honest zero is a fact spoolway should not have to be told.
+    /// The sum of every turn's cost: the agent's own figure for a turn that
+    /// reports one, trusted over the price map because a local lane's honest
+    /// zero is a fact spoolway should not have to be told, and the price
+    /// map's rate for the tier that turn's prompt reached for a turn that does
+    /// not. `None` when any turn has neither, since a partial sum would read as
+    /// a complete one.
     pub cost_usd: Option<f64>,
     /// The largest single-turn context reading seen anywhere in the
     /// transcript — the same figure [`last_turn`] takes of the *last* turn,
@@ -1001,8 +1025,12 @@ pub struct Harvest {
 /// Absence is not an error. A lane may have failed before its first turn, or
 /// the project's `args` may not pass `{session_id}` through at all — neither is
 /// worth failing a dispatch pass over, and both simply produce no ledger line.
-pub fn harvest(kind: &str, session: &str) -> Option<Harvest> {
-    harvest_file(kind, &session_file(kind, session)?)
+pub fn harvest(
+    kind: &str,
+    session: &str,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Option<Harvest> {
+    harvest_file(kind, &session_file(kind, session)?, prices)
 }
 
 /// The last assistant turn a transcript records, in whichever of the two
@@ -1070,8 +1098,8 @@ pub struct Live {
 /// banked once by id for the reason [`read_transcript`] does it — Claude Code
 /// writes an assistant line per content block and repeats that request's usage
 /// verbatim on each, so counting every line roughly doubles the output.
-pub fn live_of(kind: &str, path: &Path) -> Option<Live> {
-    let transcript = read_transcript(kind, path);
+pub fn live_of(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Live> {
+    let transcript = read_transcript(kind, path, prices);
     Some(Live {
         context: transcript.context,
         harvest: transcript.total?,
@@ -1249,8 +1277,8 @@ pub fn touched_at(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-fn harvest_file(kind: &str, path: &Path) -> Option<Harvest> {
-    read_transcript(kind, path).total
+fn harvest_file(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Harvest> {
+    read_transcript(kind, path, prices).total
 }
 
 /// A transcript read once, totalled and sized.
@@ -1268,8 +1296,9 @@ struct Transcript {
     context: u64,
 }
 
-/// The totals of one transcript, deduped by request.
-fn read_transcript(kind: &str, path: &Path) -> Transcript {
+/// The totals of one transcript, deduped by request, with its cost summed
+/// turn by turn against `prices` — the project's `[models]` table.
+fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Transcript {
     let none = Transcript {
         total: None,
         context: 0,
@@ -1287,8 +1316,11 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
     // that compacted after peaking close to its window from one that never
     // did. See [`Harvest::ctx_peak`].
     let mut ctx_peak = 0u64;
-    let mut reported = 0.0f64;
-    let mut any_cost = false;
+    let mut spent = 0.0f64;
+    // Set by a turn that neither reports a cost nor has a price, which makes
+    // the lane's cost unknown rather than the sum of the turns that did.
+    let mut any_unpriced = false;
+    let mut resolved: HashMap<String, Option<ModelPrice>> = HashMap::new();
     // One request, several records: Claude Code writes an assistant line per
     // content block — text, thinking, each tool call — and repeats that
     // request's usage verbatim on every one of them. In a real transcript half
@@ -1349,9 +1381,19 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
         if !turn.model.is_empty() {
             model = turn.model.clone();
         }
-        if let Some(cost) = turn.cost {
-            reported += cost;
-            any_cost = true;
+        // Priced one turn at a time because a tier depends on a single
+        // request's prompt, which the summed tokens cannot show. The agent's
+        // own figure wins over the table, as it always has.
+        //
+        // Resolved once per distinct model: a lookup for a model with no
+        // `[models]` row reads the refreshed price file from disk, and a
+        // transcript has hundreds of turns on one or two models.
+        let entry = *resolved
+            .entry(turn.model.clone())
+            .or_insert_with(|| crate::models::resolve(prices, &turn.model).price);
+        match turn.cost.or_else(|| Some(entry?.apply_turn(&turn.tokens))) {
+            Some(cost) => spent += cost,
+            None => any_unpriced = true,
         }
     }
 
@@ -1365,7 +1407,7 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
             tokens,
             turns,
             ctx_peak,
-            cost_usd: any_cost.then_some(reported),
+            cost_usd: (!any_unpriced).then_some(spent),
         }),
         context,
     }
@@ -2488,7 +2530,7 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    let harvest = harvest(kind, session)?;
+    let harvest = harvest(kind, session, &repo.config.models)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
@@ -2523,11 +2565,11 @@ struct Delta {
 }
 
 /// The delta itself: every line in `ledger` naming `session` is summed and
-/// subtracted from `harvest`'s own totals, and `cost_usd` is either the
-/// harvest's own reported cost minus what was already banked of it, or —
-/// when the agent reports no cost of its own — the delta priced fresh from
-/// this project's `[models]` table.
-fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<Delta> {
+/// subtracted from `harvest`'s own totals, and `cost_usd` is the harvest's
+/// cost minus what was already banked of it, floored at zero. The harvest has
+/// priced every turn already — see [`read_transcript`] — so a cost it lacks
+/// stays absent here.
+fn banked_delta(session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<Delta> {
     let mut banked = Tokens::default();
     let mut banked_cost = 0.0f64;
     let mut banked_turns = 0u32;
@@ -2544,10 +2586,10 @@ fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest)
         return None;
     }
     let model = harvest.model.clone();
-    let cost_usd = match harvest.cost_usd {
-        Some(total) => Some((total - banked_cost).max(0.0)),
-        None => price(&repo.config.models, &model, &tokens),
-    };
+    // The harvest's cost already covers every turn, each priced at its own
+    // tier, so it is absent only when some turn had no price. Pricing the
+    // delta here would hide that turn behind the last turn's model.
+    let cost_usd = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
     Some(Delta {
         model,
         tokens,
@@ -2597,7 +2639,7 @@ fn bank_lane_at(
     ledger: &[Entry],
     harvest: &Harvest,
 ) -> Option<Entry> {
-    let delta = banked_delta(repo, session, ledger, harvest)?;
+    let delta = banked_delta(session, ledger, harvest)?;
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: task.to_string(),
@@ -2684,7 +2726,7 @@ fn catch_up_settled_lane_at(
         return None;
     }
 
-    let harvest = harvest_file(kind, path)?;
+    let harvest = harvest_file(kind, path, &repo.config.models)?;
     // The lane's most recent line, whose columns the catch-up line inherits.
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
@@ -2912,7 +2954,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             // worktree is never a `dir` line's root (see this function's own
             // doc), so there is nothing new to classify here.
             if let Some((_, dir)) = known {
-                let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models) else {
                     continue;
                 };
                 if let Some(entry) = bank_dir_session(
@@ -2939,7 +2981,8 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             // reaches this line on every sweep. See this function's own doc.
             if let Some(parent) = parent_of_transcript(&path) {
                 if let Some(carry) = hand_lines.get(&parent) {
-                    let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                    let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models)
+                    else {
                         continue;
                     };
                     if let Some(entry) = bank_lane_at(
@@ -2980,7 +3023,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                     // at least one line.
                     continue;
                 };
-                let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models) else {
                     continue;
                 };
                 // Marked here, on the carry, since the task's own line it
@@ -3024,7 +3067,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                 continue;
             };
 
-            let Some(harvest) = harvest_file(adapter.kind, &path) else {
+            let Some(harvest) = harvest_file(adapter.kind, &path, &repo.config.models) else {
                 continue;
             };
             if let Some(entry) = bank_dir_session(
@@ -3305,7 +3348,7 @@ fn bank_dir_session(
     ledger: &[Entry],
     harvest: &Harvest,
 ) -> Option<Entry> {
-    let delta = banked_delta(repo, session, ledger, harvest)?;
+    let delta = banked_delta(session, ledger, harvest)?;
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: String::new(),
@@ -4266,7 +4309,7 @@ mod tests {
         let home = home_with("pi", session, PI_TRANSCRIPT);
 
         let path = session_file_in(&home, "pi", session).expect("transcript not found");
-        let harvest = harvest_file("pi", &path).expect("nothing harvested");
+        let harvest = harvest_file("pi", &path, &BTreeMap::new()).expect("nothing harvested");
 
         assert_eq!(harvest.model, "Qwen3.6-35B-A3B");
         assert_eq!(harvest.turns, 2, "the user turn must not count");
@@ -4351,7 +4394,7 @@ mod tests {
         let home = home_with("codex", session, CODEX_TRANSCRIPT);
 
         let path = session_file_in(&home, "codex", session).expect("transcript not found");
-        let harvest = harvest_file("codex", &path).expect("nothing harvested");
+        let harvest = harvest_file("codex", &path, &BTreeMap::new()).expect("nothing harvested");
 
         assert_eq!(harvest.turns, 2, "one `token_count` per turn, and no more");
         // Turn two reported 9,723 input of which 9,705 was cached: 18 fresh.
@@ -4415,7 +4458,10 @@ mod tests {
                 .ends_with(&format!("-{session}.jsonl"))),
             "the id ends the filename, and that is what matched"
         );
-        assert_eq!(harvest_file("codex", &path).map(|h| h.turns), Some(2));
+        assert_eq!(
+            harvest_file("codex", &path, &BTreeMap::new()).map(|h| h.turns),
+            Some(2)
+        );
 
         // `CODEX_HOME` moves the tree for this lookup exactly as it moves it
         // for codex — a person who relocates their codex home keeps being
@@ -4456,7 +4502,7 @@ mod tests {
         // it arrived cached or fresh — not the 19,353 the two turns sum to.
         assert_eq!(last_turn_size_at("codex", &path), Some(9723));
 
-        let live = live_of("codex", &path).expect("no live reading");
+        let live = live_of("codex", &path, &BTreeMap::new()).expect("no live reading");
         assert_eq!(live.context, 9723);
         assert_eq!(live.harvest.tokens.output, 76 + 42);
 
@@ -4535,7 +4581,7 @@ mod tests {
         let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
 
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
-        let harvest = harvest_file("claude", &path).expect("nothing harvested");
+        let harvest = harvest_file("claude", &path, &prices()).expect("nothing harvested");
 
         // req_1 spans two records and is banked once.
         assert_eq!(harvest.turns, 2);
@@ -4544,11 +4590,120 @@ mod tests {
         assert_eq!(harvest.tokens.cache_read, 42609);
         // req_2 is the fullest point: 2 fresh + 42609 read back from cache.
         // Claude Code records no cost, so the price map is what answers.
-        assert_eq!(harvest.cost_usd, None);
-
-        let cost = price(&prices(), &harvest.model, &harvest.tokens).expect("no price matched");
+        let cost = harvest.cost_usd.expect("no price matched");
         let expected = (4.0 * 5.0 + 784.0 * 25.0 + 42609.0 * 0.5 + 23511.0 * 6.25) / 1e6;
         assert!((cost - expected).abs() < 1e-9, "{cost} vs {expected}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// One request under the threshold and one over it, for a model that prices
+    /// a tier at 100k tokens. Turn one is 1k in and 100 out; turn two is 150k
+    /// of prompt (50k fresh, 100k cached) and 200 out.
+    const TIERED_TRANSCRIPT: &str = r#"{"type":"assistant","requestId":"req_1","uuid":"b","timestamp":"2026-08-04T06:14:20.000Z","message":{"model":"claude-tiered","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+{"type":"assistant","requestId":"req_2","uuid":"d","timestamp":"2026-08-04T06:14:44.000Z","message":{"model":"claude-tiered","usage":{"input_tokens":50000,"output_tokens":200,"cache_read_input_tokens":100000,"cache_creation_input_tokens":0}}}
+"#;
+
+    /// A price table whose `claude-tiered` charges double from 100k prompt
+    /// tokens up, on every class.
+    fn tiered_prices() -> BTreeMap<String, ModelPrice> {
+        let base = Rates {
+            input: 1.0,
+            output: 10.0,
+            cache_read: 0.1,
+            ..Rates::default()
+        };
+        let over = Rates {
+            input: 2.0,
+            output: 20.0,
+            cache_read: 0.2,
+            ..Rates::default()
+        };
+        BTreeMap::from([(
+            "claude-tiered".to_string(),
+            ModelPrice {
+                input: base.input,
+                output: base.output,
+                cache_read: base.cache_read,
+                tier: Some(PriceTier {
+                    above_k: 100,
+                    rates: over,
+                }),
+                ..ModelPrice::default()
+            },
+        )])
+    }
+
+    /// The tier depends on one request's prompt, which a summed delta cannot
+    /// show, so each turn is priced alone and only the costs are added.
+    #[test]
+    fn a_turn_over_the_threshold_is_charged_whole_at_the_tier_rates() {
+        let session = "0198e2c0-2222-4000-8000-000000000021";
+        let home = home_with("claude", session, TIERED_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+
+        let first = (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6;
+        let second = (50_000.0 * 2.0 + 200.0 * 20.0 + 100_000.0 * 0.2) / 1e6;
+        let cost = harvest.cost_usd.expect("a priced lane has a cost");
+        assert!(
+            (cost - (first + second)).abs() < 1e-12,
+            "{cost} vs {}",
+            first + second
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A prompt of exactly the threshold is not over it.
+    #[test]
+    fn a_turn_exactly_at_the_threshold_stays_at_the_base_rates() {
+        let session = "0198e2c0-2222-4000-8000-000000000022";
+        let transcript = r#"{"type":"assistant","requestId":"req_1","uuid":"b","message":{"model":"claude-tiered","usage":{"input_tokens":100000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+"#;
+        let home = home_with("claude", session, transcript);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+
+        let expected = (100_000.0 * 1.0 + 100.0 * 10.0) / 1e6;
+        assert!((harvest.cost_usd.unwrap() - expected).abs() < 1e-12);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A model with no tier costs what pricing the summed tokens always gave.
+    #[test]
+    fn an_untiered_model_banks_the_same_cost_as_pricing_the_summed_tokens() {
+        let session = "0198e2c0-2222-4000-8000-000000000023";
+        let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &prices()).expect("nothing harvested");
+
+        let summed = price(&prices(), &harvest.model, &harvest.tokens).expect("no price matched");
+        let cost = harvest.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - summed).abs() < 1e-9, "{cost} vs {summed}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// One turn with no price makes the lane's cost unknown. Summing only the
+    /// priced turns would bank a figure that reads as complete.
+    #[test]
+    fn a_turn_whose_model_has_no_price_leaves_the_cost_absent() {
+        let session = "0198e2c0-2222-4000-8000-000000000024";
+        let transcript = format!(
+            "{TIERED_TRANSCRIPT}{}",
+            r#"{"type":"assistant","requestId":"req_3","uuid":"e","message":{"model":"mystery-model","usage":{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+"#
+        );
+        let home = home_with("claude", session, &transcript);
+        let path = session_file_in(&home, "claude", session).expect("transcript not found");
+
+        let harvest = harvest_file("claude", &path, &tiered_prices()).expect("nothing harvested");
+        assert_eq!(harvest.cost_usd, None);
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -4571,7 +4726,7 @@ mod tests {
 "#;
         let home = home_with("claude", session, transcript);
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
-        let harvest = harvest_file("claude", &path).expect("nothing harvested");
+        let harvest = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing harvested");
 
         assert_eq!(
             harvest.turns, 2,
@@ -4595,7 +4750,7 @@ mod tests {
         );
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
 
-        let harvest = harvest_file("claude", &path).expect("nothing harvested");
+        let harvest = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing harvested");
         assert_eq!(
             harvest.model, "claude-opus-5",
             "the synthetic turn must not overwrite the real model"
@@ -4654,7 +4809,7 @@ mod tests {
         // `ctx_peak` must disagree, or this is not testing anything.
         assert_eq!(last_turn_size_at("pi", &path), Some(100));
 
-        let harvest = harvest_file("pi", &path).expect("nothing harvested");
+        let harvest = harvest_file("pi", &path, &BTreeMap::new()).expect("nothing harvested");
         assert_eq!(harvest.ctx_peak, 90000);
 
         std::fs::remove_dir_all(&home).ok();
@@ -4671,14 +4826,14 @@ mod tests {
         let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
 
-        let live = live_of("claude", &path).expect("nothing read");
+        let live = live_of("claude", &path, &BTreeMap::new()).expect("nothing read");
 
         // The same last turn `last_turn_size_at` sizes, and the same totals
         // `harvest_file` banks — one read rather than two.
         assert_eq!(live.context, 2 + 42609 + 2169);
         assert_eq!(live.harvest.tokens.output, 268 + 516);
 
-        let banked = harvest_file("claude", &path).expect("nothing harvested");
+        let banked = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing harvested");
         assert_eq!(
             live.harvest.tokens.output, banked.tokens.output,
             "the board and the ledger must agree about one transcript"
@@ -4716,7 +4871,14 @@ mod tests {
         let home = crate::scratch::root("usage-empty");
         std::fs::create_dir_all(&home).unwrap();
         assert!(session_file_in(&home, "pi", "0198e2c0-3333-4000-8000-000000000003").is_none());
-        assert!(harvest("nushell", "0198e2c0-3333-4000-8000-000000000003").is_none());
+        assert!(
+            harvest(
+                "nushell",
+                "0198e2c0-3333-4000-8000-000000000003",
+                &BTreeMap::new()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -5985,6 +6147,187 @@ mod tests {
         assert_eq!(line.outcome, None, "late turns were never judged");
     }
 
+    /// The two requests of [`TIERED_TRANSCRIPT`], stamped with a working
+    /// directory so the directory and worktree sweeps can place them.
+    fn tiered_transcript_in(cwd: &Path) -> String {
+        let cwd = cwd.to_string_lossy();
+        let turn = |n: u32, input: u64, cache_read: u64, output: u64| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "assistant",
+                    "requestId": format!("req-{n}"),
+                    "timestamp": format!("2026-08-04T07:00:0{n}.000Z"),
+                    "cwd": cwd,
+                    "message": {
+                        "model": "claude-tiered",
+                        "usage": {
+                            "input_tokens": input,
+                            "output_tokens": output,
+                            "cache_read_input_tokens": cache_read,
+                        },
+                    },
+                })
+            )
+        };
+        turn(1, 1_000, 0, 100) + &turn(2, 50_000, 100_000, 200)
+    }
+
+    /// What [`tiered_transcript_in`] costs under [`tiered_prices`]: the first
+    /// turn at the base rates, the second at the tier's.
+    fn tiered_cost() -> f64 {
+        (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6
+            + (50_000.0 * 2.0 + 200.0 * 20.0 + 100_000.0 * 0.2) / 1e6
+    }
+
+    /// The settled-lane catch-up passes the project's `[models]` to the reader.
+    /// Pricing the summed delta at the base rates would bank the first turn's
+    /// rates for the second, which crossed the threshold.
+    #[test]
+    fn a_settled_lane_catch_up_prices_each_turn_at_its_own_tier() {
+        let (mut repo, path, _root_guard) = fixture("settled-lane-tiered");
+        repo.config.models = tiered_prices();
+        std::fs::write(&path, tiered_transcript_in(Path::new("/work"))).unwrap();
+        append(
+            &repo,
+            &Entry {
+                ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+                task: "demo".into(),
+                step: "implement".into(),
+                session: "s".into(),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("the catch-up line");
+
+        let cost = line.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+    }
+
+    /// The headless interrupt's `bank_lane` reads the transcript itself, so it
+    /// needs the project's `[models]` as well.
+    #[test]
+    fn bank_lane_prices_each_turn_at_its_own_tier() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut repo, _, _root_guard) = fixture("bank-lane-tiered");
+        repo.config.models = tiered_prices();
+        let session = "0198e2c0-9999-4000-8000-000000000031";
+        let home = home_with("claude", session, &tiered_transcript_in(Path::new("/work")));
+
+        let line = crate::platform::test_home::with_home(&home, || {
+            bank_lane(&repo, "claude", session, "demo", "implement")
+        })
+        .expect("a banked line");
+
+        let cost = line.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A session banked twice banks only what it had not banked before: the
+    /// new total minus the banked cost, never below zero.
+    #[test]
+    fn a_session_banked_twice_banks_only_the_cost_not_banked_before() {
+        let (mut repo, _, _root_guard) = fixture("bank-twice-tiered");
+        repo.config.models = tiered_prices();
+        let dir = crate::scratch::root("bank-twice-tiered-files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.jsonl");
+        let both = dir.join("both.jsonl");
+        let whole = tiered_transcript_in(Path::new("/work"));
+        let first_line = whole.lines().next().unwrap();
+        std::fs::write(&first, format!("{first_line}\n")).unwrap();
+        std::fs::write(&both, &whole).unwrap();
+
+        let harvest = |path: &Path| harvest_file("claude", path, &repo.config.models).unwrap();
+        let one = bank_lane_from(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now(),
+            &harvest(&first),
+        )
+        .expect("a first bank");
+        let two = bank_lane_from(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now(),
+            &harvest(&both),
+        )
+        .expect("a second bank");
+
+        let base_turn = (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6;
+        assert!((one.cost_usd.unwrap() - base_turn).abs() < 1e-12);
+        assert!((two.cost_usd.unwrap() - (tiered_cost() - base_turn)).abs() < 1e-12);
+        assert!(
+            (one.cost_usd.unwrap() + two.cost_usd.unwrap() - tiered_cost()).abs() < 1e-12,
+            "the two lines total the transcript"
+        );
+
+        // A later total below what the ledger already holds is floored.
+        let whole = harvest(&both);
+        let ledger = read(&repo).unwrap();
+        let delta = banked_delta(
+            "s",
+            &ledger,
+            &Harvest {
+                tokens: Tokens {
+                    input: whole.tokens.input + 1,
+                    ..whole.tokens
+                },
+                cost_usd: Some(0.0),
+                ..whole
+            },
+        )
+        .expect("one token more than banked");
+        assert_eq!(delta.cost_usd, Some(0.0));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A turn with no price makes the lane's cost unknown even when the last
+    /// turn's model is priced; pricing the delta at that last model would bank
+    /// a figure that hides the unpriced turn.
+    #[test]
+    fn a_lane_with_an_unpriced_turn_banks_no_cost() {
+        let (mut repo, _, _root_guard) = fixture("bank-unpriced-turn");
+        repo.config.models = tiered_prices();
+        let dir = crate::scratch::root("bank-unpriced-turn-files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let unpriced = r#"{"type":"assistant","requestId":"req-0","message":{"model":"mystery-model","usage":{"input_tokens":10,"output_tokens":10}}}"#;
+        std::fs::write(
+            &path,
+            format!("{unpriced}\n{}", tiered_transcript_in(Path::new("/work"))),
+        )
+        .unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+        assert_eq!(harvest.model, "claude-tiered", "the last turn is priced");
+
+        let line = bank_lane_from(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now(),
+            &harvest,
+        )
+        .expect("a banked line");
+        assert_eq!(line.cost_usd, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A settled lane whose transcript has not moved since its last banked line
     /// is not read at all — `spoolway eval` runs on every invocation, and
     /// re-parsing the largest file in every finished run each time is the
@@ -6959,6 +7302,66 @@ mod tests {
             "grouped onto the project root's own row"
         );
         assert!(!appended[0].is_lane());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The directory sweep hands the project's `[models]` to the reader: a hand
+    /// session in the project root is banked as a directory line whose second
+    /// turn is priced at the tier.
+    #[test]
+    fn the_directory_sweep_prices_each_turn_at_its_own_tier() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut repo, root, _root_guard) = dir_fixture("dir-sweep-tiered");
+        repo.config.models = tiered_prices();
+        let session = "0198e2c0-bbbb-4000-8000-00000000f001";
+        let home = claude_home_with("dir-sweep-tiered", session, &tiered_transcript_in(&root));
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+
+        assert_eq!(appended.len(), 1, "one directory line");
+        assert!(!appended[0].is_lane());
+        let cost = appended[0].cost_usd.expect("a priced session has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The worktree sweep hands it over too: a hand session in a task's
+    /// worktree is banked on that task, its second turn priced at the tier.
+    #[test]
+    fn the_worktree_sweep_prices_each_turn_at_its_own_tier() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut repo, root, _root_guard) = dir_fixture("wt-sweep-tiered");
+        repo.config.models = tiered_prices();
+        let worktree = root.join("nonexistent-task-worktree");
+        write_task(&repo.queue_dir(), "wt-tiered", "review", &worktree);
+        append(
+            &repo,
+            &Entry {
+                ts: "2026-08-04T06:00:00+00:00".into(),
+                task: "wt-tiered".into(),
+                step: "implement".into(),
+                pipeline: "default".into(),
+                agent: "claude".into(),
+                kind: "claude".into(),
+                session: "sL".into(),
+                run: Some("r1".into()),
+                ..plain_entry()
+            },
+        )
+        .unwrap();
+        let session = "0198e2c0-bbbb-4000-8000-00000000f002";
+        let home = claude_home_with("wt-sweep-tiered", session, &tiered_transcript_in(&worktree));
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+
+        assert_eq!(appended.len(), 1, "one banked line for the hand session");
+        assert_eq!(appended[0].task, "wt-tiered");
+        let cost = appended[0].cost_usd.expect("a priced session has a cost");
+        assert!((cost - tiered_cost()).abs() < 1e-12, "{cost}");
 
         std::fs::remove_dir_all(&home).ok();
     }

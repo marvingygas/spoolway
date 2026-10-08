@@ -2781,7 +2781,9 @@ impl<'a> Dispatcher<'a> {
         // sweep on exactly that mtime against this line's `ts`, so a `ts`
         // chosen after the read would strand the unread tail forever.
         let banked_at = chrono::Utc::now();
-        let Some(harvest) = crate::usage::harvest(&record.kind, &record.session) else {
+        let Some(harvest) =
+            crate::usage::harvest(&record.kind, &record.session, &self.repo.config.models)
+        else {
             return false;
         };
 
@@ -2822,19 +2824,11 @@ impl<'a> Dispatcher<'a> {
         {
             return false;
         }
-        // The mutable borrow of `self` from `usage_banked()` above ends
-        // here, at its last use — needed before the immutable borrow of
-        // `self.repo` just below, which the borrow checker cannot see is a
-        // disjoint field the way it could when this read `self.usage_banked`
-        // directly rather than through a method.
-        //
-        // Prices are linear in tokens, so pricing the delta is the same as
-        // differencing two priced totals — and it stays right when the agent
-        // reports its own cost instead.
-        let cost_usd = match harvest.cost_usd {
-            Some(total) => Some((total - banked_cost).max(0.0)),
-            None => crate::usage::price(&self.repo.config.models, &model, &tokens),
-        };
+        // The harvest has priced every turn at its own tier already, so what
+        // is left is the part not banked before. It is absent when some turn
+        // had no price, and pricing the delta from the last model here would
+        // hide that turn.
+        let cost_usd = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
 
         // Only this step's own verdict counts. A report left over from the
         // previous step means this lane never reported one, and an absent
@@ -5103,9 +5097,9 @@ impl<'a> Dispatcher<'a> {
     /// [`Dispatcher::over_output_ceiling`]'s own counterpart in money rather
     /// than tokens — see `unattended.max_cost_usd`.
     ///
-    /// Priced the same way every ledger line already is: `crate::usage::price`
-    /// through project config, the refreshed table, then the one vendored into
-    /// the binary. The premise `max_output_tokens` was written against — that
+    /// Priced the same way every ledger line already is: turn by turn through
+    /// project config, the refreshed table, then the one vendored into the
+    /// binary. The premise `max_output_tokens` was written against — that
     /// `[models]` ships empty and a priced ceiling would silently never fire —
     /// stopped holding the moment that table shipped. A line this run's own
     /// `record_usage` could not price at all — a model the tables have never
@@ -11180,6 +11174,113 @@ mod tests {
         let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
         assert_eq!(lines.len(), 1, "banked once, before the pane went");
         assert_eq!(lines[0].tokens.input, 6_000);
+    }
+
+    /// Bank a Claude lane through the dispatcher, the path every torn-down lane
+    /// takes, and answer the one line it appended. `earlier` is any transcript
+    /// records that come before the two tiered requests.
+    fn bank_claude_lane_through_a_pass(name: &str, earlier: &str) -> crate::usage::Entry {
+        let (mut repo, _root_guard) = fixture(name);
+        repo.config.dispatch.keep_finished_lanes = false;
+        repo.config.models.insert(
+            "claude-tiered".to_string(),
+            crate::usage::ModelPrice {
+                input: 1.0,
+                output: 10.0,
+                cache_read: 0.1,
+                tier: Some(crate::usage::PriceTier {
+                    above_k: 100,
+                    rates: crate::usage::Rates {
+                        input: 2.0,
+                        output: 20.0,
+                        cache_read: 0.2,
+                        ..Default::default()
+                    },
+                }),
+                ..Default::default()
+            },
+        );
+        let worktree = a_checkout(&format!("dispatch-{name}"));
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let session = "tiered-lane";
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kind: "claude".into(),
+                agent: "claude".into(),
+                model: "claude-tiered".into(),
+                ..kept_record(session, 1)
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        let home = crate::scratch::root(&format!("dispatch-{name}-home"));
+        let dir = home.join(".claude/projects/-home-someone-work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = |id: &str, input: u64, cache_read: u64, output: u64| {
+            format!(
+                "{{\"type\":\"assistant\",\"requestId\":\"{id}\",\"message\":{{\
+                 \"model\":\"claude-tiered\",\"usage\":{{\"input_tokens\":{input},\
+                 \"output_tokens\":{output},\"cache_read_input_tokens\":{cache_read},\
+                 \"cache_creation_input_tokens\":0}}}}}}\n"
+            )
+        };
+        std::fs::write(
+            dir.join(format!("{session}.jsonl")),
+            format!(
+                "{earlier}{}{}",
+                request("r1", 1_000, 0, 100),
+                request("r2", 50_000, 100_000, 200)
+            ),
+        )
+        .unwrap();
+
+        let mux = FakeMux::new(vec![lane_in(
+            &repo,
+            "demo · implement",
+            LaneStatus::Working,
+            "w1:p7",
+        )]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let mut lines = banked.into_iter().filter(|e| e.session == session);
+        let line = lines.next().expect("the lane was not banked");
+        assert!(lines.next().is_none(), "banked once");
+        line
+    }
+
+    /// `record_usage` is the path every torn-down lane is banked through. Its
+    /// second request passed the threshold, so it is charged whole at the
+    /// tier's rates and the first at the base rates.
+    #[test]
+    fn a_banked_lane_is_priced_turn_by_turn_at_each_turns_own_tier() {
+        let line = bank_claude_lane_through_a_pass("bank-tiered-lane", "");
+
+        let expected = (1_000.0 * 1.0 + 100.0 * 10.0) / 1e6
+            + (50_000.0 * 2.0 + 200.0 * 20.0 + 100_000.0 * 0.2) / 1e6;
+        let cost = line.cost_usd.expect("a priced lane has a cost");
+        assert!((cost - expected).abs() < 1e-12, "{cost} vs {expected}");
+    }
+
+    /// One request on a model nothing prices makes the lane's cost unknown,
+    /// even though the last request's model is priced.
+    #[test]
+    fn a_banked_lane_with_an_unpriced_turn_banks_no_cost() {
+        let unpriced = "{\"type\":\"assistant\",\"requestId\":\"r0\",\"message\":{\
+                        \"model\":\"mystery-model\",\"usage\":{\"input_tokens\":10,\
+                        \"output_tokens\":10}}}\n";
+        let line = bank_claude_lane_through_a_pass("bank-unpriced-lane", unpriced);
+
+        assert_eq!(line.cost_usd, None);
     }
 
     /// A boot that fails after the pane to take over was picked leaves that

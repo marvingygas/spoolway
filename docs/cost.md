@@ -147,8 +147,20 @@ cache_write_1h = 1.00
 A sub-table whose name does not read as `above_<N>k_tokens` is refused when the config loads,
 and so is a second tier on the same model. A tier rate left out is unset, as on the base entry,
 and a missing `cache_write_1h` falls back to the tier's `cache_write_5m`. `spoolway models`
-shows a tier's rates on an indented row under its model. Lane costs are priced at the base
-rates.
+shows a tier's rates on an indented row under its model.
+
+### How a lane is priced
+
+spoolway prices each turn of a transcript on its own and adds up the costs. A turn is over the
+threshold when its `input + cache_read + cache_write` is more than the threshold. An over-threshold
+turn is charged whole at the tier's rates, output included. Every other turn is charged at the
+base rates. A model with no tier is charged at the base rates for every turn.
+
+A lane that has been banked before adds only the cost it has not banked yet. The `COST` column
+of the dispatch board shows the same figure for a running step.
+
+A lane with a turn whose model has no price banks no cost at all. The cost is left out, not
+set to zero.
 
 Set a price from the command line:
 
@@ -188,8 +200,8 @@ and US-only rates are not read, so a lane that uses them is priced at the standa
 `spoolway models refresh --vendor` fetches the upstream file with curl and rewrites
 `assets/model-prices.json` for review and commit.
 
-`pi` prices its own transcripts and reports zero for a local model. Claude Code records no
-cost, so the price table answers for it.
+`pi` prices its own transcripts and reports zero for a local model. Claude Code and codex
+record no cost, so the price table answers for them, one turn at a time.
 
 ## The version a lane ran under
 
