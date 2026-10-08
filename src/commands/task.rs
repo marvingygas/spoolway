@@ -67,6 +67,7 @@ const IGNORED_KEYS: &[&str] = &[
     "escalated",
     "parked_by_stop",
     "resume",
+    "restart",
     "patch",
     "skip",
     "replay_of",

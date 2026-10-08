@@ -509,6 +509,7 @@ mod tests {
                 escalated: false,
                 parked_by_stop: false,
                 resume: None,
+                restart: None,
                 pipeline: Some("default".to_string()),
                 group: group.map(str::to_string),
                 group_description: None,

@@ -66,6 +66,7 @@ as JSON.
 | `attempts`, `launched_at`, `steps`, `rounds`, `arrivals`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
+| `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |
 | `missing_start_branch` | the dispatcher | The start branch that did not exist when the dispatcher paused the task. `spoolway resume` clears it. |
 | `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and paused the task. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. |
 | `parked_by_stop` | the dispatcher | Set when the dispatch tab's stop popup, `i`, is what parked this task. The next start resumes it on its own and clears the flag; `spoolway resume` and `r` clear it too. |
@@ -267,16 +268,16 @@ A task moves to `blocked` when a step reports `block`, when a step spends its `l
 and routes to `blocked`, or when a lane fails to start three times. The reason is written to
 `## Blocker`, and the board pins the task at the top of its group.
 
-```
-spoolway resume <task>
-spoolway resume <task> --stage review -m "credentials rotated"
-```
-
-`resume` continues the blocked lane's own session at the step it stopped on, if that session's
-last reply is within the model's [`prompt_cache_ttl`](agents.md#cache-warmth-is-a-models-fact).
-Past it, `resume` opens a fresh session at the same step. The same check applies to a task
-that comes back from a park. `--stage` always starts a fresh session at the step you name. A task that leaves `blocked` by any road starts every
+Press `r` on the blocked row. The picker preselects the step the task stopped on, and `enter`
+continues the blocked lane's own session there, if that session's last reply is within the
+model's [`prompt_cache_ttl`](agents.md#cache-warmth-is-a-models-fact). Past it, `enter` opens
+a fresh session at the same step. The same check applies to a task that comes back from a
+park. Pick another step and `enter` starts a fresh session at that step. A task that leaves
+`blocked` by any road starts every
 step's [`loop:`](pipelines.md#loops) count again from zero.
+
+To throw the step's conversation away and brief the step from scratch, run
+[`spoolway restart <task>`](cli-reference.md#spoolway-restart-task).
 
 ### Paused is the other one, and it is not a block
 
@@ -285,10 +286,8 @@ task whose own `gate_at:` names the step it is reporting from, whatever that ste
 same holds for a command step: `gate: true` holds a passing exit, and `gate_at:` holds any exit.
 Nothing went wrong. You decide whether it goes on.
 
-```
-spoolway resume <task>                                    # on, by the step's on_pass
-spoolway resume <task> --stage review -m "send it back round"   # on, at a step you name
-```
+Press `r` on the paused row. The picker preselects the step the gate's pass leads to, and
+`enter` sends the task on. Pick another step to send it back round to that step.
 
 A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plain resume to
 `blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT

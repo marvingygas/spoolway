@@ -110,7 +110,7 @@ a second `enter` while a stop is already going does nothing. Starting dispatchin
 every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
-finishing` for one, left out once none are). `r`/`R`, `p` and `u`/`U` work whether or not a
+finishing` for one, left out once none are). `r`, `p`, `s` and `u`/`U` work whether or not a
 child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
@@ -299,7 +299,7 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task, the way the board's `r` key does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
+Resume one task, the way the `(next)` row of the board's `r` picker does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
 
 A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
@@ -628,6 +628,47 @@ spoolway resume <task> --stage review -m "send it back round"
 | `-m`, `--message <TEXT>` | | Note for the status log |
 
 See [Gates](pipelines.md#gates).
+
+### `spoolway restart <task>`
+
+Start the step a task is on over. The step's conversation is discarded, and the step is briefed from scratch even where it declares `session: true`. Nothing in the worktree is touched.
+
+The command writes the task first, then ends the lane on the step it restarts. The lanes on steps the task has already run stay open until the task is done, as they do after a resume. A lane that is working or waiting on a prompt is interrupted, and every lane is stopped, whichever terminal backend runs it. A blocked task owns its unblocker lane, so that is the lane it ends. The task goes back to the same step with `attempts` at zero and `restart: <step>` set. A task on `blocked` also starts every step's [`loop:`](pipelines.md#loops) count again from zero.
+
+A `paused` task restarts the step it was parked or gated on. The command accepts a task that is running, paused or blocked, and refuses these, each with a message that says what to do:
+
+| Task | What the message says to do |
+|---|---|
+| On `queued` | It starts on its own. Run `spoolway queue pause <task>` to hold it back |
+| Paused by an issue-tracking hook | Run `spoolway resume <task>` |
+| On `done`, or on a step that ends the pipeline | Run `spoolway resume <task> --stage <step>` to run a step again |
+| On a step the pipeline does not define | Run `spoolway resume <task> --stage <step>` |
+| On a step that runs a command | Run `spoolway resume <task>`, because a command holds no conversation |
+
+The command is refused when run from inside a lane. It is also refused when a `spoolway report` changed the task file first. In that case it touches no lane and asks you to run it again.
+
+```
+spoolway restart <task>
+spoolway restart <task> -m "the conversation looped"
+```
+
+The output names each lane it tore down, the session it abandoned and the step it sent the task to:
+
+```
+  tore down lane `<task> · <step>`
+  session 32b0d7bd — abandoned, already banked
+<task>: -> <step> (fresh session)
+```
+
+The session line reads `abandoned, already banked` when the usage ledger already holds that session, and `abandoned` otherwise. If a lane will not stop, the task is already restarted. Run the command again to retry the stop.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-m`, `--message <TEXT>` | `restarted by hand — fresh session` | Note for the status log |
+
+The board's `s` key does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
+
+See [A step that carries its own session](dispatcher.md#a-step-that-carries-its-own-session).
 
 ### `spoolway task edit <task>`
 

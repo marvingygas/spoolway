@@ -1046,6 +1046,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.escalated = false;
     front.parked_by_stop = false;
     front.resume = None;
+    front.restart = None;
     front.branch = Some(format!("task/{}", front.id));
     // A task that names its own `base:` keeps it — a task cut for a
     // branch other than the one `--base` named for the rest of the
@@ -9984,6 +9985,16 @@ mod tests {
         );
         let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         assert!(task.front.launch_failures.is_empty());
+    }
+
+    /// `restart` is a dispatcher-owned one-shot key the task contract throws
+    /// away, so a submitted task never arrives restarting a step that never
+    /// ran.
+    #[test]
+    fn a_task_carrying_restart_has_it_reset() {
+        let text = task_text("demo", "group: demo\nrestart: implement\n", BODY);
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
+        assert_eq!(task.front.restart, None);
     }
 
     /// A repeat submission is refused whether the id is still in the queue —

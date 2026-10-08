@@ -291,24 +291,214 @@ pub(super) fn pause_confirm_panel(id: &str, abort: &Abort) -> Vec<String> {
     crate::screen::boxed(&format!("pause {id}"), &body)
 }
 
-/// [`BoardMode::ConfirmResume`]'s panel: the gated tasks, named, and nothing
-/// more — the ids are the whole of what a person needs to see before `enter`
-/// carries them past their gates. One blank row above the body and one under
-/// the key line, as the dispatch tab's mockup draws it.
-pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {
+/// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough
+/// to keep `The lane is torn down and `review-spec` is briefed from` on one
+/// row, and narrow enough that the panel stays inside an 80-column pane.
+const RESTART_WRAP: usize = 56;
+
+/// [`BoardMode::ConfirmRestart`]'s panel, `s`'s own: the step, the lane and
+/// the session a restart throws away, then what happens to them, so a person
+/// sees exactly which conversation they are giving up before they answer.
+///
+/// The session row is left out when none is on record — a lane that never
+/// got as far as a turn — rather than printed empty, the same as
+/// `spoolway restart` prints no session line then. A refusal `s` met is
+/// printed under the two closing lines, above the key line.
+pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
     let mut body = vec![
-        String::new(),
+        format!("step      {}", confirm.step),
         format!(
-            "{} task{} waiting at a gate:",
-            gated.len(),
-            if gated.len() == 1 { "" } else { "s" }
+            "lane      {}",
+            crate::mux::lane_name(&confirm.step, &confirm.id)
         ),
     ];
-    body.extend(gated.iter().map(|id| format!("  {id}")));
+    if let Some(session) = &confirm.session {
+        body.push(format!("session   {}", session.describe()));
+    }
     body.push(String::new());
-    body.push("[enter] resume them   [esc] cancel".to_string());
+    body.extend(crate::screen::wrap(
+        &format!(
+            "The lane is torn down and `{}` is briefed from scratch. Its conversation is not \
+             kept.",
+            confirm.step
+        ),
+        RESTART_WRAP,
+    ));
+    if let Some(err) = &confirm.error {
+        body.push(String::new());
+        body.extend(
+            err.lines()
+                .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP)),
+        );
+    }
+    crate::screen::panel(
+        &format!("restart {}", confirm.id),
+        &body,
+        &crate::screen::keys(&[("s", "restart"), ("esc", "cancel")]),
+    )
+}
+
+/// [`BoardMode::ResumePicker`]'s panel: where the task stopped, its
+/// pipeline's steps with the cursor's row marked `▸`, any pinned row under
+/// them, a refusal if `enter` met one, and the key line.
+///
+/// `height` is [`pane_height`]'s: the list shows as many steps as the pane
+/// leaves room for, with `▲ n more` and `▼ n more` standing in for the rest,
+/// so a long pipeline in a short pane keeps the cursor's row and the key line
+/// on screen. A refusal keeps its first line whatever the pane — the whole
+/// point of printing one is that a refused `enter` does not look like
+/// nothing happened — and is cut, ending in `…`, before the list drops under
+/// its three-row least. Past that it is the list that gives way, down to the
+/// cursor's row alone — see [`list_window`]. Only a pane too short for the
+/// panel's fixed rows, that row and the refusal's first line still
+/// overflows. `None` — no terminal to measure — shows every step and the
+/// whole refusal.
+pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) -> Vec<String> {
+    // Three columns past the longest step id, so every note starts in one
+    // column however long the pipeline's own step names are.
+    let column = picker
+        .rows
+        .iter()
+        .map(|row| row.step.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let line = |i: usize| {
+        let row = &picker.rows[i];
+        let mark = if i == picker.cursor { "▸" } else { " " };
+        let text = format!(
+            "{mark} {}{}",
+            crate::screen::pad_to(&row.step, column),
+            row.note
+        );
+        text.trim_end().to_string()
+    };
+    let mut error: Vec<String> = match &picker.error {
+        Some(err) => std::iter::once(String::new())
+            .chain(
+                err.lines()
+                    .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP)),
+            )
+            .collect(),
+        None => Vec::new(),
+    };
+    let pinned = picker.rows.len() - picker.listed;
+
+    // Every row but the list's own and the refusal's: the two borders, a
+    // blank, the header and a blank above the list; the pinned rows under
+    // it; and a blank, the key line and a blank to close. Three more rows are
+    // kept spare, because `with_popup` pads a frame shorter than the panel
+    // plus two, and the unhosted board's frame is one row short of the pane
+    // — see `clamp_rows`. A panel more than three rows short of the pane is
+    // never padded past it.
+    let fixed = 2 + 3 + pinned + 3 + 3;
+    let room = match height {
+        Some(height) => {
+            let free = height.saturating_sub(fixed);
+            // The refusal takes what the list can spare above its own least,
+            // but never less than its blank line and its first line.
+            let keep = free
+                .saturating_sub(MIN_WINDOW)
+                .max(REFUSAL_LEAST)
+                .min(error.len());
+            if keep < error.len() {
+                error.truncate(keep);
+                if let Some(last) = error.last_mut() {
+                    last.push_str(" …");
+                }
+            }
+            free.saturating_sub(error.len())
+        }
+        None => usize::MAX,
+    };
+    let window = list_window(picker, room);
+
+    let mut body = vec![String::new(), picker.header.clone(), String::new()];
+    if window.marked && window.start > 0 {
+        body.push(format!("▲ {} more", window.start));
+    }
+    body.extend((window.start..window.start + window.shown).map(line));
+    let below = picker.listed - window.start - window.shown;
+    if window.marked && below > 0 {
+        body.push(format!("▼ {below} more"));
+    }
+    body.extend((picker.listed..picker.rows.len()).map(line));
+    body.extend(error);
     body.push(String::new());
-    crate::screen::boxed("resume all", &body)
+    body.push(crate::screen::keys(&[
+        ("↑↓", "pick"),
+        ("enter", "resume"),
+        ("esc", "cancel"),
+    ]));
+    body.push(String::new());
+    crate::screen::boxed(&format!("resume {}", picker.id), &body)
+}
+
+/// The fewest rows a scrolled picker list is drawn in while it can still
+/// say what it leaves out: `▲`, the cursor's own step, and `▼`.
+const MIN_WINDOW: usize = 3;
+
+/// The fewest rows a refusal is cut to: the blank line above it and its
+/// first line.
+const REFUSAL_LEAST: usize = 2;
+
+/// The slice of the picker's listed steps [`list_window`] draws.
+struct Window {
+    start: usize,
+    shown: usize,
+    /// Whether the `▲`/`▼` lines are drawn for what the slice leaves out —
+    /// `false` once the pane has room for one step and nothing more.
+    marked: bool,
+}
+
+/// The slice of the picker's listed steps that fits in `room` rows — `room`
+/// counting the `▲`/`▼` lines the slice needs for whatever it leaves out.
+///
+/// Centred on the cursor while it is on a listed step. On a pinned row it is
+/// centred on the stopped step and its `on_pass` and `on_fail` targets
+/// instead, so the list still shows where the task stopped and where it
+/// would have gone. A window that reaches either end of the list needs no
+/// line for that end, and takes the row back for one more step.
+///
+/// With fewer than [`MIN_WINDOW`] rows the list folds to its anchor alone,
+/// with no `▲`/`▼` lines: the cursor's row, which the person is acting on,
+/// is the one row never cut.
+fn list_window(picker: &ResumePicker, room: usize) -> Window {
+    let n = picker.listed;
+    if n <= room {
+        return Window {
+            start: 0,
+            shown: n,
+            marked: false,
+        };
+    }
+    let anchor = match picker.cursor < n {
+        true => picker.cursor,
+        false => picker
+            .labelled
+            .map_or(0, |(first, last)| (first + last) / 2),
+    };
+    if room < MIN_WINDOW {
+        return Window {
+            start: anchor,
+            shown: 1,
+            marked: false,
+        };
+    }
+    let inner = room - 2;
+    let start = anchor.saturating_sub(inner / 2).min(n - inner);
+    let (start, shown) = if start == 0 {
+        (0, room - 1)
+    } else if start + inner == n {
+        (n - (room - 1), room - 1)
+    } else {
+        (start, inner)
+    };
+    Window {
+        start,
+        shown,
+        marked: true,
+    }
 }
 
 /// [`BoardMode::ConfirmUnqueue`]'s panel — today's single-line panel
@@ -365,8 +555,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     )
 }
 
-/// [`BoardMode::ConfirmUnqueueAll`]'s panel. One id per line, the same as
-/// [`resume_confirm_panel`]'s own list of gated tasks — `boxed` sizes the
+/// [`BoardMode::ConfirmUnqueueAll`]'s panel. One id per line — `boxed` sizes the
 /// panel from its widest line, and a single line joining every id, the way
 /// an earlier version of this did, grows with the count instead of the
 /// longest id: five or more unstarted tasks pushed it past 80 columns.
@@ -3509,6 +3698,56 @@ mod tests {
         for id in &ids {
             assert!(panel.iter().any(|line| line.contains(id.as_str())), "{id}");
         }
+    }
+
+    /// `restart_confirm_panel` draws the board's restart mockup row for row,
+    /// and stays inside an 80-column pane with a refusal printed in it.
+    #[test]
+    fn the_restart_panel_draws_its_mockup_within_eighty_columns() {
+        let mut confirm = RestartConfirm {
+            id: "prompt-cache-ttl-default".to_string(),
+            step: "review-spec".to_string(),
+            session: Some(crate::commands::AbandonedSession {
+                id: "32b0d7bd-1111-2222-3333-444455556666".to_string(),
+                banked: true,
+            }),
+            error: None,
+        };
+        let panel = restart_confirm_panel(&confirm);
+        let body: Vec<&str> = panel[1..panel.len() - 1]
+            .iter()
+            .map(|line| line.trim_matches('│').trim_end())
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "  step      review-spec",
+                "  lane      prompt-cache-ttl-default · review-spec",
+                "  session   32b0d7bd — abandoned, already banked",
+                "",
+                "  The lane is torn down and `review-spec` is briefed from",
+                "  scratch. Its conversation is not kept.",
+                "",
+                "  [s] restart   [esc] cancel",
+            ]
+        );
+        assert!(
+            panel[0].starts_with("┌─ restart prompt-cache-ttl-default ─"),
+            "{}",
+            panel[0]
+        );
+
+        confirm.error = Some(
+            "task `prompt-cache-ttl-default` changed while the restart was being written — a \
+             report landed first, so the restart was not written and no lane was touched."
+                .to_string(),
+        );
+        let panel = restart_confirm_panel(&confirm);
+        for line in &panel {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
+        assert!(panel.iter().any(|line| line.contains("a report landed")));
+        assert!(panel[panel.len() - 2].contains("[s] restart   [esc] cancel"));
     }
 
     /// `unqueue_confirm_panel`'s chain form is built through `screen::boxed`

@@ -902,6 +902,7 @@ mod tests {
             escalated: false,
             parked_by_stop: false,
             resume: None,
+            restart: None,
             pipeline: None,
             group: None,
             group_description: None,

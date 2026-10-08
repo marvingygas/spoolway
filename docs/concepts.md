@@ -168,7 +168,7 @@ Every pipeline gets a `blocked` step from `[unattended]` unless it declares its 
 |---|---|
 | `queued` | Waiting for its dependencies and a worker slot. |
 | `done` | Finished. The worktree is removed, the branch deleted once pushed, the file archived. |
-| `paused` | Held for a person after a gate. `spoolway resume` sends it on; `--stage <step>` sends it to a step you name instead. |
+| `paused` | Held for a person after a gate. `r` on the board sends it on, or to a step you pick instead. |
 | `blocked` | Needs help. `spoolway resume` continues it. An [unattended run](pipelines.md#unattended-runs) starts the unblocker lane instead. |
 
 A step names where the task goes next with `on_pass` and `on_fail`. Prompts report an outcome
@@ -216,7 +216,7 @@ sends a caught block or loop-max to `blocked`, the same place it would have reac
 A command step has no lane to report, so its exit is the report: `gate: true` holds a passing
 exit, and `gate_at` holds any exit. `spoolway resume` sends a held failing command exit down the
 step's `on_fail`.
-`spoolway resume <task> --stage <step>` sends it to a step you name instead.
+Picking another step in the board's resume picker sends it to a step you name instead.
 
 A gate holds in unattended runs too. Use it for a step no pull request shows first, such as a
 deploy or a release.

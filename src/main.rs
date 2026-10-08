@@ -418,6 +418,10 @@ fn run() -> Result<()> {
                     let from_step = std::env::var(dispatch::ENV_STEP).ok();
                     commands::resume(&repo, routing(&graph)?, args, from_step.as_deref())
                 }
+                Command::Restart(args) => {
+                    let from_step = std::env::var(dispatch::ENV_STEP).ok();
+                    commands::restart(&repo, routing(&graph)?, args, from_step.as_deref())
+                }
                 Command::Lane(args) => {
                     let mux = mux::backend(&repo)?;
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();

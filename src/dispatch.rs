@@ -4854,7 +4854,7 @@ pub const ENV_SESSION: &str = "SPOOLWAY_SESSION";
 /// byte hash: two loads of the very same content always render identically,
 /// however the file on disk happens to be formatted, so this never flags a
 /// write as stale over whitespace or field order it never actually changed.
-fn file_fingerprint(task: &Task) -> u64 {
+pub(crate) fn file_fingerprint(task: &Task) -> u64 {
     hash_of(&task.render().unwrap_or_default())
 }
 
@@ -4870,7 +4870,7 @@ fn file_fingerprint(task: &Task) -> u64 {
 /// `file_seen` updated to match so a second persist of the same task later
 /// in the same pass is compared against what this call just wrote, not the
 /// pass's original read.
-fn persist_task(
+pub(crate) fn persist_task(
     repo: &Repo,
     task: &mut Task,
     file_seen: &mut HashMap<String, u64>,
@@ -5324,6 +5324,9 @@ struct Boot {
     /// goes on to fail must find the flag exactly as it left it, for the
     /// next pass's retry to read.
     resuming: bool,
+    /// Whether `task.front.restart` named this step — spent the same way and
+    /// for the same reason.
+    restarting: bool,
     /// Whether `task.front.parked_from` named this step — spent the same way
     /// and for the same reason.
     parked: bool,
@@ -5410,7 +5413,7 @@ fn boot_start_lane(mux: &dyn Mux, boot: &Boot) -> Result<()> {
 }
 
 /// What a successful `Mux::start_lane` earns — the stage move, the spent
-/// `resume`/`parked_from`, `bank_launch`, `attempts`, `launched_at`, and the
+/// `resume`/`restart`/`parked_from`, `bank_launch`, `attempts`, `launched_at`, and the
 /// `persist_task` that writes all of it down — run on
 /// [`Dispatcher::start_lanes`]' own thread, in rank order, once that round's
 /// threads have all rejoined it. Answers whether the write actually reached
@@ -5434,6 +5437,13 @@ fn finish_launch_bookkeeping(
     // retry is meant to start again.
     if boot.resuming {
         task.front.resume = None;
+    }
+    // Spent in the same pass, for the same reason: the restart has had its
+    // launch, and leaving the key set would make every later retry of this
+    // step a restart too — a fresh conversation each time, whatever `session:`
+    // says.
+    if boot.restarting {
+        task.front.restart = None;
     }
     // Spent the same way, and for the same reason: whether or not this park
     // found a session to carry, its one launch has now happened, and leaving
@@ -5680,6 +5690,12 @@ fn prepare_boot(
     // against the real binary, either way.
     let adapter = crate::agent::adapter(&profile.kind);
     let resuming = task.front.resume.as_deref() == Some(step.id.as_str());
+    // A restart is the one road that ends the step's conversation instead of
+    // continuing it, so it suppresses both lookups below: the one-shot
+    // `resume:` and the step's standing `session:`. Without that, a step that
+    // declares `session: true` would find its own earlier session and walk
+    // straight back into the conversation the restart was meant to abandon.
+    let restarting = task.front.restart.as_deref() == Some(step.id.as_str());
     // A `p` park sets `resume` exactly the way a real block does, so this
     // launch continues the same lane either way — but it is not the same
     // *fact* to hand the lane back: nothing stopped it, a person's own
@@ -5699,7 +5715,7 @@ fn prepare_boot(
     // `note`, so nothing is added to RECENT. A blocked task's `## Blocker`
     // carries what the old lane knew; a park leaves its Handoff and commits.
     let price = crate::models::resolve(&repo.config.models, &model).price;
-    let one_shot = resuming
+    let one_shot = (resuming && !restarting)
         .then(|| lane_session_in(repo, ledger, &name))
         .flatten()
         .filter(|(kind, session)| !session_is_cold(price.as_ref(), kind, session));
@@ -5707,8 +5723,8 @@ fn prepare_boot(
     // fallback for it — a task coming back from `blocked` names an exact
     // session to continue, and a miss there says that lane's session is
     // gone, not that any prompt match will do instead. So this is only
-    // tried when `resuming` is false to begin with.
-    let (carried, session_miss) = match (resuming, step.session) {
+    // tried when `resuming` is false to begin with, and never on a restart.
+    let (carried, session_miss) = match (resuming, step.session && !restarting) {
         (false, true) => match carried_session(repo, pipeline, task, step, profile, &model, ledger)
         {
             Ok(found) => (Some(found), None),
@@ -5884,7 +5900,7 @@ fn prepare_boot(
                 repo.unattended(),
             )]
         }
-        (false, _, _) => crate::compose::opening_messages(task, pipeline, step),
+        (false, _, _) => crate::compose::opening_messages(task, pipeline, step, restarting),
     };
 
     Ok(Boot {
@@ -5901,6 +5917,7 @@ fn prepare_boot(
         head,
         note: session_miss,
         resuming,
+        restarting,
         parked,
         parked_with_session: previous.is_some(),
     })
@@ -7362,6 +7379,7 @@ mod tests {
             escalated: false,
             parked_by_stop: false,
             resume: None,
+            restart: None,
             // Required now — a test naming a task with no `pipeline:` of
             // its own overrides this back to `None` explicitly with `edit`.
             pipeline: Some("default".to_string()),
@@ -14342,6 +14360,98 @@ mod tests {
         }
     }
 
+    /// A restart opens a new conversation on a `session: true` step whose
+    /// ledger holds a session the carry would have continued, and briefs it
+    /// as an opening plus the not-clean-worktree paragraph. The launch after
+    /// it carries no `restart` key, so it reads as an ordinary retry.
+    #[test]
+    fn a_restart_opens_a_fresh_session_on_a_session_step_and_is_spent() {
+        let (repo, _root_guard) = fixture("restart-fresh");
+        let path = add_task_with(&repo, "demo", "fix", |f| {
+            f.restart = Some("fix".into());
+        });
+        let kind = local_kind(&repo);
+        write_entry(
+            &repo,
+            "demo",
+            "implement",
+            &kind,
+            "test-model",
+            "carried-session",
+        );
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &session_pipelines(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let session = load_lane_records(&repo)["demo · fix"].session.clone();
+        assert!(!session.is_empty());
+        assert_ne!(
+            session, "carried-session",
+            "the standing `session:` must not be tried on a restart"
+        );
+        let sent = mux.read("demo · fix", 9999).unwrap();
+        assert!(sent.contains("before anything else."), "{sent}");
+        assert!(sent.contains("its changes are still here"), "{sent}");
+        assert!(!sent.contains("nobody in between"), "{sent}");
+        assert_eq!(reload(&path).front.restart, None, "spent by the launch");
+    }
+
+    /// The restart wins over the one-shot `resume:` too: a task both resumed
+    /// and restarted is a fresh conversation, and both keys are spent.
+    #[test]
+    fn a_restart_beats_the_one_shot_resume_flag() {
+        let (repo, _root_guard) = fixture("restart-beats-resume");
+        let path = add_task_with(&repo, "demo", "fix", |f| {
+            f.resume = Some("fix".into());
+            f.restart = Some("fix".into());
+        });
+        let kind = local_kind(&repo);
+        record_lane(&repo, "demo · fix", "one-shot-session", &kind);
+
+        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_ne!(
+            load_lane_records(&repo)["demo · fix"].session,
+            "one-shot-session"
+        );
+        let task = reload(&path);
+        assert_eq!(task.front.resume, None);
+        assert_eq!(task.front.restart, None);
+    }
+
+    /// A `restart` naming some other step is not this launch's to read or
+    /// spend, so this step's own session carry is unaffected.
+    #[test]
+    fn a_restart_naming_another_step_leaves_this_steps_carry_alone() {
+        let (repo, _root_guard) = fixture("restart-other-step");
+        let path = add_task_with(&repo, "demo", "fix", |f| {
+            f.restart = Some("implement".into());
+        });
+        let kind = local_kind(&repo);
+        write_entry(
+            &repo,
+            "demo",
+            "implement",
+            &kind,
+            "test-model",
+            "carried-session",
+        );
+
+        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(
+            load_lane_records(&repo)["demo · fix"].session,
+            "carried-session"
+        );
+        assert_eq!(reload(&path).front.restart.as_deref(), Some("implement"));
+    }
+
     /// Distinct wording for a distinct reason: nobody was in between for a
     /// carried session, which is the one thing [`carry_prompt`] says and
     /// [`resume_prompt`] never does.
@@ -18649,8 +18759,7 @@ mod tests {
 
     /// `blocked`'s own bare `spoolway resume <task>` line is in its toolbox
     /// and nowhere else — no other step's system prompt should ever mention
-    /// `READING THE RUN` or offer that line. Every lane is still handed the
-    /// `--stage` form by `YOUR LANE`, which this test does not forbid.
+    /// `READING THE RUN` or offer that line.
     #[test]
     fn only_blocked_names_the_bare_spoolway_resume_command() {
         let (repo, _root_guard) = fixture("only-blocked-names-resume");
@@ -18675,8 +18784,7 @@ mod tests {
             !implement_prompt.contains("READING THE RUN"),
             "{implement_prompt}"
         );
-        // `YOUR LANE` hands a person `spoolway resume <task> --stage <step>`
-        // on every step, so the bare command is the one only `blocked` names.
+        // Only `blocked` names the bare command, in its toolbox.
         assert!(
             !implement_prompt.contains("`spoolway resume <task>`"),
             "{implement_prompt}"
@@ -18705,10 +18813,11 @@ mod tests {
 - `spoolway queue route example` shows every step, what each does, and where resuming sends this task. Read it before you tell a person what happens next.
 - If a person talks to you in this pane, do what they ask, whichever step's work it is. Write every change they ask for into the task file, so later steps see it: `spoolway task edit example --section <heading> --from -` while the task is held on `paused` or `blocked`, `--handoff` while it runs.
 - Resuming a held task stays the person's: once their request is done, tell them where resuming sends it, and to resume it on the board.
-- What a person has to do, name on the board, never as a `spoolway` command. The one exception: to send the task to another step than resuming would, give them `spoolway resume example --stage <step>`, to run in their own shell.";
+- What a person has to do, name on the board, never as a `spoolway` command. To send the task to another step than resuming would, tell them to press `r` on its row and pick the step.";
         let flat = lane.split_whitespace().collect::<Vec<_>>().join(" ");
         let expected = bullets.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(flat.contains(&expected), "got: {lane}");
+        assert!(!lane.contains("--stage"), "{lane}");
 
         let blocked = pipeline.step(crate::pipeline::BLOCKED).unwrap();
         let blocked_task = reload(&add_task(&repo, "stuck", crate::pipeline::BLOCKED));
@@ -18987,6 +19096,32 @@ mod tests {
         );
     }
 
+    /// A restart adds one paragraph to the briefing message itself: the
+    /// message count and the skill messages ahead of it are unchanged.
+    #[test]
+    fn a_restarting_opening_adds_one_paragraph_to_the_briefing_message() {
+        let (repo, _root_guard) = fixture("prompt-restart");
+        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .skills = vec!["code-review".to_string()];
+        let step = pipeline.step("implement").unwrap();
+        let task = reload(&add_task(&repo, "demo", "implement"));
+
+        let plain = crate::compose::opening_messages(&task, &pipeline, step, false);
+        let restarted = crate::compose::opening_messages(&task, &pipeline, step, true);
+
+        assert_eq!(restarted.len(), plain.len());
+        assert_eq!(restarted[0], plain[0], "the skill message is unchanged");
+        let briefing = restarted.last().unwrap();
+        assert!(briefing.starts_with(plain.last().unwrap()), "{briefing}");
+        assert!(briefing.contains("`## Status Log`"), "{briefing}");
+        assert!(briefing.contains("still here"), "{briefing}");
+    }
+
     /// A step naming `skills:` gets one `/name` message per skill, in
     /// declaration order, ahead of the briefing. The briefing sentence is the
     /// same one a step without skills is sent.
@@ -18998,7 +19133,7 @@ mod tests {
         let plain_step = plain_pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
         assert_eq!(
-            crate::compose::opening_messages(&task, &plain_pipeline, plain_step),
+            crate::compose::opening_messages(&task, &plain_pipeline, plain_step, false),
             [crate::compose::opening_prompt(
                 &task,
                 &plain_pipeline,
@@ -19017,7 +19152,7 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
 
         assert_eq!(
-            crate::compose::opening_messages(&task, &pipeline, step),
+            crate::compose::opening_messages(&task, &pipeline, step, false),
             [
                 "/code-review".to_string(),
                 "/spoolway-doctor".to_string(),
@@ -19044,7 +19179,7 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        for message in crate::compose::opening_messages(&task, &pipeline, step) {
+        for message in crate::compose::opening_messages(&task, &pipeline, step, false) {
             assert!(
                 !message.contains('\n'),
                 "the message must arrive as typed text, not a multi-line paste: {message}"
@@ -19070,7 +19205,7 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let messages = crate::compose::opening_messages(&task, &pipeline, step);
+        let messages = crate::compose::opening_messages(&task, &pipeline, step, false);
         let briefing = format!("Read {} before anything else.", task.path.display());
         assert_eq!(
             messages.iter().filter(|m| m.contains(&briefing)).count(),
@@ -19207,7 +19342,14 @@ mod tests {
         let opening = crate::compose::lane_prompt_for_state(&task, &pipeline, step, "opening");
         assert_eq!(opening.len(), 3, "{opening:?}");
         assert_eq!(opening[..2], ["/code-review", "/spoolway-doctor"]);
-        for state in crate::compose::STATES.iter().filter(|s| **s != "opening") {
+        // A restart is an opening too, so it keeps the same skill messages.
+        let restart = crate::compose::lane_prompt_for_state(&task, &pipeline, step, "restart");
+        assert_eq!(restart.len(), 3, "{restart:?}");
+        assert_eq!(restart[..2], opening[..2]);
+        for state in crate::compose::STATES
+            .iter()
+            .filter(|s| !["opening", "restart"].contains(s))
+        {
             let messages = crate::compose::lane_prompt_for_state(&task, &pipeline, step, state);
             assert_eq!(messages.len(), 1, "{state}: {messages:?}");
         }

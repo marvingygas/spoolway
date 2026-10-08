@@ -244,6 +244,20 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
 
+    /// The step to start over on, for exactly one launch: a fresh
+    /// conversation even where the step declares `session: true`.
+    ///
+    /// Every other road onto a step continues a conversation the step
+    /// already has, so a conversation that cannot work is walked back into
+    /// by resume and by the next retry alike. This one ends it. `prepare_boot`
+    /// reads it as `restarting` when it names the step being started, skips
+    /// both session lookups, and briefs the lane as if the step had never
+    /// run, plus a sentence saying the worktree is not clean.
+    /// `finish_launch_bookkeeping` spends it in the same pass as `resume` and
+    /// `parked_from`, so the launch after a restart is an ordinary retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<String>,
+
     /// Pipeline this task runs on — the only routing source spoolway reads
     /// any more; there is no project default to fall back to. Still
     /// `Option` rather than required at this layer, on purpose: a legacy or
