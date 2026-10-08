@@ -853,7 +853,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
                 step.id == crate::pipeline::BLOCKED && !config.unattended.enabled;
             if !unstaffed_blocked && (model_is_missing || model_is_blank) {
                 problems.push(format!(
-                    "`{}`/`{}` names no model: — give it one",
+                    "`{}`/`{}` names no model — set `model:` on it",
                     pipeline.name, step.id
                 ));
             }
