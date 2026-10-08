@@ -89,8 +89,9 @@ runs `spoolway task contract --from` over the directory to check the set.
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
-Bare `spoolway` opens the screen, on the queue tab. The left pane lists one row per group in the
-pending directory. The right pane lists the highlighted group's tasks and what each waits on.
+Bare `spoolway` opens the screen, on the queue tab. The left pane, titled `groups`, lists one
+row per group in the pending directory. The right pane, titled `tasks`, lists the highlighted
+group's tasks and what each waits on.
 
 | Key | What it does |
 |---|---|
@@ -164,8 +165,9 @@ Nothing creates the directory for you. `spoolway task contract` prints this shap
 project's own routines directory, for a producer writing a routine by hand. A routine is
 never a task template: it holds finished tasks, not a skeleton with a placeholder in it.
 
-Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane lists one
-row per routine, and its right pane lists the highlighted routine's tasks.
+Bare `spoolway` has a routines tab, between the queue and jobs tabs. Its left pane,
+titled `routines`, lists one row per routine. Its right pane, titled `tasks`, lists the
+highlighted routine's tasks.
 
 | Key | What it does |
 |---|---|

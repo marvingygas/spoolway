@@ -82,13 +82,15 @@ const TABS: [Tab; 5] = [
 ];
 
 impl Tab {
+    /// The tab's name on the strip, in capitals so the strip reads as the
+    /// screen's navigation rather than as one more lowercase box title.
     fn label(self) -> &'static str {
         match self {
-            Tab::Dispatch => "dispatch",
-            Tab::Queue => "queue",
-            Tab::Routines => "routines",
-            Tab::Jobs => "jobs",
-            Tab::Eval => "eval",
+            Tab::Dispatch => "DISPATCH",
+            Tab::Queue => "QUEUE",
+            Tab::Routines => "ROUTINES",
+            Tab::Jobs => "JOBS",
+            Tab::Eval => "EVAL",
         }
     }
 
@@ -959,11 +961,11 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "      ← [dispatch]       queue        routines        jobs        eval  →",
-                "      ←  dispatch       [queue]       routines        jobs        eval  →",
-                "      ←  dispatch        queue       [routines]       jobs        eval  →",
-                "      ←  dispatch        queue        routines       [jobs]       eval  →",
-                "      ←  dispatch        queue        routines        jobs       [eval] →",
+                "      ← [DISPATCH]       QUEUE        ROUTINES        JOBS        EVAL  →",
+                "      ←  DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL  →",
+                "      ←  DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL  →",
+                "      ←  DISPATCH        QUEUE        ROUTINES       [JOBS]       EVAL  →",
+                "      ←  DISPATCH        QUEUE        ROUTINES        JOBS       [EVAL] →",
             ]
         );
     }
@@ -986,8 +988,8 @@ mod tests {
     #[test]
     fn a_narrow_terminal_still_keeps_a_space_between_each_arrow_and_the_labels() {
         let line = plain(&strip_line(Tab::Queue, 20));
-        assert!(line.starts_with("  ←  dispatch"), "{line:?}");
-        assert!(line.ends_with("eval  →"), "{line:?}");
+        assert!(line.starts_with("  ←  DISPATCH"), "{line:?}");
+        assert!(line.ends_with("EVAL  →"), "{line:?}");
     }
 
     #[test]
@@ -1030,26 +1032,25 @@ mod tests {
 
     // The e2e suite's own gesture, at unit level: the screen opens on the
     // queue tab under the strip, and `←` from there draws the board with no
-    // dispatcher behind it, offering `enter` to start one.
+    // dispatcher behind it, offering `enter` to start one. The queue is
+    // empty, so `enter` and `q` are the only keys on the line.
     #[test]
     fn host_opens_on_the_queue_tab_and_left_reaches_the_board() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-left");
         let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
-            first.contains("dispatch       [queue]       routines        jobs        eval"),
+            first.contains("DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL"),
             "{first}"
         );
         assert!(first.contains("─ groups"), "{first}");
         let last = frames.last().unwrap();
         assert!(last.contains("dispatcher stopped"), "{last}");
-        assert!(last.contains("┌─ dispatch ─"), "{last}");
+        assert!(!last.contains("─ dispatch"), "the box has no title: {last}");
         assert!(!last.contains("─ groups"), "{last}");
+        assert!(last.contains("Nothing queued"), "{last}");
         assert!(
-            last.contains(
-                "[enter] start dispatching   [o] open task   [p] pause task   \
-                 [r] resume   [s] restart   [u/U] unqueue / all   [q] quit"
-            ),
+            last.contains("\n [enter] start dispatching   [q] quit\n"),
             "{last}"
         );
     }
@@ -1105,9 +1106,9 @@ mod tests {
             &repo,
             "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[D\x1b[C",
         );
-        const DISPATCH: &str = "┌─ dispatch ─";
+        const DISPATCH: &str = "dispatcher stopped";
         const QUEUE: &str = "─ groups";
-        const ROUTINES: &str = "[routines]";
+        const ROUTINES: &str = "[ROUTINES]";
         const JOBS: &str = "no jobs yet";
         const EVAL: &str = "┌─ eval ·";
         let visited = [
@@ -1326,10 +1327,10 @@ mod tests {
         let frames = drive_host(&repo, "s\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("dispatch        queue       [routines]       jobs        eval"),
+            last.contains("DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL"),
             "{last}"
         );
-        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
             last.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
@@ -1339,7 +1340,7 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[C\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("dispatch        queue        routines       [jobs]       eval"),
+            last.contains("DISPATCH        QUEUE        ROUTINES       [JOBS]       EVAL"),
             "{last}"
         );
     }
@@ -1807,7 +1808,7 @@ mod tests {
         let leave = message_tab("spoolway eval: no ledger", &mut input, &mut out);
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let drawn = plain(&String::from_utf8(out).unwrap());
-        assert!(drawn.contains("dispatch        queue"), "{drawn}");
+        assert!(drawn.contains("DISPATCH        QUEUE"), "{drawn}");
         assert!(drawn.contains("spoolway eval: no ledger"), "{drawn}");
     }
 
@@ -1832,7 +1833,7 @@ mod tests {
             let strip = strip();
             assert_eq!(strip.len(), 3);
             assert_eq!(strip[0], "");
-            assert!(plain(&strip[1]).contains("[jobs]"), "{:?}", strip[1]);
+            assert!(plain(&strip[1]).contains("[JOBS]"), "{:?}", strip[1]);
             assert_eq!(strip[2], "");
         }
         assert_eq!(hosted(), None);

@@ -3964,9 +3964,9 @@ impl ScreenState {
 }
 
 /// Whether `group` is one this screen lists at all, under any [`HideScope`]
-/// or filter: queueable or done, never [`GroupState::Queued`]. The pane
-/// title's total and the "nothing to queue — N hidden" count are both taken
-/// over these alone, so neither counts a group no key here can bring back.
+/// or filter: queueable or done, never [`GroupState::Queued`]. The "nothing
+/// to queue — N hidden" count is taken over these alone, so it never counts
+/// a group no key here can bring back.
 fn reachable(group: &Group) -> bool {
     group.state != GroupState::Queued
 }
@@ -6110,7 +6110,8 @@ fn routine_task_lines(
 
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
 /// [`two_pane_frame`] lays the pending screen out with, folders on the left
-/// and the highlighted one's own tasks on the right.
+/// and the highlighted one's own tasks on the right, titled with fixed words
+/// the same way [`pending_frame`] titles its own.
 fn render_routines(
     routines: &[RoutineFolder],
     routines_dir: &std::path::Path,
@@ -6124,8 +6125,6 @@ fn render_routines(
     let (right, right_starts, focus) =
         routine_task_lines(highlighted, pipelines, nav, layout.right);
 
-    let left_title = format!("routines  {} of {}", routines.len(), routines.len());
-    let right_title = highlighted.map_or("no folder", |folder| folder.name.as_str());
     let folder_line = nav.folder_cursor.min(routines.len().saturating_sub(1));
     two_pane_frame(
         &window(
@@ -6148,8 +6147,8 @@ fn render_routines(
             layout.rows,
             layout.right,
         ),
-        &left_title,
-        right_title,
+        "routines",
+        "tasks",
         layout,
     )
 }
@@ -6631,6 +6630,9 @@ fn popup(
 
 /// The pending screen's own two panes, groups on the left and the
 /// highlighted group's tasks on the right.
+/// Each pane is titled with the fixed word for what it lists, never a count
+/// or the highlighted group's name: a title that changed as the cursor moved
+/// said what was in the pane but not what the pane was for.
 fn pending_frame(
     groups: &[Group],
     pipelines: &Pipelines,
@@ -6640,14 +6642,6 @@ fn pending_frame(
     let shown = shown(groups, state);
     let (left, left_starts) = groups_pane_lines(groups, &shown, state, layout.left);
     let (right, right_starts, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
-    // The total counts only what `h` and `f` can reach — a queued group is
-    // never on this screen, so counting it would promise a row no key shows.
-    let total = groups.iter().filter(|group| reachable(group)).count();
-    let left_title = format!("groups  {} of {}", shown.len(), total);
-    let title = shown
-        .get(state.group_cursor)
-        .map(|group| group.name.as_str())
-        .unwrap_or("no group");
     // `group_cursor` addresses `shown`, not `left`'s own lines — the two
     // disagree by one row past every separator [`groups_pane_lines`] draws
     // between two states (never present while filtering — see
@@ -6678,8 +6672,8 @@ fn pending_frame(
             layout.rows,
             layout.right,
         ),
-        &left_title,
-        title,
+        "groups",
+        "tasks",
         layout,
     )
 }
@@ -10956,7 +10950,7 @@ mod tests {
 
         let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[D");
         assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
-        assert!(last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(last_frame(&drawn).contains("DISPATCH"), "{drawn}");
         assert!(last_frame(&drawn).contains("[q] quit"), "{drawn}");
 
         let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[C");
@@ -10988,7 +10982,7 @@ mod tests {
                 .contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
             "{drawn}"
         );
-        assert!(last_frame(&drawn).contains("[routines]"), "{drawn}");
+        assert!(last_frame(&drawn).contains("[ROUTINES]"), "{drawn}");
         let (exit, _) = routines_exit(&repo, "\x1b[D");
         assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
         let (exit, _) = routines_exit(&repo, "\x1b[C");
@@ -11070,7 +11064,7 @@ mod tests {
         assert!(first.contains("no-group.md"), "{first}");
         assert!(first.contains("[enter] confirm"), "{first}");
         assert!(first.contains("─ groups"), "the tab under it: {first}");
-        assert!(first.contains("dispatch"), "under the strip: {first}");
+        assert!(first.contains("DISPATCH"), "under the strip: {first}");
     }
 
     /// What the screen opens with — the sync notice, then the update notice
@@ -11198,7 +11192,7 @@ mod tests {
 
         let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[Dq");
         assert_eq!(exit, ScreenExit::Quit);
-        assert!(!last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(!last_frame(&drawn).contains("DISPATCH"), "{drawn}");
         assert!(!last_frame(&drawn).contains("[q] quit"), "{drawn}");
     }
 
@@ -13835,10 +13829,10 @@ mod tests {
         let (opening, after_h) = (frames[0], frames[1]);
 
         assert!(
-            opening.contains("groups  0 of 1"),
-            "the opening title must count the done group as not shown, and \
-             the queued one not at all:\n{opening}"
+            opening.contains("─ groups ─") && opening.contains("─ tasks ─"),
+            "the opening titles are the panes' fixed names, with no count:\n{opening}"
         );
+        assert!(!opening.contains("no group"), "{opening}");
         // Not the full sentence: the fallback (no-terminal) width this test
         // runs at is now the narrower `MIN_LEFT_PANE`, and `two_pane_frame`'s
         // own `pad_to` cuts this row off there the same as any other line too
@@ -13860,8 +13854,8 @@ mod tests {
         );
 
         assert!(
-            after_h.contains("groups  1 of 1"),
-            "`h` must bring the done group into the shown count:\n{after_h}"
+            after_h.contains("─ groups ─") && after_h.contains("─ tasks ─"),
+            "`h` leaves both titles as they were:\n{after_h}"
         );
         assert!(after_h.contains("finished"), "{after_h}");
         assert!(!after_h.contains("queued"), "{after_h}");
@@ -14781,7 +14775,7 @@ mod tests {
 
         assert_eq!(exit, ScreenExit::Quit);
         assert!(
-            drawn.contains("groups  0 of 0"),
+            drawn.contains("─ groups ─"),
             "the empty screen still draws its title:\n{drawn}"
         );
         assert!(drawn.contains("nothing to queue"), "{drawn}");
@@ -14974,7 +14968,11 @@ mod tests {
             !last.contains("home-state"),
             "a group with no match on its name must drop out of the filtered list:\n{last}"
         );
-        assert!(last.contains("groups  2 of 3"), "{last}");
+        assert!(
+            last.contains("─ groups ─"),
+            "the filter leaves the title alone: {last}"
+        );
+        assert!(last.contains("─ tasks ─"), "{last}");
     }
 
     /// `t`, `s` and `p` are ordinary text while the filter box has focus —
@@ -15140,7 +15138,11 @@ mod tests {
         let drawn = routines_screen(&repo, "");
         let last = last_frame(&drawn);
 
-        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(
+            last.contains("─ tasks ─") && !last.contains("─ nightly"),
+            "the right title names the pane, not the highlighted routine: {last}"
+        );
         assert!(last.contains("nightly"), "{last}");
         assert!(last.contains("1 task"), "{last}");
         assert!(
@@ -15225,7 +15227,7 @@ mod tests {
         let drawn = routines_screen(&repo, "");
         let last = last_frame(&drawn);
 
-        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [ ] maintenance"), "{last}");
         assert!(!last.contains("weekly"), "a subfolder is no row: {last}");
         assert!(last.contains("  sweep"), "{last}");
@@ -15303,10 +15305,7 @@ mod tests {
         assert!(tasks.contains("> audit-deps"), "{tasks}");
 
         let back = last_frame(&routines_screen(&repo, "\t\x1b")).to_string();
-        assert!(
-            back.contains("routines  1 of 1"),
-            "still in the view: {back}"
-        );
+        assert!(back.contains("─ routines ─"), "still in the view: {back}");
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
             back.contains(" [space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit"),
@@ -15621,7 +15620,7 @@ mod tests {
 
         let last = last_frame(&routines_screen(&repo, "jx\x1b")).to_string();
         assert!(!last.contains("delete this routine"), "{last}");
-        assert!(last.contains("routines  2 of 2"), "{last}");
+        assert!(last.contains("─ routines ─"), "{last}");
         assert!(repo.routines_dir().join("nightly").is_dir());
         assert_eq!(job_names(&repo), vec!["nightly-audit"]);
     }
@@ -15642,7 +15641,7 @@ mod tests {
 
         assert!(!repo.routines_dir().join("nightly").exists());
         assert_eq!(job_names(&repo), vec!["weekly-prune"]);
-        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [ ] maintenance"), "{last}");
         assert!(!last.contains("nightly"), "{last}");
         assert!(!last.contains("delete this routine"), "{last}");
@@ -15730,7 +15729,7 @@ mod tests {
             let last = last_frame(&routines_screen(&repo, input)).to_string();
             assert!(!last.contains("when does"), "{input:?}: {last}");
             assert!(!last.contains("which pipeline"), "{input:?}: {last}");
-            assert!(last.contains("routines  2 of 2"), "{input:?}: {last}");
+            assert!(last.contains("─ routines ─"), "{input:?}: {last}");
             assert!(job_names(&repo).is_empty(), "{input:?}");
             assert!(!repo.user_jobs_file().exists(), "{input:?}");
         }
@@ -15824,7 +15823,7 @@ mod tests {
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
-        assert!(last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("─ routines ─"), "{last}");
         assert!(last.contains("> [x] nightly"), "the tick kept: {last}");
         assert!(!last.contains("─ groups"), "{last}");
     }
@@ -15845,8 +15844,8 @@ mod tests {
         let drawn = screen(&repo, listed(&repo), "r");
         let last = last_frame(&drawn);
 
-        assert!(last.contains("groups  1 of 1"), "{last}");
-        assert!(!last.contains("routines  1 of 1"), "{last}");
+        assert!(last.contains("─ groups ─"), "{last}");
+        assert!(!last.contains("─ routines ─"), "{last}");
         assert!(!last.contains("[r] routines"), "{last}");
     }
 
@@ -15872,7 +15871,7 @@ mod tests {
 
         let under = last_frame(&routines_screen(&repo, " \r")).to_string();
         assert!(under.contains("queued 1 task"), "{under}");
-        assert!(under.contains("routines  1 of 1"), "over the list: {under}");
+        assert!(under.contains("─ routines ─"), "over the list: {under}");
 
         let (repo, _root_guard) = fixture("routines-queued-close-2");
         write_routine(

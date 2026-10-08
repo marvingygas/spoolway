@@ -122,8 +122,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // something this guard has any business refusing.
     let live_tasks = repo.tasks()?;
     // A run the screen started is the exception: it waits on an empty queue
-    // for whatever the queue tab sends next, and the board says `nothing
-    // queued` meanwhile — the screen, not the queue, decides when it ends.
+    // for whatever the queue tab sends next, and the board greets the person
+    // over `Nothing queued` meanwhile — the screen, not the queue, decides
+    // when it ends.
     if live_tasks.is_empty() && !args.screen {
         if crate::jobs::enabled_count(repo) == 0 {
             println!("nothing is queued, so there is nothing to dispatch.");

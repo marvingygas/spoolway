@@ -7538,7 +7538,7 @@ mod screen_tests {
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let drawn = String::from_utf8(out).unwrap();
         assert!(drawn.contains("spoolway eval: "), "{drawn}");
-        assert!(drawn.contains("dispatch"), "under the strip: {drawn}");
+        assert!(drawn.contains("DISPATCH"), "under the strip: {drawn}");
     }
 
     /// Hosted as bare `spoolway`'s eval tab, `←` and `→` while browsing hand
@@ -7559,7 +7559,7 @@ mod screen_tests {
         let (leave, drawn) = run("\x1b[D");
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
-        assert!(first.contains("dispatch"), "{first}");
+        assert!(first.contains("DISPATCH"), "{first}");
         assert!(first.contains("─ eval · by pipeline"), "{first}");
         assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
 
@@ -7632,7 +7632,7 @@ mod screen_tests {
         // every redrawing screen by this task.
         assert_eq!(all.len(), 1, "no frame changed, so nothing was repainted");
         for frame in &all {
-            assert!(frame.contains("dispatch"), "under the strip: {frame}");
+            assert!(frame.contains("DISPATCH"), "under the strip: {frame}");
             assert!(frame.contains("┌─ eval · by pipeline "), "{frame}");
             assert!(shows_loading(frame), "{frame}");
             assert!(!frame.contains("PIPELINE"), "no table yet: {frame}");

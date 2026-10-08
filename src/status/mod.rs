@@ -39,10 +39,10 @@ pub use view::{banner, plain_table};
 // out a second time — see `screen::key_hint` — and bare `spoolway`'s tab strip
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
-    AMBER, Cause, Move, RecentEvent, Reported, Style, boxed, clamp_rows, footer, group_totals,
-    masthead, pane_height, pane_width, pause_confirm_panel, restart_confirm_panel,
-    resume_picker_panel, spool_frame, table, ticker, unqueue_all_confirm_panel,
-    unqueue_confirm_panel,
+    AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
+    clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, pane_height,
+    pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel, spool_frame,
+    table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -381,6 +381,11 @@ pub struct Board {
     /// [`Board::frame`] never needs one at all, and never pays a thread for
     /// it.
     reader: Option<Reader<Snapshot>>,
+    /// The first word of git's `user.name`, for the empty board's greeting —
+    /// `None` until the first frame reads it, then `Some(None)` when git had
+    /// no name to give. Read once per board and kept, so a changed name
+    /// shows the next time the board opens. See [`git_first_name`].
+    name: Option<Option<String>>,
     /// [`Reader`]'s own memory, kept here instead for a board whose tests
     /// call [`Board::frame`] directly: one synchronous [`build`] per call,
     /// with nothing asynchronous to own a thread of its own.
@@ -398,6 +403,7 @@ impl Board {
             recent: VecDeque::new(),
             current: None,
             reader: None,
+            name: None,
             #[cfg(test)]
             memory: Memory::new(),
         }
@@ -432,7 +438,7 @@ impl Board {
     /// A lock file that cannot be read reads as nobody holding it, since
     /// this must never name a live pid it did not see.
     ///
-    /// Drawn inside a box titled `dispatch` with the key line under it — see
+    /// Drawn inside an untitled box with the key line under it — see
     /// `paint` — so the tab reads like the three beside it.
     ///
     /// `popup` is the tab's own — a start gate, or why its dispatcher ended
@@ -527,6 +533,7 @@ impl Board {
         snapshot: &Arc<Snapshot>,
     ) -> String {
         self.apply(snapshot);
+        let name = self.greeting_name(repo);
         let frame = paint(
             repo,
             pipelines,
@@ -534,8 +541,16 @@ impl Board {
             snapshot,
             self.cursor.as_deref(),
             &self.recent,
+            name.as_deref(),
         );
         self.with_popup(frame, popup)
+    }
+
+    /// [`Board::name`], read off git on the first call and kept after.
+    fn greeting_name(&mut self, repo: &Repo) -> Option<String> {
+        self.name
+            .get_or_insert_with(|| git_first_name(repo))
+            .clone()
     }
 
     /// One frame, built whole before anything is written so a slow read never
@@ -568,6 +583,7 @@ impl Board {
         } = phase;
         let snapshot = Arc::new(build(repo, pipelines, holder, &mut self.memory)?);
         self.apply(&snapshot);
+        let name = self.greeting_name(repo);
         let frame = paint(
             repo,
             pipelines,
@@ -575,6 +591,7 @@ impl Board {
             &snapshot,
             self.cursor.as_deref(),
             &self.recent,
+            name.as_deref(),
         );
         Ok(self.with_popup(frame, popup))
     }
@@ -2697,6 +2714,7 @@ fn paint(
     snapshot: &Snapshot,
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
+    name: Option<&str>,
 ) -> String {
     let phase = Phase::Watching {
         holder: snapshot.holder,
@@ -2734,13 +2752,16 @@ fn paint(
     let version = version_label(crate::release::installed_newer().as_deref());
     let header = header_cells(phase, snapshot.finishing, version);
     let pane = pane_width();
+    if snapshot.rows.is_empty() {
+        return paint_empty(&header.join(" · "), pane, phase, recent, name);
+    }
     // One blank row before the lockup, so its ascenders have a margin to sit
-    // in rather than landing flush on the pane's own top row. `masthead`
-    // stays untouched: `init` prints its banner through the same function and
-    // must not gain a line it never asked for. Inside bare `spoolway`'s
-    // dispatch tab the blank row under the tab strip is that margin already,
-    // and a second one would push the board a row lower than the mockup
-    // draws it.
+    // in rather than landing flush on the pane's own top row. The row is
+    // pushed here rather than by `board_masthead`, which draws only the
+    // lockup and the header, as the `masthead` behind `init`'s banner does.
+    // Inside bare `spoolway`'s dispatch tab the blank row under the tab strip
+    // is that margin already, and a second one would push the board a row
+    // lower than the mockup draws it.
     if crate::screen::shell::hosted().is_none() {
         frame.push('\n');
     }
@@ -2758,22 +2779,19 @@ fn paint(
         Some(n) => n > 0,
         None => logo_turns(&snapshot.rows),
     };
-    frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
+    frame.push_str(&board_masthead(
+        &header.join(" · "),
+        pane,
+        spool_frame(running),
+    ));
     frame.push('\n');
 
-    if snapshot.rows.is_empty() {
-        // `nothing queued` either way, enabled job or not — the job ledger
-        // in the footer below already names every enabled job and its next
-        // firing, so there is nothing left for this line to explain.
-        frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
-    } else {
-        frame.push_str(&table(
-            &snapshot.rows,
-            Style::board(pane),
-            &snapshot.totals,
-            cursor,
-        ));
-    }
+    frame.push_str(&table(
+        &snapshot.rows,
+        Style::board(pane),
+        &snapshot.totals,
+        cursor,
+    ));
 
     // A queue file that would not parse is skipped rather than freezing the
     // board — see [`crate::task::load_dir`] — and named here so the fix is
@@ -2807,9 +2825,10 @@ fn paint(
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
-    // The key hint, last of all. Nothing about it depends on whether any row
-    // can use it right now; it says what the board can do, not what it would
-    // do this frame.
+    // The key hint, last of all. The row keys are drawn whenever the board
+    // has a row, whether or not that row can use them this frame; it says
+    // what the board can do, not what it would do now. A board with no row
+    // drops them in `paint_empty`.
     //
     // Built by `crate::screen::key_hint` — see that function's own doc
     // comment for why this is the one place left to build it, rather than
@@ -2821,16 +2840,8 @@ fn paint(
     // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
     // it quits — see `crate::screen::shell::quit_hint` — and so does `enter`,
     // the one place it starts or stops dispatching.
-    let enter: &[(&str, &str)] = match phase {
-        Phase::Watching {
-            dispatching: false, ..
-        } => &[("enter", "start dispatching")],
-        Phase::Watching {
-            dispatching: true, ..
-        } => &[("enter", "stop dispatching")],
-    };
     let keys = [
-        enter,
+        &[enter_hint(phase)][..],
         [
             ("o", "open task"),
             ("p", "pause task"),
@@ -2859,8 +2870,8 @@ fn paint(
     frame.push_str(&ticker(recent, pane, rows));
     frame.push_str(&tail);
 
-    // Inside bare `spoolway`'s dispatch tab the board draws in a box titled
-    // `dispatch`, the way the other three tabs draw theirs, with the key
+    // Inside bare `spoolway`'s dispatch tab the board draws in an untitled box
+    // the way the other three tabs draw theirs, with the key
     // line under the box rather than inside it. The blank row above the key
     // line stays inside, as the box's last row.
     if crate::screen::shell::hosted().is_some() {
@@ -2870,6 +2881,104 @@ fn paint(
     frame.push_str(&format!("\n{keys}\n"));
 
     clamp_rows(&frame, height)
+}
+
+/// The key line's `enter` pair: what pressing it would do to the tab's own
+/// dispatcher, given whether it has one up.
+fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
+    match phase {
+        Phase::Watching {
+            dispatching: false, ..
+        } => ("enter", "start dispatching"),
+        Phase::Watching {
+            dispatching: true, ..
+        } => ("enter", "stop dispatching"),
+    }
+}
+
+/// [`paint`]'s frame for a board with no rows: the header alone in the
+/// top-right corner, then [`view::greeting_screen`] centred down the rest of
+/// the pane, and a key line of `enter` and, inside the dispatch tab, `q`.
+///
+/// Everything else the busy board draws is left off, so an idle board reads
+/// as idle at a glance: the rule, the slots lines, the jobs ledger, the
+/// `pipelines` notice, hook failures and the parse warning. Each comes back
+/// once the board has a row again. A queue file that fails to parse makes no
+/// row, so a broken file on an otherwise empty queue is not named on the
+/// board at all. The keys that act on a row go too, since there is no row to
+/// act on.
+///
+/// RECENT is the one exception, and only while no dispatcher holds the lock
+/// (`phase`'s `holder` is `None`): it is then the record of what the last
+/// run did before it stopped.
+///
+/// The lockup holds frame 0: nothing on an empty board is running.
+fn paint_empty(
+    header: &str,
+    pane: usize,
+    phase: Phase,
+    recent: &VecDeque<RecentEvent>,
+    name: Option<&str>,
+) -> String {
+    let hosted = crate::screen::shell::hosted().is_some();
+    let height = pane_height();
+    let mut frame = String::new();
+    // The same top margin the busy board keeps — see `paint`.
+    if !hosted {
+        frame.push('\n');
+    }
+    frame.push_str(&board_header(header, pane));
+    // The rows between the header and the key line. Hosted, `boxed` gives
+    // the body `height - 2` rows, the header one of them. On its own the
+    // frame also spends the top margin above, the key line, and the row
+    // `clamp_rows` holds back so the cursor never scrolls the pane.
+    let region = height.map(|height| match hosted {
+        true => height.saturating_sub(3),
+        false => height.saturating_sub(4),
+    });
+    let none = VecDeque::new();
+    let recent = empty_board_recent(phase, recent, &none);
+    let hour = chrono::Timelike::hour(&chrono::Local::now());
+    frame.push_str(&greeting_screen(
+        &greeting(hour, name),
+        recent,
+        pane,
+        region,
+    ));
+    let keys = crate::screen::key_hint(
+        &[&[enter_hint(phase)][..], crate::screen::shell::quit_hint()].concat(),
+    );
+    if hosted {
+        return boxed(&frame, &keys, pane, height);
+    }
+    frame.push_str(&format!("{keys}\n"));
+    clamp_rows(&frame, height)
+}
+
+/// The RECENT lines an empty board draws: `recent` while no dispatcher holds
+/// the lock, and `none` while one does. See [`paint_empty`].
+fn empty_board_recent<'a>(
+    phase: Phase,
+    recent: &'a VecDeque<RecentEvent>,
+    none: &'a VecDeque<RecentEvent>,
+) -> &'a VecDeque<RecentEvent> {
+    match phase {
+        Phase::Watching {
+            holder: Some(_), ..
+        } => none,
+        Phase::Watching { holder: None, .. } => recent,
+    }
+}
+
+/// The first word of git's `user.name` in `repo`, for an empty board's
+/// greeting. Asked of git once per board — see [`Board::name`] — rather than
+/// once per frame, which would start a process several times a second.
+/// `git config` falls back to the global setting by itself; no git, a key
+/// that is not set (git exits 1) or a blank value all read as no name.
+fn git_first_name(repo: &Repo) -> Option<String> {
+    repo.git(&["config", "user.name"])
+        .ok()
+        .and_then(|value| first_name(&value))
 }
 
 /// How many live lanes each agent profile is paying for, keyed by profile name.
@@ -5411,12 +5520,12 @@ mod tests {
         assert!(!version_label(Some("99.0.0")).contains("99.0.0"));
     }
 
-    /// An empty queue with a cron job enabled still reads "nothing queued"
-    /// on the board — the job ledger in the footer already names the
-    /// enabled job and its next firing, so this line does not repeat it.
+    /// An empty board is the greeting and nothing else: no rule, no slots
+    /// lines, no jobs ledger even with a job enabled, no `pipelines` notice
+    /// and no parse warning — and only `enter` on the key line.
     #[test]
-    fn an_empty_queue_with_a_job_enabled_says_nothing_queued() {
-        let (repo, _root_guard) = fixture("board-jobs-resident");
+    fn an_empty_board_draws_only_its_greeting() {
+        let (repo, _root_guard) = fixture("board-empty-greeting");
         let pipelines = Pipelines::builtin();
         std::fs::create_dir_all(repo.home()).unwrap();
         std::fs::write(
@@ -5438,17 +5547,117 @@ mod tests {
                 )
                 .unwrap(),
         );
-        assert!(frame.contains("nothing queued"), "{frame}");
-        assert!(!frame.contains("staying up"), "{frame}");
-        assert!(!frame.contains("ctrl-c stops."), "{frame}");
-        // The next firing is not repeated here — the job ledger in the
-        // footer below already names it once, for `nightly` itself.
-        assert!(!frame.contains("next: nightly,"), "{frame}");
+        assert!(frame.contains("Nothing queued"), "{frame}");
+        assert!(!frame.contains("nothing queued"), "{frame}");
+        assert!(frame.contains("dispatcher stopped"), "{frame}");
+        // The fixture's own `user.name` is `spoolway t`.
+        assert!(frame.contains(", spoolway."), "{frame}");
+        assert!(!frame.contains("nightly"), "{frame}");
+        assert!(!frame.contains("slots"), "{frame}");
+        assert!(!frame.contains("────"), "{frame}");
+        assert!(frame.contains("[enter] start dispatching"), "{frame}");
+        assert!(!frame.contains("[o] open task"), "{frame}");
+
+        // What only a reading can carry — a file that would not parse, an
+        // edited pipeline — stays off an empty board too.
+        let snapshot = Snapshot {
+            load_problems: vec![crate::task::LoadProblem {
+                path: "broken.md".into(),
+                error: "no frontmatter".to_string(),
+            }],
+            changed_pipelines: vec!["default".to_string()],
+            ..Snapshot::empty()
+        };
+        let frame = strip(&paint(
+            &repo,
+            &pipelines,
+            false,
+            &snapshot,
+            None,
+            &VecDeque::new(),
+            None,
+        ));
+        assert!(!frame.contains("broken.md"), "{frame}");
+        assert!(!frame.contains("default"), "{frame}");
+        assert!(frame.contains("Nothing queued"), "{frame}");
+    }
+
+    /// RECENT stays on an empty board while no dispatcher is running, and
+    /// goes while one is.
+    ///
+    /// Where RECENT lands, and how much of it a pane holds, depends on the
+    /// pane's height, which `paint` reads from the real terminal. That layout
+    /// is covered by `greeting_screen`'s own tests with a fixed region; this
+    /// one checks only what holds at any height.
+    #[test]
+    fn an_empty_board_keeps_recent_only_while_no_dispatcher_runs() {
+        let (repo, _root_guard) = fixture("board-empty-recent");
+        let pipelines = Pipelines::builtin();
+        let recent = arrivals(2);
+        let none = VecDeque::new();
+        let stopped = Phase::Watching {
+            holder: None,
+            dispatching: false,
+        };
+        let held = Phase::Watching {
+            holder: Some(4242),
+            dispatching: true,
+        };
+        assert_eq!(empty_board_recent(stopped, &recent, &none).len(), 2);
+        assert!(empty_board_recent(held, &recent, &none).is_empty());
+
+        let running = strip(&paint(
+            &repo,
+            &pipelines,
+            true,
+            &Snapshot {
+                holder: Some(4242),
+                ..Snapshot::empty()
+            },
+            None,
+            &recent,
+            Some("Marvin"),
+        ));
         assert!(
-            frame.contains("jobs") && frame.contains("1 active"),
-            "{frame}"
+            running.contains("dispatcher running · pid 4242"),
+            "{running}"
         );
-        assert!(frame.contains("nightly"), "{frame}");
+        assert!(running.contains("[enter] stop dispatching"), "{running}");
+        assert!(!running.contains("RECENT"), "{running}");
+        assert!(!running.contains("task-1"), "{running}");
+    }
+
+    /// The greeting's name is read off git once per board and kept: a name
+    /// changed under an open board shows on the next board, not this one,
+    /// and a blank `user.name` greets nobody — no comma, the full stop kept.
+    #[test]
+    fn the_greeting_reads_the_git_name_once_per_board() {
+        let (repo, _root_guard) = fixture("board-greeting-name");
+        let pipelines = Pipelines::builtin();
+        let watching = Phase::Watching {
+            holder: None,
+            dispatching: false,
+        };
+        let greeting_of = |board: &mut Board| {
+            let frame = strip(&board.frame(&repo, &pipelines, watching).unwrap());
+            frame
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("Good ") || line.starts_with("Working late"))
+                .unwrap_or_else(|| panic!("no greeting in {frame}"))
+                .to_string()
+        };
+
+        let mut board = Board::for_test();
+        assert!(greeting_of(&mut board).ends_with(", spoolway."));
+        repo.git(&["config", "user.name", "Ada Lovelace"]).unwrap();
+        assert!(greeting_of(&mut board).ends_with(", spoolway."));
+        assert!(greeting_of(&mut Board::for_test()).ends_with(", Ada."));
+
+        repo.git(&["config", "user.name", "  "]).unwrap();
+        let nameless = greeting_of(&mut Board::for_test());
+        assert!(!nameless.contains(','), "{nameless}");
+        assert!(nameless.ends_with('.'), "{nameless}");
     }
 
     /// A task's `url:` frontmatter reaches the group band as a real OSC 8
@@ -5496,13 +5705,12 @@ mod tests {
         );
     }
 
-    /// A board says what its keys do — the mockup's own last line — on every
-    /// frame it draws, not only once something on the board can use one: the
-    /// hint says what the board can do, not what it would do this frame.
-    /// There is one board per run now, and it is the one reading keys, so
-    /// the hint is never conditional.
+    /// A board with a row on it says what every key does — the mockup's own
+    /// last line — whether or not that row can use one: the hint says what
+    /// the board can do, not what it would do this frame. An empty board has
+    /// no row for those keys to act on, so its key line keeps only `enter`.
     #[test]
-    fn the_key_hint_is_drawn_on_every_frame() {
+    fn the_row_keys_join_the_key_hint_once_a_row_is_on_the_board() {
         let (repo, _root_guard) = fixture("key-hint");
         let pipelines = Pipelines::builtin();
 
@@ -5519,11 +5727,10 @@ mod tests {
                 )
                 .unwrap(),
         );
+        assert!(frame.contains("[enter] start dispatching"), "{frame}");
         assert!(
-            frame.contains(
-                "[o] open task   [p] pause task   [r] resume   [s] restart   [u/U] unqueue / all"
-            ),
-            "an empty queue's own frame should still carry the hint — {frame}"
+            !frame.contains("[o] open task"),
+            "an empty queue's frame has no row for these keys — {frame}"
         );
 
         add(&repo, "login", &[], Some("implement"));
@@ -8411,7 +8618,7 @@ mod tests {
         assert!(frame.contains("[enter] its own key"), "{frame}");
     }
 
-    /// Inside the dispatch tab the board draws in a box titled `dispatch`,
+    /// Inside the dispatch tab the board draws in an untitled box,
     /// and a popup the tab opens still lands on it: every row of the box,
     /// the popup's included, ends in the box's right border, and the key
     /// line stays under the bottom border.
@@ -8435,7 +8642,7 @@ mod tests {
                 .hosted_frame(&repo, &pipelines, false, popup.as_deref())
                 .unwrap();
             let lines: Vec<String> = frame.lines().map(strip_ansi).collect();
-            assert!(lines[0].starts_with("┌─ dispatch ─"), "{frame}");
+            assert!(lines[0].starts_with("┌──"), "{frame}");
             let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
             for line in &lines[..=bottom] {
                 assert_eq!(line.chars().count(), width, "{line:?}");

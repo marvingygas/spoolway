@@ -48,7 +48,8 @@ nothing queued
 next: nightly-audit, Mon 8 Sep 03:00  (in 5h 48m)
 ```
 
-The board shows `nothing queued` alone. Its job ledger shows the next firing of every job.
+The board shows the greeting and `Nothing queued`. It does not list the jobs. See
+[The empty board](dispatcher.md#the-empty-board).
 With no job enabled, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).
 
@@ -57,8 +58,8 @@ With no job enabled, an empty queue stops the run as usual. See
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
 Bare `spoolway`'s jobs tab opens this screen. It is the only place a job is edited, paused or
-deleted. The left pane lists every job from both stores. The right pane shows the highlighted
-job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
+deleted. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
+`details`, shows the highlighted job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
 The routines tab writes a job too, with its own `n`. See [Routines](planning.md#routines).
 

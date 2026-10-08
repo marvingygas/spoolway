@@ -112,8 +112,9 @@ dispatcher_stop
 
 # ------------- the dispatcher board's job ledger, busy and empty
 # Every enabled job is on the board's own ledger — beneath the slot lines,
-# above the key controls — whether the queue is empty or has work in it. No
-# `covers:` tag here either, for the same reason the top of this file gives.
+# above the key controls — while the queue has work in it, and the ledger
+# goes with the rest of the footer once it is empty. No `covers:` tag here
+# either, for the same reason the top of this file gives.
 #
 # Read off the dispatch tab with nothing dispatching, so the ledger is all
 # that is being watched. `nightly-audit` still moves off `* * * * *` first,
@@ -159,24 +160,19 @@ rm -f "$SPOOLWAY_PROJECT_HOME"/queue/*.md
 
 BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
 board_open
-if poll_until 15 screen_drew_since "$BEFORE" "nothing queued"; then
-  ok "an empty board still says nothing queued while a job keeps it resident"
+if poll_until 15 screen_drew_since "$BEFORE" "Nothing queued"; then
+  ok "an empty board still says Nothing queued while a job keeps it resident"
 else
-  bad "an empty board still says nothing queued while a job keeps it resident"
+  bad "an empty board still says Nothing queued while a job keeps it resident"
 fi
 tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/empty-board.out"
-if grep -qaF "2 active" "$LIVE/empty-board.out" \
-   && grep -qaF "nightly-audit" "$LIVE/empty-board.out" \
-   && grep -qaF "release-readiness" "$LIVE/empty-board.out"; then
-  ok "the empty board's ledger names both enabled jobs too"
-else
-  bad "the empty board's ledger names both enabled jobs too"
-  sed 's/^/        /' "$LIVE/empty-board.out"
-fi
+# An empty board is its greeting and nothing else, so the ledger the busy
+# board drew above is gone with the rest of the footer; the jobs tab still
+# lists every job and its next firing.
+lacks "the empty board leaves the job ledger off" "2 active" "$LIVE/empty-board.out"
 # The plain run prints a "next: ..." line under its own "nothing queued"
-# line; the board leaves it out, since its ledger already names every job's
-# next firing.
-lacks "the empty-queue copy does not repeat a job's next firing the ledger already names" \
+# line; the board draws no such line either.
+lacks "the empty board does not name a job's next firing" \
   "next: nightly-audit," "$LIVE/empty-board.out"
 screen_stop
 

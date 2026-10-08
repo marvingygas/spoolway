@@ -318,7 +318,7 @@ frame "$IGNORED_SCREEN" 2 >"$IGNORED_SCREEN.second"
 has "bare spoolway opens on the override ignored popup" \
   "┌─ override ignored " "$IGNORED_SCREEN.first"
 has "over the queue tab it opens on" \
-  "dispatch       [queue]       routines        jobs        eval" "$IGNORED_SCREEN.first"
+  "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$IGNORED_SCREEN.first"
 has "naming the file, the step and the keys it set" \
   "pipelines/default.yml   step review   agent" "$IGNORED_SCREEN.first"
 # The reason is wrapped to the queue tab's frame, so only its first row is
@@ -329,7 +329,7 @@ has "with the whole reason under them" \
 has "and enter to confirm it" "[enter] confirm" "$IGNORED_SCREEN.first"
 lacks "enter closes it" "override ignored" "$IGNORED_SCREEN.second"
 has "and the queue tab is drawn again under the strip" \
-  "dispatch       [queue]       routines        jobs        eval" "$IGNORED_SCREEN.second"
+  "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$IGNORED_SCREEN.second"
 
 # Never acknowledged: the next open asks again while the override is still
 # ignored.

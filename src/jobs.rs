@@ -626,10 +626,10 @@ pub fn staying_up(repo: &Repo) -> StayingUp {
 
 /// The two lines the plain run prints on an empty queue kept resident by a
 /// job: `nothing queued`, then which job fires next and when — or that none
-/// ever will. The board prints its own `nothing queued` line the same way,
-/// but leaves the "next: ..." line out, since its own job ledger below
-/// already names every enabled job's next firing — see
-/// `crate::status::view::footer`. Assumes at least one job is enabled.
+/// ever will. The board says `Nothing queued` under its own greeting instead,
+/// and names no job at all while the queue is empty, its job ledger included
+/// — see `crate::status::view::greeting_screen`. The jobs tab still names
+/// every job's next firing. Assumes at least one job is enabled.
 pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
     let next_line = match &jobs.next {
         Some((name, when)) => format!(
