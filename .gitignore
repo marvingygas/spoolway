@@ -22,7 +22,3 @@ __pycache__/
 
 # Assembled by site/build.sh; never committed.
 site/_src/
-
-# Written by scripts/release-anchor.sh into a release worktree: the base commit
-# and run name later release steps read. Per-run state, never part of a release.
-/.release-run/

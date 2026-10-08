@@ -19,11 +19,10 @@ pipeline: release
   workflow as the GitHub release body; the contract it must follow is written at the top of the file.
 - Daily CI verifies main, but release rehearsal and publication each require the shared full
   verification gate on the exact release commit. An older green run is not release approval.
-- The pipeline recommends the next version, and a person approves or overrides that one value before
-  preflight validates it; downstream lanes use the chosen version without reinterpreting the bump.
+- The pipeline picks the next version by the runbook's rule. To force one, name it in this task.
 - `docs/releasing.md` is the repository-local runbook used by every release role.
-- The tag is irreversible in ordinary operation and therefore follows an independent merge review
-  of the exact candidate version and release notes plus a green rehearsal on the landed commit.
+- The tag is irreversible in ordinary operation, so it only follows a green rehearsal of the
+  release pull request's exact head.
 
 ## Goal
 
@@ -46,19 +45,19 @@ commands, provenance, and contributing pull requests clear.
 ## Acceptance criteria
 
 - clean main passes formatting, clippy, and locked tests before release work begins
-- a person approves or overrides the suggested version, every later lane uses that exact choice, and
-  both Cargo files agree
-- release notes validated by the notes and merge-review lanes are grounded in the complete diff and merged pull requests since the
+- the version follows the runbook's rule, or the one this task names, and `Cargo.toml`,
+  `Cargo.lock` and `herdr-plugin.toml` agree
+- release notes are grounded in the complete diff and merged pull requests since the
   previous tag, and archived task files clarify intent when present without ever standing in for that
   proof
 - the approved section is committed to `CHANGELOG.md` in the release commit, satisfies the contract at
   the top of that file, adds nothing to older sections, and is confirmed by the locked tests and by
   `spoolway whats-new` before the rehearsal
-- the rehearsal's head SHA equals the release commit; Linux checks, nightly end-to-end tests,
+- the rehearsal ran on the release pull request's head, with the release commit last; Linux checks, nightly end-to-end tests,
   and advisories all pass without the daily skip policy
 - the rehearsal validates the approved changelog section, assembles five platforms, dry-runs six
   packages, and reports correct provenance without publishing to npm or GitHub
-- the tag names the exact rehearsed release commit, and publication requires the full gate again
+- the tag names the release commit landed from that rehearsed head, and publication requires the full gate again
 - the approved tag publishes six packages and five archives plus `SHA256SUMS`
 - the GitHub release body is created by the workflow from the tagged changelog section and reads back
   byte-for-byte identical to the approved notes

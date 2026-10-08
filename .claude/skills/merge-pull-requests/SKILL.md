@@ -41,15 +41,18 @@ The first of those two is worth more than it looks, because the way it gets brok
 deciding to break it. See the heredoc entry under *What has bitten before*: a command can be run by
 writing about it.
 
-**Merging is local, not on the forge.** Nothing is merged through `gh pr merge`. You merge
-into `main` on this machine, verify the result compiles and passes, and push. GitHub then
-marks the pull requests merged on its own, because their head commits are on `main`.
+**Merging is local, not on the forge.** Nothing is merged through `gh pr merge`. You make
+the merge commit on this machine, verify the result compiles and passes, and push it. GitHub
+then marks the pull requests merged on its own, because their head commits are on `main`.
 
-**`main` is protected, so the push goes through a pull request of its own.** Branch
+**`main` is protected, so the merge commit is checked on the pull request it closes.** Branch
 protection requires `verify / test` and `verify / audit` to have passed on the exact commit
 being pushed, admins included, and `ci.yml` runs on pull requests only. A plain
 `git push origin main` of a fresh merge is refused with `GH006 ... 2 of 2 required status
-checks are expected`. Step 7 is how to satisfy that without touching the protection.
+checks are expected`. So the merge commit goes first to the tip's own branch — a fast-forward
+of it, since the tip is the merge's second parent — where the pull request's own CI runs on it,
+and `main` is fast-forwarded to that same commit once it is green. Step 7 has the commands.
+No pull request is ever opened just to carry a merge through CI.
 
 ## Procedure
 
@@ -67,8 +70,9 @@ one that conflicts. Read `baseRefName` on every row: a base that is not `main` i
 **stacked** pull request, sitting on another branch in the same list.
 
 Expect `BLOCKED` on nearly every row, and do not read it as a problem. It is the forge
-refusing its own merge button, usually for a review this repository never collects. You merge
-locally, so it says nothing about whether the branch merges.
+refusing its own merge button. No review rule is configured, so the cause is not that, and it
+has not been pinned down further. You never press that button, so it says nothing about
+whether the branch merges.
 
 `statusCheckRollup` is the state of continuous integration for each head commit. Take it in
 at the survey, but do not act on it yet — step 3 decides which of these rows actually have to
@@ -93,6 +97,11 @@ request in it. Merging the bottom separately only creates a second conflict to r
 
 Everything not in a stack merges in any order, but merge them one at a time — a conflict you
 can attribute to one branch is a conflict you can reason about.
+
+Each tip gets its own merge commit, and each one is pushed to its own tip's branch (step 7).
+Build them in a line: the second tip merges onto the first one's merge commit, the third onto
+the second's, and so on. The last merge commit then contains every tip, and `main` is
+fast-forwarded to it once each tip's checks are green.
 
 ### 3. Wait for the checks
 
@@ -166,6 +175,9 @@ git merge --no-ff origin/<branch> -m "Merge PRs #158, #161: cursor-in-gap + boar
 That message shape is this repository's convention for a batch: the numbers, then the task ids
 behind them. One branch alone gets `Merge PR #161: board-key-map`.
 
+Note `git rev-parse HEAD` after each tip's merge, next to that tip's branch. Step 7 pushes
+each merge commit to its own tip's branch.
+
 ### 5. Resolve
 
 ```
@@ -198,9 +210,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-All three, every time, before the push. The forge checked each branch on its own; nothing
-checked them combined, and the merge you just resolved by hand exists only here. This is the
-only verdict there will ever be on that tree.
+All three, every time, before the push. The forge checked each branch on its own, and the
+merge you just resolved by hand exists only here. Step 7 has the forge check it too, but a red
+there costs a full CI round trip, and the local run catches most of it in a minute.
 
 Then look at the thing. A merge that compiles can still render a broken table, and no test
 pins every frame:
@@ -215,24 +227,38 @@ installed, so it will happily show you the old layout and tell you nothing.
 ### 7. Push, then prove `main` is green
 
 `main` refuses any commit its two required checks have not passed on (see *Merging is
-local* above), so the merged tree goes up as a pull request first and `main` is
-fast-forwarded to it once CI is green:
+local* above). So each merge commit goes to its own tip's branch first, where that pull
+request's CI runs on it, and `main` is fast-forwarded once every one of them is green:
 
 ```
-git push origin HEAD:refs/heads/merge/<date>
-gh pr create --base main --head merge/<date> --title "Merge pass <date>: #<first>–#<last>" \
-  --body "<which pull requests, and that this exists only for its checks>"
-gh pr checks <number> --watch
+git push origin <merge-sha>:refs/heads/<tip-branch>       # once per tip, its own merge commit
+gh pr checks <tip-number> --watch                         # once per tip
 git fetch origin && git log --oneline HEAD..origin/main   # must print nothing
-git push origin main                                      # the same sha, now checked
+git push origin main                                      # the last merge commit, now checked
 gh pr list --state open
 ```
 
-Never `gh pr merge` the helper pull request. That would put a new merge commit on `main` —
-one nothing checked — rather than the commit that just passed. The fast-forward push lands the
-exact sha CI ran on, and the helper closes as merged on its own, along with every pull request
-the pass merged. If `main` moved in the meantime, the fast-forward is no longer possible:
-merge `origin/main` in, run step 6 again, and push the helper branch again for a fresh run.
+The push to the tip's branch is a fast-forward. The tip is the merge commit's second parent,
+so nothing on the branch is rewritten and no force is needed. If the push is refused, somebody
+pushed to that branch after the survey: fetch it, and redo that tip's merge.
+
+The pull request's diff and commit list will now show `main`'s commits as well. That is the
+merge commit's first parent, and expected.
+
+Push every tip's merge commit before watching any of them, so their CI runs side by side. A
+red one is fixed as step 3 says, on the task branch, and every merge commit from that tip
+onward is rebuilt on the fixed tip and pushed again.
+
+Never `gh pr merge` anything in this pass. That would put a new merge commit on `main` — one
+nothing checked — rather than the commit that just passed. The fast-forward push lands the
+exact sha CI ran on, and every pull request the pass merged closes as merged on its own,
+stacked ones included. If `main` moved in the meantime, the fast-forward is no longer possible:
+merge `origin/main` into the last merge commit, run step 6 again, and push it to the last tip's
+branch again for a fresh run.
+
+Never open a pull request whose only job is to carry a merge through CI. Earlier passes did,
+from a `merge/<date>` branch, and it left a pull request on the record that said "do not merge
+this" and closed as a side effect. The tip's own pull request already runs the same checks.
 
 The last line is the check, not a formality. Every pull request whose head landed should now
 be gone from the open list, the stacked one included. Anything still open did not actually
@@ -262,8 +288,10 @@ that ran on the branches — and step 6's local `cargo test` is smaller still. A
 pull requests is no evidence at all about the run you have just dispatched.
 
 **A red run here is this pass's, on the same terms as a red tip.** Open the failing job, find
-what is actually wrong, fix it on `main`, push it through a helper pull request the same way as
-the merge, and dispatch again until it is green. What not
+what is actually wrong, and fix it on a branch cut from `main`. The fix is a real change, so it
+gets a real pull request, made the way the `create-pr` skill makes one. Once its checks are
+green, fast-forward `main` to it as above rather than merging it on the forge, and dispatch
+again until it is green. What not
 to do is stop at the push and call the pile empty: the merges are the reason anybody is looking
 at `main` today, and a red left here sits until the next morning's schedule, where it surfaces
 as a mysterious nightly failure rather than as the thing this pass walked past.
@@ -335,15 +363,16 @@ you want to see which one before it lands. Leave `--force-contract` and `--repla
 here: both discard human edits, and neither is a merge's decision to make.
 
 Commit the result if anything changed. It is a change to this repository's control plane and
-belongs in the history with the merge that caused it. It reaches `main` the same way the merge
-did — a helper pull request of its own, its checks, then a fast-forward push (step 7).
+belongs in the history with the merge that caused it. It reaches `main` the way step 7's fix
+does: a `sync/<date>` branch cut from `main`, a real pull request for it, its checks, then a
+fast-forward push.
 
 ### 11. Prune
 
 Clear the branches the merge made dead:
 
 ```
-git push origin --delete <branch> ... merge/<date> sync/<date>
+git push origin --delete <branch> ... sync/<date>
 git branch -d <branch> ...
 ```
 
@@ -532,10 +561,15 @@ ends at the push is claiming something it never checked.
   began requiring `verify / test` and `verify / audit` on every commit pushed to `main`, admins
   included, and step 7 still said `git push origin main`. The merged tree had passed every
   local check and been checked by nobody else, which is exactly what the rule exists to stop.
-  The answer is to satisfy the rule, not to go around it: a helper pull request carries the
-  merged head through CI, and `main` is fast-forwarded to that same sha. Never switch the
-  protection off to make a pass fit, and never `gh pr merge` the helper, which would land a
-  merge commit nothing checked.
+  The answer is to satisfy the rule, not to go around it: the merge commit goes through CI
+  first, and `main` is fast-forwarded to that same sha. Never switch the protection off to make
+  a pass fit, and never `gh pr merge`, which would land a merge commit nothing checked.
+
+  The first answer carried the merge through CI on a helper pull request from a `merge/<date>`
+  branch. It worked, but every pass left a pull request whose body said "do not merge this"
+  and which closed as merged as a side effect. That reads as something being slipped past the
+  rule, even though nothing was. The merge commit now goes to the tip's own branch instead,
+  where the pull request it closes runs the same checks on it.
 - **A newer feature quietly undid an older one in the combined tree.** #541 made a task
   queued with `tracking: off` fire no hook at all; #550, written alongside it, added a
   `started` event whose fire site checked only for a trial arm. Each branch was green on its

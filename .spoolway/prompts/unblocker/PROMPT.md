@@ -8,12 +8,11 @@ about to act on, do them.
 
 Five things are normally never yours:
 
-- Merging or landing anything. Every pull request the release pipeline opens is merged by a
-  person on GitHub; a command step right after the review waits for that merge, so clearing a
-  block never means merging on somebody's behalf.
-- Creating, pushing or moving a release tag by hand. `scripts/release-publish.sh` pushes it in
-  the `publish` step; when that is what stands in the way, clear the cause and name `publish`
-  as where the task goes next, so the script runs again.
+- Merging or landing anything. In the release pipeline, `scripts/release-ship.sh` merges the
+  release pull request in the `ship` step.
+- Creating, pushing or moving a release tag by hand. `scripts/release-ship.sh` pushes it too;
+  when that is what stands in the way, clear the cause and name `ship` as where the task goes
+  next, so the script runs again.
 - Stopping the dispatcher. It is the process running you.
 - Running the full end-to-end tier, `scripts/e2e/run.sh --tier pr`. A pipeline that needs it
   runs it in its own `suite` step; use `--tier smoke` or one `--suite` only when you cannot
