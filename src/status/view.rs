@@ -1916,7 +1916,7 @@ pub(super) fn pane_height() -> Option<usize> {
         .map(|(_, h)| (h.0 as usize).saturating_sub(crate::screen::shell::strip_rows() + boxed))
 }
 
-/// The hosted board's `body` inside a box titled `dispatch`, `inner` columns
+/// The hosted board's `body` inside a box with no title, `inner` columns
 /// between its borders, with `keys` — the key line — under the bottom border,
 /// the way the queue, jobs and eval tabs draw theirs.
 ///
@@ -1936,9 +1936,7 @@ pub(super) fn boxed(body: &str, keys: &str, inner: usize, height: Option<usize>)
         rows.truncate(room);
         rows.resize(room, "");
     }
-    let title = "─ dispatch ";
-    let dashes = inner.saturating_sub(title.chars().count());
-    let mut out = format!("┌{title}{}┐\n", "─".repeat(dashes));
+    let mut out = format!("┌{}┐\n", "─".repeat(inner));
     for row in rows {
         out.push_str(&format!("│{}│\n", fit_visible(row, inner)));
     }
@@ -2575,16 +2573,16 @@ mod tests {
         );
     }
 
-    /// The box: a `dispatch` title in the top border, every row ending in
+    /// The box: an untitled top border, every row ending in
     /// `│` one column past `inner` — plain, coloured or clipped alike —
     /// padded down to the height it was given, and the key line under the
     /// bottom border.
     #[test]
-    fn the_box_ends_every_row_in_the_last_column_under_a_dispatch_title() {
+    fn the_box_ends_every_row_in_the_last_column_under_an_untitled_border() {
         let body = format!("plain\n {DIM}dim{RESET}\n{}\n", "x".repeat(40));
         let drawn = boxed(&body, "[q] quit", 20, Some(8));
         let lines: Vec<&str> = drawn.lines().collect();
-        assert_eq!(lines[0], "┌─ dispatch ─────────┐");
+        assert_eq!(lines[0], "┌────────────────────┐");
         assert_eq!(lines.len(), 1 + 6 + 1 + 1, "{drawn}");
         for line in &lines[..lines.len() - 1] {
             let seen = strip_ansi(line);

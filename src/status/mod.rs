@@ -438,7 +438,7 @@ impl Board {
     /// A lock file that cannot be read reads as nobody holding it, since
     /// this must never name a live pid it did not see.
     ///
-    /// Drawn inside a box titled `dispatch` with the key line under it — see
+    /// Drawn inside an untitled box with the key line under it — see
     /// `paint` — so the tab reads like the three beside it.
     ///
     /// `popup` is the tab's own — a start gate, or why its dispatcher ended
@@ -2841,8 +2841,8 @@ fn paint(
     frame.push_str(&ticker(recent, pane, rows));
     frame.push_str(&tail);
 
-    // Inside bare `spoolway`'s dispatch tab the board draws in a box titled
-    // `dispatch`, the way the other three tabs draw theirs, with the key
+    // Inside bare `spoolway`'s dispatch tab the board draws in an untitled box
+    // the way the other three tabs draw theirs, with the key
     // line under the box rather than inside it. The blank row above the key
     // line stays inside, as the box's last row.
     if crate::screen::shell::hosted().is_some() {
@@ -8522,7 +8522,7 @@ mod tests {
         assert!(frame.contains("[enter] its own key"), "{frame}");
     }
 
-    /// Inside the dispatch tab the board draws in a box titled `dispatch`,
+    /// Inside the dispatch tab the board draws in an untitled box,
     /// and a popup the tab opens still lands on it: every row of the box,
     /// the popup's included, ends in the box's right border, and the key
     /// line stays under the bottom border.
@@ -8546,7 +8546,7 @@ mod tests {
                 .hosted_frame(&repo, &pipelines, false, popup.as_deref())
                 .unwrap();
             let lines: Vec<String> = frame.lines().map(strip_ansi).collect();
-            assert!(lines[0].starts_with("┌─ dispatch ─"), "{frame}");
+            assert!(lines[0].starts_with("┌──"), "{frame}");
             let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
             for line in &lines[..=bottom] {
                 assert_eq!(line.chars().count(), width, "{line:?}");

@@ -93,15 +93,15 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "the strip names all five tabs in order" \
-  "dispatch       [queue]       routines        jobs        eval" "$FIRST"
-has "it opens on the queue tab" "groups  1 of 1" "$FIRST"
+  "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$FIRST"
+has "it opens on the queue tab" "─ groups ─" "$FIRST"
 has "with the pending group listed" "cart" "$FIRST"
 lacks "not on the dispatch tab" "dispatcher" "$FIRST"
 
 has "← reaches the dispatch tab's board" "dispatcher stopped" "$LAST"
-has "drawn inside a box titled dispatch" "┌─ dispatch ─" "$LAST"
-has "with dispatch the open tab on the strip" "← [dispatch]       queue" "$LAST"
-lacks "which is no longer the queue tab" "groups  1 of 1" "$LAST"
+lacks "drawn inside a box with no title" "─ dispatch" "$LAST"
+has "with dispatch the open tab on the strip" "← [DISPATCH]       QUEUE" "$LAST"
+lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
 
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
 # again asks how to stop it — even with nothing running — and `enter` on that
@@ -181,7 +181,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "Dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "dispatch       [queue]       routines        jobs        eval" "$SECOND.plain"
+lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "Dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -195,7 +195,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "Dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "dispatch       [queue]       routines        jobs        eval" "$AFTER.plain"
+has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -213,7 +213,7 @@ has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
-has "under the strip" "dispatch       [queue]       routines        jobs        eval" "$LAST"
+has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # A clean submission lands on the queued popup, which ends by saying whether a
@@ -256,9 +256,9 @@ sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
 # quit before drawing a single tab has no `ESC[2J` in it either. These five
 # require every tab this walk visits actually drew, so the check above is
 # proof about frames that were really there.
-has "the walk actually reached the dispatch tab" "┌─ dispatch ─" "$ALL_TABS.plain"
+has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS.plain"
 has "and the queue tab" "─ groups" "$ALL_TABS.plain"
-has "and the routines tab" "queue       [routines]       jobs" "$ALL_TABS.plain"
+has "and the routines tab" "QUEUE       [ROUTINES]       JOBS" "$ALL_TABS.plain"
 has "and the jobs tab" "no jobs yet" "$ALL_TABS.plain"
 has "and the eval tab" "┌─ eval ·" "$ALL_TABS.plain"
 
@@ -273,8 +273,9 @@ works "→ from the queue tab ends when its keys run out" \
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "→ reaches the routines tab" \
-  "dispatch        queue       [routines]       jobs        eval" "$LAST"
-has "listing the routine" "routines  1 of 1" "$LAST"
+  "DISPATCH        QUEUE       [ROUTINES]       JOBS        EVAL" "$LAST"
+has "titled routines" "─ routines ─" "$LAST"
+has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
   "[space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit" "$LAST"
 

@@ -1111,26 +1111,21 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     let min_rows = overlay_panel.as_ref().map_or(0, |panel| panel.len() + 4);
 
     let (mut left, left_focus) = jobs_list_lines(jobs, state, lay.left, in_walk);
+    // The right pane is titled for what it is, not for the job it shows:
+    // the details' own first line already names the highlighted job. The
+    // walk is the one exception, because its pane is a form for a job that
+    // does not exist yet rather than any job's details.
     let (right_title, mut right, right_focus) = if in_walk {
-        ("new job".to_string(), Vec::new(), (0, 0))
+        ("new job", Vec::new(), (0, 0))
     } else if jobs.is_empty() {
-        (
-            "no jobs yet".to_string(),
-            empty_detail_lines(ctx.repo),
-            (0, 0),
-        )
+        ("details", empty_detail_lines(ctx.repo), (0, 0))
     } else {
-        let job = jobs.get(state.cursor);
-        let title = job
-            .map(|job| job.name.clone())
-            .unwrap_or_else(|| "no job".to_string());
-        let (lines, focus) = jobs_detail_lines(ctx.repo, job, lay.right);
-        (title, lines, focus)
+        let (lines, focus) = jobs_detail_lines(ctx.repo, jobs.get(state.cursor), lay.right);
+        ("details", lines, focus)
     };
     left.resize(left.len().max(min_rows), String::new());
     right.resize(right.len().max(min_rows), String::new());
 
-    let left_title = format!("jobs  {} of {}", jobs.len(), jobs.len());
     // One item per line and no noun: the jobs screen keeps the marker it
     // has always drawn, counting lines — see `Items::noun`.
     let left_starts: Vec<usize> = (0..left.len()).collect();
@@ -1156,8 +1151,8 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
             lay.rows,
             lay.right,
         ),
-        &left_title,
-        &right_title,
+        "jobs",
+        right_title,
         lay,
     );
 
@@ -1789,7 +1784,7 @@ mod tests {
 
         let (leave, drawn) = run("\x1b[D");
         assert_eq!(leave, Leave::Switch(Toward::Left));
-        assert!(last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(last_frame(&drawn).contains("DISPATCH"), "{drawn}");
         assert!(last_frame(&drawn).contains("[q] quit"), "{drawn}");
         assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
         assert_eq!(run("q").0, Leave::Quit);
@@ -2135,6 +2130,12 @@ mod tests {
             "no (new) row at rest: {}",
             last_frame(&resting)
         );
+        assert!(
+            last_frame(&resting).contains("─ jobs ─")
+                && last_frame(&resting).contains("─ details ─"),
+            "fixed titles, not the highlighted job's name: {}",
+            last_frame(&resting)
+        );
 
         // During the walk the background list highlights `> (new)` and the
         // detail pane is titled `new job`, not the old job.
@@ -2142,8 +2143,24 @@ mod tests {
         let frame = last_frame(&walking);
         assert!(frame.contains("> (new)"), "walk highlights (new): {frame}");
         assert!(
-            frame.contains("new job"),
+            frame.contains("─ new job ─") && !frame.contains("─ details ─"),
             "detail titled `new job`: {frame}"
+        );
+    }
+
+    /// With no job at all the titles are the same two words as with jobs:
+    /// `no jobs yet` stays the line inside the pane, never its title.
+    #[test]
+    fn an_empty_jobs_tab_keeps_its_fixed_titles() {
+        let (repo, _root_guard) = fixture("jobs-screen-empty-titles");
+        let drawn = drive(&repo, "q").to_string();
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("─ jobs ─"), "{frame}");
+        assert!(frame.contains("─ details ─"), "{frame}");
+        assert!(!frame.contains("─ no jobs yet"), "{frame}");
+        assert!(
+            frame.contains("  no jobs yet"),
+            "the line inside the pane: {frame}"
         );
     }
 

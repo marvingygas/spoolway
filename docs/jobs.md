@@ -58,8 +58,8 @@ With no job enabled, an empty queue stops the run as usual. See
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
 Bare `spoolway`'s jobs tab opens this screen. It is the only place a job is edited, paused or
-deleted. The left pane lists every job from both stores. The right pane shows the highlighted
-job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
+deleted. The left pane, titled `jobs`, lists every job from both stores. The right pane, titled
+`details`, shows the highlighted job: its routine, schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
 The routines tab writes a job too, with its own `n`. See [Routines](planning.md#routines).
 

@@ -66,9 +66,10 @@ The screen draws on the terminal's alternate screen for as long as it is open, s
 finds nothing older than the current frame and the mouse wheel does nothing. `q` puts the
 terminal back exactly as it was before spoolway started.
 
-The strip is drawn bold, with no colour. The open tab's label is marked with brackets, the
-same mark the key line gives a key: `[queue]`, `[dispatch]`. `←` sits one space outside
-`dispatch`, the first tab, and `→` sits one space outside `eval`, the last. One blank row sits
+The strip is drawn bold, with no colour. Tab labels are written in capitals. The open tab's
+label is marked with brackets, the same mark the key line gives a key: `[QUEUE]`, `[DISPATCH]`.
+`←` sits one space outside `DISPATCH`, the first tab, and `→` sits one space outside `EVAL`,
+the last. One blank row sits
 above the strip and one below it.
 
 | Key | What it does |
@@ -80,7 +81,7 @@ Inside the eval tab's filter panel and any popup drawn over a tab, `←` and `�
 meaning instead.
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
-titled `dispatch`, as wide and as tall as the terminal allows, from a `spoolway dispatch` child
+with no title, as wide and as tall as the terminal allows, from a `spoolway dispatch` child
 it starts and stops. The key line draws under the box, the same as under the queue, routines,
 jobs and eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens
 described below; the routines tab draws the routine list, see
@@ -130,7 +131,8 @@ With no subcommand, prints its usage and exits, the same as `spoolway queue --he
 
 Bare `spoolway`'s queue tab draws the queue screen. The left pane lists one row per `group:`
 that still has a task to queue or has every task archived. A group with every task already
-queued never appears. The right pane lists the highlighted group's tasks. Each task shows its `Pipeline:`, `Depends on:`,
+queued never appears. The left pane is titled `groups`. The right pane is titled `tasks` and
+lists the highlighted group's tasks. Each task shows its `Pipeline:`, `Depends on:`,
 `Starts from:` and `Lands in:`. `Starts from:` is the task's own `starts_from:`, else its first
 dependency's id, else the same branch as `Lands in:`. `Lands in:` is the task's `base:`, else the
 board's branch.
@@ -495,6 +497,8 @@ is configured or the hook has no `fetch` branch. See
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
 Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writes a cron job.
+The left pane is titled `jobs` and the right pane `details`. While a new job is being written,
+the right pane is titled `new job`.
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
