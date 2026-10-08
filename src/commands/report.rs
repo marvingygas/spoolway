@@ -1879,7 +1879,10 @@ fn task_lanes(
 /// it: a park's `parked_from`, a gate's `paused_at`, otherwise
 /// [`resume_target`]. A task that never started has no step to start over,
 /// and neither has one held by a hook, whose pause is on `queued` or `done`.
-fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
+///
+/// `pub(crate)` for the board's `s`, which opens its panel only where this
+/// finds a step, so the panel never offers a restart this would refuse.
+pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
     let id = &task.front.id;
     let stage = task.stage();
     if stage == crate::pipeline::QUEUED {
@@ -1998,11 +2001,9 @@ pub(crate) fn restart_with(
         crate::dispatch::file_fingerprint(&task),
     )]);
 
-    let lane_name = crate::mux::lane_name(&step, &task.front.id);
-    let ledger = crate::usage::read(repo).unwrap_or_default();
     // Read before the lane goes: the dispatcher's own record of it is dropped
     // once the lane is gone, and the ledger is what outlives that.
-    let session = crate::dispatch::lane_session_in(repo, &ledger, &lane_name).map(|(_, s)| s);
+    let session = abandoned_session(repo, &step, &task.front.id);
     let lanes = task_lanes(repo, pipelines, &task, mux.list_lanes()?);
 
     // A stop's marks are spent by a restart as by a resume: left set, they
@@ -2057,15 +2058,47 @@ pub(crate) fn restart_with(
         println!("  tore down lane `{}`", lane.name);
     }
     if let Some(session) = &session {
-        let banked = ledger.iter().any(|entry| &entry.session == session);
-        println!(
-            "  session {} — abandoned{}",
-            session.chars().take(8).collect::<String>(),
-            if banked { ", already banked" } else { "" }
-        );
+        println!("  session {}", session.describe());
     }
     println!("{}: -> {step} (fresh session)", args.task);
     Ok(())
+}
+
+/// The conversation a restart of `step` on task `id` throws away, if one is
+/// on record.
+///
+/// Shared by `spoolway restart`'s own report and the board's `s` panel, so
+/// the session a person confirms is the one the command says it abandoned.
+pub(crate) fn abandoned_session(repo: &Repo, step: &str, id: &str) -> Option<AbandonedSession> {
+    let ledger = crate::usage::read(repo).unwrap_or_default();
+    let lane = crate::mux::lane_name(step, id);
+    let (_, session) = crate::dispatch::lane_session_in(repo, &ledger, &lane)?;
+    let banked = ledger.iter().any(|entry| entry.session == session);
+    Some(AbandonedSession {
+        id: session,
+        banked,
+    })
+}
+
+/// See [`abandoned_session`].
+pub(crate) struct AbandonedSession {
+    /// The session id in full.
+    pub(crate) id: String,
+    /// Whether the usage ledger already holds this session, so what it spent
+    /// is counted even though the conversation is gone.
+    pub(crate) banked: bool,
+}
+
+impl AbandonedSession {
+    /// `32b0d7bd — abandoned, already banked`: the id cut to its first
+    /// eight characters, and `already banked` only when the ledger holds it.
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "{} — abandoned{}",
+            self.id.chars().take(8).collect::<String>(),
+            if self.banked { ", already banked" } else { "" }
+        )
+    }
 }
 
 /// The person's half of a gate: let a paused task past its gated step, or send

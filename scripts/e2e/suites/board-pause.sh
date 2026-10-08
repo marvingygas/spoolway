@@ -19,7 +19,9 @@
 # the bottom, to cover the other panels, and a park off `queued` is checked
 # for the `parked_from` record it leaves; `r` proves it sends that
 # same kind of row straight back to `queued`, dependency or not, and opens
-# the step picker on a real gate beside it. Last of all is the pass-yields
+# the step picker on a real gate beside it. `s` restarts a parked row's
+# step from its own panel and is checked for the new session the step comes
+# back on. Last of all is the pass-yields
 # section, which queues six more hang lanes of its own — placed after the
 # `r` section simply so it does not disturb the state that section's own
 # assertions read, not because anything here is scarce enough to make the
@@ -662,8 +664,76 @@ has "the status log records the note" "e2e restart" \
   "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
 stage_reaches "the task is sent back to the step the block stopped" stuck implement 25
 # The restarted `implement` lane hangs too, as `stuck` is still set to. Parked
-# here so it does not hold a slot for the sections below.
+# here so it does not hold a slot for the sections below — but only once the
+# dispatcher has launched it. The restart writes the stage at once, and a park
+# before the launch would leave `implement` with no lane ever run, and the
+# board's own restart below with no earlier session to compare against.
+STUCK_LOG="$SPOOLWAY_PROJECT_HOME/headless/logs/stuck · implement.log"
+last_session() { grep -ao -- '--session-id [^ ]*' "$STUCK_LOG" 2>/dev/null | tail -1 | awk '{print $2}'; }
+launches() { grep -ac 'lane argv:' "$STUCK_LOG" 2>/dev/null || true; }
+_launched_past() { [ "$(launches)" -gt "$1" ] 2>/dev/null; }
+if poll_until 30 _launched_past 0; then ok "the dispatcher launches the restarted step"
+else bad "the dispatcher launches the restarted step"; fi
 must "the restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause stuck
+
+# ---------------------------------------- `s` restarts a step from the board
+# The same restart, reached from the board: `s` on `stuck`'s row opens the
+# restart panel, and `s` again inside it carries the restart out. `stuck` is
+# parked off `implement` now, a row a restart accepts, and the lane that ran
+# there opened a session of its own. The stand-in echoes its argv into the
+# lane's log, which is appended to across launches, and `pi` is pinned with
+# `--session-id`: a continued conversation passes the same id again, and a
+# fresh one a new id. So the last id in the log, before and after, is the
+# proof the step came back on a new session rather than its old one.
+#
+# The suite does not track which row the cursor is on, so it walks the rows
+# from the top the way the `r` section below does. Other rows a restart
+# accepts open a panel too; each is closed with `esc`, and nothing is touched.
+OLD_SESSION=$(last_session)
+OLD_LAUNCHES=$(launches)
+if [ -n "$OLD_SESSION" ]; then ok "the parked lane's session is in its log before the restart"
+else bad "the parked lane's session is in its log before the restart"; fi
+
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do press $'\x1b[A'; done
+next_frame 3
+SAW_RESTART=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  MARK=$(wc -l < "$BOARD_LOG")
+  press s
+  next_frame 3
+  SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
+  if grep -qF -- "┌─ restart stuck ─" <<<"$SINCE"; then
+    SAW_RESTART=stuck
+    for want in "step      implement" "lane      stuck · implement" \
+      "is briefed from" "[s] restart   [esc] cancel"; do
+      if grep -qF -- "$want" <<<"$SINCE"; then ok "the restart panel says: $want"
+      else bad "the restart panel says: $want"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+    done
+    press s
+    next_frame 3
+    break
+  elif grep -qF -- "┌─ restart " <<<"$SINCE"; then
+    press $'\x1b'
+    next_frame 3
+  fi
+  press $'\x1b[B'
+  next_frame 3
+done
+if [ "$SAW_RESTART" = stuck ]; then ok "\`s\` on the parked row opens the restart panel"
+else bad "\`s\` on the parked row opens the restart panel"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+stage_reaches "\`s\` in the panel sends the task back to the step it held" stuck implement 25
+if poll_until 30 _launched_past "${OLD_LAUNCHES:-0}"; then ok "the dispatcher launches the step again"
+else bad "the dispatcher launches the step again"; fi
+NEW_SESSION=$(last_session)
+if [ -n "$NEW_SESSION" ] && [ "$NEW_SESSION" != "$OLD_SESSION" ]; then
+  ok "on a new session, not the one it held"
+else bad "on a new session, not the one it held (before $OLD_SESSION, after $NEW_SESSION)"; fi
+# Anchored to the front matter: the Status Log's own notes say "restart" too.
+_restart_spent() { ! grep -q '^restart:' "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"; }
+if poll_until 15 _restart_spent; then ok "and the restart key is spent by that launch"
+else bad "and the restart key is spent by that launch"; fi
+# Hanging again, as `stuck` is set to: parked so it holds no slot below.
+must "the board-restarted lane is parked so it holds no slot" "$SPOOLWAY" queue pause stuck
 
 # ------------------------- a schedule catches a failing step, not only a pass
 # `s` above already proved it writes and clears `gate_at`; what a schedule

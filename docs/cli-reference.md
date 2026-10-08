@@ -110,7 +110,7 @@ a second `enter` while a stop is already going does nothing. Starting dispatchin
 every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
 header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
-finishing` for one, left out once none are). `r`, `p` and `u`/`U` work whether or not a
+finishing` for one, left out once none are). `r`, `p`, `s` and `u`/`U` work whether or not a
 child is running. `q` or `ctrl-c` quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
@@ -653,6 +653,8 @@ The session line reads `abandoned, already banked` when the usage ledger already
 | Flag | Default | What it does |
 |---|---|---|
 | `-m`, `--message <TEXT>` | `restarted by hand — fresh session` | Note for the status log |
+
+The board's `s` key does the same on the row under the cursor. See [Restart panel](dispatcher.md#restart-panel).
 
 See [A step that carries its own session](dispatcher.md#a-step-that-carries-its-own-session).
 

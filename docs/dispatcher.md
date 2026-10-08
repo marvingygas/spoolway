@@ -254,7 +254,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whol
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies are done. The picker lists every step, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
-| `s` | On an open pause panel, schedule the pause instead of carrying it out. |
+| `s` | On a running, paused or blocked row, open the restart panel. See [Restart panel](#restart-panel). On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
@@ -297,6 +297,31 @@ a command step kills the run, and the command runs again in full on resume.
 the named task pauses itself once that step reports, whatever it reports. For a command step,
 the task pauses once the command exits, whatever the exit code. Press `s` again on a
 row that already has a scheduled pause to clear it.
+
+### Restart panel
+
+`s` on a row opens a panel titled `restart <task>`. It names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
+
+```
+┌─ restart login ─────────────────────────────────────┐
+│                                                     │
+│ step      review                                    │
+│ lane      login · review                            │
+│ session   32b0d7bd — abandoned, already banked      │
+│                                                     │
+│ The lane is torn down and `review` is briefed from  │
+│ scratch. Its conversation is not kept.              │
+│                                                     │
+│ [s] restart   [esc] cancel                          │
+└─────────────────────────────────────────────────────┘
+```
+
+| Key | What it does |
+|---|---|
+| `s` | The same as `spoolway restart <task>`. |
+| `esc` | Close the panel and change nothing. |
+
+The panel opens for a task that `spoolway restart` accepts. A queued, done or hook-held row opens nothing, and neither does a row on a command step. A restart the command refuses leaves the panel open and prints the reason under the two closing lines. When the task has moved to another step since the panel opened, `s` restarts nothing and says so.
 
 ### Footer
 

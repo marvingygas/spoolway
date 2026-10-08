@@ -291,6 +291,53 @@ pub(super) fn pause_confirm_panel(id: &str, abort: &Abort) -> Vec<String> {
     crate::screen::boxed(&format!("pause {id}"), &body)
 }
 
+/// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough
+/// to keep `The lane is torn down and `review-spec` is briefed from` on one
+/// row, and narrow enough that the panel stays inside an 80-column pane.
+const RESTART_WRAP: usize = 56;
+
+/// [`BoardMode::ConfirmRestart`]'s panel, `s`'s own: the step, the lane and
+/// the session a restart throws away, then what happens to them, so a person
+/// sees exactly which conversation they are giving up before they answer.
+///
+/// The session row is left out when none is on record — a lane that never
+/// got as far as a turn — rather than printed empty, the same as
+/// `spoolway restart` prints no session line then. A refusal `s` met is
+/// printed under the two closing lines, above the key line.
+pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
+    let mut body = vec![
+        format!("step      {}", confirm.step),
+        format!(
+            "lane      {}",
+            crate::mux::lane_name(&confirm.step, &confirm.id)
+        ),
+    ];
+    if let Some(session) = &confirm.session {
+        body.push(format!("session   {}", session.describe()));
+    }
+    body.push(String::new());
+    body.extend(crate::screen::wrap(
+        &format!(
+            "The lane is torn down and `{}` is briefed from scratch. Its conversation is not \
+             kept.",
+            confirm.step
+        ),
+        RESTART_WRAP,
+    ));
+    if let Some(err) = &confirm.error {
+        body.push(String::new());
+        body.extend(
+            err.lines()
+                .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP)),
+        );
+    }
+    crate::screen::panel(
+        &format!("restart {}", confirm.id),
+        &body,
+        &crate::screen::keys(&[("s", "restart"), ("esc", "cancel")]),
+    )
+}
+
 /// [`BoardMode::ResumePicker`]'s panel: where the task stopped, its
 /// pipeline's steps with the cursor's row marked `▸`, any pinned row under
 /// them, a refusal if `enter` met one, and the key line.
@@ -3651,6 +3698,56 @@ mod tests {
         for id in &ids {
             assert!(panel.iter().any(|line| line.contains(id.as_str())), "{id}");
         }
+    }
+
+    /// `restart_confirm_panel` draws the board's restart mockup row for row,
+    /// and stays inside an 80-column pane with a refusal printed in it.
+    #[test]
+    fn the_restart_panel_draws_its_mockup_within_eighty_columns() {
+        let mut confirm = RestartConfirm {
+            id: "prompt-cache-ttl-default".to_string(),
+            step: "review-spec".to_string(),
+            session: Some(crate::commands::AbandonedSession {
+                id: "32b0d7bd-1111-2222-3333-444455556666".to_string(),
+                banked: true,
+            }),
+            error: None,
+        };
+        let panel = restart_confirm_panel(&confirm);
+        let body: Vec<&str> = panel[1..panel.len() - 1]
+            .iter()
+            .map(|line| line.trim_matches('│').trim_end())
+            .collect();
+        assert_eq!(
+            body,
+            [
+                "  step      review-spec",
+                "  lane      prompt-cache-ttl-default · review-spec",
+                "  session   32b0d7bd — abandoned, already banked",
+                "",
+                "  The lane is torn down and `review-spec` is briefed from",
+                "  scratch. Its conversation is not kept.",
+                "",
+                "  [s] restart   [esc] cancel",
+            ]
+        );
+        assert!(
+            panel[0].starts_with("┌─ restart prompt-cache-ttl-default ─"),
+            "{}",
+            panel[0]
+        );
+
+        confirm.error = Some(
+            "task `prompt-cache-ttl-default` changed while the restart was being written — a \
+             report landed first, so the restart was not written and no lane was touched."
+                .to_string(),
+        );
+        let panel = restart_confirm_panel(&confirm);
+        for line in &panel {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
+        assert!(panel.iter().any(|line| line.contains("a report landed")));
+        assert!(panel[panel.len() - 2].contains("[s] restart   [esc] cancel"));
     }
 
     /// `unqueue_confirm_panel`'s chain form is built through `screen::boxed`

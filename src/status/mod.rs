@@ -40,8 +40,8 @@ pub use view::{banner, plain_table};
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
     AMBER, RecentEvent, Style, Verdict, boxed, clamp_rows, footer, group_totals, masthead,
-    pane_height, pane_width, pause_confirm_panel, resume_picker_panel, spool_frame, table, ticker,
-    unqueue_all_confirm_panel, unqueue_confirm_panel,
+    pane_height, pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel,
+    spool_frame, table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -346,7 +346,7 @@ pub struct Board {
     /// pressed. `None` again only once the board has nothing left to show at
     /// all.
     cursor: Option<String>,
-    /// What a `p`, `r`, `u` or `U` keypress is waiting on, if anything — see
+    /// What a `p`, `r`, `s`, `u` or `U` keypress is waiting on, if anything — see
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves, which never open a panel at all.
     mode: BoardMode,
@@ -687,19 +687,22 @@ impl Board {
     /// here; `u` takes the
     /// cursor's task off the queue and back to pending if nothing has
     /// started for it and no still-queued task depends on it, `U` does the
-    /// same for every task that has not started. A run-wide key opens a
+    /// same for every task that has not started; `s` starts the cursor's
+    /// task's step over with a fresh session. A run-wide key opens a
     /// confirm panel first wherever what it is about to do is not free to
-    /// undo — `u` and `U` open one unconditionally, since writing a task
-    /// back to pending is exactly that — see [`BoardMode`]. With a panel
-    /// already open every other key is read by that panel instead: `enter`
-    /// confirms whatever it opened and `esc` cancels it, on every panel the
-    /// board draws, and the letter that opened the panel no longer answers
-    /// it once it is — a `q` typed there, or any other key neither mode
-    /// recognises, is ignored, the same as it is while browsing. A pause
-    /// panel answers one key further: `s` leaves every named abort running
-    /// and schedules its task's `gate_at` on the step it is on instead. The
-    /// resume picker answers `↑`/`↓` too, which move its own cursor rather
-    /// than the board's.
+    /// undo — `u`, `U` and `s` open one unconditionally, since writing a
+    /// task back to pending and throwing a conversation away are exactly
+    /// that — see [`BoardMode`]. With a panel already open every other key
+    /// is read by that panel instead: `esc` cancels it on every panel the
+    /// board draws, and `enter` confirms whatever it opened on every panel
+    /// but the restart panel. The letter that opened a panel no longer
+    /// answers it once it is — a `q` typed there, or any other key neither
+    /// mode recognises, is ignored, the same as it is while browsing. The
+    /// restart panel is the exception: it is confirmed by `s`, the letter
+    /// that opened it, and `enter` there is ignored. A pause panel answers one key further: `s` leaves every named abort
+    /// running and schedules its task's `gate_at` on the step it is on
+    /// instead. The resume picker answers `↑`/`↓` too, which move its own
+    /// cursor rather than the board's.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -728,6 +731,9 @@ impl Board {
                 self.on_key_unqueue_confirm(repo, pipelines, chain, dir, key)
             }
             BoardMode::ConfirmUnqueueAll(ids) => self.on_key_unqueue_all_confirm(repo, ids, key),
+            BoardMode::ConfirmRestart(confirm) => {
+                self.on_key_restart_confirm(repo, pipelines, confirm, key)
+            }
         }
     }
 
@@ -747,6 +753,7 @@ impl Board {
             Key::Char('o') => self.open_cursor(repo)?,
             Key::Char('r') => self.resume_cursor(repo, pipelines)?,
             Key::Char('p') => self.begin_pause_cursor(repo, pipelines)?,
+            Key::Char('s') => self.begin_restart_cursor(repo, pipelines)?,
             Key::Char('u') => self.begin_unqueue_cursor(repo)?,
             Key::Char('U') => self.begin_unqueue_all(repo)?,
             _ => {}
@@ -982,6 +989,87 @@ impl Board {
         Ok(())
     }
 
+    /// `s`: open [`BoardMode::ConfirmRestart`] on the cursor's task, naming
+    /// the step a restart would start over and the session it would throw
+    /// away.
+    ///
+    /// A no-op with no cursor, a cursor on a row the queue no longer has, or
+    /// a task `spoolway restart` itself would refuse — one that never
+    /// started, one that is done, one held by a hook or one on a command
+    /// step. [`crate::commands::restart_step`] is asked rather than the row's
+    /// state, so the panel only ever offers a restart the command carries
+    /// out.
+    fn begin_restart_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
+        let Some(id) = self.cursor.clone() else {
+            return Ok(());
+        };
+        let Ok(task) = repo.task(&id) else {
+            return Ok(());
+        };
+        let Ok(step) = restartable_step(&task, pipelines) else {
+            return Ok(());
+        };
+        self.mode = BoardMode::ConfirmRestart(RestartConfirm {
+            session: crate::commands::abandoned_session(repo, &step, &id),
+            id,
+            step,
+            error: None,
+        });
+        Ok(())
+    }
+
+    fn on_key_restart_confirm(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        mut confirm: RestartConfirm,
+        key: crate::screen::Key,
+    ) -> Result<()> {
+        use crate::screen::Key;
+        match key {
+            // Nothing was touched while the panel was open.
+            Key::Esc => return Ok(()),
+            Key::Char('s') => {
+                // The panel can sit open while the task moves on: a report
+                // passing the step, or a resume from a shell. `restart`
+                // reads the step afresh and would start over whichever one
+                // the task is on now, so a step that is no longer the one
+                // the panel named is refused here rather than restarted
+                // unseen.
+                let now = repo
+                    .task(&confirm.id)
+                    .and_then(|task| restartable_step(&task, pipelines));
+                let restarted = match now {
+                    Ok(step) if step == confirm.step => crate::commands::restart(
+                        repo,
+                        pipelines,
+                        &crate::cli::RestartArgs {
+                            task: confirm.id.clone(),
+                            message: None,
+                        },
+                        None,
+                    ),
+                    Ok(step) => Err(anyhow::anyhow!(
+                        "task `{}` moved to `{step}` since this panel opened — press esc and \
+                         `s` again to restart the step it is on now.",
+                        confirm.id
+                    )),
+                    Err(err) => Err(err),
+                };
+                // The dispatch loop drops an `Err` out of `on_key` without a
+                // word, so a refused restart would close the panel and look
+                // like it happened. It stays open with the refusal in it.
+                match restarted {
+                    Ok(()) => return Ok(()),
+                    Err(err) => confirm.error = Some(format!("{err:#}")),
+                }
+            }
+            _ => {}
+        }
+        self.mode = BoardMode::ConfirmRestart(confirm);
+        Ok(())
+    }
+
     /// `u`: open [`BoardMode::ConfirmUnqueue`] for the cursor's task and
     /// everything that reaches it through `depends_on` — a no-op with no
     /// cursor, a cursor on a row the queue no longer has, or a task that has
@@ -1096,7 +1184,7 @@ pub(crate) fn editor_command(path: &Path) -> String {
     format!("{editor} '{}'", path.display())
 }
 
-/// What a `p`, `r`, `u` or `U` keypress is waiting to be answered — a
+/// What a `p`, `r`, `s`, `u` or `U` keypress is waiting to be answered — a
 /// panel drawn over the table, and the one thing standing between an
 /// accidental press and the run it would otherwise change. `Default` is
 /// `Browsing`, both for [`Board::with_term`] and for [`std::mem::take`]
@@ -1131,6 +1219,10 @@ enum BoardMode {
     /// `U`'s own version of the same panel, naming every task it would carry
     /// back to pending rather than just the one under the cursor.
     ConfirmUnqueueAll(Vec<String>),
+    /// `s` on a task `spoolway restart` accepts: the step it would start
+    /// over and the session it would abandon. `[s]` carries the restart out
+    /// and `[esc]` leaves the task and its lane exactly as they were.
+    ConfirmRestart(RestartConfirm),
 }
 
 impl BoardMode {
@@ -1142,6 +1234,7 @@ impl BoardMode {
             BoardMode::ResumePicker(picker) => Some(resume_picker_panel(picker, pane_height())),
             BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
             BoardMode::ConfirmUnqueueAll(ids) => Some(unqueue_all_confirm_panel(ids)),
+            BoardMode::ConfirmRestart(confirm) => Some(restart_confirm_panel(confirm)),
         }
     }
 }
@@ -1172,6 +1265,23 @@ struct ResumePicker {
     cursor: usize,
     /// The last refusal `enter` met, printed under the list until `esc`.
     error: Option<String>,
+}
+
+/// [`BoardMode::ConfirmRestart`]'s state, read once when `s` opens it.
+struct RestartConfirm {
+    /// The task being restarted.
+    id: String,
+    /// The step it would start over — [`crate::commands::restart_step`]'s.
+    step: String,
+    /// The conversation the restart throws away, if one is on record.
+    session: Option<crate::commands::AbandonedSession>,
+    /// The last refusal `s` met, printed in the panel until `esc`.
+    error: Option<String>,
+}
+
+/// The step `spoolway restart` would start over for `task`, or its refusal.
+fn restartable_step(task: &crate::task::Task, pipelines: &Pipelines) -> Result<String> {
+    crate::commands::restart_step(task, pipelines.for_task(task)?)
 }
 
 /// What a held task's stop is made of: its stage and the three fields that
@@ -2648,6 +2758,7 @@ fn paint(
             ("o", "open task"),
             ("p", "pause task"),
             ("r", "resume"),
+            ("s", "restart"),
             ("u/U", "unqueue / all"),
         ]
         .as_slice(),
@@ -4885,7 +4996,9 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            frame.contains("[o] open task   [p] pause task   [r] resume   [u/U] unqueue / all"),
+            frame.contains(
+                "[o] open task   [p] pause task   [r] resume   [s] restart   [u/U] unqueue / all"
+            ),
             "an empty queue's own frame should still carry the hint — {frame}"
         );
 
@@ -4903,7 +5016,9 @@ mod tests {
                 .unwrap(),
         );
         assert!(
-            frame.contains("[o] open task   [p] pause task   [r] resume   [u/U] unqueue / all"),
+            frame.contains(
+                "[o] open task   [p] pause task   [r] resume   [s] restart   [u/U] unqueue / all"
+            ),
             "{frame}"
         );
     }
@@ -7438,6 +7553,210 @@ mod tests {
         assert_eq!(task.stage(), "implement");
         assert_eq!(task.front.gate_at.as_deref(), Some("implement"));
         assert_eq!(task.front.parked_from, None);
+        assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// A board over one task, drawn once so the cursor has a row to sit on,
+    /// with `keys` pressed in order — the shape every restart test below
+    /// starts from.
+    fn board_after(repo: &Repo, pipelines: &Pipelines, keys: &[crate::screen::Key]) -> Board {
+        let mut board = Board::for_test();
+        board
+            .frame(
+                repo,
+                pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
+        for key in keys {
+            board.on_key(repo, pipelines, *key).unwrap();
+        }
+        board
+    }
+
+    fn watching_frame(board: &mut Board, repo: &Repo, pipelines: &Pipelines) -> String {
+        strip(
+            &board
+                .frame(
+                    repo,
+                    pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        )
+    }
+
+    /// `s` on the row list opens the restart panel, not the pause panel's
+    /// schedule: nothing is written, `gate_at` stays unset, the lane keeps
+    /// running, and the panel names the step and the lane it would end.
+    #[test]
+    fn pressing_s_on_the_row_list_opens_the_restart_panel() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-opens");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let (mux, name) = live_headless_lane(&repo);
+        let before = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s')]);
+
+        assert!(matches!(board.mode, BoardMode::ConfirmRestart(_)));
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains("┌─ restart login ─"), "{frame}");
+        assert!(frame.contains("step      implement"), "{frame}");
+        assert!(frame.contains("lane      login · implement"), "{frame}");
+        assert!(frame.contains("[s] restart   [esc] cancel"), "{frame}");
+        let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(repo.task("login").unwrap().front.gate_at, None);
+        assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// `s` opens nothing on a row `spoolway restart` would refuse: a task
+    /// still on `queued`, and one parked before it ever started a step.
+    #[test]
+    fn pressing_s_on_a_task_that_never_started_opens_nothing() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("restart-panel-never-started");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], None);
+
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s')]);
+        assert!(matches!(board.mode, BoardMode::Browsing), "queued");
+
+        let mut task = repo.task("login").unwrap();
+        task.set_stage(crate::pipeline::PAUSED, Some("parked by hand"));
+        task.save().unwrap();
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s')]);
+        assert!(
+            matches!(board.mode, BoardMode::Browsing),
+            "parked off queued"
+        );
+    }
+
+    /// `esc` closes the restart panel and changes nothing; `enter`, which
+    /// confirms every other panel, is ignored by this one.
+    #[test]
+    fn esc_on_the_restart_panel_changes_nothing() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-esc");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let (mux, name) = live_headless_lane(&repo);
+        let before = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
+
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s'), Key::Enter]);
+        assert!(matches!(board.mode, BoardMode::ConfirmRestart(_)), "enter");
+        let board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s'), Key::Esc]);
+        assert!(matches!(board.mode, BoardMode::Browsing));
+
+        let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
+        assert_eq!(before, after);
+        assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// `s` on the restart panel carries the restart out: the task stays on
+    /// its step with `restart:` naming it, and the lane is gone.
+    #[test]
+    fn pressing_s_twice_restarts_the_step() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-confirm");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let (mux, name) = live_headless_lane(&repo);
+
+        let board = board_after(
+            &repo,
+            &pipelines,
+            &[Key::Down, Key::Char('s'), Key::Char('s')],
+        );
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("login").unwrap();
+        assert_eq!(task.stage(), "implement");
+        assert_eq!(task.front.restart.as_deref(), Some("implement"));
+        assert!(!mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// A task that moved to another step while the panel was open is not
+    /// restarted on the step it is on now, which the panel never named: `s`
+    /// refuses, the panel stays open saying where it went, and the task and
+    /// the lane are left as they were.
+    #[test]
+    fn a_task_moved_to_another_step_is_not_restarted_from_a_stale_panel() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-moved");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let (mux, name) = live_headless_lane(&repo);
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s')]);
+        let mut task = repo.task("login").unwrap();
+        task.set_stage("review", Some("passed while the panel was open"));
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Char('s')).unwrap();
+
+        let BoardMode::ConfirmRestart(confirm) = &board.mode else {
+            panic!("the panel closed on a task that moved");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("moved to `review` since this panel opened")),
+            "{:?}",
+            confirm.error
+        );
+        let task = repo.task("login").unwrap();
+        assert_eq!(task.stage(), "review");
+        assert_eq!(task.front.restart, None);
+        assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// A refused restart keeps the panel open with the refusal printed in
+    /// it, rather than closing as if the restart had happened: here the
+    /// task went back to `queued` while the panel was open.
+    #[test]
+    fn a_refused_restart_keeps_the_panel_open_with_the_error() {
+        use crate::screen::Key;
+        let (mut repo, _root_guard) = fixture("restart-panel-refused");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let (mux, name) = live_headless_lane(&repo);
+
+        let mut board = board_after(&repo, &pipelines, &[Key::Down, Key::Char('s')]);
+        let mut task = repo.task("login").unwrap();
+        task.set_stage(crate::pipeline::QUEUED, Some("sent back by hand"));
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Char('s')).unwrap();
+
+        let BoardMode::ConfirmRestart(confirm) = &board.mode else {
+            panic!("the panel closed on a refused restart");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("no step has started")),
+            "{:?}",
+            confirm.error
+        );
+        let frame = watching_frame(&mut board, &repo, &pipelines);
+        assert!(frame.contains("no step has started"), "{frame}");
+        let task = repo.task("login").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::QUEUED);
+        assert_eq!(task.front.restart, None);
         assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
     }
 

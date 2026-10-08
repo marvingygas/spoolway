@@ -1048,7 +1048,7 @@ mod tests {
         assert!(
             last.contains(
                 "[enter] start dispatching   [o] open task   [p] pause task   \
-                 [r] resume   [u/U] unqueue / all   [q] quit"
+                 [r] resume   [s] restart   [u/U] unqueue / all   [q] quit"
             ),
             "{last}"
         );
