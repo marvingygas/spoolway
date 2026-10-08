@@ -80,6 +80,13 @@ pub const REFERENCE: &[Reference] = &[
                     running before the reminder loop treats it as silent anyway.",
     },
     Reference {
+        key: "dispatch.keep_finished_lanes",
+        values: "true, false",
+        default: "true",
+        sentence: "Whether a finished step's agent stays open in its own pane until its \
+                    task is done, or each new step takes over the last one's place.",
+    },
+    Reference {
         key: "unattended.enabled",
         values: "true, false",
         default: "false",
@@ -370,18 +377,22 @@ pub fn entries(config: &Config) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
-/// The two flat `[dispatch]` keys `get` and `set` accept that [`entries`]
+/// The flat `[dispatch]` keys `get` and `set` accept that [`entries`]
 /// never lists, because they are skipped from the file while they hold their
 /// default — see [`unset_value`], which resolves each. [`all_settings`] adds
 /// these plus the per-entry omissions (`[models]` zeros, an absent
 /// `agents.<profile>.concurrency`) for every profile and model glob the
 /// config already carries; only a `[models]` glob nobody has named yet stays
 /// off the list, and no list could show that open-ended keyspace.
-pub const OMITTED_DEFAULT_KEYS: &[&str] = &["dispatch.lane_child_ceiling", "dispatch.priority"];
+pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
+    "dispatch.lane_child_ceiling",
+    "dispatch.priority",
+    "dispatch.keep_finished_lanes",
+];
 
 /// Every scalar setting `config get`/`set` resolves for a key that already
 /// names something: [`entries`] plus the omitted-default keys it skips — the
-/// two flat [`OMITTED_DEFAULT_KEYS`], the `concurrency` of every profile
+/// flat [`OMITTED_DEFAULT_KEYS`], the `concurrency` of every profile
 /// that omits it, and every price/limit field of every `[models]` glob the
 /// config already carries. This is the list `spoolway config list` prints, so
 /// its promise to name every settable scalar key holds for every key that
@@ -554,6 +565,9 @@ fn unset_value(config: &Config, key: &str) -> Option<String> {
             Priority::Group => "group".to_string(),
             Priority::Any => "any".to_string(),
         });
+    }
+    if key == "dispatch.keep_finished_lanes" {
+        return Some(config.dispatch.keep_finished_lanes.to_string());
     }
     let field = match models_key(config, key) {
         Some(parts) => parts[2],
@@ -799,6 +813,7 @@ fn ensure_dispatch_default(value: &mut Value, key: &str, config: &Config) {
         "lane_child_ceiling" => Value::String(crate::config::format_duration(
             config.dispatch.lane_child_ceiling,
         )),
+        "keep_finished_lanes" => Value::Boolean(config.dispatch.keep_finished_lanes),
         _ => return,
     };
     if let Some(table) = value.get_mut("dispatch").and_then(Value::as_table_mut) {
@@ -1074,6 +1089,33 @@ mod tests {
     fn worktree_root_is_refused_rather_than_resolved() {
         let err = get(&Config::default(), "dispatch.worktree_root").unwrap_err();
         assert!(err.to_string().contains("no config key"), "{err}");
+    }
+
+    /// The same read/write-while-absent mechanism, for `keep_finished_lanes`.
+    #[test]
+    fn keep_finished_lanes_is_readable_and_writable_while_absent() {
+        let config = Config::default();
+        assert_eq!(
+            get(&config, "dispatch.keep_finished_lanes").unwrap(),
+            "true"
+        );
+
+        let off = set(&config, "dispatch.keep_finished_lanes", "false").unwrap();
+        assert!(!off.dispatch.keep_finished_lanes);
+        assert_eq!(get(&off, "dispatch.keep_finished_lanes").unwrap(), "false");
+        assert!(
+            toml::to_string(&off)
+                .unwrap()
+                .contains("keep_finished_lanes = false")
+        );
+
+        let back = set(&off, "dispatch.keep_finished_lanes", "true").unwrap();
+        assert!(back.dispatch.keep_finished_lanes);
+        assert!(
+            !toml::to_string(&back)
+                .unwrap()
+                .contains("keep_finished_lanes")
+        );
     }
 
     /// The same read/write-while-absent mechanism, for `lane_child_ceiling`.

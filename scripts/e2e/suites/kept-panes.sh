@@ -3,7 +3,9 @@
 #
 # A two-step task is driven through `herdr-stub.sh`. While the second step
 # runs, `spoolway lane` must still list the first step's lane, and its pane
-# must still stand. Once the task is done, both are gone.
+# must still stand. Once the task is done, both are gone. A second task, run
+# with `keep_finished_lanes` off, shows the first step's lane gone while the
+# second runs.
 #
 # Against the double rather than a real server — its header says why there is
 # no isolated herdr to run this on. An agent there is a registration, not a
@@ -120,6 +122,35 @@ if [ "$(panes_standing)" -eq 0 ]; then
 else
   bad "and every pane it had is closed: $(cat "$HSTATE/panes")"
 fi
+
+# ------------------------------------------- with kept panes turned off
+# The same two-step task, with `keep_finished_lanes` off: the first step's lane
+# is closed behind the second, so only the second is left to list.
+must "kept panes turned off" "$SPOOLWAY" config set dispatch.keep_finished_lanes false
+task_doc "$LIVE/off.md" off "$BODY" "group: off" "pipeline: twostep"
+must "a task queued with kept panes off" "$SPOOLWAY" queue add --from "$LIVE/off.md"
+
+if drive off first 60 && poll_until 60 lane_listed "off · first"; then
+  ok "with kept panes off, the first step's lane starts"
+else bad "with kept panes off, the first step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
+
+must "the first step reports" report_as off first
+if drive off second 60 && poll_until 60 lane_listed "off · second"; then
+  ok "with kept panes off, the second step's lane starts"
+else bad "with kept panes off, the second step's lane starts"; "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'; fi
+
+if poll_while 60 lane_listed "off · first"; then
+  ok "the first step's lane is gone once the second is running"
+else
+  bad "the first step's lane is gone once the second is running"
+  "$SPOOLWAY" lane 2>&1 | sed 's/^/        /'
+fi
+says "and the second step's lane is the one left" "off · second" "$SPOOLWAY" lane
+
+must "the second step reports" report_as off second
+if drive off gone 60; then ok "the task with kept panes off is done and archived"
+else bad "the task with kept panes off is done and archived"; fi
+must "kept panes turned back on" "$SPOOLWAY" config set dispatch.keep_finished_lanes true
 
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
