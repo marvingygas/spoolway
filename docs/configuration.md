@@ -525,13 +525,13 @@ or in `spoolway init`; they belong to this repository only.
 ```toml
 [agents.pi]
 kind = "pi"
-session_reuse_ctx = 0
-session_blocked_ctx = 0
+session_reuse_ctx = 20
+session_blocked_ctx = 40
 
 [agents.claude]
 kind = "claude"
-session_reuse_ctx = 0
-session_blocked_ctx = 0
+session_reuse_ctx = 20
+session_blocked_ctx = 40
 permission_mode = "auto"
 ```
 
@@ -542,8 +542,8 @@ A profile says which agent binary runs and under what limits. Three ship: `pi`, 
 |---|---|---|
 | `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. |
 | `concurrency` | unset | Most lanes of this profile at once. Absent means no cap. `config set` writes it; setting it to `0` removes it. |
-| `session_reuse_ctx` | `0` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
-| `session_blocked_ctx` | `0` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task sent to `blocked`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
+| `session_reuse_ctx` | `20` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
+| `session_blocked_ctx` | `40` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task sent to `blocked`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
 | `permission_mode` | the kind's first mode | The permission mode the lane starts with. `claude` ships `auto`, `codex` ships `never`. `pi` has no mode and no key. Blank is refused. |
 
 `spoolway doctor` warns when `session_blocked_ctx` is set but the profile's steps run a model

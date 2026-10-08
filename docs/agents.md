@@ -29,8 +29,8 @@ defines.
 |---|---|---|
 | `kind` | `pi` | Which agent binary this profile runs. See [Agent kinds](#agent-kinds). |
 | `concurrency` | absent (`0`, unlimited) | Most lanes of this profile running at once. For a local model, set `models."<glob>".slots` instead. |
-| `session_reuse_ctx` | `0` (off) | Percent of the model's context window. If the earlier session's last turn is larger, a `session: true` step opens a fresh session. `1..=100`. |
-| `session_blocked_ctx` | `0` (off) | Percent of the model's context window. If a running lane's last turn is larger, the dispatcher stops the lane and blocks the task. Must be above `session_reuse_ctx` when both are set. |
+| `session_reuse_ctx` | `20` | Percent of the model's context window. If the earlier session's last turn is larger, a `session: true` step opens a fresh session. `1..=100`. |
+| `session_blocked_ctx` | `40` | Percent of the model's context window. If a running lane's last turn is larger, the dispatcher stops the lane and blocks the task. Must be above `session_reuse_ctx` when both are set. |
 | `permission_mode` | the kind's first mode; absent on `pi` | Whether the kind's lanes stop and ask about a tool call. `claude` ships `"auto"`, `codex` ships `"never"`. |
 
 A profile carries no `model`, `context_window` or `args`. The model is a step key. The

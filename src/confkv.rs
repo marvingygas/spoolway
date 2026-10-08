@@ -228,14 +228,14 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "agents.<profile>.session_reuse_ctx",
         values: "0, 1..=100",
-        default: "0",
+        default: "20",
         sentence: "How large a carried session may be, as a percentage of the model's \
                     context window, before a fresh one opens instead; 0 is off.",
     },
     Reference {
         key: "agents.<profile>.session_blocked_ctx",
         values: "0, 1..=100",
-        default: "0",
+        default: "40",
         sentence: "Percentage of the model's context window a *running* lane's last turn may \
                     reach before the dispatcher stops it and blocks the task; 0 is off. Must be \
                     above `session_reuse_ctx` when both are nonzero. The reading is only taken \
@@ -1380,7 +1380,8 @@ mod tests {
             .to_string();
         assert!(err.contains("1..=100"), "{err}");
 
-        assert!(set(&config, "agents.claude.session_reuse_ctx", "75").is_ok());
+        // Under the shipped `session_blocked_ctx` of 40, which it must stay below.
+        assert!(set(&config, "agents.claude.session_reuse_ctx", "30").is_ok());
     }
 
     /// When both guards are enabled, a blocked ceiling set at or under the
@@ -1389,8 +1390,8 @@ mod tests {
     // covers: agents.<profile>.session_blocked_ctx — the ceiling on a running lane's size
     #[test]
     fn a_session_blocked_ctx_at_or_under_the_reuse_threshold_is_refused() {
-        let config = Config::default();
-        assert_eq!(config.agents["claude"].session_reuse_ctx, 0);
+        let config = set(&Config::default(), "agents.claude.session_blocked_ctx", "0").unwrap();
+        let config = set(&config, "agents.claude.session_reuse_ctx", "0").unwrap();
         // With reuse off there is no reuse threshold for the blocked ceiling
         // to sit above.
         assert!(set(&config, "agents.claude.session_blocked_ctx", "1").is_ok());
