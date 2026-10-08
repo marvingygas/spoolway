@@ -201,6 +201,10 @@ spoolway queue add --from <PATH> --base <BRANCH>
 | `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
+While a dispatcher runs, a task whose `pipeline:` that dispatcher did not load is refused, and
+the message says to restart the dispatcher. See [Editing a pipeline while it
+runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
 A task that sets neither its own `base:` nor `--base` is refused by name and nothing is
 written. A `base:` that exists only on `origin` is accepted; the worktree is cut from
 `origin/<base>` later, with no local branch made for it. A base on neither is refused, naming
@@ -287,7 +291,7 @@ spoolway queue pause <task> [--force]
 
 ### `spoolway queue resume <task>`
 
-Resume one task, the way the board's `r` key does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered.
+Resume one task, the way the board's `r` key does. It sends a `blocked` or `paused` task on exactly as `spoolway resume <task>` does. It also restarts a task that stands on a step with nothing running behind it, such as one whose lane stopped on a question nobody answered. While a dispatcher runs, it routes on the pipelines that dispatcher loaded at start.
 
 A task that is still `queued`, or has a live lane or running command on its step, is refused. The refusal is the one `spoolway resume` gives. See [`spoolway resume <task>`](#spoolway-resume-task).
 
@@ -605,6 +609,9 @@ These tasks are refused, each with a message that names the reason and what to d
 
 A task on a step the pipeline no longer defines can still be resumed.
 
+While a dispatcher runs, the destination comes from the pipelines it loaded at start. See
+[Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
 ```
 spoolway resume <task>
 spoolway resume <task> --stage review -m "send it back round"
@@ -692,6 +699,10 @@ $ spoolway pipeline check
 
 A missing or overlong `description:` is a warning, not a failure. So is a step that no route
 from the first step reaches.
+
+While a dispatcher runs, the check first prints a line naming each pipeline file edited since
+it started. That line is not a failure. See [Editing a pipeline while it
+runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
@@ -1426,6 +1437,9 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
 
 A report from a `queued` or `paused` task is refused, because no lane works at either state. The refusal names the next action: `spoolway resume <task>` for a paused task, and waiting for the dispatcher for a queued one.
+
+While a dispatcher runs, the route comes from the pipelines it loaded at start. See [Editing a
+pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 See [Gates](pipelines.md#gates).
 

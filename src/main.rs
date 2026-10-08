@@ -34,6 +34,7 @@ mod models;
 mod mux;
 mod overrides;
 mod pipeline;
+mod pipeline_snapshot;
 mod platform;
 mod problem_log;
 mod prompt;
@@ -362,6 +363,10 @@ fn run() -> Result<()> {
             // committed yet. The control-plane readers below load the
             // checkout's own copy instead — that is what they are for.
             //
+            // While a dispatcher runs, `report`, `resume`, `queue resume`
+            // and `queue add` route on the copy it loaded instead of this — see
+            // `routing_for_task` and `crate::pipeline_snapshot`.
+            //
             // Read here, but not *demanded* here: the failure is handed to
             // `routing` and lands at the call sites that actually route. Most
             // commands below never ask — `stack`, `sync`, `pipeline check`,
@@ -411,12 +416,19 @@ fn run() -> Result<()> {
                     // The one place the lane's own step is read. Everything
                     // below takes it as an argument.
                     let started_for = std::env::var(dispatch::ENV_STEP).ok();
-                    commands::report(&repo, routing(&graph)?, args, started_for.as_deref())
+                    let own = args.task.clone().or_else(|| {
+                        std::env::var(commands::TASK_ENV)
+                            .ok()
+                            .filter(|id| !id.is_empty())
+                    });
+                    let routed = routing_for_task(&repo, &graph, own.as_deref())?;
+                    commands::report(&repo, &routed, args, started_for.as_deref())
                 }
                 Command::Stack(args) => commands::stack(&repo, args),
                 Command::Resume(args) => {
                     let from_step = std::env::var(dispatch::ENV_STEP).ok();
-                    commands::resume(&repo, routing(&graph)?, args, from_step.as_deref())
+                    let routed = routing_for_task(&repo, &graph, Some(&args.task))?;
+                    commands::resume(&repo, &routed, args, from_step.as_deref())
                 }
                 Command::Lane(args) => {
                     let mux = mux::backend(&repo)?;
@@ -444,13 +456,21 @@ fn run() -> Result<()> {
                 }
                 Command::Queue(QueueCommand::Add(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
-                    commands::queue_add(&repo, routing(&graph)?, args, &cwd, in_lane)
+                    // A running dispatcher's own pipelines, not the files —
+                    // see `routing_for_task`. Handed over unread, because
+                    // which pipelines it needs is only known once `--from`
+                    // is read, and `--from -` can be read only once.
+                    match pipeline_snapshot::LoadedPipelines::live(&repo) {
+                        Some(loaded) => commands::queue_add_on(&repo, &loaded, args, in_lane),
+                        None => commands::queue_add(&repo, routing(&graph)?, args, &cwd, in_lane),
+                    }
                 }
                 Command::Queue(QueueCommand::Pause(args)) => {
                     commands::queue_pause(&repo, routing(&graph)?, &args.task, args.force)
                 }
                 Command::Queue(QueueCommand::Resume { task }) => {
-                    commands::queue_resume(&repo, routing(&graph)?, task)
+                    let routed = routing_for_task(&repo, &graph, Some(task))?;
+                    commands::queue_resume(&repo, &routed, task)
                 }
                 Command::Queue(QueueCommand::Unqueue(args)) => {
                     commands::queue_unqueue(&repo, routing(&graph)?, args)
@@ -593,6 +613,20 @@ fn routing(graph: &Result<Pipelines>) -> Result<&Pipelines> {
     graph.as_ref().map_err(|err| anyhow::anyhow!("{err:#}"))
 }
 
+/// The routing graph for a command that moves one task: the running
+/// dispatcher's own copy of that task's pipeline when a dispatcher is up, and
+/// [`routing`]'s files when none is — see [`pipeline_snapshot::for_task`].
+fn routing_for_task<'a>(
+    repo: &Repo,
+    graph: &'a Result<Pipelines>,
+    task: Option<&str>,
+) -> Result<std::borrow::Cow<'a, Pipelines>> {
+    match pipeline_snapshot::for_task(repo, task) {
+        Some(routed) => routed.map(std::borrow::Cow::Owned),
+        None => routing(graph).map(std::borrow::Cow::Borrowed),
+    }
+}
+
 /// Say, once, that a newer release is out — if there is a person here to say
 /// it to. Bare `spoolway` gets the line back instead of printed, for its
 /// screen to show as a popup: printed ahead of the screen, it would be wiped
@@ -690,6 +724,32 @@ fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::platform::PathExt;
+
+    /// While a dispatcher runs, a task routes on that dispatcher's copy of
+    /// its own pipeline, and only that one — so pipeline files that no
+    /// longer load fail nothing. With none running, the files speak, broken
+    /// or not.
+    #[test]
+    fn a_task_routes_on_the_running_dispatchers_copy_of_its_own_pipeline() {
+        let (repo, _root) = crate::commands::testutil::fixture("routing-for-task");
+        crate::commands::testutil::add(&repo, "t1", &[]);
+        let broken: Result<Pipelines> = Err(anyhow::anyhow!("t.yml does not parse"));
+
+        let err = routing_for_task(&repo, &broken, Some("t1")).unwrap_err();
+        assert!(err.to_string().contains("t.yml does not parse"), "{err:#}");
+
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        pipeline_snapshot::write(&repo, &Pipelines::builtin()).unwrap();
+        let routed = routing_for_task(&repo, &broken, Some("t1")).unwrap();
+        assert_eq!(routed.names(), vec!["default"]);
+
+        // A task that cannot be read gets nothing to route on, and the
+        // command's own read of it says why.
+        let routed = routing_for_task(&repo, &broken, Some("missing")).unwrap();
+        assert!(routed.names().is_empty());
+        let routed = routing_for_task(&repo, &broken, Some("../escape")).unwrap();
+        assert!(routed.names().is_empty());
+    }
 
     fn git(dir: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")

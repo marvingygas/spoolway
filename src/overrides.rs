@@ -578,6 +578,12 @@ pub(crate) fn warnings_ack_write(home: &Path, fingerprint: &str) -> Result<()> {
 // nothing below reaches back into the merge itself.
 // ---------------------------------------------------------------------------
 
+/// The directory holding every pipeline patch — for
+/// [`crate::pipeline_snapshot`], which records each file in it.
+pub(crate) fn pipeline_patches_dir(overrides: &Path) -> PathBuf {
+    overrides.join(PIPELINES_SUBDIR)
+}
+
 /// Where a pipeline's patch lives.
 pub(crate) fn pipeline_patch_path(overrides: &Path, name: &str) -> PathBuf {
     overrides.join(PIPELINES_SUBDIR).join(format!("{name}.yml"))

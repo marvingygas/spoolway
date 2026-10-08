@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs"]
 ---
 
 # The dispatcher
@@ -274,7 +274,9 @@ One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its o
 its own figure appended after the profile's, model name then `<live>/<cap>`, so a profile
 running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line
 `issue_tracking: N hook failures — see tracking/` appears while any hook
-has failed. Then the job ledger lists every enabled job with its next firing:
+has failed. A line `pipelines  <files> changed since this run started — restart the dispatcher
+to use it` appears while a pipeline file differs from the copy the dispatcher loaded. See
+[Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). Then the job ledger lists every enabled job with its next firing:
 
 ```
 jobs    2 active
@@ -284,6 +286,33 @@ jobs    2 active
 
 `spoolway queue list` prints the same table from another terminal, and `spoolway lane <lane>`
 shows what one lane is doing.
+
+## Editing a pipeline while it runs
+
+The dispatcher reads the pipelines once, when it starts. Right after it takes the project's
+lock, it writes a copy of what it loaded to `<home>/dispatch-pipelines.json`. A dispatcher
+that starts later replaces that copy.
+
+While a dispatcher is running, these commands route a task on that copy and not on the files:
+
+- `spoolway report`
+- `spoolway resume` and `spoolway queue resume`
+- the `r` and `R` keys on the board
+- `spoolway queue add`
+
+Each reads only the pipeline its own task names. With no dispatcher running, they read the
+pipeline files.
+
+An edit to a pipeline file changes nothing until the dispatcher restarts. The footer and
+`spoolway pipeline check` name each pipeline file that differs from the loaded copy:
+
+```
+$ spoolway pipeline check
+  pipelines: t.yml changed since the running dispatcher started — restart the dispatcher to use it
+```
+
+`spoolway queue add` refuses a task whose pipeline the running dispatcher did not load. It
+tells you to restart the dispatcher and try again.
 
 ## Gates: when the pipeline waits for you
 

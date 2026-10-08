@@ -959,6 +959,17 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         note.print(json)?;
     }
 
+    // First, and ahead of the load below: a file a person broke mid-run is
+    // exactly the edit a running dispatcher has not seen, and the problems
+    // below describe the files, not the graph that run is routing on. Never
+    // a problem itself — the edit may be right, and only waits on a restart.
+    let changed = crate::pipeline_snapshot::changed_since_start(repo);
+    if let Some(notice) =
+        crate::pipeline_snapshot::restart_notice(&changed, "the running dispatcher")
+    {
+        println!("  pipelines: {notice}");
+    }
+
     // A pipeline file that will not load does not stop this check — it is
     // reported, and nothing else is derived: there is no loaded set left to
     // check a step, a skip, or a prompt against, and the embedded samples

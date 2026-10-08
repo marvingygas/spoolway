@@ -1457,11 +1457,14 @@ impl ResumeRoad {
 /// then a park, then a hook pause on `done`, then [`resume_target`], whose
 /// `queued` answer is a task that never started.
 ///
-/// Where a gate goes is read out of the pipeline *now*, from the step recorded
-/// in `paused_at`, rather than out of anything the pass wrote down. A pipeline
-/// edited while a task sat on `paused` should route the task the way the file
-/// says today; a destination frozen at report time would send it somewhere the
-/// project has since stopped meaning.
+/// Where a gate goes is read out of `pipelines` at resume time, from the step
+/// recorded in `paused_at`, rather than out of anything the pass wrote down.
+/// `pipelines` is the graph the resuming command routes on: the running
+/// dispatcher's own copy while one runs — see [`crate::pipeline_snapshot`] —
+/// and the files otherwise. So a pipeline edited while a task sat on `paused`
+/// routes it the edited way once no dispatcher is running, or once the
+/// running one restarts; until then the edit waits, since a step it added is
+/// one that dispatcher could never start.
 pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
     if let Some(gated) = task.front.paused_at.clone() {
         let pipeline = pipelines.for_task(task)?;

@@ -200,6 +200,121 @@ else
 fi
 rm -f .spoolway/pipelines/adopt.yml
 
+# ---------------------------- a pipeline edited mid-run waits for the restart
+# The dispatcher reads its pipelines once, at start. A lane's own `spoolway
+# report` is another process, and it must route on what that dispatcher
+# loaded — not on the file as it is now — or an edit made mid-run moves the
+# task onto a step the running dispatcher has never heard of. So: a lane on
+# `a` lingers while `t.yml` gains a step `x` between `a` and `b`, then
+# reports its pass. The task must go to `b` as loaded, and `x` must run only
+# for a task the restarted dispatcher routes. Each command step appends its
+# own id to a file outside the worktree, which is what is asserted on.
+#
+# A real lane is needed for this, not a command step: a command step is
+# routed by the dispatcher itself, which never re-read anything. The `pi`
+# stand-in reports from its own process, the way a real lane does.
+MIDRUN_CTL="$WORK/ctl"
+install_agents "$WORK/bin" "$MIDRUN_CTL"
+cat >> .spoolway/config.toml <<'PROFILE'
+
+[agents.pi]
+kind = "pi"
+PROFILE
+suite_prompt builder "You write the change a task asks for, and nothing beside it."
+
+MIDRUN_MARK="$WORK/midrun-steps.txt"
+rm -f "$MIDRUN_MARK"
+midrun_pipeline() {
+  local pass_to=$1
+  cat <<YML
+description: An agent step, then command steps that record which of them ran.
+
+steps:
+  - id: a
+    description: The lane whose report this case is about.
+    agent: pi
+    model: fake-local
+    prompt: builder
+    on_pass: $pass_to
+    on_fail: blocked
+YML
+  if [ "$pass_to" = x ]; then
+    cat <<YML
+  - id: x
+    description: Added mid-run; only a restarted dispatcher may route here.
+    run: echo x >> $MIDRUN_MARK
+    on_pass: b
+    on_fail: blocked
+YML
+  fi
+  cat <<YML
+  - id: b
+    description: The step the running dispatcher loaded after a.
+    run: echo b >> $MIDRUN_MARK
+    on_pass: done
+    on_fail: blocked
+YML
+}
+midrun_pipeline b > .spoolway/pipelines/t.yml
+works "the mid-run pipeline checks out" "$SPOOLWAY" pipeline check
+
+MIDRUN_BODY="$WORK/midrun-body.md"
+task_body "$MIDRUN_BODY"
+task_doc midrun.md midrun "$MIDRUN_BODY" "group: midrun" "pipeline: t"
+must "a task for the mid-run edit queues" "$SPOOLWAY" queue add --from midrun.md
+# Long enough to make the edit and both checks below while the lane is up;
+# spent as it is read, so it holds only this one turn.
+echo "linger:10" > "$MIDRUN_CTL/midrun.a"
+
+"$SPOOLWAY" dispatch >/dev/null 2>&1 &
+MIDRUN_DISPATCHER=$!
+if poll_until 30 grep -q '^stage: a$' "$SPOOLWAY_PROJECT_HOME/queue/midrun.md"; then
+  ok "the lane on a is up before the pipeline is edited"
+else
+  bad "the lane on a is up before the pipeline is edited (stage: $(stage_of midrun))"
+fi
+
+midrun_pipeline x > .spoolway/pipelines/t.yml
+says "pipeline check names the file waiting on a restart" \
+  "t.yml changed since the running dispatcher started — restart the dispatcher to use it" \
+  "$SPOOLWAY" pipeline check
+
+# A pipeline added mid-run is one the running dispatcher could never route.
+cp .spoolway/pipelines/t.yml .spoolway/pipelines/u.yml
+task_doc midrun-new.md midrun-new "$MIDRUN_BODY" "group: midrun-new" "pipeline: u"
+refuses "queue add refuses a pipeline the running dispatcher never loaded" \
+  "restart the dispatcher" "$SPOOLWAY" queue add --from midrun-new.md
+rm -f .spoolway/pipelines/u.yml
+
+# The run drains its one task and ends on its own. A task routed onto `x`
+# never does — the running dispatcher has no `x` to start — so a run still
+# up after the wait is stopped here, and the check below fails on the
+# steps it ran rather than the suite hanging on `wait`.
+if ! poll_while 60 kill -0 "$MIDRUN_DISPATCHER"; then
+  kill "$MIDRUN_DISPATCHER" 2>/dev/null
+  rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
+fi
+wait "$MIDRUN_DISPATCHER" 2>/dev/null
+if [ "$(cat "$MIDRUN_MARK" 2>/dev/null)" = b ]; then
+  ok "the lane's report routed on the pipeline the dispatcher loaded, not the edit"
+else
+  bad "the lane's report routed on the pipeline the dispatcher loaded, not the edit \
+(steps run: $(tr '\n' ' ' 2>/dev/null < "$MIDRUN_MARK"))"
+fi
+
+# A restarted dispatcher loads the edit, and a task it routes goes through x.
+rm -f "$MIDRUN_MARK"
+task_doc midrun-after.md midrun-after "$MIDRUN_BODY" "group: midrun-after" "pipeline: t"
+must "a task for after the restart queues" "$SPOOLWAY" queue add --from midrun-after.md
+exit_code "the restarted dispatcher runs the edited pipeline to its end" 0 "$SPOOLWAY" dispatch
+if [ "$(tr '\n' ' ' 2>/dev/null < "$MIDRUN_MARK")" = "x b " ]; then
+  ok "the edit is used once the dispatcher restarts"
+else
+  bad "the edit is used once the dispatcher restarts \
+(steps run: $(tr '\n' ' ' 2>/dev/null < "$MIDRUN_MARK"))"
+fi
+rm -f .spoolway/pipelines/t.yml
+
 # --------------------------------------------- refused before the lock: git identity
 # A start that would actually try to run something and cannot — no git
 # identity, and the shipped `handover` step reaches `spoolway stack`, which

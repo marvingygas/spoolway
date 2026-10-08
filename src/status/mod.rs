@@ -1333,6 +1333,13 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     if repo.task(id).is_err() {
         return Ok(());
     }
+    // `pipelines` is the board's own, read from the files when the screen
+    // opened. While a dispatcher runs, the task goes where that dispatcher's
+    // copy says instead, the same as `spoolway resume` — or a pipeline
+    // edited since would send it to a step the run never loaded. See
+    // `crate::pipeline_snapshot::for_task`.
+    let routed = crate::pipeline_snapshot::for_task(repo, Some(id)).transpose()?;
+    let pipelines = routed.as_ref().unwrap_or(pipelines);
     // `paused_at` is a gate passed, waiting to be sent on past it;
     // `parked_from` is a person's own interrupt, and `blocked_from` is a
     // real block — all three waiting to be sent back to where they stopped.
@@ -1787,6 +1794,11 @@ struct Snapshot {
     model_used: BTreeMap<String, usize>,
     agent_model: BTreeMap<String, Vec<String>>,
     active_jobs: Vec<crate::jobs::ActiveJob>,
+    /// Every pipeline file edited since the running dispatcher loaded them —
+    /// see [`crate::pipeline_snapshot::changed_since_start`]. Read here, off
+    /// the key thread, rather than in the footer, since it reads every
+    /// pipeline file.
+    changed_pipelines: Vec<String>,
     recent: VecDeque<RecentEvent>,
 }
 
@@ -1805,6 +1817,7 @@ impl Snapshot {
             model_used: BTreeMap::new(),
             agent_model: BTreeMap::new(),
             active_jobs: Vec::new(),
+            changed_pipelines: Vec::new(),
             recent: VecDeque::new(),
         }
     }
@@ -1978,6 +1991,7 @@ fn build(
     // — memoised, so a reading over an unchanged calendar does not re-scan
     // it for every enabled job.
     let active_jobs = crate::jobs::active_jobs_cached(repo, &mut memory.jobs_next);
+    let changed_pipelines = crate::pipeline_snapshot::changed_since_start(repo);
 
     // Taken before the clear below, which must not erase the very news this
     // reading is handing back — see `Memory::adopted`.
@@ -1997,6 +2011,7 @@ fn build(
         model_used,
         agent_model,
         active_jobs,
+        changed_pipelines,
         recent,
     })
 }
@@ -2355,6 +2370,7 @@ fn paint(
         &model_used,
         &agent_model,
         &snapshot.active_jobs,
+        &snapshot.changed_pipelines,
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
@@ -6931,6 +6947,53 @@ mod tests {
             assert_eq!(task.stage(), crate::pipeline::PAUSED, "{id}");
             assert!(!task.front.parked_by_stop, "{id}");
         }
+    }
+
+    /// `r` on a gate sends the task where the running dispatcher's copy of
+    /// its pipeline says, not where the board's own file-read graph says: a
+    /// pipeline edited mid-run must not move a task onto a step the run
+    /// never loaded. With no dispatcher running, the board's graph decides.
+    #[test]
+    fn r_on_a_gate_routes_on_the_running_dispatchers_pipelines() {
+        let (repo, _root_guard) = fixture("resume-on-snapshot");
+        let loaded = Pipelines::builtin();
+        let loaded_next = loaded
+            .get("default")
+            .unwrap()
+            .step("implement")
+            .unwrap()
+            .on_pass
+            .clone()
+            .unwrap();
+        // The board's graph: the same file, edited so a gate passed at
+        // `implement` skips straight to `document`.
+        let mut edited = loaded.clone();
+        let default = edited.pipelines.get_mut("default").unwrap();
+        default
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_pass = Some("document".into());
+        assert_ne!(loaded_next, "document", "the edit must change the route");
+
+        let gate = |id: &str| {
+            add_to(&repo, id, &[], Some("implement"), Some(id));
+            let mut task = repo.task(id).unwrap();
+            task.front.paused_at = Some("implement".into());
+            task.set_stage(crate::pipeline::PAUSED, None);
+            task.save().unwrap();
+        };
+
+        gate("unwatched");
+        resume_task(&repo, &edited, "unwatched").unwrap();
+        assert_eq!(repo.task("unwatched").unwrap().stage(), "document");
+
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &loaded).unwrap();
+        gate("running");
+        resume_task(&repo, &edited, "running").unwrap();
+        assert_eq!(repo.task("running").unwrap().stage(), loaded_next);
     }
 
     /// A task a stop parked and a person then resumed by hand, then parked

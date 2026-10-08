@@ -215,6 +215,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         Err(err) => return Err(err),
     };
 
+    // What this run loaded, written down the moment the lock is ours, so a
+    // lane's `report` — and `resume` and `queue add` — routes on the same
+    // graph this dispatcher does rather than on files edited since. See
+    // `crate::pipeline_snapshot`. Before any lane exists, so no lane of
+    // this run can report ahead of it.
+    crate::pipeline_snapshot::write(repo, pipelines).context("refusing to start")?;
+
     // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
     crate::usage::registry::register(&repo.root);
