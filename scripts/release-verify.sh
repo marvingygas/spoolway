@@ -58,13 +58,24 @@ fi
 scope="$(git show "$tag:npm/targets.json" | jq -r .scope)"
 mapfile -t pkgs < <(git show "$tag:npm/targets.json" | jq -r '.targets[].pkg')
 [ "${#pkgs[@]}" -gt 0 ] || die "no platform packages listed in npm/targets.json at $tag"
+# npm answers "being processed and may take a few minutes" to a publish, and
+# a check run the minute after the workflow finished found most packages
+# missing that all appeared within three. So each one gets ten minutes.
+npm_wait() {
+  local name="$1" got="" tries=0
+  while :; do
+    got="$(curl -fsS "$registry/$name/$version" 2>/dev/null | jq -r '.version // empty')" || true
+    [ "$got" = "$version" ] && return 0
+    tries=$((tries + 1))
+    [ "$tries" -lt 20 ] || die "npm: ${name/\%2f//} has no $version after 10 minutes (got '${got:-nothing}')"
+    sleep 30
+  done
+}
 for pkg in "${pkgs[@]}"; do
   # A scoped name is one path segment on the registry: the slash is %2f.
-  got="$(curl -fsS "$registry/$scope%2f$pkg/$version" 2>/dev/null | jq -r '.version // empty')" || true
-  [ "$got" = "$version" ] || die "npm: $scope/$pkg has no $version (got '${got:-nothing}')"
+  npm_wait "$scope%2f$pkg"
 done
-got="$(curl -fsS "$registry/spoolway/$version" 2>/dev/null | jq -r '.version // empty')" || true
-[ "$got" = "$version" ] || die "npm: spoolway has no $version (got '${got:-nothing}')"
+npm_wait spoolway
 
 # 4. The GitHub release carries one archive per platform, plus the checksums.
 assets="$(gh release view "$tag" --json assets --jq '.assets[].name')" \
@@ -82,10 +93,15 @@ printf '%s\n' "$assets" | grep -qxF SHA256SUMS || die "$tag has no SHA256SUMS as
 # The heading is `## <version>` today; tags older than 177b963 carry a theme
 # after it. Enforcing which of the two is legal belongs to the changelog
 # contract in src/release_notes.rs — all this needs is the section's bounds.
-section="$(git show "$tag:CHANGELOG.md" | awk -v v="$version" '
+# Read whole before awk sees it: awk stops at the section's end, and once the
+# file outgrew the 64 KiB pipe buffer a piped `git show` died of SIGPIPE, which
+# pipefail and set -e turned into a silent exit 141.
+changelog="$(git show "$tag:CHANGELOG.md")" \
+  || die "no CHANGELOG.md at $tag"
+section="$(awk -v v="$version" '
   $0 ~ "^## " v "( |$)" { if (p) exit; p = 1 }
   p && /^## / && $0 !~ "^## " v "( |$)" { exit }
-  p')"
+  p' <<<"$changelog")"
 [ -n "$section" ] || die "no '## $version' section in CHANGELOG.md at $tag"
 body="$(gh release view "$tag" --json body --jq .body | tr -d '\r')"
 diff <(printf '%s\n' "$section" | sed -e 's/[[:space:]]*$//') \
