@@ -93,6 +93,10 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
         let count = jobs.iter().filter(|job| &job.source == path).count();
         println!("  {label:<width$}   {count}");
     }
+    for note in jobs.iter().filter_map(Job::unknown_keys_note) {
+        println!();
+        println!("warning: {note}");
+    }
 
     Ok(())
 }
@@ -237,6 +241,8 @@ struct Row {
     pipeline: String,
     routine: String,
     enabled: bool,
+    /// Keys in the job's table that no job reads. Empty when it has none.
+    unknown_keys: Vec<String>,
     source: String,
     /// Local RFC 3339, or `null` when the job is paused, the expression will
     /// not parse, or it can never fire.
@@ -259,6 +265,7 @@ impl Row {
             pipeline: job.spec.pipeline.clone(),
             routine: job.spec.routine.clone(),
             enabled: job.spec.enabled,
+            unknown_keys: job.unknown_keys.clone(),
             source: store_label(repo, &job.source),
             next: match job.spec.enabled {
                 true => jobs::next_fire(&job.spec.schedule).map(|when| when.to_rfc3339()),
@@ -1680,7 +1687,8 @@ mod tests {
         std::fs::write(
             repo.user_jobs_file(),
             "[jobs.good]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"nightly\"\n\
-             [jobs.bad]\nschedule = \"99 3 * * *\"\npipeline = \"default\"\nroutine = \"nightly\"\n",
+             [jobs.bad]\nschedule = \"99 3 * * *\"\npipeline = \"default\"\nroutine = \"nightly\"\n\
+             [jobs.typo]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"nightly\"\nenable = false\n",
         )
         .unwrap();
         let jobs = crate::jobs::load(&repo).unwrap();
@@ -1703,6 +1711,13 @@ mod tests {
         assert!(
             bad.get("schedule_error").and_then(|v| v.as_str()).is_some(),
             "{bad}"
+        );
+
+        assert_eq!(good["unknown_keys"], serde_json::json!([]), "{good}");
+        assert_eq!(
+            row("typo")["unknown_keys"],
+            serde_json::json!(["enable"]),
+            "a misspelt key is named in the JSON row"
         );
     }
 

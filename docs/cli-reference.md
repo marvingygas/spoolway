@@ -536,8 +536,9 @@ spoolway jobs list
 spoolway jobs list --json
 ```
 
-`NEXT` reads `paused`, `bad expr`, `never`, or the next firing time. `--json` prints one
-object per job.
+`NEXT` reads `paused`, `bad expr`, `never`, or the next firing time. A job whose table holds an
+unknown key gets a `warning:` line under the table. `--json` prints one object per job, with its
+unknown keys under `unknown_keys`. See [Jobs](jobs.md).
 
 ### `spoolway eval`
 

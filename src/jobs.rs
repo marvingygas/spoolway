@@ -60,9 +60,9 @@ impl Scope {
 }
 
 /// One job as its `[jobs.<name>]` table declares it. Not
-/// `deny_unknown_fields`: the `spoolway jobs` screen owns this shape and may
-/// grow it, and an older reader should ignore a key it does not know rather
-/// than refuse the whole store.
+/// `deny_unknown_fields`: one misspelt key must not refuse the whole store.
+/// The keys it drops are collected into [`Job::unknown_keys`] instead, and
+/// that job is named and not fired.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JobSpec {
     /// The five-field cron expression, verbatim. Parsed on use, not here, so
@@ -143,9 +143,31 @@ pub struct Job {
     /// The store file it was read from — for `jobs list`'s footer and
     /// `doctor`'s messages.
     pub source: PathBuf,
+    /// Keys in its table that [`JOB_KEYS`] does not name, sorted. A job that
+    /// carries one is never fired: `enable = false` is a paused job that
+    /// would otherwise run, since an ignored key leaves `enabled` true.
+    pub unknown_keys: Vec<String>,
 }
 
 impl Job {
+    /// The sentence naming this job's unknown keys, or `None` when it has
+    /// none. Shared by `fire_due`, `jobs list` and `doctor` so all three say
+    /// the same thing.
+    pub fn unknown_keys_note(&self) -> Option<String> {
+        if self.unknown_keys.is_empty() {
+            return None;
+        }
+        let keys: Vec<String> = self.unknown_keys.iter().map(|k| format!("`{k}`")).collect();
+        Some(format!(
+            "job `{}` has unknown key{} {} in {} — it will not fire until {} removed or corrected",
+            self.name,
+            if keys.len() == 1 { "" } else { "s" },
+            keys.join(", "),
+            self.source.display(),
+            if keys.len() == 1 { "it is" } else { "they are" },
+        ))
+    }
+
     /// The path the job's `routine` resolves to under the checkout's
     /// `.spoolway/routines/`.
     ///
@@ -193,7 +215,7 @@ pub fn load(repo: &Repo) -> Result<Vec<Job>> {
         (Scope::User, repo.user_jobs_file()),
         (Scope::Project, repo.jobs_file()),
     ] {
-        let store = read_store(&path)?;
+        let (store, unknown) = read_store(&path)?;
         for (name, spec) in store.jobs {
             if let Some(other) = seen.get(&name) {
                 bail!(
@@ -204,6 +226,7 @@ pub fn load(repo: &Repo) -> Result<Vec<Job>> {
             }
             seen.insert(name.clone(), path.clone());
             jobs.push(Job {
+                unknown_keys: unknown.get(&name).cloned().unwrap_or_default(),
                 name,
                 scope,
                 spec,
@@ -214,13 +237,37 @@ pub fn load(repo: &Repo) -> Result<Vec<Job>> {
     Ok(jobs)
 }
 
-/// A store file's contents, or an empty store if the file is not there.
-fn read_store(path: &Path) -> Result<Store> {
+/// A store file's contents, or an empty store if the file is not there, with
+/// each job's keys that [`JOB_KEYS`] does not name. [`JobSpec`] cannot report
+/// them itself: serde drops an unknown key while deserializing, so the raw
+/// table is read a second time for them.
+fn read_store(path: &Path) -> Result<(Store, BTreeMap<String, Vec<String>>)> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            toml::from_str(&text).with_context(|| format!("parsing job store {}", path.display()))
+            let context = || format!("parsing job store {}", path.display());
+            let store: Store = toml::from_str(&text).with_context(context)?;
+            let raw: toml::Table = toml::from_str(&text).with_context(context)?;
+            let mut unknown = BTreeMap::new();
+            if let Some(jobs) = raw.get("jobs").and_then(|jobs| jobs.as_table()) {
+                for (name, table) in jobs {
+                    let Some(table) = table.as_table() else {
+                        continue;
+                    };
+                    let keys: Vec<String> = table
+                        .keys()
+                        .filter(|key| !JOB_KEYS.iter().any(|known| known.name == key.as_str()))
+                        .cloned()
+                        .collect();
+                    if !keys.is_empty() {
+                        unknown.insert(name.clone(), keys);
+                    }
+                }
+            }
+            Ok((store, unknown))
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok((Store::default(), BTreeMap::new()))
+        }
         Err(err) => Err(err).with_context(|| format!("reading job store {}", path.display())),
     }
 }
@@ -345,9 +392,10 @@ pub struct FireRecord {
     /// stacking a second copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_ids: Vec<String>,
-    /// The local minute a window was last skipped because that previous run
-    /// was still in the queue — so the skip is reported once, not on every
-    /// pass that crosses the minute.
+    /// The local minute a window was last skipped, either because the
+    /// previous run was still in the queue or because the job's table carries
+    /// an unknown key — so the skip is reported once, not on every pass that
+    /// crosses the minute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_minute: Option<String>,
     /// The local minute [`fire_due`] last looked at for this job,
@@ -491,6 +539,7 @@ pub fn fire_due(
             // An expression that will not parse never fires; `doctor` names it.
             continue;
         };
+        let unknown_note = job.unknown_keys_note();
 
         let record = state.entry(job.name.clone()).or_default();
         let own_look = (record.checked_by.as_deref() == Some(run_id()))
@@ -514,6 +563,16 @@ pub fn fire_due(
             || record.skipped_minute.as_deref() == Some(minute.as_str())
         {
             // Already fired, or already reported as skipped, for this minute.
+            continue;
+        }
+
+        if let Some(note) = unknown_note {
+            // A misspelt key (`enable = false`) is ignored by the parser, so
+            // the job would run as if enabled. Report it once per window,
+            // like a skip, rather than on every pass.
+            record.skipped_minute = Some(minute.clone());
+            dirty = true;
+            problems.push(note);
             continue;
         }
 
@@ -1594,5 +1653,49 @@ mod tests {
             "{actions:?} {problems:?}"
         );
         assert!(repo.queued_ids().is_empty());
+    }
+
+    /// A misspelt key in a job table is named, with the job's name, and the
+    /// job is not fired while it carries one: `enable = false` must not
+    /// leave a job meant to be paused running.
+    #[test]
+    fn a_job_with_an_unknown_key_is_named_and_does_not_fire() {
+        let (repo, _root_guard) = fixture("jobs-unknown-key");
+        every_minute_job(&repo, "nightly", "default");
+        let store = std::fs::read_to_string(super::store_path(&repo, Scope::User)).unwrap();
+        write_user_store(&repo, &format!("{store}enable = false\n"));
+
+        let (actions, problems) = fire(&repo);
+        assert!(
+            actions.is_empty(),
+            "the job must not fire while it has an unknown key: {actions:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|line| line.contains("nightly") && line.contains("enable")),
+            "the problem names the job and the key: {problems:?}"
+        );
+        assert!(
+            !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
+            "no task was queued"
+        );
+    }
+
+    /// `load` carries each job's unknown keys, so `jobs list` and `doctor`
+    /// can name them; a job with only known keys carries none.
+    #[test]
+    fn load_reports_unknown_keys_per_job() {
+        let (repo, _root_guard) = fixture("jobs-unknown-key-load");
+        write_user_store(
+            &repo,
+            "[jobs.a]\nschedule = \"* * * * *\"\npipeline = \"default\"\nroutine = \"r\"\nEnabled = false\n\n\
+             [jobs.b]\nschedule = \"* * * * *\"\npipeline = \"default\"\nroutine = \"r\"\n",
+        );
+        let jobs = load(&repo).unwrap();
+        assert_eq!(jobs[0].unknown_keys, vec!["Enabled".to_string()]);
+        let note = jobs[0].unknown_keys_note().unwrap();
+        assert!(note.contains("`a`") && note.contains("`Enabled`"), "{note}");
+        assert!(jobs[1].unknown_keys_note().is_none());
     }
 }
