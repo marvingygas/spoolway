@@ -319,6 +319,13 @@ each failure. `spoolway resume` forgets that run, so the hook fires again. A non
 `blocked` or `paused` only records the failure, since both stages are already stopped for a
 person.
 
+A hook run killed without an exit code, by a reboot or `wsl --shutdown` for example, is fired
+again on the next pass. The pass report says so. If three runs in a row are killed this way, the
+hook is not fired again. For the `queued`, `started` and `done` events the task is then paused
+with the reason `issue_tracking hook was killed 3 times in a row without an exit code`. `spoolway resume` clears
+that count along with the run. A re-fired hook can repeat whatever the killed run already did,
+such as opening a ticket.
+
 | Event | When it fires | Waits for the script | A non-zero exit |
 |---|---|---|---|
 | `fetch` | `spoolway issue show <ref>` reads one issue | Yes | Refuses the command |

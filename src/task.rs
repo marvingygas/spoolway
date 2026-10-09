@@ -509,7 +509,9 @@ pub struct Frontmatter {
 
     /// `"queued"` or `"done"` — which reserved stage's issue-tracking hook
     /// paused this task, set the moment [`crate::dispatch::Dispatcher::
-    /// tracking_gate`] finds one exited non-zero. Unlike [`paused_by`] this
+    /// tracking_gate`] finds one exited non-zero, or killed
+    /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row without leaving an
+    /// exit code at all. Unlike [`paused_by`] this
     /// is not one of a gate's two roads — a hook pause answers no question a
     /// person releases past, it stops the task until the hook itself is
     /// made to run again — so it needs its own field rather than a third

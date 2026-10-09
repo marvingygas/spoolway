@@ -471,14 +471,19 @@ impl Runs {
         self.dir.join(format!("{key}.kills"))
     }
 
+    /// How many runs of this key have been killed in a row without an exit
+    /// code, without counting another. Zero when none have.
+    pub fn kills(&self, key: &str) -> u32 {
+        std::fs::read_to_string(self.kills_path(key))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
     /// Count one more run of this key killed without an exit code, and answer
     /// the new total. [`Runs::forget`] and [`Runs::begin_visit`] reset it.
     pub fn note_kill(&self, key: &str) -> Result<u32> {
-        let seen = std::fs::read_to_string(self.kills_path(key))
-            .ok()
-            .and_then(|text| text.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        let total = seen + 1;
+        let total = self.kills(key) + 1;
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(self.kills_path(key), total.to_string())
             .with_context(|| format!("writing {}", self.kills_path(key).display()))?;

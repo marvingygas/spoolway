@@ -641,8 +641,22 @@ enum TrackingGate {
     Pending,
     /// The hook exited clean.
     Clean,
-    /// The hook exited nonzero, with the code.
-    Failed(i32),
+    /// The hook exited nonzero, or was killed without an exit code
+    /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row — with the reason
+    /// the task is paused under.
+    Failed(String),
+}
+
+/// The pass report's line for a hook run [`crate::tracking::fire`] started
+/// again because the one before it was killed without an exit code — the
+/// counterpart of a command step's own "interrupted without an exit code"
+/// line, so two runs of the same hook in its log are never unexplained.
+fn refired_note(id: &str, event: &str, kills: u32) -> String {
+    format!(
+        "{id}: issue_tracking hook on `{event}` was interrupted without an exit code \
+         ({kills} of {} in a row) — running it again",
+        crate::tracking::MAX_HOOK_KILLS
+    )
 }
 
 /// What [`Dispatcher::collect_candidates`]'s loop should do with a step once
@@ -1912,11 +1926,13 @@ impl<'a> Dispatcher<'a> {
         // `Task::tracking_off`.
         if task.front.trial.is_none() && !task.tracking_off() {
             let group_open = graph.group_open(task.id());
-            if let Err(err) = crate::tracking::fire(self.repo, task, stage, group_open) {
-                report.problems.push(format!(
+            match crate::tracking::fire(self.repo, task, stage, group_open) {
+                Ok(Some(kills)) => report.actions.push(refired_note(task.id(), stage, kills)),
+                Ok(None) => {}
+                Err(err) => report.problems.push(format!(
                     "{}: issue_tracking hook on `{stage}`: {err:#}",
                     task.id()
-                ));
+                )),
             }
         }
         if stage == crate::pipeline::QUEUED {
@@ -1937,8 +1953,8 @@ impl<'a> Dispatcher<'a> {
             // all.
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
-                TrackingGate::Failed(code) => {
-                    self.pause_for_hook_failure(task, stage, code)?;
+                TrackingGate::Failed(reason) => {
+                    self.pause_for_hook_failure(task, stage, &reason)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -1969,20 +1985,29 @@ impl<'a> Dispatcher<'a> {
                 // `queued` hook above skips.
                 if task.front.trial.is_none() && !task.tracking_off() {
                     let group_open = graph.group_open(&id);
-                    if let Err(err) =
-                        crate::tracking::fire(self.repo, task, crate::pipeline::STARTED, group_open)
-                    {
-                        report.problems.push(format!(
+                    match crate::tracking::fire(
+                        self.repo,
+                        task,
+                        crate::pipeline::STARTED,
+                        group_open,
+                    ) {
+                        Ok(Some(kills)) => report.actions.push(refired_note(
+                            task.id(),
+                            crate::pipeline::STARTED,
+                            kills,
+                        )),
+                        Ok(None) => {}
+                        Err(err) => report.problems.push(format!(
                             "{}: issue_tracking hook on `{}`: {err:#}",
                             task.id(),
                             crate::pipeline::STARTED
-                        ));
+                        )),
                     }
                 }
                 match self.tracking_gate(task, crate::pipeline::STARTED) {
                     TrackingGate::Inactive | TrackingGate::Clean => {}
-                    TrackingGate::Failed(code) => {
-                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, code)?;
+                    TrackingGate::Failed(reason) => {
+                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, &reason)?;
                         return Ok(Routed::NextTask);
                     }
                     TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2072,8 +2097,8 @@ impl<'a> Dispatcher<'a> {
             // `spoolway resume` to send it there directly instead.
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
-                TrackingGate::Failed(code) => {
-                    self.pause_for_hook_failure(task, stage, code)?;
+                TrackingGate::Failed(reason) => {
+                    self.pause_for_hook_failure(task, stage, &reason)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2149,15 +2174,21 @@ impl<'a> Dispatcher<'a> {
         {
             return TrackingGate::Inactive;
         }
+        if let Some(kills) = crate::tracking::killed(self.repo, task, stage) {
+            return TrackingGate::Failed(format!(
+                "issue_tracking hook was killed {kills} times in a row without an exit code"
+            ));
+        }
         match crate::tracking::exit_code(self.repo, task, stage) {
             Some(0) => TrackingGate::Clean,
-            Some(code) => TrackingGate::Failed(code),
+            Some(code) => TrackingGate::Failed(format!("issue_tracking hook exited {code}")),
             None => TrackingGate::Pending,
         }
     }
 
     /// Pause `task` at `stage` (`queued`, `started` or `done`) over a hook
-    /// that exited `code` — the one road all three take into `paused` now,
+    /// that failed for `reason` — a non-zero exit, or too many runs killed
+    /// without one (see [`TrackingGate::Failed`]) — the one road all three take into `paused` now,
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
@@ -2169,14 +2200,14 @@ impl<'a> Dispatcher<'a> {
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
     ///
-    /// The pause reason keeps only the exit code now — the hook's own last
+    /// The pause reason stays one short line — the hook's own last
     /// output, not a log path a person has to go find, is what explains it:
     /// the last 15 lines of its combined stdout and stderr, indented the way
     /// a failed command step's own `## Blocker` tail already is (see the
     /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
     /// under `## Hook error` so a second failure on the same task grows the
     /// section rather than overwriting it.
-    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, code: i32) -> Result<()> {
+    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, reason: &str) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
         let runs = crate::command_step::Runs::new(&self.repo.tracking_dir());
         let log = std::fs::read_to_string(runs.log_path(&key)).unwrap_or_default();
@@ -2191,10 +2222,7 @@ impl<'a> Dispatcher<'a> {
             .collect();
         task.append_to_section("## Hook error", &format!("  Last output:\n\n{tail}\n"));
         task.front.hook_paused = Some(stage.to_string());
-        task.set_stage(
-            crate::pipeline::PAUSED,
-            Some(&format!("issue_tracking hook exited {code}")),
-        );
+        task.set_stage(crate::pipeline::PAUSED, Some(reason));
         self.persist(task)?;
         Ok(())
     }
@@ -21323,6 +21351,107 @@ exit 0"#,
             Some(crate::pipeline::DONE),
             "resume needs to know this hold is `done`'s, not `queued`'s"
         );
+    }
+
+    /// Leaves `event`'s hook run for `demo` looking killed without an exit
+    /// code, `kills` times in a row: a pid that is already dead, no `.exit`
+    /// file, and the count beside it.
+    fn seed_killed_hook_run(repo: &Repo, event: &str, kills: u32) {
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(event, "demo");
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        // A child already waited on: dead, so the run reads as killed. A
+        // made-up number could belong to a live process.
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        std::fs::write(
+            repo.tracking_dir().join(format!("{key}.pid")),
+            dead_pid.to_string(),
+        )
+        .unwrap();
+        for _ in 0..kills {
+            runs.note_kill(&key).unwrap();
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Interrupted);
+    }
+
+    /// A `done` hook run killed without an exit code is fired again, and the
+    /// pass report says so, so a second run in the hook's log is explained.
+    #[test]
+    fn a_killed_done_hook_run_is_fired_again_and_reported() {
+        let (mut repo, _root_guard) = fixture("hook-done-refire");
+        write_hook(&repo, "ok.sh", "exit 0");
+        repo.config.issue_tracking.hook = "ok.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::DONE);
+        seed_killed_hook_run(&repo, crate::pipeline::DONE, 0);
+        let mux = FakeMux::new(vec![]);
+
+        let report = run_pass(&repo, &mux);
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("demo: issue_tracking hook on `done`")
+                    && a.contains("running it again")),
+            "the refire must be in the pass report: {:?}",
+            report.actions
+        );
+        for _ in 0..200 {
+            if !path.exists() {
+                break;
+            }
+            run_pass(&repo, &mux);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !path.exists(),
+            "the refired run exited 0, so the task archives"
+        );
+    }
+
+    /// A hook something kills every time it starts is not started forever:
+    /// the run killed [`crate::tracking::MAX_HOOK_KILLS`] times in a row
+    /// pauses the task the way a non-zero exit does, with `hook_paused` set
+    /// so `spoolway resume` forgets the run and its count.
+    #[test]
+    fn a_hook_run_killed_too_often_pauses_the_task() {
+        for (event, from) in [
+            (crate::pipeline::STARTED, crate::pipeline::QUEUED),
+            (crate::pipeline::DONE, crate::pipeline::DONE),
+        ] {
+            let (mut repo, _root_guard) = fixture(&format!("hook-{event}-killed"));
+            let marker = repo.root.join("hook-ran");
+            write_hook(
+                &repo,
+                "mark.sh",
+                &format!(
+                    "if [ \"$SPOOLWAY_EVENT\" = {event} ]; then touch '{}'; fi\nexit 0",
+                    marker.display()
+                ),
+            );
+            repo.config.issue_tracking.hook = "mark.sh".into();
+            let path = add_task(&repo, "demo", from);
+            seed_killed_hook_run(&repo, event, crate::tracking::MAX_HOOK_KILLS - 1);
+            let mux = FakeMux::new(vec![]);
+
+            let stage = pass_until_settled(&repo, &mux, &path, from);
+            assert_eq!(stage, crate::pipeline::PAUSED, "{event}");
+            let task = reload(&path);
+            assert_eq!(task.front.hook_paused.as_deref(), Some(event));
+            assert!(
+                task.section("## Status Log")
+                    .unwrap()
+                    .contains("killed 3 times in a row without an exit code"),
+                "{event}: {:?}",
+                task.section("## Status Log")
+            );
+            assert!(
+                !marker.exists(),
+                "{event}: the hook must not run a fourth time"
+            );
+            assert!(mux.did("start").is_empty(), "{event}: no lane may start");
+        }
     }
 
     /// A hook failing on `blocked` or `paused` only ever records the

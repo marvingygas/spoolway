@@ -274,7 +274,8 @@ pub(crate) enum Cause {
     Gate,
     /// The task's own `gate_at` held the step's outcome.
     Scheduled,
-    /// An issue-tracking hook exited non-zero.
+    /// An issue-tracking hook exited non-zero, or was killed three times in a
+    /// row without an exit code.
     HookFailed,
     /// A person parked it: the board's `p`, or an Escape in the pane.
     Manually,

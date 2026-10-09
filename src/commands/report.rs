@@ -1850,11 +1850,13 @@ fn back_onto_its_step(
     task.front.missing_start_branch = None;
 
     // A hook pause is neither a block nor a park: nothing inside the
-    // pipeline failed a check, a hook exited non-zero on `queued` or `done`
-    // — see `crate::dispatch::Dispatcher::pause_for_hook_failure`. Forgetting
+    // pipeline failed a check, a hook exited non-zero on `queued`, `started`
+    // or `done`, or was killed three times in a row without an exit code —
+    // see `crate::dispatch::Dispatcher::pause_for_hook_failure`. Forgetting
     // the failed run is always right, whichever road the rest of this
     // function takes, so it happens ahead of everything else — `resume` is
-    // the one place a hook pause is ever undone.
+    // the one place a hook pause is ever undone. For the kill pause this
+    // forget is also what resets the kill count, so the hook is fired afresh.
     if let Some(stage) = task.front.hook_paused.take() {
         crate::tracking::forget(repo, &task, &stage);
     }
