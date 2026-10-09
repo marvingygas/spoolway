@@ -46,9 +46,10 @@ the merge commit on this machine, verify the result compiles and passes, and pus
 then marks the pull requests merged on its own, because their head commits are on `main`.
 
 **`main` is protected, so the merge commit is checked on the pull request it closes.** Branch
-protection requires `verify / test` and `verify / audit` to have passed on the exact commit
+protection requires `verify / test`, `verify / audit` and `verify / test-macos` to have passed
+on the exact commit
 being pushed, admins included, and `ci.yml` runs on pull requests only. A plain
-`git push origin main` of a fresh merge is refused with `GH006 ... 2 of 2 required status
+`git push origin main` of a fresh merge is refused with `GH006 ... 3 of 3 required status
 checks are expected`. So the merge commit goes first to the tip's own branch — a fast-forward
 of it, since the tip is the merge's second parent — where the pull request's own CI runs on it,
 and `main` is fast-forwarded to that same commit once it is green. Step 7 has the commands.
@@ -117,10 +118,10 @@ gh pr checks <number> --watch
 
 `--watch` holds until every check on that head commit reaches a conclusion, then prints the
 table and exits non-zero if any of them failed. Run it per tip. There is no hurry to be clever
-here: `verify / test` takes something like eight minutes, and a merge pushed on top of a red
+here: `verify / test` takes something like eight minutes and `verify / test-macos` about fifteen, and a merge pushed on top of a red
 branch costs far more than that to unpick.
 
-The checks you will see are `changes`, `verify / test` and `verify / audit`. `dress-rehearsal`
+The checks you will see are `changes`, `verify / test`, `verify / audit` and `verify / test-macos`. `dress-rehearsal`
 reports `SKIPPED` on pull requests by its own `if:`, and a skipped or neutral check is not a
 failure.
 
@@ -226,7 +227,7 @@ installed, so it will happily show you the old layout and tell you nothing.
 
 ### 7. Push, then prove `main` is green
 
-`main` refuses any commit its two required checks have not passed on (see *Merging is
+`main` refuses any commit its three required checks have not passed on (see *Merging is
 local* above). So each merge commit goes to its own tip's branch first, where that pull
 request's CI runs on it, and `main` is fast-forwarded once every one of them is green:
 

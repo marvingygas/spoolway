@@ -76,9 +76,10 @@ wait_checks() { # <pr> <head-sha> — returns once every check on that head is g
       || die "pull request #$pr moved off $head while its checks ran — run this step again"
     rows="$(gh pr view "$pr" --repo "$repo" --json statusCheckRollup --jq '.statusCheckRollup[]
       | "\(.name // .context)=\(if .status then (if .status == "COMPLETED" then .conclusion else "PENDING" end) else .state end)"')"
-    # The two contexts branch protection requires. Until both have reported,
-    # the checks have not all started yet.
-    if grep -q '^verify / test=' <<<"$rows" && grep -q '^verify / audit=' <<<"$rows"; then
+    # The contexts branch protection requires. Until all have reported, the
+    # checks have not all started yet.
+    if grep -q '^verify / test=' <<<"$rows" && grep -q '^verify / audit=' <<<"$rows" \
+      && grep -q '^verify / test-macos=' <<<"$rows"; then
       pending="" bad=""
       while IFS='=' read -r name concl; do
         case "$concl" in

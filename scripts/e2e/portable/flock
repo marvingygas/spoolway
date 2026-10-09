@@ -1,0 +1,15 @@
+#!/usr/bin/env perl
+# A `flock` for machines without util-linux, for the one form the harness uses:
+# `flock N` and `flock -u N`, an exclusive lock on a file descriptor the calling
+# shell opened (`exec 9>file`). The lock belongs to the open file description,
+# which the shell keeps, so it outlives this process exactly as it would the
+# real command.
+use strict;
+use warnings;
+use Fcntl qw(:flock);
+
+my $unlock = @ARGV && $ARGV[0] eq '-u' ? shift : 0;
+@ARGV == 1 && $ARGV[0] =~ /^\d+$/ or die "usage: flock [-u] fd\n";
+my $fh;
+open($fh, '+<&=', $ARGV[0]) or open($fh, '<&=', $ARGV[0]) or die "flock: fd $ARGV[0]: $!\n";
+flock($fh, $unlock ? LOCK_UN : LOCK_EX) or die "flock: $!\n";

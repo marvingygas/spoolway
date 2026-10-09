@@ -1,0 +1,16 @@
+#!/usr/bin/env perl
+# A `setsid` for machines without util-linux: run a command in a session of its
+# own, so one signal to its process group reaches everything it forked.
+#
+# Exactly the util-linux behaviour the harness relies on when it is started in
+# the background (`setsid cmd &`): the harness's child is not a group leader,
+# so `setsid(2)` succeeds in place and the pid the shell holds in `$!` is the
+# command's own, and the session leader's. A process that already leads its
+# group cannot call it; that is an error here, where util-linux would fork.
+use strict;
+use warnings;
+use POSIX ();
+
+@ARGV or die "usage: setsid command [argument...]\n";
+POSIX::setsid() != -1 or die "setsid: $!\n";
+exec { $ARGV[0] } @ARGV or die "setsid: failed to execute $ARGV[0]: $!\n";
