@@ -2238,8 +2238,9 @@ fn open_tickets(
             continue;
         };
         // A queued file can be hand-edited, and a stored slug with it. One
-        // that no longer passes `check_id` is ignored outright — not used to
-        // strip a `<slug>-` prefix off the group for the epic lookup, and not
+        // that no longer passes `check_id`, or is over the length limit, is
+        // ignored outright — not used to strip a `<slug>-` prefix off the
+        // group for the epic lookup, and not
         // seeded as a prefix — so a bad value cannot attach this group to the
         // wrong epic or an invalid branch. It is dropped in silence: a queued
         // sibling is not this command's input to complain about.
@@ -2283,7 +2284,7 @@ fn open_tickets(
             } else {
                 log.note(&format!(
                     "  issue_tracking: slug `{slug}` on `{}` is not a valid name \
-                     (lowercase letters, digits and hyphens) — ignored",
+                     (lowercase letters, digits and hyphens, at most {SLUG_MAX_LEN} characters) — ignored",
                     task.id()
                 ));
                 task.front.extra.remove("slug");
@@ -2468,11 +2469,23 @@ fn pending_task_group(repo: &Repo, id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The longest slug [`accept_slug`] takes.
+///
+/// The slug is put in front of a task's id to make `task/<slug>-<id>`, and
+/// git refuses a ref, or a worktree folder, whose file name is over 255
+/// bytes. A tracker key is a few characters, so this leaves room for the id
+/// behind it while stopping a runaway hook answer from producing a branch no
+/// worktree can be cut on.
+const SLUG_MAX_LEN: usize = 64;
+
 /// Whether a slug a hook or a task offered is one spoolway will build a
-/// name out of: non-blank and inside [`crate::config::check_id`]'s alphabet,
-/// the same one every task id, group and branch already uses.
+/// name out of: non-blank, no longer than [`SLUG_MAX_LEN`], and inside
+/// [`crate::config::check_id`]'s alphabet, the same one every task id, group
+/// and branch already uses.
 fn accept_slug(slug: &str) -> bool {
-    !slug.is_empty() && crate::config::check_id("issue_tracking slug", slug).is_ok()
+    !slug.is_empty()
+        && slug.len() <= SLUG_MAX_LEN
+        && crate::config::check_id("issue_tracking slug", slug).is_ok()
 }
 
 /// Take the `slug=` and `url=` a hook answered on the `open` event.
@@ -2508,7 +2521,7 @@ fn record_slug_and_url(
         } else {
             println!(
                 "  issue_tracking: slug `{slug}` for `{}` is not a valid name \
-                 (lowercase letters, digits and hyphens) — ignored",
+                 (lowercase letters, digits and hyphens, at most {SLUG_MAX_LEN} characters) — ignored",
                 task.id()
             );
         }
@@ -16701,6 +16714,73 @@ mod tests {
             assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
             // The value the note said was dropped is not on the queued task.
             assert_eq!(task.extra_str("slug"), "");
+        }
+
+        /// A slug a hook answers is held to a length as well as an alphabet:
+        /// one so long that `task/<slug>-<id>` could not be a git ref file
+        /// name (255 bytes) is dropped like any other invalid slug, so the
+        /// queued branch stays the plain `task/<id>`.
+        #[test]
+        fn a_hook_slug_too_long_for_a_branch_name_is_not_turned_into_a_prefix() {
+            let (mut repo, _root_guard) = fixture("open-long-slug");
+            repo.config.issue_tracking.key_in_names = true;
+            let hook = format!(
+                r#"{{ echo "ticket=PROJ-13"; echo "slug={}"; }} >"$SPOOLWAY_OUT""#,
+                "a".repeat(300)
+            );
+            with_hook(&mut repo, &hook);
+
+            let doc = task_text(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
+            assert_eq!(task.extra_str("slug"), "");
+        }
+
+        /// The longest slug is still taken: the limit is a ceiling, not a
+        /// tighter alphabet.
+        #[test]
+        fn a_slug_at_the_length_limit_is_still_used() {
+            let (mut repo, _root_guard) = fixture("open-max-slug");
+            repo.config.issue_tracking.key_in_names = true;
+            let slug = "a".repeat(SLUG_MAX_LEN);
+            let hook =
+                format!(r#"{{ echo "ticket=PROJ-13"; echo "slug={slug}"; }} >"$SPOOLWAY_OUT""#);
+            with_hook(&mut repo, &hook);
+
+            let doc = task_text(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(
+                task.front.branch.as_deref(),
+                Some(format!("task/{slug}-auth-01").as_str())
+            );
         }
 
         /// A `url=` that is not an absolute http(s) address is dropped, not

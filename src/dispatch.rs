@@ -4603,8 +4603,21 @@ impl<'a> Dispatcher<'a> {
                     ));
                     return Ok(None);
                 }
-                let (worktree, _) =
-                    ensure_workspace(self.repo, self.mux, task, &mut self.file_seen)?;
+                // A checkout that cannot be cut — a branch name git refuses,
+                // say — is this task's failure alone. Passed up with `?` it
+                // ended the whole pass, so every other task waited behind
+                // it; counted as a failed launch it is retried and then
+                // routed like any other command that never got going.
+                let worktree =
+                    match ensure_workspace(self.repo, self.mux, task, &mut self.file_seen) {
+                        Ok((worktree, _)) => worktree,
+                        Err(err) => {
+                            let destination =
+                                self.note_launch_failure(task, step, "run", &err, report);
+                            self.persist(task)?;
+                            return Ok(destination.map(|to| (to, Outcome::Fail)));
+                        }
+                    };
                 let env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
                     (ENV_STEP.to_string(), step.id.clone()),
@@ -7912,6 +7925,38 @@ mod tests {
         assert_eq!(task.front.workspace_id.as_deref(), Some("w9"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w9:p1"));
         assert_eq!(task.steps_at("implement"), 1);
+    }
+
+    /// A branch git cannot create holds its own task and nothing else.
+    ///
+    /// A name over git's 255-byte file-name limit makes the worktree cut fail.
+    /// On a command step that failure used to come out of the pass as an
+    /// error, so no other task was started either. It now spends the task's
+    /// launch attempts and then blocks it with the reason in its file.
+    #[test]
+    fn a_worktree_cut_that_fails_holds_only_its_own_task() {
+        let (repo, _root_guard) = fixture("cut-fails-alone");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
+             - id: work\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        let long = format!("task/{}-bad", "a".repeat(300));
+        let bad = add_task_with(&repo, "bad", crate::pipeline::QUEUED, |f| {
+            f.branch = Some(long.clone())
+        });
+        let good = add_task(&repo, "good", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        for _ in 0..MAX_LAUNCH_FAILURES {
+            run_pass_with(&repo, &mux, &pipelines);
+        }
+
+        assert_ne!(reload(&good).stage(), crate::pipeline::QUEUED);
+        let bad = reload(&bad);
+        assert_eq!(bad.stage(), crate::pipeline::BLOCKED, "{}", bad.body);
+        assert!(bad.body.contains("could not be started"), "{}", bad.body);
     }
 
     /// A task with no `base:` — queued before the rule held, or edited by
