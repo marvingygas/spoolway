@@ -43,7 +43,27 @@ pub fn run(cwd: &Path) -> Result<()> {
         println!();
         print!("{digest}");
     }
+    if let Some(line) = closing_line(upgraded.as_deref()) {
+        println!();
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// What a finished install tells the person to do next. `update` replaces the
+/// binary and nothing else, so each project still has its own files to bring
+/// forward, and nothing else announces that.
+const SYNC_REMINDER: &str = "Run spoolway sync in each project to apply the update.";
+
+/// The line that ends a successful install, or `None` for every run that
+/// installed nothing.
+///
+/// The install is done by the process `update` hands over to, which is the
+/// only one carrying [`crate::release::ENV_UPGRADED`]. A run that found
+/// nothing newer, an install npm cannot take, or a dispatcher in the way never
+/// has it, so none of them tell anybody to sync an update that did not happen.
+fn closing_line(upgraded: Option<&str>) -> Option<&'static str> {
+    upgraded.map(|_| SYNC_REMINDER)
 }
 
 /// Whether this invocation is the successful far side of a person-facing npm
@@ -148,6 +168,12 @@ mod tests {
         assert_eq!(digest_previous(Some("0.1.0"), true), Some("0.1.0"));
         assert_eq!(digest_previous(None, true), None, "no handover happened");
         assert_eq!(digest_previous(Some("0.1.0"), false), None, "piped output");
+    }
+
+    #[test]
+    fn only_a_successful_install_ends_with_the_sync_reminder() {
+        assert_eq!(closing_line(Some("0.1.0")), Some(SYNC_REMINDER));
+        assert_eq!(closing_line(None), None, "nothing was installed");
     }
 
     fn successful_status() -> std::process::ExitStatus {

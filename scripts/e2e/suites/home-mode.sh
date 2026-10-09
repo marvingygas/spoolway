@@ -354,10 +354,8 @@ if [ "$(ls -d "$HOME"/.spoolway/sub-*/ | wc -l)" -eq 1 ]; then ok "no second hom
 else bad "no second home is made for the moved checkout"; ls -A "$HOME/.spoolway" | sed 's/^/        /'; fi
 
 # --------------------------------------------------- a cancelled init
-# `init` asks every question before it writes anything, and the lookup every
-# command runs first, to decide on the update notice, only reads. So a run
-# stopped at its first question leaves `.git` and
-# `~/.spoolway` exactly as they were. Run under a pseudo-terminal, since a
+# `init` asks every question before it writes anything. So a run stopped at
+# its first question leaves `.git` and `~/.spoolway` exactly as they were. Run under a pseudo-terminal, since a
 # silent run never reaches a question at all.
 if script -qec true /dev/null >/dev/null 2>&1; then
   CANCEL="$LIVE/cancelled"

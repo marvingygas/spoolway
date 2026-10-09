@@ -22,12 +22,10 @@
 //! its popups, keep its own meaning without this module knowing what any of
 //! them are.
 //!
-//! What the screen has to say the moment it opens — the sync notice, any
-//! override the load left out and the update notice, which every other
-//! command prints ahead of itself — is handed to the queue tab, the one the
-//! screen opens on, to show as popups over it: printed ahead of the screen,
-//! the first frame would wipe it
-//! before anybody could read it. See [`OnOpen`].
+//! What the screen has to say the moment it opens — any override the load
+//! left out — is handed to the queue tab, the one the screen opens on, to show
+//! as a popup over it: printed ahead of the screen, the first frame would wipe
+//! it before anybody could read it. See [`OnOpen`].
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
 //! through every screen's own `render`: the strip and the three rows it takes
@@ -53,12 +51,8 @@ use crate::repo::Repo;
 /// module doc. Each is `None` when there is nothing to say.
 #[derive(Debug, Default)]
 pub(crate) struct OnOpen {
-    /// The sync notice's popup — [`crate::gate::sync_popup`].
-    pub(crate) sync: Option<Vec<String>>,
     /// The "override ignored" popup — [`crate::commands::ignored_popup`].
     pub(crate) ignored: Option<crate::commands::IgnoredPopup>,
-    /// The update notice's line — [`crate::release::notice`].
-    pub(crate) update: Option<String>,
 }
 
 /// One tab of the shell, in strip order.
@@ -271,18 +265,12 @@ fn strip_line(open: Tab, width: usize) -> String {
 /// Holds the one [`crate::platform::TermGuard`] every tab draws under and
 /// installs the one `ctrl-c` handler ahead of it: a `ctrl-c` between the two
 /// would otherwise kill the process with the terminal already raw and
-/// nothing left to restore it. Opens on the queue tab, with the sync notice
-/// and `update` — the update notice's line, which `main` holds back from
-/// stderr for this — as popups over it.
+/// nothing left to restore it. Opens on the queue tab, with the "override
+/// ignored" popup over it when there is one.
 ///
 /// A dispatcher the dispatch tab started stops when this returns, however it
 /// returns — see [`super::dispatcher::Dispatcher`]'s own `Drop`.
-pub(crate) fn run(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    cwd: &Path,
-    update: Option<String>,
-) -> Result<()> {
+pub(crate) fn run(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> {
     // `false`: bare `spoolway` is never the `--from-screen` child, so both
     // locks are checked, the same as a typed `spoolway dispatch`. Shared
     // with `commands::dispatch` rather than written out a second time here,
@@ -293,12 +281,10 @@ pub(crate) fn run(
         return Ok(());
     }
     let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None)?;
-    // Asked before the terminal is taken: a scan that fails is reported the
-    // way the printed notice reports it, as this command's own error.
+    // Asked before the terminal is taken, so a failure is reported as this
+    // command's own error.
     let on_open = OnOpen {
-        sync: crate::gate::sync_popup(repo)?,
         ignored: crate::commands::ignored_popup(repo)?,
-        update,
     };
 
     crate::platform::stop::catch_interrupt();

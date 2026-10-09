@@ -8947,35 +8947,64 @@ mod screen_tests {
         const LINES_PER_SESSION: usize = 20;
         const BOUND: f64 = 8.0;
 
-        let (repo_small, _small_guard) = fixture("eval-load-perf-small");
-        let home_small = many_sessions_home("small", &repo_small, SMALL_N, LINES_PER_SESSION);
-        let elapsed_small = crate::platform::test_home::with_home(&home_small, || {
-            let start = std::time::Instant::now();
-            let loaded = load(&repo_small, &no_filters()).unwrap();
-            assert_eq!(loaded.dirs.len(), SMALL_N * 2);
-            start.elapsed()
-        });
+        // One timing per size is at the mercy of whatever else holds the
+        // cores at that moment: the full unit run puts 2,600 other tests on
+        // the same machine, and lanes run side by side. So time up to
+        // `ATTEMPTS` pairs, each over fresh files the transcript cache has
+        // never seen, and keep the best ratio. A quadratic read pattern costs
+        // about `SCALE * SCALE` on every attempt, so the best of them still
+        // fails; a linear one only has to come in under `BOUND` once.
+        const ATTEMPTS: usize = 3;
+        let mut best: Option<(f64, std::time::Duration, std::time::Duration)> = None;
+        for attempt in 0..ATTEMPTS {
+            let (repo_small, _small_guard) = fixture(&format!("eval-load-perf-small-{attempt}"));
+            let home_small = many_sessions_home(
+                &format!("small-{attempt}"),
+                &repo_small,
+                SMALL_N,
+                LINES_PER_SESSION,
+            );
+            let elapsed_small = crate::platform::test_home::with_home(&home_small, || {
+                let start = std::time::Instant::now();
+                let loaded = load(&repo_small, &no_filters()).unwrap();
+                assert_eq!(loaded.dirs.len(), SMALL_N * 2);
+                start.elapsed()
+            });
 
-        let (repo_large, _large_guard) = fixture("eval-load-perf-large");
-        let home_large = many_sessions_home("large", &repo_large, LARGE_N, LINES_PER_SESSION);
-        let elapsed_large = crate::platform::test_home::with_home(&home_large, || {
-            let start = std::time::Instant::now();
-            let loaded = load(&repo_large, &no_filters()).unwrap();
-            assert_eq!(loaded.dirs.len(), LARGE_N * 2);
-            start.elapsed()
-        });
+            let (repo_large, _large_guard) = fixture(&format!("eval-load-perf-large-{attempt}"));
+            let home_large = many_sessions_home(
+                &format!("large-{attempt}"),
+                &repo_large,
+                LARGE_N,
+                LINES_PER_SESSION,
+            );
+            let elapsed_large = crate::platform::test_home::with_home(&home_large, || {
+                let start = std::time::Instant::now();
+                let loaded = load(&repo_large, &no_filters()).unwrap();
+                assert_eq!(loaded.dirs.len(), LARGE_N * 2);
+                start.elapsed()
+            });
 
-        std::fs::remove_dir_all(&home_small).ok();
-        std::fs::remove_dir_all(&home_large).ok();
+            std::fs::remove_dir_all(&home_small).ok();
+            std::fs::remove_dir_all(&home_large).ok();
 
-        let ratio = elapsed_large.as_secs_f64() / elapsed_small.as_secs_f64().max(f64::EPSILON);
+            let ratio = elapsed_large.as_secs_f64() / elapsed_small.as_secs_f64().max(f64::EPSILON);
+            if best.is_none_or(|(b, _, _)| ratio < b) {
+                best = Some((ratio, elapsed_small, elapsed_large));
+            }
+            if ratio < BOUND {
+                break;
+            }
+        }
+
+        let (ratio, elapsed_small, elapsed_large) = best.unwrap();
         assert!(
             ratio < BOUND,
             "load took {elapsed_small:?} for {SMALL_N} sessions and {elapsed_large:?} for \
-             {LARGE_N} sessions ({SCALE}x as many) — a {ratio:.1}x slowdown means load is \
-             rescanning the whole session list per session and re-reading each transcript \
-             several times over, not once; the bound is {BOUND}x, well under the \
-             {}x a quadratic read pattern would cost",
+             {LARGE_N} sessions ({SCALE}x as many) at best over {ATTEMPTS} attempts — a \
+             {ratio:.1}x slowdown means load is rescanning the whole session list per session \
+             and re-reading each transcript several times over, not once; the bound is \
+             {BOUND}x, well under the {}x a quadratic read pattern would cost",
             SCALE * SCALE,
         );
     }

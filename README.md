@@ -81,9 +81,9 @@ npm install -g spoolway
 ```
 
 The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release. The next
-time you open spoolway in a project, it lists the files the new release rewrites and applies
-them when you confirm. `spoolway whats-new` prints the release notes offline.
+musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release. Run
+`spoolway sync` in each project to list the files the new release rewrites and apply them when
+you confirm. `spoolway whats-new` prints the release notes offline.
 
 From source instead, in a clone of this repository:
 
@@ -323,7 +323,7 @@ blocked_session = true       # the unblocker carries its own earlier session for
 blocked_prompt = "unblocker"
 
 [housekeeping]
-update_check = true          # tell a person at a keyboard that a newer release is out
+update_check = true          # show a newer release in the dispatcher header
 calibrate_window = "14d"     # how far back `/spoolway-calibrate` reads
 retention_days = 30          # how long run records, logs and scratch space are kept; 0 keeps everything
 archive_retention_days = 0   # how long finished tasks are kept; 0 keeps every one

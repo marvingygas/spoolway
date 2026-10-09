@@ -3339,11 +3339,6 @@ enum Mode {
         panel: Vec<String>,
         routines: Option<RoutineNav>,
     },
-    /// The notice bare `spoolway` opens on once an update is installed but
-    /// not yet synced — [`crate::gate::sync_popup`]'s panel. `enter`
-    /// dismisses it, the only key it reads, and writes nothing: only
-    /// `spoolway sync` applies the update.
-    SyncGate(Vec<String>),
     /// The overrides bare `spoolway` opens on that the load left out —
     /// [`crate::commands::ignored_popup`]. `enter` closes it, the only key
     /// it reads, the same as [`Mode::Queued`].
@@ -4113,10 +4108,9 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
 /// is held on the tab as its [`Mode::Outcome`] instead, closed like any
 /// other.
 ///
-/// `on_open` is what the screen has to say the moment it opens — the sync
-/// notice, the ignored overrides and the update notice, see
-/// [`crate::screen::shell::OnOpen`] — shown as popups over this tab, the one
-/// the screen opens on, in that order and ahead of the opening message.
+/// `on_open` is what the screen has to say the moment it opens — the ignored
+/// overrides, see [`crate::screen::shell::OnOpen`] — shown as a popup over
+/// this tab, the one the screen opens on, ahead of the opening message.
 ///
 /// [`Leave`]: crate::screen::shell::Leave
 pub(crate) fn queue_tab(
@@ -4133,11 +4127,7 @@ pub(crate) fn queue_tab(
     let groups = super::pending::list_groups(repo)?;
     let routines = super::routines::list_routines(repo)?;
     let mut state = ScreenState::new();
-    state.waiting.extend(on_open.sync.map(Mode::SyncGate));
     state.waiting.extend(on_open.ignored.map(Mode::Ignored));
-    state
-        .waiting
-        .extend(on_open.update.map(|line| outcome("update available", line)));
     if let Some(msg) = opening_message(repo, &groups) {
         state.waiting.push_back(outcome("nothing to queue", msg));
     }
@@ -4384,11 +4374,6 @@ fn run_screen_from(
                 }
             }
             Mode::Ignored(_) => {
-                if key == Key::Enter {
-                    state.mode = state.after_popup(Mode::Browsing);
-                }
-            }
-            Mode::SyncGate(_) => {
                 if key == Key::Enter {
                     state.mode = state.after_popup(Mode::Browsing);
                 }
@@ -6493,8 +6478,7 @@ fn popup(
         }
         Mode::ToolGate { panel, .. }
         | Mode::IssueQuestion { panel, .. }
-        | Mode::Queued { panel, .. }
-        | Mode::SyncGate(panel) => Some(panel.clone()),
+        | Mode::Queued { panel, .. } => Some(panel.clone()),
         // Wrapped to the frame the same way as `Mode::Outcome` above.
         Mode::Ignored(popup) => {
             Some(popup.panel(crate::commands::IGNORED_POPUP_WRAP.min(checkbox_row_cap(layout))))
@@ -10901,58 +10885,6 @@ mod tests {
         assert!(first.contains("DISPATCH"), "under the strip: {first}");
     }
 
-    /// What the screen opens with — the sync notice, then the update notice
-    /// — is shown over the queue tab in that order, each closed by `enter`
-    /// alone, before the tab is the person's. Dismissing the sync notice
-    /// writes nothing: no stamp appears where `sync` would record one.
-    #[test]
-    fn the_queue_tab_opens_with_the_sync_notice_then_the_update_notice() {
-        use crate::screen::shell::{Hosting, OnOpen, Tab};
-        let (repo, _root_guard) = fixture("queue-tab-on-open");
-        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
-        let _hosting = Hosting::open(Tab::Queue);
-        let on_open = OnOpen {
-            sync: Some(crate::screen::notice(
-                "update installed",
-                crate::gate::LINE,
-                "[enter] dismiss",
-                crate::screen::NOTICE_WRAP,
-            )),
-            ignored: None,
-            update: Some("Update available: 0.42.0. Run \"spoolway update\"".to_string()),
-        };
-
-        let mut input = keys("x\r");
-        let mut out = Vec::new();
-        queue_tab(
-            &repo,
-            &Pipelines::builtin(),
-            &repo.root,
-            on_open,
-            &mut crate::screen::frame_writer::FrameWriter::new(),
-            &mut input,
-            &mut out,
-        )
-        .unwrap();
-        let drawn = String::from_utf8(out).unwrap();
-        let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
-        assert!(frames[0].contains("┌─ update installed "), "{}", frames[0]);
-        assert!(frames[0].contains(crate::gate::LINE), "{}", frames[0]);
-        assert!(frames[0].contains("[enter] dismiss"), "{}", frames[0]);
-        assert!(frames[0].contains("─ groups"), "{}", frames[0]);
-        assert!(
-            !crate::sync::stamp_path(&repo.home).exists(),
-            "dismissing the notice must not sync"
-        );
-        let last = frames.last().unwrap();
-        assert!(last.contains("┌─ update available "), "{last}");
-        assert!(
-            last.contains("Update available: 0.42.0. Run \"spoolway update\""),
-            "{last}"
-        );
-        assert!(last.contains("[enter] confirm"), "{last}");
-    }
-
     /// The "override ignored" popup the screen opens on takes every key
     /// until `enter` closes it — `q` and `←` behind it must not quit or leave
     /// with the popup unread — and the tab is the person's again after it.
@@ -10975,7 +10907,6 @@ mod tests {
                         .into(),
                 }],
             }]),
-            ..OnOpen::default()
         };
 
         let mut input = keys("q\x1b[D\r\x1b[D");

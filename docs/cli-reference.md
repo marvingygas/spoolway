@@ -1324,7 +1324,8 @@ skills](installation.md#the-pipeline-skills).
 ### `spoolway update`
 
 Install the latest release. Runs from any directory, project or not, and writes no project
-file. After an npm self-update at a terminal, it prints the release notes.
+file. After an npm self-update at a terminal, it prints the release notes. A successful
+install ends with one line telling you to run `spoolway sync` in each project.
 
 ```
 spoolway update
@@ -1355,7 +1356,7 @@ spoolway sync
 | `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`, or `.bak.<n>` if that name is taken, with the same file mode. In home mode a path under `.spoolway/` is the workspace's `config/`. Repeatable |
 
 At a terminal, with something to write or remove, `sync` lists it and waits: enter writes the
-files, records the stamp and prints the report; esc, ctrl-c, or the terminal going away
+files and prints the report; esc, ctrl-c, or the terminal going away
 mid-question writes nothing and prints "Nothing was changed." With no terminal to answer, under
 `--json`, inside a lane, with `--dry-run`, with `--replace`, or with nothing to write, it writes
 straight away with no panel.
@@ -1372,32 +1373,11 @@ for the messages.
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
 
-On a run that refused no file, `sync` writes a stamp under the project's home recording this
-binary's version and a fingerprint of the text it would write, one line per checkout. A run
-that refused a file removes that checkout's line. `spoolway init` writes the same stamp for a
-freshly scaffolded project, and none when it kept an existing file or joined a workspace.
-
 The report lists refused files first. It then lists each file written or removed, and a line
 for each replaced key block and each value `sync` set on its own.
 
-Every other command that needs a project reads that stamp back. When the stamp is missing or
-unreadable, the command prints one line on stderr and then runs. It does the same when the
-stamp no longer matches and a scan finds a file to write, remove or refuse:
-
-```
-Run spoolway sync to apply the last update.
-```
-
-That line prints only to a person at a terminal: never under `--json`, never inside a lane, and
-never when stderr is not a terminal. It never stops the command and never reads a key.
-
-Bare `spoolway` shows the same sentence in a popup over the tab it opens on instead, dismissed
-by `[enter]` alone, unless the project's pipeline file cannot load, in which case its screen
-cannot open to show the popup and it prints the line like every other command.
-
-`init`, `doctor`, `whats-new`, `update`, `config edit` and `config override` never print this
-line or show this popup. `sync` never does either: it draws its own panel first, described
-above.
+No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes
+a project that `sync` would change.
 
 ### `spoolway whats-new`
 

@@ -117,18 +117,6 @@ impl Repo {
         Repo::discover_lenient_as(start, Bind::Settle)
     }
 
-    /// [`Repo::discover_lenient`] that only reads: it never stamps a `.git`,
-    /// records a move or creates a home, and a project that would need any
-    /// of those comes back with the refusal in its `home_error` instead. For
-    /// the lookup every command runs first, to decide on the update notice —
-    /// before `spoolway init` has asked its first question, and so before
-    /// anything may be written.
-    pub fn discover_lenient_read_only(
-        start: &Path,
-    ) -> Result<(Repo, Option<anyhow::Error>, Option<anyhow::Error>)> {
-        Repo::discover_lenient_as(start, Bind::Peek)
-    }
-
     fn discover_lenient_as(
         start: &Path,
         mode: Bind,
@@ -1439,10 +1427,8 @@ pub(crate) enum Bind {
     /// for, then answer with the home.
     Settle,
     /// Only reads, and reports what `Settle` would have written as the
-    /// refusal it leaves in its place. For a lookup that runs before the
-    /// command knows it needs a home — the update notice ahead of
-    /// `spoolway init`'s first question — which must leave `.git` and
-    /// `~/.spoolway` exactly as it found them.
+    /// refusal it leaves in its place. For a lookup that must leave `.git`
+    /// and `~/.spoolway` exactly as it found them.
     Peek,
 }
 
@@ -1458,10 +1444,9 @@ fn bind_as(root: &Path, mode: Bind) -> Result<PathBuf> {
         }
     }
     for record_path in &broken {
-        // `bind` runs twice on an ordinary command — once through
-        // `gate::notify`'s own lenient discovery, once through the command's
-        // own strict one — so printing unconditionally here would say the
-        // same broken file twice. `first_time_this_process` is the same
+        // A command can discover its project, and so run `bind`, more than
+        // once, so printing unconditionally here could say the same broken
+        // file twice. `first_time_this_process` is the same
         // process-wide dedup `overrides::print_ignored_notices` already
         // uses for the identical reason. Stderr, not stdout: this is a
         // notice about the machine, not part of a command's own output —
@@ -5620,9 +5605,7 @@ mod tests {
     }
 
     /// A read-only bind on a clone nothing has stamped refuses and writes
-    /// nothing, in `.git` or under `~/.spoolway`: it is what the update-notice
-    /// lookup runs before `init` has asked its first question, so a cancelled
-    /// `init` must leave both as they were.
+    /// nothing, in `.git` or under `~/.spoolway`.
     #[test]
     fn a_read_only_bind_on_a_fresh_clone_writes_nothing() {
         let work = bind_fixture("peek-fresh");
@@ -5632,10 +5615,6 @@ mod tests {
             let err = bind_as(&work, Bind::Peek).unwrap_err().to_string();
             assert!(err.contains("no spoolway id"), "{err}");
             assert!(err.contains("`spoolway init`"), "{err}");
-            assert!(!crate::mux::state_root().exists());
-            let (_repo, _config_error, home_error) =
-                Repo::discover_lenient_read_only(&work).unwrap();
-            assert!(home_error.is_some());
             assert!(!crate::mux::state_root().exists());
         });
         let stamped: Vec<_> = std::fs::read_dir(work.join(".git"))

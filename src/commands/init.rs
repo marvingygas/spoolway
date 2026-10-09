@@ -1327,12 +1327,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             )
         );
     }
-    // Resolved once and shared: `write_stamp` below records this checkout's
-    // fact against it. Best-effort, and never printed: a project's home
-    // resolving is not this command's own concern to fail over, and `bind`
-    // above has already settled it for every ordinary case.
-    let home = crate::mux::project_home(root).ok();
-
     // The skills, in the provider's own convention. Run from here rather than
     // suggested, because "and now run this other command" is the manual step
     // this exists to remove — and a project that skipped it had skills that
@@ -1351,21 +1345,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // next to "Skills installed successfully" saying otherwise.
     wrote_any |= installed.wrote;
     crate::install::report(installed);
-    // A fresh (or freshly `--force`d) project is, by construction, exactly
-    // what this binary would write — so it is stamped the same fact
-    // `spoolway sync` would have recorded had it run here instead: this
-    // checkout, at this binary's version, matching what it would still
-    // write today. Not when a file was kept: a project claimed over an older
-    // setup still holds that setup's files, and a stamp saying "current"
-    // would switch off the notice telling it to run `sync`. Nor when joining
-    // a workspace: that places no file of its own, so the setup it shares is
-    // whatever the workspace already held, which `init` did not write.
-    if !placer.kept_a_file
-        && !joined
-        && let Some(home) = &home
-    {
-        let _ = crate::sync::write_stamp(home, root);
-    }
     // The mockup above ends its transcript at `crate::install::report`'s
     // line, but it is an excerpt of the run this task changes, not a
     // contract for every line `init` has ever printed: it also elides the
@@ -1462,31 +1441,6 @@ mod tests {
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
         run_init(&root, args).expect("init");
         root
-    }
-
-    /// A fresh `init` stamps the checkout current. A second one that kept
-    /// every file leaves it alone, so a project claimed over an older setup
-    /// is never stamped current by `init`.
-    #[test]
-    fn init_stamps_only_when_it_kept_no_file() {
-        let root = scaffold("stamp-fresh", &confirmed());
-        let stamp = |root: &Path| {
-            crate::platform::test_home::with_home(&home_for(root), || {
-                let home = crate::mux::project_home(root).unwrap();
-                crate::sync::read_stamp(&home, root)
-            })
-        };
-        assert!(stamp(&root).is_some(), "a fresh init stamps");
-
-        let home = crate::platform::test_home::with_home(&home_for(&root), || {
-            crate::mux::project_home(&root).unwrap()
-        });
-        std::fs::remove_file(crate::sync::stamp_path(&home)).unwrap();
-        run_init(&root, &confirmed()).expect("a repeat init");
-        assert!(
-            stamp(&root).is_none(),
-            "a repeat init kept files, so no stamp"
-        );
     }
 
     /// Acceptance criterion 5: `init` restoring an example pipeline whose
@@ -1612,21 +1566,6 @@ mod tests {
 
         // And the default provider's skills, installed rather than suggested.
         assert!(root.join(".claude").join("skills").is_dir());
-    }
-
-    /// `init` writes the same sync stamp `spoolway sync` would on success —
-    /// a fresh project is, by construction, exactly what this binary would
-    /// write, so the stamp says so without a sync ever having run.
-    #[test]
-    fn init_writes_a_sync_stamp() {
-        let root = scaffold("sync-stamp", &confirmed());
-        let stamp = crate::platform::test_home::with_home(&home_for(&root), || {
-            let home = crate::mux::project_home(&root).unwrap();
-            crate::sync::read_stamp(&home, &root)
-        });
-        let (version, fingerprint) = stamp.expect("init records a sync stamp");
-        assert_eq!(version, crate::release::current());
-        assert!(!fingerprint.is_empty());
     }
 
     /// `spoolway init` stamps a project's home off its own `.git`, and a
@@ -2399,8 +2338,8 @@ mod tests {
             home: root.join(".home"),
             root: root.to_path_buf(),
         };
-        // `scan`, not `run`: `run` also prints the report and writes the
-        // sync-stamp, neither of which this test is about — see `sync.rs`'s
+        // `scan`, not `run`: `run` also prints the report, which this test is
+        // not about — see `sync.rs`'s
         // own tests, which call `scan` for the same reason.
         crate::sync::scan(
             &repo,

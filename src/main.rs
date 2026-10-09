@@ -21,7 +21,6 @@ mod cron;
 mod dispatch;
 mod eval;
 mod fmt;
-mod gate;
 mod gitignore;
 mod graph;
 mod headless;
@@ -68,9 +67,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use cli::{
-    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HerdrCommand, HookCommand,
-    IssueCommand, JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand,
-    QueueCommand, TaskCommand, TemplateCommand,
+    AgentCommand, Command, ConfigCommand, GroupCommand, HerdrCommand, HookCommand, IssueCommand,
+    JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand, QueueCommand,
+    TaskCommand, TemplateCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -140,9 +139,6 @@ fn run() -> Result<()> {
     }
 
     let cwd = cli.repo.clone().unwrap_or(std::env::current_dir()?);
-    // Bare `spoolway` shows the notice as a popup over its screen — see
-    // `notify` — so it is held here until the screen is open.
-    let update = notify(&cli, &cwd);
 
     match &cli.command {
         // `init` is the one command that runs before a project exists, so it
@@ -310,32 +306,6 @@ fn run() -> Result<()> {
                 Repo::discover(&cwd)?
             };
 
-            // Whether this checkout has fallen behind a `spoolway update`
-            // that already ran, said before the command runs and never in
-            // its way: `gate::notify` prints one line and returns. `sync` is
-            // the one command this must never print in front of — it *is*
-            // the thing the line tells a person to run — so it is excluded
-            // by name here rather than left to fall out of the match below.
-            // Every other excluded command (`init`, `doctor`, `whats-new`,
-            // `update`, `config edit`, `config override`) is answered in an
-            // earlier arm of the outer match and never reaches this one at
-            // all.
-            //
-            // Bare `spoolway` shows the same line as a popup over the tab it
-            // opens on instead — see `gate::sync_popup` — which reads the
-            // project's pipelines first, the one file read ahead of the
-            // question. When they do not load, the screen could not open to
-            // show it, and it is printed here like every other command's,
-            // ahead of the refusal: see `gate::asks_as_popup`.
-            let popup = matches!(command, Command::Screen) && gate::asks_as_popup(&repo);
-            if !matches!(command, Command::Sync(_)) && !popup {
-                gate::notify(
-                    &repo,
-                    std::env::var_os(dispatch::ENV_STEP).is_some(),
-                    cli.json,
-                )?;
-            }
-
             // Byproducts older than `housekeeping.retention_days`, and archived
             // tasks older than `housekeeping.archive_retention_days` when that
             // is set, go, once per process — see `retain` for the fixed split
@@ -453,7 +423,7 @@ fn run() -> Result<()> {
                 // dispatch, queue, jobs and eval tabs. Off a terminal no
                 // command at all never gets this far — `cli::parse` prints
                 // the grouped help instead.
-                Command::Screen => screen::shell::run(&repo, routing(&graph)?, &cwd, update),
+                Command::Screen => screen::shell::run(&repo, routing(&graph)?, &cwd),
                 Command::Queue(QueueCommand::List) => {
                     commands::queue_list(&repo, routing(&graph)?, cli.json)
                 }
@@ -632,62 +602,6 @@ fn routing_for_task<'a>(
         Some(routed) => routed.map(std::borrow::Cow::Owned),
         None => routing(graph).map(std::borrow::Cow::Borrowed),
     }
-}
-
-/// Say, once, that a newer release is out — if there is a person here to say
-/// it to. Bare `spoolway` gets the line back instead of printed, for its
-/// screen to show as a popup: printed ahead of the screen, it would be wiped
-/// by the first frame before anybody could read it.
-///
-/// In front of every command rather than inside any of them, because "which
-/// commands should mention this" has exactly one defensible answer and it is
-/// "the ones a person typed". What decides that is [`release::Audience`]; this
-/// only gathers the five facts, each of which lives somewhere different.
-///
-/// The config read is deliberately lenient and deliberately discarded: a
-/// project whose config does not parse still gets its notice, and a directory
-/// that is no project at all — somebody about to run `init` — gets one too.
-fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
-    use std::io::IsTerminal;
-
-    // Not in front of the command it would advise. `update` says what it is
-    // installing as it installs it, and a line telling somebody to run what
-    // they are already running is noise — twice over, since the process an
-    // upgrade re-execs would print it again on the way through.
-    //
-    // `herdr` is machine-wide too. Its command arms deliberately run before a
-    // project is looked for, so the best-effort config read below must not do
-    // that lookup first: discovery binds an otherwise-unclaimed checkout,
-    // making a keybinding edit silently stamp whichever git repository the
-    // caller happened to be standing in.
-    if matches!(
-        cli.command,
-        Command::Update(_) | Command::WhatsNew(_) | Command::Herdr(_)
-    ) {
-        return None;
-    }
-
-    // Read-only: this runs before `init` has asked anything, and a
-    // cancelled `init` must leave `.git` and `~/.spoolway` as they were.
-    let enabled = Repo::discover_lenient_read_only(cwd)
-        .map(|(repo, _, _)| repo.config.housekeeping.update_check)
-        .unwrap_or(true);
-
-    let audience = release::Audience {
-        // The dispatcher exports this into every lane it launches. A lane that
-        // reads "Run spoolway update" is a lane that runs it, mid-step, in a
-        // worktree it is being reviewed on.
-        in_lane: std::env::var_os(dispatch::ENV_STEP).is_some(),
-        machine_readable: cli.json,
-        tty: std::io::stderr().is_terminal(),
-        enabled,
-        skipped: std::env::var_os(release::ENV_SKIP).is_some(),
-    };
-    if matches!(cli.command, Command::Screen) {
-        return release::notice(audience);
-    }
-    release::notify(audience);
-    None
 }
 
 /// Where `spoolway init` should place `.spoolway/`: the main checkout if
