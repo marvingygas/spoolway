@@ -26,7 +26,9 @@
 # construction, so it proves nothing about them — those are unit-tested in
 # `src/mux.rs` against captured payloads. It is here for the handover, and the
 # transcript it keeps is the other half of that: every string spoolway typed
-# into a pane, so a case can assert nothing long was ever typed at all.
+# into a pane, so a case can assert nothing long was ever typed at all. A
+# `pane run` over 512 bytes is refused with `line_too_long`, as a Mac's pane
+# would garble it.
 #
 # An agent is a registration, not a process. `agent start` records that a
 # named session sits in a pane, and `agent list` reports it idle for as long
@@ -418,12 +420,20 @@ case "$DOMAIN $VERB" in
     n=${pane##*:p}
     fifo="$STATE/p$n.in"
     [ -p "$fifo" ] || fail no_such_pane "no pane $pane"
+    # A real herdr pane garbles what is typed past a few hundred bytes on a
+    # Mac (858 arrived whole, 1,140 did not), so the double refuses past the
+    # same 512 `src/mux.rs` bounds every `pane run` by. Refused before
+    # anything is kept or typed: a line over the bound never reached a shell.
+    bytes=$(printf '%s' "$cmd" | wc -c | tr -d ' ')
+    if [ "$bytes" -gt 512 ]; then
+      fail line_too_long "pane $pane was typed $bytes bytes; the bound is 512"
+    fi
     # The transcript. Every string spoolway typed into a pane, kept whole and
     # measured, so a case can assert what got typed rather than only what came
     # out the far end.
     slot=$(next_id)
     printf '%s' "$cmd" >"$STATE/typed/$slot"
-    printf '%s\t%s\t%s\n' "$pane" "$(printf '%s' "$cmd" | wc -c | tr -d ' ')" \
+    printf '%s\t%s\t%s\n' "$pane" "$bytes" \
       "typed/$slot" >>"$STATE/typed.index"
     printf '%s\n' "$cmd" >"$fifo"
     echo '{"result":{}}'

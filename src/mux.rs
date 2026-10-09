@@ -397,10 +397,10 @@ pub trait Mux: Sync {
     ///
     /// For [`crate::command_step`]'s own use: a command step's blocking run,
     /// given a pane rather than the `setsid`-detached process it used to be
-    /// spawned as. The script is the caller's whole wrapper — pid file, exit
-    /// trap, the `run:` line itself — piped to `tee` so the pane shows every
-    /// line while the log gets the same text; this call only has to land it
-    /// somewhere a person can watch.
+    /// spawned as. The script is the one short line that runs the caller's
+    /// wrapper file (pid file, exit trap, the `run:` line itself), piped to
+    /// `tee` so the pane shows every line while the log gets the same text;
+    /// this call only has to land it somewhere a person can watch.
     ///
     /// `env` is not the step's own small named map alone: the caller —
     /// [`crate::dispatch::Dispatcher::start_command_in_pane`] — hands this
@@ -421,7 +421,7 @@ pub trait Mux: Sync {
     ///
     /// `script` itself is not built from this full map:
     /// [`crate::command_step::script_for_pane`] writes only the step's own
-    /// named map into the script text, since that is the small, declared
+    /// named map into the wrapper file, since that is the small, declared
     /// contract a step actually asks for, not everything this process
     /// happens to be carrying.
     ///
@@ -540,6 +540,12 @@ pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
 /// plain `timeout` error at exactly this bound, and spoolway reads that the
 /// same as its own `agent_prompt_stalled`.
 const PROMPT_SUBMIT_TIMEOUT_MS: &str = "5000";
+
+/// The most bytes one `herdr pane run` is given. A Mac's pane garbles what is
+/// typed past about 870 (858 arrived whole, 1,140 did not); this stays well
+/// under it. The herdr double in `scripts/e2e/herdr-stub.sh` refuses at the
+/// same number, so a longer line fails on Linux too.
+const PANE_LINE_MAX: usize = 512;
 
 /// How long [`Herdr::wait_for_pane_shell`] waits for a pane's shell to settle
 /// before `agent start`, and how it is bounded rather than open-ended: a shell
@@ -816,6 +822,24 @@ impl Herdr {
                 args.join(" ")
             ),
         }
+    }
+
+    /// Type `text` into a pane and submit it — the one way spoolway reaches
+    /// `herdr pane run`.
+    ///
+    /// Refused past [`PANE_LINE_MAX`], naming the pane and the count, with
+    /// nothing typed: a Mac's pane garbles a longer line (a 1,140-byte one
+    /// came out as `sh -c '/Ussh -c '/U…`) and the shell then runs whatever
+    /// the garble spells. A caller with more to say writes a file and types
+    /// the short line that runs it.
+    fn pane_run(&self, pane: &str, text: &str) -> Result<()> {
+        if text.len() > PANE_LINE_MAX {
+            bail!(
+                "refusing to type {} bytes into pane {pane}; a pane takes {PANE_LINE_MAX} intact",
+                text.len()
+            );
+        }
+        self.call_ignoring_result(&["pane", "run", pane, text])
     }
 
     fn call_ignoring_result(&self, args: &[&str]) -> Result<()> {
@@ -1634,7 +1658,7 @@ impl Mux for Herdr {
         // into it and submitted, the same way `start_lane` types a lane's
         // own environment into a fresh pane before the agent starts.
         let workspace = self.create_pane(cwd, label)?;
-        self.call_ignoring_result(&["pane", "run", &workspace.pane_id, command])
+        self.pane_run(&workspace.pane_id, command)
     }
 
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
@@ -1881,8 +1905,8 @@ impl Mux for Herdr {
         script: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<Option<String>> {
-        // Split exactly the way a lane's pane is, then hand the whole script
-        // to it as one shell command — the same `pane run` route
+        // Split exactly the way a lane's pane is, then hand it the short line
+        // that runs the step's wrapper file, as one shell command — the same `pane run` route
         // [`Herdr::open_command`] takes for the board's own `o`, just against
         // an existing tab instead of a fresh pane of its own.
         let pane = self.split_pane(tab_id, cwd)?;
@@ -1897,12 +1921,24 @@ impl Mux for Herdr {
         // Named off `key`, never `label`: `label` is
         // the step alone, and two tasks running the same step at once would
         // otherwise hand each other's environment file the same name.
-        if !env.is_empty() {
-            let handover_key = format!("{} · handover", lane_task(key));
-            let source = self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
-            self.call_ignoring_result(&["pane", "run", &pane, &source])?;
+        //
+        // A refusal leaves the split pane standing and unrecorded, and the
+        // caller closes only a pane it was told about: closed here, or each
+        // retry of a line that is too long for this task would add another
+        // empty pane to its tab.
+        let typed = (|| {
+            if !env.is_empty() {
+                let handover_key = format!("{} · handover", lane_task(key));
+                let source =
+                    self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
+                self.pane_run(&pane, &source)?;
+            }
+            self.pane_run(&pane, script)
+        })();
+        if let Err(err) = typed {
+            let _ = self.close_pane(&pane);
+            return Err(err);
         }
-        self.call_ignoring_result(&["pane", "run", &pane, script])?;
         Ok(Some(pane))
     }
 
@@ -1922,7 +1958,7 @@ impl Mux for Herdr {
         // stand-in agent in front of the real one.
         if let Some(prefix) = spec.path_prefix {
             let export = crate::platform::path_export(prefix);
-            self.call_ignoring_result(&["pane", "run", spec.pane_id, &export])?;
+            self.pane_run(spec.pane_id, &export)?;
         }
 
         // The lane's environment reaches the pane's shell first, so the agent
@@ -1937,7 +1973,7 @@ impl Mux for Herdr {
         if !spec.env.is_empty() {
             let source =
                 self.hand_environment(crate::dispatch::SYSTEM_PROMPTS_DIR, spec.name, spec.env)?;
-            self.call_ignoring_result(&["pane", "run", spec.pane_id, &source])?;
+            self.pane_run(spec.pane_id, &source)?;
         }
 
         // The environment just typed above is still being sourced for a
@@ -3071,6 +3107,25 @@ mod tests {
             &work,
             &["worktree", "remove", "--force", release.to_str().unwrap()],
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Past [`PANE_LINE_MAX`] nothing is typed: the refusal names the pane and
+    /// the byte count, and comes back before any `herdr` is run (none is
+    /// installed for this test to reach).
+    #[test]
+    fn a_line_over_the_pane_bound_is_refused_naming_the_pane_and_its_length() {
+        let base = crate::scratch::root("mux-test-pane-bound");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let herdr = Herdr::new(&base, &base, &base);
+
+        let err = herdr
+            .pane_run("w1:p2", &"x".repeat(PANE_LINE_MAX + 1))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("w1:p2") && err.contains("513"), "{err}");
         std::fs::remove_dir_all(&base).ok();
     }
 

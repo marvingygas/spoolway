@@ -143,6 +143,11 @@ impl Runs {
         self.files.pid_path(key)
     }
 
+    /// The wrapper a paned run executes — see [`Runs::script_for_pane`].
+    fn script_path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.sh"))
+    }
+
     /// Where the pane a run landed in is recorded, if it landed in one at
     /// all — see [`Runs::record_pane`].
     fn pane_path(&self, key: &str) -> PathBuf {
@@ -330,18 +335,24 @@ impl Runs {
     /// still reads the command's own status — no `PIPESTATUS` needed, since
     /// the group on the left of the pipe is what the trap watches.
     ///
-    /// The body runs inside its own `sh -c`, not a bare `{ ... }` group: a
+    /// The body runs in its own `sh` reading the wrapper file, not a bare `{ ... }` group: a
     /// brace group on the left of a pipe still runs in a subshell, but `$$`
     /// there is inherited from the shell that forked it rather than computed
     /// fresh, so the pid `wrapper_body`'s first line writes would name the
     /// pane's own long-lived shell — which outlives every command ever run
-    /// in it — rather than this run. `sh -c` execs a genuinely new process
+    /// in it — rather than this run. `sh <file>` is a genuinely new process
     /// image, whose own `$$` is its own real pid: the same one that ends
     /// when the pipeline's first process does, and the one a job-controlled
     /// shell makes the leader of the pipeline's own process group.
     ///
-    /// Answers with the script text alone; running it is [`crate::mux::Mux::run_in_pane`]'s
-    /// job, since only the backend can put it somewhere a person can watch.
+    /// The body is written to `<key>.sh` beside the run's log, `0600` because
+    /// it carries the step's environment, and the answer is the one short
+    /// line that runs it. Typing the body itself into the pane is what broke
+    /// on a Mac: its pane garbles a line past about 870 bytes, and a `run:`
+    /// line or a long project home passes that easily.
+    ///
+    /// Running the line is [`crate::mux::Mux::run_in_pane`]'s job, since only
+    /// the backend can put it somewhere a person can watch.
     /// The caller still confirms the run actually started with
     /// [`Runs::await_started`], the same as [`Runs::start`] does for itself.
     pub fn script_for_pane(
@@ -358,12 +369,12 @@ impl Runs {
         // is non-interactive by construction. Nothing to redirect stdout or
         // stderr to here — the whole group is piped to `tee` below instead.
         //
-        // The body is handed to the nested `sh -c` as one quoted argument,
-        // not typed into the pane's own shell as syntax: this is text, going
-        // through a variable, and quoting it is what keeps it from being
-        // touched by the pane's shell before the nested one ever sees it.
-        let inner = crate::platform::quote(&format!("exec </dev/null\n{body}"));
-        Ok(format!("sh -c {inner} 2>&1 | tee -a {log_path}\n"))
+        // The body is a file the nested `sh` reads, so the pane's own shell
+        // never parses any of it.
+        let path = self.script_path(key);
+        write_private(&path, &format!("exec </dev/null\n{body}"))?;
+        let file = crate::platform::quote(&path.display().to_string());
+        Ok(format!("sh {file} 2>&1 | tee -a {log_path}\n"))
     }
 
     /// Wait for the wrapper's pid file to appear — the one thing that says a
@@ -595,6 +606,32 @@ impl Runs {
             }
         }
     }
+}
+
+/// Write `text` to `path`, readable by this user alone. The wrapper carries the
+/// step's environment, whatever secrets the dispatcher was started with among
+/// it, so the mode is set on creation and again after, for a file an earlier
+/// arrival left behind with another one.
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Spawn a wrapper script detached, so it outlives the pass that started it.
@@ -1195,6 +1232,53 @@ mod tests {
             f.runs.what_a_dead_wrapper_left("demo · gate"),
             RunState::Interrupted
         );
+    }
+
+    /// A herdr pane garbles whatever is typed into it past a few hundred
+    /// bytes, so the line `script_for_pane` answers with stays short however
+    /// long the step's `run:` line, its environment or the project home are:
+    /// the wrapper itself lives in a file under the commands directory, and
+    /// the line only runs it.
+    #[test]
+    fn a_paned_steps_typed_line_stays_short_however_long_its_run_line_is() {
+        let f = Fixture::new("paned-typed-line-bound");
+        let run = format!("echo {}", "x".repeat(4000));
+        let mut env = BTreeMap::new();
+        env.insert("SPOOLWAY_NOTE".to_string(), "y".repeat(600));
+
+        let script = f.runs.script_for_pane("build-demo", &run, &env).unwrap();
+
+        assert!(
+            script.len() <= 512,
+            "the typed line is {} bytes, over the 512 a pane takes intact",
+            script.len()
+        );
+        assert!(!script.contains("xxxx"), "the run: line was typed");
+    }
+
+    /// The wrapper holds the step's environment, so the file the line runs is
+    /// `0600` — including when an earlier arrival at the step left one with
+    /// another mode, which `OpenOptions::mode` alone would not reset.
+    #[test]
+    fn a_paned_steps_wrapper_file_is_private_and_holds_the_run_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new("paned-wrapper-mode");
+        let key = "build-demo";
+        let path = f.runs.script_path(key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let script = f
+            .runs
+            .script_for_pane(key, "echo wrapped-run-line", &BTreeMap::new())
+            .unwrap();
+
+        assert!(script.contains(&path.display().to_string()), "{script}");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("echo wrapped-run-line") && !body.contains("stale"));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     /// The pid `script_for_pane` records has to belong to the run itself, not

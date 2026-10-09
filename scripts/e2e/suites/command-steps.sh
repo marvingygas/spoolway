@@ -1174,6 +1174,26 @@ PATH="$HERDRBIN:$PATH"; export PATH
 
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
 
+# A real project home is `~/.spoolway/<label>-<id>/`, a good deal longer than
+# the short paths this suite lives under, and every path in a paned step's
+# wrapper grows with it. The binary builds that home from `$HOME`, so `$HOME`
+# is pointed at a symlink to the real one with a long name for the length of
+# this case, and the dispatcher restarted under it: a line that only fits a
+# short home does not pass here. Put back after the case, before the
+# dispatcher is restarted for the cases that follow.
+REAL_HOME="$HOME"
+REAL_PROJECT_HOME="$SPOOLWAY_PROJECT_HOME"
+PADDED_HOME="$LIVE/a-home-as-long-as-a-real-one-with-its-user-name/padding"
+mkdir -p "$(dirname "$PADDED_HOME")"
+ln -s "$REAL_HOME" "$PADDED_HOME"
+export HOME="$PADDED_HOME"
+export SPOOLWAY_PROJECT_HOME="$PADDED_HOME/.spoolway/${REAL_PROJECT_HOME#"$REAL_HOME"/.spoolway/}"
+if [ "${#SPOOLWAY_PROJECT_HOME}" -ge 100 ]; then
+  ok "the project home for this case is ${#SPOOLWAY_PROJECT_HOME} bytes, as long as a real one"
+else
+  bad "the project home for this case is padded to at least 100 bytes (${#SPOOLWAY_PROJECT_HOME})"
+fi
+
 # The two variables this case is about, both set before the dispatcher starts
 # so they are really part of the environment it inherited.
 #
@@ -1184,8 +1204,10 @@ must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
 export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 SPOOLWAY_E2E_PANE_BULK=$(head -c 8000 /dev/zero | tr '\0' 'x'); export SPOOLWAY_E2E_PANE_BULK
 
-# A pipeline of one paned command step, so this case needs no agent lane and
-# the double needs no agent to start. The step reads both variables back out.
+# A pipeline of two paned command steps, so this case needs no agent lane and
+# the double needs no agent to start. The first reads both variables back out;
+# the second has a `run:` line of about four kilobytes, to show a long line is
+# run from the wrapper file and never typed.
 #
 # And then it waits on a file, which is not decoration. Seven of the
 # assertions below read something spoolway wrote *while this step was
@@ -1205,18 +1227,26 @@ SPOOLWAY_E2E_PANE_BULK=$(head -c 8000 /dev/zero | tr '\0' 'x'); export SPOOLWAY_
 # before releasing it does not leave a pane waiting forever.
 CARRY_RELEASE="$LIVE/carry.release"
 rm -f "$CARRY_RELEASE"
-sed "s|@RELEASE@|$CARRY_RELEASE|" > .spoolway/pipelines/herdrpane.yml <<'YML'
-description: One paned command step, for the environment a pane is handed.
+
+LONG_PAD=$(head -c 4000 /dev/zero | tr '\0' 'x')
+sed -e "s|@RELEASE@|$CARRY_RELEASE|" -e "s|@PAD@|$LONG_PAD|" > .spoolway/pipelines/herdrpane.yml <<'YML'
+description: Two paned command steps, for the environment a pane is handed and a long run line.
 
 steps:
   - id: carry
     description: Read back the environment the dispatcher was started with.
     run: 'echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"; echo "bulk:${#SPOOLWAY_E2E_PANE_BULK}"; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
     timeout: 120s
+    on_pass: long
+    on_fail: blocked
+  - id: long
+    description: A run line of about four kilobytes, which is never typed into the pane.
+    run: ': @PAD@; echo long-run-line-ran-whole'
+    timeout: 120s
     on_pass: done
     on_fail: blocked
 YML
-works "a one-step paned pipeline checks out" "$SPOOLWAY" pipeline check
+works "a two-step paned pipeline checks out" "$SPOOLWAY" pipeline check
 
 dispatcher_restart
 task_doc "$LIVE/carried.md" carried "$BODY" "group: carried" \
@@ -1246,21 +1276,6 @@ else
   bad "and it is the big one — past what a prompt would have carried"
 fi
 
-# `herdr-stub.sh` keeps every string spoolway typed into a pane, with its
-# length. The environment is 8KB; nothing typed may be anywhere near that.
-TYPED_MAX=$(awk -F'\t' 'BEGIN{m=0} $2>m {m=$2} END{print m+0}' "$HSTATE/typed.index")
-if [ "$TYPED_MAX" -lt 2000 ]; then
-  ok "and no single line typed into a pane was longer than $TYPED_MAX bytes"
-else
-  bad "nothing long is typed into a pane (longest was $TYPED_MAX bytes)"
-  cut -f1,2 "$HSTATE/typed.index"
-fi
-if grep -rqF -- ". '$HANDOVER'" "$HSTATE/typed"; then
-  ok "and one of them is the dot command that sources the file"
-else
-  bad "and one of them is the dot command that sources the file"
-fi
-
 # The pane spoolway recorded is the one herdr's own `pane list` agrees with —
 # the split's reply alone is not enough to record, and `split_pane` refuses
 # rather than write an id the multiplexer has never heard of.
@@ -1272,13 +1287,44 @@ else
 fi
 
 # Everything the window was held open for has been read. Let the command
-# finish, and the task carries on from a pass like any other.
+# finish, and the task carries on from a pass like any other. The second step
+# is a `run:` line of about four kilobytes under the padded home: it runs whole
+# only if the pane was handed a file to run, not the line itself.
 touch "$CARRY_RELEASE"
+records "a four-kilobyte run: line under a full-length home ran whole" \
+  "long-run-line-ran-whole" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · long.log" carried
+
+# `herdr-stub.sh` keeps every string spoolway typed into a pane, with its
+# length, and refuses one past 512 bytes. The environment is 8KB and the
+# run: line 4KB; nothing typed may be near either. Read here, after both steps
+# have been typed, so the second one's line is counted too.
+TYPED_MAX=$(awk -F'\t' 'BEGIN{m=0} $2>m {m=$2} END{print m+0}' "$HSTATE/typed.index")
+if [ "$(wc -l <"$HSTATE/typed.index")" -ge 3 ] && [ "$TYPED_MAX" -le 512 ]; then
+  ok "and no single line typed into a pane was longer than $TYPED_MAX bytes"
+else
+  bad "nothing over 512 bytes is typed into a pane (longest was $TYPED_MAX bytes)"
+  cut -f1,2 "$HSTATE/typed.index"
+fi
+# What the binary typed carries the padded home, so the length above was
+# earned under it and not under the short one.
+if grep -rqF -- "sh '$SPOOLWAY_PROJECT_HOME/commands/carried · long.sh'" "$HSTATE/typed"; then
+  ok "and the line that ran it names the wrapper file under the full-length home"
+else
+  bad "and the line that ran it names the wrapper file under the full-length home"
+fi
+if grep -rqF -- ". '$HANDOVER'" "$HSTATE/typed"; then
+  ok "and one of them is the dot command that sources the file"
+else
+  bad "and one of them is the dot command that sources the file"
+fi
 if drive carried gone 180; then ok "the task carries on once the paned command has passed"
 else bad "the task carries on once the paned command has passed (at \`$(stage_of carried)\`)"; fi
 rm -f "$CARRY_RELEASE"
 
 unset SPOOLWAY_E2E_PANE_ENV_MARKER SPOOLWAY_E2E_PANE_BULK
+export HOME="$REAL_HOME"
+export SPOOLWAY_PROJECT_HOME="$REAL_PROJECT_HOME"
 rm -f .spoolway/pipelines/herdrpane.yml
 must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
 # Every pane of the double is a real shell with a real process holding its
@@ -1291,6 +1337,8 @@ must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 dispatcher_restart
+# Only now: the dispatcher stopped by that restart was started under it.
+rm -f "$PADDED_HOME"
 
 # --------------------------------------------------- the wake: acted on fast
 # The split this task makes: a background step's own `.exit` file lands in

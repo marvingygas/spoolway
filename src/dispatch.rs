@@ -7210,7 +7210,7 @@ mod tests {
             self.log(format!("run_in_pane {tab_id} -> {pane} ({key}) ({label})"));
             // The names in its environment, the same way `start_lane` logs a
             // lane's own — so a test can assert this backend was handed one at
-            // all, without depending on the script text `script_for_pane` also
+            // all, without depending on the wrapper file `script_for_pane` also
             // wrote it into.
             let mut names: Vec<&str> = env.keys().map(String::as_str).collect();
             names.sort_unstable();
