@@ -489,7 +489,8 @@ impl Metrics {
 /// Priced as eval reads, not banked: a ledger line carries one `cost_usd`
 /// for its whole lane and no split by class. So the four need not add up to
 /// `USD`, which is what the lane cost when it settled — under that day's
-/// price table, or the agent's own report where it banks one, as pi does.
+/// price table, or the agent's own report where it banks one, as pi does, or
+/// where it is larger, the total Claude Code reported for a claude session.
 /// A line's `tier_tokens` are priced at the tier's rates, the rest at the base
 /// rates. Resolved the way banking resolves a price, through
 /// [`crate::models::resolve`].
@@ -5570,6 +5571,7 @@ mod tests {
             turns: 1,
             tokens: Tokens::default(),
             cost_usd: Some(1.0),
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: outcome.map(str::to_string),
@@ -6785,6 +6787,7 @@ mod tests {
                 ..Tokens::default()
             },
             cost_usd: Some(cost),
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: String::new(),
             outcome: None,
@@ -7470,6 +7473,7 @@ mod screen_tests {
                 turns: 1,
                 tokens: Tokens::default(),
                 cost_usd: Some(cost),
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: outcome.map(str::to_string),
@@ -7569,6 +7573,7 @@ mod screen_tests {
                 turns: 1,
                 tokens: Tokens::default(),
                 cost_usd: Some(2.0),
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: String::new(),
                 outcome: None,
@@ -8139,6 +8144,7 @@ mod screen_tests {
             turns: 1,
             tokens: Tokens::default(),
             cost_usd: Some(1.0),
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),
@@ -8542,6 +8548,7 @@ mod screen_tests {
                     ..Tokens::default()
                 },
                 cost_usd: Some(cost),
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: String::new(),
                 outcome: None,
@@ -9114,6 +9121,7 @@ mod screen_tests {
             turns: 1,
             tokens: Tokens::default(),
             cost_usd: Some(1.0),
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),

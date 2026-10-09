@@ -116,6 +116,7 @@ pub fn banked(task: &str, step: &str, session: &str, cost_usd: Option<f64>) -> c
         turns: 0,
         tokens: crate::usage::Tokens::default(),
         cost_usd,
+        reported_usd: None,
         ctx_peak: None,
         pipeline_version: "1.0".into(),
         outcome: None,

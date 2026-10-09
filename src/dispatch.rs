@@ -555,6 +555,9 @@ struct BankedTotals {
     tier_tokens: crate::usage::Tokens,
     turns: u32,
     cost_usd: f64,
+    /// The part of the session's reported total already banked — see
+    /// [`crate::usage::Entry::reported_usd`].
+    reported_usd: f64,
 }
 
 /// A task that wants a lane started for it, and the step to start.
@@ -2822,7 +2825,16 @@ impl<'a> Dispatcher<'a> {
             .since(&banked.tier_tokens)
             .within(&tokens);
         let banked_cost = banked.cost_usd;
+        let banked_reported = banked.reported_usd;
         let banked_turns = banked.turns;
+        // The harvest's cost already covers every turn, each priced at its own
+        // tier, so what is left is the part not banked before. It is absent
+        // when some turn had no price, and pricing the delta from the last
+        // model here would hide that turn.
+        let cost_usd = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
+        let reported_usd = harvest
+            .reported_usd
+            .map(|total| (total - banked_reported).max(0.0));
         // A kept lane is banked when its step moves on and again when its pane
         // closes, and a pane nobody typed into in between has spent nothing
         // the second time. Appending an all-zero line for it would put one
@@ -2832,17 +2844,12 @@ impl<'a> Dispatcher<'a> {
         if record.kept
             && (banked_turns > 0 || !banked.tokens.is_zero())
             && tokens.is_zero()
+            && !crate::usage::reported_spend_moved(cost_usd, reported_usd)
             && harvest.turns <= banked_turns
             && record.busy_s == 0
         {
             return false;
         }
-        // The harvest has priced every turn at its own tier already, so what
-        // is left is the part not banked before. It is absent when some turn
-        // had no price, and pricing the delta from the last model here would
-        // hide that turn.
-        let cost_usd = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
-
         // Only this step's own verdict counts. A report left over from the
         // previous step means this lane never reported one, and an absent
         // outcome says that plainly rather than borrowing a neighbour's.
@@ -2874,6 +2881,7 @@ impl<'a> Dispatcher<'a> {
             tokens,
             tier_tokens,
             cost_usd,
+            reported_usd,
             // The transcript's own peak, not a delta against what was already
             // banked — a peak from an earlier lane of a carried session is
             // still a real peak, and taking the max of two banked figures
@@ -2912,6 +2920,7 @@ impl<'a> Dispatcher<'a> {
         banked.tier_tokens.add(&entry.tier_tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
+        banked.reported_usd += entry.reported_usd.unwrap_or(0.0);
         appended
     }
 
@@ -6766,6 +6775,7 @@ fn banked_totals(ledger: &[crate::usage::Entry]) -> HashMap<String, BankedTotals
         banked.tier_tokens.add(&entry.tier_tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
+        banked.reported_usd += entry.reported_usd.unwrap_or(0.0);
     }
     totals
 }
@@ -11603,6 +11613,70 @@ mod tests {
         assert_eq!(lines.len(), 1, "{banked:?}");
     }
 
+    /// A kept claude pane whose only news since it was banked is a late
+    /// `cost-state` record (the title call, a classifier decision) still banks
+    /// that spend when the task is done, though no token moved.
+    #[test]
+    fn a_kept_claude_lane_banks_a_cost_state_that_lands_after_its_first_bank() {
+        let (mut repo, _root_guard) = fixture("kept-lane-late-cost");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.branch = Some("task/demo".into());
+        });
+        let session = "kept-late-cost";
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: "claude".into(),
+                    agent: "claude".into(),
+                    model: "priced-model".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+        let home = crate::scratch::root("dispatch-late-cost");
+        let dir = home.join(".claude/projects/e2e");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{session}.jsonl"));
+        let cost_state = |total: f64| {
+            format!("{{\"type\":\"cost-state\",\"totalCostUSD\":{total},\"modelUsage\":{{}}}}\n")
+        };
+        let turn = "{\"type\":\"assistant\",\"requestId\":\"r1\",\"message\":{\"model\":\"priced-model\",\
+                    \"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n";
+        std::fs::write(&file, format!("{turn}{}", cost_state(1.0))).unwrap();
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+        let banked = crate::usage::read(&repo).unwrap();
+        let first: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(first.len(), 1, "{banked:?}");
+        assert_eq!(first[0].cost_usd, Some(1.0));
+
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text += &cost_state(1.25);
+        std::fs::write(&file, text).unwrap();
+        let mut task = reload(&path);
+        task.set_stage("done", None);
+        task.save().unwrap();
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 2, "{banked:?}");
+        assert!(lines[1].tokens.is_zero());
+        assert!((lines[1].cost_usd.unwrap() - 0.25).abs() < 1e-9);
+    }
+
     /// A step coming back does not wait on its own finished lane: that lane
     /// is out of every count, so a profile whose only slot it once held starts
     /// the new run at once instead of stalling behind a pane that is about to
@@ -13865,6 +13939,7 @@ mod tests {
                     ..Default::default()
                 },
                 cost_usd: None,
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
@@ -14566,6 +14641,7 @@ mod tests {
                 turns: 1,
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: None,
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
@@ -14605,6 +14681,7 @@ mod tests {
                     ..Default::default()
                 },
                 cost_usd: None,
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,
@@ -14685,6 +14762,7 @@ mod tests {
                 turns: 1,
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: Some(7.50),
+                reported_usd: None,
                 ctx_peak: None,
                 pipeline_version: "1.0".into(),
                 outcome: None,

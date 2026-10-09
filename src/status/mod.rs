@@ -6760,6 +6760,8 @@ mod tests {
             tokens: crate::usage::Tokens::default(),
             turns: 1,
             cost_usd: Some(cost),
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: 0,
         };
 
@@ -6790,6 +6792,8 @@ mod tests {
             },
             turns: 4,
             cost_usd: Some(22.5),
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: 0,
         };
 
@@ -6821,6 +6825,8 @@ mod tests {
             },
             turns: 2,
             cost_usd: None,
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: 0,
         };
 
