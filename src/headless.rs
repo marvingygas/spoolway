@@ -534,8 +534,8 @@ fn signal_group(pid: u32, signal: i32) {
 /// it went.
 ///
 /// The interval backs off geometrically from 20ms rather than staying fixed
-/// there: `group_alive` below is a full scan of `/proc`, and the ordinary
-/// case is a process that dies within the first poll or two of a signal —
+/// there: `group_alive` below is a full scan of `/proc` on Linux, and the
+/// ordinary case is a process that dies within the first poll or two of a signal —
 /// paying for up to 300 of those scans at a flat 20ms, which the six-second
 /// `SIGKILL` patience worked out to, bought nothing over checking less often
 /// once the first few checks have already come back "still there".
@@ -561,7 +561,7 @@ fn settles_within(pid: u32, patience: std::time::Duration) -> bool {
 /// counting one as a member would mean waiting out the full patience above
 /// every time — the leader is this process's own child, so nothing reaps it
 /// until the test or the dispatcher does.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn group_alive(pid: u32) -> bool {
     let group = pid.to_string();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -583,6 +583,35 @@ fn group_alive(pid: u32) -> bool {
     })
 }
 
+/// Is anything still running in this process group?
+///
+/// Every Unix that is not Linux has no `/proc` to scan, so the kernel is asked
+/// instead: signal `0` to `-pgid` is delivered to nobody and succeeds if any
+/// member could be signalled. `EPERM` still means the group exists, merely
+/// belonging to someone else; only `ESRCH` means it is gone.
+///
+/// Unlike the `/proc` scan a zombie counts as alive here. That is harmless:
+/// the leaders this is asked about are reaped ([`reap_when_it_ends`], or init
+/// once the process that started it has exited), so the group empties the moment its last real member dies.
+///
+/// Without this, `kill_group` read every group as already gone on a Mac and
+/// returned before sending a single signal.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn group_alive(pid: u32) -> bool {
+    // `kill(-0, 0)` is `kill(0, 0)`: the caller's own group, which is always
+    // there. A pid that does not fit an `i32` would wrap negative and name
+    // some other group, or all of them.
+    let Ok(pgid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pgid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 takes no pointers and delivers nothing.
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Is this pid a live process?
 ///
 /// `/proc` rather than `kill -0`, because it also answers the question `kill -0`
@@ -602,7 +631,7 @@ pub fn alive(pid: u32) -> bool {
 }
 
 /// macOS has no `/proc`, so the answer comes from [`crate::lock::is_running`]
-/// instead — `kill -0` is the portable best that platform offers.
+/// instead, which asks the kernel with `kill(2)` signal `0`.
 #[cfg(not(target_os = "linux"))]
 pub fn alive(pid: u32) -> bool {
     crate::lock::is_running(pid)
@@ -1783,17 +1812,12 @@ mod tests {
         resume_carries_context("pi", "Qwen3.6-35B-A3B", &["--no-approve", "--no-skills"]);
     }
 
-    /// The session a pid belongs to, read the same careful way [`alive`] reads
-    /// state: `comm` can contain spaces and parentheses, so the fields are
-    /// counted from the last `)`.
+    /// The session a pid belongs to, asked of the kernel with `getsid(2)` so
+    /// that it means the same on every Unix, `/proc` or not.
     fn session_of(pid: u32) -> Option<u32> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        stat.rsplit_once(')')?
-            .1
-            .split_whitespace()
-            .nth(3)?
-            .parse()
-            .ok()
+        // SAFETY: `getsid` takes no pointers; a pid that is not there is -1.
+        let sid = unsafe { libc::getsid(pid as i32) };
+        u32::try_from(sid).ok()
     }
 
     /// A fresh backend on a project that has never run one has no lanes, rather
