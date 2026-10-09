@@ -1923,6 +1923,13 @@ fn back_onto_its_step(
     // task a person resumed by hand, the next start would find it again —
     // see `crate::status::resume_stop_parked`. Every road below saves.
     task.front.parked_by_stop = false;
+    // Whatever stopped it is over once it is sent back. Every road below
+    // saves, so the mark lands with the move. A park taken on a blocked task
+    // goes back onto `blocked` with its stop still standing, so that road
+    // leaves the newest entry unmarked.
+    if road.destination() != crate::pipeline::BLOCKED {
+        task.mark_blocker_cleared();
+    }
 
     // A `p` park runs none of `resume_at`'s bookkeeping — see `unpark`.
     // Ahead of the hook pause below, which a park leaves standing.
@@ -2247,6 +2254,7 @@ pub(crate) fn restart_with(
     // A stop's marks are spent by a restart as by a resume: left set, they
     // would describe a stop the task is no longer in.
     task.front.parked_by_stop = false;
+    task.mark_blocker_cleared();
     task.front.missing_start_branch = None;
     task.front.paused_at = None;
     task.front.paused_by = None;
@@ -2358,6 +2366,11 @@ fn past_the_gate(
 ) -> Result<()> {
     if cleared_block {
         resume_at(&mut task, &destination);
+    }
+    // A gate can sit over a caught block, whose entry is over once a person
+    // answers. Answered onto `blocked` itself, the stop is still standing.
+    if destination != crate::pipeline::BLOCKED {
+        task.mark_blocker_cleared();
     }
 
     // `blocked_from` naming `gated` stops describing where this task is
@@ -7153,5 +7166,231 @@ mod tests {
         assert_eq!(task.rounds_at("mid"), 0);
         bank_walked_past(&mut task, &ids);
         assert_eq!(task.rounds_at("mid"), 1);
+    }
+
+    /// A task left stopped with an entry under `## Blocker`, as the dispatcher
+    /// writes one when a lane stops.
+    fn stopped_with_a_blocker_entry(repo: &Repo, id: &str, entry: &str) {
+        add(repo, id, &[]);
+        let mut task = queued(repo, id);
+        task.set_stage("review", None);
+        task.front.blocked_from = Some("review".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.append_to_section("## Blocker", entry);
+        task.save().unwrap();
+    }
+
+    /// What a lane reading `## Blocker` finds after `entry`: the lines that
+    /// follow it, which must say that stop was cleared and when.
+    fn after_the_entry(repo: &Repo, id: &str, entry: &str) -> String {
+        let task = queued(repo, id);
+        let blocker = task.section("## Blocker").unwrap();
+        let entry = entry.trim_end();
+        let at = blocker
+            .find(entry)
+            .expect("the earlier entry is kept whole");
+        blocker[at + entry.len()..].to_string()
+    }
+
+    /// The local dates on either side of `action`. A mark written just before
+    /// midnight carries the earlier date, so a check against a date read only
+    /// afterwards would fail on timing alone.
+    fn dates_around(action: impl FnOnce()) -> Vec<String> {
+        let today = || chrono::Local::now().format("%Y-%m-%d").to_string();
+        let before = today();
+        action();
+        vec![before, today()]
+    }
+
+    /// Once a person puts a blocked task back, `## Blocker` says the entry
+    /// above is a stop already cleared, and when. Anyone reading the section
+    /// can then tell it is not a current blocker. The earlier entry itself is
+    /// left exactly as it was written. `dates` is [`dates_around`] the move.
+    fn assert_marked_cleared(repo: &Repo, id: &str, entry: &str, dates: &[String]) {
+        let after = after_the_entry(repo, id, entry);
+        assert!(
+            after.to_lowercase().contains("cleared") && dates.iter().any(|d| after.contains(d)),
+            "nothing under `## Blocker` marks the entry as a stop already cleared, with the \
+             date; what follows it is {after:?}"
+        );
+    }
+
+    /// `spoolway resume` on a blocked task marks its `## Blocker` entry as past.
+    #[test]
+    fn resuming_a_blocked_task_marks_its_blocker_entry_as_cleared() {
+        let (repo, _root_guard) = fixture("blocker-past-resume");
+        let entry = "- API Error: 400 Claude Code 2.1.220 does not support this model\n";
+        stopped_with_a_blocker_entry(&repo, "stuck", entry);
+
+        let dates = dates_around(|| {
+            resume(
+                &repo,
+                &Pipelines::builtin(),
+                &resume_args("stuck", None),
+                None,
+            )
+            .unwrap();
+        });
+
+        assert_eq!(queued(&repo, "stuck").stage(), "review");
+        assert_marked_cleared(&repo, "stuck", entry, &dates);
+    }
+
+    /// The board's `r` marks a blocked task's `## Blocker` entry as past, as
+    /// `spoolway resume` does.
+    #[test]
+    fn resuming_a_blocked_row_from_the_board_marks_its_blocker_entry_as_cleared() {
+        let (repo, _root_guard) = fixture("blocker-past-board-resume");
+        let entry = "- API Error: 400 Claude Code 2.1.220 does not support this model\n";
+        stopped_with_a_blocker_entry(&repo, "stuck", entry);
+
+        let dates = dates_around(|| {
+            resume_held_row(&repo, &Pipelines::builtin(), &resume_args("stuck", None)).unwrap();
+        });
+
+        assert_eq!(queued(&repo, "stuck").stage(), "review");
+        assert_marked_cleared(&repo, "stuck", entry, &dates);
+    }
+
+    /// Restarting a blocked task from the board marks its `## Blocker` entry
+    /// as past, as a resume does.
+    #[test]
+    fn restarting_a_blocked_task_marks_its_blocker_entry_as_cleared() {
+        let (repo, _root_guard) = fixture("blocker-past-restart");
+        let entry = "- API Error: 400 Claude Code 2.1.220 does not support this model\n";
+        stopped_with_a_blocker_entry(&repo, "stuck", entry);
+        let mux = RestartMux {
+            lanes: Vec::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+            on_list: Box::new(|| {}),
+            on_stop: Box::new(|| {}),
+        };
+
+        let dates = dates_around(|| {
+            restart_with(&repo, &Pipelines::builtin(), &restart_args("stuck"), &mux).unwrap();
+        });
+
+        assert_eq!(queued(&repo, "stuck").stage(), "review");
+        assert_marked_cleared(&repo, "stuck", entry, &dates);
+    }
+
+    /// A task stopped again after it was put back shows the new entry as the
+    /// current one: the mark for the first stop sits between the two entries,
+    /// and nothing marks the second.
+    #[test]
+    fn a_task_stopped_again_after_being_put_back_shows_its_new_entry_as_current() {
+        let (repo, _root_guard) = fixture("blocker-past-stopped-again");
+        let first = "- API Error: 400 Claude Code 2.1.220 does not support this model\n";
+        let second = "- llama-server unreachable\n";
+        stopped_with_a_blocker_entry(&repo, "stuck", first);
+        let dates = dates_around(|| {
+            resume(
+                &repo,
+                &Pipelines::builtin(),
+                &resume_args("stuck", None),
+                None,
+            )
+            .unwrap();
+        });
+
+        let mut task = queued(&repo, "stuck");
+        task.front.blocked_from = Some("review".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.append_to_section("## Blocker", second);
+        task.save().unwrap();
+
+        assert_marked_cleared(&repo, "stuck", first, &dates);
+        let after_first = after_the_entry(&repo, "stuck", first);
+        assert!(
+            after_first.trim_end().ends_with(second.trim_end()),
+            "the new entry is the last thing under `## Blocker`: {after_first:?}"
+        );
+        let after_second = after_the_entry(&repo, "stuck", second);
+        assert!(
+            after_second.trim().is_empty(),
+            "nothing marks the new entry as past: {after_second:?}"
+        );
+    }
+
+    /// A park taken on a blocked task goes back onto `blocked` with its stop
+    /// still standing, so its newest `## Blocker` entry is not marked past.
+    #[test]
+    fn resuming_a_park_taken_on_a_blocked_task_leaves_its_blocker_entry_current() {
+        let (repo, _root_guard) = fixture("blocker-park-on-blocked");
+        let entry = "- timeout\n";
+        stopped_with_a_blocker_entry(&repo, "stuck", entry);
+        let mut task = queued(&repo, "stuck");
+        task.front.parked_from = Some(crate::pipeline::BLOCKED.into());
+        task.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &resume_args("stuck", None),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(queued(&repo, "stuck").stage(), crate::pipeline::BLOCKED);
+        let after = after_the_entry(&repo, "stuck", entry);
+        assert!(
+            after.trim().is_empty(),
+            "the live stop is marked: {after:?}"
+        );
+    }
+
+    /// A task held at a gate over a block, as `spoolway resume` finds one: it
+    /// paused at `deploy` with `blocked_from` naming it, and has an entry
+    /// under `## Blocker`.
+    fn gated_over_a_block(repo: &Repo, id: &str, entry: &str, report_outcome: Option<&str>) {
+        add(repo, id, &[]);
+        let mut task = queued(repo, id);
+        task.set_stage("deploy", None);
+        task.front.paused_at = Some("deploy".into());
+        task.front.blocked_from = Some("deploy".into());
+        task.front.last_report = report_outcome.map(|outcome| crate::task::LastReport {
+            step: "deploy".into(),
+            outcome: outcome.into(),
+            at: 0,
+            blocked: false,
+        });
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.append_to_section("## Blocker", entry);
+        task.save().unwrap();
+    }
+
+    /// Answering a gate that stood over a block clears that block, so the
+    /// gate road marks `## Blocker` as the other roads do.
+    #[test]
+    fn clearing_a_block_held_at_a_gate_marks_its_blocker_entry_as_cleared() {
+        let (repo, _root_guard) = fixture("blocker-past-gate-cleared");
+        let entry = "- deploy window closed\n";
+        gated_over_a_block(&repo, "ship", entry, None);
+
+        let dates = dates_around(|| {
+            resume(&repo, &gate_pipelines(), &resume_args("ship", None), None).unwrap();
+        });
+
+        assert_ne!(queued(&repo, "ship").stage(), crate::pipeline::BLOCKED);
+        assert_marked_cleared(&repo, "ship", entry, &dates);
+    }
+
+    /// A gate answered onto `blocked` leaves the stop standing, so its entry
+    /// is not marked past.
+    #[test]
+    fn answering_a_gate_onto_blocked_leaves_its_blocker_entry_current() {
+        let (repo, _root_guard) = fixture("blocker-gate-onto-blocked");
+        let entry = "- deploy window closed\n";
+        gated_over_a_block(&repo, "ship", entry, Some("block"));
+
+        resume(&repo, &gate_pipelines(), &resume_args("ship", None), None).unwrap();
+
+        assert_eq!(queued(&repo, "ship").stage(), crate::pipeline::BLOCKED);
+        let after = after_the_entry(&repo, "ship", entry);
+        assert!(
+            after.trim().is_empty(),
+            "the live stop is marked: {after:?}"
+        );
     }
 }

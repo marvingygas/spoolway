@@ -31,6 +31,10 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
+/// What opens the line [`Task::mark_blocker_cleared`] adds, and what it looks
+/// for to avoid adding a second.
+const BLOCKER_CLEARED: &str = "- Cleared";
+
 /// What one lane said on its way out, kept until the dispatcher banks it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastReport {
@@ -1139,12 +1143,48 @@ impl Task {
         self.append_to_section("## Status Log", &format!("- {stamp} {text}\n"));
     }
 
+    /// Mark everything now under `## Blocker` as a stop that has been cleared.
+    ///
+    /// The dispatcher appends to `## Blocker`, so the entries a stopped lane
+    /// left stay in the file after the task is put back, and a later lane
+    /// reading them cannot tell they are over. This adds a dated line after
+    /// them instead of touching what the earlier writer put there. A person
+    /// or lane can still rewrite the whole section with `spoolway task edit`,
+    /// which drops the line along with the entries.
+    ///
+    /// A stop that comes after the line appends below it, so the newest entry
+    /// is the one with no mark under it. A section that is absent or empty,
+    /// or already ends in this line, is left alone: putting a task back twice
+    /// does not stack marks.
+    pub fn mark_blocker_cleared(&mut self) {
+        let Some((start, end)) = self.find_section("## Blocker") else {
+            return;
+        };
+        let last = self.body[start..end]
+            .trim_end()
+            .lines()
+            .last()
+            .unwrap_or("");
+        if last.is_empty() || last.starts_with(BLOCKER_CLEARED) {
+            return;
+        }
+        let stamp = Local::now().format("%Y-%m-%d %H:%M");
+        self.append_to_section(
+            "## Blocker",
+            &format!(
+                "{BLOCKER_CLEARED} {stamp}: the task was put back; the entries above are \
+                 past.\n"
+            ),
+        );
+    }
+
     /// Append `text` under `heading`, creating the section if it is absent.
     ///
     /// Sections are appended to rather than replaced so that no writer can
     /// clobber another's section — the dispatcher owns `## Blocker`, every
     /// step's own findings and notes go to `## Handoff`, everyone appends to
-    /// `## Status Log`.
+    /// `## Status Log`. [`Task::mark_blocker_cleared`] also appends a line to
+    /// `## Blocker`.
     pub fn append_to_section(&mut self, heading: &str, text: &str) {
         match self.find_section(heading) {
             Some((_, end)) => {
@@ -1933,6 +1973,26 @@ mod tests {
         );
         // The pre-existing section is untouched.
         assert!(task.section("## Status Log").unwrap().contains("earlier"));
+    }
+
+    /// The mark is added once per stop: a second put-back with nothing new
+    /// under `## Blocker` leaves the section as it was, and a section with no
+    /// entries gets none.
+    #[test]
+    fn marking_a_blocker_cleared_twice_adds_one_line_and_an_empty_section_none() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.append_to_section("## Blocker", "");
+        task.mark_blocker_cleared();
+        assert_eq!(task.section("## Blocker").unwrap(), "");
+
+        task.append_to_section("## Blocker", "- llama-server unreachable\n");
+        task.mark_blocker_cleared();
+        let once = task.section("## Blocker").unwrap().to_string();
+        task.mark_blocker_cleared();
+
+        assert_eq!(task.section("## Blocker").unwrap(), once);
+        assert_eq!(once.matches("- Cleared").count(), 1, "{once}");
+        assert!(once.starts_with("- llama-server unreachable\n"), "{once}");
     }
 
     /// `--from` content with no trailing newline — the ordinary shape a
