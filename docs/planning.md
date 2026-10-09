@@ -44,6 +44,13 @@ no pipeline. When you approve the shape, it calls `/spoolway-tasks`.
 task, chooses ids, and writes the dependency order. You can also run it directly when the
 shape is already agreed.
 
+`/spoolway-plan` asks its questions as a batch of options. You can answer one with free text
+instead of picking an option. If your text is a question or shows doubt, the skill explains the
+topic in the session output and asks the same question again, with the options revised if the
+explanation changed them. The answers you picked for the other questions in the batch stay. If
+your text is a statement, the skill replies with one line saying how it read you and what that
+changes.
+
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
 URL goes into each task's `source:`.
 
