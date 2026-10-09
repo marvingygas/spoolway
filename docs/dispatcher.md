@@ -103,6 +103,12 @@ A model's `slots` caps lanes on that model, and a profile's `concurrency` caps l
 profile. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
+The `slots` cap belongs to a `[models]` row. Every model name that matches the same row shares
+its count. With `[models.qwen3] slots = 1`, a step on `qwen3` and a step on `local/qwen3` share
+one slot. A row keyed by a glob such as `qwen3-coder*` shares its slots across all the names it
+matches. A task that waits prints the row, as in `waiting for a qwen3 slot (1/1)`. A model with
+no `[models]` row that sets `slots` is not capped.
+
 Only the lane on a task's current step counts against those caps, from the pass that starts it.
 A lane whose task has moved to another step counts for nothing, even while it is `Working`, the
 same as a session you started by hand. Typing into one on a local model may make the server swap
@@ -439,7 +445,8 @@ shows what one lane is doing.
 
 ## Editing a pipeline while it runs
 
-The dispatcher reads the pipelines once, when it starts. Right after it takes the project's
+The dispatcher reads the pipelines once, when it starts. Configuration is read every pass,
+with a few exceptions; see the end of this section. Right after it takes the project's
 lock, it writes a copy of what it loaded to `<home>/dispatch-pipelines.json`. A dispatcher
 that starts later replaces that copy.
 
@@ -454,8 +461,10 @@ While a dispatcher is running, these commands route a task on that copy and not 
 Each reads only the pipeline its own task names. With no dispatcher running, they read the
 pipeline files.
 
-An edit to a pipeline file changes nothing until the dispatcher restarts. The footer and
-`spoolway pipeline check` name each pipeline file that differs from the loaded copy:
+An edit to a pipeline file changes nothing until the dispatcher restarts. A pipeline override
+follows the same rule: `spoolway pipeline override` writes a patch file, and the running
+dispatcher uses it only after a restart. The footer and `spoolway pipeline check` name each
+pipeline file or override patch that differs from the loaded copy:
 
 ```
 $ spoolway pipeline check
@@ -464,6 +473,16 @@ $ spoolway pipeline check
 
 `spoolway queue add` refuses a task whose pipeline the running dispatcher did not load. It
 tells you to restart the dispatcher and try again.
+
+Configuration is the exception. The dispatcher reads `config.toml` and the config override again
+at the start of every pass, so a change such as a higher `agents.claude.concurrency` applies on
+the next pass with no restart. If the file stops parsing, the dispatcher keeps running on the
+last good config and prints the error once. It reads the file again every pass, so the error
+clears as soon as the file is valid.
+
+Three groups of keys are fixed when the dispatcher starts. `spoolway config get` shows a new
+value for them at once, but the running dispatcher keeps the old one until you restart it.
+They are `unattended.enabled`, the `unattended.blocked_*` keys and `dispatch.backend`.
 
 ## Gates: when the pipeline waits for you
 

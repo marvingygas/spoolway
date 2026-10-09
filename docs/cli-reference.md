@@ -824,16 +824,19 @@ $ spoolway pipeline override impl --set implement.model=claude-opus-5
   wrote ~/.spoolway/spoolway/overrides/pipelines/impl.yml
     implement.model   claude-sonnet-5 -> claude-opus-5
 
-  active on the next dispatcher pass. `spoolway override drop impl` to clear it.
+  a running dispatcher uses it once restarted, as with an edit to the pipeline file. `spoolway override drop impl` to clear it.
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--set <STEP.KEY=VALUE>` | required | The step, key and new value |
 
-A step the pipeline does not have, a key the merge refuses, or `id:` set on the step is left
-out of the merge instead: the command still runs, and prints one stderr line naming what it
-left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
+The command exits 1 and writes nothing when the pipeline has no such step, when the key is
+one the merge refuses, or when `id:` is set. Every pipeline has a `blocked` step, so
+`blocked.<key>` is accepted even when the pipeline file does not declare one. The command also refuses
+`blocked.description`, and `blocked.session=false` while `unattended.blocked_session` is `true`. See [Staffing
+`blocked`](pipelines.md#staffing-blocked) and [`spoolway
+override`](#spoolway-override-list--promote--drop).
 
 `<name>` may also name a private pipeline. The patch is written the same way, but it only
 starts applying once [`spoolway pipeline promote <name>`](#spoolway-pipeline-promote-name)
@@ -1374,7 +1377,9 @@ for the messages.
 other command does.
 
 The report lists refused files first. It then lists each file written or removed, and a line
-for each replaced key block and each value `sync` set on its own.
+for each replaced key block, each value `sync` set on its own, each group of unknown settings
+it kept, and each group of retired settings it dropped. See
+[Unknown keys](configuration.md#unknown-keys).
 
 No other command prints a line or shows a popup about an unrun `sync`. `spoolway doctor` notes
 a project that `sync` would change.
@@ -1414,6 +1419,8 @@ By default it prints only failures, notes and a closing line. A failing run exit
 whether the project runs in repo mode or home mode. A note names each workspace under
 `~/.spoolway/` that lists no checkout, to be removed by hand. See
 [Home mode](concepts.md#home-mode).
+A note names every key in `config.toml` that this spoolway does not know. See
+[Unknown keys](configuration.md#unknown-keys).
 
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it

@@ -257,10 +257,10 @@ pub(crate) struct PipelinePatch {
 /// out because it no longer fits — see [`Ignored`].
 ///
 /// Called from [`crate::pipeline::Pipelines::load`] before
-/// [`crate::pipeline::Pipelines::assemble`] runs, per `d-merge-at-load`:
-/// assembling first would materialise a `blocked` step that a pipeline
-/// declaring none of its own never had in the file, letting a patch reach a
-/// step that, from the file's own perspective, does not exist.
+/// [`crate::pipeline::Pipelines::assemble`] runs, per `d-merge-at-load`. The
+/// caller first completes the pipeline's `blocked` step from config,
+/// appending one when the file declared none, so a patch on `blocked` finds
+/// a runnable step to land on.
 ///
 /// A step entry is stale one of two ways: it names a step id the pipeline no
 /// longer has, or applying it (validated here against the *whole* pipeline,
@@ -349,20 +349,29 @@ pub(crate) fn apply_pipeline_patch(
 /// `--set` against a cloned step before writing anything: refusing by the
 /// exact rule the merge itself would apply, rather than a second copy of it.
 ///
-/// Two keys are refused before the round-trip rather than by it. `id:` would
-/// rename the step, a change to the graph rather than a value on one. And
+/// Three keys are refused before the round-trip rather than by it. `id:` would
+/// rename the step, a change to the graph rather than a value on one. Next is
 /// `on_loop_max:`, retired, which the round-trip would otherwise swallow
 /// without a word: the field is `skip_serializing`, so the step that comes
 /// back out has lost it — a key accepted here, written into
-/// `overrides/pipelines/<name>.yml`, and then silently doing nothing on every
-/// dispatcher pass after. `pipeline::refuse_retired_step_keys` is the
+/// `overrides/pipelines/<name>.yml`, and then silently doing nothing every
+/// time the pipelines are loaded after. `pipeline::refuse_retired_step_keys` is the
 /// same refusal for a tracked file, where the key survives long enough to be
-/// named; here it has to be caught before serde sees it.
+/// named; here it has to be caught before serde sees it. The third is
+/// `description:` on `blocked`: that step's description is fixed, and a
+/// pipeline that declares one fails to load as a whole, so a patch setting it
+/// must be refused here rather than break every load after it.
 pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) -> Result<()> {
     if fields.contains_key("id") {
         bail!(
             "sets `id:` — a patch may only set a value on an existing step, never rename or \
              reposition one"
+        );
+    }
+    if step.id == crate::pipeline::BLOCKED && fields.contains_key("description") {
+        bail!(
+            "sets `description:` on step `blocked` — its description is fixed, and a pipeline \
+             declaring one fails to load; drop it"
         );
     }
     if fields.contains_key("on_loop_max") {
@@ -1277,8 +1286,8 @@ mod tests {
     /// way a tracked file naming it is — here rather than by the round-trip,
     /// which drops the `skip_serializing` field without a word. Left to
     /// serde, `spoolway pipeline override <name> --set review.on_loop_max=…`
-    /// would be accepted, written into the patch file, and then do nothing on
-    /// every dispatcher pass after, with `override promote` later dead-ending
+    /// would be accepted, written into the patch file, and then do nothing every
+    /// time the pipelines are loaded after, with `override promote` later dead-ending
     /// on a key the tracked step does not have.
     ///
     /// `apply_step_patch` is both halves of that at once: the merge the

@@ -601,7 +601,10 @@ lane_on_record() {
 # comfortably past any suite that is actually making progress.
 E2E_DISPATCH_MAX_ROUNDS=${E2E_DISPATCH_MAX_ROUNDS:-60}
 
-# What the dispatcher reads when it starts, and never again while it runs.
+# What the dispatcher holds from when it started. Pipelines, and the few
+# config keys it fixes at start (`dispatch.backend`, `unattended.enabled`,
+# `unattended.blocked_*`), are read once; the rest of config.toml is read again
+# every pass, so a restart over it costs time and changes nothing.
 #
 # A suite rewrites the pipeline between scenarios and turns a budget down for
 # one of them, and it does that far more often than a person would — so rather
@@ -758,9 +761,12 @@ dispatcher_stop() {
   return 0
 }
 
-# The dispatcher reads config once, when it starts. That is fine for a person —
-# they restart it — and it is the one thing a suite has to say out loud after a
-# `config set` or a pipeline edit whose effect it is about to assert on.
+# The dispatcher keeps the pipelines it loaded and its environment from when it
+# started, and a few config keys with them — see `_config_stamp`. That is fine
+# for a person — they restart it — and it is the one thing a suite has to say
+# out loud after a pipeline edit or an environment change whose effect it is
+# about to assert on, or after a `config set` a pass already under way must
+# not miss.
 dispatcher_restart() {
   dispatcher_stop
   dispatcher_start

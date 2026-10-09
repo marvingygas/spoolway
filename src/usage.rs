@@ -7040,6 +7040,16 @@ mod tests {
         );
     }
 
+    /// [`transcript`] with no input tokens on its turns. The fixture's row
+    /// prices output only, and a rate a row leaves out falls back to the
+    /// built-in table, so the turns' input would otherwise put a few millionths
+    /// of a dollar on every figure these tests compare exactly.
+    fn output_only(records: &[(&str, u64)]) -> String {
+        let text = transcript(records);
+        assert!(text.contains("\"input_tokens\":10"), "{text}");
+        text.replace("\"input_tokens\":10", "\"input_tokens\":0")
+    }
+
     /// One `cost-state` record, as Claude Code appends it to the root transcript.
     fn cost_state(total: f64, model: &str) -> String {
         format!(
@@ -7123,7 +7133,7 @@ mod tests {
     fn the_banked_cost_is_the_larger_of_reported_and_priced() {
         let (repo, path, _root_guard) = fixture("reported-larger");
         // 1M output tokens at the fixture's $10/M.
-        let priced = transcript(&[("", 1_000_000)]);
+        let priced = output_only(&[("", 1_000_000)]);
 
         std::fs::write(
             &path,
@@ -7161,7 +7171,7 @@ mod tests {
         std::fs::create_dir_all(&subagents).unwrap();
         std::fs::write(
             subagents.join("agent-a1.jsonl"),
-            transcript(&[("", 400_000)]),
+            output_only(&[("", 400_000)]),
         )
         .unwrap();
         // Claude Code reports $15: the $14 of priced turns plus $1 of its own.
@@ -7169,7 +7179,7 @@ mod tests {
             &path,
             format!(
                 "{}{}",
-                transcript(&[("", 1_000_000)]),
+                output_only(&[("", 1_000_000)]),
                 cost_state(15.0, "claude-opus-5")
             ),
         )
@@ -7192,7 +7202,7 @@ mod tests {
             &path,
             format!(
                 "{}{}",
-                transcript(&[("", 1_000_000)]),
+                output_only(&[("", 1_000_000)]),
                 cost_state(12.0, "claude-opus-5")
             ),
         )
@@ -7239,14 +7249,14 @@ mod tests {
         std::fs::create_dir_all(&subagents).unwrap();
         std::fs::write(
             subagents.join("agent-a1.jsonl"),
-            transcript(&[("", 400_000)]),
+            output_only(&[("", 400_000)]),
         )
         .unwrap();
         std::fs::write(
             &path,
             format!(
                 "{}{}",
-                transcript(&[("", 10)]),
+                output_only(&[("", 10)]),
                 cost_state(0.01, "claude-opus-5")
             ),
         )
@@ -7268,7 +7278,7 @@ mod tests {
             &path,
             format!(
                 "{}{}",
-                transcript(&[("", 1_000_000)]),
+                output_only(&[("", 1_000_000)]),
                 cost_state(10.5, "claude-opus-5")
             ),
         )
@@ -7280,7 +7290,7 @@ mod tests {
         std::fs::create_dir_all(&subagents).unwrap();
         std::fs::write(
             subagents.join("agent-a1.jsonl"),
-            transcript(&[("", 400_000)]),
+            output_only(&[("", 400_000)]),
         )
         .unwrap();
         let live = live_of("claude", "s", true, &path, &repo.config.models).unwrap();
@@ -7324,7 +7334,7 @@ mod tests {
             &path,
             format!(
                 "{}{}",
-                transcript(&[("", 1_000_000)]),
+                output_only(&[("", 1_000_000)]),
                 cost_state(10.0, "claude-opus-5")
             ),
         )

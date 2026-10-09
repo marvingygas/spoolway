@@ -469,7 +469,8 @@ answer, under `--json`, inside a lane, with `--dry-run`, with `--replace`, or wi
 write, `sync` writes straight away and draws no panel.
 
 The report lists every refused file first, then every file written or removed, then one line
-for each replaced key block and each value `sync` set on its own:
+for each replaced key block, each value `sync` set on its own, each group of unknown settings
+it kept, and each group of retired settings it dropped:
 
 ```
 refused .spoolway/pipelines/bugfix.yml — spoolway's key reference starts with `# >>> spoolway >>>` and never ends — restore the `# <<< spoolway <<<` marker, or delete the block and run this again
@@ -479,6 +480,8 @@ removed .spoolway/templates/task-log.md
 
 (migrated: key block in .spoolway/pipelines/default.yml replaced; edits are not kept)
 (set issue_tracking.key_in_names = true, the default)
+(kept 1 setting(s) this spoolway does not know, with their comments: unatended — a newer spoolway may read them, otherwise they are typos)
+(1 retired setting(s) dropped: sandbox.enabled)
 
 Files were overwritten; your config values, prompts and task skeletons were kept.
 ```

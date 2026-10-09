@@ -177,8 +177,9 @@ cache_write_5m = 0.625
 cache_write_1h = 1.00
 ```
 
-A sub-table whose name does not read as `above_<N>k_tokens` is refused when the config loads,
-and so is a second tier on the same model. A tier rate left out is unset, as on the base entry,
+A sub-table whose name does not read as `above_<N>k_tokens` loads with a note and is left out,
+so the model is priced at its base rate. A second tier on the same model is refused when the
+config loads. A tier rate left out is unset, as on the base entry,
 and a missing `cache_write_1h` falls back to the tier's `cache_write_5m`. `spoolway models`
 shows a tier's rates on an indented row under its model.
 
@@ -214,6 +215,9 @@ A model is priced from the first table that knows it:
 | Project | `[models]` in `config.toml` | glob |
 | Refreshed | `~/.spoolway/model-prices.json`, written by `spoolway models refresh` | exact name |
 | Built-in | `assets/model-prices.json`, compiled into the binary | exact name |
+
+A project row keeps the refreshed or built-in value for every field it leaves out, when those tables
+know the model. See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 A model in none of them has an unknown cost, not a free one. `spoolway models` lists every
 model the pipelines name, its window, its rates, which table answered, and how old that table

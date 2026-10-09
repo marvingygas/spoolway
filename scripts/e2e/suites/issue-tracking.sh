@@ -611,10 +611,10 @@ fi
 # it is gated like any other; a `done` pause resumes straight back to `done`,
 # not to `queued` or a step.
 must "the hook is fixed" "$SPOOLWAY" config set issue_tracking.hook record.sh
-dispatcher_restart   # a new hook name only takes effect on the next start —
-                      # a pass landing between the config set and the first
-                      # resume, still holding fail.sh in memory, would
-                      # otherwise re-fire it and pause the task right back.
+dispatcher_restart   # the next pass reads record.sh on its own, but a pass
+                      # already under way when the config set lands still
+                      # holds fail.sh, and would re-fire it and pause the
+                      # task right back.
 
 # Held at `implement` for a while. A stand-in's whole turn fits inside a poll
 # interval, so without this the task can run on through every step to the
@@ -719,11 +719,10 @@ lacks "with the hook never invoked — no ticket written" \
   "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/github-gate.md"
 lacks "and no epic either" "epic:" "$SPOOLWAY_PROJECT_HOME/queue/github-gate.md"
 
-# After both, not before: the dispatcher reads the config once at startup and
-# the block above this one left `fail.sh` in it, so a restart any earlier
-# would run every hook here as the always-failing one — silently, since that
-# is exactly what `fail.sh` does. The restart also hands it the `PATH` the
-# stub was just added to, which it could not have inherited when it started.
+# The hook switch above needs no restart: the dispatcher reads config.toml
+# again every pass. The `PATH` the stub was just added to is another matter —
+# a dispatcher keeps the environment it started with, so only a restart hands
+# it the stub.
 dispatcher_restart
 
 # A group of one still gets its own epic now — every group does, whatever

@@ -556,14 +556,26 @@ pub struct Resolved {
 /// [`resolved_row`] for the full-name-then-suffix order that table is tried
 /// in — then the refreshed and vendored tables by exact name, then nothing.
 ///
+/// A matching row does not replace the refreshed or vendored entry for the
+/// same name, it sits on top of it: every field the row leaves unset reads
+/// from that entry. Without this, a row written only to set `slots` or
+/// `prompt_cache_ttl` zeroed the model's window and prices, so its cost read
+/// as $0 and `unattended.max_cost_usd` never stopped a run. A model with no
+/// entry in either table has nothing to fall back to, so its unset fields
+/// stay zero. Two fields are exceptions to "every unset field": the higher
+/// price tier and `cache_write_1h`. See [`overlay`] for when each is and is
+/// not carried over.
+///
 /// Exact names in the price files because they hold real model names, not
 /// patterns someone wrote to match a family; a project that wants a glob to
 /// win writes one in `[models]`, which is checked first for exactly that
 /// reason.
 pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Resolved {
     if let Some(key) = resolved_row(config_models, model) {
+        let row = config_models[key];
+        let base = refreshed_price(model).or_else(|| builtin().get(model).copied());
         return Resolved {
-            price: Some(config_models[key]),
+            price: Some(base.map_or(row, |base| overlay(row, base))),
             source: Source::Config,
         };
     }
@@ -582,6 +594,50 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
     Resolved {
         price: None,
         source: Source::Unknown,
+    }
+}
+
+/// `row` with each field it leaves unset taken from `base`.
+///
+/// Unset is the field's zero (or `None` for `prompt_cache_ttl`, where an
+/// explicit `"0"` is a statement and is kept). A row that sets a five-minute
+/// cache-write rate keeps its own hourly rate even at zero: zero there means
+/// "price an hour cache like the five-minute one" (see `Rates::apply`), and
+/// filling it from the table would charge a config that predates the split
+/// at a rate it never wrote. The tier comes along only when
+/// the row sets none of the five rates: a row that writes its own `input`
+/// beside the base's higher tier would charge the two against each other.
+fn overlay(row: ModelPrice, base: ModelPrice) -> ModelPrice {
+    let sets_a_rate = row.input != 0.0
+        || row.output != 0.0
+        || row.cache_read != 0.0
+        || row.cache_write_5m != 0.0
+        || row.cache_write_1h != 0.0;
+    let or = |set: f64, fallback: f64| if set == 0.0 { fallback } else { set };
+    ModelPrice {
+        context_window: if row.context_window == 0 {
+            base.context_window
+        } else {
+            row.context_window
+        },
+        input: or(row.input, base.input),
+        output: or(row.output, base.output),
+        cache_read: or(row.cache_read, base.cache_read),
+        cache_write_5m: or(row.cache_write_5m, base.cache_write_5m),
+        cache_write_1h: if row.cache_write_5m != 0.0 {
+            row.cache_write_1h
+        } else {
+            or(row.cache_write_1h, base.cache_write_1h)
+        },
+        prompt_cache_ttl: row.prompt_cache_ttl.or(base.prompt_cache_ttl),
+        slots: row.slots,
+        local: row.local || base.local,
+        tier: if sets_a_rate {
+            row.tier
+        } else {
+            row.tier.or(base.tier)
+        },
+        ..row
     }
 }
 
@@ -1200,6 +1256,132 @@ mod tests {
         let resolved = resolve(&config, "claude-opus-5");
         assert_eq!(resolved.source, Source::Config);
         assert_eq!(resolved.price.unwrap().input, 1.0);
+    }
+
+    /// A `[models]` row that sets only a slot count, a window or a cache
+    /// lifetime on a model the built-in table knows still reads the built-in
+    /// price and window for every field it leaves out.
+    #[test]
+    fn a_row_that_sets_only_slots_keeps_the_builtin_price_and_window() {
+        let home = fixture_home("models-row-keeps-builtin");
+        crate::platform::test_home::with_home(&home, || {
+            let builtin_row = builtin()["claude-haiku-5-5"];
+            let config = BTreeMap::from([(
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    slots: 1,
+                    ..Default::default()
+                },
+            )]);
+            let resolved = resolve(&config, "claude-haiku-5-5");
+            assert_eq!(resolved.source, Source::Config);
+            let price = resolved.price.unwrap();
+            assert_eq!(price.slots, 1);
+            assert_eq!(price.context_window, builtin_row.context_window);
+            assert_eq!(price.input, builtin_row.input);
+            assert_eq!(price.output, builtin_row.output);
+            assert_eq!(price.tier.map(|tier| tier.above_k), Some(100));
+        });
+    }
+
+    #[test]
+    fn a_row_that_sets_a_rate_does_not_inherit_the_tables_tier() {
+        let home = fixture_home("models-row-drops-tier");
+        crate::platform::test_home::with_home(&home, || {
+            let config = BTreeMap::from([(
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    input: 0.2,
+                    ..Default::default()
+                },
+            )]);
+            let price = resolve(&config, "claude-haiku-5-5").price.unwrap();
+            assert_eq!(price.input, 0.2);
+            assert!(price.tier.is_none());
+        });
+    }
+
+    #[test]
+    fn a_row_with_a_five_minute_write_rate_does_not_fill_the_hourly_one() {
+        let home = fixture_home("models-row-keeps-hourly-zero");
+        crate::platform::test_home::with_home(&home, || {
+            assert!(builtin()["claude-opus-5"].cache_write_1h > 0.0);
+            let config = BTreeMap::from([(
+                "claude-opus-5".to_string(),
+                ModelPrice {
+                    cache_write_5m: 6.25,
+                    ..Default::default()
+                },
+            )]);
+            let price = resolve(&config, "claude-opus-5").price.unwrap();
+            assert_eq!(price.cache_write_1h, 0.0);
+        });
+    }
+
+    #[test]
+    fn a_row_falls_back_to_the_refreshed_entry_before_the_builtin_one() {
+        let home = fixture_home("models-row-keeps-refreshed");
+        write_refreshed(
+            &home,
+            serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
+        );
+        crate::platform::test_home::with_home(&home, || {
+            let config = BTreeMap::from([(
+                "claude-opus-5".to_string(),
+                ModelPrice {
+                    slots: 1,
+                    ..Default::default()
+                },
+            )]);
+            let resolved = resolve(&config, "claude-opus-5");
+            assert_eq!(resolved.source, Source::Config);
+            let price = resolved.price.unwrap();
+            assert_eq!(price.slots, 1);
+            assert_eq!(price.input, 2.0);
+        });
+    }
+
+    #[test]
+    fn a_row_that_sets_only_the_window_or_the_ttl_keeps_the_builtin_rates() {
+        let home = fixture_home("models-row-keeps-rates");
+        crate::platform::test_home::with_home(&home, || {
+            let builtin_row = builtin()["claude-haiku-5-5"];
+            let config = BTreeMap::from([(
+                "claude-haiku-5-5".to_string(),
+                ModelPrice {
+                    context_window: 200_000,
+                    prompt_cache_ttl: Some(std::time::Duration::from_secs(3600)),
+                    ..Default::default()
+                },
+            )]);
+            let price = resolve(&config, "claude-haiku-5-5").price.unwrap();
+            assert_eq!(price.context_window, 200_000);
+            assert_eq!(
+                price.prompt_cache_ttl,
+                Some(std::time::Duration::from_secs(3600))
+            );
+            assert_eq!(price.input, builtin_row.input);
+            assert_eq!(price.output, builtin_row.output);
+            assert_eq!(price.cache_read, builtin_row.cache_read);
+        });
+    }
+
+    #[test]
+    fn a_row_for_a_model_with_no_entry_reads_unset_fields_as_zero() {
+        let home = fixture_home("models-row-local");
+        crate::platform::test_home::with_home(&home, || {
+            let config = BTreeMap::from([(
+                "my-local-model".to_string(),
+                ModelPrice {
+                    slots: 2,
+                    ..Default::default()
+                },
+            )]);
+            let price = resolve(&config, "my-local-model").price.unwrap();
+            assert_eq!(price.slots, 2);
+            assert_eq!(price.context_window, 0);
+            assert_eq!(price.input, 0.0);
+        });
     }
 
     #[test]

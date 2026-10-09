@@ -188,6 +188,19 @@ skipped override changes what lanes run. The before-start overrides popup (see [
 dispatch`](cli-reference.md#spoolway-dispatch)) draws the same entry's row as `ignored —
 <reason>` in place of its keys, with every other row unchanged.
 
+### When an override takes effect
+
+| Override | When a running dispatcher uses it |
+|---|---|
+| `config.toml` | On the next pass, with no restart. |
+| `prompts/<name>/PROMPT.md` | When a lane starts. |
+| `pipelines/<name>.yml` | After the dispatcher restarts, the same as an edit to a pipeline file. |
+
+The same rule holds for the tracked `.spoolway/config.toml`. `spoolway config get` shows a new
+value at once. The running dispatcher keeps the old value of `dispatch.backend`,
+`unattended.enabled` and the `unattended.blocked_*` keys until you restart it. See [Editing a
+pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
@@ -567,21 +580,25 @@ local = true
 ```
 
 Each row is keyed by a glob over the model name. The most literal match wins. A bare name
-also matches `vendor/name`. Leave a field out to mean zero. `[models]` ships empty: the
-built-in price table covers known models, so a row only corrects a price or describes a local
-model. An unpriced model is reported as unpriced, not counted as free. See
+also matches `vendor/name`. Leave a field out and it keeps the value from the built-in or
+refreshed price table, when that table has an entry for the model. Only a model with no
+entry, such as a local model, reads a field you leave out as zero. One exception: a row that sets
+`cache_write_5m` and leaves `cache_write_1h` out prices hourly cache writes at its own
+five-minute rate, not at the table's hourly rate. `[models]` ships empty:
+the built-in price table covers known models, so a row only corrects a price or describes a
+local model. An unpriced model is reported as unpriced, not counted as free. See
 [Cost accounting](cost.md).
 
 | Key | Default | What it controls |
 |---|---|---|
-| `context_window` | `0` | Tokens one session gets. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of this. For a local model use the server's per-slot window, such as llama.cpp's `--ctx-size` divided by `--parallel`. |
-| `input` | `0` | USD per million input tokens. |
-| `output` | `0` | USD per million output tokens. |
-| `cache_read` | `0` | USD per million cached input tokens read. |
-| `cache_write_5m` | `0` | USD per million tokens written to a five-minute cache. |
-| `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
+| `context_window` | table entry, else `0` | Tokens one session gets. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of this. For a local model use the server's per-slot window, such as llama.cpp's `--ctx-size` divided by `--parallel`. |
+| `input` | table entry, else `0` | USD per million input tokens. |
+| `output` | table entry, else `0` | USD per million output tokens. |
+| `cache_read` | table entry, else `0` | USD per million cached input tokens read. |
+| `cache_write_5m` | table entry, else `0` | USD per million tokens written to a five-minute cache. |
+| `cache_write_1h` | table entry, else `0` | USD per million tokens written to a one-hour cache. If the row sets `cache_write_5m` and leaves this out, hourly writes are charged at the row's `cache_write_5m`. |
 | `prompt_cache_ttl` | `5m`, none if `local` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. `"0"` turns it off. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
-| `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
+| `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
 
 A row can also carry one higher tier: the rates a request pays once its prompt passes a
@@ -593,8 +610,9 @@ input = 0.50
 output = 2.50
 ```
 
-A sub-table with any other name is refused when the config loads, and so is a second tier.
-Set a tier rate with `spoolway config set models.'<glob>'.above_100k_tokens.input <usd>`. See
+A sub-table with any other name loads with a note and is left out, as described in [Unknown
+keys](#unknown-keys). A second tier on the same model is refused when the config loads. Set a
+tier rate with `spoolway config set models.'<glob>'.above_100k_tokens.input <usd>`. See
 [Pricing](cost.md#pricing).
 
 The window here is what spoolway believes, not what the server reports. Keep it in step with
@@ -602,6 +620,29 @@ the server yourself.
 
 `spoolway doctor` notes a row with `slots` but no `local`, a row no pipeline step uses, and a
 row that still names `cache_ttl` or `session_reuse_idle`.
+
+## Unknown keys
+
+A key this spoolway does not know never stops the file loading. That covers a typo, a key a
+newer spoolway added, and a misspelt table name such as `[unatended]` or `[model.qwen3]`. This
+holds in every table, `[agents.*]` and `[models."<glob>"]` rows included. A table inside a
+`[models]` row whose name is not a price tier, such as `above_100K_token`, is an unknown key
+too. It is left out, so that model is priced at its base rate until the name is fixed.
+
+Each unknown key loads with a note that names it, for example ``note: `dispatch.lane_quite` in
+<file> is not a setting this spoolway knows``, and `spoolway doctor` lists them all in one
+row. The key is otherwise ignored, so a typo does nothing until you fix it.
+
+The file keeps them. `spoolway config set` edits one key in place. `spoolway sync` rewrites
+the whole file, and carries every unknown key and unknown table over with the comment above
+it. It prints every setting it removes. Those are retired keys (see
+[Retired keys](#retired-keys)) and keys inside a table that was itself retired. A key that is
+only renamed, such as `cache_write` or a `[pricing]` row, is written under its new name and
+not listed.
+
+A key from a newer spoolway is read by that binary only. A spoolway that includes this
+handling still loads the file, names the key, and ignores it. 0.8.0 and 0.7.x do not: they
+refuse a key they do not know inside a table.
 
 ## Retired keys
 
@@ -615,9 +656,8 @@ leave a retired key in the file. `spoolway sync` drops it. These keys load with 
 `[agents.<profile>]` naming a kind spoolway no longer knows how to launch. Only the notes for
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
-rewritten or dropped on the next save. The rest of the table below are dropped with nothing
-printed.
-`spoolway sync` also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
+rewritten or dropped on the next save. The rest of the table below load with no note.
+`spoolway sync` lists every setting it drops. It also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
 
 | Key | Replaced by |
 |---|---|

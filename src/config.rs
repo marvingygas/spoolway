@@ -239,12 +239,13 @@ pub struct Config {
     /// an install a version behind a project's config as if the config were
     /// wrong: a key a newer binary added is not a typo, and refusing to parse
     /// it took down every command with it, `doctor` included — the one whose
-    /// job is explaining what broke. Never written back — `skip_serializing`,
-    /// the same as every other retired table above — so a key this binary
-    /// truly does not know is dropped on the next save exactly as
-    /// `blocked_on_write` and `blocked_on_overreach` used to be by name; the
-    /// two of them needed no field of their own once this existed to catch
-    /// them.
+    /// job is explaining what broke.
+    ///
+    /// Never written back by [`Config::render`] — `skip_serializing` — so the
+    /// struct itself forgets the key. The file does not: [`strip_refused_keys`] names every key here that
+    /// is not on [`RETIRED_TABLES`], `config set` edits the document in place,
+    /// and `spoolway sync` carries the key over with [`crate::confdoc::keep`].
+    /// A key on that list is a retired one, and `sync` drops it.
     #[allow(dead_code)]
     #[serde(flatten, skip_serializing)]
     extra: BTreeMap<String, toml::Value>,
@@ -454,9 +455,9 @@ pub struct DispatchConfig {
     ///
     /// **Not written to `config.toml` while it holds its default**, for the
     /// same reason as [`Self::priority`] below: a lane here routinely runs a
-    /// binary built from a branch behind main, and `deny_unknown_fields`
-    /// makes an unknown key a hard parse error rather than something to
-    /// ignore.
+    /// binary built from a branch behind main, and a binary before unknown keys
+    /// were tolerated (0.8.0 and earlier) refuses one with a hard parse error
+    /// rather than ignoring it.
     #[serde(
         with = "human_duration",
         skip_serializing_if = "is_default_lane_child_ceiling"
@@ -564,9 +565,9 @@ pub struct DispatchConfig {
     ///
     /// Not written to `config.toml` while it holds its default, for the same
     /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
-    /// runs a binary built from a branch behind main, and
-    /// `deny_unknown_fields` makes an unknown key a hard parse error rather
-    /// than something to ignore.
+    /// runs a binary built from a branch behind main, and a binary before
+    /// unknown keys were tolerated (0.8.0 and earlier) refuses one with a hard
+    /// parse error rather than ignoring it.
     #[serde(skip_serializing_if = "Priority::is_group")]
     pub priority: Priority,
 
@@ -579,9 +580,9 @@ pub struct DispatchConfig {
     ///
     /// Not written to `config.toml` while it holds its default, for the same
     /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
-    /// runs a binary built from a branch behind main, and
-    /// `deny_unknown_fields` makes an unknown key a hard parse error rather
-    /// than something to ignore.
+    /// runs a binary built from a branch behind main, and a binary before
+    /// unknown keys were tolerated (0.8.0 and earlier) refuses one with a hard
+    /// parse error rather than ignoring it.
     #[serde(skip_serializing_if = "is_true")]
     pub keep_finished_lanes: bool,
 
@@ -1385,7 +1386,7 @@ fn leftover_placeholder(rendered: &str) -> Option<String> {
 /// hold dots. These are the `skip_serializing` fields kept on the config
 /// structs (in `src/usage.rs` for a models row) only so an old file still
 /// parses (each under every spelling serde accepts for it), plus the two
-/// [`strip_hard_retired_keys`] removes before the parse.
+/// [`strip_refused_keys`] removes before the parse.
 ///
 /// [`crate::overrides::retired_config_patch_keys`] drops only keys on this
 /// list from a private override. It used to treat every key the config did
@@ -1421,6 +1422,34 @@ const RETIRED_KEYS: &[(&str, &str)] = &[
     ("models.*", "exclusive"),
 ];
 
+/// Every top-level key this binary has retired, which a config written for an
+/// older one may still hold. `Config::extra` catches each of them on load, so
+/// unlike a retired key inside a table they are not fields of any struct;
+/// this list is what tells them apart from a key that was never known.
+/// [`unknown_keys`] skips them, and `spoolway sync` therefore still drops them.
+/// `pricing` is not here because it is read as `models`.
+const RETIRED_TABLES: &[&str] = &[
+    "update",
+    "calibrate",
+    "retention",
+    "prices",
+    "effort",
+    "stack",
+    "sandbox",
+    "blocked_on_write",
+    "blocked_on_overreach",
+    "paths",
+    "docs",
+    "plans",
+    "pipeline_gen",
+    "skills",
+];
+
+/// Whether `name` is a top-level table this binary has retired.
+pub(crate) fn is_retired_table(name: &str) -> bool {
+    RETIRED_TABLES.contains(&name)
+}
+
 /// Whether `dotted` (`dispatch.worktree_root`, `agents.claude.env.FOO`)
 /// names a key on [`RETIRED_KEYS`], or a leaf inside one such as an entry of
 /// a retired `env` table.
@@ -1445,23 +1474,33 @@ pub(crate) fn is_retired_key(dotted: &str) -> bool {
     })
 }
 
-/// `dispatch.interval` and `issue_tracking.on_fail`, each stripped from
-/// `raw` when present, along with one note per key naming `spoolway sync`.
+/// Every key `raw` holds that the structs below would refuse, stripped from
+/// the text, with one note per key.
 ///
-/// Both are retired hard enough that `DispatchConfig` and
-/// [`IssueTrackingConfig`]'s own `deny_unknown_fields` refuses a file that
-/// still names either, rather than quietly dropping it the way every other
-/// retired key does — on purpose, so a project only discovers a key is gone
-/// the moment something tries to read it. That used to mean a project
-/// upgraded from 0.6.0 with either key still set could not run anything but
-/// `spoolway sync`: every other command loaded the same file through
-/// [`Config::load`] or [`Config::load_tracked`], both of which go straight
-/// to `toml::from_str` with no strip at all. This is what both now call
-/// before that parse, so the file loads everywhere, with a note saying so —
-/// `spoolway sync` is still the one command that writes the key away for
-/// good, the same way [`Config::save_key`] edits a document in place, so the
-/// note sends a person there. Stripping a key the file never had is a no-op.
-fn strip_hard_retired_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
+/// Two groups. `dispatch.interval` and `issue_tracking.on_fail` are retired
+/// hard enough that `DispatchConfig` and [`IssueTrackingConfig`]'s own
+/// `deny_unknown_fields` refuses a file that still names either, rather than
+/// quietly dropping it the way every other retired key does — on purpose, so
+/// a project only discovers a key is gone the moment something tries to read
+/// it. The other group is every key [`unknown_keys`] finds inside a table
+/// the structs know: a typo, or a key a newer binary added. Those are refused
+/// by the same `deny_unknown_fields`, and a file written by a newer binary
+/// must not take an older one down with it.
+///
+/// Both groups are removed from the text handed to the typed parse and
+/// nowhere else. The file on disk keeps them: [`Config::save_key`] edits the
+/// document in place, and `spoolway sync` grafts them back with
+/// [`crate::confdoc::keep`] after its re-render. A top-level key needs no
+/// strip — [`Config::extra`] accepts it — but earns its note here all the
+/// same, so a misspelt table name such as `[unatended]` is not silently
+/// ignored.
+///
+/// Every caller that loads the file runs this before its parse, which is how
+/// a project upgraded from 0.6.0 with either retired key still set can run
+/// more than `spoolway sync`. `spoolway sync` is still the one command that
+/// writes a retired key away for good, so its note sends a person there.
+/// Stripping a key the file never had is a no-op.
+fn strip_refused_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
     const RETIRED: [(&str, &str); 2] = [("dispatch", "interval"), ("issue_tracking", "on_fail")];
     let mut stripped = raw.to_string();
     let mut notices = Vec::new();
@@ -1479,7 +1518,151 @@ fn strip_hard_retired_keys(raw: &str, path: &Path) -> Result<(String, Vec<String
             stripped = crate::confdoc::remove(&stripped, &[table, key])?;
         }
     }
+    for unknown in unknown_keys(&stripped) {
+        let shown = unknown.join(".");
+        if let [_] = unknown.as_slice() {
+            notices.push(format!(
+                "note: `{shown}` in {} is not a table or setting this spoolway knows — kept in \
+                 the file and otherwise ignored. A newer spoolway may read it; if not, it is \
+                 a typo.",
+                path.display(),
+            ));
+        } else {
+            let parts: Vec<&str> = unknown.iter().map(String::as_str).collect();
+            stripped = crate::confdoc::remove(&stripped, &parts)?;
+            notices.push(format!(
+                "note: `{shown}` in {} is not a setting this spoolway knows — loaded past it \
+                 and kept in the file. A newer spoolway may read it; if not, it is a typo.",
+                path.display(),
+            ));
+        }
+    }
     Ok((stripped, notices))
+}
+
+/// Does deserializing `{ key = value }` as a `T` fail on the key itself?
+///
+/// This asks serde rather than keeping a second list of field names, so the
+/// answer cannot drift from the struct. Any other failure — a value of the
+/// wrong type, say — is a real error the typed parse reports, not an unknown
+/// key.
+fn refuses_key<T: serde::de::DeserializeOwned>(key: &str, value: &toml::Value) -> bool {
+    let mut one = toml::Table::new();
+    one.insert(key.to_string(), value.clone());
+    match toml::Value::Table(one).try_into::<T>() {
+        Ok(_) => false,
+        Err(err) => err.to_string().contains(&format!("unknown field `{key}`")),
+    }
+}
+
+/// Add the path of every key in `table` that `T` refuses to `out`.
+fn collect_refused<T: serde::de::DeserializeOwned>(
+    prefix: &[&str],
+    table: &toml::Table,
+    out: &mut Vec<Vec<String>>,
+) {
+    for (key, value) in table {
+        if refuses_key::<T>(key, value) {
+            let mut path: Vec<String> = prefix.iter().map(|part| part.to_string()).collect();
+            path.push(key.clone());
+            out.push(path);
+        }
+    }
+}
+
+/// Every key in `raw` this binary does not know, as a path of key names.
+///
+/// A path is a list rather than a dotted string because a `[models]` glob may
+/// itself hold dots. Three places can hold one: the top level, a table the
+/// structs know (`[dispatch]`, `[agents.<name>]`, `[models."<glob>"]`, and a
+/// model's price-tier sub-table), and nowhere deeper — every table below
+/// those has a fixed shape. Text that is not valid TOML has none, since the
+/// typed parse is the one that reports that.
+///
+/// `pricing` is the old name of `models` and is scanned as the same table.
+pub(crate) fn unknown_keys(raw: &str) -> Vec<Vec<String>> {
+    let Ok(toml::Value::Table(root)) = toml::from_str::<toml::Value>(raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    // What `Config` serialises is every key it has; `pricing` is the alias.
+    let known: Vec<String> = toml::Value::try_from(Config::default())
+        .ok()
+        .and_then(|value| value.as_table().map(|t| t.keys().cloned().collect()))
+        .unwrap_or_default();
+    for key in root.keys() {
+        if key != "pricing" && !known.contains(key) && !RETIRED_TABLES.contains(&key.as_str()) {
+            out.push(vec![key.clone()]);
+        }
+    }
+
+    let sub = |name: &str| root.get(name).and_then(toml::Value::as_table);
+    if let Some(table) = sub("dispatch") {
+        collect_refused::<DispatchConfig>(&["dispatch"], table, &mut out);
+    }
+    if let Some(table) = sub("unattended") {
+        collect_refused::<UnattendedConfig>(&["unattended"], table, &mut out);
+    }
+    if let Some(table) = sub("housekeeping") {
+        collect_refused::<HousekeepingConfig>(&["housekeeping"], table, &mut out);
+    }
+    if let Some(table) = sub("watch") {
+        collect_refused::<WatchConfig>(&["watch"], table, &mut out);
+    }
+    if let Some(table) = sub("issue_tracking") {
+        collect_refused::<IssueTrackingConfig>(&["issue_tracking"], table, &mut out);
+    }
+    if let Some(agents) = sub("agents") {
+        for (name, profile) in agents {
+            if let Some(table) = profile.as_table() {
+                collect_refused::<AgentProfile>(&["agents", name], table, &mut out);
+            }
+        }
+    }
+    for models_name in ["models", "pricing"] {
+        let Some(models) = sub(models_name) else {
+            continue;
+        };
+        for (glob, row) in models {
+            let Some(table) = row.as_table() else {
+                continue;
+            };
+            collect_refused::<crate::usage::ModelPrice>(&[models_name, glob], table, &mut out);
+            // `ModelPrice` refuses a table-valued key that is not a price tier
+            // in words of its own, so serde's "unknown field" never reaches
+            // `refuses_key`. Such a table is a key a newer binary added, or a
+            // misspelt tier; either way it is left out of the parse and
+            // named, and the model is priced at its base rate without it.
+            for (key, value) in table {
+                // A known field handed a table is a wrong-typed value, which
+                // the typed parse reports; only a key `ModelPrice` has no
+                // field for is unknown. A scalar stands in for the table so
+                // that the probe fails on the key and on nothing else.
+                if value.is_table()
+                    && crate::usage::PriceTier::threshold_in(key).is_none()
+                    && refuses_key::<crate::usage::ModelPrice>(key, &toml::Value::Integer(0))
+                {
+                    out.push(vec![models_name.to_string(), glob.clone(), key.clone()]);
+                }
+            }
+            // Only a real tier name is scanned for keys of its own.
+            for (tier, rates) in table {
+                if crate::usage::PriceTier::threshold_in(tier).is_some()
+                    && let Some(rates) = rates.as_table()
+                {
+                    collect_refused::<crate::usage::Rates>(
+                        &[models_name, glob, tier],
+                        rates,
+                        &mut out,
+                    );
+                }
+            }
+        }
+    }
+    // A retired key inside a table is on its way out already, and `sync` drops it.
+    out.retain(|path| !is_retired_key(&path.join(".")));
+    out
 }
 
 impl Config {
@@ -1557,7 +1740,7 @@ impl Config {
         let path = Config::path_in(root);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let (stripped, _notices) = strip_hard_retired_keys(&raw, &path)?;
+        let (stripped, _notices) = strip_refused_keys(&raw, &path)?;
         let mut config: Config =
             toml::from_str(&stripped).with_context(|| format!("parsing {}", path.display()))?;
         config.migrate();
@@ -1575,12 +1758,12 @@ impl Config {
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
                 // `dispatch.interval` and `issue_tracking.on_fail` fail every
-                // caller outright otherwise — see `strip_hard_retired_keys`'s
+                // caller outright otherwise — see `strip_refused_keys`'s
                 // own doc — so this strips them before the struct ever sees
                 // the file, and the notices it returns say so, naming
                 // `spoolway sync` as the one command that writes the key
                 // away for good.
-                let (stripped, mut notices) = strip_hard_retired_keys(&raw, &path)?;
+                let (stripped, mut notices) = strip_refused_keys(&raw, &path)?;
                 let mut config: Config = toml::from_str(&stripped)
                     .with_context(|| format!("parsing {}", path.display()))?;
                 // The alias on `Backend::Herdr` already turned a `tmux` value
@@ -1840,7 +2023,7 @@ impl Config {
         // not be refused for it. Only `spoolway sync` removes the key. The
         // notes are dropped — the load that produced `self` already printed
         // them.
-        let (text, _notices) = strip_hard_retired_keys(text, &Config::path_in(Path::new("")))?;
+        let (text, _notices) = strip_refused_keys(text, &Config::path_in(Path::new("")))?;
         let mut reparsed: Config = toml::from_str(&text).context("it no longer parses")?;
         reparsed.migrate();
 
@@ -2825,7 +3008,7 @@ mod tests {
     /// to be stripped only by `spoolway sync`'s own loader,
     /// [`Config::load_dropping_retired_keys`], leaving every other command
     /// — `queue list`, `config get`, `resume`, `doctor` — refusing to load a
-    /// project upgraded from 0.6.0 at all. [`strip_hard_retired_keys`] is
+    /// project upgraded from 0.6.0 at all. [`strip_refused_keys`] is
     /// now shared by [`Config::load`] and [`Config::load_tracked`] too, so
     /// this loads past the retired key with a note naming `spoolway sync`,
     /// the one command that still writes it away for good.
@@ -2890,7 +3073,7 @@ mod tests {
 
     /// `dispatch.worktree_root` is only soft-retired — the field still
     /// parses on its own, with no `deny_unknown_fields` to trip — so it
-    /// never needed `strip_hard_retired_keys` to load. The plan's own
+    /// never needed `strip_refused_keys` to load. The plan's own
     /// `d-upgrade-floor` still asks for a note naming `spoolway sync` on
     /// every ordinary load, the same as the two hard-retired keys, so an
     /// otherwise silent command (`queue list`, before this fix) still says
@@ -3278,11 +3461,11 @@ mod tests {
     /// used to be, and the one `doctor` least of all could afford, since its
     /// whole job is explaining what is wrong with a config it could not even
     /// open. `extra` catches a whole unrecognised table the same way it
-    /// catches a bare scalar key, and either is quietly dropped again on the
-    /// next save rather than carried forward — the same shape every retired
-    /// key here already takes.
+    /// catches a bare scalar key, and the struct forgets either on a render.
+    /// The file keeps them — see `an_unknown_key_survives_a_sync` in
+    /// `sync.rs`.
     #[test]
-    fn a_key_only_a_newer_binary_knows_still_parses_and_is_dropped_on_save() {
+    fn a_key_only_a_newer_binary_knows_still_parses_and_the_struct_forgets_it() {
         let raw = "a_future_key = \"whatever it means\"\n\n\
                     [a_future_table]\n\
                     also_unknown = 1\n\n\
@@ -3296,6 +3479,50 @@ mod tests {
         assert!(!rendered.contains("a_future_key"));
         assert!(!rendered.contains("a_future_table"));
         assert!(!rendered.contains("also_unknown"));
+    }
+
+    /// A typo inside a known table, in a `[models]` row (glob dots and a price
+    /// tier included) and a misspelt table name are all unknown; a retired
+    /// table and the `pricing` alias are not.
+    #[test]
+    fn unknown_keys_finds_typos_in_tables_and_rows_but_not_retired_ones() {
+        let raw = "[dispatch]\nlane_quite = \"5m\"\n\n\
+                    [agents.claude]\nkind = \"claude\"\nmodle = \"x\"\n\n\
+                    [models.\"qwen3.5\"]\nslots = 2\nflavour = 1\n\
+                    [models.\"qwen3.5\".above_100k_tokens]\ninput = 1.0\nbogus = 2.0\n\n\
+                    [unatended]\nx = 1\n\n[sandbox]\nenabled = true\n\n\
+                    [pricing.\"old\"]\ninput = 1.0\n";
+        let found: Vec<String> = unknown_keys(raw).iter().map(|p| p.join(".")).collect();
+        assert_eq!(
+            found,
+            [
+                "unatended",
+                "dispatch.lane_quite",
+                "agents.claude.modle",
+                "models.qwen3.5.flavour",
+                "models.qwen3.5.above_100k_tokens.bogus",
+            ],
+        );
+    }
+
+    /// Every unknown key loads, whichever table holds it, and earns a note
+    /// that names it. A key that is only misspelt is not an error.
+    #[test]
+    fn unknown_keys_load_with_a_note_naming_each() {
+        let raw = "[dispatch]\nlane_quite = \"5m\"\nbackend = \"headless\"\n\n\
+                    [models.\"m\"]\nflavour = 1\n\n[unatended]\nx = 1\n";
+        with_override_fixture("unknown-keys", raw, |root| {
+            let (config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
+            assert_eq!(config.dispatch.backend, Backend::Headless);
+            for name in ["dispatch.lane_quite", "models.m.flavour", "`unatended`"] {
+                assert!(
+                    notices
+                        .iter()
+                        .any(|n| n.starts_with("note: ") && n.contains(name)),
+                    "no note named {name}: {notices:?}"
+                );
+            }
+        });
     }
 
     /// An old `[pricing]` table is exactly what `[models]` holds now, so it
@@ -3682,17 +3909,31 @@ mod tests {
         assert_eq!(loaded.models["claude-haiku-5-5"].input, 0.1);
     }
 
-    /// A misspelt tier sub-table is refused at load, naming the key.
+    /// A misspelt tier sub-table loads, is named in a note, and is left out:
+    /// the model is priced at its base rate until the name is fixed.
     #[test]
-    fn a_misnamed_tier_sub_table_is_refused_at_load() {
-        let dir = crate::scratch::root("config-misnamed-tier");
-        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
-        std::fs::write(
-            Config::path_in(&dir),
-            "[models.\"claude-haiku-5-5\".above_100K_token]\ninput = 0.5\n",
-        )
-        .unwrap();
-        let err = format!("{:#}", Config::load(&dir).unwrap_err());
-        assert!(err.contains("above_100K_token"), "{err}");
+    fn a_misnamed_tier_sub_table_loads_with_a_note() {
+        let raw = "[models.\"claude-haiku-5-5\"]\ninput = 0.25\n\n\
+                    [models.\"claude-haiku-5-5\".above_100K_token]\ninput = 0.5\n";
+        with_override_fixture("misnamed-tier", raw, |root| {
+            let (config, notices, _ignored) = Config::load_with_notices(root, None).unwrap();
+            assert_eq!(config.models["claude-haiku-5-5"].input, 0.25);
+            assert!(config.models["claude-haiku-5-5"].tier.is_none());
+            assert!(
+                notices.iter().any(|n| n.contains("above_100K_token")),
+                "{notices:?}"
+            );
+        });
+    }
+
+    /// A known field handed a table is a wrong-typed value, not an unknown
+    /// key: it is not named as unknown, and the typed parse still refuses it.
+    #[test]
+    fn a_known_models_key_with_a_table_value_is_refused_not_called_unknown() {
+        let raw = "[models.\"m\"]\nslots = { n = 3 }\n";
+        assert!(unknown_keys(raw).is_empty(), "{:?}", unknown_keys(raw));
+        with_override_fixture("table-valued-slots", raw, |root| {
+            assert!(Config::load_with_notices(root, None).is_err());
+        });
     }
 }
