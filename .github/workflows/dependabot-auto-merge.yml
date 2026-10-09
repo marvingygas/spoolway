@@ -1,0 +1,64 @@
+name: dependabot auto-merge
+
+# Turns on GitHub's auto-merge for low-risk Cargo updates. Nothing is merged
+# here: GitHub merges the pull request once the required checks on `main`
+# (`verify / test` and `verify / audit`) pass, and a red check leaves it open.
+#
+# What merges on its own:
+#   - the `cargo-minor-and-patch` group, which Dependabot only fills with
+#     compatible bumps
+#   - a single Cargo patch bump, which is how security updates arrive
+#   - a single Cargo minor bump of a crate already at 1.0 or later
+#
+# What waits for a person:
+#   - every major bump
+#   - a minor bump of a 0.x crate, because Cargo treats 0.22 -> 0.25 as
+#     breaking even though it looks like a minor bump
+#   - every GitHub Actions update, because the third-party actions are pinned
+#     to commit SHAs on purpose (b7d33b3) and a new SHA deserves a look
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    # Both checks: the pull request is Dependabot's, and so is this push. A
+    # person pushing a commit onto a Dependabot branch must not get it merged
+    # unreviewed.
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: enable auto-merge for low-risk Cargo updates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.html_url }}
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          GROUP: ${{ steps.meta.outputs.dependency-group }}
+          PREVIOUS: ${{ steps.meta.outputs.previous-version }}
+        run: |
+          if [ "$ECOSYSTEM" != cargo ]; then
+            echo "$ECOSYSTEM update: left for review"
+            exit 0
+          fi
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch) ;;
+            version-update:semver-minor)
+              if [ "$GROUP" != cargo-minor-and-patch ] && [ "${PREVIOUS#0.}" != "$PREVIOUS" ]; then
+                echo "minor bump of 0.x crate ($PREVIOUS): left for review"
+                exit 0
+              fi
+              ;;
+            *)
+              echo "$UPDATE_TYPE: left for review"
+              exit 0
+              ;;
+          esac
+          gh pr merge --auto --squash "$PR"
