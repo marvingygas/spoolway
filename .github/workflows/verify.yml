@@ -26,7 +26,7 @@ jobs:
     if: inputs.run-tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -131,7 +131,7 @@ jobs:
       # uploaded nothing and left no evidence behind at all.
       - name: keep the wreckage
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-scratch-${{ inputs.tier }}
           path: |
@@ -146,7 +146,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
