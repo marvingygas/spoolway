@@ -16,6 +16,7 @@
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
+pub(crate) mod pane;
 pub(crate) mod shell;
 
 /// One key a screen reads, decoded from however many bytes it took.
@@ -603,6 +604,14 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
             }
         }
         *row = chars.into_iter().collect();
+    }
+}
+
+/// `n` with its noun, singular where that is what `n` is.
+pub(crate) fn plural(n: usize, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        _ => format!("{n} {noun}s"),
     }
 }
 

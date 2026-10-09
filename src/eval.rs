@@ -39,7 +39,7 @@ use crate::cli::{EvalArgs, EvalBy};
 use crate::fmt::csv_field;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-use crate::screen::{Key, PollableRead, boxed, key_hint, keys, overlay, pad_to, panel};
+use crate::screen::{Key, PollableRead, boxed, key_hint, keys, overlay, pad_to, panel, plural};
 use crate::usage::{Entry, ModelPrice, Tokens};
 
 /// The printing path: every `spoolway eval` with a flag of its own. The
@@ -4293,10 +4293,10 @@ fn wrap_notice(body: &str, width: usize) -> Vec<String> {
 }
 
 /// `lines`, cut to `rows` with the cursor's row kept in view — the same idea
-/// as the queue screen's own `window`, simplified for a single cursor index
-/// rather than a range: this screen has one pane, not two. `width` pads the
-/// scroll indicator line the same way every other row is padded, so it does
-/// not throw the frame's right border out of line.
+/// as the shared `crate::screen::pane::window`, simplified for a single
+/// cursor index rather than a range: this screen has one pane, not two.
+/// `width` pads the scroll indicator line the same way every other row is
+/// padded, so it does not throw the frame's right border out of line.
 fn clip(lines: &[String], cursor_line: usize, rows: Option<usize>, width: usize) -> Vec<String> {
     let Some(rows) = rows else {
         return lines.to_vec();
@@ -4386,17 +4386,6 @@ fn filters_label(
         parts.push(format!("{since} → {until}"));
     }
     parts.join(" · ")
-}
-
-/// `n` with its noun, singular where that is what `n` is. The same small
-/// helper `commands::queue`'s screen keeps for its own report line — not
-/// shared, because sharing one function two modules deep for four words
-/// would cost more to find than it saves to write.
-fn plural(n: usize, noun: &str) -> String {
-    match n {
-        1 => format!("1 {noun}"),
-        _ => format!("{n} {noun}s"),
-    }
 }
 
 /// The keys, under the frame — the one line that says what the screen does,
