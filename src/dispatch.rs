@@ -3676,9 +3676,10 @@ impl<'a> Dispatcher<'a> {
         tick: &mut dyn FnMut(),
     ) -> Result<()> {
         // Count what is already running against each profile's cap, and
-        // against each named model's own — a live lane is counted by the
-        // model its step names, the same name `resolve_model` hands the
-        // agent, not by anything resolved from `[models]`.
+        // against each named model's own. A live lane is counted under the
+        // `[models]` row its model resolves to, so `qwen3` and `local/qwen3`
+        // share one row's `slots`; a model with no row is counted under its
+        // literal name, which nothing caps.
         let mut in_flight: BTreeMap<String, usize> = BTreeMap::new();
         let mut model_in_flight: BTreeMap<String, usize> = BTreeMap::new();
         for (step_id, task_id, _) in owned {
@@ -3698,7 +3699,9 @@ impl<'a> Dispatcher<'a> {
                 *in_flight.entry(agent).or_insert(0) += 1;
             }
             if let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) {
-                *model_in_flight.entry(model.to_string()).or_insert(0) += 1;
+                *model_in_flight
+                    .entry(slot_key(&self.repo.config.models, model))
+                    .or_insert(0) += 1;
             }
         }
 
@@ -3901,6 +3904,7 @@ impl<'a> Dispatcher<'a> {
 
             let model_name = resolve_model(&step);
             let model_price = crate::models::resolve(&self.repo.config.models, &model_name).price;
+            let slot_key = slot_key(&self.repo.config.models, &model_name);
 
             // A model's `slots` is checked whatever `step.slot` says: it
             // describes what the machine behind the model can hold at once,
@@ -3912,10 +3916,10 @@ impl<'a> Dispatcher<'a> {
             // able to put a fourth lane on a three-slot model.
             match model_price.filter(|p| p.slots > 0).map(|p| p.slots) {
                 Some(slots) => {
-                    let running = model_in_flight.get(&model_name).copied().unwrap_or(0);
+                    let running = model_in_flight.get(&slot_key).copied().unwrap_or(0);
                     if running >= slots as usize {
                         report.actions.push(format!(
-                            "{}: waiting for a `{model_name}` slot ({running}/{slots})",
+                            "{}: waiting for a `{slot_key}` slot ({running}/{slots})",
                             tasks[candidate.task_index].id()
                         ));
                         continue;
@@ -4040,7 +4044,7 @@ impl<'a> Dispatcher<'a> {
                     // rework — see its own non-goals — so that edge is left
                     // as this restructuring finds it rather than chased.
                     *in_flight.entry(agent_name.clone()).or_insert(0) += 1;
-                    *model_in_flight.entry(model_name.clone()).or_insert(0) += 1;
+                    *model_in_flight.entry(slot_key.clone()).or_insert(0) += 1;
                     // The new pane exists, so the old one can go: it was
                     // banked above. A returning step's own old pane has to
                     // free its agent name before the new lane takes it. With
@@ -6327,6 +6331,16 @@ struct Started {
     persisted: bool,
     /// The opening messages still to send — see [`LaneRecord::opening`].
     opening: Vec<String>,
+}
+
+/// The key a lane's model is counted under against its `slots` cap: the
+/// `[models]` row it resolves to, else the literal name. Two spellings of one
+/// row (`qwen3`, `local/qwen3`) must share a count, because the cap describes
+/// the one server behind the row, not the name a step happened to use.
+fn slot_key(config_models: &BTreeMap<String, crate::usage::ModelPrice>, model: &str) -> String {
+    crate::models::resolved_row(config_models, model)
+        .unwrap_or(model)
+        .to_string()
 }
 
 /// A step's model: exactly what it names, and nothing else.
@@ -10696,7 +10710,7 @@ mod tests {
             report
                 .actions
                 .iter()
-                .any(|a| a.contains("waiting for a `your-local-model` slot (3/3)")),
+                .any(|a| a.contains("waiting for a `*local-model` slot (3/3)")),
             "the wait must say which slot ran out: {:?}",
             report.actions
         );
@@ -10736,6 +10750,59 @@ mod tests {
             1,
             "one slot, one lane, whatever the step says: {:?}",
             mux.did("start")
+        );
+    }
+
+    /// Two spellings of one model that land on the same `[models]` row share
+    /// that row's `slots`: a live lane on `qwen3` fills the one slot, so a
+    /// step on `local/qwen3` waits instead of starting beside it.
+    #[test]
+    fn two_spellings_of_one_models_row_share_its_slots() {
+        let (mut repo, _root_guard) = fixture("slots-per-row");
+        repo.config.models.insert(
+            "qwen3".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                local: true,
+                ..Default::default()
+            },
+        );
+
+        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        for (id, model) in [("implement", "qwen3"), ("document", "local/qwen3")] {
+            pipeline
+                .steps
+                .iter_mut()
+                .find(|s| s.id == id)
+                .unwrap()
+                .model = Some(model.to_string());
+        }
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+
+        add_task_with(&repo, "busy", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        add_task(&repo, "waiting", "document");
+
+        let mux = FakeMux::new(vec![lane(&repo, "busy · implement", LaneStatus::Working)]);
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        assert!(
+            mux.did("start").is_empty(),
+            "one slot is held, so the other spelling starts nothing: {:?}",
+            mux.did("start")
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("`qwen3` slot (1/1)")),
+            "{:?}",
+            report.actions
         );
     }
 
