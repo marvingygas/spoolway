@@ -201,6 +201,29 @@ When the group has an issue behind it, the group name is a link to that issue. A
 first task stacks onto another group's own last task reads `▌<group>  after <group>`. See
 [Stacking one group on another](tasks.md#stacking-one-group-on-another).
 
+### A full board
+
+When the queue has more rows than the pane can show, `RECENT` gives way first. It shows only when
+the whole task table fits, in the rows the table leaves. The wordmark, the column header, the
+slots, the jobs and the key line keep their rows.
+
+A table that still does not fit scrolls under the cursor, in `spoolway dispatch` and in the
+dispatch tab alike. It takes every row between the column header and the rule. The view keeps
+the cursor's row on screen, and the total line under it when the cursor is on a group's last
+task. `↑` and `↓` walk every task, so every task can be reached and seen.
+
+The table's last row is a marker counting the tasks out of view, such as `↑ 7 tasks above · ↓ 18
+tasks below`. It counts task rows only, never group lines, total lines or blank rows. It names
+one side alone when tasks are hidden on that side only, and it is left off when no task is
+hidden. On a narrow pane it shortens to `↑ 7 above · ↓ 18 below`, then to `↑ 7 · ↓ 18`.
+
+When the view starts partway through a group, that group's `▌<group>` line is drawn on the
+view's first row, in place of a task or the group's total line. A task it covers counts as
+above. The cursor never lands on this line.
+
+A pane too short for the wordmark, the footer and the key line together gives the table no rows
+at all. The frame is then cut from the bottom so it never scrolls the terminal.
+
 ### The empty board
 
 With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`.
