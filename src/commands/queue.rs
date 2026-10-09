@@ -3144,7 +3144,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
 /// instead, unless `--force` says the caller already knows what it is
 /// choosing.
 pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
-    let mut tasks = repo.tasks()?;
+    let tasks = repo.tasks()?;
     let idx = tasks
         .iter()
         .position(|t| t.id() == id)
@@ -3171,8 +3171,13 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         );
     }
 
-    crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`", false);
-    tasks[idx].save()?;
+    // The same body the board's `p` runs, so a task already on `paused`
+    // keeps the step it stopped on. The task is checked first because that
+    // body is silent about one that left the queue, and this command must
+    // not print `paused` for it.
+    repo.task(id)
+        .with_context(|| format!("no queued task `{id}`"))?;
+    crate::status::park_under_lock(repo, id, crate::status::ParkedBy::QueuePause)?;
 
     // Stopped only once the task is on disk as paused. Between the kill and
     // the run's files being cleared the run reads as one that died without an
@@ -9528,6 +9533,26 @@ mod tests {
         task.set_stage_unbanked("implement", "test setup");
         task.save().unwrap();
 
+        queue_pause(&repo, &pipelines, "solo", false).unwrap();
+
+        let task = queued(&repo, "solo");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
+    }
+
+    /// Pausing a task that is already paused changes nothing: `parked_from`
+    /// keeps naming the step the task was first stopped on, so `resume`
+    /// still sends it back there rather than to `paused`.
+    #[test]
+    fn queue_pause_twice_keeps_the_step_the_task_stopped_on() {
+        let (repo, _root_guard) = fixture("queue-pause-twice");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("implement", "test setup");
+        task.save().unwrap();
+
+        queue_pause(&repo, &pipelines, "solo", false).unwrap();
         queue_pause(&repo, &pipelines, "solo", false).unwrap();
 
         let task = queued(&repo, "solo");

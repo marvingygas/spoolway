@@ -298,7 +298,7 @@ The last lines apply to a task on `paused` or `blocked`. They name the step `spo
 
 ### `spoolway queue pause <task>`
 
-Interrupt the task's live lane and park it on `paused`.
+Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. The board's `p` key does the same.
 
 ```
 spoolway queue pause <task> [--force]
