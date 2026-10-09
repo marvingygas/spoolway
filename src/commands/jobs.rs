@@ -14,12 +14,13 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 
 use super::queue::{
-    Focus, Items, RoutineNav, clip as clip_to, handle_routine_key, highlighted_routine_folder,
-    highlighted_routine_task, labeled_row, layout, two_pane_frame, window,
+    Focus, RoutineNav, clip as clip_to, handle_routine_key, highlighted_routine_folder,
+    highlighted_routine_task, labeled_row, layout, two_pane_frame,
 };
 use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
+use crate::screen::pane::{Items, window};
 use crate::screen::{Key, Notice, PollableRead, key_hint, keys, overlay, pad_to, panel, read_key};
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
