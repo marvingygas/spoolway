@@ -1624,11 +1624,7 @@ fn queue_add_tasks(
         };
     }
 
-    // All or none: every task above already parsed and validated, so
-    // nothing left here can fail — the writes are the commit.
-    for task in &tasks {
-        task.save()?;
-    }
+    save_new_tasks(repo, &tasks)?;
 
     // The same rule the queue screen's own `finish_submit` keeps: a task
     // that reached the queue is not still waiting to go there. Only a source
@@ -1652,6 +1648,50 @@ fn queue_add_tasks(
     // planning session's spend had onto the ledger; an interactive session's
     // spend is not banked from any command any more, and this one was never
     // special.
+    Ok(())
+}
+
+/// Write a validated batch of brand-new tasks, refusing any id that was
+/// taken after [`validate_batch`] looked.
+///
+/// `validate_batch` checks that each id is free, but the files are written
+/// later, and nothing held the ids in between. Parallel adds of one id (the
+/// queue screen, a cron job and a CLI call landing together) all passed the
+/// check, all printed "queued", and the last writer replaced the rest without
+/// a word. Each id's [`crate::lock::TaskLock`] is held from a fresh check to
+/// the write, so exactly one add wins and the others are refused before they
+/// write anything. Locks are taken in id order so two overlapping batches
+/// cannot wait on each other. Unlike the dispatcher's use of this lock, a
+/// timeout is an error here: proceeding unlocked is the race itself.
+fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    let mut ids: Vec<&str> = tasks.iter().map(Task::id).collect();
+    ids.sort_unstable();
+    let mut locks = Vec::new();
+    for id in ids {
+        locks.push(
+            crate::lock::TaskLock::acquire(&repo.task_lock_file(id)).with_context(|| {
+                format!(
+                    "could not lock task `{id}` to queue it — another `queue add` or \
+                     dispatch pass is holding it. Run this again in a moment."
+                )
+            })?,
+        );
+    }
+    for task in tasks {
+        if let Some(existing) = existing_task_path(repo, task.id()) {
+            bail!(
+                "task `{}` already exists at {} — nothing was queued",
+                task.id(),
+                existing.display()
+            );
+        }
+    }
+    // All or none: every task parsed and validated above and every id was
+    // just re-checked under its lock, so the writes are the commit.
+    for task in tasks {
+        task.save()?;
+    }
+    drop(locks);
     Ok(())
 }
 
@@ -7172,9 +7212,7 @@ fn finish_submit(
     let gate = ToolGate::Answered { tracking_off };
     open_and_prefix(repo, tasks, &task_files, &mut pending, gate, log)?;
 
-    for task in &pending {
-        task.save()?;
-    }
+    save_new_tasks(repo, &pending)?;
 
     // Past this point the queue holds the work, so a failure to unlink is
     // not a reason to refuse a submission that has already landed: the
@@ -8075,11 +8113,10 @@ pub(crate) fn queue_routine_target(
         gate,
         &mut PrintedTickets,
     )?;
-    // All or none: everything above parsed and validated, so these writes
-    // are the commit — the same discipline `queue_add_tasks` follows.
-    for task in &tasks {
-        task.save()?;
-    }
+    // The same lock-and-recheck `queue_add_tasks` saves with: a scheduled
+    // firing can land on the same minted id as a person's add or another
+    // firing.
+    save_new_tasks(repo, &tasks)?;
     Ok(tasks)
 }
 
@@ -8106,9 +8143,7 @@ fn finish_routine(
 ) -> Result<()> {
     let gate = ToolGate::Answered { tracking_off };
     open_and_prefix(repo, &[], task_files, tasks, gate, log)?;
-    for task in tasks.iter() {
-        task.save()?;
-    }
+    save_new_tasks(repo, tasks)?;
     Ok(())
 }
 
@@ -10139,6 +10174,95 @@ mod tests {
                 .contains(&repo.archive_dir().join("done.md").display().to_string()),
             "{err:#}"
         );
+    }
+
+    /// Of several `queue add` calls submitting one id at the same moment,
+    /// exactly one is queued. The others are refused with "already exists"
+    /// and write nothing, so the file left behind is the winner's task and
+    /// no caller is told "queued" for a task that was overwritten.
+    #[test]
+    fn parallel_adds_of_one_id_queue_one_and_refuse_the_rest() {
+        const ADDERS: usize = 6;
+        for round in 0..5 {
+            let (repo, _root_guard) = fixture(&format!("parallel-add-same-id-{round}"));
+            let pipelines = Pipelines::builtin();
+            let barrier = std::sync::Barrier::new(ADDERS);
+
+            let outcomes: Vec<(usize, Result<()>)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..ADDERS)
+                    .map(|n| {
+                        let (repo, pipelines, barrier) = (&repo, &pipelines, &barrier);
+                        scope.spawn(move || {
+                            let text = task_text("race", &format!("group: g{n}\n"), BODY);
+                            let submitted = [(format!("race{n}.md"), text)];
+                            barrier.wait();
+                            (
+                                n,
+                                queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted),
+                            )
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+
+            let winners: Vec<usize> = outcomes
+                .iter()
+                .filter(|(_, r)| r.is_ok())
+                .map(|(n, _)| *n)
+                .collect();
+            assert_eq!(
+                winners.len(),
+                1,
+                "round {round}: {} adds of one id reported queued, want exactly one",
+                winners.len()
+            );
+            for (n, outcome) in &outcomes {
+                if let Err(err) = outcome {
+                    assert!(
+                        err.to_string().contains("already exists"),
+                        "round {round}: add {n} was refused for another reason: {err:#}"
+                    );
+                }
+            }
+            let kept = std::fs::read_to_string(repo.queue_dir().join("race.md")).unwrap();
+            assert!(
+                kept.contains(&format!("group: g{}\n", winners[0])),
+                "round {round}: the queued task is not the winner's:\n{kept}"
+            );
+        }
+    }
+
+    /// Parallel adds of different ids do not hold each other up: every one
+    /// is queued, because the lock that serialises a repeated id is per id.
+    #[test]
+    fn parallel_adds_of_different_ids_all_queue() {
+        const ADDERS: usize = 6;
+        let (repo, _root_guard) = fixture("parallel-add-distinct-ids");
+        let pipelines = Pipelines::builtin();
+        let barrier = std::sync::Barrier::new(ADDERS);
+
+        let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..ADDERS)
+                .map(|n| {
+                    let (repo, pipelines, barrier) = (&repo, &pipelines, &barrier);
+                    scope.spawn(move || {
+                        let text = task_text(&format!("distinct{n}"), "group: g\n", BODY);
+                        let submitted = [(format!("distinct{n}.md"), text)];
+                        barrier.wait();
+                        queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        for outcome in &outcomes {
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+        for n in 0..ADDERS {
+            assert!(repo.queue_dir().join(format!("distinct{n}.md")).exists());
+        }
     }
 
     /// A `gate_at:` naming no step of the task's pipeline is refused with the

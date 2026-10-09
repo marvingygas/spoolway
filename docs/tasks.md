@@ -182,7 +182,9 @@ a file of its own.
 `spoolway queue add --from` is the only way into the queue. The queue screen uses it too. All
 tasks in one call are checked together and written all or none. The queue screen leaves out a
 task whose start branch does not exist and queues the rest. See [A start branch that does not
-exist](#a-start-branch-that-does-not-exist).
+exist](#a-start-branch-that-does-not-exist). A task id that is already in the queue or the
+archive is refused, also when several adds of that id run at once. See [`spoolway queue
+add`](cli-reference.md#spoolway-queue-add).
 
 ```
 spoolway queue add --from task.md               # one file
