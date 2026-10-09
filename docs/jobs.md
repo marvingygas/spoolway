@@ -36,8 +36,10 @@ A folder routine is queued as one batch with fresh ids. A single `.md` routine i
 with its `depends_on` emptied. The same pass dispatches what it queued.
 
 The fired minute is written to `jobs.state.json`, so a job fires once per matching minute. A
-window that passes while no dispatcher runs is not caught up later. A job whose previous run
-is still in the queue skips its window.
+window that passes between two passes of one running dispatcher still fires, up to one hour
+back. A window that passes while no dispatcher runs is not caught up when a dispatcher
+starts. A disabled job skips its windows, so enabling it again does not fire the window it
+was off for. A job whose previous run is still in the queue skips its window.
 
 ### The resident dispatcher
 

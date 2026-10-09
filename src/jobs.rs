@@ -353,19 +353,43 @@ pub struct FireRecord {
     /// The local minute [`fire_due`] last looked at for this job,
     /// `MINUTE_FMT`. The next pass walks every minute after it up to its
     /// own — an hour back at most — so a window that fell between two passes
-    /// still fires; see [`due_minute`]. Absent in a state file written
-    /// before the field existed, which reads as "the current minute only",
-    /// exactly what every pass did until then.
+    /// still fires, but only when [`FireRecord::checked_by`] names the same dispatcher run; see
+    /// [`due_minute`]. Disabled jobs keep it moving too, so enabling a job
+    /// does not fire the window it was off for. Absent in a state file
+    /// written before the field existed, which reads as "the current minute
+    /// only", exactly what every pass did until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_minute: Option<String>,
+    /// The dispatcher run that wrote [`FireRecord::checked_minute`], from
+    /// [`run_id`]. A different run, or none, means no dispatcher was awake
+    /// between that minute and this pass, so nothing in the gap is caught up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_by: Option<String>,
+}
+
+/// Names this process, so a pass can tell its own earlier look from one a
+/// previous dispatcher run left behind. A pid alone is reused after a
+/// restart; the start time in nanoseconds makes the name unique.
+fn run_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        format!("{}-{nanos}", std::process::id())
+    })
 }
 
 /// How far back a pass looks for a window it was not awake for.
 const CATCH_UP_LIMIT: Duration = Duration::hours(1);
 
 /// The latest minute `cron` fires on, out of the current one and every
-/// minute since `checked` — the minute the previous pass looked at — back at
+/// minute since `checked` — the minute the previous pass looked at, back at
 /// most [`CATCH_UP_LIMIT`]. `None` when none of them matches.
+///
+/// `checked` is `None` unless this same run wrote it: a window that passes
+/// while no dispatcher runs is not caught up later (`docs/jobs.md`), and
+/// the saved minute alone cannot tell a stopped dispatcher from a slow pass.
 ///
 /// A pass samples the clock once at its top, and passes are as far apart as
 /// [`crate::dispatch::PROBE_INTERVAL`] plus however long a pass runs: `0 3 * * *`
@@ -426,20 +450,41 @@ pub fn fire_due(
             return;
         }
     };
-    if !jobs.iter().any(|job| job.spec.enabled) {
+    if jobs.is_empty() {
         return;
     }
 
     let now = Local::now().naive_local();
     let minute = now.format(MINUTE_FMT).to_string();
-    let base = repo.branch().unwrap_or_else(|_| "main".to_string());
-    let queued = repo.queued_ids();
+    // Only a pass with an enabled job reads the branch and the queue; a
+    // project whose jobs are all off would otherwise pay for both every pass.
+    let any_enabled = jobs.iter().any(|job| job.spec.enabled);
+    let base = if any_enabled {
+        repo.branch().unwrap_or_else(|_| "main".to_string())
+    } else {
+        String::new()
+    };
+    let queued = if any_enabled {
+        repo.queued_ids()
+    } else {
+        Default::default()
+    };
 
     let mut state = read_state(repo);
     let mut dirty = false;
 
     for job in &jobs {
         if !job.spec.enabled {
+            // A disabled job skips its windows. Moving its minute along keeps
+            // enabling it later from looking back over the time it was off.
+            if let Some(record) = state.get_mut(&job.name)
+                && (record.checked_minute.as_deref() != Some(minute.as_str())
+                    || record.checked_by.as_deref() != Some(run_id()))
+            {
+                record.checked_minute = Some(minute.clone());
+                record.checked_by = Some(run_id().to_string());
+                dirty = true;
+            }
             continue;
         }
         let Ok(cron) = Cron::parse(&job.spec.schedule) else {
@@ -448,9 +493,15 @@ pub fn fire_due(
         };
 
         let record = state.entry(job.name.clone()).or_default();
-        let due = due_minute(&cron, record.checked_minute.as_deref(), now);
-        if record.checked_minute.as_deref() != Some(minute.as_str()) {
+        let own_look = (record.checked_by.as_deref() == Some(run_id()))
+            .then_some(record.checked_minute.as_deref())
+            .flatten();
+        let due = due_minute(&cron, own_look, now);
+        if record.checked_minute.as_deref() != Some(minute.as_str())
+            || record.checked_by.as_deref() != Some(run_id())
+        {
             record.checked_minute = Some(minute.clone());
+            record.checked_by = Some(run_id().to_string());
             dirty = true;
         }
         let Some(due) = due else {
@@ -1380,6 +1431,99 @@ mod tests {
         // looked at.
         let (actions, _) = fire(&repo);
         assert!(actions.is_empty(), "{actions:?}");
+    }
+
+    /// A job's schedule at a single minute `ago` minutes back, as a cron
+    /// expression, with the job's saved `checked_minute` set `looked` minutes
+    /// back — the last time any dispatcher pass looked at it.
+    fn job_due_between(repo: &Repo, ago: i64, looked: i64) {
+        use chrono::Timelike;
+        let now = Local::now().naive_local();
+        let due = now - Duration::minutes(ago);
+        scheduled_job(
+            repo,
+            "nightly",
+            "default",
+            &format!("{} {} * * *", due.minute(), due.hour()),
+        );
+        let mut state = State::new();
+        state.insert(
+            "nightly".to_string(),
+            FireRecord {
+                checked_minute: Some(
+                    (now - Duration::minutes(looked))
+                        .format(MINUTE_FMT)
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        );
+        write_state(repo, &state).unwrap();
+    }
+
+    /// A window that passes while no dispatcher runs is not caught up when
+    /// one starts again: the last pass looked six minutes ago, passes are ten
+    /// seconds apart, and the job's minute fell inside that silence.
+    #[test]
+    fn a_window_that_passed_while_no_dispatcher_ran_is_not_fired_on_restart() {
+        let (repo, _root_guard) = fixture("jobs-restart-no-catch-up");
+        job_due_between(&repo, 3, 6);
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(actions.is_empty(), "nothing is caught up: {actions:?}");
+        assert!(
+            !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
+            "no task was queued for a window nobody was awake for"
+        );
+    }
+
+    /// The bug as first seen: the dispatcher stopped just before the window
+    /// and came back two minutes after it, so the saved look is only four
+    /// minutes old. A short gap cannot be told from a slow pass by its length;
+    /// the run that wrote the look decides.
+    #[test]
+    fn a_short_stop_over_a_window_is_not_fired_on_restart() {
+        let (repo, _root_guard) = fixture("jobs-short-stop");
+        job_due_between(&repo, 2, 4);
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(actions.is_empty(), "nothing is caught up: {actions:?}");
+    }
+
+    /// A job that is disabled skips its windows, so enabling it again does
+    /// not fire the one that passed meanwhile.
+    #[test]
+    fn a_window_that_passed_while_the_job_was_disabled_is_not_fired_on_re_enabling() {
+        let (repo, _root_guard) = fixture("jobs-reenable-no-catch-up");
+        job_due_between(&repo, 3, 6);
+        // The look belongs to this run: the dispatcher is the one that was
+        // awake throughout, and only the disabled branch can move it along.
+        let mut state = read_state(&repo);
+        state.get_mut("nightly").unwrap().checked_by = Some(run_id().to_string());
+        write_state(&repo, &state).unwrap();
+        let enabled = std::fs::read_to_string(super::store_path(&repo, Scope::User)).unwrap();
+        write_user_store(&repo, &format!("{enabled}enabled = false\n"));
+
+        // The dispatcher is running throughout; the job is off for its window.
+        let (actions, problems) = fire(&repo);
+        assert!(
+            actions.is_empty() && problems.is_empty(),
+            "{actions:?} {problems:?}"
+        );
+
+        write_user_store(&repo, &enabled);
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            actions.is_empty(),
+            "the skipped window stays skipped: {actions:?}"
+        );
+        assert!(
+            !repo.queued_ids().iter().any(|id| id.starts_with("audit-")),
+            "no task was queued for a window the job was disabled over"
+        );
     }
 
     #[test]
