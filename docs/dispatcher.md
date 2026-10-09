@@ -99,6 +99,11 @@ command step finishing, ends the wait immediately and starts the next pass, whic
 that step. A pass also draws on the same once-a-second cadence between the checkpoints in its
 own work, so the board keeps redrawing through a slow pass too.
 
+A task that `spoolway queue unqueue` moves to the pending directory while a pass runs is dropped
+by that pass. The pass does not write its task file back. It starts no command and sends no
+briefing for the task, and it removes the checkout and the branch it cut for it, unless that branch
+holds commits. A lane already booting for the task is stopped.
+
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
 profile. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
