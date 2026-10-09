@@ -20070,8 +20070,10 @@ mod tests {
         assert!(
             prompt.contains(
                 "`tab-shell` stopped at `look`: Open the changed screen, drive it, and read \
-                 back what it actually renders. Your pass stands in for that step's work. Its \
-                 craft is prompt `looker`:\n`spoolway prompt show looker`."
+                 back what it actually renders. A plain pass stands in for that step's work. If \
+                 you only cleared what stopped it, send it back to run again:\n\n    \
+                 spoolway report --pass --stage look -m \"<one line on what happened>\"\n\n\
+                 Its craft is prompt `looker`:\n`spoolway prompt show looker`."
             ),
             "{prompt}"
         );
@@ -20111,11 +20113,15 @@ mod tests {
         let prompt = sent(&repo, &task, &pipeline, blocked_step);
         assert!(
             prompt.contains(
-                "`release-cut` stopped at `build`: Your pass stands in for that step's work. \
+                "`release-cut` stopped at `build`: A plain pass stands in for that step's work. \
                  Its craft is the command `cargo build --release`, which runs again once your \
                  pass carries this task past it."
             ),
             "{prompt}"
+        );
+        assert!(
+            !prompt.contains("--pass --stage build"),
+            "a command step is handed back to itself by a plain pass: {prompt}"
         );
 
         let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
@@ -20124,10 +20130,7 @@ mod tests {
             "{contract}"
         );
         assert!(
-            contract.contains(
-                "The same, except you name where the task goes next. Only a step\n  \
-                 this task has already been through."
-            ),
+            contract.contains("again, or any step this task has already been through.\n\n"),
             "an ungated origin leaves the stage form's own explanation untouched: {contract}"
         );
     }
