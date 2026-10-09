@@ -932,7 +932,7 @@ fn agent_verify_live(
 
     report(
         "tokens read back",
-        match crate::usage::harvest(&args.kind, &session, &Default::default()) {
+        match crate::usage::harvest(&args.kind, &session, &Default::default(), false) {
             Some(harvest) => Clause::Ok(format!(
                 "in {} · out {} · cache read {} · cache write {}",
                 harvest.tokens.input,
@@ -995,7 +995,7 @@ fn agent_verify_live(
 
     report(
         "running totals read back",
-        match crate::usage::harvest(&args.kind, &session, &Default::default()) {
+        match crate::usage::harvest(&args.kind, &session, &Default::default(), false) {
             Some(harvest) => Clause::Ok(format!(
                 "{} turn(s), {} output{}",
                 harvest.turns,
@@ -1022,8 +1022,8 @@ fn agent_verify_live(
     // than the model whether it remembers — a model's recall is obedience,
     // and the transcript the accounting row names is evidence.
     let first_path = crate::usage::session_path(&args.kind, &session);
-    let first_turns =
-        crate::usage::harvest(&args.kind, &session, &Default::default()).map_or(0, |h| h.turns);
+    let first_turns = crate::usage::harvest(&args.kind, &session, &Default::default(), false)
+        .map_or(0, |h| h.turns);
     let resume_argv = adapter
         .headless_args(&rendered_args, true)
         .context("this kind has no headless row")?;
@@ -1053,8 +1053,8 @@ fn agent_verify_live(
     // defect twice.
     if resumed.status.success() {
         let same_store = crate::usage::session_path(&args.kind, &session) == first_path;
-        let turns =
-            crate::usage::harvest(&args.kind, &session, &Default::default()).map_or(0, |h| h.turns);
+        let turns = crate::usage::harvest(&args.kind, &session, &Default::default(), false)
+            .map_or(0, |h| h.turns);
         report(
             "the resumed turn continued the same session",
             match (same_store, turns > first_turns) {

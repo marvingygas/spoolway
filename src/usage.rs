@@ -1036,12 +1036,36 @@ pub struct Harvest {
 /// Absence is not an error. A lane may have failed before its first turn, or
 /// the project's `args` may not pass `{session_id}` through at all — neither is
 /// worth failing a dispatch pass over, and both simply produce no ledger line.
+///
+/// `own_subagents` says whether the session's subagents are part of this
+/// reading; see [`lane_owns_subagents`] for who decides.
 pub fn harvest(
     kind: &str,
     session: &str,
     prices: &BTreeMap<String, ModelPrice>,
+    own_subagents: bool,
 ) -> Option<Harvest> {
-    harvest_file(kind, &session_file(kind, session)?, prices)
+    let path = session_file(kind, session)?;
+    if own_subagents {
+        harvest_lane_file(kind, session, &path, prices)
+    } else {
+        harvest_file(kind, &path, prices)
+    }
+}
+
+/// Whether a dispatched lane banks the subagent spend of `session`.
+///
+/// One rule for every reader of a lane's transcript: the subagents are the
+/// lane's unless the ledger holds a hand line for the session. A session a
+/// person ran by hand is banked by [`sweep_dirs`] with its subagents as lines
+/// of their own, and a dispatched lane can resume it, so folding the
+/// subagents into the lane's line as well would count them twice. The sweep
+/// applies the same test from its side: it banks a subagent exactly when the
+/// parent has a hand line.
+pub fn lane_owns_subagents(ledger: &[Entry], session: &str) -> bool {
+    !ledger
+        .iter()
+        .any(|entry| entry.session == session && entry.hand)
 }
 
 /// The last assistant turn a transcript records, in whichever of the two
@@ -1109,11 +1133,29 @@ pub struct Live {
 /// banked once by id for the reason [`read_transcript`] does it — Claude Code
 /// writes an assistant line per content block and repeats that request's usage
 /// verbatim on each, so counting every line roughly doubles the output.
-pub fn live_of(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Live> {
+///
+/// `session` names the conversation so its subagents' transcripts can be added
+/// to the harvest, as [`harvest`] adds them when the lane settles. The board
+/// subtracts the ledger's banked lines from this reading, and those lines
+/// include the subagents' spend, so leaving them out would read as zero until
+/// the root alone passed what was banked. `own_subagents` is
+/// [`lane_owns_subagents`]'s answer. `context` stays the root's.
+pub fn live_of(
+    kind: &str,
+    session: &str,
+    own_subagents: bool,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Option<Live> {
     let transcript = read_transcript(kind, path, prices);
+    let total = transcript.total?;
     Some(Live {
         context: transcript.context,
-        harvest: transcript.total?,
+        harvest: if own_subagents {
+            with_subagents(total, kind, session, path, prices)
+        } else {
+            total
+        },
     })
 }
 
@@ -1290,6 +1332,86 @@ pub fn touched_at(path: &Path) -> Option<std::time::SystemTime> {
 
 fn harvest_file(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Harvest> {
     read_transcript(kind, path, prices).total
+}
+
+/// The transcripts of the subagents `session` started, given the path of its
+/// root transcript.
+///
+/// Claude Code writes each subagent's turns to
+/// `<session>/subagents/agent-<id>.jsonl`, beside `<session>.jsonl` rather
+/// than inside it — the same layout [`parent_of_transcript`] reads in the
+/// other direction. Empty for a kind that writes no such directory, and for a
+/// session that never started a subagent.
+fn subagent_transcripts(path: &Path, session: &str) -> Vec<PathBuf> {
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir.join(session).join("subagents")) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+    // Directory order is the filesystem's own; a stable order keeps the summed
+    // cost from differing in its last digits between two reads.
+    found.sort();
+    found
+}
+
+/// [`harvest_file`] for a dispatched lane's root transcript: the lane's own
+/// turns plus every subagent's, as one reading.
+///
+/// A subagent's spend is the lane's — [`sweep_dirs`] leaves the subagents of
+/// a lane session alone, and a lane's live reading ([`live_of`]) sums them
+/// the same way. The exception is a session with a hand line, where the sweep
+/// banks them: see [`lane_owns_subagents`]. They are summed here, into the one
+/// reading the lane's ledger line is diffed against, so a subagent whose
+/// transcript grows after the lane was banked shows up as a delta on the
+/// lane's session like any later root turn.
+/// `ctx_peak` and `model` stay the root's: a subagent runs in a context of its
+/// own and says nothing about how full the lane's window got. `None` when the
+/// root holds no turn, as for [`harvest_file`].
+fn harvest_lane_file(
+    kind: &str,
+    session: &str,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Option<Harvest> {
+    let lane = harvest_file(kind, path, prices)?;
+    Some(with_subagents(lane, kind, session, path, prices))
+}
+
+/// `lane`, the root transcript's reading, with every subagent's spend added.
+fn with_subagents(
+    mut lane: Harvest,
+    kind: &str,
+    session: &str,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Harvest {
+    for sub in subagent_transcripts(path, session) {
+        let Some(spent) = harvest_file(kind, &sub, prices) else {
+            continue;
+        };
+        lane.tokens.add(&spent.tokens);
+        lane.tier_tokens.add(&spent.tier_tokens);
+        lane.turns += spent.turns;
+        // Unknown cost is contagious, as within one transcript: a partial sum
+        // would read as a complete one.
+        lane.cost_usd = lane.cost_usd.zip(spent.cost_usd).map(|(a, b)| a + b);
+    }
+    lane
+}
+
+/// When a lane's spend last moved: the newest modification time among its root
+/// transcript and its subagents' transcripts.
+pub fn lane_touched_at(path: &Path, session: &str) -> Option<std::time::SystemTime> {
+    subagent_transcripts(path, session)
+        .iter()
+        .filter_map(|sub| touched_at(sub))
+        .chain(touched_at(path))
+        .max()
 }
 
 /// A transcript read once, totalled and sized.
@@ -2549,7 +2671,8 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    let harvest = harvest(kind, session, &repo.config.models)?;
+    let own_subagents = lane_owns_subagents(&read(repo).unwrap_or_default(), session);
+    let harvest = harvest(kind, session, &repo.config.models, own_subagents)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
@@ -2745,14 +2868,6 @@ fn catch_up_settled_lane_at(
         .filter_map(|entry| chrono::DateTime::parse_from_rfc3339(&entry.ts).ok())
         .map(|ts| ts.with_timezone(&chrono::Utc))
         .max()?;
-    let moved = touched_at(path)
-        .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
-        .unwrap_or(false);
-    if !moved {
-        return None;
-    }
-
-    let harvest = harvest_file(kind, path, &repo.config.models)?;
     // The lane's most recent line, whose columns the catch-up line inherits.
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
@@ -2760,6 +2875,27 @@ fn catch_up_settled_lane_at(
         .iter()
         .rev()
         .find(|entry| entry.session == session && entry.is_lane())?;
+    // See [`lane_owns_subagents`]: a hand session's subagents are the sweep's.
+    let subagents_are_ours = lane_owns_subagents(ledger, session);
+    let touched = if subagents_are_ours {
+        // A subagent can finish after the root transcript's last write, so its
+        // file moves the gate too.
+        lane_touched_at(path, session)
+    } else {
+        touched_at(path)
+    };
+    let moved = touched
+        .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
+        .unwrap_or(false);
+    if !moved {
+        return None;
+    }
+
+    let harvest = if subagents_are_ours {
+        harvest_lane_file(kind, session, path, &repo.config.models)?
+    } else {
+        harvest_file(kind, path, &repo.config.models)?
+    };
     bank_lane_at(
         repo,
         kind,
@@ -2874,10 +3010,8 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
 ///   root transcript before any subagent is what lets one started before
 ///   the parent's first sweep take the same road.
 /// - Parent is a dispatched lane, live or already carrying a lane line: the
-///   subagent is left out. A lane's own subagent spend is not banked on
-///   either table today, and banking it here, under a step nobody chose for
-///   it, would change how a lane banks its own spend, not what a person
-///   spends by hand.
+///   subagent is left out. Its spend is banked on the lane's own line by
+///   [`harvest_lane_file`], so banking it here as well would count it twice.
 /// - Anything else, a subagent of an ordinary directory session most often,
 ///   is classified by its own `cwd` like any other session, and
 ///   [`crate::eval`] folds a directory one onto its parent's row at read
@@ -2999,10 +3133,12 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
 
             // A subagent's own spend belongs to whichever session started
             // it, and a lane's subagent transcripts sit under that lane's
-            // own worktree the same as anything typed by hand there — so
-            // without this every one of a lane's own subagents would be
-            // banked as a hand session under a guessed step. Read off the
-            // path in hand, never looked up by id: that lookup walks every
+            // own worktree the same as anything typed by hand there. A
+            // subagent of a hand session is banked beside its parent below.
+            // A subagent of a dispatched lane is skipped, because
+            // [`harvest_lane_file`] banks it on the lane's own line and a
+            // second line here would count it twice. Read off the path in
+            // hand, never looked up by id: that lookup walks every
             // transcript on the machine, and a session outside every root
             // reaches this line on every sweep. See this function's own doc.
             if let Some(parent) = parent_of_transcript(&path) {
@@ -4529,7 +4665,7 @@ mod tests {
         // it arrived cached or fresh — not the 19,353 the two turns sum to.
         assert_eq!(last_turn_size_at("codex", &path), Some(9723));
 
-        let live = live_of("codex", &path, &BTreeMap::new()).expect("no live reading");
+        let live = live_of("codex", "s", true, &path, &BTreeMap::new()).expect("no live reading");
         assert_eq!(live.context, 9723);
         assert_eq!(live.harvest.tokens.output, 76 + 42);
 
@@ -4953,7 +5089,7 @@ mod tests {
         let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
 
-        let live = live_of("claude", &path, &BTreeMap::new()).expect("nothing read");
+        let live = live_of("claude", "s", true, &path, &BTreeMap::new()).expect("nothing read");
 
         // The same last turn `last_turn_size_at` sizes, and the same totals
         // `harvest_file` banks — one read rather than two.
@@ -5002,7 +5138,8 @@ mod tests {
             harvest(
                 "nushell",
                 "0198e2c0-3333-4000-8000-000000000003",
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                true
             )
             .is_none()
         );
@@ -6633,6 +6770,139 @@ mod tests {
         let tail = catch_up(&repo, "claude", "s", &path, &ledger)
             .expect("the tail written past the watermark is not lost to the gate");
         assert_eq!(tail.tokens.output, 7);
+    }
+
+    /// A dispatched lane's spend includes the subagents it started. Claude Code
+    /// writes each subagent's turns to `<session>/subagents/agent-<id>.jsonl`
+    /// beside the root transcript, so catching a settled lane up to its
+    /// transcript must bank those turns on the lane's own line, once.
+    #[test]
+    fn a_settled_lanes_catch_up_banks_the_spend_of_its_subagents() {
+        let (repo, path, _root_guard) = fixture("settled-lane-subagent");
+        let torn_down = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &torn_down).unwrap();
+        std::fs::write(&path, transcript(&[("", 100)])).unwrap();
+        // The root has not moved since the torn-down line, so only the
+        // subagent's file can open the catch-up's gate.
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 30), ("", 12)]),
+        )
+        .unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s", &path, &ledger)
+            .expect("a subagent's spend the ledger has not seen is banked on the lane");
+        assert_eq!(line.session, "s");
+        assert_eq!(line.step, "implement");
+        assert_eq!(line.tokens.output, 30 + 12);
+
+        let ledger = read(&repo).unwrap();
+        assert!(
+            catch_up(&repo, "claude", "s", &path, &ledger).is_none(),
+            "the subagent's spend is counted once"
+        );
+    }
+
+    /// The board subtracts the ledger's banked lines from the live reading, and
+    /// those lines now include subagent spend, so the live reading has to
+    /// include it too or a resumed lane reads zero.
+    #[test]
+    fn a_live_reading_counts_the_subagents_the_ledger_line_counts() {
+        let (_repo, path, _root_guard) = fixture("live-lane-subagent");
+        std::fs::write(&path, transcript(&[("", 100)])).unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 30), ("", 12)]),
+        )
+        .unwrap();
+
+        let live = live_of("claude", "s", true, &path, &BTreeMap::new()).expect("nothing read");
+        assert_eq!(live.harvest.tokens.output, 100 + 30 + 12);
+    }
+
+    /// A hand session's subagents are banked by the sweep as lines of their own,
+    /// so a settled lane's catch-up on a session it resumed from a hand line
+    /// must not bank them too. Covers the catch-up only: the teardown and
+    /// interrupt paths share the rule but are not driven here.
+    #[test]
+    fn a_lane_resuming_a_hand_session_leaves_its_subagents_to_the_sweep() {
+        let (repo, path, _root_guard) = fixture("hand-session-subagent");
+        let hand_line = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            hand: true,
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &hand_line).unwrap();
+        // The lane that resumed the session banked at teardown, so the newest
+        // line is the dispatcher's and a per-line `hand` check alone would
+        // fold the subagent in.
+        let lane_line = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(200)).to_rfc3339(),
+            hand: false,
+            tokens: Tokens::default(),
+            ..hand_line.clone()
+        };
+        append(&repo, &lane_line).unwrap();
+        std::fs::write(&path, transcript(&[("", 100), ("", 5)])).unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 30)])).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        assert!(!lane_owns_subagents(&ledger, "s"));
+        assert!(lane_owns_subagents(&ledger, "another"));
+        let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("root moved");
+        assert_eq!(line.tokens.output, 5, "the subagent's 30 is the sweep's");
+    }
+
+    /// The board's cache gate and the catch-up's gate both read this: a
+    /// subagent that finishes after the root's last write still moves it.
+    #[test]
+    fn a_lane_is_touched_when_only_a_subagent_file_moved() {
+        let (_repo, path, _root_guard) = fixture("lane-touched-subagent");
+        std::fs::write(&path, transcript(&[("", 1)])).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 1)])).unwrap();
+
+        assert!(lane_touched_at(&path, "s") > touched_at(&path));
+        assert_eq!(lane_touched_at(&path, "none"), touched_at(&path));
     }
 
     // -------------------------------------------- watched directories, swept

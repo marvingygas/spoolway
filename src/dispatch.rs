@@ -2783,9 +2783,15 @@ impl<'a> Dispatcher<'a> {
         // sweep on exactly that mtime against this line's `ts`, so a `ts`
         // chosen after the read would strand the unread tail forever.
         let banked_at = chrono::Utc::now();
-        let Some(harvest) =
-            crate::usage::harvest(&record.kind, &record.session, &self.repo.config.models)
-        else {
+        // Off the pass's snapshot, not a fresh read: a hand line for the
+        // session is already in it, which is all the rule looks for.
+        let own_subagents = crate::usage::lane_owns_subagents(&self.ledger(), &record.session);
+        let Some(harvest) = crate::usage::harvest(
+            &record.kind,
+            &record.session,
+            &self.repo.config.models,
+            own_subagents,
+        ) else {
             return false;
         };
 

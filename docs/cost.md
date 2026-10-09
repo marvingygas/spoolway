@@ -78,7 +78,10 @@ on its own.
 
 A subagent started inside that session follows it: onto the same lanes row for a session in a
 task's own worktree, or folded onto the same directory row otherwise. A subagent of a dispatched
-lane's own session is never banked this way. That spend is the lane's own.
+lane's own session is never banked this way. That spend is banked on the lane itself, in the
+same line as the lane's own turns, and a subagent that finishes after the lane settles is caught
+up on the lane like any other late turn. A session a person ran by hand keeps its subagents as
+lines of their own, even when a lane later resumes that session.
 
 ## Reading it
 
