@@ -13,7 +13,9 @@ rule out stays unbuilt however good an idea it is.
    assumptions nobody tested — a helper that already exists, a field that is nullable, a call
    site you did not know about, a config key spelled differently in the one place that matters.
    Spend the one command that confirms it: grep the other callers, read the type, run the thing
-   once.
+   once. Callers are not the only twins: find every other place that computes the same rule or
+   reads the same file — home mode and repo mode, the board and the CLI, a script under
+   `scripts/` reading what you just changed on disk.
 3. **Work in the smallest verifiable steps you can.** One coherent change, run what covers it,
    then the next. Size the step by how long you would be willing to spend bisecting it.
 4. **Change what the task asks for, and leave the rest.** A refactor you were not asked for, a
@@ -39,17 +41,25 @@ rule out stays unbuilt however good an idea it is.
    that answers a review as much as on the first: as many findings here are new prose that was
    never true as old prose left behind. Shipped prose never cites the task, its plan or its
    mockup — they are deleted at handover, and the reference is left pointing at nothing.
+   End your handoff with every comment you wrote or rewrote, as `file:line`, each one read
+   against the code beneath it. Wrap comments at the width the surrounding ones use, about 80
+   columns, since `cargo fmt` does not; a new test goes above the doc comment of the one it
+   follows, never between that comment and its `#[test]`.
 8. **Test the behaviour you changed and the callers it affects.** Add or update coverage at
    the level this project already uses, then run the relevant tests by name, module or test
    target with `cargo test --locked <filter>` or `cargo test --locked --test <target>`.
    Read the output: the intended tests must actually run; zero matching tests proves nothing.
+   Each new test fails on the code before your change; say in your handoff what makes it fail
+   there. A test that passes either way is a review finding, not coverage.
    After a failure, diagnose it, fix it, and rerun the affected tests. Check the traps below
    before concluding the failure is yours.
 
-   Run `cargo fmt` before you stop. The downstream `test` step owns full tests, Clippy and the
-   other mechanical checks; do not repeat that gate routinely. Broaden your checks when a
+   Run `cargo fmt` and `cargo clippy --all-targets --locked -- -D warnings` before you stop:
+   it is quick on a warm build, and it is the gate failure a diff causes most. The downstream
+   `test` step owns the full test run; do not repeat it routinely. Broaden your checks when a
    shared interface, dependency, build change or unexplained failure makes the impact wider
-   than the focused tests can establish. For changes with no executable behaviour, run the
+   than the focused tests can establish — a function other modules call is a shared interface,
+   so run those modules' tests too. For changes with no executable behaviour, run the
    relevant format or contract check and explain why no behaviour test applies.
    Record the exact commands, results and coverage limits in your findings; distinguish your
    focused checks from the full gate that has yet to run.
@@ -57,7 +67,8 @@ rule out stays unbuilt however good an idea it is.
    what you built, one at a time. A criterion you cannot point at a line for is not met. On a
    bug fix, a passing repro is one criterion among them, not the finish line. A criterion you
    know is unmet is not a note for the review: meet it, or block, naming the criterion and why
-   it cannot be met as written.
+   it cannot be met as written. That holds for a mockup line too, and for a deviation you judge
+   better or one an existing test seems to forbid: each is a block, never a handoff note.
 
 ## Traps
 
@@ -85,6 +96,11 @@ rule out stays unbuilt however good an idea it is.
   is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
   alone, it is yours after all.
 
+- **The review holds you to rules this prompt has not named yet.** An error, `bail!` or refusal
+  is a full sentence: it names the thing, says why, and says what to do instead — and that
+  advice works, so follow it once in a scratch project. A new config key ships with its note in
+  `confkv`.
+
 ## When you get stuck
 
 Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
@@ -99,11 +115,16 @@ your changes.
 - Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
   45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single
   largest fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot
-  tell whether an edit parses; reach for it rarely, and never for the full tier.
+  tell whether an edit parses; reach for it rarely, and never for the full tier. A suite your
+  diff edits is the exception: run it alone against your own build, with
+  `SPOOLWAY=$PWD/target/release/spoolway scripts/e2e/run.sh --suite <name>` — the `spoolway`
+  on PATH is an older release.
 - Never install the binary this project builds over the one already running. `cargo build` and
   `cargo test` in your worktree as much as you like, but `cargo install` or copying your build
   over the running dispatcher's own binary overwrites the process that started you and that
   every other lane reports through. Installing is a person's decision, taken between runs.
+- Never use `git stash`. The stash is shared by every worktree, so a pop can take another
+  lane's entry; commit instead.
 - Never restart, reconfigure, or kill a server or service. Broken infrastructure is not yours to
   repair.
 - Never weaken a test, skip it, or loosen an assertion to get a green run. A test that is wrong

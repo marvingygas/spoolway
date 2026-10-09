@@ -59,7 +59,8 @@
 # <<< spoolway <<<
 
 # 1.1: one review split into `review-spec` and `review-code`, each with its own fixer.
-version: 1.1
+# 1.2: `fix-spec-review` and `fix-code-review` at high effort.
+version: 1.2
 
 description: >-
   Small feature work: implement against the acceptance criteria, review the
@@ -104,7 +105,7 @@ steps:
     agent: claude
     prompt: implementer
     model: claude-sonnet-5-5
-    effort: medium
+    effort: high
     session: true
     loop: 2
     on_pass: review-spec
@@ -125,7 +126,7 @@ steps:
     agent: claude
     prompt: implementer
     model: claude-sonnet-5-5
-    effort: medium
+    effort: high
     session: true
     loop: 2
     on_pass: review-code
