@@ -577,8 +577,33 @@ fn started_at(pid: u32) -> Option<String> {
     after_name.split_whitespace().nth(19).map(str::to_string)
 }
 
-/// No portable way to ask, so the pid stands alone — exactly as it did before.
-#[cfg(all(unix, not(target_os = "linux")))]
+/// macOS keeps the process's start time in its BSD info, and no reuse of the
+/// pid can reproduce it.
+#[cfg(target_os = "macos")]
+fn started_at(pid: u32) -> Option<String> {
+    let pid = i32::try_from(pid).ok()?;
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of a plain C struct.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a live buffer of exactly `size` bytes, which is all the
+    // kernel is told it may write.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    // Anything short of a whole struct is a failure (no such process, or not
+    // ours to look at) and there is then nothing to compare.
+    (written == size).then(|| format!("{}.{}", info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+/// No way to ask on the other Unixes, so the pid stands alone — exactly as it
+/// did before.
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
 fn started_at(_pid: u32) -> Option<String> {
     None
 }
@@ -616,17 +641,32 @@ pub(crate) fn is_running(pid: u32) -> bool {
         .is_some_and(|state| state != "Z")
 }
 
+/// Off Linux the kernel is asked directly: signal `0` is delivered to nobody
+/// and succeeds if the process could be signalled. `EPERM` means it exists but
+/// is someone else's; only `ESRCH` means it is gone.
+///
+/// A zombie counts as alive, as it did under `kill -0`, where the Linux twin
+/// above counts it dead. Turns are reaped, so for them it does not matter, but
+/// a lock holder left a zombie by a parent that never reaps stays a holder
+/// until something reaps it.
+///
+/// A syscall rather than the `kill` command for the reason
+/// `headless::signal_group` gives: which binary answers is a property of the
+/// machine.
 #[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn is_running(pid: u32) -> bool {
-    // `kill -0` reports whether a signal could be delivered, without sending
-    // one. Absent /proc this is the portable equivalent.
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // Pid 0 is not a process: `kill(0, 0)` signals the caller's own group and
+    // always succeeds, which would make every "0\n" lock file a live holder.
+    // A pid beyond `i32` would wrap negative and name a group instead.
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 takes no pointers and delivers nothing.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(test)]
@@ -670,6 +710,10 @@ mod tests {
     /// from that moment a pid-only check says a dispatcher is running forever.
     /// Stand in for the reuse by writing this process's pid against a start
     /// time that is not this process's — which is what a reused pid looks like.
+    // Not a silenced failure: the other Unixes have no `started_at` (it is
+    // `None` there), so `Lock::holder` falls back to the pid alone and a reused
+    // pid still reads as a holder.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_pid_reused_by_another_process_is_not_a_holder() {
         let (path, _guard) = scratch("reused");
