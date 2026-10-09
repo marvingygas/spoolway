@@ -1787,7 +1787,8 @@ fn refuse_if_not_stopped(task: &Task, pipelines: &Pipelines) -> Result<()> {
     Ok(())
 }
 
-/// Refuse `resume --stage` while a task in `depends_on` is not `done`.
+/// Refuse `resume --stage` while a task in `depends_on` has not finished, that
+/// is reached `done` and been archived.
 ///
 /// The dispatcher gates a dependency only on `queued`, so a child sent to a
 /// later step by hand would otherwise run and finish ahead of its parent. The
@@ -1813,6 +1814,12 @@ fn refuse_while_dependencies_unfinished(repo: &Repo, task: &Task) -> Result<()> 
     let advice = match state == crate::pipeline::BLOCKED || state == crate::pipeline::PAUSED {
         true => format!("resume {dep} first"),
         false => format!("wait for {dep} to finish"),
+    };
+    // A dependency on `done` is not archived until cleanup and the `done`
+    // hook have run; saying only "which is done" would read as a contradiction.
+    let state = match state == crate::pipeline::DONE {
+        true => "done but not yet cleaned up and archived".to_string(),
+        false => state.to_string(),
     };
     bail!("{id} depends on {dep}, which is {state} — {advice}");
 }
@@ -4999,6 +5006,39 @@ mod tests {
         let said = format!("{err:#}");
         assert!(said.contains("wait for parent"), "{said}");
         assert!(!said.contains("resume parent"), "{said}");
+    }
+
+    /// A parent on `done` is still in the queue until cleanup archives it, and
+    /// it holds the child. The refusal says why, rather than calling a `done`
+    /// task unfinished without explanation.
+    #[test]
+    fn resume_stage_explains_a_parent_that_is_done_but_not_archived() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-done-parent");
+        let pipelines = gate_pipelines();
+        add(&repo, "parent", &[]);
+        add(&repo, "child", &["parent"]);
+        let mut parent = queued(&repo, "parent");
+        parent.set_stage(crate::pipeline::DONE, None);
+        parent.save().unwrap();
+        let mut child = queued(&repo, "child");
+        child.front.blocked_from = Some("build".into());
+        child.set_stage(crate::pipeline::BLOCKED, None);
+        child.save().unwrap();
+
+        let err = resume(
+            &repo,
+            &pipelines,
+            &resume_args("child", Some("deploy")),
+            None,
+        )
+        .expect_err("a parent still in the queue holds the child");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("done but not yet cleaned up and archived"),
+            "{said}"
+        );
+        assert!(said.contains("wait for parent"), "{said}");
     }
 
     /// A lane on `blocked` may unblock other stopped tasks but never the task

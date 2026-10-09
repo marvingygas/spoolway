@@ -26,14 +26,15 @@ use crate::task::Task;
 /// Where a task stands, seen from something waiting on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepState {
-    /// Finished. Its changes are on the group's base branch, so a dependent cut from
-    /// that branch will contain them.
+    /// Finished: cleaned up and archived. Its branch is final, so a dependent
+    /// cut from it contains all of its work.
     Done,
-    /// Still moving through the pipeline — including a task parked on
-    /// `blocked`, or sitting on a stage no pipeline declares any more. Neither
-    /// of those will ever become `Done` on its own, but nothing here has to say so: a dependent only ever
-    /// asks whether this is `Done`, so anything short of it is treated the
-    /// same. See [`Graph::ready`].
+    /// Still in the queue — including a task that has reached `done` but not
+    /// yet been cleaned up and archived, one parked on `blocked`, and one
+    /// sitting on a stage no pipeline declares any more. None of those is
+    /// finished, and nothing here has to tell them apart: a dependent only
+    /// ever asks whether this is `Done`, so anything short of it is treated
+    /// the same. See [`Graph::ready`].
     Pending,
     /// Named by a `depends_on` but present in neither the queue nor the
     /// archive. Almost always a typo, and permanent if left alone.
@@ -64,7 +65,11 @@ impl Graph {
         let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for task in tasks {
-            state.insert(task.front.id.clone(), classify(task));
+            // Still in the queue means not finished, even on `done`: that stage
+            // is reached before cleanup and the `done` hook have run, and
+            // either can still park the task on `blocked` or `paused`. Only
+            // the archive says a dependency is complete.
+            state.insert(task.front.id.clone(), DepState::Pending);
             edges.insert(task.front.id.clone(), task.front.depends_on.clone());
         }
 
@@ -98,7 +103,7 @@ impl Graph {
         // all of it is merged, so the one with least left to do is worth most.
         let mut per_group: BTreeMap<String, usize> = BTreeMap::new();
         for task in tasks {
-            if state.get(task.id()) == Some(&DepState::Done) {
+            if task.stage() == crate::pipeline::DONE {
                 continue;
             }
             if let Some(group) = &task.front.group {
@@ -121,7 +126,7 @@ impl Graph {
                         // last, because by the pass its own `done` hook fires
                         // it is no longer one of the group's unfinished tasks.
                         let others = per_group.get(group).copied().unwrap_or(0);
-                        others + usize::from(state.get(task.id()) == Some(&DepState::Done))
+                        others + usize::from(task.stage() == crate::pipeline::DONE)
                     }
                     None => 1,
                 };
@@ -159,7 +164,14 @@ impl Graph {
         }
 
         let cycles = find_cycles(&edges);
-        let depth = compute_depths(&edges, &state, &cycles);
+        // Depth orders a group's block for display, where a task on `done` has
+        // already finished its work even though it is not yet archived, so it
+        // counts as finished here and nowhere that gates a start.
+        let mut shown_state = state.clone();
+        for task in tasks.iter().filter(|t| t.stage() == crate::pipeline::DONE) {
+            shown_state.insert(task.front.id.clone(), DepState::Done);
+        }
+        let depth = compute_depths(&edges, &shown_state, &cycles);
 
         Graph {
             state,
@@ -184,6 +196,9 @@ impl Graph {
     ///
     /// Asks for [`DepState::Done`] specifically, not merely "not moving" —
     /// the guarantee that keeps any stage short of `done` from releasing work.
+    /// A dependency still in the queue on `done` has not been cleaned up and
+    /// archived, so it holds its dependents too, and they are cut from its
+    /// final branch.
     /// A third terminal name — `superseded`, `rejected`, `abandoned` — would
     /// release every dependent the moment a task reached it, silently, if
     /// this accepted anything short of the one reserved name that actually
@@ -262,8 +277,9 @@ impl Graph {
     }
 
     /// How deep this task sits in the run: the longest chain of unfinished
-    /// (not [`DepState::Done`]) dependencies standing above it, zero where it
-    /// has none. What lets a group's block read top to bottom as run order —
+    /// (not archived, and not on `done` either — see the display-only carve-out
+    /// in [`Graph::build`]) dependencies standing above it, zero where it has
+    /// none. What lets a group's block read top to bottom as run order —
     /// see [`crate::status::Row::key`] — since it is depth, not steps left on
     /// a task's own pipeline, that tells a dependency from its dependent.
     ///
@@ -329,22 +345,6 @@ pub fn render_cycle(cycle: &[String]) -> String {
         path.push(first);
     }
     format!("dependency cycle {}", path.join(" → "))
-}
-
-/// Where a task stands, from the dispatcher's point of view.
-///
-/// One stage means finished, and it is a reserved one: `done`. Everything
-/// else — still moving, parked on `blocked`, or sitting on a stage no
-/// pipeline declares — is `Pending`.
-/// [`Graph::ready`] is where that flattening is made safe: it releases a
-/// dependent only once every dependency is `Done`, so a stage that
-/// will never reach `done` on its own holds its dependents exactly as a
-/// `blocked` task does, without this needing to tell the two apart.
-fn classify(task: &Task) -> DepState {
-    match task.stage() {
-        crate::pipeline::DONE => DepState::Done,
-        _ => DepState::Pending,
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -583,6 +583,21 @@ mod tests {
         assert_eq!(graph.waiting_on("second"), ["first"]);
     }
 
+    /// A dependency that has reached `done` but is still in the queue has
+    /// not been cleaned up and archived yet. Its dependents stay held until
+    /// the archive has it, so they are cut from its final branch.
+    #[test]
+    fn a_dependent_waits_while_its_dependency_is_on_done_but_not_archived() {
+        let tasks = [
+            task("first", "done", &[], None),
+            task("second", "queued", &["first"], None),
+        ];
+        let graph = graph(&tasks);
+
+        assert!(!graph.ready("second"));
+        assert_eq!(graph.waiting_on("second"), ["first"]);
+    }
+
     /// `c` names only `b` in `depends_on` — `waiting_on` never walks past a
     /// direct dependency, whatever is holding it further up the chain.
     #[test]
@@ -616,15 +631,15 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_dependency_hides_whatever_it_once_waited_on() {
-        let tasks = [
-            task("a", "blocked", &[], None),
-            task("b", "done", &["a"], None),
-            task("c", "queued", &["b"], None),
-        ];
-        let graph = graph(&tasks);
+    fn an_archived_dependency_releases_its_dependent() {
+        let tasks = [task("c", "queued", &["b"], None)];
+        let archive = crate::scratch::root("graph-archived-dep");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("b.md"), "").unwrap();
 
-        // `b` merged, so `a`'s state stopped mattering the moment it did.
+        let graph = Graph::build(&tasks, &archive);
+
+        // `b` was archived, so it no longer holds `c`.
         assert!(graph.ready("c"));
         assert!(graph.waiting_on("c").is_empty());
     }

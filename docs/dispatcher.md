@@ -76,7 +76,7 @@ queue, it deletes any half-written task file in `queue/` whose writer has stoppe
 flowchart TD
   A[Fire any cron job due this minute] --> B[Reconcile every task]
   B --> B1[A lane settled: read its report, move the stage]
-  B --> B2[A queued task whose dependencies are done: mark it ready]
+  B --> B2[A queued task whose dependencies are archived: mark it ready]
   B --> B3[A silent lane: remind or escalate]
   B1 & B2 & B3 --> C[Sort the ready tasks]
   C --> D[Start lanes while slots are free]
@@ -250,7 +250,7 @@ An empty board draws none of the following, and each returns once a task is on t
 stateDiagram-v2
   [*] --> queued
   [*] --> unknown: stage: names a step the pipeline does not have
-  queued --> starting: dependencies done, slot free
+  queued --> starting: dependencies archived, slot free
   starting --> running: the lane comes up
   starting --> queued: the boot fails
   running --> starting: step passes or fails, the next lane starts
@@ -322,7 +322,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase `U` acts on the whol
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Open the resume picker for a paused or blocked row whose dependencies are done. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
+| `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started, or paused by its `done` hook, resumes at once with no picker. See [Resume picker](#resume-picker). |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `s` | On a running, paused or blocked row, open the restart panel. See [Restart panel](#restart-panel). On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
