@@ -431,6 +431,7 @@ pub fn doctor(
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout, &tasks));
             report.record_all(override_layer_note(repo));
+            report.record_all(orphaned_home_note());
             report.record(mux_finding(&mux));
             doctor_sync(repo, &mut report);
             report.record(match crate::lock::Lock::holder(&repo.lock_file())? {
@@ -450,6 +451,7 @@ pub fn doctor(
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout, &tasks));
     report.record_all(override_layer_note(repo));
+    report.record_all(orphaned_home_note());
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
     report.record_all(branch_and_forge_checks(
@@ -1132,6 +1134,30 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
         }
     }
     findings
+}
+
+/// One note naming every project home under `~/.spoolway/` whose checkout
+/// no longer exists, so a person can find the folders and delete them.
+///
+/// Nothing in spoolway ever removes a home, so a deleted scratch repository
+/// leaves one behind for good. This only reports: it is a note, never a
+/// failure, and deletes nothing. A home-mode workspace counts only when every
+/// one of its clones is gone, since one live clone still uses the workspace.
+fn orphaned_home_note() -> Vec<Finding> {
+    let gone: Vec<String> = crate::repo::recorded_checkouts()
+        .into_iter()
+        .filter(|(_, roots)| roots.iter().all(|root| !root.exists()))
+        .map(|(home, _)| home.display().to_string())
+        .collect();
+    if gone.is_empty() {
+        return Vec::new();
+    }
+    vec![Finding::Note(format!(
+        "{} project home(s) under ~/.spoolway/ record a checkout that is gone; \
+         delete a folder to remove it: {}",
+        gone.len(),
+        gone.join(", ")
+    ))]
 }
 
 /// One note naming every key the checkout's config holds that this binary
@@ -2265,6 +2291,95 @@ mod tests {
 
         assert_eq!(short["checks"], 2);
         assert_eq!(short["problems"], 1);
+    }
+
+    /// Builds `<scratch>/.spoolway/` with the given `(folder, project.toml)`
+    /// pairs and runs `orphaned_home_note` with that scratch folder standing
+    /// in for the home, so the real `~/.spoolway/` is never read.
+    fn orphan_note_for(name: &str, homes: &[(&str, Option<String>)]) -> Vec<Finding> {
+        let base = crate::scratch::root(&format!("doctor-{name}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let state = base.join(".spoolway");
+        for (folder, toml) in homes {
+            std::fs::create_dir_all(state.join(folder)).unwrap();
+            if let Some(toml) = toml {
+                std::fs::write(state.join(folder).join("project.toml"), toml).unwrap();
+            }
+        }
+        crate::platform::test_home::with_home(&base, orphaned_home_note)
+    }
+
+    fn note_text(findings: &[Finding]) -> &str {
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let Finding::Note(text) = &findings[0] else {
+            panic!("expected a note: {findings:?}");
+        };
+        text
+    }
+
+    /// A repo-mode home whose recorded checkout is gone is named by path in
+    /// a note; a home whose checkout still exists is not.
+    #[test]
+    fn orphaned_home_note_names_a_gone_checkout_and_not_a_live_one() {
+        let live = crate::scratch::root("doctor-orphan-live-checkout");
+        std::fs::create_dir_all(&live).unwrap();
+        let findings = orphan_note_for(
+            "orphan-basic",
+            &[
+                (
+                    "dead-aaaa",
+                    Some("id = \"aaaa\"\nroot = \"/nonexistent/spoolway-dead\"\n".into()),
+                ),
+                (
+                    "live-bbbb",
+                    Some(format!(
+                        "id = \"bbbb\"\nroot = {:?}\n",
+                        live.display().to_string()
+                    )),
+                ),
+            ],
+        );
+        let text = note_text(&findings);
+        assert!(text.contains(".spoolway/dead-aaaa"), "{text}");
+        assert!(!text.contains("live-bbbb"), "{text}");
+        assert!(text.contains("is gone"), "{text}");
+    }
+
+    /// A workspace is orphaned only when every clone is gone: one live clone
+    /// keeps it off the list, and all clones gone puts it on.
+    #[test]
+    fn orphaned_home_note_needs_every_clone_gone() {
+        let live = crate::scratch::root("doctor-orphan-live-clone");
+        std::fs::create_dir_all(&live).unwrap();
+        let clone = |root: &str| format!("[[clones]]\nroot = {root:?}\ndispatcher = \"d\"\n");
+        let mixed = format!(
+            "id = \"w1\"\n{}{}",
+            clone("/nonexistent/clone-a"),
+            clone(&live.display().to_string())
+        );
+        let all_gone = format!(
+            "id = \"w2\"\n{}{}",
+            clone("/nonexistent/clone-b"),
+            clone("/nonexistent/clone-c")
+        );
+        let findings = orphan_note_for(
+            "orphan-workspace",
+            &[("mixed", Some(mixed)), ("all-gone", Some(all_gone))],
+        );
+        let text = note_text(&findings);
+        assert!(text.contains(".spoolway/all-gone"), "{text}");
+        assert!(!text.contains("mixed"), "{text}");
+    }
+
+    /// A folder with no `project.toml`, or one that will not parse, is not a
+    /// home that can be called orphaned, and adds no row at all.
+    #[test]
+    fn orphaned_home_note_skips_folders_it_cannot_read() {
+        let findings = orphan_note_for(
+            "orphan-skipped",
+            &[("logs", None), ("garbled", Some("not [ toml".into()))],
+        );
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     /// No layer at all is nothing to say: `override_layer_note` must not add

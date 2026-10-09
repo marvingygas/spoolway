@@ -1751,6 +1751,38 @@ fn home_recording(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Every folder under `~/.spoolway/` whose `project.toml` can be read as a
+/// project home, with the checkout paths it records: one for a repo-mode
+/// home, one per `[[clones]]` entry for a home-mode workspace.
+///
+/// Folders that are not homes (`logs/`, `worktrees/`, `.dispatcher/`) have no
+/// `project.toml` and are left out. So is a folder whose `project.toml` will
+/// not parse as either shape, and a workspace with no clones: neither names a
+/// checkout, so nothing can be said about whether it is gone. Sorted by path
+/// so a report built from this reads the same on every run.
+pub(crate) fn recorded_checkouts() -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let Ok(entries) = std::fs::read_dir(crate::mux::state_root()) else {
+        return Vec::new();
+    };
+    let mut homes: Vec<(PathBuf, Vec<PathBuf>)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let raw = std::fs::read_to_string(path.join(BINDING_FILE)).ok()?;
+            let roots = if let Ok(binding) = toml::from_str::<Binding>(&raw) {
+                vec![binding.root]
+            } else {
+                let workspace = toml::from_str::<WorkspaceToml>(&raw).ok()?;
+                workspace.clones.into_iter().map(|c| c.root).collect()
+            };
+            (!roots.is_empty()).then_some((path, roots))
+        })
+        .collect();
+    homes.sort();
+    homes
+}
+
 /// A home-mode workspace's own `project.toml`: the clones that share its
 /// `config/`, each found by its path rather than a stamp — see the
 /// `home-mode-discovery` task and the plan's `#d-path-binding` drawing.
