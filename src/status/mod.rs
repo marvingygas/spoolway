@@ -3444,7 +3444,7 @@ fn build_rows(
                 // that is blocked, one that is paused, or a
                 // cycle — used to be drawn apart, but the dispatcher has
                 // never treated it apart: `graph.ready()` passes over any
-                // task whose dependencies are not all `done`, so a dead
+                // task whose dependencies have not all finished, so a dead
                 // wait and an ordinary one sit on the same step for the
                 // same reason. The graph is not asked here at all, which
                 // also retires the substring-matching that once decided
@@ -6006,8 +6006,8 @@ mod tests {
     /// `search-facets` depends on a task parked on `blocked`, so nothing
     /// will ever make it ready — the shape the board used to draw apart, in
     /// red, as `unreachable`. The dispatcher never told the two apart:
-    /// `graph.ready()` passes over any task whose dependencies are not all
-    /// `done`, so a dead wait sits on `queued` exactly as an ordinary one
+    /// `graph.ready()` passes over any task whose dependencies have not all
+    /// finished, so a dead wait sits on `queued` exactly as an ordinary one
     /// does, and the NEXT column names the direct dependency rather than
     /// diagnosing it as stranded.
     #[test]

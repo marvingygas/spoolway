@@ -47,7 +47,7 @@ as JSON.
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
 | `group` | you | The group of work this task belongs to. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
-| `depends_on` | you | Task ids that must reach `done` before this one starts. See [Expressing order](#expressing-order). |
+| `depends_on` | you | Task ids that must finish (reach `done`, be cleaned up and be archived) before this one starts. See [Expressing order](#expressing-order). |
 | `gate_at` | you | A step id. The task pauses after that step reports, or after a command step exits, once, whatever it reports or exits with. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | `spoolway-tasks`, or you | The branch the group lands in. `spoolway-tasks` writes it from `spoolway task contract`'s own `base`, the branch your checkout has out. Otherwise required, here or with `spoolway queue add --base`. Must exist locally or on `origin`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
@@ -233,9 +233,11 @@ group `cart` has two tasks with no dependency in it: cart-totals and cart-empty 
 one chain. Give one a `depends_on`, or move it to a group of its own.
 ```
 
-A task stays `queued` until every task it names has reached `done`. A dependency is refused
-when it names a task that does not exist, names itself, closes a cycle, or crosses two bases.
-If a dependency is blocked, every task behind it stays `queued`.
+A task stays `queued` until every task it names has finished. A dependency has finished once it
+has reached `done`, been cleaned up and been archived. Reaching `done` is not enough: if cleanup
+or the `done` hook holds the dependency on `blocked` or `paused`, every task behind it stays
+`queued`. A dependency is refused when it names a task that does not exist, names itself, closes
+a cycle, or crosses two bases.
 
 Work that has nothing to do with another task goes in a group of its own, not a second root of
 the same group.
@@ -315,7 +317,7 @@ one line:
 ```
 
 This applies to a task that sets `starts_from:` or names a `depends_on`. The start branch is its
-own `starts_from:`, else its first dependency's branch once that dependency is `done`. A branch
+own `starts_from:`, else its first dependency's branch once that dependency has finished. A branch
 counts as existing when it is a local branch, a remote-tracking branch or a branch on `origin`.
 When `origin` cannot be reached, the task is not paused.
 

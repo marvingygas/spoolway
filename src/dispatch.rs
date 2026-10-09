@@ -5531,9 +5531,10 @@ fn ensure_workspace(
             // Cut. One worktree per task, created once and reused by every
             // later step.
             None => {
-                // A dependency has always reached `done` before this task is
-                // ready to start — `Graph::ready` in `src/graph.rs` is what
-                // enforces that — so its branch is finished and ancestry is a
+                // A dependency has always been cleaned up and archived before
+                // this task is ready to start — `Graph::ready` in
+                // `src/graph.rs` is what enforces that — so its branch is
+                // final and ancestry is a
                 // fact rather than something to build later with a rebase.
                 // `base` keeps its own meaning — the branch the plan lands in
                 // — regardless: only the commit the worktree actually starts
@@ -17101,9 +17102,13 @@ mod tests {
     #[test]
     fn a_dependent_whose_dependency_branch_was_deleted_pauses_naming_it() {
         let (repo, _root_guard) = fixture("pause-deleted-dependency-branch");
-        add_task_with(&repo, "first", "done", |f| {
+        // The dependency is archived, not merely on `done`: a dependent waits
+        // out cleanup, so only an archived one can have lost its branch.
+        let archived = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
         });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
         let path = add_task_with(&repo, "second", crate::pipeline::QUEUED, |f| {
             f.depends_on = vec!["first".into()];
         });
