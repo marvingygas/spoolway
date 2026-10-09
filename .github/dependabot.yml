@@ -5,6 +5,10 @@
 # npm/ is left out on purpose: scripts/build-npm.mjs generates those manifests
 # at release time and stamps the version from Cargo.toml, so a bump there would
 # be overwritten by the next release.
+#
+# Cooldown: a version must be out for a few days before Dependabot proposes it.
+# A compromised or broken release is usually yanked within that time. It does
+# not delay security updates.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -12,6 +16,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 5
     groups:
       # One pull request for every compatible bump, so a week of patch
@@ -27,6 +33,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     groups:
       actions:
         patterns: ["*"]
