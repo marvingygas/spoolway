@@ -441,10 +441,16 @@ flowchart LR
 - Two tasks that depend on the same task are siblings. A GitHub stack is one line, so only the
   first sibling joins it. The second passes and reports `none — <task> is a sibling of #<n>`
   on its `stack` line.
-- When the branch a task was cut from is gone and GitHub shows its pull request merged, `stack`
-  opens against the branch that pull request merged into, printing `` `<branch>` has landed —
-  against `<base>` ``. When the only pull request for that branch was closed without merging,
-  `stack` stops and names it, since there is no work in it to open against.
+- When the branch a task was cut from is gone, `stack` opens against the task's own `base:`
+  if that branch exists. Otherwise it opens against the branch the merged pull request landed
+  in. Either way it prints `` `<branch>` has landed — against `<base>` ``. When the only pull
+  request for that branch was closed without merging, `stack` stops and names it, since there
+  is no work in it to open against.
+- A `starts_from:` branch that is gone from `origin` counts as gone, even when a local branch
+  or an `origin/` tracking ref for it is still there. A local branch counts only when GitHub
+  shows a merged pull request for it. A branch nobody has published yet is still pushed and
+  used. A task with no `starts_from:`, or one equal to `base:`, is not checked this way. No
+  local branch is deleted.
 
 ### `skip:` — walking past a step
 
