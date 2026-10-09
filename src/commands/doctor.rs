@@ -231,7 +231,7 @@ pub(crate) enum Warning {
 /// `doctor()`'s own doc comment for the order these checks run in, which
 /// this mirrors except for the calls named below.
 ///
-/// Three more of `doctor()`'s own rows are left out on purpose, not merely
+/// Four more of `doctor()`'s own rows are left out on purpose, not merely
 /// skipped for being expensive:
 ///
 /// - The override-layer note has its own screen one step earlier, in
@@ -250,6 +250,9 @@ pub(crate) enum Warning {
 ///   Calling it here would at best repeat a fact already acted on, and if
 ///   ever read a moment too late, once the lock is this very process's own,
 ///   would misreport the caller's own lock back to it as somebody else's.
+/// - [`unrouted_model_notes`] is never called: a `[models]` row no step routes
+///   to is dead config that costs nothing at run time, so it is worth naming
+///   in the `spoolway doctor` report but not worth stopping a run over.
 pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Warning> {
     let mux = crate::mux::backend(repo);
     let tasks = repo.tasks().unwrap_or_default();
@@ -482,6 +485,7 @@ pub fn doctor(
     ));
     report.record_all(agent_checks(repo, pipelines, &config));
     report.record_all(model_health_checks(pipelines, &config));
+    report.record_all(unrouted_model_notes(pipelines, &config));
     report.record_all(agent_kind_checks(&config));
     doctor_sync(repo, &mut report);
     report.record_all(prompt_checks(repo, pipelines));
@@ -1594,6 +1598,21 @@ fn agent_checks(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Find
     findings
 }
 
+/// The note for every `[models]` row no step routes to. Kept out of
+/// `model_health_checks` because that function also feeds `cheap_findings`,
+/// and an unrouted row is dead config that costs nothing at run time: it is
+/// worth naming in the `spoolway doctor` report, but not worth stopping a
+/// person at the warnings popup before a run.
+///
+/// A row nothing routes to is exactly what a rename leaves behind: a step's
+/// model is renamed in a pass that leaves its own row unreached.
+fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+    crate::models::unrouted(pipelines, &config.models)
+        .into_iter()
+        .map(|glob| Finding::Note(format!("model `{glob}` routes to no step")))
+        .collect()
+}
+
 /// Every check and note that reads a model's own settings rather than an
 /// agent profile's: the legacy/template placeholder, a name that resolves to nothing,
 /// a step nothing caps, a `slots` model that has not said whether it is
@@ -1729,15 +1748,6 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         findings.push(Finding::Note(format!(
             "model `{glob}` sets `slots` but not `local`"
         )));
-    }
-
-    // A row nothing routes to is exactly what a rename leaves behind — the
-    // task that added this check found `[models."*Qwen3.6-35B-A3B"]` sitting
-    // unreached after a step's model was renamed in the same pass its own row
-    // was not. Silent otherwise: an unrouted row costs nothing to leave, but
-    // it is dead config a person should be told about rather than stumble on.
-    for glob in crate::models::unrouted(pipelines, &config.models) {
-        findings.push(Finding::Note(format!("model `{glob}` routes to no step")));
     }
 
     // `agents.<profile>.session_blocked_ctx` only ever fires against the
@@ -2591,7 +2601,7 @@ mod tests {
             crate::usage::ModelPrice::default(),
         );
 
-        let notes: Vec<String> = model_health_checks(&pipelines, &config)
+        let notes: Vec<String> = unrouted_model_notes(&pipelines, &config)
             .iter()
             .filter_map(|f| match f {
                 Finding::Note(text) if text.contains("routes to no step") => Some(text.clone()),
@@ -4224,5 +4234,36 @@ mod tests {
             }),
             "no network or live-pane check may appear on this path: {warnings:?}"
         );
+    }
+
+    /// A `[models]` row no step routes to is dead config that costs nothing at
+    /// run time, so the warnings gate stays quiet about it; `spoolway doctor`
+    /// still names the row.
+    #[test]
+    fn an_unrouted_model_row_stays_off_the_warnings_gate() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-unrouted-model-gate");
+        let pipelines = Pipelines::builtin();
+        let mut config = Config::default();
+        config.models.insert(
+            "Ornith-1.5-35B-A3B".into(),
+            crate::usage::ModelPrice::default(),
+        );
+
+        let doctor_notes = unrouted_model_notes(&pipelines, &config)
+            .iter()
+            .filter(|f| matches!(f, Finding::Note(t) if t.contains("routes to no step")))
+            .count();
+        assert_eq!(doctor_notes, 1, "the doctor report must still name the row");
+
+        let warnings = cheap_findings(&repo, &pipelines, &config);
+        let routed: Vec<&Warning> = warnings
+            .iter()
+            .filter(|w| match w {
+                Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) => {
+                    t.contains("routes to no step")
+                }
+            })
+            .collect();
+        assert!(routed.is_empty(), "{routed:?}");
     }
 }
