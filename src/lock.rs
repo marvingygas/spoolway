@@ -188,14 +188,11 @@ impl Lock {
             return Ok(None);
         }
 
-        // Both sides have to have an answer for the comparison to mean
-        // anything. A file written before this line existed has none, and a
-        // platform with no way to ask has none either — in both cases the pid
-        // on its own is what there is, and it is what the check was before.
         let recorded = lines.next().unwrap_or_default().trim();
-        match (recorded.is_empty(), started_at(pid)) {
-            (false, Some(now)) if now != recorded => Ok(None),
-            _ => Ok(Some(pid)),
+        if is_same_process(pid, recorded) {
+            Ok(Some(pid))
+        } else {
+            Ok(None)
         }
     }
 }
@@ -562,13 +559,30 @@ fn link_into_place(path: &Path, contents: &str) -> std::io::Result<bool> {
     }
 }
 
+/// Whether the live process at `pid` is the one that recorded `recorded` as
+/// its start time, rather than a later process handed the same number.
+///
+/// Both sides have to have an answer for the comparison to mean anything. A
+/// file written before the start time was recorded has none (`recorded` is
+/// empty), and a platform with no way to ask has none either. In both cases
+/// the pid stands alone, as it did before.
+pub(crate) fn is_same_process(pid: u32, recorded: &str) -> bool {
+    match (recorded.is_empty(), started_at(pid)) {
+        (false, Some(now)) => now == recorded,
+        _ => true,
+    }
+}
+
 /// Something about a process that a later process with the same pid cannot have.
 ///
-/// The value is opaque and only ever compared with itself, so each platform
-/// answers in whatever unit it already keeps — this is never parsed, formatted
-/// or shown to anyone.
+/// The value is opaque to this module and only ever compared with itself, but
+/// it is not private to it: the command step's wrapper script
+/// (`Runs::wrapper_body` in `command_step.rs`) computes the same field in
+/// shell and writes it to the run's pid file, and [`is_same_process`] compares
+/// the two. Changing the unit or the source here without changing that script
+/// makes every live command run read as interrupted.
 #[cfg(target_os = "linux")]
-fn started_at(pid: u32) -> Option<String> {
+pub(crate) fn started_at(pid: u32) -> Option<String> {
     // Field 22 of /proc/<pid>/stat, in clock ticks since boot. Counted from the
     // *last* `)` rather than split from the left, because field 2 is the
     // executable name and a process is free to have a space or a bracket in it.
@@ -580,7 +594,7 @@ fn started_at(pid: u32) -> Option<String> {
 /// macOS keeps the process's start time in its BSD info, and no reuse of the
 /// pid can reproduce it.
 #[cfg(target_os = "macos")]
-fn started_at(pid: u32) -> Option<String> {
+pub(crate) fn started_at(pid: u32) -> Option<String> {
     let pid = i32::try_from(pid).ok()?;
     // SAFETY: an all-zero `proc_bsdinfo` is a valid value of a plain C struct.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -604,7 +618,7 @@ fn started_at(pid: u32) -> Option<String> {
 /// No way to ask on the other Unixes, so the pid stands alone — exactly as it
 /// did before.
 #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
-fn started_at(_pid: u32) -> Option<String> {
+pub(crate) fn started_at(_pid: u32) -> Option<String> {
     None
 }
 

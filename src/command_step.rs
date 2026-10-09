@@ -170,9 +170,14 @@ impl Runs {
         if let Some(code) = self.files.read_exit_code(key) {
             return RunState::Exited(code);
         }
-        match self.read_pid(key) {
+        match self.files.read_run(key) {
             None => RunState::Fresh,
-            Some(pid) if !crate::headless::alive(pid) => self.what_a_dead_wrapper_left(key),
+            Some((pid, _)) if !crate::headless::alive(pid) => self.what_a_dead_wrapper_left(key),
+            // Alive, but not the process that wrote the file: the number was
+            // reused after the wrapper was gone, so this run is over.
+            Some((pid, recorded)) if !crate::lock::is_same_process(pid, &recorded) => {
+                self.what_a_dead_wrapper_left(key)
+            }
             Some(_) => RunState::Running,
         }
     }
@@ -288,7 +293,19 @@ impl Runs {
         // killed would read as one that passed. Clearing the trap and exiting
         // here makes the two agree.
         body.push_str("trap 'trap - EXIT; exit 143' HUP INT TERM\n");
-        body.push_str(&format!("echo $$ >{pid_path}\n"));
+        // The wrapper's start time goes on the file's second line, so a pid
+        // file that outlives a reboot cannot be mistaken for whatever process
+        // now holds the number (see `lock::is_same_process`). The time is
+        // worked out *before* the file is opened and both lines go in one
+        // `printf`: a redirect opened first would show a reader the pid alone
+        // while `sed` still ran, and that reader would take the file for one
+        // from an older binary. Field 22 of `/proc/$$/stat` is counted from
+        // the last `)` as `lock::started_at` does; where there is no `/proc`
+        // the time is empty and the pid stands alone.
+        body.push_str(&format!(
+            "__spoolway_t=$(sed 's/^.*) //' /proc/$$/stat 2>/dev/null | cut -d' ' -f20)\n\
+             printf '%s\\n%s\\n' \"$$\" \"$__spoolway_t\" >{pid_path}\n"
+        ));
         // The exit code is written from a trap rather than by a line after
         // the command, because `run: ./deploy.sh || exit 1` — or anything
         // else that ends the shell itself — would never reach that line, and
@@ -430,19 +447,19 @@ impl Runs {
     /// End a run and everything under it. Silent about a run that is already
     /// over, which is the ordinary case.
     ///
-    /// Signals unconditionally, including a run that has already finished.
-    /// A pid here addresses a process *group*, [`crate::headless::kill_group`]
+    /// Signals the pid file's group even when the run has already finished,
+    /// but not when a live process there has a different start time than the
+    /// one recorded. A pid here addresses a process *group*, [`crate::headless::kill_group`]
     /// refuses a group with nothing left in it, and reaching a group whose
     /// leader has already exited is the reason that function exists — a
     /// `run:` line that backgrounded a server and then returned leaves
     /// exactly that shape behind, and it is the leader's own exit that makes
     /// it invisible to every other check. Membership is the guard, and it is
     /// also what makes a recycled pid safe: a reused number is only a group
-    /// again if something new leads one.
+    /// again if something new leads one — and a new leader that is alive
+    /// right now is caught by its start time, see [`Runs::signal_the_run`].
     pub fn stop(&self, key: &str) {
-        if let Some(pid) = self.read_pid(key) {
-            crate::headless::kill_group(pid);
-        }
+        self.signal_the_run(key);
         // Nowhere to report a clearing that failed, and nothing that needs it
         // to have succeeded: this run is over either way, and the next arrival
         // at this key goes through [`Runs::prepare`], which does not carry on
@@ -477,10 +494,23 @@ impl Runs {
     /// An error means the old code may still be on disk, so the move must not
     /// go ahead as if the step were clean.
     pub fn begin_visit(&self, key: &str) -> Result<()> {
-        if let Some(pid) = self.read_pid(key) {
+        self.signal_the_run(key);
+        self.forget(key)
+    }
+
+    /// Kill the process group the pid file names, unless a live process there
+    /// has a different start time than the one recorded.
+    ///
+    /// That mismatch is a pid reused after the wrapper was gone, typically
+    /// across a reboot, and its group is a stranger's. A pid that is not alive
+    /// at all passes the check on purpose: the group may still have members
+    /// behind a leader that has exited, which is what [`Runs::stop`] is for.
+    fn signal_the_run(&self, key: &str) {
+        if let Some((pid, recorded)) = self.files.read_run(key)
+            && crate::lock::is_same_process(pid, &recorded)
+        {
             crate::headless::kill_group(pid);
         }
-        self.forget(key)
     }
 
     /// Drop a killed run's pid and exit code but keep its kill count, so the
@@ -1215,6 +1245,111 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert_eq!(f.runs.state("bench-demo"), RunState::Interrupted);
+    }
+
+    /// A pid file whose process is alive but is not the one that wrote it
+    /// reads as interrupted, and nothing is stopped on its account.
+    ///
+    /// After a reboot the number a run saved can belong to any process at
+    /// all. Reading that process as the run would show the task as running
+    /// until its timeout, and then stop an unrelated process group.
+    ///
+    /// The run is started for real, so the file has whatever the wrapper
+    /// writes. Only its first line is then swapped for a live decoy's pid,
+    /// which is what a recycled pid looks like from here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pid_now_held_by_another_process_reads_as_interrupted() {
+        let f = Fixture::new("recycled-pid");
+        let real = f.start("bench-demo", "sleep 60");
+        // Start times are in clock ticks of 10ms. A pid handed out again after
+        // a reboot never shares a tick with a live wrapper, but a decoy
+        // spawned in the same instant as the wrapper can, and would then
+        // match its start time.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut decoy = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+
+        let pid_file = f.runs.pid_path("bench-demo");
+        let written = std::fs::read_to_string(&pid_file).unwrap();
+        let rest: Vec<&str> = written.lines().skip(1).collect();
+        let mut forged = format!("{}\n", decoy.id());
+        for line in rest {
+            forged.push_str(line);
+            forged.push('\n');
+        }
+        std::fs::write(&pid_file, forged).unwrap();
+
+        let state = f.runs.state("bench-demo");
+        let decoy_survived = decoy.try_wait().unwrap().is_none();
+
+        crate::headless::kill_group(real);
+        let _ = decoy.kill();
+        let _ = decoy.wait();
+
+        assert_eq!(
+            state,
+            RunState::Interrupted,
+            "a live process that is not the one that wrote the pid file is not the run"
+        );
+        assert!(decoy_survived, "reading the state must not stop the decoy");
+    }
+
+    /// Cleaning up a run must not signal the group of a live process that only
+    /// shares the pid the file names — `stop` and `begin_visit` kill by pid
+    /// just as the timeout does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopping_a_run_leaves_a_process_that_only_shares_its_pid() {
+        use std::os::unix::process::CommandExt;
+        for visit in [false, true] {
+            let f = Fixture::new(if visit {
+                "recycled-visit"
+            } else {
+                "recycled-stop"
+            });
+            let real = f.start("bench-demo", "sleep 60");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Its own group leader, as a pid the kernel handed out again to
+            // a fresh session would be.
+            let mut decoy = std::process::Command::new("sleep")
+                .arg("60")
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let pid_file = f.runs.pid_path("bench-demo");
+            let written = std::fs::read_to_string(&pid_file).unwrap();
+            let start_time = written.lines().nth(1).unwrap().to_string();
+            std::fs::write(&pid_file, format!("{}\n{start_time}\n", decoy.id())).unwrap();
+
+            if visit {
+                f.runs.begin_visit("bench-demo").unwrap();
+            } else {
+                f.runs.stop("bench-demo");
+            }
+            let survived = decoy.try_wait().unwrap().is_none();
+
+            crate::headless::kill_group(real);
+            let _ = decoy.kill();
+            let _ = decoy.wait();
+            assert!(survived, "visit={visit}: the decoy's group was signalled");
+        }
+    }
+
+    /// A pid file from a binary that recorded no start time is the pid alone,
+    /// and a live process at that pid still reads as the run.
+    #[test]
+    fn a_pid_file_without_a_start_time_still_reads_as_running() {
+        let f = Fixture::new("old-pid-file");
+        let real = f.start("bench-demo", "sleep 60");
+        std::fs::write(f.runs.pid_path("bench-demo"), format!("{real}\n")).unwrap();
+
+        let state = f.runs.state("bench-demo");
+        crate::headless::kill_group(real);
+
+        assert_eq!(state, RunState::Running);
     }
 
     /// The read of the exit file and the read of the wrapper's liveness are

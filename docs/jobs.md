@@ -27,7 +27,9 @@ A job fires only on its schedule. To queue a routine now, tick it on the routine
 flowchart LR
   A[dispatcher pass starts] --> B{job enabled and<br/>minute matches?}
   B -- no --> E[read the queue]
-  B -- yes --> C{previous run<br/>still queued?}
+  B -- yes --> H{unknown key<br/>in its table?}
+  H -- yes --> I[name it, skip, record it] --> E
+  H -- no --> C{previous run<br/>still queued?}
   C -- yes --> D[skip, record it] --> E
   C -- no --> F[queue the routine<br/>on the job's pipeline] --> G[record the minute] --> E
 ```
@@ -40,6 +42,11 @@ window that passes between two passes of one running dispatcher still fires, up 
 back. A window that passes while no dispatcher runs is not caught up when a dispatcher
 starts. A disabled job skips its windows, so enabling it again does not fire the window it
 was off for. A job whose previous run is still in the queue skips its window.
+
+A job table may only hold the keys in the example under [Where a job lives](#where-a-job-lives).
+A job whose table holds any other key, such as `enable = false`, never fires. The dispatcher
+names the job and the key once per matching minute. Remove or correct the key and the job fires
+again.
 
 ### The resident dispatcher
 
@@ -131,7 +138,7 @@ routine  = "nightly"     # a folder or a single .md under .spoolway/routines/
 enabled  = true          # optional; absent means enabled
 ```
 
-One name in both stores is refused.
+One name in both stores is refused. A key outside this table is an unknown key.
 
 ## Usage
 
@@ -156,11 +163,18 @@ lint-sweep     user     */30 * * * *  impl_fast   paused      -
   .spoolway/jobs.toml               1
 ```
 
+A job with an unknown key adds a line under the table:
+
+```
+warning: job `lint-sweep` has unknown key `enable` in ~/.spoolway/spoolway/jobs.toml — it will not fire until it is removed or corrected
+```
+
 `NEXT` reads `paused` for a disabled job, `bad expr` for an expression that will not parse,
 and `never` for one that never comes round.
 
 A `--json` row carries `name`, `scope`, `schedule`, `pipeline`, `routine`, `enabled`,
-`source`, `next` and `last_fired`. `schedule_error` appears only when the expression will
+`unknown_keys`, `source`, `next` and `last_fired`. `unknown_keys` is a sorted list, empty when the
+table has none. `schedule_error` appears only when the expression will
 not parse.
 
 ## Diagnostics
@@ -169,6 +183,7 @@ not parse.
 
 | Check | Fails when |
 | --- | --- |
+| job `<name>` has no unknown keys | The job's table holds a key no job reads. |
 | job `<name>` schedule fires | The expression will not parse, or never comes round. |
 | job `<name>` routine exists | The routine path is missing or outside `.spoolway/routines/`. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |

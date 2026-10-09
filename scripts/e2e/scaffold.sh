@@ -206,13 +206,15 @@ clean_mux() {
 }
 
 # Kill anything this project left running with no multiplexer to ask: headless
-# lanes, and the observer, which is a detached process by construction and the
-# one thing here that nothing else would ever stop.
+# lanes and command runs, and the observer, which is a detached process by
+# construction and the one thing here that nothing else would ever stop. Only
+# line 1 of a pid file is the pid: a command run's file has a start time on
+# line 2.
 clean_processes() {
   local pidfile pid
   for pidfile in "$PROJECT_HOME/headless"/*.pid "$PROJECT_HOME/commands"/*.pid; do
     [ -f "$pidfile" ] || continue
-    pid=$(cat "$pidfile" 2>/dev/null) || continue
+    pid=$(head -n1 "$pidfile" 2>/dev/null) || continue
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || continue
     say "killing $(basename "$pidfile" .pid) (pid $pid)"
     kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
@@ -220,7 +222,7 @@ clean_processes() {
   sleep 1
   for pidfile in "$PROJECT_HOME/headless"/*.pid "$PROJECT_HOME/commands"/*.pid; do
     [ -f "$pidfile" ] || continue
-    pid=$(cat "$pidfile" 2>/dev/null) || continue
+    pid=$(head -n1 "$pidfile" 2>/dev/null) || continue
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || continue
     kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
   done

@@ -1887,8 +1887,8 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     findings
 }
 
-/// Cron jobs: one that names a routine that is gone, one whose expression
-/// will not parse, one whose pipeline is not defined. A store that will not
+/// Cron jobs: one whose table carries a key no job reads, one that names a
+/// routine that is gone, one whose expression will not parse, one whose pipeline is not defined. A store that will not
 /// load at all — a name in both, malformed TOML — is a single finding.
 fn jobs_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1903,6 +1903,14 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 
     for job in &jobs {
         let name = &job.name;
+
+        findings.push(Finding::Check(
+            format!("job `{name}` has no unknown keys"),
+            match job.unknown_keys_note() {
+                Some(note) => Err(anyhow::anyhow!(note)),
+                None => Ok(None),
+            },
+        ));
 
         // Parses *and* comes round: `0 0 30 2 *` parses cleanly and never
         // fires, and `spoolway jobs list` / the dispatcher's "run doctor"
@@ -2479,6 +2487,38 @@ mod tests {
             }
             _ => true,
         }));
+    }
+
+    /// A job table with a misspelt key fails its own `has no unknown keys`
+    /// check, naming the job and the key; a clean job's check passes.
+    #[test]
+    fn a_job_with_an_unknown_key_fails_its_doctor_check() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-job-unknown-key");
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.typo]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\nenable = false\n\
+             [jobs.clean]\nschedule = \"@daily\"\npipeline = \"default\"\nroutine = \"r\"\n",
+        )
+        .unwrap();
+
+        let findings = jobs_checks(&repo, &crate::pipeline::Pipelines::builtin());
+        let check = |label: &str| {
+            findings.iter().find_map(|f| match f {
+                Finding::Check(l, result) if l == label => Some(result),
+                _ => None,
+            })
+        };
+        let failure = check("job `typo` has no unknown keys")
+            .expect("the check exists")
+            .as_ref()
+            .expect_err("a misspelt key must fail the check");
+        assert!(format!("{failure:#}").contains("enable"), "{failure:#}");
+        assert!(
+            check("job `clean` has no unknown keys")
+                .expect("the check exists")
+                .is_ok()
+        );
     }
 
     /// One note per `[models]` entry that sets `slots` without saying whether

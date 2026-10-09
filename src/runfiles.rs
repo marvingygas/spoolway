@@ -47,11 +47,28 @@ impl RunFiles {
     /// The wrapper's own pid, which is the process group everything it
     /// started belongs to.
     pub(crate) fn read_pid(&self, key: &str) -> Option<u32> {
-        std::fs::read_to_string(self.pid_path(key))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        self.read_run(key).map(|(pid, _)| pid)
+    }
+
+    /// The pid file's pid together with the start time recorded beside it,
+    /// empty when there is none, both from one read.
+    ///
+    /// The command step's wrapper writes its start time on a second line.
+    /// Lane pid files, which the headless wrapper writes, and command pid
+    /// files from older binaries have the pid alone. Reading both from one
+    /// read keeps them from coming from two different writes, which a
+    /// separate second read could not.
+    ///
+    /// Pids are reused, most surely across a reboot, and a pid file outlives
+    /// the machine. A caller that signals or trusts the pid should first ask
+    /// [`crate::lock::is_same_process`] whether the live process there is the
+    /// one that wrote the file, or it acts on a stranger.
+    pub(crate) fn read_run(&self, key: &str) -> Option<(u32, String)> {
+        let raw = std::fs::read_to_string(self.pid_path(key)).ok()?;
+        let mut lines = raw.lines();
+        let pid = lines.next()?.trim().parse().ok()?;
+        let recorded = lines.next().unwrap_or_default().trim().to_string();
+        Some((pid, recorded))
     }
 
     /// The exit file's content, parsed as a code — `None` while there is

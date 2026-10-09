@@ -306,6 +306,10 @@ A build, a test suite, a formatter or a deploy script is a command step.
   every way a task reaches the step, including a lane's report and a resume.
 - A dispatcher restart is not an arrival. The restarted dispatcher adopts the run it finds on
   the step, or routes on the exit code that run wrote.
+- The run's pid file holds the pid and the process start time. After a reboot, a live process
+  with the same pid but a different start time is not the run. The step reads as interrupted and
+  runs again, and neither the timeout nor a cleanup signals that process. A pid file with no
+  start time is read as the pid alone. Only Linux records a start time.
 - A run killed without writing an exit code runs again. A run killed three times in a row
   blocks the task. The task's `## Status Log` names the run's log.
 - A late background failure can move a task off a command step. That stops the step's running
