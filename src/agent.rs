@@ -1586,10 +1586,7 @@ mod tests {
     }
 
     fn read_lane_config(home: &std::path::Path) -> toml::Value {
-        std::fs::read_to_string(home.join("config.toml"))
-            .unwrap()
-            .parse()
-            .unwrap()
+        toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap()
     }
 
     /// A seed file is linked, not copied, so a credential rotated in the real

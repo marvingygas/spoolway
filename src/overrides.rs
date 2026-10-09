@@ -398,9 +398,8 @@ pub(crate) fn apply_config_patch(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((config, Vec::new())),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let parsed: toml::Value = raw
-        .parse()
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let toml::Value::Table(table) = parsed else {
         bail!("{} must be a table of settings", path.display());
     };
@@ -702,9 +701,8 @@ pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let parsed: toml::Value = raw
-        .parse()
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let toml::Value::Table(table) = parsed else {
         bail!("{} must be a table of settings", path.display());
     };
@@ -986,9 +984,8 @@ pub(crate) fn promote_config_patch(root: &Path) -> Result<Vec<(String, String)>>
     let path = config_patch_path(&overrides);
     let raw =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed: toml::Value = raw
-        .parse()
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     let toml::Value::Table(table) = parsed else {
         bail!("{} must be a table of settings", path.display());
     };
@@ -1207,17 +1204,17 @@ mod tests {
     /// back this is the rendering it will get.
     #[test]
     fn a_list_in_a_patch_renders_as_the_text_config_set_takes() {
-        let value: toml::Value = "k = [\"a\", \"b\"]".parse().unwrap();
+        let value: toml::Value = toml::from_str("k = [\"a\", \"b\"]").unwrap();
         let list = value.get("k").unwrap();
         assert_eq!(render_config_leaf(list).unwrap(), "a, b");
 
-        let numbers: toml::Value = "k = [1, 2]".parse().unwrap();
+        let numbers: toml::Value = toml::from_str("k = [1, 2]").unwrap();
         assert_eq!(
             render_config_leaf(numbers.get("k").unwrap()).unwrap(),
             "1, 2"
         );
 
-        let empty: toml::Value = "k = []".parse().unwrap();
+        let empty: toml::Value = toml::from_str("k = []").unwrap();
         assert_eq!(render_config_leaf(empty.get("k").unwrap()).unwrap(), "");
     }
 
@@ -1227,11 +1224,11 @@ mod tests {
     /// the patch rather than with the config.
     #[test]
     fn a_list_of_structured_entries_is_refused() {
-        let nested: toml::Value = "k = [[1, 2]]".parse().unwrap();
+        let nested: toml::Value = toml::from_str("k = [[1, 2]]").unwrap();
         let err = render_config_leaf(nested.get("k").unwrap()).unwrap_err();
         assert!(format!("{err:#}").contains("nested value"), "{err:#}");
 
-        let tables: toml::Value = "k = [{ a = 1 }]".parse().unwrap();
+        let tables: toml::Value = toml::from_str("k = [{ a = 1 }]").unwrap();
         let err = render_config_leaf(tables.get("k").unwrap()).unwrap_err();
         assert!(format!("{err:#}").contains("nested value"), "{err:#}");
     }
@@ -1241,7 +1238,7 @@ mod tests {
     /// it, not a re-serialised TOML literal.
     #[test]
     fn a_scalar_renders_without_toml_quoting() {
-        let value: toml::Value = "s = \"impl\"\nb = true\nn = 30\n".parse().unwrap();
+        let value: toml::Value = toml::from_str("s = \"impl\"\nb = true\nn = 30\n").unwrap();
         assert_eq!(render_config_leaf(value.get("s").unwrap()).unwrap(), "impl");
         assert_eq!(render_config_leaf(value.get("b").unwrap()).unwrap(), "true");
         assert_eq!(render_config_leaf(value.get("n").unwrap()).unwrap(), "30");
