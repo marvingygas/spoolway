@@ -42,7 +42,7 @@ use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
     clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, pane_height,
     pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel, spool_frame,
-    table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
+    table, ticker, tint_available, unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -2749,11 +2749,25 @@ fn paint(
     // dispatcher up, while a step is still working; with nothing running the
     // board holds still, and a still board over a still queue is the truth
     // rather than something to animate over.
-    let version = version_label(crate::release::installed_newer().as_deref());
+    let installed = crate::release::installed_newer();
+    let published = published_newer(
+        repo.config.housekeeping.update_check,
+        std::env::var_os(crate::release::ENV_SKIP).is_some(),
+        crate::release::published_newer,
+    );
+    let version = version_label(installed.as_deref(), published.as_deref());
+    let available = available_label(installed.as_deref(), published.as_deref());
     let header = header_cells(phase, snapshot.finishing, version);
     let pane = pane_width();
     if snapshot.rows.is_empty() {
-        return paint_empty(&header.join(" · "), pane, phase, recent, name);
+        return paint_empty(
+            &header.join(" · "),
+            available.as_deref(),
+            pane,
+            phase,
+            recent,
+            name,
+        );
     }
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. The row is
@@ -2779,10 +2793,9 @@ fn paint(
         Some(n) => n > 0,
         None => logo_turns(&snapshot.rows),
     };
-    frame.push_str(&board_masthead(
-        &header.join(" · "),
-        pane,
-        spool_frame(running),
+    frame.push_str(&tint_available(
+        &board_masthead(&header.join(" · "), pane, spool_frame(running)),
+        available.as_deref(),
     ));
     frame.push('\n');
 
@@ -2915,6 +2928,7 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// The lockup holds frame 0: nothing on an empty board is running.
 fn paint_empty(
     header: &str,
+    available: Option<&str>,
     pane: usize,
     phase: Phase,
     recent: &VecDeque<RecentEvent>,
@@ -2927,7 +2941,7 @@ fn paint_empty(
     if !hosted {
         frame.push('\n');
     }
-    frame.push_str(&board_header(header, pane));
+    frame.push_str(&tint_available(&board_header(header, pane), available));
     // The rows between the header and the key line. Hosted, `boxed` gives
     // the body `height - 2` rows, the header one of them. On its own the
     // frame also spends the top margin above, the key line, and the row
@@ -4861,7 +4875,8 @@ fn push_recent(recent: &mut VecDeque<RecentEvent>, event: RecentEvent) {
 }
 
 /// The header's version cell: what this dispatcher is running, and a nudge to
-/// restart it when a newer `spoolway` has been installed underneath it.
+/// restart it when a newer `spoolway` has been installed underneath it, or
+/// else word that a newer one has been published.
 ///
 /// The version is the running process's own, compiled in — not the
 /// executable's on disk. An install swaps that file while a dispatcher goes on
@@ -4871,13 +4886,55 @@ fn push_recent(recent: &mut VecDeque<RecentEvent>, event: RecentEvent) {
 /// `installed` is what the `spoolway` on `PATH` reports, already filtered to a
 /// genuinely newer version by [`crate::release::installed_newer`] — so an
 /// equal, older, unparseable or missing executable arrives here as `None` and
-/// leaves the label off. Taken as an argument rather than read here so the
-/// wording is checked without a test standing up an executable on `PATH`.
-fn version_label(installed: Option<&str>) -> String {
+/// leaves the label off. `published` is [`published_newer`]'s answer, already
+/// filtered the same way and already gated on the check being wanted. Both are
+/// taken as arguments rather than read here so the wording is checked without
+/// a test standing up an executable on `PATH` or an npm cache.
+///
+/// The restart nudge wins over the published version whatever npm says: a
+/// newer binary on `PATH` is one restart from running, and naming a release
+/// beside it would read as a second thing to do. The published version is
+/// named with no command beside it, because the command to take it depends on
+/// how this binary was installed and the header is the same for every install.
+fn version_label(installed: Option<&str>, published: Option<&str>) -> String {
     let running = format!("v{}", crate::release::current());
-    match installed {
-        Some(_) => format!("{running} (restart to use latest installed version)"),
+    if installed.is_some() {
+        return format!("{running} (restart to use latest installed version)");
+    }
+    match available_label(installed, published) {
+        Some(available) => format!("{running} {available}"),
         None => running,
+    }
+}
+
+/// The part of [`version_label`]'s cell the header paints yellow: the
+/// bracketed published version, under the same rule that decides whether
+/// the cell carries it — so the two can never disagree about it. `None`
+/// whenever the cell has nothing to paint.
+fn available_label(installed: Option<&str>, published: Option<&str>) -> Option<String> {
+    match installed {
+        Some(_) => None,
+        None => published.map(|version| format!("({version} available)")),
+    }
+}
+
+/// A published version newer than this build, when this project and this
+/// machine want to hear about one.
+///
+/// `update_check` is `housekeeping.update_check` and `skipped` is whether
+/// [`crate::release::ENV_SKIP`] is set — the same two switches that silence
+/// the printed notice. Either one turned off means `read` is never called,
+/// so a board told to keep quiet does not start a cache reading, or the
+/// refresh child behind it, either. `read` is
+/// [`crate::release::published_newer`] on the board, and a stub in tests.
+fn published_newer(
+    update_check: bool,
+    skipped: bool,
+    read: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match update_check && !skipped {
+        true => read(),
+        false => None,
     }
 }
 
@@ -5506,14 +5563,86 @@ mod tests {
     fn the_version_cell_names_the_running_build_and_hints_only_at_a_newer_one() {
         let running = format!("v{}", crate::release::current());
 
-        assert_eq!(version_label(None), running);
+        assert_eq!(version_label(None, None), running);
+        assert_eq!(available_label(None, None), None);
         assert_eq!(
-            version_label(Some("99.0.0")),
+            version_label(Some("99.0.0"), None),
             format!("{running} (restart to use latest installed version)")
         );
         // What was installed is not printed: the header says what is running,
         // and a second version beside it would read as the running one.
-        assert!(!version_label(Some("99.0.0")).contains("99.0.0"));
+        assert!(!version_label(Some("99.0.0"), None).contains("99.0.0"));
+    }
+
+    /// A newer published version is named beside the running one, bracketed,
+    /// with no command in it — and the bracketed part is exactly what the
+    /// header paints.
+    #[test]
+    fn the_version_cell_names_a_newer_published_version_without_a_command() {
+        let running = format!("v{}", crate::release::current());
+
+        let cell = version_label(None, Some("99.0.0"));
+        assert_eq!(cell, format!("{running} (99.0.0 available)"));
+        assert!(!cell.contains("spoolway"), "{cell}");
+        assert_eq!(
+            available_label(None, Some("99.0.0")).as_deref(),
+            Some("(99.0.0 available)")
+        );
+    }
+
+    /// A newer binary on `PATH` wins over anything npm says: the cell carries
+    /// the restart hint alone, and nothing is left for the header to paint.
+    #[test]
+    fn the_restart_hint_wins_over_a_published_version() {
+        let running = format!("v{}", crate::release::current());
+
+        let cell = version_label(Some("98.0.0"), Some("99.0.0"));
+        assert_eq!(
+            cell,
+            format!("{running} (restart to use latest installed version)")
+        );
+        assert!(!cell.contains("99.0.0"), "{cell}");
+        assert_eq!(available_label(Some("98.0.0"), Some("99.0.0")), None);
+    }
+
+    /// `housekeeping.update_check = false` or `SPOOLWAY_SKIP_VERSION_CHECK`
+    /// leaves the published version off — and without even asking for it, so
+    /// a board told to keep quiet starts no reading behind the header.
+    #[test]
+    fn a_check_turned_off_never_asks_for_the_published_version() {
+        let never = || -> Option<String> { panic!("the published version was read") };
+        assert_eq!(published_newer(false, false, never), None);
+        assert_eq!(published_newer(true, true, never), None);
+        assert_eq!(published_newer(false, true, never), None);
+
+        assert_eq!(
+            published_newer(true, false, || Some("99.0.0".to_string())).as_deref(),
+            Some("99.0.0")
+        );
+    }
+
+    /// The notice is painted yellow in the laid-out header, at full strength
+    /// rather than inside the header's dim, and the header's visible text and
+    /// width are what they were before it was painted.
+    #[test]
+    fn the_available_notice_is_painted_yellow_in_the_masthead() {
+        let header = "dispatcher running · pid 4120 · v0.9.0 (0.10.0 available)";
+        let plain = board_masthead(header, 120, 0);
+        let painted = tint_available(&plain, Some("(0.10.0 available)"));
+
+        assert!(
+            painted.contains(&format!("{RESET}{AMBER}(0.10.0 available){RESET}{DIM}")),
+            "{painted:?}"
+        );
+        assert_eq!(strip_ansi(&painted), strip_ansi(&plain));
+        assert_eq!(tint_available(&plain, None), plain);
+
+        // The empty board's header row is painted the same way.
+        let row = tint_available(&board_header(header, 120), Some("(0.10.0 available)"));
+        assert!(
+            row.contains(&format!("{AMBER}(0.10.0 available){RESET}")),
+            "{row:?}"
+        );
     }
 
     /// An empty board is the greeting and nothing else: no rule, no slots

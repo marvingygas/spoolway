@@ -41,7 +41,9 @@
 //! asks what the `spoolway` on `PATH` is *now*, because an install swaps that
 //! file under a dispatcher that goes on running the code it started with. It
 //! opens nothing, reaches no network, and answers off a cache a background
-//! thread refills — the board asks it on every redraw.
+//! thread refills — the board asks it on every redraw. [`published_newer`] is
+//! [`newer`] behind the same kind of cache, for the board's header, which
+//! says when a newer release is out.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -602,23 +604,25 @@ const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// the life of the run, which would freeze the hint at whatever it last said.
 const PATH_CHECK_DEADLINE: Duration = Duration::from_secs(5);
 
-/// The last reading of the `spoolway` on `PATH`, and whether one is in flight.
+/// The last reading taken through [`cached_reading`], and whether one is in
+/// flight — of the `spoolway` on `PATH`, or of the published version.
 #[derive(Debug, Default)]
-struct PathVersion {
-    /// What the executable reported, or `None` where the reading failed —
-    /// no `spoolway` on `PATH`, a non-zero exit, or the deadline passing.
+struct Reading {
+    /// What the reader answered, or `None` where the reading failed or had
+    /// nothing to say — no `spoolway` on `PATH`, a non-zero exit, nothing
+    /// newer published, or the deadline passing.
     version: Option<String>,
     /// When the last reading finished, either way. `None` until one has.
     read_at: Option<Instant>,
     /// A reading is running right now, so a second call does not start a
-    /// second child behind it.
+    /// second one behind it.
     reading: bool,
 }
 
-static PATH_VERSION: OnceLock<Mutex<PathVersion>> = OnceLock::new();
+static PATH_VERSION: OnceLock<Mutex<Reading>> = OnceLock::new();
 
-fn path_version_cell() -> &'static Mutex<PathVersion> {
-    PATH_VERSION.get_or_init(|| Mutex::new(PathVersion::default()))
+fn path_version_cell() -> &'static Mutex<Reading> {
+    PATH_VERSION.get_or_init(|| Mutex::new(Reading::default()))
 }
 
 /// The version the `spoolway` on `PATH` reports, when it is newer than the one
@@ -635,7 +639,7 @@ fn path_version_cell() -> &'static Mutex<PathVersion> {
 /// answer comes off a cache that a background thread refills, so the first
 /// call of a run says `None` and a later one carries the reading.
 pub fn installed_newer() -> Option<String> {
-    cached_path_version(
+    cached_reading(
         path_version_cell(),
         path_reported_version,
         PATH_CHECK_INTERVAL,
@@ -644,15 +648,59 @@ pub fn installed_newer() -> Option<String> {
     .filter(|version| is_newer(version, current()))
 }
 
-/// The cache behind [`installed_newer`], with its state, its reader and its
-/// two durations passed in.
+/// How long a reading of the published version is trusted before another is
+/// taken.
+///
+/// The cache file it reads is refreshed at most once per [`MAX_AGE`], so
+/// reading it more often would only read the same answer again; a refresh
+/// that has just landed waits at most a minute before the board shows it.
+/// What it buys is the same as [`PATH_CHECK_INTERVAL`]'s: a board redrawing
+/// once a second reads the file, and may spawn a refresh, once a minute.
+const PUBLISHED_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long [`newer`] gets before its reading is given up on. It reads one
+/// small file, so this only ever matters for a filesystem that has stopped
+/// answering — and then, as with [`PATH_CHECK_DEADLINE`], so the stalled
+/// reading hands the slot back rather than freezing the notice.
+const PUBLISHED_CHECK_DEADLINE: Duration = Duration::from_secs(5);
+
+static PUBLISHED_VERSION: OnceLock<Mutex<Reading>> = OnceLock::new();
+
+fn published_version_cell() -> &'static Mutex<Reading> {
+    PUBLISHED_VERSION.get_or_init(|| Mutex::new(Reading::default()))
+}
+
+/// [`newer`], answered off memory: the published version newer than this
+/// binary, as of the last reading.
+///
+/// For the board, which asks on every redraw. [`newer`] reads the cache file
+/// and may spawn a refresh child, neither of which belongs on a path that
+/// runs once a second, so the reading is taken on a background thread once
+/// per [`PUBLISHED_CHECK_INTERVAL`] and every call in between answers from
+/// what it left. The first call of a run therefore says `None`, the same as
+/// [`installed_newer`]'s.
+///
+/// Gates nothing itself: whether the notice is wanted at all —
+/// `housekeeping.update_check` and [`ENV_SKIP`] — is the caller's to decide,
+/// before it calls, so a check that is turned off never starts a reading.
+pub fn published_newer() -> Option<String> {
+    cached_reading(
+        published_version_cell(),
+        newer,
+        PUBLISHED_CHECK_INTERVAL,
+        PUBLISHED_CHECK_DEADLINE,
+    )
+}
+
+/// The cache behind [`installed_newer`] and [`published_newer`], with its
+/// state, its reader and its two durations passed in.
 ///
 /// Split out so a test can drive it with a stub reader and durations short
 /// enough to watch — including a reader that never answers, which proves the
 /// deadline rather than hanging the test. `read` is a plain function pointer
 /// because the reading is handed to a thread that outlives this call.
-fn cached_path_version(
-    cell: &'static Mutex<PathVersion>,
+fn cached_reading(
+    cell: &'static Mutex<Reading>,
     read: fn() -> Option<String>,
     interval: Duration,
     deadline: Duration,
@@ -1213,10 +1261,10 @@ mod tests {
     /// once per redraw.
     #[test]
     fn a_path_reading_lands_behind_the_call_and_is_taken_once_per_interval() {
-        static CELL: OnceLock<Mutex<PathVersion>> = OnceLock::new();
-        let cell = CELL.get_or_init(|| Mutex::new(PathVersion::default()));
+        static CELL: OnceLock<Mutex<Reading>> = OnceLock::new();
+        let cell = CELL.get_or_init(|| Mutex::new(Reading::default()));
         let ask = || {
-            cached_path_version(
+            cached_reading(
                 cell,
                 stub_reader,
                 Duration::from_secs(600),
@@ -1242,11 +1290,11 @@ mod tests {
     /// the next interval can try again rather than waiting on it forever.
     #[test]
     fn a_stalled_executable_loses_its_turn_rather_than_holding_the_slot() {
-        static CELL: OnceLock<Mutex<PathVersion>> = OnceLock::new();
-        let cell = CELL.get_or_init(|| Mutex::new(PathVersion::default()));
+        static CELL: OnceLock<Mutex<Reading>> = OnceLock::new();
+        let cell = CELL.get_or_init(|| Mutex::new(Reading::default()));
 
         let started = Instant::now();
-        let answer = cached_path_version(
+        let answer = cached_reading(
             cell,
             stalled_reader,
             Duration::from_secs(600),
