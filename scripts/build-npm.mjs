@@ -214,13 +214,11 @@ function report() {
 
   for (const target of built) {
     const binary = path.join(distDir, target.pkg, "bin", binaryName(target));
-    const { size } = fs.statSync(binary);
-    const sum = createHash("sha256")
-      .update(fs.readFileSync(binary))
-      .digest("hex")
-      .slice(0, 12);
+    // Read once, so the size and the checksum describe the same bytes.
+    const bytes = fs.readFileSync(binary);
+    const sum = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
     console.log(
-      `  built    ${scope}/${target.pkg.padEnd(15)} ${mb(size)}  ${sum}`,
+      `  built    ${scope}/${target.pkg.padEnd(15)} ${mb(bytes.length)}  ${sum}`,
     );
   }
 
