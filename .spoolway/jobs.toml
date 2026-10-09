@@ -1,0 +1,7 @@
+# Scheduled jobs for everyone running a dispatcher on this project.
+# Format: `spoolway jobs contract`.
+
+[jobs.dependabot-review]
+schedule = "0 */2 * * *"
+pipeline = "dependabot"
+routine = "dependabot"
