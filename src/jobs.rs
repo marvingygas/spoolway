@@ -1382,7 +1382,7 @@ mod tests {
     fn a_window_that_fell_between_two_passes_still_fires() {
         use chrono::Timelike;
         let (repo, _root_guard) = fixture("jobs-missed-window");
-        let now = Local::now().naive_local();
+        let now = settled_now();
         let due = now - Duration::minutes(30);
         scheduled_job(
             &repo,
@@ -1433,12 +1433,29 @@ mod tests {
         assert!(actions.is_empty(), "{actions:?}");
     }
 
+    /// The local time, read where the minute will not turn over before the
+    /// test's own `fire` reads the clock again.
+    ///
+    /// These tests compare the minute they read with the minute `fire` reads a
+    /// moment later. Read at 19:04:59, the two land a minute apart and the test
+    /// fails on nothing but timing, so the last few seconds of a minute are
+    /// waited out first.
+    fn settled_now() -> chrono::NaiveDateTime {
+        use chrono::Timelike;
+        let now = Local::now();
+        if now.second() >= 55 {
+            let left = 60 - u64::from(now.second());
+            std::thread::sleep(std::time::Duration::from_millis(left * 1000 + 100));
+        }
+        Local::now().naive_local()
+    }
+
     /// A job's schedule at a single minute `ago` minutes back, as a cron
     /// expression, with the job's saved `checked_minute` set `looked` minutes
     /// back — the last time any dispatcher pass looked at it.
     fn job_due_between(repo: &Repo, ago: i64, looked: i64) {
         use chrono::Timelike;
-        let now = Local::now().naive_local();
+        let now = settled_now();
         let due = now - Duration::minutes(ago);
         scheduled_job(
             repo,
