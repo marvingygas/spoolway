@@ -10247,7 +10247,10 @@ mod tests {
                 .map(|n| {
                     let (repo, pipelines, barrier) = (&repo, &pipelines, &barrier);
                     scope.spawn(move || {
-                        let text = task_text(&format!("distinct{n}"), "group: g\n", BODY);
+                        // A group of its own each: a group is one chain, so six
+                        // roots in one group would be refused for that instead.
+                        let text =
+                            task_text(&format!("distinct{n}"), &format!("group: g{n}\n"), BODY);
                         let submitted = [(format!("distinct{n}.md"), text)];
                         barrier.wait();
                         queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted)
