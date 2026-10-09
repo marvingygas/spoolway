@@ -69,24 +69,41 @@ reading the file whole.
    group costs an extra `last:` run. A split group is named `<plan-slug>-<part>`, `<part>` a
    short word for what it holds, never a number.
 
-   Give `1 group (Recommended)` its own lettered section first, always, drawing the one line
-   the plan stays as. Give each split worth offering its own lettered section after it, each
-   drawing this layout, every group its own header line and its own sentence beneath it, one
-   blank line between groups, in dependency order:
+   Settle on a recommended group count first, leaning towards fewer groups, then put **that
+   count and up to three below it** on the ballot, floored at 1 — a recommendation of 4 names
+   1, 2, 3 and 4; a recommendation of 2 names 1 and 2. Every smaller count merges
+   neighbouring groups of the larger split and never makes a different cut, so no count cuts
+   the plan anywhere the largest one does not. Open with the line that names every count —
+   `Split <plan-slug> into groups: 1, 2 or 3` — then give every count its own lettered
+   section, largest first, the recommended one marked `(Recommended)`, and say that the
+   person answers with a letter. When the skill judges the best count to be 1, skip the
+   ballot: say `Keeping one group.` and go straight on, with every task in one group.
+
+   Each section draws this layout. Groups are numbered from 1 in dependency order, with one
+   blank line between them:
 
    ```
-   <group-id>                    base  <branch>
-      One sentence on what the group holds.
+   1  <group-id>                 base  <branch>
+      One or two plain sentences on what the
+      group holds.
+      holds    <subject>, <subject>
+      touches  <area>, <area>
 
-   <group-id>               after <group-id>
-      One sentence on what the group holds.
+   2  <group-id>                 after <group-id>
+      One or two plain sentences on what the
+      group holds.
+      holds    <subject>
+      touches  <area>
    ```
 
    A group that stacks on no other carries a `base` line — the branch from step 1, unless the
    plan argues another. A group stacked on another carries `after <group-id>` instead, never a
-   `base` line of its own. Open with `Split this into groups?` and say that the person answers
-   with a letter. When the skill sees no split worth making, skip the ballot: say `Keeping one
-   group.` and go straight on, with every task in one group.
+   `base` line of its own. Line the `base` or `after` part up in one column with spaces, and
+   wrap the sentences under each group at around 48 characters, because a narrow terminal is
+   what reads them. `holds` names the subjects in the group, and `touches` names the areas of
+   code it changes, so a person can see why no two groups share a file. Draw no sizes and no
+   pipelines here. The one-group section draws the same layout, with every subject and every
+   area under its single group.
 
    **Print the ballot and end the turn there**, the same way the task ballot below does. The
    answer arrives as the person's next prompt.
