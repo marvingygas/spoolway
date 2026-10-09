@@ -110,6 +110,117 @@ pub fn remove(text: &str, parts: &[&str]) -> Result<String> {
     Ok(doc.to_string())
 }
 
+/// Carry the keys at `paths` from `old` into `new`, each with the comment
+/// standing above it.
+///
+/// For the one rewrite that starts from the struct, `spoolway sync`: a struct
+/// holds only what this binary knows, so a key it does not know — a typo, or
+/// a setting a newer binary added — is not in what it renders. Every comment
+/// in this file is spoolway's, but a comment above a key spoolway has never
+/// heard of is the only explanation of it there is, so it travels with the
+/// key. The key lands at the end of its table.
+///
+/// A path under `pricing`, the old spelling of `models`, lands under `models`,
+/// because that is the only spelling the rewrite writes.
+///
+/// A path whose parent table is not in `new` is skipped: its parent was
+/// itself dropped, a retired agent profile say, and a key with no table to
+/// sit in has nowhere to go. [`compare`] then lists it as dropped.
+///
+/// Returns the rewritten text and the paths, as they now stand in it, that
+/// were actually carried over — so a caller reports what it kept, not what it
+/// was asked to keep.
+pub fn keep(old: &str, new: &str, paths: &[Vec<String>]) -> Result<(String, Vec<Vec<String>>)> {
+    let old: DocumentMut = old.parse().context("this file is not valid TOML")?;
+    let mut new: DocumentMut = new
+        .parse()
+        .context("the rewritten config is not valid TOML")?;
+
+    let mut kept = Vec::new();
+    'paths: for path in paths {
+        let Some((leaf, parents)) = path.split_last() else {
+            continue;
+        };
+        let mut from: &dyn toml_edit::TableLike = old.as_table();
+        let mut found = true;
+        for part in parents {
+            match from.get(part).and_then(Item::as_table_like) {
+                Some(next) => from = next,
+                None => {
+                    found = false;
+                    break;
+                }
+            }
+        }
+        let (true, Some(item), Some(key)) = (found, from.get(leaf), from.key(leaf)) else {
+            continue;
+        };
+        let mut into: &mut dyn toml_edit::TableLike = new.as_table_mut();
+        let mut landed: Vec<String> = parents.to_vec();
+        if let Some(first) = landed.first_mut()
+            && first == "pricing"
+        {
+            *first = "models".to_string();
+        }
+        for part in &landed {
+            let Some(next) = into.get_mut(part).and_then(Item::as_table_like_mut) else {
+                continue 'paths;
+            };
+            into = next;
+        }
+        let prefix = key.leaf_decor().prefix().cloned();
+        let mut carried = item.clone();
+        unpositioned(&mut carried);
+        into.insert(leaf, carried);
+        if let (Some(prefix), Some(mut key)) = (prefix, into.key_mut(leaf)) {
+            key.leaf_decor_mut().set_prefix(prefix);
+        }
+        landed.push(leaf.clone());
+        kept.push(landed);
+    }
+    Ok((new.to_string(), kept))
+}
+
+/// Forget where a table stood in the document it was read from.
+///
+/// `toml_edit` writes tables in order of their position, and a parsed table
+/// remembers its position in the *old* file. Left alone, a carried table lands
+/// wherever that number happens to fall among the rendered tables, which
+/// depends on the file `sync` is replacing — so the next sync, reading the new
+/// file, would place it somewhere else and rewrite the file again. With none,
+/// `toml_edit` gives it the position of the table it walks just before it.
+/// `keep` appends the carried table to its parent, so that is the last table
+/// already in the parent, or the parent itself: a carried `[dispatch.future]`
+/// follows `[dispatch]`, and a carried top-level table goes last. Either way it
+/// is the same place on every sync.
+fn unpositioned(item: &mut Item) {
+    match item {
+        Item::Table(table) => {
+            table.set_position(None);
+            for (_, child) in table.iter_mut() {
+                unpositioned(child);
+            }
+        }
+        Item::ArrayOfTables(tables) => {
+            for table in tables.iter_mut() {
+                table.set_position(None);
+                for (_, child) in table.iter_mut() {
+                    unpositioned(child);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The dotted path of every setting in `text`, as [`compare`] counts them.
+pub fn leaf_paths(text: &str) -> Result<Vec<String>> {
+    let doc: DocumentMut = text.parse().context("this file is not valid TOML")?;
+    let mut leaves = Vec::new();
+    leaves_of_doc(doc.as_table(), &mut Vec::new(), &mut leaves);
+    Ok(leaves.iter().map(|path| path.join(".")).collect())
+}
+
 /// What rewriting a config file did to it, key by key.
 ///
 /// A rewrite is one blunt act — the whole file, from the struct — so what it

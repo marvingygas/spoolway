@@ -782,6 +782,7 @@ fn config_checks(
             Err(err.context(Config::path_in(&repo.root).display().to_string())),
         ));
     }
+    findings.extend(unknown_key_notes(&repo.checkout));
     findings.extend(config_value_checks(config));
     if let Some(note) = current_price_table_age_note(config.housekeeping.price_max_age_days) {
         findings.push(Finding::Note(note));
@@ -1131,6 +1132,33 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
         }
     }
     findings
+}
+
+/// One note naming every key the checkout's config holds that this binary
+/// does not know.
+///
+/// Read off the raw file for the same reason [`worktree_root_note`] is: the
+/// loaded [`Config`] has already forgotten them. A newer binary's key and a
+/// typo look the same from here, so the note says both and leaves the choice
+/// to the person. Nothing is wrong enough to fail a check — the file loads
+/// and every key is kept — which is why this is a note and not a failure.
+fn unknown_key_notes(checkout: &Path) -> Vec<Finding> {
+    let Ok(raw) = std::fs::read_to_string(Config::path_in(checkout)) else {
+        return Vec::new();
+    };
+    let names: Vec<String> = crate::config::unknown_keys(&raw)
+        .iter()
+        .map(|path| path.join("."))
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    vec![Finding::Note(format!(
+        "this checkout's config holds {} key(s) this spoolway does not know: {} — they are \
+         kept and otherwise ignored; a newer spoolway may read them, and if not they are typos",
+        names.len(),
+        names.join(", "),
+    ))]
 }
 
 /// Retired: the guard this used to size — how many times a lane may be

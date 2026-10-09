@@ -1019,7 +1019,7 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
     // above: this fails loudly rather than recording a quiet
     // `Outcome::Blocked` a plain `sync` or `sync --dry-run` never prints.
     // `load_dropping_retired_keys`'s own error already names the path —
-    // `strip_hard_retired_keys` only touches the raw text through
+    // `strip_refused_keys` only touches the raw text through
     // `crate::confdoc::remove` when a lenient, untyped parse finds the key
     // actually there, so invalid TOML reaches the named `toml::from_str`
     // unchanged and its error names the file same as any other parse
@@ -1076,7 +1076,12 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         }
     }
 
-    let rewritten = current.render()?;
+    // A key this binary does not know is not in what `current` renders, so it
+    // is carried over from the file with its comment instead — a typo is the
+    // person's to fix and a newer binary's key is that binary's to read, and
+    // neither is `sync`'s to delete. `doctor` and every load name them.
+    let unknown = crate::config::unknown_keys(&text);
+    let (rewritten, kept) = crate::confdoc::keep(&text, &current.render()?, &unknown)?;
 
     // Its own work, checked. A rewrite may not change a single value — every one
     // of them came out of this file a moment ago — so a rendering that no longer
@@ -1103,6 +1108,25 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
     };
 
     let listed = |keys: &[String]| keys.join(", ");
+    // What `keep` carried, not what it was asked to: a key whose table the
+    // rewrite no longer has is gone, and `dropped` below says so.
+    if !kept.is_empty() {
+        let names: Vec<String> = kept.iter().map(|path| path.join(".")).collect();
+        outcomes.push(Outcome::migrated(
+            &shown,
+            format!(
+                "kept {} setting(s) this spoolway does not know, with their comments: {} — \
+                 a newer spoolway may read them, otherwise they are typos",
+                names.len(),
+                listed(&names)
+            ),
+            format!(
+                "kept {} unknown setting(s): {}",
+                names.len(),
+                listed(&names)
+            ),
+        ));
+    }
     if !refresh.added.is_empty() {
         outcomes.push(Outcome::wrote(
             &shown,
@@ -1113,13 +1137,45 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
             ),
         ));
     }
-    if !refresh.dropped.is_empty() {
-        outcomes.push(Outcome::wrote(
+    // `compare` lists every path that is no longer there, and a path that
+    // moved is not one that was dropped: `cache_write` is written back as
+    // `cache_write_5m`, and a `[pricing]` row as a `[models]` row. Such a key
+    // keeps its table, so a retired key or one whose table went with it are
+    // the only ones that were removed — reporting a renamed price as deleted
+    // would tell a person their prices are gone.
+    let now = crate::confdoc::leaf_paths(&rewritten)?;
+    let removed: Vec<String> = refresh
+        .dropped
+        .iter()
+        .filter(|key| {
+            let key = key
+                .strip_prefix("pricing.")
+                .map_or_else(|| key.to_string(), |rest| format!("models.{rest}"));
+            let top = key.split('.').next().unwrap_or_default();
+            let table = key.rsplit_once('.').map_or("", |(table, _)| table);
+            crate::config::is_retired_table(top)
+                || crate::config::is_retired_key(&key)
+                || !now
+                    .iter()
+                    .any(|path| path.starts_with(&format!("{table}.")))
+        })
+        .cloned()
+        .collect();
+    if !removed.is_empty() {
+        // A `Migrated`, not a `Wrote`: a `Wrote`'s detail is never printed, and
+        // a rewrite that removes a setting without saying which one is the
+        // "did it eat my config?" the report exists to answer.
+        outcomes.push(Outcome::migrated(
             &shown,
             format!(
                 "{} retired setting(s) dropped: {}",
-                refresh.dropped.len(),
-                listed(&refresh.dropped)
+                removed.len(),
+                listed(&removed)
+            ),
+            format!(
+                "dropped {} retired setting(s): {}",
+                removed.len(),
+                listed(&removed)
             ),
         ));
         // `on_fail` never drops on its own — it is the one field
@@ -2899,7 +2955,123 @@ mod tests {
         assert!(
             outcome_lines(&outcomes)
                 .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("dispatch.interval")),
+                .any(|line| line.starts_with("migrated") && line.contains("dispatch.interval")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
+    /// A key this binary does not know — one typo'd inside a table, a whole
+    /// misspelt table, and a model row's own — survives a full re-render, each
+    /// with the comment written above it, while a retired top-level table is
+    /// still dropped. The report names what it kept.
+    #[test]
+    fn an_unknown_key_survives_a_sync() {
+        let (repo, _root_guard) = fixture("config-unknown-kept");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "# my own explanation\nfuture_key = 1\n\n\
+             [dispatch]\nbackend = \"headless\"\n# quiet, spelt wrong\nlane_quite = \"5m\"\n\n\
+             # a table I misspelt\n[unatended]\nmax_cost = 3\n\n\
+             [models.\"qwen3.5\"]\nslots = 2\nflavour = \"x\"\n\n\
+             [sandbox]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(after.contains("future_key = 1"), "{after}");
+        assert!(
+            after.contains("# my own explanation\nfuture_key"),
+            "{after}"
+        );
+        assert!(
+            after.contains("# quiet, spelt wrong\nlane_quite = \"5m\""),
+            "{after}"
+        );
+        assert!(
+            after.contains("# a table I misspelt\n[unatended]"),
+            "{after}"
+        );
+        assert!(after.contains("flavour = \"x\""), "{after}");
+        assert!(!after.contains("[sandbox"), "{after}");
+        assert!(
+            crate::config::Config::load(&repo.root).is_ok(),
+            "the rewritten file must still load"
+        );
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines.iter().any(|line| line.contains("kept 4")
+                && line.contains("dispatch.lane_quite")
+                && line.contains("unatended")
+                && line.contains("models.qwen3.5.flavour")),
+            "{lines:?}"
+        );
+    }
+
+    /// An unknown key in an old-spelling `[pricing."<glob>"]` row follows its
+    /// row to `[models]` and is reported as kept; the row's known keys, which
+    /// moved, and an aliased `cache_write` are not reported as dropped.
+    #[test]
+    fn a_pricing_row_keeps_its_unknown_key_and_renamed_keys_are_not_called_dropped() {
+        let (repo, _root_guard) = fixture("config-pricing-unknown");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "[pricing.\"qwen3\"]\nslots = 2\n# explain\nflavour = 1\n\n\
+             [pricing.\"m\"]\ncache_write = 2.0\n",
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(after.contains("# explain\nflavour = 1"), "{after}");
+        assert!(after.contains("cache_write_5m"), "{after}");
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("kept 1") && line.contains("models.qwen3.flavour")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("dropped")),
+            "a moved or renamed key is not a dropped one: {lines:?}"
+        );
+    }
+
+    /// A second sync over a file holding unknown tables and keys changes
+    /// nothing: a carried table's place must not depend on the file it came
+    /// from, or every sync would move it again.
+    #[test]
+    fn a_second_sync_over_unknown_tables_changes_nothing() {
+        let (repo, _root_guard) = fixture("config-unknown-stable");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "[dispatch]\nbackend = \"headless\"\n\n\
+             [pricing.\"qwen3\"]\nslots = 2\nflavour = 1\n\n\
+             [pricing.\"m\"]\ncache_write = 2.0\n\n\
+             [sandbox]\nenabled = true\n\n[unatended]\nx = 1\n",
+        )
+        .unwrap();
+
+        config(&repo, &args(), &mut Vec::new()).unwrap();
+        let once = std::fs::read_to_string(&path).unwrap();
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let twice = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(once, twice, "a second sync moved something");
+        assert!(
+            !outcome_lines(&outcomes)
+                .iter()
+                .any(|line| line.starts_with("wrote")),
             "{:?}",
             outcome_lines(&outcomes)
         );
@@ -2957,7 +3129,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("issue_tracking.on_fail")),
+                .any(|line| line.starts_with("migrated") && line.contains("issue_tracking.on_fail")),
             "{lines:?}"
         );
         assert!(
@@ -3002,7 +3174,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("dispatch.worktree_root")),
+                .any(|line| line.starts_with("migrated") && line.contains("dispatch.worktree_root")),
             "{lines:?}"
         );
 
@@ -3148,16 +3320,17 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("dispatch.worktree_root")),
+                .any(|line| line.starts_with("migrated") && line.contains("dispatch.worktree_root")),
             "{lines:?}"
         );
         // The config never named `key_in_names` either, which earns its own
-        // note; only a note about the directory is ruled out here.
+        // note, and the dropped-key line names `worktree_root`; only the note
+        // about the directory is ruled out here.
         assert!(
             migration_notes(&outcomes)
                 .values()
                 .flatten()
-                .all(|(report, _)| !report.contains("worktree_root")),
+                .all(|(report, _)| !report.contains("its worktrees were cut")),
             "a blank value must not earn the dedicated directory note"
         );
     }

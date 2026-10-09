@@ -598,8 +598,9 @@ input = 0.50
 output = 2.50
 ```
 
-A sub-table with any other name is refused when the config loads, and so is a second tier.
-Set a tier rate with `spoolway config set models.'<glob>'.above_100k_tokens.input <usd>`. See
+A sub-table with any other name loads with a note and is left out, as described in [Unknown
+keys](#unknown-keys). A second tier on the same model is refused when the config loads. Set a
+tier rate with `spoolway config set models.'<glob>'.above_100k_tokens.input <usd>`. See
 [Pricing](cost.md#pricing).
 
 The window here is what spoolway believes, not what the server reports. Keep it in step with
@@ -607,6 +608,29 @@ the server yourself.
 
 `spoolway doctor` notes a row with `slots` but no `local`, a row no pipeline step uses, and a
 row that still names `cache_ttl` or `session_reuse_idle`.
+
+## Unknown keys
+
+A key this spoolway does not know never stops the file loading. That covers a typo, a key a
+newer spoolway added, and a misspelt table name such as `[unatended]` or `[model.qwen3]`. This
+holds in every table, `[agents.*]` and `[models."<glob>"]` rows included. A table inside a
+`[models]` row whose name is not a price tier, such as `above_100K_token`, is an unknown key
+too. It is left out, so that model is priced at its base rate until the name is fixed.
+
+Each unknown key loads with a note that names it, for example ``note: `dispatch.lane_quite` in
+<file> is not a setting this spoolway knows``, and `spoolway doctor` lists them all in one
+row. The key is otherwise ignored, so a typo does nothing until you fix it.
+
+The file keeps them. `spoolway config set` edits one key in place. `spoolway sync` rewrites
+the whole file, and carries every unknown key and unknown table over with the comment above
+it. It prints every setting it removes. Those are retired keys (see
+[Retired keys](#retired-keys)) and keys inside a table that was itself retired. A key that is
+only renamed, such as `cache_write` or a `[pricing]` row, is written under its new name and
+not listed.
+
+A key from a newer spoolway is read by that binary only. A spoolway that includes this
+handling still loads the file, names the key, and ignores it. 0.8.0 and 0.7.x do not: they
+refuse a key they do not know inside a table.
 
 ## Retired keys
 
@@ -620,9 +644,8 @@ leave a retired key in the file. `spoolway sync` drops it. These keys load with 
 `[agents.<profile>]` naming a kind spoolway no longer knows how to launch. Only the notes for
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
-rewritten or dropped on the next save. The rest of the table below are dropped with nothing
-printed.
-`spoolway sync` also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
+rewritten or dropped on the next save. The rest of the table below load with no note.
+`spoolway sync` lists every setting it drops. It also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
 
 | Key | Replaced by |
 |---|---|

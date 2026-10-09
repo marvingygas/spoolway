@@ -144,8 +144,9 @@ cache_write_5m = 0.625
 cache_write_1h = 1.00
 ```
 
-A sub-table whose name does not read as `above_<N>k_tokens` is refused when the config loads,
-and so is a second tier on the same model. A tier rate left out is unset, as on the base entry,
+A sub-table whose name does not read as `above_<N>k_tokens` loads with a note and is left out,
+so the model is priced at its base rate. A second tier on the same model is refused when the
+config loads. A tier rate left out is unset, as on the base entry,
 and a missing `cache_write_1h` falls back to the tier's `cache_write_5m`. `spoolway models`
 shows a tier's rates on an indented row under its model.
 

@@ -1378,7 +1378,9 @@ that refused a file removes that checkout's line. `spoolway init` writes the sam
 freshly scaffolded project, and none when it kept an existing file or joined a workspace.
 
 The report lists refused files first. It then lists each file written or removed, and a line
-for each replaced key block and each value `sync` set on its own.
+for each replaced key block, each value `sync` set on its own, each group of unknown settings
+it kept, and each group of retired settings it dropped. See
+[Unknown keys](configuration.md#unknown-keys).
 
 Every other command that needs a project reads that stamp back. When the stamp is missing or
 unreadable, the command prints one line on stderr and then runs. It does the same when the
@@ -1434,6 +1436,8 @@ By default it prints only failures, notes and a closing line. A failing run exit
 whether the project runs in repo mode or home mode. A note names each workspace under
 `~/.spoolway/` that lists no checkout, to be removed by hand. See
 [Home mode](concepts.md#home-mode).
+A note names every key in `config.toml` that this spoolway does not know. See
+[Unknown keys](configuration.md#unknown-keys).
 
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it
