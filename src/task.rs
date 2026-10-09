@@ -199,16 +199,24 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_from: Option<String>,
 
-    /// Whether [`Self::parked_from`] names a step `escalate_clock` gave up
-    /// on, rather than a person's own keypress or Escape.
+    /// Whether the dispatcher gave up on a lane, rather than a person
+    /// stopping it. The mark has two meanings.
     ///
-    /// The one fact `prepare_boot` cannot otherwise recover once a lane resumes:
+    /// Beside [`Self::parked_from`], it says that step is one `escalate_clock`
+    /// gave up on, not a person's own keypress or Escape. It is the one fact
+    /// `prepare_boot` cannot otherwise recover once a lane resumes:
     /// `parked_from` alone reads the same for all three gestures that set it.
     /// A person's interrupt genuinely changed nothing, and the resumed lane
     /// is told so by `park_prompt`; an escalation reminded the lane three
     /// times, tore its pane down and wrote a `## Status Log` line saying why
-    /// — telling it nothing changed would be false. Spent alongside
-    /// `parked_from`, in the same places and at the same moment.
+    /// — telling it nothing changed would be false. This meaning is spent
+    /// with `parked_from`, in the same places and at the same moment.
+    ///
+    /// Beside [`Self::blocked_from`], with no `parked_from`, it says an
+    /// unattended run stopped the lane and sent the task to `blocked`, so the
+    /// board's RECENT line can tell a stopped lane from one dead at launch.
+    /// That meaning is cleared by `Task::set_stage` when the task leaves
+    /// `blocked`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escalated: bool,
 
@@ -1015,6 +1023,13 @@ impl Task {
             .entry(route_key(&from, stage))
             .or_insert(0) += 1;
         *self.front.arrivals.entry(stage.to_string()).or_insert(0) += 1;
+        // `Dispatcher::tear_down_and_escalate` marks a task it sent to
+        // `blocked` as `escalated`. The mark describes that one stop, so it
+        // ends when the task leaves `blocked`; left set, the next block on
+        // the task would read on the board as another escalation.
+        if from == crate::pipeline::BLOCKED {
+            self.front.escalated = false;
+        }
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
         self.front.launched_at = None;

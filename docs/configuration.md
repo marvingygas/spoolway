@@ -208,7 +208,7 @@ auto_commit = true
 | `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
-| `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. |
+| `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. Past it the task is escalated. |
 | `keep_finished_lanes` | `true` | Whether a step's pane, with its agent left running, is kept until its task is done. Set to `false` and each new agent step opens where the spiral puts it, then the task's most recent kept pane is closed, so a task shows one agent pane at a time. Panes already kept when you turn it off stay open until their task is done. Only the most recent one closes with each new step. |
 
 `priority`, `lane_child_ceiling` and `keep_finished_lanes` are not written to a fresh
@@ -550,7 +550,7 @@ A profile says which agent binary runs and under what limits. Three ship: `pi`, 
 | `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. |
 | `concurrency` | unset | Most lanes of this profile at once. Absent means no cap. `config set` writes it; setting it to `0` removes it. |
 | `session_reuse_ctx` | `20` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
-| `session_blocked_ctx` | `40` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task sent to `blocked`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
+| `session_blocked_ctx` | `40` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task escalated: to `blocked` in an unattended run, otherwise to `paused`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
 | `permission_mode` | the kind's first mode | The permission mode the lane starts with. `claude` ships `auto`, `codex` ships `never`. `pi` has no mode and no key. Blank is refused. |
 
 `spoolway doctor` warns when `session_blocked_ctx` is set but the profile's steps run a model
