@@ -582,6 +582,11 @@ unless it is its workspace's only tab.
 A task's tab is renamed to the task's slug, and stays that way across a dispatcher restart. Its
 panes then show only the step.
 
+Spoolway types at most 512 bytes into a pane in one `herdr pane run`. Longer text is refused with
+an error naming the pane and the byte count, and nothing is typed. A paned command step's pane
+is typed one short line that runs the step's script file. See [Background and
+headless](pipelines.md#background-and-headless).
+
 ### Finished lanes keep their pane
 
 When a step finishes, its agent is left running, idle, in its own pane. Nothing is typed into it

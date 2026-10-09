@@ -321,6 +321,11 @@ step option is separate from the internal test-only dispatcher backend. A pane c
 moment its exit code is judged, on a pass and on a failure alike. Only a timed-out run's pane
 stands, until the task reaches the step again or is cleaned up.
 
+A paned step's script is written to `<task> · <step>.sh` beside the log, readable by you alone,
+because it holds the step's environment. The pane is typed one short line that runs that file.
+The `run:` line itself is never typed. Spoolway types nothing over 512 bytes into any pane and
+refuses longer text with an error naming the pane and the byte count.
+
 ### `last:` — a step the chain runs once
 
 The top task of a chain carries every change beneath it, so a suite the whole stack must pass
