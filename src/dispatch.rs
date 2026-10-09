@@ -2085,7 +2085,14 @@ impl<'a> Dispatcher<'a> {
                     }
                     _ => {
                         task.set_stage(&next, walked_past.as_deref());
-                        self.persist(task)?;
+                        // A dropped write means this pass's copy is stale,
+                        // whether the file was moved away (unqueued
+                        // mid-pass) or rewritten by another writer. Either
+                        // way the task must not go on to run `next` from
+                        // that copy.
+                        if !self.persist(task)? {
+                            return Ok(Routed::NextTask);
+                        }
                         // Round the inner loop rather than the outer
                         // one, so the command runs on the pass this
                         // task's dependencies came in rather than the
@@ -4025,6 +4032,14 @@ impl<'a> Dispatcher<'a> {
                 }
             }
 
+            // A task whose file was moved away since this pass read it (see
+            // [`task_file_moved_away`]) is not started: cutting its worktree
+            // and booting its lane would run work for a task that
+            // `spoolway queue unqueue` just took off the queue.
+            if task_file_moved_away(&tasks[candidate.task_index], &self.file_seen) {
+                continue;
+            }
+
             let task = &mut tasks[candidate.task_index];
             claims.claim(task.id(), &step.id);
 
@@ -4184,6 +4199,25 @@ impl<'a> Dispatcher<'a> {
             }
         }
 
+        // The last look before any agent starts. Preparing a lane cuts a
+        // worktree, which takes long enough for `spoolway queue unqueue` to
+        // land in the middle of it: a task still on `queued` is unqueueable
+        // until its stage move is written, and that write only comes after
+        // the lane is running. A lane for a task whose file is gone by now is
+        // not started; the pane and checkout this pass just opened for it are
+        // taken back, branch included, so the copy in `pending/` can be sent again
+        // cleanly.
+        pending.retain(|lane| {
+            let task = &tasks[lane.candidate.task_index];
+            if !task_file_moved_away(task, &self.file_seen) {
+                return true;
+            }
+            claims.release(task.id());
+            let _ = self.mux.close_pane(&lane.boot.pane_id);
+            take_back_fresh_cut(self.mux, self.repo, task, task.stage());
+            false
+        });
+
         // Every prepared lane's `Mux::start_lane`, at once — one thread per
         // lane, sharing `self.mux` across them (see [`crate::mux::Mux`]'s own
         // doc on why it is `Sync`). `tick` cannot cross with them: it is
@@ -4217,6 +4251,7 @@ impl<'a> Dispatcher<'a> {
             match start_result {
                 Ok(()) => {
                     let task = &mut tasks[pending[i].candidate.task_index];
+                    let stage_before = task.stage().to_string();
                     let persisted = finish_launch_bookkeeping(
                         self.repo,
                         task,
@@ -4226,6 +4261,23 @@ impl<'a> Dispatcher<'a> {
                         pending[i].candidate.walked_past.as_deref(),
                         &pending[i].candidate.to_bank,
                     )?;
+                    // The check above cannot see an unqueue that lands while
+                    // `start_lane` itself runs, and under herdr that is the
+                    // seconds an agent takes to reach its prompt. The write
+                    // just made holds the task lock that unqueue takes too.
+                    // So either the stage move landed and any later unqueue
+                    // refuses, or the file was gone and the lane, already
+                    // up, is stopped before its briefing and its fresh cut
+                    // taken back. A write dropped because another writer
+                    // changed the file, which is still there, is left alone
+                    // on purpose: that lane is briefed as it always was.
+                    if !persisted && task_file_moved_away(task, &self.file_seen) {
+                        claims.release(task.id());
+                        let boot = &pending[i].boot;
+                        let _ = self.mux.stop_lane(&boot.name, &boot.pane_id);
+                        take_back_fresh_cut(self.mux, self.repo, task, &stage_before);
+                        continue;
+                    }
                     pending[i].persisted = Some(persisted);
                     ready.push(i);
                 }
@@ -4691,8 +4743,21 @@ impl<'a> Dispatcher<'a> {
                     ));
                     return Ok(None);
                 }
-                let (worktree, _) =
-                    ensure_workspace(self.repo, self.mux, task, &mut self.file_seen)?;
+                // A checkout that cannot be cut — a branch name git refuses,
+                // say — is this task's failure alone. Passed up with `?` it
+                // ended the whole pass, so every other task waited behind
+                // it; counted as a failed launch it is retried and then
+                // routed like any other command that never got going.
+                let worktree =
+                    match ensure_workspace(self.repo, self.mux, task, &mut self.file_seen) {
+                        Ok((worktree, _)) => worktree,
+                        Err(err) => {
+                            let destination =
+                                self.note_launch_failure(task, step, "run", &err, report);
+                            self.persist(task)?;
+                            return Ok(destination.map(|to| (to, Outcome::Fail)));
+                        }
+                    };
                 let env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
                     (ENV_STEP.to_string(), step.id.clone()),
@@ -5328,8 +5393,8 @@ pub(crate) fn persist_task(
             &format!("{}: task lock still held, saving without it", task.id()),
         );
     }
-    // A load failure here (the file gone, or briefly unreadable mid-write by
-    // someone else) is optimistic on purpose, the same as it always was: with
+    // A load failure here (briefly unreadable mid-write by someone else) is
+    // optimistic on purpose, the same as it always was: with
     // nothing to compare against, the pass's own write proceeds rather than
     // being dropped on a transient read error.
     //
@@ -5342,15 +5407,72 @@ pub(crate) fn persist_task(
     // (built from the very tasks it is about to route, in `run_pass`), so
     // this only ever fires for a test calling `persist_task` or
     // `ensure_workspace` directly, beneath no `Dispatcher::pass` at all.
-    if let Some(seen) = file_seen.get(task.id())
-        && let Ok(disk) = Task::load(&task.path)
-        && file_fingerprint(&disk) != *seen
-    {
-        return Ok(false);
+    if let Some(seen) = file_seen.get(task.id()) {
+        // A file this pass read earlier and that is now absent was moved
+        // away by `spoolway queue unqueue` (or deleted) mid-pass. Saving
+        // would recreate `queue/<id>.md` beside the copy in `pending/`, so
+        // the task would run on after being unqueued and run again once
+        // re-sent. The write is dropped like any other stale one.
+        if task_file_moved_away(task, file_seen) {
+            return Ok(false);
+        }
+        if let Ok(disk) = Task::load(&task.path)
+            && file_fingerprint(&disk) != *seen
+        {
+            return Ok(false);
+        }
     }
     task.save()?;
     file_seen.insert(task.id().to_string(), file_fingerprint(task));
     Ok(true)
+}
+
+/// Take apart the workspace, checkout and branch a pass cut for a task that
+/// was unqueued before its lane got going — see [`Dispatcher::start_lanes`].
+///
+/// Only a checkout spoolway cut for this task is taken apart, and only a task
+/// on `queued` (`stage_before`, the stage it had before this pass moved it)
+/// is touched. That checkout may predate this pass, when an earlier launch
+/// failed and left it recorded. It may also have been briefed once, when a
+/// write dropped for another writer's change let that lane go ahead and the
+/// task came back to `queued`. So the branch is deleted only while it still
+/// sits at the commit it was cut from: work committed on it is never thrown
+/// away. A borrowed checkout is a person's own and stays.
+fn take_back_fresh_cut(mux: &dyn Mux, repo: &Repo, task: &Task, stage_before: &str) {
+    if stage_before != crate::pipeline::QUEUED || task.front.borrowed {
+        return;
+    }
+    let Some(workspace) = task.front.workspace_id.as_deref() else {
+        return;
+    };
+    if mux.remove_workspace(workspace).is_err() {
+        if let Some(path) = task.front.worktree_path.as_deref() {
+            let _ = mux.remove_checkout(path);
+        }
+        let _ = mux.close_workspace(workspace);
+    }
+    if let (Some(branch), Some(base_commit)) = (
+        task.front.branch.as_deref(),
+        task.front.base_commit.as_deref(),
+    ) && repo
+        .git(&["rev-parse", branch])
+        .is_ok_and(|tip| tip.trim() == base_commit)
+    {
+        let _ = repo.git(&["branch", "-D", branch]);
+    }
+}
+
+/// Whether this pass read the task's file earlier and it is no longer there.
+///
+/// That is what `spoolway queue unqueue` leaves behind when it races a pass:
+/// the file is in `pending/`, and the pass still holds a copy it read before.
+/// Work started from that copy — a worktree cut, a command, a lane — runs a
+/// task the person was told had stopped, and leaves an orphan checkout that
+/// re-sending `pending/` would then collide with. A task the pass never read
+/// (a test calling in directly) has no earlier read to compare, so it is
+/// never reported as moved.
+fn task_file_moved_away(task: &Task, file_seen: &HashMap<String, u64>) -> bool {
+    file_seen.contains_key(task.id()) && !task.path.exists()
 }
 
 /// One task's base problem, if it has one, split into the fact — what
@@ -5511,6 +5633,14 @@ fn ensure_workspace(
     task: &mut Task,
     file_seen: &mut HashMap<String, u64>,
 ) -> Result<(PathBuf, Option<String>)> {
+    // Whether anything has set up a checkout for this task before, cut or
+    // borrowed. Read ahead of the block below that clears `worktree_path`,
+    // because a re-cut has to be told apart from a first cut once that field
+    // is gone.
+    let cut_before = task.front.worktree_path.is_some()
+        || task.front.run.is_some()
+        || task.front.base_commit.is_some();
+
     // Where a task's lane sits — its worktree, workspace and panes — is a fact
     // about one machine, and the only part of a task file that is. A task file
     // that arrives from somewhere else carries a path that does not exist here,
@@ -5523,6 +5653,25 @@ fn ensure_workspace(
     if let Some(recorded) = task.front.worktree_path.clone()
         && !recorded.is_dir()
     {
+        // Git keeps its entry for a folder removed by hand until it is
+        // pruned, and `worktree_for` below would answer with that entry: the
+        // task would "borrow" a folder that is not there and be marked
+        // `borrowed`, so it would fail to start and cleanup would leave its
+        // branch behind. Pruning forgets only entries whose folder is gone,
+        // so a checkout a person really lent is untouched.
+        //
+        // This runs before the recorded fields are cleared. A failed prune is
+        // an error, and the task may be persisted on the way out of a failed
+        // start; had the path been cleared by then, the next attempt would
+        // skip this block and borrow the stale entry. Leaving the missing
+        // path recorded makes every retry prune again.
+        repo.git(&["worktree", "prune"]).with_context(|| {
+            format!(
+                "{}: its worktree folder {} is gone, and git could not forget the entry it kept for it; run `git worktree prune` in the repository, then resume the task",
+                task.id(),
+                recorded.display()
+            )
+        })?;
         task.front.worktree_path = None;
         task.front.workspace_id = None;
         task.front.pane_id = None;
@@ -5668,6 +5817,34 @@ fn ensure_workspace(
                 // re-cut after a worktree deleted by hand reads back too —
                 // the branch it was first cut from.
                 let starts_from = start_branch(repo, task, &base)?;
+                // A task's first cut never adopts a branch it did not make.
+                // `cut_worktree` reuses any existing branch, which is right
+                // for re-cutting this task's own deleted worktree and wrong
+                // here: an earlier task with the same id (its id freed by
+                // archive retention, its branch kept) leaves `task/<id>`
+                // behind, and reusing it runs the new task on old commits
+                // while the task file below claims it started from
+                // `starts_from`. `cut_before` says whether this task has a
+                // checkout on record, so a re-cut still reuses its own branch.
+                let branch_exists = repo
+                    .git(&["rev-parse", "--verify", "--quiet", &branch])
+                    .is_ok();
+                if branch_exists && !cut_before {
+                    anyhow::bail!(
+                        "{}: the branch `{branch}` already exists and this task has no checkout on record. \
+                         It is either left over from an earlier task with the same id, or it holds this task's own saved work from before an unqueue. \
+                         To keep it, rename it with `git branch -m {branch} <name>` and set `starts_from: <name>` in the task. \
+                         To drop it, run `git branch -D {branch}`. Then resume the task",
+                        task.id()
+                    );
+                }
+                // Only a cut that creates the branch has a commit to pin. A
+                // re-cut that reuses this task's own branch checks out the
+                // branch's tip, which may be far from where `starts_from` has
+                // moved to since, so resolving `starts_from` again would name
+                // a commit the branch does not contain. The pin already on
+                // record stays.
+                //
                 // Resolved just before the cut, so it names the exact commit
                 // the new branch's history starts from — the one thing a
                 // replay of this task can pin to once `starts_from` itself has
@@ -5680,13 +5857,16 @@ fn ensure_workspace(
                 // pushed — so the same local-else-origin resolution the cut
                 // itself uses runs first, or this pins nothing at all
                 // (review finding 2).
-                let base_commit = repo
-                    .git(&[
+                let base_commit = if branch_exists {
+                    task.front.base_commit.clone()
+                } else {
+                    repo.git(&[
                         "rev-parse",
                         &crate::mux::resolve_cut_base(&repo.root, &starts_from),
                     ])
                     .ok()
-                    .map(|c| c.trim().to_string());
+                    .map(|c| c.trim().to_string())
+                };
                 let workspace = mux.create_workspace(
                     &repo.root,
                     &branch,
@@ -6963,6 +7143,13 @@ mod tests {
         /// than running one after another. Zero, the ordinary case, sleeps
         /// nothing.
         boot_delay: Duration,
+        /// A task file `start_lane` moves into `pending/` before it answers —
+        /// `spoolway queue unqueue` landing while herdr's `agent start` is
+        /// still waiting for the agent to reach its prompt.
+        unqueue_on_start: Mutex<Option<PathBuf>>,
+        /// The same, moved while `create_workspace` cuts the checkout, ahead
+        /// of any lane start.
+        unqueue_on_create: Mutex<Option<PathBuf>>,
         /// Whether a waiting lane keeps a process alive, as a multiplexer's
         /// does and a headless lane's does not.
         resident: bool,
@@ -7024,6 +7211,8 @@ mod tests {
                 refuse_split_beside: false,
                 refuse_split_pane: false,
                 boot_delay: Duration::ZERO,
+                unqueue_on_start: Mutex::new(None),
+                unqueue_on_create: Mutex::new(None),
                 resident: true,
                 shared_workspace: None,
                 cuts_real_worktrees: None,
@@ -7097,6 +7286,18 @@ mod tests {
         /// that wants to tell an overlapped boot from a serial one.
         fn with_boot_delay(mut self, delay: Duration) -> FakeMux {
             self.boot_delay = delay;
+            self
+        }
+        /// A backend that moves `path` out of `queue/` into `pending/` while
+        /// the next lane boots, the way an unqueue does.
+        fn unqueuing_on_start(self, path: &Path) -> FakeMux {
+            *self.unqueue_on_start.lock().unwrap() = Some(path.to_path_buf());
+            self
+        }
+        /// A backend that moves `path` out of `queue/` into `pending/` while
+        /// the next workspace is being cut, before any lane is started.
+        fn unqueuing_on_create(self, path: &Path) -> FakeMux {
+            *self.unqueue_on_create.lock().unwrap() = Some(path.to_path_buf());
             self
         }
         /// A backend whose `agent start` always answers the way herdr does
@@ -7242,6 +7443,9 @@ mod tests {
             _label: &str,
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
+            if let Some(path) = self.unqueue_on_create.lock().unwrap().take() {
+                unqueue_file(&path);
+            }
             if let Some(root) = &self.cuts_real_worktrees {
                 let path = root.join(crate::mux::branch_slug(branch));
                 crate::mux::cut_worktree(cwd, &path, branch, base)?;
@@ -7365,6 +7569,9 @@ mod tests {
                 std::thread::sleep(self.boot_delay);
             }
             self.log(format!("start {}", spec.name));
+            if let Some(path) = self.unqueue_on_start.lock().unwrap().take() {
+                unqueue_file(&path);
+            }
             // The real backend labels the pane as the last thing `start_lane`
             // does; mirroring it here keeps the label assertable.
             self.log(format!("pane {}", spec.label));
@@ -7986,6 +8193,38 @@ mod tests {
         assert_eq!(task.front.workspace_id.as_deref(), Some("w9"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w9:p1"));
         assert_eq!(task.steps_at("implement"), 1);
+    }
+
+    /// A branch git cannot create holds its own task and nothing else.
+    ///
+    /// A name over git's 255-byte file-name limit makes the worktree cut fail.
+    /// On a command step that failure used to come out of the pass as an
+    /// error, so no other task was started either. It now spends the task's
+    /// launch attempts and then blocks it with the reason in its file.
+    #[test]
+    fn a_worktree_cut_that_fails_holds_only_its_own_task() {
+        let (repo, _root_guard) = fixture("cut-fails-alone");
+        let pipelines = pipelines_of(
+            "steps:\n  \
+             - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
+             - id: work\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n",
+        );
+        let long = format!("task/{}-bad", "a".repeat(300));
+        let bad = add_task_with(&repo, "bad", crate::pipeline::QUEUED, |f| {
+            f.branch = Some(long.clone())
+        });
+        let good = add_task(&repo, "good", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        for _ in 0..MAX_LAUNCH_FAILURES {
+            run_pass_with(&repo, &mux, &pipelines);
+        }
+
+        assert_ne!(reload(&good).stage(), crate::pipeline::QUEUED);
+        let bad = reload(&bad);
+        assert_eq!(bad.stage(), crate::pipeline::BLOCKED, "{}", bad.body);
+        assert!(bad.body.contains("could not be started"), "{}", bad.body);
     }
 
     /// A task with no `base:` — queued before the rule held, or edited by
@@ -10568,6 +10807,238 @@ mod tests {
             crate::pipeline::PAUSED,
             "the park stands, not the pass's stale move"
         );
+    }
+
+    /// A task whose file left `queue/` while the pass held it (an unqueue
+    /// moves it to `pending/`) is dropped by the pass, not written back:
+    /// `persist_task` answers `Ok(false)` and `queue/<id>.md` stays gone.
+    #[test]
+    fn persist_task_does_not_recreate_a_file_that_was_moved_away_mid_pass() {
+        let (repo, _root_guard) = fixture("persist-guards-an-unqueue");
+        let path = add_task(&repo, "demo", "implement");
+
+        // What the pass read: the task is in `queue/`.
+        let mut stale = Task::load(&path).unwrap();
+        let mut seen: HashMap<String, u64> = [("demo".to_string(), file_fingerprint(&stale))]
+            .into_iter()
+            .collect();
+
+        // An unqueue lands mid-pass and takes the file out of `queue/`.
+        std::fs::remove_file(&path).unwrap();
+
+        stale.set_stage("review", Some("done"));
+        let saved = persist_task(&repo, &mut stale, &mut seen).unwrap();
+
+        assert!(!saved, "the pass reports its write as dropped");
+        assert!(
+            !path.exists(),
+            "the pass must not write the moved-away task file back"
+        );
+    }
+
+    /// The helper the pass's start sites share reports a seen task with no
+    /// file as moved, and nothing else.
+    #[test]
+    fn a_seen_task_with_no_file_counts_as_moved_away() {
+        let (repo, _root_guard) = fixture("moved-away-helper");
+        let path = add_task(&repo, "demo", "implement");
+        let task = Task::load(&path).unwrap();
+        let seen: HashMap<String, u64> = [("demo".to_string(), file_fingerprint(&task))]
+            .into_iter()
+            .collect();
+
+        assert!(!task_file_moved_away(&task, &seen), "file still there");
+        std::fs::remove_file(&path).unwrap();
+        assert!(task_file_moved_away(&task, &seen), "file gone after a read");
+        assert!(
+            !task_file_moved_away(&task, &HashMap::new()),
+            "a task the pass never read is not moved away"
+        );
+    }
+
+    /// Move a task file from `queue/` into the sibling `pending/`, the way
+    /// `spoolway queue unqueue` does.
+    fn unqueue_file(path: &Path) {
+        let pending = path.parent().unwrap().parent().unwrap().join("pending");
+        std::fs::create_dir_all(&pending).unwrap();
+        std::fs::rename(path, pending.join(path.file_name().unwrap())).unwrap();
+    }
+
+    /// Run one pass that moves `path` into `pending/` on its `at`th tick, the
+    /// way an unqueue landing mid-pass does. Returns whether the move landed
+    /// before `started()` said the work for the task had begun.
+    fn pass_unqueueing_at_tick(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        mux: &FakeMux,
+        path: &Path,
+        at: u32,
+        started: impl Fn() -> bool,
+    ) -> bool {
+        let mut ticks = 0u32;
+        let mut early = false;
+        Dispatcher::new(repo, pipelines, mux)
+            .pass(&mut || {
+                ticks += 1;
+                if ticks == at && path.exists() {
+                    early = !started();
+                    unqueue_file(path);
+                }
+            })
+            .unwrap();
+        early
+    }
+
+    /// An unqueue landing at any tick of a pass, ahead of a command step's
+    /// start, stops the step: the command never runs and the file is not
+    /// written back. Ticks are tried in order until one lands after the
+    /// command has started: the window is the ticks between the pass reading
+    /// the file and the stage move it persists.
+    #[test]
+    fn a_command_step_is_not_run_for_a_task_unqueued_mid_pass() {
+        let pipelines = pipelines_running("touch ran.txt", false);
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let mut stopped_in_time = 0;
+        for at in 1.. {
+            let (repo, _root_guard) = fixture(&format!("command-unqueued-{at}"));
+            let path = add_task_with_worktree(&repo, "demo", crate::pipeline::QUEUED);
+            let runs = crate::command_step::Runs::new(&repo.commands_dir());
+            let mux = FakeMux::new(vec![]);
+
+            let early = pass_unqueueing_at_tick(&repo, &pipelines, &mux, &path, at, || {
+                runs.state(&key) != crate::command_step::RunState::Fresh
+            });
+
+            if !early {
+                break;
+            }
+            {
+                stopped_in_time += 1;
+                assert!(!path.exists(), "tick {at}: the file was written back");
+                assert!(
+                    !repo.root.join("wt-demo").join("ran.txt").exists(),
+                    "tick {at}: the command ran for an unqueued task"
+                );
+                assert_eq!(
+                    runs.state(&key),
+                    crate::command_step::RunState::Fresh,
+                    "tick {at}: the command was started"
+                );
+            }
+        }
+        assert!(stopped_in_time > 0, "no tick landed inside the pass");
+    }
+
+    /// An unqueue landing at any tick of a pass, ahead of an agent step's
+    /// worktree cut, stops the lane before any workspace is cut for it. Ticks
+    /// are tried in order until one lands after the cut.
+    #[test]
+    fn no_workspace_is_cut_for_a_task_unqueued_before_its_lane_prepares() {
+        let mut stopped_in_time = 0;
+        for at in 1.. {
+            let (repo, _root_guard) = fixture(&format!("agent-unqueued-{at}"));
+            let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+            let mux = FakeMux::new(vec![]);
+
+            let early =
+                pass_unqueueing_at_tick(&repo, &Pipelines::builtin(), &mux, &path, at, || {
+                    !mux.did("create_workspace").is_empty()
+                });
+
+            if !early {
+                break;
+            }
+            {
+                stopped_in_time += 1;
+                assert!(!path.exists(), "tick {at}: the file was written back");
+                assert!(
+                    mux.did("create_workspace").is_empty(),
+                    "tick {at}: a workspace was cut: {:?}",
+                    mux.calls()
+                );
+                assert!(mux.did("start").is_empty(), "tick {at}: {:?}", mux.calls());
+            }
+        }
+        assert!(stopped_in_time > 0, "no tick landed inside the pass");
+    }
+
+    /// An unqueue that lands while the workspace is being cut leaves the file
+    /// gone by the last look before the lane starts: nothing is started, the
+    /// cut is taken back and the file is not written back.
+    #[test]
+    fn a_task_unqueued_while_its_workspace_is_cut_never_starts() {
+        let (repo, _root_guard) = fixture("unqueued-during-cut");
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]).unqueuing_on_create(&path);
+
+        run_pass(&repo, &mux);
+
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w9"]);
+        assert!(!path.exists(), "the moved-away file is not written back");
+        assert!(repo.pending_dir().join("demo.md").exists());
+    }
+
+    /// An unqueue can land while the lane's own boot runs: herdr's `agent
+    /// start` waits seconds for the agent to reach its prompt, and the task
+    /// is still on `queued` on disk until the bookkeeping after it. The
+    /// bookkeeping's write is dropped, and the lane must then be stopped
+    /// rather than briefed, with the checkout this pass cut for it taken back.
+    #[test]
+    fn a_task_unqueued_while_its_lane_boots_is_never_briefed() {
+        let (repo, _root_guard) = fixture("unqueued-during-boot");
+        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
+        let mux = FakeMux::new(vec![]).unqueuing_on_start(&path);
+
+        let report = run_pass(&repo, &mux);
+
+        assert_eq!(mux.did("start"), ["start demo · implement"]);
+        assert!(mux.did("prompt").is_empty(), "{:?}", mux.calls());
+        assert_eq!(mux.did("stop"), ["stop demo · implement"]);
+        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w9"]);
+        assert!(!path.exists(), "the moved-away file is not written back");
+        assert!(repo.pending_dir().join("demo.md").exists());
+        assert!(
+            !report.actions.iter().any(|a| a.starts_with("started")),
+            "{:?}",
+            report.actions
+        );
+        let lanes = std::fs::read_to_string(repo.lanes_file()).unwrap_or_default();
+        assert!(!lanes.contains("demo"), "no lane record kept: {lanes}");
+    }
+
+    /// Taking back a cut deletes the task's branch only while it still sits
+    /// at the base it was cut from. A fresh branch goes, so re-sending the
+    /// task does not hit `ensure_workspace`'s "branch already exists"; a
+    /// branch with a commit on it is kept, so committed work survives.
+    #[test]
+    fn taking_back_a_cut_deletes_only_a_branch_still_at_its_base() {
+        let (repo, _root_guard) = fixture("take-back-branch");
+        let base = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |front| {
+            front.branch = Some("task/demo".to_string());
+            front.base_commit = Some(base.clone());
+            front.workspace_id = Some("w9".to_string());
+        });
+        let task = Task::load(&path).unwrap();
+        let mux = FakeMux::new(vec![]);
+        let exists = || {
+            repo.git(&["rev-parse", "--verify", "-q", "task/demo"])
+                .is_ok()
+        };
+
+        repo.git(&["branch", "task/demo"]).unwrap();
+        take_back_fresh_cut(&mux, &repo, &task, crate::pipeline::QUEUED);
+        assert!(!exists(), "a branch still at its base is deleted");
+
+        let tree = format!("{base}^{{tree}}");
+        let ahead = repo
+            .git(&["commit-tree", &tree, "-p", &base, "-m", "work"])
+            .unwrap();
+        repo.git(&["branch", "task/demo", ahead.trim()]).unwrap();
+        take_back_fresh_cut(&mux, &repo, &task, crate::pipeline::QUEUED);
+        assert!(exists(), "a branch with a commit beyond its base is kept");
     }
 
     /// `pass` calls the callback it is handed between each task —
@@ -17074,6 +17545,90 @@ mod tests {
         std::fs::remove_dir_all(&worktree).ok();
     }
 
+    /// A person can delete a task's worktree folder by hand without running
+    /// `git worktree prune`, which leaves git listing the folder as a stale
+    /// entry for the task's branch. That entry is not a checkout somebody lent
+    /// to the task: the worktree is cut again and the task is not borrowed.
+    #[test]
+    fn a_worktree_deleted_by_hand_is_cut_again_rather_than_borrowed() {
+        let (repo, _root_guard) = fixture("worktree-deleted-by-hand");
+        let worktree = crate::scratch::root("dispatch-deleted-by-hand-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.borrowed = false;
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.tab_id = Some("w1:t1".into());
+        }));
+
+        // Gone from disk, but git still lists it as a prunable entry.
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(
+            !task.front.borrowed,
+            "a stale entry git kept for a deleted folder is not a lent checkout"
+        );
+        assert!(
+            !mux.did("create_workspace").is_empty(),
+            "the worktree is cut again, not reused"
+        );
+    }
+
+    /// A re-cut that reuses the task's own branch checks out that branch's
+    /// tip, not the head of `starts_from`, which may have moved on. The
+    /// commit recorded at the first cut stays, so `base_commit` never names a
+    /// commit the branch does not contain.
+    #[test]
+    fn a_recut_onto_the_tasks_own_branch_keeps_the_recorded_base_commit() {
+        let (repo, _root_guard) = fixture("recut-keeps-base-commit");
+        let worktree = crate::scratch::root("dispatch-recut-keeps-base-commit-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.starts_from = Some("work".into());
+            f.base_commit = Some("0123456789abcdef".into());
+            f.borrowed = false;
+            f.worktree_path = Some(worktree.to_path_buf());
+        }));
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(
+            !mux.did("create_workspace").is_empty(),
+            "the worktree is cut again"
+        );
+        assert_eq!(
+            task.front.base_commit.as_deref(),
+            Some("0123456789abcdef"),
+            "the branch was reused, so the commit it was first cut from is kept"
+        );
+    }
+
     /// A multiplexer that restarted while the worktree survived — the whole
     /// point of this task. The directory is still there, so the existing
     /// missing-directory check never fires; only the recorded workspace is
@@ -17365,6 +17920,78 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A task's first cut never lands on a branch the task did not create.
+    /// A branch named `task/<id>` can be left over from an earlier task that
+    /// had the same id, and the new task must not run on its old commits while
+    /// its file claims it started from its base. Either the cut is refused, or
+    /// the worktree is made from the base's current head and `base_commit`
+    /// names exactly that commit.
+    #[test]
+    fn a_new_task_never_runs_on_a_leftover_branch_of_an_earlier_task_with_its_id() {
+        let (repo, _root_guard) = fixture("leftover-branch-first-cut");
+        let worktree = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug("task/demo"));
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        // The earlier task's branch, left behind at the base's old head.
+        repo.git(&["branch", "task/demo", "work"]).unwrap();
+        // The base moves on.
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        std::fs::write(repo.root.join("b.txt"), "newer than the leftover\n").unwrap();
+        crate::repo::run(&repo.root, "git", &["add", "b.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "base moves on"]).unwrap();
+
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |_| {}));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        if ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).is_ok() {
+            let head = |dir: &Path| {
+                crate::repo::run(dir, "git", &["rev-parse", "HEAD"])
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            };
+            let cut_from = head(task.front.worktree_path.as_deref().unwrap());
+            assert_eq!(
+                task.front.base_commit.as_deref(),
+                Some(cut_from.as_str()),
+                "`base_commit` is the commit the worktree was really cut from"
+            );
+            assert_eq!(
+                cut_from,
+                head(&repo.root),
+                "the worktree starts from the base's current head, not the leftover branch"
+            );
+            assert!(worktree.join("b.txt").exists());
+        }
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// The refusal itself: a leftover `task/<id>` stops the first cut, names
+    /// the branch, cuts nothing, and persists nothing that would make the
+    /// next pass look like a re-cut and adopt the branch.
+    #[test]
+    fn a_first_cut_onto_an_existing_branch_is_refused_and_stays_refused() {
+        let (repo, _root_guard) = fixture("first-cut-refused");
+        repo.git(&["branch", "task/demo", "work"]).unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |_| {}));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        for _ in 0..2 {
+            let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
+                .expect_err("a branch the task did not create is not adopted");
+            assert!(
+                format!("{err:#}").contains("task/demo"),
+                "the message names the branch; got: {err:#}"
+            );
+            assert!(mux.did("create_workspace").is_empty(), "nothing is cut");
+            assert!(task.front.run.is_none() && task.front.base_commit.is_none());
+            assert!(task.front.worktree_path.is_none());
+        }
     }
 
     /// The cut reads a dependency's branch from that task, not by formatting

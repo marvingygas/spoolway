@@ -944,7 +944,7 @@ impl Board {
             .filter(|a| a.task == id)
             .collect();
         if aborts.is_empty() {
-            park_under_lock(repo, &id, false)?;
+            park_under_lock(repo, &id, ParkedBy::Board)?;
             return Ok(());
         }
         self.mode = BoardMode::ConfirmPause { aborts, id };
@@ -978,10 +978,10 @@ impl Board {
                     match abort.kind {
                         AbortKind::Agent => {
                             carry_out_abort(mux.as_ref(), &runs, abort);
-                            park_under_lock(repo, &abort.task, false)?;
+                            park_under_lock(repo, &abort.task, ParkedBy::Board)?;
                         }
                         AbortKind::Command => {
-                            park_under_lock(repo, &abort.task, false)?;
+                            park_under_lock(repo, &abort.task, ParkedBy::Board)?;
                             carry_out_abort(mux.as_ref(), &runs, abort);
                         }
                     }
@@ -1680,7 +1680,7 @@ pub(crate) fn interrupt_for_stop(repo: &Repo, pipelines: &Pipelines) -> Result<(
     let lanes = mux.list_lanes().unwrap_or_default();
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
     for abort in live_aborts(repo, &tasks, pipelines, &lanes) {
-        park_under_lock(repo, &abort.task, true)?;
+        park_under_lock(repo, &abort.task, ParkedBy::Stop)?;
         carry_out_abort(mux.as_ref(), &runs, &abort);
     }
     Ok(())
@@ -1713,6 +1713,19 @@ pub(crate) fn resume_stop_parked(repo: &Repo, pipelines: &Pipelines) -> Result<V
     Ok(problems)
 }
 
+/// Who is parking a task, which decides the Status Log line and whether the
+/// park carries a stop's mark. See [`park_under_lock`].
+#[derive(Clone, Copy)]
+pub(crate) enum ParkedBy {
+    /// A person's `p` on the board.
+    Board,
+    /// A dispatching stop, marked so the next start resumes the task — see
+    /// [`interrupt_for_stop`].
+    Stop,
+    /// `spoolway queue pause`, for a person with no board in front of them.
+    QueuePause,
+}
+
 /// Park one task by id: read, [`park`] and save under the same per-task
 /// lock a lane's `spoolway report` and the dispatcher's own `persist` take,
 /// so the park cannot land in the middle of either one's read-modify-write
@@ -1720,9 +1733,14 @@ pub(crate) fn resume_stop_parked(repo: &Repo, pipelines: &Pipelines) -> Result<V
 /// from the queue as the board last saw it, and silent about a task the
 /// queue no longer has, or one already stopped on `paused`: a stop walks
 /// every running step, and one row archived since it read the queue must
-/// not leave the rest unparked (jobs review finding 5). `by_stop` marks the
-/// park as a stop's — see [`interrupt_for_stop`].
-fn park_under_lock(repo: &Repo, id: &str, by_stop: bool) -> Result<()> {
+/// not leave the rest unparked (jobs review finding 5). A task already on
+/// `paused` is left alone because [`park`] would overwrite `parked_from`
+/// with `paused`, and `resume` could then only land back on `paused`.
+/// Shared by the board's `p`, a stop and `spoolway queue pause`, so a rule
+/// learned by one reaches the others; a caller that must refuse a task the
+/// queue no longer has checks for it first, as `queue_pause` does.
+/// `by` picks the log line and, for a stop, sets the mark.
+pub(crate) fn park_under_lock(repo: &Repo, id: &str, by: ParkedBy) -> Result<()> {
     let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
     let Ok(mut task) = repo.task(id) else {
         return Ok(());
@@ -1730,12 +1748,13 @@ fn park_under_lock(repo: &Repo, id: &str, by_stop: bool) -> Result<()> {
     if task.stage() == crate::pipeline::PAUSED {
         return Ok(());
     }
-    match by_stop {
-        true => {
+    match by {
+        ParkedBy::Stop => {
             park(&mut task, "interrupted when dispatching stopped", false);
             task.front.parked_by_stop = true;
         }
-        false => park(&mut task, "paused from the board", false),
+        ParkedBy::Board => park(&mut task, "paused from the board", false),
+        ParkedBy::QueuePause => park(&mut task, "paused via `spoolway queue pause`", false),
     }
     task.save()
 }
@@ -7696,7 +7715,7 @@ mod tests {
             "road-manual",
             "implement",
             |_| {},
-            |repo, _| park_under_lock(repo, "t", false).unwrap(),
+            |repo, _| park_under_lock(repo, "t", ParkedBy::Board).unwrap(),
         );
         assert_eq!(line, "stopped on implement, moved to paused (manually)");
     }
@@ -7707,7 +7726,7 @@ mod tests {
             "road-manual-queued",
             "queued",
             |_| {},
-            |repo, _| park_under_lock(repo, "t", false).unwrap(),
+            |repo, _| park_under_lock(repo, "t", ParkedBy::Board).unwrap(),
         );
         assert_eq!(line, "stopped before starting, moved to paused (manually)");
     }
@@ -7718,7 +7737,7 @@ mod tests {
             "road-stop",
             "implement",
             |_| {},
-            |repo, _| park_under_lock(repo, "t", true).unwrap(),
+            |repo, _| park_under_lock(repo, "t", ParkedBy::Stop).unwrap(),
         );
         assert_eq!(
             line,
@@ -9119,8 +9138,8 @@ mod tests {
         for id in ["stopped", "by-hand", "escaped"] {
             add_to(&repo, id, &[], Some("implement"), Some(id));
         }
-        park_under_lock(&repo, "stopped", true).unwrap();
-        park_under_lock(&repo, "by-hand", false).unwrap();
+        park_under_lock(&repo, "stopped", ParkedBy::Stop).unwrap();
+        park_under_lock(&repo, "by-hand", ParkedBy::Board).unwrap();
         let mut escaped = repo.task("escaped").unwrap();
         park(
             &mut escaped,
@@ -9223,7 +9242,7 @@ mod tests {
         let (repo, _root_guard) = fixture("stop-mark-spent");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
-        park_under_lock(&repo, "login", true).unwrap();
+        park_under_lock(&repo, "login", ParkedBy::Stop).unwrap();
         assert!(repo.task("login").unwrap().front.parked_by_stop);
 
         resume_task(&repo, &pipelines, "login").unwrap();
@@ -9234,7 +9253,7 @@ mod tests {
         let mut task = repo.task("login").unwrap();
         task.front.parked_by_stop = true;
         task.save().unwrap();
-        park_under_lock(&repo, "login", false).unwrap();
+        park_under_lock(&repo, "login", ParkedBy::Board).unwrap();
         let task = repo.task("login").unwrap();
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert!(!task.front.parked_by_stop);
@@ -9248,8 +9267,8 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add_to(&repo, "login", &[], Some("implement"), Some("login"));
         add_to(&repo, "by-hand", &[], Some("implement"), Some("by-hand"));
-        park_under_lock(&repo, "login", true).unwrap();
-        park_under_lock(&repo, "by-hand", false).unwrap();
+        park_under_lock(&repo, "login", ParkedBy::Stop).unwrap();
+        park_under_lock(&repo, "by-hand", ParkedBy::Board).unwrap();
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
@@ -10797,7 +10816,7 @@ mod tests {
 
         // `p`'s own park. Under herdr, `p` interrupts the turn and its lane
         // stays standing, settled, which is the lane this checks for.
-        park_under_lock(&repo, "login", false).unwrap();
+        park_under_lock(&repo, "login", ParkedBy::Board).unwrap();
         let mut board = Board::for_test();
         board.cursor = Some("login".to_string());
         assert_eq!(

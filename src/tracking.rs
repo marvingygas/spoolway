@@ -141,7 +141,8 @@ pub enum OpenResult {
     ///
     /// - `slug` feeds naming only, so it is consulted only when
     ///   `issue_tracking.key_in_names` is on, and dropped unless it passes
-    ///   [`crate::config::check_id`]'s alphabet.
+    ///   [`crate::config::check_id`]'s alphabet and is at most `SLUG_MAX_LEN`
+    ///   characters (see `accept_slug` in `commands::queue`).
     /// - `url` is stored on the task whatever the flag says — it is there for
     ///   `terminal-names` to use later — and dropped unless it is an absolute
     ///   `http`/`https` address.

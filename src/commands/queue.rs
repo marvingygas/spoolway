@@ -1624,11 +1624,7 @@ fn queue_add_tasks(
         };
     }
 
-    // All or none: every task above already parsed and validated, so
-    // nothing left here can fail — the writes are the commit.
-    for task in &tasks {
-        task.save()?;
-    }
+    save_new_tasks(repo, &tasks)?;
 
     // The same rule the queue screen's own `finish_submit` keeps: a task
     // that reached the queue is not still waiting to go there. Only a source
@@ -1652,6 +1648,50 @@ fn queue_add_tasks(
     // planning session's spend had onto the ledger; an interactive session's
     // spend is not banked from any command any more, and this one was never
     // special.
+    Ok(())
+}
+
+/// Write a validated batch of brand-new tasks, refusing any id that was
+/// taken after [`validate_batch`] looked.
+///
+/// `validate_batch` checks that each id is free, but the files are written
+/// later, and nothing held the ids in between. Parallel adds of one id (the
+/// queue screen, a cron job and a CLI call landing together) all passed the
+/// check, all printed "queued", and the last writer replaced the rest without
+/// a word. Each id's [`crate::lock::TaskLock`] is held from a fresh check to
+/// the write, so exactly one add wins and the others are refused before they
+/// write anything. Locks are taken in id order so two overlapping batches
+/// cannot wait on each other. Unlike the dispatcher's use of this lock, a
+/// timeout is an error here: proceeding unlocked is the race itself.
+fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    let mut ids: Vec<&str> = tasks.iter().map(Task::id).collect();
+    ids.sort_unstable();
+    let mut locks = Vec::new();
+    for id in ids {
+        locks.push(
+            crate::lock::TaskLock::acquire(&repo.task_lock_file(id)).with_context(|| {
+                format!(
+                    "could not lock task `{id}` to queue it — another `queue add` or \
+                     dispatch pass is holding it. Run this again in a moment."
+                )
+            })?,
+        );
+    }
+    for task in tasks {
+        if let Some(existing) = existing_task_path(repo, task.id()) {
+            bail!(
+                "task `{}` already exists at {} — nothing was queued",
+                task.id(),
+                existing.display()
+            );
+        }
+    }
+    // All or none: every task parsed and validated above and every id was
+    // just re-checked under its lock, so the writes are the commit.
+    for task in tasks {
+        task.save()?;
+    }
+    drop(locks);
     Ok(())
 }
 
@@ -2238,8 +2278,9 @@ fn open_tickets(
             continue;
         };
         // A queued file can be hand-edited, and a stored slug with it. One
-        // that no longer passes `check_id` is ignored outright — not used to
-        // strip a `<slug>-` prefix off the group for the epic lookup, and not
+        // that no longer passes `check_id`, or is over the length limit, is
+        // ignored outright — not used to strip a `<slug>-` prefix off the
+        // group for the epic lookup, and not
         // seeded as a prefix — so a bad value cannot attach this group to the
         // wrong epic or an invalid branch. It is dropped in silence: a queued
         // sibling is not this command's input to complain about.
@@ -2283,7 +2324,7 @@ fn open_tickets(
             } else {
                 log.note(&format!(
                     "  issue_tracking: slug `{slug}` on `{}` is not a valid name \
-                     (lowercase letters, digits and hyphens) — ignored",
+                     (lowercase letters, digits and hyphens, at most {SLUG_MAX_LEN} characters) — ignored",
                     task.id()
                 ));
                 task.front.extra.remove("slug");
@@ -2468,11 +2509,23 @@ fn pending_task_group(repo: &Repo, id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The longest slug [`accept_slug`] takes.
+///
+/// The slug is put in front of a task's id to make `task/<slug>-<id>`, and
+/// git refuses a ref, or a worktree folder, whose file name is over 255
+/// bytes. A tracker key is a few characters, so this leaves room for the id
+/// behind it while stopping a runaway hook answer from producing a branch no
+/// worktree can be cut on.
+const SLUG_MAX_LEN: usize = 64;
+
 /// Whether a slug a hook or a task offered is one spoolway will build a
-/// name out of: non-blank and inside [`crate::config::check_id`]'s alphabet,
-/// the same one every task id, group and branch already uses.
+/// name out of: non-blank, no longer than [`SLUG_MAX_LEN`], and inside
+/// [`crate::config::check_id`]'s alphabet, the same one every task id, group
+/// and branch already uses.
 fn accept_slug(slug: &str) -> bool {
-    !slug.is_empty() && crate::config::check_id("issue_tracking slug", slug).is_ok()
+    !slug.is_empty()
+        && slug.len() <= SLUG_MAX_LEN
+        && crate::config::check_id("issue_tracking slug", slug).is_ok()
 }
 
 /// Take the `slug=` and `url=` a hook answered on the `open` event.
@@ -2508,7 +2561,7 @@ fn record_slug_and_url(
         } else {
             println!(
                 "  issue_tracking: slug `{slug}` for `{}` is not a valid name \
-                 (lowercase letters, digits and hyphens) — ignored",
+                 (lowercase letters, digits and hyphens, at most {SLUG_MAX_LEN} characters) — ignored",
                 task.id()
             );
         }
@@ -3131,7 +3184,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
 /// instead, unless `--force` says the caller already knows what it is
 /// choosing.
 pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
-    let mut tasks = repo.tasks()?;
+    let tasks = repo.tasks()?;
     let idx = tasks
         .iter()
         .position(|t| t.id() == id)
@@ -3158,8 +3211,13 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         );
     }
 
-    crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`", false);
-    tasks[idx].save()?;
+    // The same body the board's `p` runs, so a task already on `paused`
+    // keeps the step it stopped on. The task is checked first because that
+    // body is silent about one that left the queue, and this command must
+    // not print `paused` for it.
+    repo.task(id)
+        .with_context(|| format!("no queued task `{id}`"))?;
+    crate::status::park_under_lock(repo, id, crate::status::ParkedBy::QueuePause)?;
 
     // Stopped only once the task is on disk as paused. Between the kill and
     // the run's files being cleared the run reads as one that died without an
@@ -7138,9 +7196,7 @@ fn finish_submit(
     let gate = ToolGate::Answered { tracking_off };
     open_and_prefix(repo, tasks, &task_files, &mut pending, gate, log)?;
 
-    for task in &pending {
-        task.save()?;
-    }
+    save_new_tasks(repo, &pending)?;
 
     // Past this point the queue holds the work, so a failure to unlink is
     // not a reason to refuse a submission that has already landed: the
@@ -8041,11 +8097,10 @@ pub(crate) fn queue_routine_target(
         gate,
         &mut PrintedTickets,
     )?;
-    // All or none: everything above parsed and validated, so these writes
-    // are the commit — the same discipline `queue_add_tasks` follows.
-    for task in &tasks {
-        task.save()?;
-    }
+    // The same lock-and-recheck `queue_add_tasks` saves with: a scheduled
+    // firing can land on the same minted id as a person's add or another
+    // firing.
+    save_new_tasks(repo, &tasks)?;
     Ok(tasks)
 }
 
@@ -8072,9 +8127,7 @@ fn finish_routine(
 ) -> Result<()> {
     let gate = ToolGate::Answered { tracking_off };
     open_and_prefix(repo, &[], task_files, tasks, gate, log)?;
-    for task in tasks.iter() {
-        task.save()?;
-    }
+    save_new_tasks(repo, tasks)?;
     Ok(())
 }
 
@@ -9506,6 +9559,26 @@ mod tests {
         assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
     }
 
+    /// Pausing a task that is already paused changes nothing: `parked_from`
+    /// keeps naming the step the task was first stopped on, so `resume`
+    /// still sends it back there rather than to `paused`.
+    #[test]
+    fn queue_pause_twice_keeps_the_step_the_task_stopped_on() {
+        let (repo, _root_guard) = fixture("queue-pause-twice");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("implement", "test setup");
+        task.save().unwrap();
+
+        queue_pause(&repo, &pipelines, "solo", false).unwrap();
+        queue_pause(&repo, &pipelines, "solo", false).unwrap();
+
+        let task = queued(&repo, "solo");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
+    }
+
     /// `queue pause` on a `blocked` task with the unblocker mid-turn
     /// interrupts that lane and parks the task, exactly as it already does
     /// for any other live step — gained through the same two predicates the
@@ -10085,6 +10158,98 @@ mod tests {
                 .contains(&repo.archive_dir().join("done.md").display().to_string()),
             "{err:#}"
         );
+    }
+
+    /// Of several `queue add` calls submitting one id at the same moment,
+    /// exactly one is queued. The others are refused with "already exists"
+    /// and write nothing, so the file left behind is the winner's task and
+    /// no caller is told "queued" for a task that was overwritten.
+    #[test]
+    fn parallel_adds_of_one_id_queue_one_and_refuse_the_rest() {
+        const ADDERS: usize = 6;
+        for round in 0..5 {
+            let (repo, _root_guard) = fixture(&format!("parallel-add-same-id-{round}"));
+            let pipelines = Pipelines::builtin();
+            let barrier = std::sync::Barrier::new(ADDERS);
+
+            let outcomes: Vec<(usize, Result<()>)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..ADDERS)
+                    .map(|n| {
+                        let (repo, pipelines, barrier) = (&repo, &pipelines, &barrier);
+                        scope.spawn(move || {
+                            let text = task_text("race", &format!("group: g{n}\n"), BODY);
+                            let submitted = [(format!("race{n}.md"), text)];
+                            barrier.wait();
+                            (
+                                n,
+                                queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted),
+                            )
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+
+            let winners: Vec<usize> = outcomes
+                .iter()
+                .filter(|(_, r)| r.is_ok())
+                .map(|(n, _)| *n)
+                .collect();
+            assert_eq!(
+                winners.len(),
+                1,
+                "round {round}: {} adds of one id reported queued, want exactly one",
+                winners.len()
+            );
+            for (n, outcome) in &outcomes {
+                if let Err(err) = outcome {
+                    assert!(
+                        err.to_string().contains("already exists"),
+                        "round {round}: add {n} was refused for another reason: {err:#}"
+                    );
+                }
+            }
+            let kept = std::fs::read_to_string(repo.queue_dir().join("race.md")).unwrap();
+            assert!(
+                kept.contains(&format!("group: g{}\n", winners[0])),
+                "round {round}: the queued task is not the winner's:\n{kept}"
+            );
+        }
+    }
+
+    /// Parallel adds of different ids do not hold each other up: every one
+    /// is queued, because the lock that serialises a repeated id is per id.
+    #[test]
+    fn parallel_adds_of_different_ids_all_queue() {
+        const ADDERS: usize = 6;
+        let (repo, _root_guard) = fixture("parallel-add-distinct-ids");
+        let pipelines = Pipelines::builtin();
+        let barrier = std::sync::Barrier::new(ADDERS);
+
+        let outcomes: Vec<Result<()>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..ADDERS)
+                .map(|n| {
+                    let (repo, pipelines, barrier) = (&repo, &pipelines, &barrier);
+                    scope.spawn(move || {
+                        // A group of its own each: a group is one chain, so six
+                        // roots in one group would be refused for that instead.
+                        let text =
+                            task_text(&format!("distinct{n}"), &format!("group: g{n}\n"), BODY);
+                        let submitted = [(format!("distinct{n}.md"), text)];
+                        barrier.wait();
+                        queue_add_tasks(repo, pipelines, Some("plan/demo"), &submitted)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        for outcome in &outcomes {
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+        for n in 0..ADDERS {
+            assert!(repo.queue_dir().join(format!("distinct{n}.md")).exists());
+        }
     }
 
     /// A `gate_at:` naming no step of the task's pipeline is refused with the
@@ -16632,6 +16797,73 @@ mod tests {
             assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
             // The value the note said was dropped is not on the queued task.
             assert_eq!(task.extra_str("slug"), "");
+        }
+
+        /// A slug a hook answers is held to a length as well as an alphabet:
+        /// one so long that `task/<slug>-<id>` could not be a git ref file
+        /// name (255 bytes) is dropped like any other invalid slug, so the
+        /// queued branch stays the plain `task/<id>`.
+        #[test]
+        fn a_hook_slug_too_long_for_a_branch_name_is_not_turned_into_a_prefix() {
+            let (mut repo, _root_guard) = fixture("open-long-slug");
+            repo.config.issue_tracking.key_in_names = true;
+            let hook = format!(
+                r#"{{ echo "ticket=PROJ-13"; echo "slug={}"; }} >"$SPOOLWAY_OUT""#,
+                "a".repeat(300)
+            );
+            with_hook(&mut repo, &hook);
+
+            let doc = task_text(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
+            assert_eq!(task.extra_str("slug"), "");
+        }
+
+        /// The longest slug is still taken: the limit is a ceiling, not a
+        /// tighter alphabet.
+        #[test]
+        fn a_slug_at_the_length_limit_is_still_used() {
+            let (mut repo, _root_guard) = fixture("open-max-slug");
+            repo.config.issue_tracking.key_in_names = true;
+            let slug = "a".repeat(SLUG_MAX_LEN);
+            let hook =
+                format!(r#"{{ echo "ticket=PROJ-13"; echo "slug={slug}"; }} >"$SPOOLWAY_OUT""#);
+            with_hook(&mut repo, &hook);
+
+            let doc = task_text(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(
+                task.front.branch.as_deref(),
+                Some(format!("task/{slug}-auth-01").as_str())
+            );
         }
 
         /// A `url=` that is not an absolute http(s) address is dropped, not

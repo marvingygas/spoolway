@@ -401,7 +401,7 @@ The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 |---|---|---|
 | `epic=` | `epic:` | One epic per group. The first task's answer wins. |
 | `ticket=` | `ticket:` | One ticket per task. |
-| `slug=` | prefix on names | Used only with `key_in_names`. Lowercase letters, digits and hyphens. |
+| `slug=` | prefix on names | Used only with `key_in_names`. Lowercase letters, digits and hyphens, at most 64 characters. A longer slug is ignored with a note, and the task is queued without it. |
 | `url=` | `url:` | Must be an absolute `http` or `https` URL. |
 
 A non-zero exit refuses the whole batch. Ids already returned are written back into the

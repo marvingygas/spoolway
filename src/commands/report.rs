@@ -3193,7 +3193,7 @@ mod tests {
     }
 
     /// The same late report, but the park it lands on is the stop popup's
-    /// own — `park_under_lock`'s `by_stop` road, which leaves `parked_from`
+    /// own — `park_under_lock`'s `ParkedBy::Stop` road, which leaves `parked_from`
     /// set exactly like a person's own Escape does, plus `parked_by_stop`.
     /// `back_onto_its_step` already clears that mark on every ordinary road
     /// out of `paused` — see its own doc on "a stop's mark is spent by any

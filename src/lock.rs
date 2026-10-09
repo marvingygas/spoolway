@@ -171,29 +171,38 @@ impl Lock {
     /// is running. The second line pins the answer to *that* process: a start
     /// time, which no reuse of the number can reproduce.
     pub fn holder(path: &Path) -> Result<Option<u32>> {
+        Ok(Self::holder_if_present(path)?.flatten())
+    }
+
+    /// [`Lock::holder`], but telling a file that is gone (`None`) from a file
+    /// that is there and names no live holder (`Some(None)`). A waiter needs
+    /// the difference: a gone file means the holder just released, so the next
+    /// link attempt may succeed, whereas deleting a path it merely failed to
+    /// read could delete a lock someone else linked in the meantime.
+    fn holder_if_present(path: &Path) -> Result<Option<Option<u32>>> {
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
+        Ok(Some(Self::judge(&raw)))
+    }
 
+    /// The live pid a lock file's contents name, if any; see [`Lock::holder`].
+    fn judge(raw: &str) -> Option<u32> {
         let mut lines = raw.lines();
         let pid: u32 = match lines.next().unwrap_or_default().trim().parse() {
             Ok(pid) => pid,
             // An unreadable lock file is stale by definition.
-            Err(_) => return Ok(None),
+            Err(_) => return None,
         };
 
         if !is_running(pid) {
-            return Ok(None);
+            return None;
         }
 
         let recorded = lines.next().unwrap_or_default().trim();
-        if is_same_process(pid, recorded) {
-            Ok(Some(pid))
-        } else {
-            Ok(None)
-        }
+        is_same_process(pid, recorded).then_some(pid)
     }
 }
 
@@ -219,18 +228,21 @@ pub struct TaskLock {
 impl TaskLock {
     /// How long to wait on a lock a live process holds before giving up. A
     /// task read-modify-write is a render and a rename — a holder still in
-    /// one after this long has stalled, and the caller proceeds without the
-    /// lock rather than failing a whole dispatch pass for one task. A
+    /// one after this long has stalled, and the caller decides what that
+    /// costs: the dispatcher proceeds without the lock rather than fail a
+    /// whole pass for one task, while a queue add refuses. A
     /// *crashed* holder does not wait this out: its file is stale by
     /// [`Lock::holder`] and is cleared on the first retry.
     const WAIT: Duration = Duration::from_secs(3);
 
     /// Take the lock, waiting out a live holder up to [`TaskLock::WAIT`] and
     /// reaping a crashed holder's file on the way. Returns `Err` when a live
-    /// process still holds it after the wait — callers treat that as "the
-    /// read-modify-write is not serialised this time, proceed unlocked"
-    /// rather than an error to propagate, because failing a whole dispatch
-    /// pass for one contended task file is the worse outcome.
+    /// process still holds it after the wait. What that means is the
+    /// caller's. The dispatcher treats it as "not serialised this time,
+    /// proceed unlocked", because failing a whole pass for one contended task
+    /// file is the worse outcome. `save_new_tasks` in `commands::queue`
+    /// propagates it, because proceeding would let two adds of one id both
+    /// succeed.
     pub fn acquire(path: &Path) -> Result<TaskLock> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -245,11 +257,16 @@ impl TaskLock {
                         path: path.to_path_buf(),
                     });
                 }
-                Ok(false) => match Lock::holder(path)? {
+                Ok(false) => match Lock::holder_if_present(path)? {
+                    // The holder released between our link and our read. Try
+                    // the link again and remove nothing: another waiter may
+                    // already have linked its own lock into that gap, and
+                    // deleting it would admit two holders at once.
+                    None => {}
                     // A live holder: wait a moment and try again, up to the
-                    // deadline, then return `Err` — the caller reads that as
-                    // "proceed without the lock" (see `acquire`'s own doc).
-                    Some(pid) => {
+                    // deadline, then return `Err` for the caller to decide
+                    // on (see `acquire`'s own doc).
+                    Some(Some(pid)) => {
                         if std::time::Instant::now() >= deadline {
                             bail!(
                                 "task lock at {} is still held by pid {pid} after {:?}",
@@ -259,10 +276,12 @@ impl TaskLock {
                         }
                         std::thread::sleep(Duration::from_millis(20));
                     }
-                    // Stale — nothing alive holds it. Clear and retry; a
-                    // caller that loses that removal race still lands on a
-                    // fresh link on the next turn of the loop.
-                    None => {
+                    // Stale — a file is there but nothing alive holds it.
+                    // Clear and retry. Two waiters can still both judge the
+                    // same crashed holder's file stale and the slower one
+                    // delete the faster one's fresh link; that needs a crash
+                    // first, so it is left.
+                    Some(None) => {
                         let _ = std::fs::remove_file(path);
                     }
                 },

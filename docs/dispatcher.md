@@ -99,6 +99,11 @@ command step finishing, ends the wait immediately and starts the next pass, whic
 that step. A pass also draws on the same once-a-second cadence between the checkpoints in its
 own work, so the board keeps redrawing through a slow pass too.
 
+A task that `spoolway queue unqueue` moves to the pending directory while a pass runs is dropped
+by that pass. The pass does not write its task file back. It starts no command and sends no
+briefing for the task, and it removes the checkout and the branch it cut for it, unless that branch
+holds commits. A lane already booting for the task is stopped.
+
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
 profile. See
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
@@ -574,7 +579,7 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | Limit | What it bounds | Reset by |
 |---|---|---|
 | Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
-| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the task. |
+| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab, an unconfigured model or a worktree that cannot be cut, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the task. |
 | Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the task. |
 | A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past, a failed launch and a late background failure count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
@@ -700,6 +705,22 @@ workspace's `dispatchers/<dispatcher>/worktrees/task-<id>`. See [Home
 mode](concepts.md#home-mode). If somebody already has the task's branch checked out, the lane
 borrows that checkout and cleanup leaves it alone. See
 [Whose worktree](pipelines.md#whose-worktree).
+
+If you delete a task's worktree folder by hand, the dispatcher runs `git worktree prune` before the
+task's next start and cuts the worktree again. The task is not marked `borrowed`. If the prune
+fails, the start fails with a message that says to run `git worktree prune` in the repository and
+resume the task. The new worktree uses the task's own branch, and `base_commit` keeps the value it
+had.
+
+A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
+the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
+The message names the branch. The branch is either left over from an earlier task with the same
+id, or it holds this task's own work saved by `spoolway queue unqueue --force`. Choose one:
+
+| Goal | Steps |
+|---|---|
+| Keep the branch | Run `git branch -m task/<id> <name>`. Set `starts_from: <name>` in the task. Resume the task. |
+| Drop the branch | Run `git branch -D task/<id>`. Resume the task. |
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 

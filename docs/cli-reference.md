@@ -215,6 +215,18 @@ written. A `base:` that exists only on `origin` is accepted; the worktree is cut
 `origin/<base>` later, with no local branch made for it. A base on neither is refused, naming
 both places.
 
+A task whose id is already in the queue or the archive refuses the whole batch and writes
+nothing:
+
+```
+task `cart-totals` already exists at /home/me/.spoolway/proj-ab12cd34/queue/cart-totals.md
+```
+
+When several adds of one id run at the same moment, exactly one is queued and the others are
+refused with the same message and write nothing. The queue screen, scheduled jobs and the
+routines tab follow the same rule. An add that cannot take the id's lock within three seconds is refused with
+`could not lock task`. Run it again.
+
 A task whose start branch exists neither locally nor on `origin` refuses the whole batch. The
 command prints one line for each such task and then `Nothing was queued.`:
 
@@ -298,7 +310,7 @@ The last lines apply to a task on `paused` or `blocked`. They name the step `spo
 
 ### `spoolway queue pause <task>`
 
-Interrupt the task's live lane and park it on `paused`.
+Interrupt the task's live lane and park it on `paused`. A task already on `paused` stays as it is, so `spoolway resume` still sends it to the step it stopped on. The board's `p` key does the same.
 
 ```
 spoolway queue pause <task> [--force]

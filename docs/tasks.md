@@ -182,7 +182,9 @@ a file of its own.
 `spoolway queue add --from` is the only way into the queue. The queue screen uses it too. All
 tasks in one call are checked together and written all or none. The queue screen leaves out a
 task whose start branch does not exist and queues the rest. See [A start branch that does not
-exist](#a-start-branch-that-does-not-exist).
+exist](#a-start-branch-that-does-not-exist). A task id that is already in the queue or the
+archive is refused, also when several adds of that id run at once. See [`spoolway queue
+add`](cli-reference.md#spoolway-queue-add).
 
 ```
 spoolway queue add --from task.md               # one file
@@ -344,8 +346,15 @@ spoolway resume cart-totals
 It prints `cart-totals: -> queued`. A pass that still finds no start branch pauses it again.
 
 Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolway queue unqueue
---force` removes that value, so a task sent again is cut afresh. A `starts_from:` you set before
-the cut stays.
+--force` removes that value, so a task sent again is cut again from its start branch. A
+`starts_from:` you set before the cut stays.
+
+`unqueue --force` keeps the task's branch when it has commits no remote has. A task sent again
+with that branch in place is refused and moves to `blocked`, because its first cut never uses a
+branch that already exists. Rename the branch with `git branch -m task/<id> <name>` and set
+`starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop it. Then resume
+the task. See [Where work happens on
+disk](dispatcher.md#where-work-happens-on-disk).
 
 ### The stop is yours to work in
 
