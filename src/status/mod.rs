@@ -4384,19 +4384,27 @@ fn live_session(
     }
     let path = cached.path.clone()?;
 
-    let mtime = crate::usage::touched_at(&path);
+    let own_subagents = crate::usage::lane_owns_subagents(ledger, &session);
+    let mtime = if own_subagents {
+        crate::usage::lane_touched_at(&path, &session)
+    } else {
+        crate::usage::touched_at(&path)
+    };
     if mtime.is_some() && mtime == cached.mtime {
         return cached.reading;
     }
     cached.mtime = mtime;
-    cached.reading = crate::usage::live_of(&kind, &path, &repo.config.models).map(|live| {
-        let (output, cost) = live_spend(ledger, &session, &live.harvest);
-        Reading {
-            context: live.context,
-            output,
-            cost,
-        }
-    });
+    cached.reading =
+        crate::usage::live_of(&kind, &session, own_subagents, &path, &repo.config.models).map(
+            |live| {
+                let (output, cost) = live_spend(ledger, &session, &live.harvest);
+                Reading {
+                    context: live.context,
+                    output,
+                    cost,
+                }
+            },
+        );
     cached.reading
 }
 
@@ -6937,6 +6945,8 @@ mod tests {
             tokens: crate::usage::Tokens::default(),
             turns: 1,
             cost_usd: Some(cost),
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: 0,
         };
 
@@ -6967,6 +6977,8 @@ mod tests {
             },
             turns: 4,
             cost_usd: Some(22.5),
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: 0,
         };
 
@@ -6998,6 +7010,8 @@ mod tests {
             },
             turns: 2,
             cost_usd: None,
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: 0,
         };
 

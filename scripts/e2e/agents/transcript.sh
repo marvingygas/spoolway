@@ -15,6 +15,7 @@
 # read stale, and so how to reach `prompt_cache_ttl` headlessly. A claude
 # line carries its own `timestamp`, which is what the age check reads, so it
 # is backdated too; pi's line has none and the age falls back to the mtime.
+# A claude transcript also gets the `cost-state` record Claude Code appends.
 
 # write_transcript <kind> <argv...>
 write_transcript() {
@@ -70,6 +71,12 @@ write_transcript() {
         || date -u +%Y-%m-%dT%H:%M:%SZ)
       printf '{"type":"assistant","requestId":"r%s","timestamp":"%s","message":{"model":"fake-cloud","usage":{"input_tokens":%s,"output_tokens":16,"cache_creation":{"ephemeral_5m_input_tokens":1}}}}\n' \
         "$turn" "$stamp" "$tokens" >> "$file"
+      # Claude Code's own running total, appended at the end of every turn. The
+      # model carries the `[1m]` suffix a long-context run puts on its name.
+      # Priced by nothing — `fake-cloud` has no row — so the banked cost can
+      # only come from this record.
+      printf '{"type":"cost-state","totalCostUSD":0.5,"modelUsage":{"fake-cloud[1m]":{"costUSD":0.5}},"hasUnknownModelCost":false}\n' \
+        >> "$file"
       ;;
   esac
 

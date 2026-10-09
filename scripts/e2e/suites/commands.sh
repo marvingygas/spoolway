@@ -196,6 +196,25 @@ works "eval prices a line's tier_tokens at the tier's rates in the four class co
       and near(.cache_read_usd; 0.12) and near(.cache_write_usd; 0.375)
       and .cost_usd == 1.5"' "$SPOOLWAY"
 if [ "$LEDGER_HAD" = 1 ]; then cp "$LIVE/usage.jsonl.keep" "$LEDGER"; else rm -f "$LEDGER"; fi
+# A claude session banks Claude Code's own `cost-state` total. The claude
+# stand-in's transcript writer appends one for a turn whose model nothing
+# prices, so a settled lane caught up by `eval` can only get its cost from that
+# record. The ledger is put back after.
+LEDGER_HAD=0
+if [ -e "$LEDGER" ]; then LEDGER_HAD=1; cp "$LEDGER" "$LIVE/usage.jsonl.keep"; fi
+printf '%s\n' '{"ts":"2020-01-01T00:00:00+00:00","task":"cost-state-e2e","step":"implement","pipeline":"costcheck","agent":"claude","kind":"claude","model":"fake-cloud","session":"costcheck-s1","tokens":{}}' >>"$LEDGER"
+mkdir -p "$LIVE/cost-state-ctl"
+printf '100\n' >"$LIVE/cost-state-ctl/transcript"
+(
+  # shellcheck source=../agents/transcript.sh
+  . "$HERE/../agents/transcript.sh"
+  E2E_CTL="$LIVE/cost-state-ctl" write_transcript claude --session-id costcheck-s1
+)
+works "eval banks the total Claude Code reported for a claude session" \
+  bash -c '"$0" eval --by pipeline --pipeline costcheck --json | jq -e ".total.cost_usd == 0.5"' "$SPOOLWAY"
+works "the ledger line carries that reported total beside the cost" \
+  bash -c 'jq -es "map(select(.session == \"costcheck-s1\" and .reported_usd == 0.5 and .cost_usd == 0.5)) | length == 1" "$0" >/dev/null' "$LEDGER"
+if [ "$LEDGER_HAD" = 1 ]; then cp "$LIVE/usage.jsonl.keep" "$LEDGER"; else rm -f "$LEDGER"; fi
 REFRESHED_GENERATED=$(jq -r '.generated' "$HOME/.spoolway/model-prices.json")
 MODELS_FOOTER=$(tail -n 1 "$MODELS_OUT")
 MODELS_FOOTER_PATTERN="^Prices generated ${REFRESHED_GENERATED}, [0-9]+ days ago\\. Refresh with "

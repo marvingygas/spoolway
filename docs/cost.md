@@ -39,6 +39,36 @@ groups these lines by task, step, round and session. Tokens, cost and time are d
 what a lane already banked, so a settled line's zero adds nothing and `WALL` sums every line
 for that lane.
 
+### What Claude Code reports
+
+A claude session is banked at the larger of two figures. One is the price of its assistant
+turns, summed from the transcript. The other is the total Claude Code itself reports. Claude
+Code appends that total to the transcript as a `cost-state` record at the end of every turn,
+and the ledger lines carry it as `reported_usd`. Like `cost_usd`, each line holds only what
+was new since the session's previous line, and the figure is Claude Code's own, subagents
+included.
+
+The reported total covers spend that no assistant turn records:
+
+- the auto-mode classifier in an interactive session,
+- the side calls behind WebSearch and WebFetch, and the search fee,
+- the call that writes the session's title,
+- the session's subagents.
+
+Subagents are also priced from their own transcripts, so the two are never added. A lane is
+banked at the larger of the reported total and the priced turns of the lane and its subagents.
+A session a person ran by hand keeps its subagents as lines of their own, so its own line is
+compared with the reported total less what those subagent lines price to.
+
+The total restarts when the Claude process does. spoolway takes the last record of each run and
+adds the runs together. The record can also lag the turns after it, which is why the larger
+figure is used. A total that lands after a lane was banked is caught up like a late turn, as a
+line with no tokens. `spoolway eval` and `unattended.max_cost_usd` read the banked figure.
+
+One cost is still not counted. With `CLAUDE_CODE_AUTO_MODE_SERVER=0` the client runs the
+auto-mode classifier itself. Those calls appear in no transcript and in no `cost-state` record,
+so they are missing from the ledger. Other agent kinds report no such total.
+
 ### Directory spend
 
 A watched directory has sessions of its own that never went through the dispatcher: a person
@@ -78,7 +108,10 @@ on its own.
 
 A subagent started inside that session follows it: onto the same lanes row for a session in a
 task's own worktree, or folded onto the same directory row otherwise. A subagent of a dispatched
-lane's own session is never banked this way. That spend is the lane's own.
+lane's own session is never banked this way. That spend is banked on the lane itself, in the
+same line as the lane's own turns, and a subagent that finishes after the lane settles is caught
+up on the lane like any other late turn. A session a person ran by hand keeps its subagents as
+lines of their own, even when a lane later resumes that session.
 
 ## Reading it
 
@@ -164,7 +197,8 @@ A lane that has been banked before adds only the cost, `tokens` and `tier_tokens
 banked yet. The `COST` column of the dispatch board shows the same cost for a running step.
 
 A lane with a turn whose model has no price banks no cost at all. The cost is left out, not
-set to zero.
+set to zero. A claude lane that has a reported total banks at least that total, even when a
+turn has no price.
 
 Set a price from the command line:
 

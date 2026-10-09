@@ -168,9 +168,24 @@ pub struct Entry {
     /// and a line written before the field reads as all base-rate.
     #[serde(default, skip_serializing_if = "Tokens::is_zero")]
     pub tier_tokens: Tokens,
-    /// Absent when nothing could price this model — never estimated.
+    /// Absent when nothing could price this model — never estimated. For a
+    /// claude lane that owns its subagents, summed over the
+    /// lane's lines it is at least [`Entry::reported_usd`] summed, so a session
+    /// whose model nothing prices still has a cost where Claude Code reported
+    /// one. That does not hold per line, both being deltas, nor for a session
+    /// whose subagents are lines of their own: its reported total includes
+    /// them and its cost does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+
+    /// What Claude Code itself reported for the session this line belongs to,
+    /// as a delta like `tokens` and `cost_usd` — see [`Harvest::reported_usd`].
+    /// It is Claude Code's figure as it said it, subagents included, so it can
+    /// exceed the `cost_usd` of a line whose subagents are banked as lines of
+    /// their own. Absent for every other kind, and on a line written before
+    /// the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_usd: Option<f64>,
 
     /// The largest single-turn context reading the transcript reached, over
     /// every deduped turn rather than just the last — see [`Harvest::ctx_peak`],
@@ -1008,6 +1023,7 @@ pub fn ambient_sessions() -> Vec<(&'static str, String)> {
 }
 
 /// What one transcript added up to.
+#[derive(Default)]
 pub struct Harvest {
     pub model: String,
     pub tokens: Tokens,
@@ -1021,7 +1037,37 @@ pub struct Harvest {
     /// map's rate for the tier that turn's prompt reached for a turn that does
     /// not. `None` when any turn has neither, since a partial sum would read as
     /// a complete one.
+    ///
+    /// For a claude session a settled harvest folds Claude Code's reported
+    /// total in, so every reader of it banks and compares the same figure; the
+    /// raw reading [`read_transcript`] returns is the priced sum alone. The
+    /// reported total includes the session's subagents, so how it is folded in
+    /// depends on the reading. A lane harvest is the larger of the priced root
+    /// plus subagents and [`Harvest::reported_usd`] (see [`with_subagents`]).
+    /// A root-only harvest is the larger of the priced root and
+    /// [`Harvest::reported_usd`] less what the subagents price to (see
+    /// [`settle_root`]), so it can sit below [`Harvest::reported_usd`].
     pub cost_usd: Option<f64>,
+    /// Claude Code's own running total for the session, from the `cost-state`
+    /// records it appends to the root transcript: the last record of each
+    /// process run, summed. The total restarts at zero with the Claude process,
+    /// so a record lower than the one before it opens a new run. It covers
+    /// spend no assistant turn carries — the auto-mode classifier, web-search
+    /// and web-fetch side calls, the title call — and the session's subagents.
+    /// Kept as Claude Code said it: it is what [`Entry::reported_usd`] banks,
+    /// and only [`Harvest::cost_usd`] is adjusted for the subagents' own
+    /// transcripts. `None` for any kind but claude, and for a claude
+    /// transcript with no such record.
+    pub reported_usd: Option<f64>,
+    /// [`Harvest::reported_usd`] split by model, summed over runs the same
+    /// way, with the `[1m]` context-window suffix Claude Code puts on a model
+    /// name stripped so a model is one key however it was run. Not netted of
+    /// subagent spend: it is what Claude Code said, per model. Nothing reads it
+    /// in production yet — the ledger banks only the total — but the split is
+    /// kept because the record gives it for free and a model's name is the one
+    /// thing in it that needs normalising.
+    #[allow(dead_code)]
+    pub reported_models: BTreeMap<String, f64>,
     /// The largest single-turn context reading seen anywhere in the
     /// transcript — the same figure [`last_turn`] takes of the *last* turn,
     /// maximised over every deduped turn instead. A compaction drops the last
@@ -1036,12 +1082,36 @@ pub struct Harvest {
 /// Absence is not an error. A lane may have failed before its first turn, or
 /// the project's `args` may not pass `{session_id}` through at all — neither is
 /// worth failing a dispatch pass over, and both simply produce no ledger line.
+///
+/// `own_subagents` says whether the session's subagents are part of this
+/// reading; see [`lane_owns_subagents`] for who decides.
 pub fn harvest(
     kind: &str,
     session: &str,
     prices: &BTreeMap<String, ModelPrice>,
+    own_subagents: bool,
 ) -> Option<Harvest> {
-    harvest_file(kind, &session_file(kind, session)?, prices)
+    let path = session_file(kind, session)?;
+    if own_subagents {
+        harvest_lane_file(kind, session, &path, prices)
+    } else {
+        harvest_file(kind, &path, prices)
+    }
+}
+
+/// Whether a dispatched lane banks the subagent spend of `session`.
+///
+/// One rule for every reader of a lane's transcript: the subagents are the
+/// lane's unless the ledger holds a hand line for the session. A session a
+/// person ran by hand is banked by [`sweep_dirs`] with its subagents as lines
+/// of their own, and a dispatched lane can resume it, so folding the
+/// subagents into the lane's line as well would count them twice. The sweep
+/// applies the same test from its side: it banks a subagent exactly when the
+/// parent has a hand line.
+pub fn lane_owns_subagents(ledger: &[Entry], session: &str) -> bool {
+    !ledger
+        .iter()
+        .any(|entry| entry.session == session && entry.hand)
 }
 
 /// The last assistant turn a transcript records, in whichever of the two
@@ -1109,11 +1179,32 @@ pub struct Live {
 /// banked once by id for the reason [`read_transcript`] does it — Claude Code
 /// writes an assistant line per content block and repeats that request's usage
 /// verbatim on each, so counting every line roughly doubles the output.
-pub fn live_of(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Live> {
+///
+/// `session` names the conversation so its subagents' transcripts can be added
+/// to the harvest, as [`harvest`] adds them when the lane settles. The board
+/// subtracts the ledger's banked lines from this reading, and those lines
+/// include the subagents' spend, so leaving them out would read as zero until
+/// the root alone passed what was banked. `own_subagents` is
+/// [`lane_owns_subagents`]'s answer. `context` stays the root's.
+pub fn live_of(
+    kind: &str,
+    session: &str,
+    own_subagents: bool,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Option<Live> {
     let transcript = read_transcript(kind, path, prices);
+    let total = transcript.total?;
+    // Settled like the harvest the ledger line is diffed against, or the board
+    // would read zero spend until the priced turns alone passed what a
+    // reported total had already banked.
     Some(Live {
         context: transcript.context,
-        harvest: transcript.total?,
+        harvest: if own_subagents {
+            with_subagents(total, kind, session, path, prices)
+        } else {
+            settle_root(kind, path, prices, total)
+        },
     })
 }
 
@@ -1289,7 +1380,139 @@ pub fn touched_at(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 fn harvest_file(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice>) -> Option<Harvest> {
-    read_transcript(kind, path, prices).total
+    let total = read_transcript(kind, path, prices).total?;
+    Some(settle_root(kind, path, prices, total))
+}
+
+/// Fold Claude Code's reported total into a root transcript's harvest when the
+/// subagents are priced apart from it: `cost_usd` becomes the larger of the
+/// priced turns and the reported total less the subagents.
+///
+/// The reported total includes the session's subagents, which are banked as
+/// lines of their own where [`sweep_dirs`] sweeps a hand session, and priced by
+/// [`with_subagents`] where a dispatched lane owns them. Taking the larger
+/// figure of the root alone would count them twice, so what the subagents'
+/// transcripts price to is taken off the reported total first. A lane does not
+/// come through here: [`with_subagents`] compares the whole in one pass.
+///
+/// A subagent with a turn that cannot be priced takes nothing off, so the
+/// reported total may then still hold its spend; that spend is unpriced on its
+/// own line too, and the overlap is the lesser fault than hiding it.
+fn settle_root(
+    kind: &str,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+    mut harvest: Harvest,
+) -> Harvest {
+    let Some(reported) = harvest.reported_usd else {
+        return harvest;
+    };
+    let session = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let subagents: f64 = subagent_transcripts(path, session)
+        .iter()
+        .filter_map(|sub| read_transcript(kind, sub, prices).total?.cost_usd)
+        .sum();
+    let reported = (reported - subagents).max(0.0);
+    harvest.cost_usd = Some(
+        harvest
+            .cost_usd
+            .map_or(reported, |priced| priced.max(reported)),
+    );
+    harvest
+}
+
+/// The transcripts of the subagents `session` started, given the path of its
+/// root transcript.
+///
+/// Claude Code writes each subagent's turns to
+/// `<session>/subagents/agent-<id>.jsonl`, beside `<session>.jsonl` rather
+/// than inside it — the same layout [`parent_of_transcript`] reads in the
+/// other direction. Empty for a kind that writes no such directory, and for a
+/// session that never started a subagent.
+fn subagent_transcripts(path: &Path, session: &str) -> Vec<PathBuf> {
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir.join(session).join("subagents")) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+    // Directory order is the filesystem's own; a stable order keeps the summed
+    // cost from differing in its last digits between two reads.
+    found.sort();
+    found
+}
+
+/// [`harvest_file`] for a dispatched lane's root transcript: the lane's own
+/// turns plus every subagent's, as one reading.
+///
+/// A subagent's spend is the lane's — [`sweep_dirs`] leaves the subagents of
+/// a lane session alone, and a lane's live reading ([`live_of`]) sums them
+/// the same way. The exception is a session with a hand line, where the sweep
+/// banks them: see [`lane_owns_subagents`]. They are summed here, into the one
+/// reading the lane's ledger line is diffed against, so a subagent whose
+/// transcript grows after the lane was banked shows up as a delta on the
+/// lane's session like any later root turn.
+/// `ctx_peak` and `model` stay the root's: a subagent runs in a context of its
+/// own and says nothing about how full the lane's window got. `None` when the
+/// root holds no turn, as for [`harvest_file`].
+fn harvest_lane_file(
+    kind: &str,
+    session: &str,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Option<Harvest> {
+    let lane = read_transcript(kind, path, prices).total?;
+    Some(with_subagents(lane, kind, session, path, prices))
+}
+
+/// `lane`, the root transcript's unsettled reading, with every subagent's
+/// spend added and Claude Code's reported total folded in.
+fn with_subagents(
+    mut lane: Harvest,
+    kind: &str,
+    session: &str,
+    path: &Path,
+    prices: &BTreeMap<String, ModelPrice>,
+) -> Harvest {
+    for sub in subagent_transcripts(path, session) {
+        let Some(spent) = harvest_file(kind, &sub, prices) else {
+            continue;
+        };
+        lane.tokens.add(&spent.tokens);
+        lane.tier_tokens.add(&spent.tier_tokens);
+        lane.turns += spent.turns;
+        // Unknown cost is contagious, as within one transcript: a partial sum
+        // would read as a complete one.
+        lane.cost_usd = lane.cost_usd.zip(spent.cost_usd).map(|(a, b)| a + b);
+    }
+    // The reported total includes the subagents, so it is compared with the
+    // priced root plus subagents and never added to them. It stands even when
+    // a subagent turn could not be priced: the lane banks at least that,
+    // rather than nothing.
+    if let Some(reported) = lane.reported_usd {
+        lane.cost_usd = Some(
+            lane.cost_usd
+                .map_or(reported, |priced| priced.max(reported)),
+        );
+    }
+    lane
+}
+
+/// When a lane's spend last moved: the newest modification time among its root
+/// transcript and its subagents' transcripts.
+pub fn lane_touched_at(path: &Path, session: &str) -> Option<std::time::SystemTime> {
+    subagent_transcripts(path, session)
+        .iter()
+        .filter_map(|sub| touched_at(sub))
+        .chain(touched_at(path))
+        .max()
 }
 
 /// A transcript read once, totalled and sized.
@@ -1350,8 +1573,13 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
     let mut last_unidentified: Option<(String, Tokens, Option<f64>)> = None;
     // The model a kind announces beside its turns rather than on them.
     let mut announced = String::new();
+    let mut reported = ReportedRuns::default();
 
     for value in values {
+        if let Some((total, models)) = reported_state(kind, &value) {
+            reported.observe(total, models);
+            continue;
+        }
         if let Some(model) = turn_model(kind, &value) {
             announced = model;
             continue;
@@ -1419,6 +1647,7 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
         return none;
     }
 
+    let (reported_usd, reported_models) = reported.finish();
     Transcript {
         total: Some(Harvest {
             model,
@@ -1427,8 +1656,86 @@ fn read_transcript(kind: &str, path: &Path, prices: &BTreeMap<String, ModelPrice
             turns,
             ctx_peak,
             cost_usd: (!any_unpriced).then_some(spent),
+            reported_usd,
+            reported_models,
         }),
         context,
+    }
+}
+
+/// The suffix Claude Code puts on a model name run with the 1M-token context
+/// window. The price is the same model's, so it is not part of the name.
+const LONG_CONTEXT_SUFFIX: &str = "[1m]";
+
+/// Read one `cost-state` record: `{"type":"cost-state","totalCostUSD":..,
+/// "modelUsage":{"<model>":{"costUSD":..}}}`, which Claude Code appends to the
+/// root transcript at the end of each turn. `None` for any other record and
+/// for any kind but claude — no other kind writes one, and only the claude
+/// format is known to mean this by the name.
+fn reported_state(
+    kind_name: &str,
+    value: &serde_json::Value,
+) -> Option<(f64, BTreeMap<String, f64>)> {
+    if kind(kind_name)?.format != Format::AnthropicApi || value.get("type")? != "cost-state" {
+        return None;
+    }
+    let total = value
+        .get("totalCostUSD")?
+        .as_f64()
+        .filter(|total| total.is_finite() && *total >= 0.0)?;
+    let mut models = BTreeMap::new();
+    // The total stands without the split: a record with no `modelUsage` still
+    // says what the session spent.
+    let by_model = value.get("modelUsage").and_then(|usage| usage.as_object());
+    for (name, usage) in by_model.into_iter().flatten() {
+        let Some(cost) = usage.get("costUSD").and_then(|cost| cost.as_f64()) else {
+            continue;
+        };
+        let name = name.strip_suffix(LONG_CONTEXT_SUFFIX).unwrap_or(name);
+        *models.entry(name.to_string()).or_insert(0.0) += cost;
+    }
+    Some((total, models))
+}
+
+/// The `cost-state` totals of one transcript, summed across process runs.
+///
+/// Claude Code's total is cumulative for the process, so it restarts at zero
+/// when the process does — a resumed session, a lane relaunched on the same
+/// session id. Records are in order, so a total lower than the one before it
+/// marks a restart and the earlier run is closed at its last record. A restart
+/// that happens to open above where the last run ended looks like growth and
+/// is undercounted; the record offers nothing to tell the two apart.
+#[derive(Default)]
+struct ReportedRuns {
+    closed: f64,
+    closed_models: BTreeMap<String, f64>,
+    open: Option<(f64, BTreeMap<String, f64>)>,
+}
+
+impl ReportedRuns {
+    fn observe(&mut self, total: f64, models: BTreeMap<String, f64>) {
+        if let Some((last, last_models)) = self.open.take()
+            && total < last
+        {
+            self.close(last, last_models);
+        }
+        self.open = Some((total, models));
+    }
+
+    fn close(&mut self, total: f64, models: BTreeMap<String, f64>) {
+        self.closed += total;
+        for (name, cost) in models {
+            *self.closed_models.entry(name).or_insert(0.0) += cost;
+        }
+    }
+
+    /// `None` when the transcript held no `cost-state` record at all.
+    fn finish(mut self) -> (Option<f64>, BTreeMap<String, f64>) {
+        let Some((total, models)) = self.open.take() else {
+            return (None, BTreeMap::new());
+        };
+        self.close(total, models);
+        (Some(self.closed), self.closed_models)
     }
 }
 
@@ -2549,7 +2856,8 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
     let banked_at = chrono::Utc::now();
-    let harvest = harvest(kind, session, &repo.config.models)?;
+    let own_subagents = lane_owns_subagents(&read(repo).unwrap_or_default(), session);
+    let harvest = harvest(kind, session, &repo.config.models, own_subagents)?;
     bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
@@ -2582,6 +2890,7 @@ struct Delta {
     tier_tokens: Tokens,
     turns: u32,
     cost_usd: Option<f64>,
+    reported_usd: Option<f64>,
 }
 
 /// The delta itself: every line in `ledger` naming `session` is summed and
@@ -2593,25 +2902,30 @@ fn banked_delta(session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<De
     let mut banked = Tokens::default();
     let mut banked_tier = Tokens::default();
     let mut banked_cost = 0.0f64;
+    let mut banked_reported = 0.0f64;
     let mut banked_turns = 0u32;
     for entry in ledger {
         if entry.session == session {
             banked.add(&entry.tokens);
             banked_tier.add(&entry.tier_tokens);
             banked_cost += entry.cost_usd.unwrap_or(0.0);
+            banked_reported += entry.reported_usd.unwrap_or(0.0);
             banked_turns += entry.turns;
         }
     }
 
     let tokens = harvest.tokens.since(&banked);
-    if tokens.is_zero() {
-        return None;
-    }
-    let model = harvest.model.clone();
     // The harvest's cost already covers every turn, each priced at its own
     // tier, so it is absent only when some turn had no price. Pricing the
     // delta here would hide that turn behind the last turn's model.
     let cost_usd = harvest.cost_usd.map(|total| (total - banked_cost).max(0.0));
+    let reported_usd = harvest
+        .reported_usd
+        .map(|total| (total - banked_reported).max(0.0));
+    if tokens.is_zero() && !reported_spend_moved(cost_usd, reported_usd) {
+        return None;
+    }
+    let model = harvest.model.clone();
     Some(Delta {
         model,
         tokens,
@@ -2620,7 +2934,26 @@ fn banked_delta(session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<De
         tier_tokens: harvest.tier_tokens.since(&banked_tier).within(&tokens),
         turns: harvest.turns.saturating_sub(banked_turns),
         cost_usd,
+        reported_usd,
     })
+}
+
+/// Whether a delta with no new tokens still has spend worth a line: Claude
+/// Code's reported total grew, and the banked cost grows with it. A reported
+/// total can move with no new turn — the title call, a classifier decision or a
+/// web side call lands after the last turn.
+///
+/// Both must have moved. A cost that moved on its own is a price table that
+/// changed under a transcript already banked, which has never been a reason to
+/// append a line; a reported total that moved while the priced turns stayed
+/// larger changes no figure. Moved means over a millionth of a dollar: a banked
+/// total is a sum of deltas, so subtracting it from the harvest's own sum can
+/// leave a remainder around 1e-16 that would otherwise append an empty line on
+/// every sweep, and nothing Claude Code reports is that small (a title call is
+/// about $0.0002).
+pub(crate) fn reported_spend_moved(cost: Option<f64>, reported: Option<f64>) -> bool {
+    let moved = |delta: Option<f64>| delta.is_some_and(|usd| usd > 1e-6);
+    moved(cost) && moved(reported)
 }
 
 /// The diff-and-append behind [`bank_lane_from`], with the ledger already read
@@ -2681,6 +3014,7 @@ fn bank_lane_at(
         tokens: delta.tokens,
         tier_tokens: delta.tier_tokens,
         cost_usd: delta.cost_usd,
+        reported_usd: delta.reported_usd,
         ctx_peak: Some(harvest.ctx_peak),
         // Carried from the line this sweep continues rather than read fresh
         // — the pipeline that ran this lane, not whatever a pipeline file
@@ -2745,14 +3079,6 @@ fn catch_up_settled_lane_at(
         .filter_map(|entry| chrono::DateTime::parse_from_rfc3339(&entry.ts).ok())
         .map(|ts| ts.with_timezone(&chrono::Utc))
         .max()?;
-    let moved = touched_at(path)
-        .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
-        .unwrap_or(false);
-    if !moved {
-        return None;
-    }
-
-    let harvest = harvest_file(kind, path, &repo.config.models)?;
     // The lane's most recent line, whose columns the catch-up line inherits.
     // Its own `task` and `step` are read back from it too — a settled lane
     // knows which task it belonged to only through what it was banked as.
@@ -2760,6 +3086,27 @@ fn catch_up_settled_lane_at(
         .iter()
         .rev()
         .find(|entry| entry.session == session && entry.is_lane())?;
+    // See [`lane_owns_subagents`]: a hand session's subagents are the sweep's.
+    let subagents_are_ours = lane_owns_subagents(ledger, session);
+    let touched = if subagents_are_ours {
+        // A subagent can finish after the root transcript's last write, so its
+        // file moves the gate too.
+        lane_touched_at(path, session)
+    } else {
+        touched_at(path)
+    };
+    let moved = touched
+        .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
+        .unwrap_or(false);
+    if !moved {
+        return None;
+    }
+
+    let harvest = if subagents_are_ours {
+        harvest_lane_file(kind, session, path, &repo.config.models)?
+    } else {
+        harvest_file(kind, path, &repo.config.models)?
+    };
     bank_lane_at(
         repo,
         kind,
@@ -2874,10 +3221,8 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
 ///   root transcript before any subagent is what lets one started before
 ///   the parent's first sweep take the same road.
 /// - Parent is a dispatched lane, live or already carrying a lane line: the
-///   subagent is left out. A lane's own subagent spend is not banked on
-///   either table today, and banking it here, under a step nobody chose for
-///   it, would change how a lane banks its own spend, not what a person
-///   spends by hand.
+///   subagent is left out. Its spend is banked on the lane's own line by
+///   [`harvest_lane_file`], so banking it here as well would count it twice.
 /// - Anything else, a subagent of an ordinary directory session most often,
 ///   is classified by its own `cwd` like any other session, and
 ///   [`crate::eval`] folds a directory one onto its parent's row at read
@@ -2999,10 +3344,12 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
 
             // A subagent's own spend belongs to whichever session started
             // it, and a lane's subagent transcripts sit under that lane's
-            // own worktree the same as anything typed by hand there — so
-            // without this every one of a lane's own subagents would be
-            // banked as a hand session under a guessed step. Read off the
-            // path in hand, never looked up by id: that lookup walks every
+            // own worktree the same as anything typed by hand there. A
+            // subagent of a hand session is banked beside its parent below.
+            // A subagent of a dispatched lane is skipped, because
+            // [`harvest_lane_file`] banks it on the lane's own line and a
+            // second line here would count it twice. Read off the path in
+            // hand, never looked up by id: that lookup walks every
             // transcript on the machine, and a session outside every root
             // reaches this line on every sweep. See this function's own doc.
             if let Some(parent) = parent_of_transcript(&path) {
@@ -3391,6 +3738,7 @@ fn bank_dir_session(
         tokens: delta.tokens,
         tier_tokens: delta.tier_tokens,
         cost_usd: delta.cost_usd,
+        reported_usd: delta.reported_usd,
         ctx_peak: Some(harvest.ctx_peak),
         pipeline_version: String::new(),
         outcome: None,
@@ -4529,7 +4877,7 @@ mod tests {
         // it arrived cached or fresh — not the 19,353 the two turns sum to.
         assert_eq!(last_turn_size_at("codex", &path), Some(9723));
 
-        let live = live_of("codex", &path, &BTreeMap::new()).expect("no live reading");
+        let live = live_of("codex", "s", true, &path, &BTreeMap::new()).expect("no live reading");
         assert_eq!(live.context, 9723);
         assert_eq!(live.harvest.tokens.output, 76 + 42);
 
@@ -4953,7 +5301,7 @@ mod tests {
         let home = home_with("claude", session, CLAUDE_TRANSCRIPT);
         let path = session_file_in(&home, "claude", session).expect("transcript not found");
 
-        let live = live_of("claude", &path, &BTreeMap::new()).expect("nothing read");
+        let live = live_of("claude", "s", true, &path, &BTreeMap::new()).expect("nothing read");
 
         // The same last turn `last_turn_size_at` sizes, and the same totals
         // `harvest_file` banks — one read rather than two.
@@ -5002,7 +5350,8 @@ mod tests {
             harvest(
                 "nushell",
                 "0198e2c0-3333-4000-8000-000000000003",
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                true
             )
             .is_none()
         );
@@ -5038,6 +5387,7 @@ mod tests {
                 reasoning: 0,
             },
             cost_usd: Some(0.41),
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: "1.1".into(),
             outcome: Some("pass".into()),
@@ -5100,6 +5450,7 @@ mod tests {
             turns: 1,
             tokens: Tokens::default(),
             cost_usd: None,
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: None,
@@ -5940,6 +6291,7 @@ mod tests {
             turns: 1,
             tokens: Tokens::default(),
             cost_usd: None,
+            reported_usd: None,
             ctx_peak: None,
             pipeline_version: "1.0".into(),
             outcome: None,
@@ -5970,6 +6322,8 @@ mod tests {
             },
             turns,
             cost_usd: None,
+            reported_usd: None,
+            reported_models: Default::default(),
             ctx_peak: input,
         };
 
@@ -6633,6 +6987,466 @@ mod tests {
         let tail = catch_up(&repo, "claude", "s", &path, &ledger)
             .expect("the tail written past the watermark is not lost to the gate");
         assert_eq!(tail.tokens.output, 7);
+    }
+
+    /// A dispatched lane's spend includes the subagents it started. Claude Code
+    /// writes each subagent's turns to `<session>/subagents/agent-<id>.jsonl`
+    /// beside the root transcript, so catching a settled lane up to its
+    /// transcript must bank those turns on the lane's own line, once.
+    #[test]
+    fn a_settled_lanes_catch_up_banks_the_spend_of_its_subagents() {
+        let (repo, path, _root_guard) = fixture("settled-lane-subagent");
+        let torn_down = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &torn_down).unwrap();
+        std::fs::write(&path, transcript(&[("", 100)])).unwrap();
+        // The root has not moved since the torn-down line, so only the
+        // subagent's file can open the catch-up's gate.
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 30), ("", 12)]),
+        )
+        .unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s", &path, &ledger)
+            .expect("a subagent's spend the ledger has not seen is banked on the lane");
+        assert_eq!(line.session, "s");
+        assert_eq!(line.step, "implement");
+        assert_eq!(line.tokens.output, 30 + 12);
+
+        let ledger = read(&repo).unwrap();
+        assert!(
+            catch_up(&repo, "claude", "s", &path, &ledger).is_none(),
+            "the subagent's spend is counted once"
+        );
+    }
+
+    /// One `cost-state` record, as Claude Code appends it to the root transcript.
+    fn cost_state(total: f64, model: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "cost-state",
+                "totalCostUSD": total,
+                "modelUsage": {model: {"costUSD": total}},
+                "hasUnknownModelCost": false,
+            })
+        )
+    }
+
+    /// Claude Code's total restarts with its process, so the session's spend is
+    /// the last record of each run added up, and a model run with the
+    /// long-context window is the same model.
+    #[test]
+    fn the_reported_total_is_the_last_record_of_each_process_run() {
+        let (_repo, path, _root_guard) = fixture("reported-runs");
+        let mut text = transcript(&[("", 10)]);
+        // One run climbing to 3.0, a restart that climbs to 2.0, a third at 0.5.
+        for (total, model) in [
+            (1.0, "claude-opus-5[1m]"),
+            (3.0, "claude-opus-5[1m]"),
+            (0.5, "claude-opus-5"),
+            (2.0, "claude-opus-5"),
+            (0.5, "claude-haiku-5-5"),
+        ] {
+            text += &cost_state(total, model);
+        }
+        std::fs::write(&path, text).unwrap();
+
+        let harvest = harvest_file("claude", &path, &BTreeMap::new()).expect("nothing read");
+        assert_eq!(harvest.reported_usd, Some(3.0 + 2.0 + 0.5));
+        assert_eq!(harvest.reported_models["claude-opus-5"], 3.0 + 2.0);
+        assert_eq!(harvest.reported_models["claude-haiku-5-5"], 0.5);
+        assert!(
+            !harvest
+                .reported_models
+                .keys()
+                .any(|name| name.contains("[1m]")),
+            "{:?}",
+            harvest.reported_models
+        );
+    }
+
+    /// A kind other than claude never writes one, and a record of the name in
+    /// a transcript of another shape is not Claude Code's total.
+    #[test]
+    fn only_a_claude_transcript_is_read_for_a_reported_total() {
+        let (_repo, path, _root_guard) = fixture("reported-pi");
+        let text = format!("{CLAUDE_TRANSCRIPT}{}", cost_state(9.0, "claude-opus-5"));
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(
+            harvest_file("claude", &path, &BTreeMap::new())
+                .unwrap()
+                .reported_usd,
+            Some(9.0)
+        );
+        // A transcript pi does read turns from, with the record in it: the
+        // total is Claude Code's, so no other kind takes it.
+        let pi_turn = r#"{"type":"message","id":"t1","message":{"role":"assistant","model":"fake-local","usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0}}}"#;
+        std::fs::write(&path, format!("{pi_turn}\n{}", cost_state(9.0, "x"))).unwrap();
+        let pi = read_transcript("pi", &path, &BTreeMap::new())
+            .total
+            .expect("pi reads its own turn");
+        assert_eq!(pi.reported_usd, None);
+        let plain = home_with("claude", "s0", CLAUDE_TRANSCRIPT);
+        let found = session_file_in(&plain, "claude", "s0").unwrap();
+        assert_eq!(
+            harvest_file("claude", &found, &BTreeMap::new())
+                .unwrap()
+                .reported_usd,
+            None
+        );
+    }
+
+    /// What the session is banked at is the larger of the reported total and
+    /// the priced turns, whichever way round they fall.
+    #[test]
+    fn the_banked_cost_is_the_larger_of_reported_and_priced() {
+        let (repo, path, _root_guard) = fixture("reported-larger");
+        // 1M output tokens at the fixture's $10/M.
+        let priced = transcript(&[("", 1_000_000)]);
+
+        std::fs::write(
+            &path,
+            format!("{priced}{}", cost_state(10.5, "claude-opus-5")),
+        )
+        .unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+        assert_eq!(harvest.cost_usd, Some(10.5));
+
+        std::fs::write(
+            &path,
+            format!("{priced}{}", cost_state(9.0, "claude-opus-5")),
+        )
+        .unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+        assert_eq!(harvest.cost_usd, Some(10.0));
+        assert_eq!(harvest.reported_usd, Some(9.0));
+
+        std::fs::write(&path, &priced).unwrap();
+        let harvest = harvest_file("claude", &path, &repo.config.models).unwrap();
+        assert_eq!(harvest.cost_usd, Some(10.0));
+        assert_eq!(harvest.reported_usd, None);
+    }
+
+    /// The reported total includes the subagents, which are priced from their
+    /// own transcripts too. A lane's figure is the larger of the reported total
+    /// and the priced root plus subagents — never the two added — and a root
+    /// read alone, as the sweep reads it, leaves the subagents out.
+    #[test]
+    fn a_reported_total_is_not_added_to_the_subagents_it_already_holds() {
+        let (repo, path, _root_guard) = fixture("reported-subagents");
+        let path = path.with_file_name("s.jsonl");
+        // Root: $10 priced. Subagent: $4 priced.
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 400_000)]),
+        )
+        .unwrap();
+        // Claude Code reports $15: the $14 of priced turns plus $1 of its own.
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transcript(&[("", 1_000_000)]),
+                cost_state(15.0, "claude-opus-5")
+            ),
+        )
+        .unwrap();
+
+        let lane = harvest_lane_file("claude", "s", &path, &repo.config.models).unwrap();
+        assert_eq!(lane.cost_usd, Some(15.0));
+        assert_eq!(lane.reported_usd, Some(15.0));
+
+        let root = harvest_file("claude", &path, &repo.config.models).unwrap();
+        assert_eq!(
+            root.cost_usd,
+            Some(11.0),
+            "the $4 is the subagent's own line"
+        );
+        assert_eq!(root.reported_usd, Some(15.0), "as Claude Code said it");
+
+        // Reported below the priced sum: the priced sum stands.
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transcript(&[("", 1_000_000)]),
+                cost_state(12.0, "claude-opus-5")
+            ),
+        )
+        .unwrap();
+        let lane = harvest_lane_file("claude", "s", &path, &repo.config.models).unwrap();
+        assert_eq!(lane.cost_usd, Some(14.0));
+    }
+
+    /// A subagent whose model nothing prices must not take the lane's reported
+    /// total with it: Claude Code's figure still covers that spend.
+    #[test]
+    fn an_unpriced_subagent_leaves_the_reported_total_banked() {
+        let (repo, path, _root_guard) = fixture("reported-unpriced-sub");
+        let path = path.with_file_name("s.jsonl");
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 10)]).replace("claude-opus-5", "fake-cloud"),
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transcript(&[("", 10)]),
+                cost_state(5.0, "claude-opus-5")
+            ),
+        )
+        .unwrap();
+
+        let lane = harvest_lane_file("claude", "s", &path, &repo.config.models).unwrap();
+        assert_eq!(lane.reported_usd, Some(5.0));
+        assert_eq!(lane.cost_usd, Some(5.0));
+    }
+
+    /// A lane's reported total is Claude Code's own figure, even when it lags
+    /// what the subagents price to; the cost stays the priced sum.
+    #[test]
+    fn a_lagging_reported_total_is_banked_as_reported_and_costs_the_priced_sum() {
+        let (repo, path, _root_guard) = fixture("reported-lagging");
+        let path = path.with_file_name("s.jsonl");
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 400_000)]),
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transcript(&[("", 10)]),
+                cost_state(0.01, "claude-opus-5")
+            ),
+        )
+        .unwrap();
+
+        let lane = harvest_lane_file("claude", "s", &path, &repo.config.models).unwrap();
+        assert_eq!(lane.reported_usd, Some(0.01));
+        assert!((lane.cost_usd.unwrap() - 4.0001).abs() < 1e-9);
+    }
+
+    /// The board's live reading is the harvest the ledger line is diffed
+    /// against, so it holds the reported total too: root alone, and root with
+    /// the subagents a lane owns.
+    #[test]
+    fn a_live_reading_holds_the_reported_total() {
+        let (repo, path, _root_guard) = fixture("reported-live");
+        let path = path.with_file_name("s.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transcript(&[("", 1_000_000)]),
+                cost_state(10.5, "claude-opus-5")
+            ),
+        )
+        .unwrap();
+        let live = live_of("claude", "s", false, &path, &repo.config.models).unwrap();
+        assert_eq!(live.harvest.cost_usd, Some(10.5));
+
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 400_000)]),
+        )
+        .unwrap();
+        let live = live_of("claude", "s", true, &path, &repo.config.models).unwrap();
+        assert_eq!(
+            live.harvest.cost_usd,
+            Some(14.0),
+            "reported 10.5 is below the priced $14, which stands"
+        );
+        let live = live_of("claude", "s", false, &path, &repo.config.models).unwrap();
+        assert_eq!(
+            live.harvest.cost_usd,
+            Some(10.0),
+            "a root read alone takes the subagents' $4 off the reported 10.5"
+        );
+    }
+
+    /// The total does not depend on the per-model split being there.
+    #[test]
+    fn a_cost_state_without_a_model_split_still_gives_its_total() {
+        let (_repo, path, _root_guard) = fixture("reported-no-split");
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}\n",
+                transcript(&[("", 10)]),
+                r#"{"type":"cost-state","totalCostUSD":2.5}"#
+            ),
+        )
+        .unwrap();
+        let harvest = harvest_file("claude", &path, &BTreeMap::new()).unwrap();
+        assert_eq!(harvest.reported_usd, Some(2.5));
+        assert!(harvest.reported_models.is_empty());
+    }
+
+    /// A reported total that lands after the lane was banked, with no new turn
+    /// beside it, is picked up as a delta of its own — once.
+    #[test]
+    fn a_reported_total_landing_after_the_bank_is_caught_up_as_a_delta() {
+        let (repo, path, _root_guard) = fixture("reported-late");
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transcript(&[("", 1_000_000)]),
+                cost_state(10.0, "claude-opus-5")
+            ),
+        )
+        .unwrap();
+        let first = bank_lane_at(
+            &repo,
+            "claude",
+            "s",
+            "demo",
+            "implement",
+            chrono::Utc::now() - chrono::Duration::seconds(300),
+            None,
+            &[],
+            &harvest_file("claude", &path, &repo.config.models).unwrap(),
+        )
+        .expect("the lane's own line");
+        assert_eq!(first.cost_usd, Some(10.0));
+        assert_eq!(first.reported_usd, Some(10.0));
+        let carried = Entry {
+            task: "demo".into(),
+            step: "implement".into(),
+            ..first
+        };
+        // The classifier and title calls land after teardown: no new turn.
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text += &cost_state(10.25, "claude-opus-5");
+        std::fs::write(&path, text).unwrap();
+
+        let ledger = vec![carried];
+        let late = catch_up(&repo, "claude", "s", &path, &ledger)
+            .expect("a cost-state with no new turn still moves the bank");
+        assert!(late.tokens.is_zero());
+        assert!((late.cost_usd.unwrap() - 0.25).abs() < 1e-9);
+        assert!((late.reported_usd.unwrap() - 0.25).abs() < 1e-9);
+
+        let ledger = vec![ledger[0].clone(), late];
+        assert!(
+            catch_up(&repo, "claude", "s", &path, &ledger).is_none(),
+            "the late spend is counted once"
+        );
+    }
+
+    /// The board subtracts the ledger's banked lines from the live reading, and
+    /// those lines now include subagent spend, so the live reading has to
+    /// include it too or a resumed lane reads zero.
+    #[test]
+    fn a_live_reading_counts_the_subagents_the_ledger_line_counts() {
+        let (_repo, path, _root_guard) = fixture("live-lane-subagent");
+        std::fs::write(&path, transcript(&[("", 100)])).unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            transcript(&[("", 30), ("", 12)]),
+        )
+        .unwrap();
+
+        let live = live_of("claude", "s", true, &path, &BTreeMap::new()).expect("nothing read");
+        assert_eq!(live.harvest.tokens.output, 100 + 30 + 12);
+    }
+
+    /// A hand session's subagents are banked by the sweep as lines of their own,
+    /// so a settled lane's catch-up on a session it resumed from a hand line
+    /// must not bank them too. Covers the catch-up only: the teardown and
+    /// interrupt paths share the rule but are not driven here.
+    #[test]
+    fn a_lane_resuming_a_hand_session_leaves_its_subagents_to_the_sweep() {
+        let (repo, path, _root_guard) = fixture("hand-session-subagent");
+        let hand_line = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            hand: true,
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &hand_line).unwrap();
+        // The lane that resumed the session banked at teardown, so the newest
+        // line is the dispatcher's and a per-line `hand` check alone would
+        // fold the subagent in.
+        let lane_line = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(200)).to_rfc3339(),
+            hand: false,
+            tokens: Tokens::default(),
+            ..hand_line.clone()
+        };
+        append(&repo, &lane_line).unwrap();
+        std::fs::write(&path, transcript(&[("", 100), ("", 5)])).unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 30)])).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        assert!(!lane_owns_subagents(&ledger, "s"));
+        assert!(lane_owns_subagents(&ledger, "another"));
+        let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("root moved");
+        assert_eq!(line.tokens.output, 5, "the subagent's 30 is the sweep's");
+    }
+
+    /// The board's cache gate and the catch-up's gate both read this: a
+    /// subagent that finishes after the root's last write still moves it.
+    #[test]
+    fn a_lane_is_touched_when_only_a_subagent_file_moved() {
+        let (_repo, path, _root_guard) = fixture("lane-touched-subagent");
+        std::fs::write(&path, transcript(&[("", 1)])).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let subagents = path.parent().unwrap().join("s/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(subagents.join("agent-a1.jsonl"), transcript(&[("", 1)])).unwrap();
+
+        assert!(lane_touched_at(&path, "s") > touched_at(&path));
+        assert_eq!(lane_touched_at(&path, "none"), touched_at(&path));
     }
 
     // -------------------------------------------- watched directories, swept
