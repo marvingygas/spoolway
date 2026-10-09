@@ -58,7 +58,9 @@
 //! add` resolves a `depends_on` against the queue and the archive, so an old
 //! finished task that has aged out stops being nameable as a dependency —
 //! see [`crate::commands::queue::check_dependencies_set`], which says so
-//! when it refuses one. The sweep also removes a swept task's line from
+//! when it refuses one. An archived task that a task in `queue/` still names
+//! in `depends_on` is spared whatever its age, because that dependent could
+//! never start without it. The sweep also removes a swept task's line from
 //! `archive/index.jsonl` in the same pass, and never sweeps that file itself
 //! — see [`crate::archive_index`].
 
@@ -160,9 +162,14 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
 /// its change stamped as this sweep's. With no lock the files are swept
 /// anyway and the index is left to rebuild.
 fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
+    // Without a trustworthy read of the queue the pass is skipped, not run
+    // unguarded: see [`depended_on_files`].
+    let Some(spared) = depended_on_files(repo) else {
+        return 0;
+    };
     let guard = crate::archive_index::lock(repo);
     let was_current = guard.is_some() && crate::archive_index::is_current(repo);
-    let removed = sweep_dir(&repo.archive_dir(), max_age, limit, None);
+    let removed = sweep_dir(&repo.archive_dir(), max_age, limit, Some(&spared));
     if removed > 0
         && let Some(guard) = &guard
     {
@@ -171,16 +178,46 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     removed
 }
 
+/// The `archive/` file names a task still in `queue/` names in `depends_on`.
+///
+/// A dependent whose dependency file has been swept waits forever: nothing
+/// can satisfy it, and the dispatcher reports "nothing to do". Archive
+/// entries are named `<id>.md`, which [`crate::mux::lane_task`] leaves whole,
+/// so these names go straight into [`sweep_dir`]'s guard.
+///
+/// `None` when the queue cannot be read in full: the directory errors, or a
+/// queue file does not parse, so its `depends_on` is unknown. The caller then
+/// skips the archive sweep for this pass. Sweeping anyway could delete the
+/// dependency of the unreadable task, which would still be missing after the
+/// file is repaired. This is the same fail-toward-keeping rule as
+/// [`max_age`].
+fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
+    let (tasks, problems) = crate::task::load_dir(&repo.queue_dir()).ok()?;
+    if !problems.is_empty() {
+        return None;
+    }
+    Some(
+        tasks
+            .iter()
+            .flat_map(|task| task.front.depends_on.iter())
+            .map(|id| format!("{id}.md"))
+            .collect(),
+    )
+}
+
 /// One pass over one directory: delete a top-level entry whose own
 /// modification time is `max_age` or older, up to `limit` deletions.
 /// Returns how many went, which is what lets the tests below see the
 /// ceiling hold and lets [`sweep_now`] divide one budget across the
 /// directories.
 ///
-/// `queued` is `Some` only for `scratch/` and `headless/` (and its `logs/`) —
-/// an entry whose leading task id ([`crate::mux::lane_task`]) is in that set
-/// is a live task's and is never swept, however old it reads. `None`
-/// everywhere else.
+/// `spared` is `Some` for `scratch/`, `headless/` (and its `logs/`) and
+/// `archive/`. An entry whose name, cut at its first lane separator by
+/// [`crate::mux::lane_task`], is in that set is never swept, however old it
+/// reads. For `scratch/` and `headless/` the set holds the ids of queued
+/// tasks, so the entry is a live task's. For `archive/` it holds the
+/// `<id>.md` file names of finished tasks a queued task depends on, which
+/// `lane_task` leaves whole. `None` everywhere else.
 ///
 /// Not gated by `days == 0` itself — that check belongs to the one caller
 /// that means it as "retention is off"; a test driving this directly passes
@@ -189,7 +226,7 @@ fn sweep_dir(
     dir: &Path,
     max_age: Duration,
     limit: usize,
-    queued: Option<&BTreeSet<String>>,
+    spared: Option<&BTreeSet<String>>,
 ) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -201,11 +238,12 @@ fn sweep_dir(
             break;
         }
         // A scratch directory or headless record whose task is still in the
-        // queue is spared before its age is ever looked at — `spoolway
-        // resume` continues a lane whose bookkeeping this would otherwise
-        // have deleted.
-        if let Some(queued) = queued
-            && queued.contains(crate::mux::lane_task(
+        // queue, or an archived task a queued task depends on, is spared
+        // before its age is ever looked at — `spoolway resume` continues a
+        // lane whose bookkeeping this would otherwise have deleted, and a
+        // dependent never starts without its dependency's file.
+        if let Some(spared) = spared
+            && spared.contains(crate::mux::lane_task(
                 entry.file_name().to_string_lossy().as_ref(),
             ))
         {
@@ -557,6 +595,85 @@ mod tests {
             "an archived task's headless record should have gone"
         );
 
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// An archived task that a queued task still names in `depends_on` stays
+    /// through the archive sweep, however old it reads, so the dependent is
+    /// never left waiting on a task that is not there. An archived task that
+    /// nothing queued depends on ages out as usual.
+    #[test]
+    fn the_archive_sweep_spares_a_task_a_queued_task_depends_on() {
+        let base = crate::scratch::root("retain-archive-dependency");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.archive_retention_days = 30;
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("dep-b.md"),
+            "---\nid: dep-b\nstage: queued\ndepends_on: [dep-a]\n---\n",
+        )
+        .unwrap();
+        for id in ["dep-a", "unrelated"] {
+            let file = repo.archive_dir().join(format!("{id}.md"));
+            std::fs::write(&file, format!("---\nid: {id}\nstage: done\n---\n")).unwrap();
+            age(&file, 60 * SECS_PER_DAY);
+        }
+
+        sweep_now(&repo);
+
+        assert!(
+            repo.archive_dir().join("dep-a.md").exists(),
+            "an archived task a queued task depends on was swept"
+        );
+        assert!(
+            !repo.archive_dir().join("unrelated.md").exists(),
+            "an archived task nothing depends on should have gone"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A queue file that does not parse hides its `depends_on`, so the
+    /// archive sweep skips the pass rather than risk deleting what that task
+    /// needs. Once the file is repaired the dependency is still there.
+    #[test]
+    fn the_archive_sweep_waits_while_a_queue_file_will_not_parse() {
+        let base = crate::scratch::root("retain-archive-unparsed-queue");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.archive_retention_days = 30;
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(repo.queue_dir().join("broken.md"), "not frontmatter").unwrap();
+        for id in ["dep-a", "unrelated"] {
+            let file = repo.archive_dir().join(format!("{id}.md"));
+            std::fs::write(&file, format!("---\nid: {id}\nstage: done\n---\n")).unwrap();
+            age(&file, 60 * SECS_PER_DAY);
+        }
+
+        sweep_now(&repo);
+
+        for id in ["dep-a", "unrelated"] {
+            assert!(
+                repo.archive_dir().join(format!("{id}.md")).exists(),
+                "{id} was swept while a queue file could not be read"
+            );
+        }
         std::fs::remove_dir_all(&base).ok();
     }
 
