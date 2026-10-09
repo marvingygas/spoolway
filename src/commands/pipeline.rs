@@ -246,8 +246,7 @@ const STEP_KEYS: &[&str] = &[
 /// "unknown field", and three struct fields that answer a fact about where a
 /// `Pipeline` came from rather than something a file could ever set —
 /// [`Pipeline::name`], because the file name is the name;
-/// [`Pipeline::blocked_declared`], set only by [`Pipelines::assemble`] once a
-/// file is read; and [`Pipeline::private_file`], set only by
+/// [`Pipeline::blocked_declared`], read off the file by the parser; and [`Pipeline::private_file`], set only by
 /// [`crate::pipeline::Pipelines::load_impl`] when this pipeline came from
 /// `local/pipelines/` rather than the tracked directory — see
 /// [`crate::local`].
@@ -1102,7 +1101,8 @@ fn report_gate_warnings(warnings: &[String]) {
 /// running, same as [`pipeline_show`] and every other reader here — so a
 /// step id or a key the merge would refuse is caught before anything is
 /// written, by probing the exact rule [`crate::overrides::apply_step_patch`]
-/// applies at load rather than a second copy of it. The layer itself is
+/// applies at load rather than a second copy of it. The one rule the command
+/// adds on its own is `blocked.session=false`, which load cannot honour. The layer itself is
 /// project-wide (`repo.overrides_dir()`), so a lane in any worktree sees the
 /// same fork on its next pass.
 pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
@@ -1146,13 +1146,30 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
         .with_context(|| format!("`{raw_value}` is not a value `{key}` can take"))?;
 
     // Refused by the exact rule the merge itself applies at load — see
-    // `apply_step_patch` — so nothing accepted here can be rejected later,
-    // silently, on the very next dispatcher pass.
+    // `apply_step_patch` — so nothing it refuses can be accepted here and
+    // then rejected, silently, on the very next dispatcher pass. The
+    // `session` check below is the one extra rule.
     let mut fields = serde_norway::Mapping::new();
     fields.insert(serde_norway::Value::String(key.to_string()), value.clone());
     let mut probe = step.clone();
     crate::overrides::apply_step_patch(&mut probe, &fields)
         .with_context(|| format!("`{key}` on step `{step_id}` of pipeline `{name}`"))?;
+
+    // `session: false` on `blocked` cannot be told apart from the key being
+    // left out, so load fills it back in from `[unattended]`. Written anyway,
+    // the patch would be reported active and the lane would still start with
+    // a session. Refused here until config itself says `false`.
+    if step_id == crate::pipeline::BLOCKED
+        && key == "session"
+        && !probe.session
+        && repo.config.unattended.blocked_session
+    {
+        bail!(
+            "`session: false` on step `blocked` of pipeline `{name}` would be read as left out \
+             and filled back in from `unattended.blocked_session`, which is true; set that \
+             config key to false instead"
+        );
+    }
 
     // The value currently active, override already layered on included, so a
     // second `--set` on the same key shows what it is actually replacing.
@@ -4374,6 +4391,41 @@ mod tests {
                 err.to_string().contains("has no step `nosuchstep`"),
                 "{err}"
             );
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "nothing should be written on a refusal"
+            );
+        });
+    }
+
+    /// `session: false` on `blocked` reads as "left out" at load and is
+    /// refilled from `[unattended]`, so a patch saying it must be refused
+    /// while config says `true`, not reported active and then ignored.
+    #[test]
+    fn pipeline_override_refuses_blocked_session_false_while_config_says_true() {
+        with_repo_and_pipeline("blocked-session", "demo", DEMO_PIPELINE, |repo| {
+            assert!(repo.config.unattended.blocked_session);
+            let err = pipeline_override(repo, "demo", "blocked.session=false").unwrap_err();
+            assert!(
+                format!("{err:#}").contains("unattended.blocked_session"),
+                "{err:#}"
+            );
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "nothing should be written on a refusal"
+            );
+        });
+    }
+
+    #[test]
+    fn pipeline_override_refuses_a_description_on_blocked() {
+        with_repo_and_pipeline("blocked-description", "demo", DEMO_PIPELINE, |repo| {
+            let err = pipeline_override(repo, "demo", "blocked.description=hello").unwrap_err();
+            assert!(format!("{err:#}").contains("description"), "{err:#}");
             assert!(
                 crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
                     .unwrap()

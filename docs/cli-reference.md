@@ -831,9 +831,12 @@ $ spoolway pipeline override impl --set implement.model=claude-opus-5
 |---|---|---|
 | `--set <STEP.KEY=VALUE>` | required | The step, key and new value |
 
-A step the pipeline does not have, a key the merge refuses, or `id:` set on the step is left
-out of the merge instead: the command still runs, and prints one stderr line naming what it
-left out. See [`spoolway override`](#spoolway-override-list--promote--drop).
+The command exits 1 and writes nothing when the pipeline has no such step, when the key is
+one the merge refuses, or when `id:` is set. Every pipeline has a `blocked` step, so
+`blocked.<key>` is accepted even when the pipeline file does not declare one. The command also refuses
+`blocked.description`, and `blocked.session=false` while `unattended.blocked_session` is `true`. See [Staffing
+`blocked`](pipelines.md#staffing-blocked) and [`spoolway
+override`](#spoolway-override-list--promote--drop).
 
 `<name>` may also name a private pipeline. The patch is written the same way, but it only
 starts applying once [`spoolway pipeline promote <name>`](#spoolway-pipeline-promote-name)

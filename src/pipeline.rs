@@ -1018,16 +1018,16 @@ pub struct Pipeline {
     #[serde(default, skip_serializing)]
     blocked_on_write: Vec<String>,
 
-    /// Whether this pipeline's own file declared a `blocked` step, set only
-    /// by [`Pipelines::assemble`] from what the file held right before it
-    /// appended or merged the config-materialised one onto it.
+    /// Whether this pipeline's own file declared a `blocked` step, read off
+    /// the file by [`parse_unchecked`] before anything seeds or merges the
+    /// config-materialised one onto it. Neither [`Pipelines::assemble`] nor
+    /// the override layer touches it afterwards, so it stays true to the file
+    /// even once a `blocked` step has been appended for a patch to land on.
     ///
     /// Never (de)serialized — like [`Self::name`], it is a fact about where a
-    /// `Pipeline` came from, not something a file could state about itself —
-    /// so a `Pipeline::parse` used directly, outside `Pipelines::assemble`
-    /// (every test in this module, `install.rs`), always reads `false`
-    /// regardless of what it declared. `spoolway pipeline show` reads it to
-    /// mark the row `from config` or `overridden in <name>.yml`.
+    /// `Pipeline` came from, not something a file could state about itself.
+    /// `spoolway pipeline show` reads it to mark the row `from config` or
+    /// `overridden in <name>.yml`.
     #[serde(skip)]
     pub blocked_declared: bool,
 
@@ -1066,6 +1066,7 @@ impl Pipeline {
     pub fn parse(name: &str, raw: &str) -> Result<Pipeline> {
         let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
         pipeline.name = name.to_string();
+        pipeline.blocked_declared = pipeline.steps.iter().any(|s| s.id == BLOCKED);
         refuse_retired_step_keys(&pipeline)?;
         pipeline.validate()?;
         Ok(pipeline)
@@ -1958,6 +1959,7 @@ impl Pipeline {
 pub(crate) fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
     let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
     pipeline.name = name.to_string();
+    pipeline.blocked_declared = pipeline.steps.iter().any(|s| s.id == BLOCKED);
     refuse_retired_step_keys(&pipeline)?;
     Ok(pipeline)
 }
@@ -1983,6 +1985,19 @@ fn refuse_retired_step_keys(pipeline: &Pipeline) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Give `pipeline` a complete `blocked` step: append one built from config
+/// when the file declared none, or fill the keys a declared one left out.
+///
+/// Appended last, so `priority()` ranks it exactly as a pipeline that
+/// declared its own trailing `blocked` step always has. Safe to run twice:
+/// a second pass finds every key already filled.
+fn materialise_blocked(pipeline: &mut Pipeline, unattended: &crate::config::UnattendedConfig) {
+    match pipeline.steps.iter_mut().find(|s| s.id == BLOCKED) {
+        Some(step) => apply_blocked_config_fallback(step, unattended),
+        None => pipeline.steps.push(blocked_step_from_config(unattended)),
+    }
 }
 
 /// A `blocked` step for a pipeline that declares none of its own, built
@@ -2234,10 +2249,9 @@ impl Pipelines {
     /// actually right there.
     ///
     /// `overrides` is applied to each pipeline right after it is parsed and
-    /// before [`Pipelines::assemble`] runs — assembling first would
-    /// materialise a `blocked` step that a pipeline declaring none of its
-    /// own never had in the file, letting a patch reach a step that, from
-    /// the file's own perspective, does not exist.
+    /// before [`Pipelines::assemble`] runs. The pipeline's `blocked` step is
+    /// completed from config first — appended when the file declared none —
+    /// so a patch on it has a runnable step to land on.
     ///
     /// `print_notices` says whether an override that was skipped is printed
     /// to stderr once per process; see [`Pipelines::load_quietly`] for why a
@@ -2273,12 +2287,27 @@ impl Pipelines {
         let mut ignored = Vec::new();
         for (name, path, raw) in files {
             // Unvalidated: a file's own `blocked` step may declare only
-            // some of its five keys on purpose, leaning on
-            // `Pipelines::assemble` to fill the rest in from config
-            // before anything checks that the step is a runnable one.
+            // some of its five keys on purpose, leaning on config to fill
+            // the rest in (below when overrides apply, else in
+            // `Pipelines::assemble`) before anything checks that the step is
+            // a runnable one.
             let mut pipeline =
                 parse_unchecked(&name, &raw).with_context(|| format!("in {}", path.display()))?;
             if let Some(overrides) = overrides {
+                // A pipeline declaring no `blocked` step still gets one from
+                // `assemble`, and `pipeline override` offers a patch on it
+                // because `load_tracked` already holds that step. Building it
+                // here, the way `assemble` would, is what gives such a patch
+                // something to land on. A declared one may name only some of
+                // its five keys, and the patch is validated against the whole
+                // pipeline right here: without the config fallback applied
+                // first it would be refused for naming no agent and dropped,
+                // though `pipeline override` accepted it against the
+                // assembled step. `assemble` repeats this after the patch and
+                // only refills what is still unset, so a patched
+                // `session: false` reads as unset and goes back to config's
+                // value.
+                materialise_blocked(&mut pipeline, &config.unattended);
                 ignored.extend(crate::overrides::apply_pipeline_patch(
                     &mut pipeline,
                     overrides,
@@ -2377,23 +2406,11 @@ impl Pipelines {
         require_nonempty: bool,
     ) -> Result<Pipelines> {
         for (name, pipeline) in pipelines.iter_mut() {
-            match pipeline.steps.iter_mut().find(|s| s.id == BLOCKED) {
-                Some(step) => {
-                    refuse_declared_blocked_description(step)
-                        .with_context(|| format!("pipeline `{name}`"))?;
-                    pipeline.blocked_declared = true;
-                    apply_blocked_config_fallback(step, &config.unattended);
-                }
-                None => {
-                    pipeline.blocked_declared = false;
-                    // Appended last, so `priority()` ranks it exactly as a
-                    // pipeline that declared its own trailing `blocked` step
-                    // always has.
-                    pipeline
-                        .steps
-                        .push(blocked_step_from_config(&config.unattended));
-                }
+            if let Some(step) = pipeline.steps.iter().find(|s| s.id == BLOCKED) {
+                refuse_declared_blocked_description(step)
+                    .with_context(|| format!("pipeline `{name}`"))?;
             }
+            materialise_blocked(pipeline, &config.unattended);
         }
 
         let mut set = Pipelines {
@@ -4610,6 +4627,118 @@ mod tests {
                     .as_deref(),
                 Some("claude-opus-5"),
                 "load, the ordinary entry point, still sees it"
+            );
+        });
+    }
+
+    /// `pipeline override` checks a patch against `load_tracked`, which holds
+    /// a `blocked` step for every pipeline. A patch on that step therefore
+    /// has to apply when pipelines load, and must not be reported as ignored
+    /// for naming a step the pipeline does not have.
+    #[test]
+    fn a_patch_on_the_blocked_step_applies_when_the_pipeline_declares_none() {
+        with_override_fixture("blocked-patch", |root| {
+            let config = crate::config::Config::default();
+            let tracked = Pipelines::load_tracked(root, &config).unwrap();
+            assert!(
+                tracked.get("impl").unwrap().step(BLOCKED).is_some(),
+                "the step `pipeline override` probes must exist"
+            );
+
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  blocked:\n    model: claude-sonnet-5\n",
+            )
+            .unwrap();
+
+            let loaded = Pipelines::load_quietly(root, &config).unwrap();
+            assert!(
+                loaded.ignored_overrides.is_empty(),
+                "{:?}",
+                loaded.ignored_overrides
+            );
+            assert_eq!(
+                loaded
+                    .get("impl")
+                    .unwrap()
+                    .step(BLOCKED)
+                    .unwrap()
+                    .model
+                    .as_deref(),
+                Some("claude-sonnet-5")
+            );
+            assert!(
+                !loaded.get("impl").unwrap().blocked_declared,
+                "the file still declares no `blocked` step"
+            );
+        });
+    }
+
+    /// A declared `blocked` step may name only some of its five keys. A
+    /// patch on one of them has to apply at load too, even though the raw
+    /// file's step is not yet a runnable one when the patch is validated.
+    #[test]
+    fn a_patch_on_a_partly_declared_blocked_step_applies_at_load() {
+        with_override_fixture("blocked-partial", |root| {
+            std::fs::write(
+                Pipelines::file_in(root, "impl"),
+                "steps:\n  \
+                 - id: implement\n    agent: pi\n    model: base-model\n    on_pass: done\n  \
+                 - id: blocked\n    model: declared-model\n",
+            )
+            .unwrap();
+            let config = crate::config::Config::default();
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  blocked:\n    model: patched-model\n",
+            )
+            .unwrap();
+
+            let loaded = Pipelines::load_quietly(root, &config).unwrap();
+            assert!(
+                loaded.ignored_overrides.is_empty(),
+                "{:?}",
+                loaded.ignored_overrides
+            );
+            let impl_ = loaded.get("impl").unwrap();
+            assert!(impl_.blocked_declared);
+            assert_eq!(
+                impl_.step(BLOCKED).unwrap().model.as_deref(),
+                Some("patched-model")
+            );
+        });
+    }
+
+    /// `description:` on `blocked` is refused by the merge, so a patch setting
+    /// it is reported ignored; accepted, it would make `assemble` refuse the
+    /// pipeline and no load would succeed after it.
+    #[test]
+    fn a_description_patch_on_the_blocked_step_is_ignored_not_fatal() {
+        with_override_fixture("blocked-description", |root| {
+            let config = crate::config::Config::default();
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  blocked:\n    description: hello\n",
+            )
+            .unwrap();
+
+            let loaded = Pipelines::load_quietly(root, &config).unwrap();
+            assert_eq!(loaded.ignored_overrides.len(), 1);
+            assert_eq!(
+                loaded
+                    .get("impl")
+                    .unwrap()
+                    .step(BLOCKED)
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some(BLOCKED_DESCRIPTION)
             );
         });
     }

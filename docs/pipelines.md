@@ -233,6 +233,11 @@ step. Any other key is refused. Keys left out fall back to the config.
     effort: high
 ```
 
+`spoolway pipeline override <name> --set blocked.model=<model>` patches this step the same way,
+whether or not the pipeline file declares it. The command refuses `blocked.description`. It
+refuses `blocked.session=false` while `blocked_session` in `[unattended]` is `true`. To start the
+lane without a session, set `blocked_session = false` in the config.
+
 - A `--pass` carries the task past the blocked step to that step's `on_pass` for an agent step,
   and back to itself for a command step. `--pass --stage <step>` sends it to `<step>` instead,
   bounded by the steps this task has already run.
