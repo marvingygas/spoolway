@@ -568,19 +568,23 @@ local = true
 ```
 
 Each row is keyed by a glob over the model name. The most literal match wins. A bare name
-also matches `vendor/name`. Leave a field out to mean zero. `[models]` ships empty: the
-built-in price table covers known models, so a row only corrects a price or describes a local
-model. An unpriced model is reported as unpriced, not counted as free. See
+also matches `vendor/name`. Leave a field out and it keeps the value from the built-in or
+refreshed price table, when that table has an entry for the model. Only a model with no
+entry, such as a local model, reads a field you leave out as zero. One exception: a row that sets
+`cache_write_5m` and leaves `cache_write_1h` out prices hourly cache writes at its own
+five-minute rate, not at the table's hourly rate. `[models]` ships empty:
+the built-in price table covers known models, so a row only corrects a price or describes a
+local model. An unpriced model is reported as unpriced, not counted as free. See
 [Cost accounting](cost.md).
 
 | Key | Default | What it controls |
 |---|---|---|
-| `context_window` | `0` | Tokens one session gets. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of this. For a local model use the server's per-slot window, such as llama.cpp's `--ctx-size` divided by `--parallel`. |
-| `input` | `0` | USD per million input tokens. |
-| `output` | `0` | USD per million output tokens. |
-| `cache_read` | `0` | USD per million cached input tokens read. |
-| `cache_write_5m` | `0` | USD per million tokens written to a five-minute cache. |
-| `cache_write_1h` | `0` | USD per million tokens written to a one-hour cache. |
+| `context_window` | table entry, else `0` | Tokens one session gets. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of this. For a local model use the server's per-slot window, such as llama.cpp's `--ctx-size` divided by `--parallel`. |
+| `input` | table entry, else `0` | USD per million input tokens. |
+| `output` | table entry, else `0` | USD per million output tokens. |
+| `cache_read` | table entry, else `0` | USD per million cached input tokens read. |
+| `cache_write_5m` | table entry, else `0` | USD per million tokens written to a five-minute cache. |
+| `cache_write_1h` | table entry, else `0` | USD per million tokens written to a one-hour cache. If the row sets `cache_write_5m` and leaves this out, hourly writes are charged at the row's `cache_write_5m`. |
 | `prompt_cache_ttl` | `5m`, none if `local` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. `"0"` turns it off. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running this model at once, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
