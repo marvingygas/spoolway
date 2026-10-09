@@ -103,6 +103,15 @@ and the suite stops testing anything.
   reach it: where the helper matches on the key, a bare `pipeline:` line leaves the task
   genuinely unset in a way an omitted line does not.
 
+- **A scratch project you run `spoolway` on lands in the person's real home unless you move it.**
+  `spoolway` keeps every project's state under `$HOME/.spoolway`, so a throwaway repository you
+  `init` with the real `HOME` outlives your task and piles up on their machine. Build it in your
+  scratch space, never in `/tmp` or your session's own scratchpad, and run every `spoolway`
+  command on it with `HOME` set to a folder inside that scratch space and
+  `SPOOLWAY_SKIP_VERSION_CHECK=1`. The project home is then deleted with the task. Run its lanes
+  on the headless backend, `dispatch.backend headless` with `SPOOLWAY_TEST_BACKEND=1`, and stop
+  every dispatcher you started before you report.
+
 ## Never
 
 - Never run the `cloud` or `live` tiers. They spend real tokens and need real binaries.

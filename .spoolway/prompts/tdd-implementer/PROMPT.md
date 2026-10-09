@@ -102,6 +102,15 @@ with no such test is not met.
   test can reach it at all, that is a finding, not a reason to write code with no red phase
   behind it.
 
+- **A scratch project you run `spoolway` on lands in the person's real home unless you move it.**
+  `spoolway` keeps every project's state under `$HOME/.spoolway`, so a throwaway repository you
+  `init` with the real `HOME` outlives your task and piles up on their machine. Build it in your
+  scratch space, never in `/tmp` or your session's own scratchpad, and run every `spoolway`
+  command on it with `HOME` set to a folder inside that scratch space and
+  `SPOOLWAY_SKIP_VERSION_CHECK=1`. The project home is then deleted with the task. Run its lanes
+  on the headless backend, `dispatch.backend headless` with `SPOOLWAY_TEST_BACKEND=1`, and stop
+  every dispatcher you started before you report.
+
 ## When you get stuck
 
 Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
