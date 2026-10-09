@@ -1533,6 +1533,7 @@ fn routine_panel(ctx: &Ctx, nav: &RoutineNav) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+    use crate::screen::corner::TOP_LEFT;
 
     /// The `routine` key's `{routines_dir}` placeholder is filled with this
     /// project's own routines path, through [`store_label`] — the same
@@ -1983,7 +1984,10 @@ mod tests {
         assert_eq!(jobs::load(&repo).unwrap().len(), 1, "nothing was added");
         let frame = last_frame(&drawn);
         assert!(frame.contains("already exists"), "{frame}");
-        assert!(frame.contains("┌─ not saved "), "{frame}");
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ not saved ")),
+            "{frame}"
+        );
         assert!(frame.contains("[enter] confirm"), "{frame}");
         assert!(frame.contains("─ jobs"), "the list under it: {frame}");
     }
@@ -2056,7 +2060,10 @@ mod tests {
         seed_routines(&repo);
         let frame = drive(&repo, "n ").to_string();
         let frame = last_frame(&frame);
-        assert!(frame.contains("┌─ which routine "), "{frame}");
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ which routine ")),
+            "{frame}"
+        );
         assert!(frame.contains("> [x] nightly"), "{frame}");
         assert!(frame.contains("  [ ] weekly"), "{frame}");
         assert!(
@@ -2251,7 +2258,7 @@ mod tests {
         let drawn = drive(&repo, "no\x1bq");
 
         assert!(
-            !drawn.contains("┌─ open task "),
+            !drawn.contains(&format!("{TOP_LEFT}─ open task ")),
             "`o` with the folders pane focused must never reach `JobMode::Outcome`:\n{drawn}"
         );
         assert!(jobs::load(&repo).unwrap().is_empty());
@@ -2275,7 +2282,10 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
-        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ open task ")),
+            "in a popup: {last}"
+        );
     }
 
     /// The picker lists one row per routine. A subfolder inside `nightly`

@@ -876,6 +876,7 @@ fn message_frame_rows(message: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     /// `line` with every escape code taken out — the colour a tab's own
     /// frame paints under the strip, the strip's own bold, and the frame
@@ -1096,9 +1097,9 @@ mod tests {
         const QUEUE: &str = "─ groups";
         const ROUTINES: &str = "[ROUTINES]";
         const JOBS: &str = "no jobs yet";
-        const EVAL: &str = "┌─ eval ·";
+        let eval: &str = &format!("{TOP_LEFT}─ eval ·");
         let visited = [
-            QUEUE, DISPATCH, QUEUE, ROUTINES, JOBS, EVAL, JOBS, ROUTINES, QUEUE, DISPATCH, QUEUE,
+            QUEUE, DISPATCH, QUEUE, ROUTINES, JOBS, eval, JOBS, ROUTINES, QUEUE, DISPATCH, QUEUE,
         ];
         assert_eq!(frames.len(), visited.len(), "{frames:?}");
 
@@ -1367,7 +1368,9 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[D\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("┌─ overrides are active for this project "),
+            last.contains(&format!(
+                "{TOP_LEFT}─ overrides are active for this project "
+            )),
             "{last}"
         );
         assert!(last.contains("pipelines/default.yml"), "{last}");
@@ -1574,9 +1577,9 @@ mod tests {
         assert_eq!(
             popup.panel(),
             [
-                "┌─ Starting dispatcher ─────────┐",
+                format!("{TOP_LEFT}─ Starting dispatcher ─────────{TOP_RIGHT}").as_str(),
                 "│  checking herdr, git, queue…  │",
-                "└───────────────────────────────┘",
+                format!("{BOTTOM_LEFT}───────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
         // Nothing has claimed yet, so a redraw leaves it up.
@@ -1680,7 +1683,10 @@ mod tests {
         let mut tab = running_tab();
         tab.enter(&repo, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Stop(_))));
-        assert!(tab.popup.as_ref().unwrap().panel()[0].starts_with("┌─ stop dispatching "));
+        assert!(
+            tab.popup.as_ref().unwrap().panel()[0]
+                .starts_with(&format!("{TOP_LEFT}─ stop dispatching "))
+        );
         assert!(!stopping(&tab), "nothing is stopped before it is answered");
 
         // A key the popup does not read leaves it up.

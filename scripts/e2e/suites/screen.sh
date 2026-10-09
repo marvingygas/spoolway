@@ -131,7 +131,7 @@ if grep -qaE "Good (morning|afternoon|evening)|Working late" "$RUN.plain"; then
 else
   bad "the empty board greets the person (no greeting in $RUN.plain)"
 fi
-has "enter over it asks how to stop, as a popup" "┌─ stop dispatching " "$RUN.plain"
+has "enter over it asks how to stop, as a popup" "╭─ stop dispatching " "$RUN.plain"
 has "saying no new steps will start" "No new steps will be started." "$RUN.plain"
 has "offering enter to let running steps finish" "[enter] let running steps finish" "$RUN.plain"
 has "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back" "$RUN.plain"
@@ -210,7 +210,7 @@ works "a refused submission on the queue tab ends when its keys run out" \
   script -qec "printf ' \\r' | '$SPOOLWAY'" "$REFUSED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "the refusal is drawn in a popup" "┌─ submission refused " "$LAST"
+has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
@@ -229,7 +229,7 @@ works "a clean submission on the queue tab ends when its keys run out" \
   script -qec "printf ' \\r' | '$SPOOLWAY'" "$QUEUED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$QUEUED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "the queued popup is drawn over the tab" "┌─ queued " "$LAST"
+has "the queued popup is drawn over the tab" "╭─ queued " "$LAST"
 has "naming the task it queued" "billing-export" "$LAST"
 has "saying no dispatcher will pick it up yet" "Start the dispatcher to begin working" "$LAST"
 lacks "never that one is running" "Dispatcher is running" "$LAST"
@@ -261,7 +261,7 @@ has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS
 has "and the queue tab" "─ groups" "$ALL_TABS.plain"
 has "and the routines tab" "QUEUE       [ROUTINES]       JOBS" "$ALL_TABS.plain"
 has "and the jobs tab" "no jobs yet" "$ALL_TABS.plain"
-has "and the eval tab" "┌─ eval ·" "$ALL_TABS.plain"
+has "and the eval tab" "╭─ eval ·" "$ALL_TABS.plain"
 
 # `→` from the queue tab, where the screen opens, reaches the routines tab
 # between queue and jobs, listing the one routine under `.spoolway/routines/`.

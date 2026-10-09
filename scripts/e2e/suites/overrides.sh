@@ -316,7 +316,7 @@ on_screen '\r' "$IGNORED_SCREEN"
 frame "$IGNORED_SCREEN" 1 >"$IGNORED_SCREEN.first"
 frame "$IGNORED_SCREEN" 2 >"$IGNORED_SCREEN.second"
 has "bare spoolway opens on the override ignored popup" \
-  "┌─ override ignored " "$IGNORED_SCREEN.first"
+  "╭─ override ignored " "$IGNORED_SCREEN.first"
 has "over the queue tab it opens on" \
   "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$IGNORED_SCREEN.first"
 has "naming the file, the step and the keys it set" \
@@ -336,7 +336,7 @@ has "and the queue tab is drawn again under the strip" \
 on_screen '\r' "$IGNORED_SCREEN.again"
 frame "$IGNORED_SCREEN.again" 1 >"$IGNORED_SCREEN.again.first"
 has "the next open shows it again" \
-  "┌─ override ignored " "$IGNORED_SCREEN.again.first"
+  "╭─ override ignored " "$IGNORED_SCREEN.again.first"
 
 must "clean up: drop the layer entry" \
   "$SPOOLWAY" override drop pipelines/default.yml

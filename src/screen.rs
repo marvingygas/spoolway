@@ -451,6 +451,23 @@ pub(crate) fn keys(pairs: &[(&str, &str)]) -> String {
     line
 }
 
+/// The four corners of every box spoolway draws, rounded: popups, printed
+/// panels and every tab's frame alike.
+///
+/// Held here, once, because the code that draws a frame and the code that
+/// finds one by its corners — `stretch` in the queue screen blanks a bottom
+/// border by matching them — have to agree on the same characters. A corner
+/// typed by hand in one of them is how a frame stops being recognised.
+///
+/// The `┬` and `┴` joins between two panes stay square: box drawing has no
+/// rounded join.
+pub(crate) mod corner {
+    pub(crate) const TOP_LEFT: char = '╭';
+    pub(crate) const TOP_RIGHT: char = '╮';
+    pub(crate) const BOTTOM_LEFT: char = '╰';
+    pub(crate) const BOTTOM_RIGHT: char = '╯';
+}
+
 /// A framed box — a title and whatever lines fill it — to be drawn over a
 /// screen's own frame.
 ///
@@ -462,6 +479,7 @@ pub(crate) fn keys(pairs: &[(&str, &str)]) -> String {
 /// a blank spacer, and by callers whose body lines are already the choices a
 /// person reads and need no footer after them.
 pub(crate) fn boxed(title: &str, body: &[String]) -> Vec<String> {
+    use corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     let head = format!("─ {title} ");
     let widest = body
         .iter()
@@ -471,13 +489,13 @@ pub(crate) fn boxed(title: &str, body: &[String]) -> Vec<String> {
     let inner = (widest + 4).max(head.chars().count() + 2);
 
     let mut out = vec![format!(
-        "┌{head}{}┐",
+        "{TOP_LEFT}{head}{}{TOP_RIGHT}",
         "─".repeat(inner - head.chars().count())
     )];
     for line in body {
         out.push(format!("│{}│", pad_to(&format!("  {line}"), inner)));
     }
-    out.push(format!("└{}┘", "─".repeat(inner)));
+    out.push(format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(inner)));
     out
 }
 
@@ -618,6 +636,7 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     // Pins the exact bytes the board's own key line already draws — see
     // `src/status/mod.rs`'s hint — so a screen that switches over to
@@ -650,12 +669,12 @@ mod tests {
         assert_eq!(
             panel,
             [
-                "┌─ trial refused ───┐",
+                format!("{TOP_LEFT}─ trial refused ───{TOP_RIGHT}").as_str(),
                 "│                   │",
                 "│  a b              │",
                 "│                   │",
                 "│  [enter] confirm  │",
-                "└───────────────────┘",
+                format!("{BOTTOM_LEFT}───────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
     }

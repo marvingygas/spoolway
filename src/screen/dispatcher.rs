@@ -231,6 +231,7 @@ pub(crate) fn stop_panel() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     /// The refusal `spoolway dispatch` gives outside a herdr pane, as the
     /// popup for step 28 draws it: the two commands indented under the
@@ -246,7 +247,7 @@ mod tests {
             .map(|line| line.trim_matches(['│', ' ']))
             .collect();
         assert!(
-            panel[0].starts_with("┌─ the dispatcher did not start "),
+            panel[0].starts_with(&format!("{TOP_LEFT}─ the dispatcher did not start ")),
             "{panel:?}"
         );
         assert_eq!(
@@ -278,7 +279,7 @@ mod tests {
              Every task is where its last lane left it.",
         );
         assert!(
-            panel[0].starts_with("┌─ the dispatcher stopped "),
+            panel[0].starts_with(&format!("{TOP_LEFT}─ the dispatcher stopped ")),
             "{panel:?}"
         );
         assert!(
@@ -297,7 +298,7 @@ mod tests {
         assert_eq!(
             stop_panel(),
             [
-                "┌─ stop dispatching ──────────────────────────────────────────────────┐",
+                format!("{TOP_LEFT}─ stop dispatching ──────────────────────────────────────────────────{TOP_RIGHT}").as_str(),
                 "│                                                                     │",
                 "│  No new steps will be started.                                      │",
                 "│  Interrupting stops agents and commands. When resumed, agents pick  │",
@@ -305,7 +306,7 @@ mod tests {
                 "│                                                                     │",
                 "│  [enter] let running steps finish                                   │",
                 "│  [i] interrupt them now   [esc] back                                │",
-                "└─────────────────────────────────────────────────────────────────────┘",
+                format!("{BOTTOM_LEFT}─────────────────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
     }
@@ -337,7 +338,7 @@ mod tests {
         );
         let panel = wait_ended(&mut child).expect("an unasked exit gets a popup");
         assert!(
-            panel[0].starts_with("┌─ the dispatcher did not start "),
+            panel[0].starts_with(&format!("{TOP_LEFT}─ the dispatcher did not start ")),
             "{panel:?}"
         );
         assert!(
@@ -360,7 +361,7 @@ mod tests {
         );
         let panel = wait_ended(&mut child).expect("an unasked exit gets a popup");
         assert!(
-            panel[0].starts_with("┌─ the dispatcher stopped "),
+            panel[0].starts_with(&format!("{TOP_LEFT}─ the dispatcher stopped ")),
             "{panel:?}"
         );
         assert!(

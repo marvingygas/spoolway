@@ -5047,6 +5047,7 @@ pub fn run_start(repo: &Repo) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     use crate::status::testutil::*;
     use crate::status::view::{GUTTER, Move, OSC8, RecentEvent, ST, ticker};
 
@@ -8866,7 +8867,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(!frame.contains("┌─"), "{frame}");
+        assert!(!frame.contains(&format!("{TOP_LEFT}─")), "{frame}");
     }
 
     /// A popup taller than the frame under it — the dispatch tab's warnings
@@ -8911,8 +8912,11 @@ mod tests {
                 .hosted_frame(&repo, &pipelines, false, popup.as_deref())
                 .unwrap();
             let lines: Vec<String> = frame.lines().map(strip_ansi).collect();
-            assert!(lines[0].starts_with("┌──"), "{frame}");
-            let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
+            assert!(lines[0].starts_with(&format!("{TOP_LEFT}──")), "{frame}");
+            let bottom = lines
+                .iter()
+                .position(|l| l.starts_with(BOTTOM_LEFT))
+                .unwrap();
             for line in &lines[..=bottom] {
                 assert_eq!(line.chars().count(), width, "{line:?}");
             }
@@ -9504,7 +9508,10 @@ mod tests {
 
         assert!(matches!(board.mode, BoardMode::ConfirmRestart(_)));
         let frame = watching_frame(&mut board, &repo, &pipelines);
-        assert!(frame.contains("┌─ restart login ─"), "{frame}");
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ restart login ─")),
+            "{frame}"
+        );
         assert!(frame.contains("step      implement"), "{frame}");
         assert!(frame.contains("lane      login · implement"), "{frame}");
         assert!(frame.contains("[s] restart   [esc] cancel"), "{frame}");
@@ -10609,7 +10616,8 @@ mod tests {
         assert_eq!(
             panel,
             vec![
-                "┌─ resume ship-login ─────────────────────────┐",
+                format!("{TOP_LEFT}─ resume ship-login ─────────────────────────{TOP_RIGHT}")
+                    .as_str(),
                 "│                                             │",
                 "│  paused at review — it passed               │",
                 "│                                             │",
@@ -10620,7 +10628,8 @@ mod tests {
                 "│                                             │",
                 "│  [↑↓] pick   [enter] resume   [esc] cancel  │",
                 "│                                             │",
-                "└─────────────────────────────────────────────┘",
+                format!("{BOTTOM_LEFT}─────────────────────────────────────────────{BOTTOM_RIGHT}")
+                    .as_str(),
             ],
         );
         assert_eq!(
@@ -11680,7 +11689,10 @@ mod tests {
             frame.last().unwrap().contains("[o] open task"),
             "{frame:#?}"
         );
-        assert!(frame[frame.len() - 2].starts_with('└'), "{frame:#?}");
+        assert!(
+            frame[frame.len() - 2].starts_with(BOTTOM_LEFT),
+            "{frame:#?}"
+        );
         let inside = |text: &str| frame.iter().any(|l| l.starts_with('│') && l.contains(text));
         assert!(inside("▸ search-ranking"), "{frame:#?}");
         assert!(inside("▌billing"), "{frame:#?}");

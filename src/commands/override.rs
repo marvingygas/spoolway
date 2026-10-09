@@ -703,6 +703,7 @@ pub fn override_drop(repo: &Repo, target: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::TOP_LEFT;
 
     const DEMO_PIPELINE: &str =
         "steps:\n  - id: implement\n    agent: pi\n    model: claude-sonnet-5\n    on_pass: done\n";
@@ -957,7 +958,10 @@ mod tests {
                 .expect("one override is ignored")
                 .panel(IGNORED_POPUP_WRAP);
             let drawn = panel.join("\n");
-            assert!(panel[0].starts_with("┌─ override ignored "), "{drawn}");
+            assert!(
+                panel[0].starts_with(&format!("{TOP_LEFT}─ override ignored ")),
+                "{drawn}"
+            );
             assert!(
                 drawn.contains("  pipelines/demo.yml   step implement   run, model "),
                 "{drawn}"

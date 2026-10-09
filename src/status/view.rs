@@ -2104,17 +2104,21 @@ pub(super) fn pane_height() -> Option<usize> {
 /// terminal's last column rather than as far right as its escape bytes
 /// would count.
 pub(super) fn boxed(body: &str, keys: &str, inner: usize, height: Option<usize>) -> String {
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     let mut rows: Vec<&str> = body.lines().collect();
     if let Some(height) = height {
         let room = height.saturating_sub(2);
         rows.truncate(room);
         rows.resize(room, "");
     }
-    let mut out = format!("┌{}┐\n", "─".repeat(inner));
+    let mut out = format!("{TOP_LEFT}{}{TOP_RIGHT}\n", "─".repeat(inner));
     for row in rows {
         out.push_str(&format!("│{}│\n", fit_visible(row, inner)));
     }
-    out.push_str(&format!("└{}┘\n", "─".repeat(inner)));
+    out.push_str(&format!(
+        "{BOTTOM_LEFT}{}{BOTTOM_RIGHT}\n",
+        "─".repeat(inner)
+    ));
     out.push_str(keys);
     out.push('\n');
     out
@@ -2400,6 +2404,7 @@ pub(crate) fn human_secs(total: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     use crate::status::testutil::*;
     use crate::status::{Row, State, done_rows, rows};
 
@@ -2762,7 +2767,10 @@ mod tests {
         let body = format!("plain\n {DIM}dim{RESET}\n{}\n", "x".repeat(40));
         let drawn = boxed(&body, "[q] quit", 20, Some(8));
         let lines: Vec<&str> = drawn.lines().collect();
-        assert_eq!(lines[0], "┌────────────────────┐");
+        assert_eq!(
+            lines[0],
+            format!("{TOP_LEFT}────────────────────{TOP_RIGHT}")
+        );
         assert_eq!(lines.len(), 1 + 6 + 1 + 1, "{drawn}");
         for line in &lines[..lines.len() - 1] {
             let seen = strip_ansi(line);
@@ -2772,7 +2780,10 @@ mod tests {
             assert!(line.starts_with('│') && line.ends_with('│'), "{line:?}");
         }
         assert_eq!(strip_ansi(lines[3]), format!("│{}│", "x".repeat(20)));
-        assert_eq!(lines[7], "└────────────────────┘");
+        assert_eq!(
+            lines[7],
+            format!("{BOTTOM_LEFT}────────────────────{BOTTOM_RIGHT}")
+        );
         assert_eq!(lines[8], "[q] quit");
     }
 
@@ -4537,7 +4548,7 @@ mod tests {
             ]
         );
         assert!(
-            panel[0].starts_with("┌─ restart prompt-cache-ttl-default ─"),
+            panel[0].starts_with(&format!("{TOP_LEFT}─ restart prompt-cache-ttl-default ─")),
             "{}",
             panel[0]
         );
