@@ -59,7 +59,7 @@ blocked_prompt = "unblocker"
 update_check = true
 calibrate_window = "14d"
 retention_days = 30
-archive_retention_days = 0
+archive_retention_days = 30
 price_max_age_days = 30
 
 [watch]
