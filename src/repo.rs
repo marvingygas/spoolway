@@ -6712,7 +6712,9 @@ mod tests {
     /// a `0xFF` byte into U+FFFD before [`require_utf8_root`] saw it, so the
     /// lossy spelling was stored and never matched again. [`toplevel_raw`],
     /// what `init` now resolves its root with, keeps git's bytes as they are.
-    #[cfg(unix)]
+    // Not on macOS: APFS refuses a file name that is not valid UTF-8 ("Illegal
+    // byte sequence"), so the checkout this builds cannot exist there.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn init_resolves_a_non_utf8_checkout_losslessly_so_it_is_refused() {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};

@@ -17,6 +17,10 @@
 unset SPOOLWAY_TASK SPOOLWAY_STEP SPOOLWAY_TASK_FILE SPOOLWAY_WORKTREE \
       SPOOLWAY_HEAD SPOOLWAY_REPO
 
+# `setsid` and `flock` stand-ins where the machine has no util-linux (macOS).
+# shellcheck source=portable.sh
+source "$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+
 # Absolute, always: a suite runs from its scratch directory, and `command -v`
 # hands back a relative path exactly as it was given.
 SPOOLWAY=${SPOOLWAY:-spoolway}

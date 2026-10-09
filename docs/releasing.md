@@ -67,8 +67,8 @@ cargo test --locked release_notes::tests
 cargo build --release --locked && ./target/release/spoolway whats-new
 ```
 
-`main` is protected. It takes no direct push, needs `verify / test` and `verify / audit` green, and
-needs a branch to be up to date before it merges. `ship` rebases a branch that fell behind and
+`main` is protected. It takes no direct push, needs `verify / test`, `verify / audit` and
+`verify / test-macos` green, and needs a branch to be up to date before it merges. `ship` rebases a branch that fell behind and
 waits for its checks again.
 
 The rehearsal and the tag, as `ship` runs them:

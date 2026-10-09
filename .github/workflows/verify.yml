@@ -47,9 +47,9 @@ jobs:
       # only stamps package.json at build time — so its `version` has to be
       # kept equal to Cargo.toml's own by hand, and checked here rather than
       # trusted. This lands in `test` rather than a job of its own beside
-      # `verify` in ci.yml: only `verify / test` and `verify / audit` are
-      # required status contexts on `main`, and a sibling job would not gate
-      # a merge.
+      # `verify` in ci.yml: only the jobs of this file (`verify / test`,
+      # `verify / audit` and `verify / test-macos`) are required status
+      # contexts on `main`, and a sibling job would not gate a merge.
       - name: herdr-plugin.toml version matches Cargo.toml
         run: |
           cargo_version="$(awk -F'"' '/^version *= *"/{print $2; exit}' Cargo.toml)"
@@ -137,6 +137,85 @@ jobs:
           path: |
             /tmp/spoolway-e2e-run.*
             /tmp/spoolway-e2e-fail.*.log
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # The Mac. Linux CI never runs a line of the macOS code paths — the
+  # `cfg`-gated process checks, the `libc` calls that differ — and nobody
+  # who works on this repo has a Mac to run them on, so a runner is the only
+  # one there is. `verify / test-macos` is a required status context on
+  # `main`, so a red run here blocks the merge.
+  #
+  # Only `command-steps` runs here, not the `pr` tier: it is the suite that
+  # starts real processes, sessions and process groups, which is where macOS
+  # differs. The rest drives git, the queue and the TUI the same way on any
+  # Unix and costs the runner minutes for nothing. The harness needs `setsid`
+  # and `flock`, which macOS lacks; it brings perl stand-ins of its own
+  # (scripts/e2e/portable.sh). What it still takes from Homebrew is GNU
+  # `sed`, `coreutils` and a current `bash`: the suites use `sed -i` with no
+  # suffix and `0,/re/` addresses, `timeout`, `date +%N` and `wait -n`, none
+  # of which the system tools do. Their unprefixed names go on PATH ahead of
+  # the system ones.
+  test-macos:
+    timeout-minutes: 45
+    if: inputs.run-tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # The scratch trees land under TMPDIR, and macOS's own is a per-user
+      # `/var/folders/...` path nobody can name in an upload step. Pinning it
+      # makes the artifact path below a fact rather than a guess. A step, not
+      # a job `env:`: the `runner` context is not available there.
+      - name: GNU tools for the harness
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          brew install bash coreutils gnu-sed
+          {
+            echo "$(brew --prefix)/bin"
+            echo "$(brew --prefix coreutils)/libexec/gnubin"
+            echo "$(brew --prefix gnu-sed)/libexec/gnubin"
+          } >> "$GITHUB_PATH"
+
+      - run: cargo test --all-targets --locked
+
+      # KEEP leaves the suite's scratch tree behind, for the step below to
+      # upload. Nobody can reproduce a red run on a Mac by hand, so the tree
+      # is the only evidence there will be.
+      #
+      # `--jobs 1` streams the suite's output into the log as it runs; with
+      # more than one job `run.sh` writes it to a file instead, and a suite
+      # that hangs would leave a log with nothing in it. The step's own
+      # timeout is shorter than the job's so a hang is cut here, with time left
+      # for the upload below — a job cancelled by its own limit skips it.
+      - name: command steps, end to end
+        timeout-minutes: 25
+        env:
+          KEEP: 1
+        run: |
+          cargo build --release --locked
+          SPOOLWAY="$PWD/target/release/spoolway" \
+            scripts/e2e/run.sh --jobs 1 --suite command-steps
+
+      # `run.sh` leaves the tree at `$TMPDIR/spoolway-e2e-run.<pid>.<random>`,
+      # and with `--jobs 1` the suite's log inside it, at
+      # `<tree>/command-steps/output.log`. The `no-setsid-bin` tree is
+      # left out: it is a symlink to every program on PATH, and the upload
+      # fails on the first directory among them it may not read.
+      - name: keep the wreckage
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-scratch-macos
+          path: |
+            ${{ runner.temp }}/spoolway-e2e-run.*
+            !${{ runner.temp }}/spoolway-e2e-run.*/*/no-setsid-bin/**
           retention-days: 3
           if-no-files-found: ignore
 

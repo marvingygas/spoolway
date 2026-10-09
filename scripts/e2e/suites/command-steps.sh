@@ -559,9 +559,10 @@ else
   ok "nothing waited for it — that is what background means"
 fi
 
+# `kill -0` rather than a `/proc/<pid>` directory, which macOS has none of.
 # A background run outlives the step that started it and must not outlive the
 # worktree it is running in: cleanup takes it down with the task.
-if [ -n "$BENCH_PID" ] && poll_while 10 test -d "/proc/$BENCH_PID"; then
+if [ -n "$BENCH_PID" ] && poll_while 10 kill -0 "$BENCH_PID"; then
   ok "cleanup stops a background command rather than orphaning it"
 else
   bad "cleanup stops a background command rather than orphaning it (pid $BENCH_PID)"
@@ -718,7 +719,7 @@ fi
 # Caught right as the pid file appears: the process is up on its own, with
 # nobody waiting on it, which is what outliving the pass that spawned it
 # means.
-if [ -n "$NOSETSID_PID" ] && [ -d "/proc/$NOSETSID_PID" ]; then
+if [ -n "$NOSETSID_PID" ] && kill -0 "$NOSETSID_PID" 2>/dev/null; then
   ok "and it outlives the pass that started it"
 else
   bad "and it outlives the pass that started it (pid $NOSETSID_PID)"
@@ -727,7 +728,7 @@ fi
 # this suite does next — so `hold` is let go first, and the task still has
 # to walk review, document and handover to reach `done` after that.
 touch "$NO_SETSID_RELEASE"
-if [ -n "$NOSETSID_PID" ] && poll_while 300 test -d "/proc/$NOSETSID_PID"; then
+if [ -n "$NOSETSID_PID" ] && poll_while 300 kill -0 "$NOSETSID_PID"; then
   ok "and cleanup stops it once the task is done, same as any other background run"
 else
   bad "and cleanup stops it once the task is done, same as any other background run (pid $NOSETSID_PID)"

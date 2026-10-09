@@ -43,7 +43,22 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 
 Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
 `bash`, `curl`, `setsid`, `flock` and `script` (util-linux). Only the `cloud` and `live` tiers
-run a real agent binary.
+run a real agent binary. On a machine with no `setsid` or `flock`, such as macOS,
+`scripts/e2e/portable.sh` appends perl stand-ins from `scripts/e2e/portable/` to `PATH`. A
+machine with the real commands keeps using them.
+
+### On macOS
+
+Only `command-steps` runs on a Mac, in CI's `verify / test-macos` job. It is the suite that
+starts real processes, sessions and process groups, which is where macOS differs. The other
+suites drive git, the queue and the TUI the same way on any Unix. Nobody who works on this
+repo has a Mac, so the runner is the only place this suite runs on macOS.
+
+The suites also need GNU `sed`, GNU `coreutils` and a current `bash`. They use `sed -i` with
+no suffix, `0,/re/` addresses, `timeout`, `date +%N` and `wait -n`, and the macOS versions
+of those tools support none of them. The job installs them with Homebrew and puts their
+unprefixed names on `PATH` ahead of the system ones. There is no stand-in for `script`: only
+the suites that drive a screen over a pty call it, and `command-steps` does not.
 
 `spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
 environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
@@ -211,6 +226,11 @@ Pushes do not trigger it. The scheduled run's Linux job runs the same gate plus 
 `nightly` tier; a pull request runs the `pr` tier instead. A commit that already has a
 successful scheduled run is skipped, and so is a pull request whose changed files are all
 under `docs/` or `site/`, or are `README.md`, `DOCS.md` or `log.md`.
+
+Every run of `verify.yml` also has a `verify / test-macos` job on `macos-latest`. It runs
+`cargo test --all-targets --locked`, then the `command-steps` suite from a release build. A
+failed run uploads the suite's scratch tree as an artifact on the run page. `main` requires
+this job together with `verify / test` and `verify / audit`.
 
 Run it by hand before a release or to check a fix:
 

@@ -15,7 +15,8 @@
 # One instrument, one question: *does spoolway still work when it is really
 # running processes?* Every lane runs a stand-in, every project is built from a
 # seed written inline, and the whole thing needs `git`, `bash`, `curl`,
-# `setsid` and `flock` and nothing else — so it runs on every push, on every
+# `setsid` and `flock` (or the perl stand-ins in `portable/` where the machine
+# has none, as macOS does not) and nothing else — so it runs on every push, on every
 # pull request, and on a laptop with no model server and no multiplexer.
 #
 # **Only what a unit test cannot reach.** Anything decidable from files and
@@ -307,6 +308,9 @@ export SPOOLWAY
 # run is testing, not whatever the machine already had installed.
 PATH="$(dirname "$SPOOLWAY"):$PATH"
 export PATH
+# `setsid` and `flock` stand-ins where the machine has no util-linux (macOS).
+# shellcheck source=portable.sh
+source "$E2E_DIR/portable.sh"
 
 # --------------------------------------------------------- one pr tier at a time
 #
@@ -350,6 +354,12 @@ if [ "$TIER" = pr ]; then
   while :; do
     exec {E2E_PR_LOCK_FD}>"$LOCK"
     flock "$E2E_PR_LOCK_FD"
+    # No `/proc` off Linux (macOS has `/dev/fd`, but its entries are not the
+    # files they name, so `-ef` cannot compare them), and the check would
+    # never pass and spin here forever. Without it the unlink race above is
+    # open, which costs two overlapping runs on one Mac nothing a CI runner
+    # ever does.
+    [ -d /proc/self/fd ] || break
     [ "/proc/self/fd/$E2E_PR_LOCK_FD" -ef "$LOCK" ] && break
     exec {E2E_PR_LOCK_FD}>&-
   done

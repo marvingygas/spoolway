@@ -53,11 +53,15 @@ pub enum RunState {
     ///
     /// The wrapper writes its code from a trap on `EXIT`, which fires however
     /// the command itself ends — a crash, a `kill`, a script calling `exit`.
-    /// Getting here means the wrapper never ran that trap, and the only ways
-    /// that happens are the whole process group taking a `SIGKILL` or the
-    /// machine going down under it.
+    /// Getting here means the wrapper never ran that trap. That happens when
+    /// the whole process group takes a `SIGKILL`, when the machine goes down
+    /// under it, and on purpose when the wrapper catches `HUP`, `INT` or
+    /// `TERM` and exits without the trap, so a shell whose `sh` runs the trap
+    /// on a signal cannot write `0` for a run that was killed. `TERM` is what
+    /// `stop` sends first; `HUP` and `INT` come from a closed pane or a
+    /// Ctrl-C.
     ///
-    /// Neither is the command's verdict, and reading them as one is expensive.
+    /// None of these is the command's verdict, and reading them as one is expensive.
     /// A dispatcher stopping at its output ceiling kills in-flight commands
     /// before it releases their worktrees; every one of those used to surface
     /// as `Exited(1)`, which routed the task down its `on_fail` edge. Three
@@ -276,6 +280,14 @@ impl Runs {
         let pid_path = crate::platform::quote(&self.pid_path(key).display().to_string());
         let exit_path = crate::platform::quote(&self.exit_path(key).display().to_string());
         let mut body = String::new();
+        // Set before anything else, so no stop can land while the EXIT trap
+        // below exists and this one does not. A signal that ends the wrapper
+        // leaves no code, on every `sh`: dash dies on it without running the
+        // EXIT trap, so a stopped run reads as interrupted; macOS's `sh` is
+        // bash, which does run the trap and writes `0` — a run that `stop`
+        // killed would read as one that passed. Clearing the trap and exiting
+        // here makes the two agree.
+        body.push_str("trap 'trap - EXIT; exit 143' HUP INT TERM\n");
         body.push_str(&format!("echo $$ >{pid_path}\n"));
         // The exit code is written from a trap rather than by a line after
         // the command, because `run: ./deploy.sh || exit 1` — or anything
