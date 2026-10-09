@@ -71,7 +71,10 @@ fn render_hook_contract(repo: &Repo) -> String {
          always recorded; on `queued` or `done` it also pauses the task, with a reason naming \
          the hook's own log under tracking/ — `spoolway resume` forgets that run, so the hook \
          runs again. On `blocked` or `paused`, already stopped for a person, it is only ever \
-         recorded.\n\n",
+         recorded.\n  A run killed without an exit code (a reboot, `wsl --shutdown`, an OOM kill) is \
+         fired again by the\n  dispatcher, up to 3 kills in a row, then the task pauses as for a \
+         non-zero exit. So a hook\n  must be safe to run twice: the killed run may already have \
+         done part of its work.\n\n",
     );
 
     out.push_str(
@@ -85,7 +88,7 @@ fn render_hook_contract(repo: &Repo) -> String {
          even while\n  it waits on a dependency; `started` fires once, only when the task is \
          actually about to\n  launch. The task launches only once this hook exits clean; a \
          non-zero exit pauses it\n  exactly as a failing `queued` hook does, and `spoolway \
-         resume` runs it again.\n\n",
+         resume` runs it again. A run killed without an exit code is fired again, as above.\n\n",
     );
 
     out.push_str("fetch       — synchronous, from `spoolway issue show <reference>`\n");

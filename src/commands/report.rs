@@ -619,7 +619,7 @@ pub fn route(
         task.front.paused_at = Some(origin);
         crate::pipeline::PAUSED.to_string()
     } else {
-        let landing = crate::dispatch::land_past_hidden(
+        let mut landing = crate::dispatch::land_past_hidden(
             pipeline,
             task,
             step.destination(outcome)
@@ -627,6 +627,7 @@ pub fn route(
                 .to_string(),
             dependents,
         );
+        spend_walked_past(pipeline, task, &mut landing, current, unattended);
         walked_past = landing.note();
         landing.destination
     };
@@ -797,8 +798,8 @@ pub fn route(
 /// exactly that case), a task found sitting on a step walked past by `skip:`,
 /// `first:` or `last:`, a lane that could not be started or whose pane never
 /// came free, and a background command that failed after its task had moved
-/// on. A walk-past is counted at the step it lands on, never the one it
-/// skips: a route follows `on_pass` past hidden steps before asking.
+/// on. A walk-past is counted at the step it lands on; the `loop:` of a
+/// step it skips is spent by [`walked_past_budgets`] before this is asked.
 ///
 /// What it counts is laps, not conversations: a step with `session: true` may
 /// be re-prompted as often as its session survives, with an optional separate
@@ -829,16 +830,9 @@ pub fn apply_loop_budget(
     let Some(dest_step) = pipeline.step(&destination) else {
         return destination;
     };
-    let limit = dest_step
-        .arrival_limit()
-        .filter(|_| !unattended || pipeline.blocked_is_staffed(unattended));
-    let Some(limit) = limit else {
+    let Some((limit, count)) = spent_budget(pipeline, task, dest_step, unattended) else {
         return destination;
     };
-    let count = task.rounds_at(&destination);
-    if count < limit {
-        return destination;
-    }
 
     // The move it is not making, counted the way a reader counts: the budget
     // is spent, so the one being refused is the next arrival after it.
@@ -849,6 +843,96 @@ pub fn apply_loop_budget(
         ordinal(count + 1)
     ));
     exit.to_string()
+}
+
+/// The `loop:` limit and arrival count of `step` when its budget is spent,
+/// or `None` when it has no budget or has room left. The one test
+/// [`apply_loop_budget`] and [`walked_past_budgets`] both ask, so the
+/// unattended carve-out cannot drift between them.
+fn spent_budget(
+    pipeline: &Pipeline,
+    task: &Task,
+    step: &Step,
+    unattended: bool,
+) -> Option<(u32, u32)> {
+    let limit = step
+        .arrival_limit()
+        .filter(|_| !unattended || pipeline.blocked_is_staffed(unattended))?;
+    let count = task.rounds_at(&step.id);
+    (count >= limit).then_some((limit, count))
+}
+
+/// Cut a move short at the first step it walked past whose `loop:` is spent,
+/// and answer the steps it still passes that carry a `loop:` — the arrivals
+/// [`bank_walked_past`] must count once the move is actually written.
+///
+/// [`apply_loop_budget`] only ever sees the step a move lands on. A cycle
+/// whose one `loop:` sits on a step the task walks past (`skip:`, `first:`,
+/// `last:`) then has no counter anywhere: the task never arrives at the
+/// bounded step, so nothing stops it going round for ever, one full lane per
+/// lap. A pass over such a step stands in for the arrival it never made, and
+/// the pass past a spent one lands on its [`Step::loop_exit`] instead.
+///
+/// This counts no arrival: that is [`bank_walked_past`]'s, because a
+/// move onto an agent step is not written until its lane starts, and a start
+/// that is refused leaves the old stage on disk to be routed again: an
+/// arrival banked now would be counted once per attempt.
+///
+/// Steps without a `loop:` are left uncounted, so a walk-past still leaves
+/// no arrival on a step that has no budget to spend.
+pub(crate) fn walked_past_budgets(
+    pipeline: &Pipeline,
+    task: &mut Task,
+    landing: &mut crate::dispatch::Landing,
+    current: &str,
+    unattended: bool,
+) -> Vec<String> {
+    let mut banked = Vec::new();
+    for index in 0..landing.passed.len() {
+        let id = landing.passed[index].0.clone();
+        let Some(step) = pipeline.step(&id) else {
+            continue;
+        };
+        if step.arrival_limit().is_none() {
+            continue;
+        }
+        if let Some((limit, count)) = spent_budget(pipeline, task, step, unattended) {
+            let exit = step.loop_exit().to_string();
+            task.log_status(&format!(
+                "`{current}` may not send this past `{id}` a {} time — `{id}` has \
+                 `loop: {limit}`; carrying on to `{exit}`",
+                ordinal(count + 1)
+            ));
+            landing.passed.truncate(index);
+            landing.destination = exit;
+            return banked;
+        }
+        if !unattended || pipeline.blocked_is_staffed(unattended) {
+            banked.push(id);
+        }
+    }
+    banked
+}
+
+/// Count one arrival on each of `ids`, in the map [`apply_loop_budget`]
+/// reads. Called where the move's stage is written.
+pub(crate) fn bank_walked_past(task: &mut Task, ids: &[String]) {
+    for id in ids {
+        *task.front.arrivals.entry(id.clone()).or_insert(0) += 1;
+    }
+}
+
+/// [`walked_past_budgets`] and [`bank_walked_past`] in one, for the moves
+/// that write their stage in the same call.
+pub(crate) fn spend_walked_past(
+    pipeline: &Pipeline,
+    task: &mut Task,
+    landing: &mut crate::dispatch::Landing,
+    current: &str,
+    unattended: bool,
+) {
+    let ids = walked_past_budgets(pipeline, task, landing, current, unattended);
+    bank_walked_past(task, &ids);
 }
 
 /// `3` → `3rd`, for the one sentence that counts the move a spent budget is
@@ -1730,8 +1814,10 @@ fn resume_checked(
     }
 }
 
-/// Land a resume on `landing.destination`, spending the landing step's
-/// `loop:` when the move walked past anything.
+/// Land a resume on `landing.destination`, spending the `loop:` of each step
+/// walked past and of the landing step when the move walked past anything. A
+/// spent budget on a step passed sends the resume to its `loop_exit`, which is
+/// `blocked`.
 ///
 /// A resume that passed nothing writes its target exactly as it always has:
 /// it refunds nothing and checks nothing. One that walked past a hidden step
@@ -1742,12 +1828,13 @@ fn land_resume(
     pipeline: &Pipeline,
     task: &mut Task,
     from: &str,
-    landing: crate::dispatch::Landing,
+    mut landing: crate::dispatch::Landing,
 ) -> (String, Option<String>) {
-    let note = landing.note();
-    if note.is_none() {
+    if landing.passed.is_empty() {
         return (landing.destination, None);
     }
+    spend_walked_past(pipeline, task, &mut landing, from, repo.unattended());
+    let note = landing.note();
     let destination =
         apply_loop_budget(pipeline, task, from, landing.destination, repo.unattended());
     if destination == crate::pipeline::BLOCKED {
@@ -1850,11 +1937,13 @@ fn back_onto_its_step(
     task.front.missing_start_branch = None;
 
     // A hook pause is neither a block nor a park: nothing inside the
-    // pipeline failed a check, a hook exited non-zero on `queued` or `done`
-    // — see `crate::dispatch::Dispatcher::pause_for_hook_failure`. Forgetting
+    // pipeline failed a check, a hook exited non-zero on `queued`, `started`
+    // or `done`, or was killed three times in a row without an exit code —
+    // see `crate::dispatch::Dispatcher::pause_for_hook_failure`. Forgetting
     // the failed run is always right, whichever road the rest of this
     // function takes, so it happens ahead of everything else — `resume` is
-    // the one place a hook pause is ever undone.
+    // the one place a hook pause is ever undone. For the kill pause this
+    // forget is also what resets the kill count, so the hook is fired afresh.
     if let Some(stage) = task.front.hook_paused.take() {
         crate::tracking::forget(repo, &task, &stage);
     }
@@ -7069,5 +7158,69 @@ mod tests {
             "{}",
             task.body
         );
+    }
+
+    /// A gate resume that walks past a hidden step whose own `loop:` is spent
+    /// goes to `blocked`, and says it was the passed step that refused.
+    #[test]
+    fn a_gate_resume_past_a_hidden_step_with_its_loop_spent_blocks() {
+        clear_lane_env();
+        let (repo, _root_guard) = fixture("resume-gate-hidden-spent");
+        let mut pipelines = Pipelines::builtin();
+        pipelines
+            .pipelines
+            .insert("default".into(), walk_past_pipeline("loop: 1"));
+        add(&repo, "demo", &[]);
+        let mut task = queued(&repo, "demo");
+        task.set_stage("work", None);
+        task.front.skip = vec!["mid".into()];
+        task.front.arrivals.insert("mid".into(), 1);
+        task.front.paused_at = Some("work".into());
+        task.front.paused_by = Some("schedule".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "demo");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(
+            task.body
+                .contains("may not send this past `mid` a 2nd time"),
+            "{}",
+            task.body
+        );
+    }
+
+    /// Checking the budgets of the steps a move passes counts nothing: the
+    /// arrival is banked where the stage is written, or a launch that is
+    /// refused and retried would count it again on every pass.
+    #[test]
+    fn checking_a_walked_past_budget_banks_no_arrival() {
+        let pipeline = walk_past_pipeline("loop: 2");
+        let mut task = Task::parse(
+            std::path::PathBuf::from("demo.md"),
+            "---\nid: demo\nstage: work\nskip:\n- mid\n---\n",
+        )
+        .unwrap();
+        let mut landing = crate::dispatch::land_past_hidden(&pipeline, &task, "mid".into(), 0);
+        assert_eq!(landing.destination, "after");
+
+        let ids = walked_past_budgets(&pipeline, &mut task, &mut landing, "work", false);
+
+        assert_eq!(ids, vec!["mid".to_string()]);
+        assert_eq!(task.rounds_at("mid"), 0);
+        bank_walked_past(&mut task, &ids);
+        assert_eq!(task.rounds_at("mid"), 1);
     }
 }

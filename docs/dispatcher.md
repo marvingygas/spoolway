@@ -300,7 +300,7 @@ stateDiagram-v2
 | `running` | A lane is working the current step. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p` or the dispatch tab's stop. |
-| `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
+| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read `## Blocker` in the task file. |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. Nothing on the row can be resumed. Correct `stage:` in the task file. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. |
@@ -323,17 +323,18 @@ A cause in brackets follows when the route alone does not explain the move.
 | `left <step>, moved to <step>` | The task file does not say how the task left the step. |
 | `passed <step>, moved to paused (gate)` | The step has `gate: true`. |
 | `passed <step>, moved to paused (scheduled)` | A scheduled pause took effect at the step. The same cause follows `failed <step>` and `reported a block on <step>`. |
-| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero. |
-| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero. |
+| `passed <step>, moved to paused (hook failed)` | The issue hook for `done` exited non-zero, or was killed three times in a row. |
+| `stopped before starting, moved to paused (hook failed)` | The issue hook for `queued` or `started` exited non-zero, or was killed three times in a row. |
 | `stopped on <step>, moved to paused (manually)` | A person pressed `p` on the board, or Escape in the lane's pane. |
 | `stopped before starting, moved to paused (manually)` | A person paused the task before it started. |
 | `stopped on <step>, moved to paused (dispatching stopped)` | The dispatch tab's stop popup parked the task. |
-| `stopped on <step>, moved to paused (escalated)` | The dispatcher stopped the lane. `escalated` always means this. The task file's `## Status Log` gives the exact reason. |
+| `stopped on <step>, moved to paused (escalated)` | The dispatcher stopped the lane in an attended run. The task file's `## Status Log` gives the exact reason. |
+| `stopped on <step>, moved to blocked (escalated)` | The dispatcher stopped the lane in an unattended run, and the unblocker takes the task. The `## Blocker` section gives the exact reason. |
 | `stopped before starting, moved to paused (branch <name> missing)` | The branch the task starts from does not exist. |
 | `stopped on <step>, moved to paused` | The task file names no cause for the step the task left. A cause counts only when the file names that step. |
 | `reported a pause on blocked, moved to paused` | The `blocked` lane reported a pause. |
 | `reported a block on blocked, moved to paused` | The `blocked` lane reported a block. The same holds for `failed blocked` when it reported a fail. |
-| `stopped on blocked, moved to paused (escalated)` | The dispatcher stopped the `blocked` lane. The `## Status Log` gives the exact reason. |
+| `stopped on blocked, moved to paused (escalated)` | The dispatcher stopped the `blocked` lane, in any run. The `## Status Log` gives the exact reason. |
 | `reported a block on <step>, moved to blocked` | The lane for the step reported a block. |
 | `failed <step>, moved to blocked (loop limit on <step>)` | The step failed, and the step it routes to has used its `loop:`. The same cause follows `passed <step>` and `skipped <step>`. |
 | `could not launch <step>, moved to <step> (3 attempts)` | The launch was refused three times in a row. |
@@ -533,10 +534,11 @@ messages to receive, the pass types the next one instead. Otherwise:
 
 1. The next pass sends the report contract into the pane again.
 2. Each later pass where the transcript has grown sends another reminder, up to three.
-3. A lane whose transcript has not grown since the last reminder is blocked, with the last of
-   what the pane said in the task's `## Blocker`. `spoolway resume` restarts the step on the
-   same session, unless its last reply is past `prompt_cache_ttl`, in which case it opens fresh.
-4. A fourth due reminder blocks the task instead.
+3. A lane whose transcript has not grown since the last reminder is escalated, with the last of
+   what the pane said in the task's `## Blocker`. An attended run parks the task on `paused`. An
+   unattended run sends it to `blocked`. `spoolway resume` restarts the step on the same session,
+   unless its last reply is past `prompt_cache_ttl`, in which case it opens fresh.
+4. A fourth due reminder escalates the task instead.
 
 A lane that still holds a process it started, such as a long build, is excused from reminders
 until `dispatch.lane_child_ceiling` (one hour by default), then escalated.
@@ -574,8 +576,9 @@ passes the same age check but not the size bound. See [When a task needs a perso
 | Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
 | Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the task. |
 | Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the task. |
-| A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past, a failed launch and a late background failure count like a lane's report. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
+| A step's `loop:` | How many times a task may arrive at the step, by any route. A walk-past, a failed launch and a late background failure count like a lane's report. A walk-past also counts at each step it skips that has a `loop:`. | The task leaving `blocked`, by any road. Every step's count starts again from zero. A resume from any other step refunds nothing. |
 | Command kills | A command step whose run is killed without an exit code runs again. The third kill in a row blocks the task. | An exit code from any run; arriving at the step again. |
+| Hook kills | An issue hook run killed without an exit code is fired again. The third kill in a row pauses the task. | `spoolway resume` on the paused task. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 
@@ -583,10 +586,20 @@ When a loop budget runs out, the task parks on `blocked`.
 
 ## Escalation
 
-An escalation puts the task on `blocked`. In an attended run the board marks the row amber and
-names the pane in NEXT, and the task waits for `spoolway resume`. In an
-[unattended run](pipelines.md#unattended-runs) a lane starts on the `blocked` step instead, using
-the `[unattended]` `blocked_*` settings.
+An escalation stops a task that the pipeline cannot move on by itself. The task goes to `blocked`
+or to `paused`, depending on the cause and the run.
+
+| Cause | Attended run | [Unattended run](pipelines.md#unattended-runs) |
+|---|---|---|
+| A step reported a block, a launch failed, or a loop budget ran out | `blocked` | `blocked` |
+| A lane ended without reporting, held a child past `dispatch.lane_child_ceiling`, or crossed `session_blocked_ctx` | `paused` | `blocked` |
+| The `blocked` lane itself went quiet | `paused` | `paused` |
+
+In an attended run the board marks a `blocked` row amber and names the pane in NEXT. The task
+waits for `spoolway resume`. A task on `paused` waits for `spoolway resume` too.
+
+In an unattended run a lane starts on the `blocked` step, using the `[unattended]` `blocked_*`
+settings.
 
 A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when the
 cause is still there and only a person can clear it. A `--fail` or `--block` from it is read as

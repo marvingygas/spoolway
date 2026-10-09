@@ -167,7 +167,10 @@ that is sent back to. In the shipped pipeline `review` fails back to `implement`
 - Every way a task reaches a step counts as an arrival: a lane's report, a command's exit code,
   a walk-past by `skip:`, `first:` or `last:`, a lane that cannot start or whose pane stays
   busy, and a background command that fails after the task moved on. A walk-past counts one
-  arrival at the step it lands on, and none at the step it skips.
+  arrival at the step it lands on. It also counts one arrival at each step it skips that
+  carries a `loop:`. A skipped step without a `loop:` counts none.
+- A walk-past over a step whose `loop:` is spent goes to that step's loop exit, which is
+  `blocked`. This stops a cycle whose only `loop:` is on a step the task skips.
 - A task leaving `blocked` starts every step's count again from zero. This holds for every
   outcome the unblocker reports and for a person's `spoolway resume`.
 - `loop: 0` is refused, naming the step. A loop is 1 or more. A step with no `loop:` has no
@@ -308,6 +311,9 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - A late background failure can move a task off a command step. That stops the step's running
   command and deletes its run files, including an exit code it already wrote. The next visit
   runs the command again.
+- A blocking command whose task leaves the step by another road, such as a `spoolway report`
+  typed by hand or a `last:` walk-past, is stopped on the dispatcher's next pass. Its run files
+  are deleted and its exit code never moves the task. Its pane closes.
 - The exit code stays on disk until the pass that read it has written the task's move to the
   destination step. A pass that cannot place that destination, for want of a free slot, leaves
   the task on the command step and routes on the same code next time, instead of running the
@@ -356,9 +362,10 @@ first step the task runs as its stage: a lane's report, a command step's exit,
 `spoolway resume`, a cleared block, and a task's start off `queued`. The walk stops after as
 many hops as the pipeline has steps. A hidden step with no `on_pass` is where the task lands.
 
-The step the task lands on spends one `loop:` arrival, and the hidden steps spend none. The
-task's `## Status Log` names each hidden step in order, with its rule, on the line for the
-step it landed on, after any message the move carries:
+The step the task lands on spends one `loop:` arrival. Each hidden step that carries a `loop:`
+spends one as well, and a spent one sends the task to `blocked`. A task's start off `queued`
+spends none at the hidden steps. The task's `## Status Log` names each hidden step in order,
+with its rule, on the line for the step it landed on, after any message the move carries:
 
 ```
 - 2026-10-08 14:09 → `document`: walked past `suite` (not last in its chain)
@@ -438,7 +445,8 @@ flowchart LR
 ### `skip:` — walking past a step
 
 A task's own `skip:` field walks the named steps to their `on_pass` without starting a lane.
-The step it lands on spends its `loop:` budget. A task over that limit lands on `blocked`.
+The step it lands on spends its `loop:` budget, and so does each named step that carries a
+`loop:`. A task over a limit lands on `blocked`.
 The queue screen's `t` trial picker writes it, so a trial arm never opens a pull request. See
 [Runs](eval.md#runs).
 

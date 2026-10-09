@@ -597,6 +597,12 @@ struct Candidate {
     /// where a move is one line. Rebuilt every pass and never saved, so a
     /// launch that fails and retries cannot leave a stale note behind.
     walked_past: Option<String>,
+    /// The steps this move passed that carry a `loop:`, whose arrival is
+    /// counted when the stage is written, with the walk note. Counting at
+    /// route time instead would persist the count while the old stage and
+    /// exit code stay on disk if the launch is refused, and the next pass
+    /// would route and count again.
+    to_bank: Vec<String>,
 }
 
 impl Candidate {
@@ -644,8 +650,22 @@ enum TrackingGate {
     Pending,
     /// The hook exited clean.
     Clean,
-    /// The hook exited nonzero, with the code.
-    Failed(i32),
+    /// The hook exited nonzero, or was killed without an exit code
+    /// [`crate::tracking::MAX_HOOK_KILLS`] times in a row — with the reason
+    /// the task is paused under.
+    Failed(String),
+}
+
+/// The pass report's line for a hook run [`crate::tracking::fire`] started
+/// again because the one before it was killed without an exit code — the
+/// counterpart of a command step's own "interrupted without an exit code"
+/// line, so two runs of the same hook in its log are never unexplained.
+fn refired_note(id: &str, event: &str, kills: u32) -> String {
+    format!(
+        "{id}: issue_tracking hook on `{event}` was interrupted without an exit code \
+         ({kills} of {} in a row) — running it again",
+        crate::tracking::MAX_HOOK_KILLS
+    )
 }
 
 /// What [`Dispatcher::collect_candidates`]'s loop should do with a step once
@@ -816,9 +836,10 @@ pub(crate) fn with_walk_note(carried: Option<&str>, note: Option<String>) -> Opt
 ///
 /// A move that wrote the hidden step as the task's stage would leave the task
 /// file naming a step that never runs, until the dispatcher's own
-/// [`fall_through`] moved it on at its next tick; and the hidden step would
-/// spend a `loop:` arrival it never used. So every move that writes a stage
-/// from a route resolves its destination through here first.
+/// [`fall_through`] moved it on at its next tick. So every move that writes a
+/// stage from a route resolves its destination through here first. A passed
+/// step that carries a `loop:` is still counted, once the move is written:
+/// see [`crate::commands::walked_past_budgets`].
 ///
 /// A name that is not a step (`blocked`, `paused`, `done`, `queued`) lands as
 /// it is. A hidden step with no `on_pass` is where the task lands, as it is
@@ -1516,12 +1537,21 @@ impl<'a> Dispatcher<'a> {
                     // follows `on_pass` to the first step it runs, so the
                     // task is never written onto the hidden one — see
                     // [`land_past_hidden`]. Its `loop:` below is then the
-                    // landing step's, and the hidden step spends none.
-                    let landing = land_past_hidden(
+                    // landing step's; a hidden step's own `loop:` is spent
+                    // by [`crate::commands::walked_past_budgets`], counted when the stage is
+                    // written.
+                    let mut landing = land_past_hidden(
                         &pipeline,
                         &tasks[index],
                         destination,
                         same_group_dependents(self.repo, tasks, graph, &tasks[index]),
+                    );
+                    let to_bank = crate::commands::walked_past_budgets(
+                        &pipeline,
+                        &mut tasks[index],
+                        &mut landing,
+                        &step.id,
+                        self.unattended,
                     );
                     let walked_past = landing.note();
                     let destination = landing.destination;
@@ -1620,6 +1650,7 @@ impl<'a> Dispatcher<'a> {
                                 pipeline: pipeline.name.clone(),
                                 command_forget,
                                 walked_past,
+                                to_bank,
                             });
                         }
                         false => {
@@ -1630,6 +1661,9 @@ impl<'a> Dispatcher<'a> {
                                 true => pause_note.map(str::to_string),
                                 false => with_walk_note(pause_note, walked_past),
                             };
+                            if destination != crate::pipeline::PAUSED {
+                                crate::commands::bank_walked_past(&mut tasks[index], &to_bank);
+                            }
                             tasks[index].set_stage(&destination, message.as_deref());
                             // `persist` answers `false` when something —
                             // a `spoolway report`, a `p`/`r`/`u` on the
@@ -1658,8 +1692,8 @@ impl<'a> Dispatcher<'a> {
                     // let run another turn toward a wall that a fresh
                     // `spoolway report` contract could not survive.
                     // `escalate_clock` is the same road a dead lane takes, so
-                    // its usage is banked and its task lands on `paused` the
-                    // same way.
+                    // its usage is banked and its task lands the same way:
+                    // on `blocked` in an unattended run, else on `paused`.
                     if let Some(lane) = lane
                         && let Some(reason) = self.ctx_ceiling_hold(&step, lane)
                     {
@@ -1849,6 +1883,7 @@ impl<'a> Dispatcher<'a> {
                                 pipeline: pipeline.name.clone(),
                                 command_forget: None,
                                 walked_past: None,
+                                to_bank: Vec::new(),
                             })
                         }
                     }
@@ -1915,11 +1950,13 @@ impl<'a> Dispatcher<'a> {
         // `Task::tracking_off`.
         if task.front.trial.is_none() && !task.tracking_off() {
             let group_open = graph.group_open(task.id());
-            if let Err(err) = crate::tracking::fire(self.repo, task, stage, group_open) {
-                report.problems.push(format!(
+            match crate::tracking::fire(self.repo, task, stage, group_open) {
+                Ok(Some(kills)) => report.actions.push(refired_note(task.id(), stage, kills)),
+                Ok(None) => {}
+                Err(err) => report.problems.push(format!(
                     "{}: issue_tracking hook on `{stage}`: {err:#}",
                     task.id()
-                ));
+                )),
             }
         }
         if stage == crate::pipeline::QUEUED {
@@ -1940,8 +1977,8 @@ impl<'a> Dispatcher<'a> {
             // all.
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
-                TrackingGate::Failed(code) => {
-                    self.pause_for_hook_failure(task, stage, code)?;
+                TrackingGate::Failed(reason) => {
+                    self.pause_for_hook_failure(task, stage, &reason)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -1972,20 +2009,29 @@ impl<'a> Dispatcher<'a> {
                 // `queued` hook above skips.
                 if task.front.trial.is_none() && !task.tracking_off() {
                     let group_open = graph.group_open(&id);
-                    if let Err(err) =
-                        crate::tracking::fire(self.repo, task, crate::pipeline::STARTED, group_open)
-                    {
-                        report.problems.push(format!(
+                    match crate::tracking::fire(
+                        self.repo,
+                        task,
+                        crate::pipeline::STARTED,
+                        group_open,
+                    ) {
+                        Ok(Some(kills)) => report.actions.push(refired_note(
+                            task.id(),
+                            crate::pipeline::STARTED,
+                            kills,
+                        )),
+                        Ok(None) => {}
+                        Err(err) => report.problems.push(format!(
                             "{}: issue_tracking hook on `{}`: {err:#}",
                             task.id(),
                             crate::pipeline::STARTED
-                        ));
+                        )),
                     }
                 }
                 match self.tracking_gate(task, crate::pipeline::STARTED) {
                     TrackingGate::Inactive | TrackingGate::Clean => {}
-                    TrackingGate::Failed(code) => {
-                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, code)?;
+                    TrackingGate::Failed(reason) => {
+                        self.pause_for_hook_failure(task, crate::pipeline::STARTED, &reason)?;
                         return Ok(Routed::NextTask);
                     }
                     TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2034,6 +2080,7 @@ impl<'a> Dispatcher<'a> {
                             pipeline: pipeline.name.clone(),
                             command_forget: None,
                             walked_past,
+                            to_bank: Vec::new(),
                         });
                     }
                     _ => {
@@ -2075,8 +2122,8 @@ impl<'a> Dispatcher<'a> {
             // `spoolway resume` to send it there directly instead.
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
-                TrackingGate::Failed(code) => {
-                    self.pause_for_hook_failure(task, stage, code)?;
+                TrackingGate::Failed(reason) => {
+                    self.pause_for_hook_failure(task, stage, &reason)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -2152,15 +2199,21 @@ impl<'a> Dispatcher<'a> {
         {
             return TrackingGate::Inactive;
         }
+        if let Some(kills) = crate::tracking::killed(self.repo, task, stage) {
+            return TrackingGate::Failed(format!(
+                "issue_tracking hook was killed {kills} times in a row without an exit code"
+            ));
+        }
         match crate::tracking::exit_code(self.repo, task, stage) {
             Some(0) => TrackingGate::Clean,
-            Some(code) => TrackingGate::Failed(code),
+            Some(code) => TrackingGate::Failed(format!("issue_tracking hook exited {code}")),
             None => TrackingGate::Pending,
         }
     }
 
     /// Pause `task` at `stage` (`queued`, `started` or `done`) over a hook
-    /// that exited `code` — the one road all three take into `paused` now,
+    /// that failed for `reason` — a non-zero exit, or too many runs killed
+    /// without one (see [`TrackingGate::Failed`]) — the one road all three take into `paused` now,
     /// since neither `on_fail` nor a `done`-only retry ladder is left to
     /// tell them apart. Records which stage's hook did it in
     /// [`Task::hook_paused`], so `commands::report::back_onto_its_step` can
@@ -2172,14 +2225,14 @@ impl<'a> Dispatcher<'a> {
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
     ///
-    /// The pause reason keeps only the exit code now — the hook's own last
+    /// The pause reason stays one short line — the hook's own last
     /// output, not a log path a person has to go find, is what explains it:
     /// the last 15 lines of its combined stdout and stderr, indented the way
     /// a failed command step's own `## Blocker` tail already is (see the
     /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
     /// under `## Hook error` so a second failure on the same task grows the
     /// section rather than overwriting it.
-    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, code: i32) -> Result<()> {
+    fn pause_for_hook_failure(&mut self, task: &mut Task, stage: &str, reason: &str) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
         let runs = crate::command_step::Runs::new(&self.repo.tracking_dir());
         let log = std::fs::read_to_string(runs.log_path(&key)).unwrap_or_default();
@@ -2194,10 +2247,7 @@ impl<'a> Dispatcher<'a> {
             .collect();
         task.append_to_section("## Hook error", &format!("  Last output:\n\n{tail}\n"));
         task.front.hook_paused = Some(stage.to_string());
-        task.set_stage(
-            crate::pipeline::PAUSED,
-            Some(&format!("issue_tracking hook exited {code}")),
-        );
+        task.set_stage(crate::pipeline::PAUSED, Some(reason));
         self.persist(task)?;
         Ok(())
     }
@@ -3076,8 +3126,9 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Tear a lane down for failing the dispatcher's one remaining check — a
-    /// settled lane that never reported — and hand its task to `paused` with
-    /// `reason` as the whole of what a person reads. The busy-lane watchdog
+    /// settled lane that never reported — and hand its task to `blocked` in an
+    /// unattended run, else to `paused`, with `reason` as the whole of what a
+    /// person reads. The busy-lane watchdog
     /// that used to share this with [`Dispatcher::check_unreported`] is gone:
     /// a busy lane is never escalated any more, whatever it is doing.
     fn escalate_clock(
@@ -3396,7 +3447,9 @@ impl<'a> Dispatcher<'a> {
     /// with the last of what its pane said — the same landing the board's own
     /// `p` key gives a person's interrupt, with `parked_from` naming the step
     /// so `spoolway resume` carries it back rather than making a person name
-    /// it by hand.
+    /// it by hand. An unattended run whose pipeline staffs `blocked` sends the
+    /// task there instead, through [`Dispatcher::escalate`], for the unblocker
+    /// lane to take.
     ///
     /// The tail is the point: an escalation that did not carry it would leave a
     /// person a stage change and no account of what the session was doing when
@@ -3419,10 +3472,9 @@ impl<'a> Dispatcher<'a> {
         // mid-thought outliving the run that started it. The log is what a
         // person reads on that backend, and the log already outlives the lane.
         // Same question as `holds_a_slot` asks, for the same reason — ask the
-        // backend rather than assume one. Unconditional otherwise: every
-        // escalation this reaches now stops in front of a person, attended
-        // run or not, so there is no second question — `parks_on_blocked` —
-        // left to ask about who is on the other end.
+        // backend rather than assume one. Unconditional otherwise, whichever
+        // stage the task is about to land on: a staffed `blocked` lane settles
+        // like any other step, and `finish_lanes` finishes the held pane then.
         let hold = self.mux.resident_while_waiting();
         if hold {
             // A held pane is not necessarily a settled one any more — the
@@ -3487,8 +3539,8 @@ impl<'a> Dispatcher<'a> {
 
         // The other end of the backstop. This lane never reached `spoolway
         // report`, so nothing has committed what it managed to do — and the
-        // task is about to sit on `paused`, where a person may well resume it
-        // at a step that cleans up. Where it stood at launch is the lane
+        // task is about to sit on `paused` or `blocked`, where a person may
+        // well resume it at a step that cleans up. Where it stood at launch is the lane
         // record's, because there is no lane left to ask.
         if let Some(worktree) = task.front.worktree_path.clone() {
             let started_at = record.as_ref().map(|r| r.head.as_str()).unwrap_or("");
@@ -3515,12 +3567,28 @@ impl<'a> Dispatcher<'a> {
             .map(|l| format!("      {l}\n"))
             .collect();
         task.append_to_section("## Blocker", &format!("  Last output:\n\n{tail}\n"));
-        // Straight to `paused`, the same landing [`crate::status::park`]
-        // gives a person's own interrupt — not through `Dispatcher::escalate`,
-        // which is `blocked`'s own road for a step's `on_fail` and a hand
-        // report; a lane that simply stopped reporting never failed a check,
-        // it just went quiet, so there is nothing here for a person to
-        // answer beyond "look at this and decide". `task.stage()` is still
+        // An unattended run whose pipeline staffs `blocked` has nobody to
+        // park the task in front of, so it goes the way every other
+        // escalation does there: to `blocked`, where the unblocker lane takes
+        // it. Left on `paused`, the run would sit idle on a task nothing was
+        // coming to look at.
+        // The exception is `blocked` itself: a silent unblocker lane has no
+        // staffed step left to go back to, so it parks like any other.
+        if pipeline.blocked_is_staffed(self.unattended) && step.id != crate::pipeline::BLOCKED {
+            // `escalate` writes the `escalated` mark in the same save as the
+            // move to `blocked`. It is what lets the board's RECENT line say a
+            // lane was stopped rather than that a launch failed: both leave
+            // `blocked_from` and no report behind, so a read between two saves
+            // would see the move without the mark and keep the wrong line.
+            return self.escalate(task, pipeline, step, reason, true);
+        }
+        // Otherwise straight to `paused`, the same landing
+        // [`crate::status::park`] gives a person's own interrupt — not
+        // through `Dispatcher::escalate`, which is `blocked`'s own road for a
+        // step's `on_fail` and a hand report. An attended run has a person to
+        // answer "look at this and decide"; an unattended one on a pipeline
+        // with no `blocked` step has no lane to hand it to either, and
+        // `escalate` would only send it round the same step again. `task.stage()` is still
         // `step.id` here — nothing has moved it since `check_unreported`
         // found the lane settled — so `park` records that same step under
         // `parked_from`. `escalated: true`, unlike a person's own interrupt —
@@ -3911,7 +3979,7 @@ impl<'a> Dispatcher<'a> {
                         step.id
                     );
                     let task = &mut tasks[candidate.task_index];
-                    self.escalate(task, &pipeline, &step, &reason)?;
+                    self.escalate(task, &pipeline, &step, &reason, false)?;
                     report.actions.push(format!("{}: {reason}", task.id()));
                     continue;
                 }
@@ -4156,6 +4224,7 @@ impl<'a> Dispatcher<'a> {
                         &mut self.file_seen,
                         &pending[i].boot,
                         pending[i].candidate.walked_past.as_deref(),
+                        &pending[i].candidate.to_bank,
                     )?;
                     pending[i].persisted = Some(persisted);
                     ready.push(i);
@@ -4832,17 +4901,22 @@ impl<'a> Dispatcher<'a> {
     ///
     /// A reroute is the one time this does touch that run: the task is being
     /// pulled off its current step, so the command on that step is stopped
-    /// and its run files forgotten before the task moves. Left alone, a
-    /// blocking command would run on after the task has gone, and this sweep
-    /// would later read its leftover non-zero code off a step the task is no
-    /// longer on, and pull the task back off its new step. Stopping before
-    /// the move is persisted is safe: if the write is dropped, the background step's exit code is
-    /// still on disk and pulls the task off again on the retry, so the
-    /// stopped command would have been abandoned anyway.
+    /// and its run files forgotten before the task moves. That stop matters
+    /// most when the destination is a reserved stage such as `blocked`, which
+    /// this sweep never visits: nothing else would stop the command, and it
+    /// would keep running for as long as the task sits there. Stopping before
+    /// the move is persisted is safe: if the write is dropped, the background step's exit
+    /// code is still on disk and pulls the task off again on the retry, so
+    /// the stopped command would have been abandoned anyway.
     ///
-    /// In practice this is the background ones — the step that started each
-    /// one has already walked away from it, so this is the only place left
-    /// that ever looks again. Two things can be found: a run that has
+    /// Only a background step's run is read for a timeout or an `on_fail`,
+    /// since the step that started it has already walked away from it and
+    /// this is the only place left that ever looks again. A run left behind
+    /// by a foreground step is stopped and forgotten without its exit being
+    /// read: the task moved on by some road that did not stop it, and the
+    /// step's `on_fail` no longer applies.
+    ///
+    /// Two things can be found in a background run: one that has
     /// outstayed its step's `timeout:`, stopped here because nothing else
     /// would; and a finished run whose step declared `on_fail`, which is
     /// routed on here because nowhere else asks. A step with no `on_fail`
@@ -4884,6 +4958,23 @@ impl<'a> Dispatcher<'a> {
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
+            // A foreground step's run belongs to the visit that started it.
+            // Once the task is anywhere else, the run is stopped and its files
+            // forgotten, and its exit is never routed on: `on_fail` of a
+            // foreground step only applies while the task sits on that step,
+            // and only a `background: true` step may pull the task off
+            // wherever it is. A manual `spoolway report` and the walk past a
+            // hidden `last:` step both move the stage without stopping the
+            // run, so without this a late non-zero exit would drag the task
+            // off a later step, even one an agent is mid-turn on.
+            if !step.background {
+                if let Some(pane) = runs.pane(key) {
+                    let _ = self.mux.close_pane(&pane);
+                    runs.forget_pane(key);
+                }
+                runs.stop(key);
+                continue;
+            }
             match runs.state(key) {
                 crate::command_step::RunState::Running => {
                     let limit = step.command_timeout();
@@ -4983,6 +5074,7 @@ impl<'a> Dispatcher<'a> {
         pipeline: &Pipeline,
         step: &Step,
         reason: &str,
+        stopped_lane: bool,
     ) -> Result<()> {
         task.append_to_section("## Blocker", &format!("- {reason}\n"));
         // Where it stopped, so resuming — by hand, by the run, or by a
@@ -5026,6 +5118,12 @@ impl<'a> Dispatcher<'a> {
             return Ok(());
         }
 
+        // Set before the move so the stage and the mark reach disk together.
+        // `stopped_lane` only ever sets the mark: one already on the task
+        // belongs to `parked_from` and is spent with it.
+        if stopped_lane {
+            task.front.escalated = true;
+        }
         task.set_stage(crate::pipeline::BLOCKED, Some(reason));
         self.persist(task)?;
         Ok(())
@@ -5769,10 +5867,13 @@ fn finish_launch_bookkeeping(
     file_seen: &mut HashMap<String, u64>,
     boot: &Boot,
     walked_past: Option<&str>,
+    to_bank: &[String],
 ) -> Result<bool> {
     // Only record a transition when this is genuinely a new step. A retry of
-    // the same step arrived by the route that is already recorded.
+    // the same step arrived by the route that is already recorded, and its
+    // walked-past arrivals were counted with it.
     if task.stage() != step.id {
+        crate::commands::bank_walked_past(task, to_bank);
         task.set_stage(&step.id, walked_past);
     }
     // Spent, whether or not a session was found to continue: a resume that
@@ -8871,6 +8972,103 @@ mod tests {
             log.contains("`b` may not send this to `a` a 3rd time — `a` has `loop: 2`"),
             "{log}"
         );
+    }
+
+    /// A cycle whose only `loop:` sits on a step the task walks past still
+    /// stops at that bound: the task ends on `blocked` rather than going round
+    /// it forever. Here `a` is
+    /// the only step with a `loop:`, the task's own `skip:` names it, and `b`
+    /// always fails back to it.
+    #[test]
+    fn a_cycle_bounded_only_on_a_skipped_step_still_stops() {
+        let (repo, _root_guard) = fixture("loop-bound-walk-past");
+        let yaml = "steps:\n  \
+             - id: a\n    run: true\n    loop: 2\n    on_pass: b\n  \
+             - id: b\n    run: \"false\"\n    on_pass: done\n    on_fail: a\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml)
+            .expect("a cycle bounded only on a skippable step is a valid pipeline");
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        let path = add_task_with_worktree(&repo, "demo", "b");
+        let mut task = reload(&path);
+        task.front.skip = vec!["a".into()];
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        let started = std::time::Instant::now();
+        while reload(&path).stage() != crate::pipeline::BLOCKED
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            run_pass_with(&repo, &mux, &pipelines);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::BLOCKED,
+            "the task kept lapping a cycle bounded only on a skipped step: {:?}",
+            task.front.arrivals
+        );
+    }
+
+    /// A walked-past `loop:` arrival is counted when the lane actually starts,
+    /// not each time the route is read. `b` fails into `a`, which the task
+    /// skips, and lands on the agent step `c`; while `c`'s pane is busy the
+    /// command's exit code stays on disk and is routed again every pass, so
+    /// counting at route time would spend `a`'s `loop: 2` on one failure.
+    #[test]
+    fn a_walked_past_arrival_is_counted_once_the_lane_starts() {
+        let (repo, _root_guard) = fixture("loop-bound-deferred-start");
+        let yaml = "steps:\n  \
+             - id: a\n    run: true\n    loop: 2\n    on_pass: c\n  \
+             - id: b\n    run: \"false\"\n    on_pass: done\n    on_fail: a\n  \
+             - id: c\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        let path = add_task_with_worktree(&repo, "demo", "b");
+        let mut task = reload(&path);
+        task.front.skip = vec!["a".into()];
+        task.save().unwrap();
+
+        // `b` runs detached, so its exit code only shows up on a later pass.
+        // Wait for it first: the busy passes below must each read that exit
+        // and try to start `c`, or they prove nothing.
+        let busy = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
+        let key = crate::command_step::Runs::key("b", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let started = std::time::Instant::now();
+        while runs.state(&key) != crate::command_step::RunState::Exited(1) {
+            assert!(started.elapsed() < Duration::from_secs(5), "b never exited");
+            run_pass_with(&repo, &busy, &pipelines);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        busy.clear_calls();
+
+        for attempt in 1..=4 {
+            run_pass_with(&repo, &busy, &pipelines);
+            assert!(
+                !busy.did("start ").is_empty(),
+                "attempt {attempt}: the pass never tried to start c"
+            );
+            busy.clear_calls();
+            let task = reload(&path);
+            assert_ne!(task.stage(), crate::pipeline::BLOCKED, "attempt {attempt}");
+            assert_eq!(
+                task.rounds_at("a"),
+                0,
+                "attempt {attempt}: nothing has started yet: {:?}",
+                task.front.arrivals
+            );
+        }
+
+        let free = FakeMux::new(vec![]);
+        run_pass_with(&repo, &free, &pipelines);
+        let task = reload(&path);
+        assert_eq!(task.stage(), "c");
+        assert_eq!(task.rounds_at("a"), 1, "{:?}", task.front.arrivals);
     }
 
     /// A task leaving `queued` onto an entry step it walks past starts on the
@@ -12147,6 +12345,7 @@ mod tests {
                 pipeline,
                 step,
                 "its pane went quiet and stayed quiet",
+                false,
             )
             .unwrap();
 
@@ -12167,6 +12366,43 @@ mod tests {
         assert_eq!(task.rounds_via("review", "implement"), 0);
     }
 
+    /// The launch guard's escalation does not touch an `escalated` mark that
+    /// belongs to an escalated park: it is spent with `parked_from`, and a
+    /// resume that follows must still be told the lane was torn down.
+    /// `stopped_lane` is what sets the mark, and does so in the same save as
+    /// the move to `blocked`.
+    #[test]
+    fn escalate_keeps_a_parked_mark_and_writes_a_stopped_lane_mark_with_the_move() {
+        let (repo, _root_guard) = unattended_fixture("escalate-mark");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.parked_from = Some("implement".into());
+            f.escalated = true;
+        });
+        let mux = FakeMux::new(vec![]);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut task = reload(&path);
+        let step = pipeline.step("implement").unwrap();
+
+        dispatcher
+            .escalate(&mut task, pipeline, step, "never launched", false)
+            .unwrap();
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(task.front.escalated, "spent with `parked_from`, not here");
+        assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
+
+        let path = add_task_with(&repo, "other", "implement", |_| {});
+        let mut task = reload(&path);
+        dispatcher
+            .escalate(&mut task, pipeline, step, "went quiet", true)
+            .unwrap();
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(task.front.escalated, "saved with the move, not after it");
+    }
+
     /// A repo whose runs stop for nobody.
     ///
     /// Set on the config rather than through a lock, because a fixture has no
@@ -12178,24 +12414,15 @@ mod tests {
         (repo, root_guard)
     }
 
-    /// The same escalation with nobody to escalate to, on a pipeline that
-    /// does not stage `blocked`: the task goes back to the step it stopped on
-    /// instead of parking, and nobody is called over.
+    /// An unattended run on a pipeline with no `blocked` step has no lane to
+    /// hand an escalation to, so the task parks on `paused` as an attended
+    /// run's would.
     ///
-    /// This is the whole of what replaced the second, dedicated lane a block
-    /// A lane that stops reporting now waits on a person the same way in
-    /// every run — attended or not. Unattended used to mean nobody was there
-    /// to park it in front of, so the task was sent back round the step
-    /// instead; that carve-out is gone along with `parks_on_blocked`, since
-    /// an unattended escalation no longer goes to a staffed lane either — see
-    /// `Dispatcher::tear_down_and_escalate`.
-    ///
-    /// Driven through the reminder loop, which is the escalation an
-    /// unattended run still has: it catches a lane going wrong rather than a
-    /// person being needed, so unlike `loop` and the launch ceiling it
-    /// keeps its teeth in both modes.
+    /// Driven through the reminder loop, which catches a lane going wrong
+    /// rather than a person being needed, so unlike `loop` and the launch
+    /// ceiling it keeps its teeth in both modes.
     #[test]
-    fn an_unattended_escalation_pauses_just_like_an_attended_one() {
+    fn an_unattended_escalation_without_a_blocked_step_pauses() {
         let (repo, _root_guard) = unattended_fixture("unattended-resume");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -12230,6 +12457,39 @@ mod tests {
             task.front.blocked_from, None,
             "it never touched `blocked` at all"
         );
+    }
+
+    /// With `blocked` staffed, an unattended run sends the escalation there so
+    /// the unblocker lane takes the task, rather than leaving it on `paused`
+    /// with nobody coming to look.
+    #[test]
+    fn an_unattended_escalation_with_a_staffed_blocked_step_goes_to_blocked() {
+        let (repo, _root_guard) = unattended_fixture("unattended-to-blocked");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        run_pass(&repo, &mux);
+        age_lane(&repo, "demo · implement", Duration::from_secs(15));
+        run_pass(&repo, &mux);
+        age_lane(&repo, "demo · implement", Duration::from_secs(700));
+        run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(
+            task.front.blocked_from.as_deref(),
+            Some("implement"),
+            "a resume from `blocked` carries on at the step it stalled at"
+        );
+        assert!(
+            task.front.escalated,
+            "marks the stop so the board does not call it a failed launch"
+        );
+        let blocker = task.section("## Blocker").unwrap_or_default();
+        assert!(blocker.contains("Last output"), "{blocker}");
     }
 
     /// The step's own record of what stopped it survives too, in the
@@ -16311,13 +16571,12 @@ mod tests {
         );
     }
 
-    /// The unattended path needs nothing extra for this either: `escalate_clock`
-    /// always lands on `paused` now, with no `unattended`-specific branch of
-    /// its own — so a task the ceiling stops waits on a person exactly as an
-    /// attended run's would, rather than reaching for an unblocker lane.
-    // covers: agents.<profile>.session_blocked_ctx — the ceiling needs no unattended special case
+    /// In an unattended run the ceiling's stop lands the task on `blocked`,
+    /// and the next pass starts the unblocker lane on it, rather than leaving
+    /// it on `paused` for a person who is not there.
+    // covers: agents.<profile>.session_blocked_ctx — an unattended stop goes to `blocked` for the unblocker
     #[test]
-    fn an_unattended_run_needs_no_special_case_for_the_ctx_ceiling() {
+    fn an_unattended_ctx_ceiling_stop_goes_to_blocked_and_is_staffed() {
         let (mut repo, _root_guard) = unattended_fixture("ctx-ceiling-unattended");
         // `implement` in the shipped pipeline names the placeholder model —
         // priced here under its own name, standing in for the real local
@@ -16360,31 +16619,24 @@ mod tests {
         let task = reload(&path);
         assert_eq!(
             task.stage(),
-            crate::pipeline::PAUSED,
-            "the same landing an attended run would get"
+            crate::pipeline::BLOCKED,
+            "an unattended run hands the stop to the unblocker"
         );
         assert_eq!(
-            task.front.parked_from.as_deref(),
+            task.front.blocked_from.as_deref(),
             Some("implement"),
-            "the step the ceiling stopped, for `spoolway resume` to carry it back to"
+            "the step the ceiling stopped, for a resume from `blocked` to carry it back to"
         );
 
-        // A pass later, nothing starts on its behalf — there is no unblocker
-        // to staff, since it never reached `blocked` at all. A fresh
-        // `FakeMux` with no lanes, standing in for the real multiplexer once
-        // the `stop_lane` the pass above just logged has actually closed the
-        // pane.
+        // A pass later the unblocker lane starts. A fresh `FakeMux` with no
+        // lanes, standing in for the real multiplexer once the `stop_lane`
+        // the pass above just logged has actually closed the pane.
         let mux = FakeMux::new(vec![]);
         run_pass(&repo, &mux);
         assert!(
-            !mux.calls().iter().any(|call| call.contains("blocked")),
-            "there is nothing at `blocked` to staff: {:?}",
+            mux.calls().iter().any(|call| call.contains("blocked")),
+            "an unblocker lane starts on the task: {:?}",
             mux.calls()
-        );
-        assert_eq!(
-            reload(&path).stage(),
-            crate::pipeline::PAUSED,
-            "still waiting on a person, not moved on by the run itself"
         );
     }
 
@@ -19329,6 +19581,123 @@ mod tests {
         );
     }
 
+    /// A foreground command's run can outlive its step when a person reports
+    /// past it by hand. Its late non-zero exit belongs to a step the task has
+    /// left, so it must not pull the task anywhere: only a `background: true`
+    /// step may route its task from wherever the task has got to.
+    #[test]
+    fn a_foreground_commands_late_failure_does_not_move_a_task_that_left_its_step() {
+        let (repo, _root_guard) = fixture("command-foreground-late-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-fg");
+        let mut pipelines = pipelines_running(&format!("{}; exit 1", run_until(&release)), false);
+        let name = "default".to_string();
+        pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Running,
+            "the foreground command must still be running on its step"
+        );
+
+        // A person passes the step by hand: the stage moves, the run stays.
+        let mut task = reload(&path);
+        task.set_stage("review", None);
+
+        std::fs::write(&release, "go").unwrap();
+        for _ in 0..100 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
+
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        let keys = runs.keys_for_task(task.id());
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
+
+        assert!(
+            rerouted.is_none(),
+            "a foreground run's late exit must not reroute: {:?}",
+            report.actions
+        );
+        assert_eq!(task.stage(), "review");
+    }
+
+    /// A foreground command that is still running when its task leaves the
+    /// step is stopped, not just ignored: its process is killed, its run files
+    /// are forgotten and its pane is closed. Otherwise a long command would
+    /// run on after the task had gone, and could still exit non-zero later.
+    #[test]
+    fn a_foreground_run_still_going_when_its_task_leaves_is_stopped_and_its_pane_closed() {
+        let (repo, _root_guard) = fixture("command-foreground-left-running");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let release = repo.root.join("release-fg-running");
+        let pipelines = pipelines_running(&format!("{}; exit 1", run_until(&release)), false);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        let pane = runs.pane(&key).expect("the run must be in a pane");
+
+        // The stage moves while the run is still going, as a walk past a
+        // hidden `last:` step does.
+        let mut task = reload(&path);
+        task.set_stage("review", None);
+
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let mut report = Report::default();
+        let keys = runs.keys_for_task(task.id());
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
+
+        assert!(rerouted.is_none(), "{:?}", report.actions);
+        assert_eq!(task.stage(), "review");
+        assert_ne!(
+            runs.state(&key),
+            crate::command_step::RunState::Running,
+            "the leftover run must be stopped"
+        );
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(runs.pane(&key).is_none(), "the pane record must be gone");
+        assert!(
+            mux.did("close_pane")
+                .iter()
+                .any(|call| call == &format!("close_pane {pane}")),
+            "{:?}",
+            mux.calls()
+        );
+    }
+
     /// A background step that fails late pulls its task off whatever step it
     /// has reached. If that step is a blocking command still running, the pull
     /// stops the run and forgets its files, so a later visit runs the command
@@ -21477,6 +21846,107 @@ exit 0"#,
             Some(crate::pipeline::DONE),
             "resume needs to know this hold is `done`'s, not `queued`'s"
         );
+    }
+
+    /// Leaves `event`'s hook run for `demo` looking killed without an exit
+    /// code, `kills` times in a row: a pid that is already dead, no `.exit`
+    /// file, and the count beside it.
+    fn seed_killed_hook_run(repo: &Repo, event: &str, kills: u32) {
+        let runs = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key(event, "demo");
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        // A child already waited on: dead, so the run reads as killed. A
+        // made-up number could belong to a live process.
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        std::fs::write(
+            repo.tracking_dir().join(format!("{key}.pid")),
+            dead_pid.to_string(),
+        )
+        .unwrap();
+        for _ in 0..kills {
+            runs.note_kill(&key).unwrap();
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Interrupted);
+    }
+
+    /// A `done` hook run killed without an exit code is fired again, and the
+    /// pass report says so, so a second run in the hook's log is explained.
+    #[test]
+    fn a_killed_done_hook_run_is_fired_again_and_reported() {
+        let (mut repo, _root_guard) = fixture("hook-done-refire");
+        write_hook(&repo, "ok.sh", "exit 0");
+        repo.config.issue_tracking.hook = "ok.sh".into();
+        let path = add_task(&repo, "demo", crate::pipeline::DONE);
+        seed_killed_hook_run(&repo, crate::pipeline::DONE, 0);
+        let mux = FakeMux::new(vec![]);
+
+        let report = run_pass(&repo, &mux);
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("demo: issue_tracking hook on `done`")
+                    && a.contains("running it again")),
+            "the refire must be in the pass report: {:?}",
+            report.actions
+        );
+        for _ in 0..200 {
+            if !path.exists() {
+                break;
+            }
+            run_pass(&repo, &mux);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !path.exists(),
+            "the refired run exited 0, so the task archives"
+        );
+    }
+
+    /// A hook something kills every time it starts is not started forever:
+    /// the run killed [`crate::tracking::MAX_HOOK_KILLS`] times in a row
+    /// pauses the task the way a non-zero exit does, with `hook_paused` set
+    /// so `spoolway resume` forgets the run and its count.
+    #[test]
+    fn a_hook_run_killed_too_often_pauses_the_task() {
+        for (event, from) in [
+            (crate::pipeline::STARTED, crate::pipeline::QUEUED),
+            (crate::pipeline::DONE, crate::pipeline::DONE),
+        ] {
+            let (mut repo, _root_guard) = fixture(&format!("hook-{event}-killed"));
+            let marker = repo.root.join("hook-ran");
+            write_hook(
+                &repo,
+                "mark.sh",
+                &format!(
+                    "if [ \"$SPOOLWAY_EVENT\" = {event} ]; then touch '{}'; fi\nexit 0",
+                    marker.display()
+                ),
+            );
+            repo.config.issue_tracking.hook = "mark.sh".into();
+            let path = add_task(&repo, "demo", from);
+            seed_killed_hook_run(&repo, event, crate::tracking::MAX_HOOK_KILLS - 1);
+            let mux = FakeMux::new(vec![]);
+
+            let stage = pass_until_settled(&repo, &mux, &path, from);
+            assert_eq!(stage, crate::pipeline::PAUSED, "{event}");
+            let task = reload(&path);
+            assert_eq!(task.front.hook_paused.as_deref(), Some(event));
+            assert!(
+                task.section("## Status Log")
+                    .unwrap()
+                    .contains("killed 3 times in a row without an exit code"),
+                "{event}: {:?}",
+                task.section("## Status Log")
+            );
+            assert!(
+                !marker.exists(),
+                "{event}: the hook must not run a fourth time"
+            );
+            assert!(mux.did("start").is_empty(), "{event}: no lane may start");
+        }
     }
 
     /// A hook failing on `blocked` or `paused` only ever records the

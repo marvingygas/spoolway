@@ -455,9 +455,11 @@ impl Runs {
     /// Called once the exit code has been routed on. A task arriving at the
     /// step again starts clean anyway — see [`Runs::begin_visit`] — so this is
     /// not what keeps a revisit from routing on an old code. It matters for a
-    /// task that has left the step: [`crate::dispatch::Dispatcher`] rereads
-    /// the leftover code of a step the task is no longer on and reroutes the
-    /// task down that step's `on_fail`, on every pass, until it is gone.
+    /// task that has left a background step: [`crate::dispatch::Dispatcher`]
+    /// rereads the leftover code of a background step the task is no longer
+    /// on and reroutes the task down that step's `on_fail`, on every pass,
+    /// until it is gone. A foreground step's leftover code is cleared without
+    /// rerouting.
     ///
     /// That is why this answers with a result instead of swallowing one:
     /// forget has to have actually forgotten.
@@ -494,14 +496,19 @@ impl Runs {
         self.dir.join(format!("{key}.kills"))
     }
 
+    /// How many runs of this key have been killed in a row without an exit
+    /// code, without counting another. Zero when none have.
+    pub fn kills(&self, key: &str) -> u32 {
+        std::fs::read_to_string(self.kills_path(key))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
     /// Count one more run of this key killed without an exit code, and answer
     /// the new total. [`Runs::forget`] and [`Runs::begin_visit`] reset it.
     pub fn note_kill(&self, key: &str) -> Result<u32> {
-        let seen = std::fs::read_to_string(self.kills_path(key))
-            .ok()
-            .and_then(|text| text.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        let total = seen + 1;
+        let total = self.kills(key) + 1;
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(self.kills_path(key), total.to_string())
             .with_context(|| format!("writing {}", self.kills_path(key).display()))?;

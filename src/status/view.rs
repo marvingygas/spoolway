@@ -247,6 +247,12 @@ pub(crate) enum Move {
         from: Option<String>,
         cause: Option<Cause>,
     },
+    /// `from`'s lane was stopped by the dispatcher — it ended its turn
+    /// without reporting, held a child past `dispatch.lane_child_ceiling`, or
+    /// crossed `session_blocked_ctx` — and an unattended run sent the task to
+    /// `to`, `blocked`, for the unblocker lane. An attended run parks the same
+    /// stop on `paused`, which is [`Move::Stopped`] with [`Cause::Escalated`].
+    Escalated { from: String, to: String },
     /// The task was on `paused`.
     Resumed { to: String },
     /// The task was on `blocked`. `by_lane` when the report that moved it
@@ -274,7 +280,8 @@ pub(crate) enum Cause {
     Gate,
     /// The task's own `gate_at` held the step's outcome.
     Scheduled,
-    /// An issue-tracking hook exited non-zero.
+    /// An issue-tracking hook exited non-zero, or was killed three times in a
+    /// row without an exit code.
     HookFailed,
     /// A person parked it: the board's `p`, or an Escape in the pane.
     Manually,
@@ -2277,6 +2284,10 @@ pub(crate) fn sentence(change: &Move) -> String {
         Move::Stopped { from: None, cause } => (
             format!("stopped before starting, moved to {PAUSED}"),
             cause.as_ref(),
+        ),
+        Move::Escalated { from, to } => (
+            format!("stopped on {from}, moved to {to}"),
+            Some(&Cause::Escalated),
         ),
         Move::Resumed { to } => (format!("resumed, moved to {to}"), None),
         Move::Unblocked { to, by_lane: false } => (format!("unblocked, moved to {to}"), None),
@@ -4673,6 +4684,10 @@ mod tests {
                     }
                 }
                 written.insert(sentence(&Move::FailedInBackground {
+                    from: f.clone(),
+                    to: t.clone(),
+                }));
+                written.insert(sentence(&Move::Escalated {
                     from: f.clone(),
                     to: t.clone(),
                 }));

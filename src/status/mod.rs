@@ -4642,6 +4642,14 @@ fn off_a_step(
     let Some(step) = pipeline.step(was) else {
         return Move::Left { from, to };
     };
+    // `tear_down_and_escalate`'s road into `blocked` marks the file
+    // `escalated`, which no other road onto `blocked` does. A lane stopped
+    // for going quiet leaves the same `blocked_from` and no report that a
+    // lane dead at launch does, so without the mark it would read as a
+    // launch that failed.
+    if into_blocked && front.escalated {
+        return Move::Escalated { from, to };
+    }
     // Where each outcome lands the task, past the steps it walks past — the
     // stage a report or a command step's exit writes. Compared raw, a move
     // from `test` straight to `document` past a hidden `suite` matches
@@ -7890,6 +7898,49 @@ mod tests {
             line,
             "could not launch review, moved to blocked (lane died at launch)"
         );
+    }
+
+    /// `Dispatcher::tear_down_and_escalate` in an unattended run: the file
+    /// matches a lane dead at launch except for the `escalated` mark, and
+    /// the line must say the lane was stopped, not that a launch failed.
+    #[test]
+    fn a_lane_the_dispatcher_stopped_into_blocked_reads_escalated() {
+        let line = line_after(
+            "road-stopped-into-blocked",
+            "review",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                crate::commands::set_blocked_from(&mut task, "review");
+                task.front.escalated = true;
+                task.set_stage(crate::pipeline::BLOCKED, Some("went quiet"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "stopped on review, moved to blocked (escalated)");
+    }
+
+    /// The `escalated` mark belongs to the stop that set it. After the
+    /// unblocker's pass carries the task off `blocked`, a later block on it
+    /// is an ordinary reported block and must read as one.
+    #[test]
+    fn a_block_after_an_escalation_was_cleared_reads_as_a_reported_block() {
+        let line = line_after(
+            "road-block-after-escalation",
+            "review",
+            |_| {},
+            |repo, _| {
+                let mut task = repo.task("t").unwrap();
+                crate::commands::set_blocked_from(&mut task, "review");
+                task.front.escalated = true;
+                task.set_stage(crate::pipeline::BLOCKED, Some("went quiet"));
+                task.set_stage("review", Some("unblocked"));
+                reported(&mut task, "review", Outcome::Block);
+                task.set_stage(crate::pipeline::BLOCKED, Some("needs a person"));
+                task.save().unwrap();
+            },
+        );
+        assert_eq!(line, "reported a block on review, moved to blocked");
     }
 
     /// The cause is dropped here: `implement` has no `on_fail`, so a pane

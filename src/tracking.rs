@@ -22,10 +22,13 @@
 //! stuck ticket integration never has to sift through build logs to find it.
 //!
 //! Firing is idempotent for a run's whole lifetime: [`fire`] starts a run
-//! only while [`RunState::Fresh`] still holds. `queued`, `paused` and
-//! `blocked` are stages a task can sit on for many passes in a row, which is
-//! exactly what that guards: without it every pass sitting on `blocked`
-//! would open a second ticket. The one caller that ever calls
+//! only while [`RunState::Fresh`] holds. `queued`, `paused` and `blocked`
+//! are stages a task can sit on for many passes in a row, which is exactly
+//! what that guards: without it every pass sitting on `blocked` would open a
+//! second ticket. The one exception is a run killed without an exit code,
+//! [`RunState::Interrupted`]: [`fire`] starts it again, up to
+//! [`MAX_HOOK_KILLS`] runs in a row, so a hook that did open a ticket before
+//! a reboot killed it may open a second one. The one caller that ever calls
 //! [`Runs::forget`] is [`forget`] — a non-zero exit on `queued`, `started` or
 //! `done` pauses the task (see `crate::dispatch::Dispatcher::tracking_gate`), and
 //! [`forget`] is what `spoolway resume` calls to undo that hold, so the very
@@ -655,10 +658,22 @@ pub(crate) fn tracker(repo: &Repo) -> String {
         .unwrap_or_else(|| hook.to_string())
 }
 
+/// How many runs of one hook event may be killed in a row, each without an
+/// exit code, before [`fire`] stops starting it again and [`killed`] answers
+/// for it instead. The same ceiling a command step gets — see
+/// `MAX_COMMAND_KILLS` in [`crate::dispatch`].
+pub const MAX_HOOK_KILLS: u32 = 3;
+
 /// Start this task's hook for `event`, unless it already has —see
 /// [`RunState::Fresh`]. A no-op with nothing configured, so a project that
 /// has never touched `[issue_tracking]` pays for none of this: no directory,
 /// no process, no difference in behaviour.
+///
+/// A run that was killed without an exit code counts as not having started,
+/// and is fired again — until [`MAX_HOOK_KILLS`] runs in a row have been
+/// killed, after which it is left for [`killed`] to report. Answers
+/// `Some(kills)` when this call started such a run again, with how many runs
+/// before it were killed, so the caller can say why the hook ran twice.
 ///
 /// `group_open` is how many of this task's own group are still in the open
 /// set — [`crate::graph::Graph::group_open`]'s own count — which is both
@@ -666,15 +681,33 @@ pub(crate) fn tracker(repo: &Repo) -> String {
 /// `SPOOLWAY_GROUP_LAST`: this task is still counted among the open ones at
 /// the moment its own `done` hook fires, so a count of one means nobody else
 /// is left.
-pub fn fire(repo: &Repo, task: &Task, event: &str, group_open: usize) -> Result<()> {
+pub fn fire(repo: &Repo, task: &Task, event: &str, group_open: usize) -> Result<Option<u32>> {
     let Some(hook) = hook_path(repo) else {
-        return Ok(());
+        return Ok(None);
     };
     let runs = runs(repo);
     let key = Runs::key(event, task.id());
-    if runs.state(&key) != RunState::Fresh {
-        return Ok(());
-    }
+    // `Interrupted` is a run that died without writing an exit code, which is
+    // what a reboot or `wsl --shutdown` mid-hook leaves behind. It never
+    // reports a code, so leaving it alone would strand the task on `queued`
+    // or `done` for good. `start` clears its stale files first. The count
+    // lives beside the run and outlives it, so a hook that something kills
+    // every time it starts stops at the ceiling rather than running forever;
+    // past it nothing is counted again, however many passes look.
+    let refired = match runs.state(&key) {
+        RunState::Fresh => None,
+        RunState::Interrupted => {
+            if runs.kills(&key) >= MAX_HOOK_KILLS {
+                return Ok(None);
+            }
+            let kills = runs.note_kill(&key)?;
+            if kills >= MAX_HOOK_KILLS {
+                return Ok(None);
+            }
+            Some(kills)
+        }
+        _ => return Ok(None),
+    };
 
     let env = build_env(repo, task, event, group_open);
     // Quoted the same way a lane's own environment is — see
@@ -682,7 +715,21 @@ pub fn fire(repo: &Repo, task: &Task, event: &str, group_open: usize) -> Result<
     // reaches the shell as one argument.
     let run_line = crate::platform::quote(&hook.display().to_string());
     runs.start(&key, &run_line, &repo.root, &env)?;
-    Ok(())
+    Ok(refired)
+}
+
+/// How many of this task's `event` hook runs were killed in a row without an
+/// exit code, once there have been [`MAX_HOOK_KILLS`] of them and [`fire`]
+/// has stopped starting it again. `None` otherwise, including while a run
+/// that replaced a killed one is still going.
+///
+/// The dispatcher pauses the task on this the way it does on a non-zero
+/// exit, and [`forget`] — what `spoolway resume` calls — clears the count.
+pub fn killed(repo: &Repo, task: &Task, event: &str) -> Option<u32> {
+    let key = Runs::key(event, task.id());
+    let runs = runs(repo);
+    let kills = runs.kills(&key);
+    (runs.state(&key) == RunState::Interrupted && kills >= MAX_HOOK_KILLS).then_some(kills)
 }
 
 /// This task's hook exit code for `event`, once it is known.
@@ -976,6 +1023,115 @@ mod tests {
             }
         }
         panic!("`{key}` never finished");
+    }
+
+    /// A hook run killed without ever writing an exit code — a reboot or
+    /// `wsl --shutdown` mid-hook — is not left as the last word on its task.
+    /// The next pass fires the hook again, and the second run's own exit
+    /// code is what the dispatcher then reads.
+    #[test]
+    fn a_hook_run_killed_without_an_exit_code_is_fired_again() {
+        interrupted_run_is_fired_again(crate::pipeline::STARTED);
+    }
+
+    /// The `done` event shares `fire` with `started`, but a stranded `done`
+    /// run is the one that keeps a finished task from ever being archived.
+    #[test]
+    fn a_done_hook_run_killed_without_an_exit_code_is_fired_again() {
+        interrupted_run_is_fired_again(crate::pipeline::DONE);
+    }
+
+    fn interrupted_run_is_fired_again(event: &str) {
+        let (mut repo, _root_guard) = fixture(&format!("interrupted-{event}"));
+        let marker = repo.root.join("first-run-seen");
+        with_hook(
+            &mut repo,
+            "once.sh",
+            &format!(
+                "if [ -e '{m}' ]; then exit 0; fi\ntouch '{m}'\nsleep 60",
+                m = marker.display()
+            ),
+        );
+        let t = task("demo", |_| {});
+        let key = Runs::key(event, t.id());
+
+        fire(&repo, &t, event, 1).unwrap();
+        let pid = runs(&repo).read_pid(&key).expect("the hook run has a pid");
+        let started = std::time::Instant::now();
+        while !marker.exists() && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        crate::headless::kill_group(pid);
+        let started = std::time::Instant::now();
+        while runs(&repo).state(&key) == RunState::Running
+            && started.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(runs(&repo).state(&key), RunState::Interrupted);
+
+        fire(&repo, &t, event, 1).unwrap();
+        assert_eq!(settle(&repo, &t, event), RunState::Exited(0));
+        assert_eq!(exit_code(&repo, &t, event), Some(0));
+    }
+
+    /// A hook something kills every time it starts — `systemd-oomd`, a
+    /// sandbox — is fired again only until [`MAX_HOOK_KILLS`] runs in a row
+    /// have died, then left for [`killed`] to report; [`forget`] clears the
+    /// count so `spoolway resume` starts it over.
+    #[test]
+    fn a_hook_run_killed_every_time_stops_being_fired() {
+        let (mut repo, _root_guard) = fixture("killed-every-time");
+        let count = repo.root.join("runs");
+        with_hook(
+            &mut repo,
+            "doomed.sh",
+            &format!("echo run >>'{c}'\nsleep 60", c = count.display()),
+        );
+        let t = task("demo", |_| {});
+        let event = crate::pipeline::STARTED;
+        let key = Runs::key(event, t.id());
+        let ran = || {
+            std::fs::read_to_string(&count)
+                .map(|text| text.lines().count())
+                .unwrap_or(0)
+        };
+        let kill_run = |expected: usize| {
+            let started = std::time::Instant::now();
+            while ran() < expected && started.elapsed() < std::time::Duration::from_secs(10) {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            crate::headless::kill_group(runs(&repo).read_pid(&key).expect("a pid"));
+            let started = std::time::Instant::now();
+            while runs(&repo).state(&key) == RunState::Running
+                && started.elapsed() < std::time::Duration::from_secs(10)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert_eq!(runs(&repo).state(&key), RunState::Interrupted);
+        };
+
+        assert_eq!(fire(&repo, &t, event, 1).unwrap(), None);
+        kill_run(1);
+        assert_eq!(killed(&repo, &t, event), None);
+        assert_eq!(fire(&repo, &t, event, 1).unwrap(), Some(1));
+        kill_run(2);
+        assert_eq!(fire(&repo, &t, event, 1).unwrap(), Some(2));
+        kill_run(3);
+
+        for _ in 0..3 {
+            assert_eq!(fire(&repo, &t, event, 1).unwrap(), None);
+        }
+        assert_eq!(ran(), 3, "no fourth run");
+        assert_eq!(killed(&repo, &t, event), Some(MAX_HOOK_KILLS));
+        assert_eq!(exit_code(&repo, &t, event), None);
+
+        forget(&repo, &t, event);
+        assert_eq!(killed(&repo, &t, event), None);
+        assert_eq!(fire(&repo, &t, event, 1).unwrap(), None);
+        kill_run(4);
+        assert_eq!(fire(&repo, &t, event, 1).unwrap(), Some(1));
+        crate::headless::kill_group(runs(&repo).read_pid(&key).unwrap());
     }
 
     /// The whole point of the empty-table default: a project that has never
