@@ -1038,6 +1038,32 @@ pub(super) fn table(
     totals: &BTreeMap<String, GroupTotal>,
     cursor: Option<&str>,
 ) -> String {
+    table_laid_out(rows, style, totals, cursor).0
+}
+
+/// Where [`table`]'s lines sit: the line each task row is drawn on, and the
+/// line of the band over its group. Counted from the column header, line 0.
+///
+/// Only the board reads it, to scroll a table taller than its pane — see
+/// [`table_window`]. A band is `None` for a row in the `no group` block,
+/// which draws none.
+#[derive(Debug, Default)]
+pub(super) struct TableLayout {
+    /// One entry per row of the table's `rows`, in the same order.
+    pub(super) tasks: Vec<usize>,
+    /// The band line over each entry of `tasks`.
+    pub(super) bands: Vec<Option<usize>>,
+}
+
+/// [`table`], with the [`TableLayout`] of what it drew. The layout is noted
+/// in the same loop that pushes each line, so it cannot fall out of step
+/// with a band or a total line the table draws or leaves off.
+pub(super) fn table_laid_out(
+    rows: &[Row],
+    style: Style,
+    totals: &BTreeMap<String, GroupTotal>,
+    cursor: Option<&str>,
+) -> (String, TableLayout) {
     let width = |of: &dyn Fn(&Row) -> usize, header: usize| {
         rows.iter().map(of).max().unwrap_or(0).max(header)
     };
@@ -1408,6 +1434,11 @@ pub(super) fn table(
         }
     }
 
+    // Every line `out` holds ends in a newline, so the count of them is the
+    // index the next line pushed will have.
+    let next_line = |out: &str| out.matches('\n').count();
+    let mut layout = TableLayout::default();
+    let mut band_line: Option<usize> = None;
     let mut group: Option<&str> = None;
     for row in rows {
         if group != Some(row.group()) {
@@ -1416,6 +1447,7 @@ pub(super) fn table(
             }
             group = Some(row.group());
             out.push('\n');
+            band_line = (row.group() != NO_GROUP).then(|| next_line(&out));
             band(
                 &mut out,
                 group.unwrap(),
@@ -1534,12 +1566,123 @@ pub(super) fn table(
             line.push_str(&next);
         }
         line.push('\n');
+        layout.tasks.push(next_line(&out));
+        layout.bands.push(band_line);
         out.push_str(&line);
     }
     if let Some(last) = group {
         close_group(&mut out, last);
     }
-    out
+    (out, layout)
+}
+
+/// [`table`]'s lines cut to its column header and the `rows` under it, for a
+/// board whose table is taller than the rows its pane leaves the table.
+///
+/// A table that fits is drawn whole. One that does not keeps its header and
+/// scrolls the rest under the cursor, `cursor` being an index into
+/// `layout.tasks`: the view ends on the cursor's task, and on the total line
+/// closing its group when it is the group's last task and the view has room
+/// for its band as well, so the foot of a group reads whole once the cursor
+/// reaches it. The view is worked out from the
+/// cursor alone every frame — see [`crate::screen::pane::offset`] — so a group
+/// that finishes between frames never leaves a stale scroll position behind.
+///
+/// The last of the `rows` is the marker, in the queue screen's words — see
+/// [`crate::screen::pane::marker_row`] — counting task rows only: a band, a
+/// total line or a blank row out of view is never counted. When no task is
+/// out of view the marker row is not drawn and the table takes that row back.
+///
+/// When the view starts on a task or a total line below its own group's
+/// band, the band is drawn on the view's first row in that line's place, so
+/// every task row and total line drawn has its group named over it. A task
+/// the band covers counts as above. The cursor
+/// never sits on the pinned band: the view's first row is never the cursor's
+/// own unless the view is too short to hold anything else, and then nothing
+/// is pinned.
+pub(super) fn table_window(
+    table: &str,
+    layout: &TableLayout,
+    cursor: Option<usize>,
+    rows: usize,
+    pane: usize,
+) -> Vec<String> {
+    let lines: Vec<String> = table.lines().map(str::to_string).collect();
+    let Some((header, body)) = lines.split_first() else {
+        return lines;
+    };
+    let mut shown = vec![header.clone()];
+    if body.len() <= rows {
+        shown.extend_from_slice(body);
+        return shown;
+    }
+    if rows == 0 {
+        return shown;
+    }
+    // The layout counts the header as line 0; the body starts under it.
+    let tasks: Vec<usize> = layout.tasks.iter().map(|line| line - 1).collect();
+    let bands: Vec<Option<usize>> = layout
+        .bands
+        .iter()
+        .map(|band| band.map(|line| line - 1))
+        .collect();
+    // The lines a view `view` lines tall keeps in sight.
+    let focus = |view: usize| match tasks.get(cursor.unwrap_or(0)) {
+        Some(&line) => {
+            // A non-blank line under a task that is not itself a task is the
+            // total line closing the group the task is last in. It joins the
+            // focus only in a view with a row left above both for the band:
+            // two rows of task and total would leave the task unnamed.
+            let closes = view > 2
+                && body
+                    .get(line + 1)
+                    .is_some_and(|next| !next.is_empty() && !tasks.contains(&(line + 1)));
+            (line, line + usize::from(closes))
+        }
+        None => (0, 0),
+    };
+    // Each task is one line here, so a task is out of view exactly when its
+    // own line is. `hidden_items` is not used: it runs a task on to the last
+    // non-blank line before the next one, which on the board is the total
+    // line and the next group's band, and would call a group's last task
+    // below while its own row is still on screen.
+    let count = |top: usize, bottom: usize| {
+        let above = tasks.iter().filter(|&&line| line < top).count();
+        let below = tasks.iter().filter(|&&line| line >= bottom).count();
+        (above, below)
+    };
+
+    let view = rows - 1;
+    let top = crate::screen::pane::offset(body.len(), view, focus(view));
+    let mut window = body[top..top + view].to_vec();
+    let mut first_shown = top;
+    // The band of the group whose block the view's first row sits in: a
+    // task's own, or, for the total line closing a group, its last task's.
+    // A blank row belongs to no group, and the band under it comes next.
+    let group_band = |line: usize| {
+        let k = tasks.iter().rposition(|&task| task <= line)?;
+        let in_block = tasks[k] == line || (tasks[k] + 1 == line && !body[line].is_empty());
+        in_block.then_some(bands[k]).flatten()
+    };
+    let pinned = group_band(top).filter(|&band| band < top && top < focus(view).0);
+    if let (Some(band), Some(first)) = (pinned, window.first_mut()) {
+        *first = body[band].clone();
+        first_shown = top + 1;
+    }
+    let (above, below) = count(first_shown, top + view);
+    if above == 0 && below == 0 {
+        // Only blank rows or a total line were out of view: a `rows`-line
+        // view holds every one of them the shorter view did, and the row the
+        // marker would have taken goes back to the table.
+        let top = crate::screen::pane::offset(body.len(), rows, focus(rows));
+        shown.extend_from_slice(&body[top..top + rows]);
+        return shown;
+    }
+    let room = pane.saturating_sub(MARGIN.len() + CURSOR_GUTTER_WIDTH);
+    let marker = crate::screen::pane::marker_row(above, below, Some("task"), room);
+    shown.extend(window);
+    shown.push(format!("{MARGIN}{NO_CURSOR}{marker}"));
+    shown
 }
 
 /// The full text of a row's STATE cell: the state's own word, with nothing
@@ -2036,10 +2179,11 @@ fn clip(text: &str, room: usize) -> String {
 /// has been stacking a fresh lockup behind itself, one per pass, for as long
 /// as it has been running.
 ///
-/// The ticker is what gives. Every other section is as long as the run makes
-/// it: the lockup is fixed, the table is one line per task, the footer is one
-/// line per agent profile. This is the only part with a spare line in it, and
-/// its oldest arrival is the line nobody is reading.
+/// The ticker is what gives first. The lockup is fixed and the footer is one
+/// line per agent profile, and the board's task table scrolls rather than
+/// give up its cursor's row — see [`table_window`] — so the ticker is drawn
+/// only when the whole table fits, in the rows the table leaves. Its oldest
+/// arrival is the line nobody is reading.
 pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -> String {
     // Two of the rows go to the blank line and the `RECENT` heading. Anything
     // less than three of them cannot show an arrival under that heading, and
@@ -2149,10 +2293,11 @@ pub(crate) fn sentence(change: &Move) -> String {
 
 /// `frame` cut to the rows a pane of `height` can hold without scrolling.
 ///
-/// The backstop under [`ticker`], for the frame that does not fit even with an
-/// empty ticker: a pane shorter than the lockup, or a queue with more tasks in
-/// it than the pane has rows. Something has to go, and it is the bottom —
-/// what the run is doing outranks what it has spent.
+/// The backstop under [`ticker`] and [`table_window`], for the frame that
+/// does not fit even with an empty ticker and a table of no rows: a pane
+/// shorter than the lockup, the footer and the key line together. Something
+/// has to go, and it is the bottom — what the run is doing outranks what it
+/// has spent.
 ///
 /// One row is held back because every line here ends in a newline, the last
 /// one included: a frame filling the pane exactly would park the cursor one
@@ -4645,5 +4790,33 @@ mod tests {
             .expect("the line is drawn");
         assert!(line.trim_end().ends_with('…'), "{line}");
         assert!(line.chars().count() <= 30, "{line}");
+    }
+
+    /// A table that overflows its rows by a blank row alone has no task out
+    /// of view, so it draws no marker and takes that row back for itself.
+    /// The one group's table here is a blank row, the band, the task and
+    /// the total line: three rows hold all but the blank one, the total line
+    /// kept as the foot of the cursor's group.
+    #[test]
+    fn a_table_hiding_no_task_draws_no_marker_row() {
+        let (table, layout) = table_laid_out(
+            &[row("alpha")],
+            Style::board(120),
+            &BTreeMap::new(),
+            Some("alpha"),
+        );
+        assert_eq!(table.lines().count(), 5, "{table}");
+        let shown: Vec<String> = table_window(&table, &layout, Some(0), 3, 120)
+            .iter()
+            .map(|line| strip(line).trim().to_string())
+            .collect();
+        assert_eq!(shown.len(), 4, "{shown:#?}");
+        assert_eq!(shown[1], "▌demo");
+        assert!(shown[2].starts_with("▸ alpha"), "{shown:#?}");
+        assert!(shown[3].starts_with('—'), "{shown:#?}");
+        assert!(
+            !shown.iter().any(|line| line.starts_with(['↑', '↓'])),
+            "{shown:#?}"
+        );
     }
 }

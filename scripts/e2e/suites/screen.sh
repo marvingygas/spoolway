@@ -11,8 +11,9 @@
 # `spoolway dispatch` in the same project refuses. A refusal on the queue tab
 # is drawn in a popup over the tab, and so is what a clean submission queued,
 # ending on whether a dispatcher will pick it up. `→` from the queue tab
-# reaches the routines tab. Off a terminal, bare `spoolway` still prints the
-# grouped help.
+# reaches the routines tab. A full board in a short pane scrolls its task
+# table under a marker row and keeps its key line. Off a terminal, bare
+# `spoolway` still prints the grouped help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -278,6 +279,29 @@ has "titled routines" "─ routines ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
   "[space] select   [enter] queue   [n] new job   [x] delete   [tab] tasks   [q] quit" "$LAST"
+
+# A full board in a short pane scrolls its task table rather than cutting the
+# frame off at the bottom. Thirty queued tasks in six groups are more than a
+# 30-row terminal leaves the dispatch tab's table, so its last table row is a
+# marker counting the tasks under it, and the key line is still drawn under
+# the box. `stty` sizes the pty `script` opens before the screen measures it;
+# nothing is dispatched, so the tasks stay where they were written.
+for g in 1 2 3 4 5 6; do
+  for t in 1 2 3 4 5; do
+    task_doc "$SPOOLWAY_PROJECT_HOME/queue/full-$g-$t.md" "full-$g-$t" "$BODY" \
+      "stage: queued" "group: full-$g"
+  done
+done
+FULL="$LIVE/full.txt"
+works "a full board in a short pane ends when its keys run out" \
+  script -qec "stty rows 30 cols 120; printf '\\033[D' | '$SPOOLWAY'" "$FULL"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FULL" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the full board is the dispatch tab's" "← [DISPATCH]       QUEUE" "$LAST"
+has "its cursor's row is drawn" "▸ " "$LAST"
+has "its last table row counts the tasks out of view" "tasks below" "$LAST"
+has "the key line is still drawn under it" "[o] open task" "$LAST"
+rm -f "$SPOOLWAY_PROJECT_HOME"/queue/full-*.md
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

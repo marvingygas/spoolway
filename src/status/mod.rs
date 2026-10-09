@@ -42,7 +42,8 @@ use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
     clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, pane_height,
     pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel, spool_frame,
-    table, ticker, tint_available, unqueue_all_confirm_panel, unqueue_confirm_panel,
+    table_laid_out, table_window, ticker, tint_available, unqueue_all_confirm_panel,
+    unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -351,11 +352,13 @@ pub struct Board {
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves, which never open a panel at all.
     mode: BoardMode,
-    /// The id of every row the last reading drew, in the order it drew them
-    /// — the live queue and the archived rows beside it, exactly as
-    /// [`paint`] composed them. This is what `↑`/`↓` walk, so a cursor move
-    /// is a step through a list already in memory rather than a fresh read
-    /// of every task file: the board reads keys while a pass is rewriting
+    /// The id of every row the last reading composed, in the order it
+    /// composed them — the live queue and the archived rows beside it,
+    /// exactly as [`paint`] laid them out. A full board draws only a window
+    /// of these rows, but the list holds them all, so `↑`/`↓` walk rows
+    /// scrolled out of view too and the window follows the cursor. A cursor
+    /// move is a step through a list already in memory rather than a fresh
+    /// read of every task file: the board reads keys while a pass is rewriting
     /// and archiving those very files, and a read caught mid-write used to
     /// lose the keypress outright. The cost is that the marker can sit for a
     /// reading or two on a row the queue has already moved — the next one
@@ -2162,7 +2165,8 @@ pub(crate) fn running_command_steps(
 ///
 /// Row ids alone, rather than the rows themselves: a cursor move needs an
 /// ordered list and nothing else, and the list it is given is the one the
-/// last frame drew — see [`Board::drawn`].
+/// last frame composed, rows scrolled out of view included — see
+/// [`Board::drawn`].
 fn shift_cursor(ids: &[String], current: Option<&str>, delta: i32) -> Option<String> {
     if ids.is_empty() {
         return None;
@@ -2716,6 +2720,33 @@ fn paint(
     recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
 ) -> String {
+    paint_at(
+        repo,
+        pipelines,
+        dispatching,
+        snapshot,
+        cursor,
+        recent,
+        name,
+        pane_height(),
+    )
+}
+
+/// [`paint`], against a pane `height` rows tall rather than the terminal's
+/// own — so a test can draw a full board in a pane of the height it names.
+/// An empty snapshot is the exception: it goes to [`paint_empty`], which
+/// still measures the terminal itself and ignores `height`.
+#[allow(clippy::too_many_arguments)]
+fn paint_at(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    dispatching: bool,
+    snapshot: &Snapshot,
+    cursor: Option<&str>,
+    recent: &VecDeque<RecentEvent>,
+    name: Option<&str>,
+    height: Option<usize>,
+) -> String {
     let phase = Phase::Watching {
         holder: snapshot.holder,
         dispatching,
@@ -2799,29 +2830,28 @@ fn paint(
     ));
     frame.push('\n');
 
-    frame.push_str(&table(
-        &snapshot.rows,
-        Style::board(pane),
-        &snapshot.totals,
-        cursor,
-    ));
+    // Built before anything under it is pushed, although it is drawn first,
+    // because how many rows it gets is what the rest of the frame leaves.
+    let (table, layout) =
+        table_laid_out(&snapshot.rows, Style::board(pane), &snapshot.totals, cursor);
 
     // A queue file that would not parse is skipped rather than freezing the
     // board — see [`crate::task::load_dir`] — and named here so the fix is
     // visible on the frame itself, not only in the log.
+    let mut problems = String::new();
     for problem in &snapshot.load_problems {
         let name = problem
             .path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("a queue file");
-        frame.push_str(&format!(
+        problems.push_str(&format!(
             " {AMBER}⚠ {name} does not parse and was skipped{RESET}\n"
         ));
     }
 
-    // Built before the ticker although it is printed after it, because how
-    // many rows are left for the ticker is what is left once this is counted.
+    // Built before the table and the ticker although it is printed after
+    // them, because the rows they share are what is left once this is counted.
     let mut tail = String::new();
     // The rule under the board, cut to the pane rather than wrapped: a rule
     // that wraps is two rules, and the second one lands where the footer goes.
@@ -2868,19 +2898,45 @@ fn paint(
     .concat();
     let keys = crate::screen::key_hint(&keys);
 
-    let height = pane_height();
-    let rows = match height {
+    // The rows the table's body and RECENT share: everything under the
+    // column header but the parse warnings, the footer, and the blank row
+    // and key line pushed below. One more is held back for the reason
+    // `clamp_rows` gives. Hosted, the count comes out the same: `boxed`
+    // gives the body two rows fewer than `height`, the key line goes under
+    // the box, and the blank row above it sits inside the box.
+    let header_rows = frame.lines().count() + 1;
+    let body_rows = table.lines().count() - 1;
+    let rows = height.map(|height| {
+        height
+            .saturating_sub(1)
+            .saturating_sub(header_rows)
+            .saturating_sub(problems.lines().count())
+            .saturating_sub(tail.lines().count())
+            .saturating_sub(2)
+    });
+    // Only RECENT gives up rows to the table, and only the table scrolls:
+    // the lockup, the slots and the jobs keep theirs. Only a pane too short
+    // for them alone loses any, to `clamp_rows` below. RECENT
+    // is drawn only when the whole table fits, in whatever rows it leaves.
+    // Otherwise the table takes every row, its last one the marker saying
+    // how many tasks are out of view.
+    let ticker_rows = match rows {
         // Nothing to overflow: keep the ticker whole. See [`pane_height`].
         None => recent.len() + 2,
-        // The last two rows counted off are the blank row above the key
-        // line and the key line itself, pushed below.
-        Some(height) => height
-            .saturating_sub(1)
-            .saturating_sub(frame.lines().count())
-            .saturating_sub(tail.lines().count())
-            .saturating_sub(2),
+        Some(rows) => rows.saturating_sub(body_rows),
     };
-    frame.push_str(&ticker(recent, pane, rows));
+    match rows {
+        Some(rows) if body_rows > rows => {
+            let at = cursor.and_then(|id| snapshot.rows.iter().position(|row| row.id == id));
+            for line in table_window(&table, &layout, at, rows, pane) {
+                frame.push_str(&line);
+                frame.push('\n');
+            }
+        }
+        _ => frame.push_str(&table),
+    }
+    frame.push_str(&problems);
+    frame.push_str(&ticker(recent, pane, ticker_rows));
     frame.push_str(&tail);
 
     // Inside bare `spoolway`'s dispatch tab the board draws in an untitled box
@@ -11179,5 +11235,375 @@ mod tests {
                 "{rule:?}"
             );
         }
+    }
+
+    // ---- a full board scrolls its task table ----
+
+    /// The plan's full board: nine groups and thirty-one tasks, in the order
+    /// the board draws them.
+    const FULL_BOARD: [(&str, &[&str]); 9] = [
+        (
+            "cart",
+            &["cart-empty-state", "cart-totals", "cart-discounts"],
+        ),
+        (
+            "checkout",
+            &["checkout-charge", "checkout-receipt", "checkout-refund"],
+        ),
+        (
+            "billing",
+            &["invoice-pdf", "invoice-email", "refunds", "tax-rates"],
+        ),
+        (
+            "search",
+            &["index-build", "facet-ui", "search-ranking", "search-cache"],
+        ),
+        (
+            "auth",
+            &["auth-login", "auth-logout", "auth-reset", "auth-mfa"],
+        ),
+        (
+            "admin",
+            &["admin-users", "admin-roles", "admin-audit", "admin-flags"],
+        ),
+        (
+            "profile",
+            &["profile-edit", "profile-avatar", "profile-export"],
+        ),
+        ("reports", &["report-weekly", "report-csv", "report-charts"]),
+        ("infra", &["infra-logs", "infra-alerts", "infra-backup"]),
+    ];
+
+    /// [`FULL_BOARD`] as a reading, with the footer the plan draws under it:
+    /// two agent profiles' slots and two jobs, eight rows with the rule —
+    /// eighteen fixed rows in all with the lockup and the key line.
+    fn full_board() -> Snapshot {
+        let rows = FULL_BOARD
+            .iter()
+            .flat_map(|(group, ids)| {
+                ids.iter().map(move |id| Row {
+                    group: Some(group.to_string()),
+                    ..row(id)
+                })
+            })
+            .collect();
+        let soon = chrono::Local::now() + chrono::TimeDelta::hours(6);
+        let job = |name: &str| crate::jobs::ActiveJob {
+            name: name.to_string(),
+            next: Some(soon),
+        };
+        Snapshot {
+            rows,
+            used: [("claude".to_string(), 1), ("pi".to_string(), 1)].into(),
+            active_jobs: vec![job("nightly-audit"), job("weekly-deps")],
+            ..Snapshot::empty()
+        }
+    }
+
+    /// The full board painted stripped in a pane `height` rows tall, the
+    /// cursor on `cursor`, with RECENT holding lines it could draw.
+    fn full_frame(repo: &Repo, cursor: &str, height: usize) -> Vec<String> {
+        let frame = paint_at(
+            repo,
+            &Pipelines::builtin(),
+            false,
+            &full_board(),
+            Some(cursor),
+            &arrivals(3),
+            None,
+            Some(height),
+        );
+        strip(&frame).lines().map(str::to_string).collect()
+    }
+
+    /// The rows the table was given: every row from the column header down
+    /// to the blank row over the rule, neither included.
+    fn table_rows(frame: &[String]) -> Vec<String> {
+        let header = frame
+            .iter()
+            .position(|line| line.trim_start().starts_with("TASK"))
+            .expect("a column header");
+        let rule = frame
+            .iter()
+            .position(|line| line.contains("────"))
+            .expect("a rule");
+        frame[header + 1..rule - 1].to_vec()
+    }
+
+    /// What a table row reads as: its band, its task id with the cursor's
+    /// mark, `total` for a group's total line, or the marker itself.
+    fn read_row(line: &str) -> String {
+        let trimmed = line.trim();
+        match line.chars().nth(3) {
+            _ if trimmed.is_empty() => String::new(),
+            _ if trimmed.starts_with('▌')
+                || trimmed.starts_with('↑')
+                || trimmed.starts_with('↓') =>
+            {
+                trimmed.to_string()
+            }
+            Some(' ') => "total".to_string(),
+            _ => line[1..]
+                .split("   ")
+                .next()
+                .unwrap()
+                .trim_end()
+                .to_string(),
+        }
+    }
+
+    /// The four frames the plan draws for a 30-row pane and a 22-row one,
+    /// and a view that starts on a group's total line:
+    /// the table takes every row between the column header and the rule,
+    /// the marker is its last, and the footer and the key line stay on
+    /// screen while RECENT — which had lines to draw — gives way.
+    #[test]
+    fn a_full_board_scrolls_its_table_under_the_cursor() {
+        let (repo, _root_guard) = fixture("board-full-scrolls");
+        let cases: [(&str, usize, &[&str]); 5] = [
+            (
+                "cart-empty-state",
+                30,
+                &[
+                    "",
+                    "▌cart",
+                    "▸ cart-empty-state",
+                    "  cart-totals",
+                    "  cart-discounts",
+                    "total",
+                    "",
+                    "▌checkout",
+                    "  checkout-charge",
+                    "  checkout-receipt",
+                    "↓ 26 tasks below",
+                ],
+            ),
+            (
+                "search-ranking",
+                30,
+                &[
+                    "▌billing",
+                    "  invoice-email",
+                    "  refunds",
+                    "  tax-rates",
+                    "total",
+                    "",
+                    "▌search",
+                    "  index-build",
+                    "  facet-ui",
+                    "▸ search-ranking",
+                    "↑ 7 tasks above · ↓ 18 tasks below",
+                ],
+            ),
+            (
+                "infra-backup",
+                30,
+                &[
+                    "▌reports",
+                    "  report-csv",
+                    "  report-charts",
+                    "total",
+                    "",
+                    "▌infra",
+                    "  infra-logs",
+                    "  infra-alerts",
+                    "▸ infra-backup",
+                    "total",
+                    "↑ 26 tasks above",
+                ],
+            ),
+            (
+                "cart-empty-state",
+                22,
+                &["▌cart", "▸ cart-empty-state", "↓ 30 tasks below"],
+            ),
+            // The view starts on cart's total line, below cart's band, so
+            // the band is pinned in the total line's place.
+            (
+                "invoice-pdf",
+                30,
+                &[
+                    "▌cart",
+                    "",
+                    "▌checkout",
+                    "  checkout-charge",
+                    "  checkout-receipt",
+                    "  checkout-refund",
+                    "total",
+                    "",
+                    "▌billing",
+                    "▸ invoice-pdf",
+                    "↑ 3 tasks above · ↓ 24 tasks below",
+                ],
+            ),
+        ];
+        for (cursor, height, expected) in cases {
+            let frame = full_frame(&repo, cursor, height);
+            let drawn: Vec<String> = table_rows(&frame).iter().map(|l| read_row(l)).collect();
+            assert_eq!(
+                drawn, expected,
+                "cursor {cursor}, {height} rows: {frame:#?}"
+            );
+            assert_eq!(frame.len(), height - 1, "fills the pane: {frame:#?}");
+            assert!(
+                frame.last().unwrap().contains("[o] open task"),
+                "the key line stays last: {frame:#?}"
+            );
+            assert!(
+                frame.iter().any(|l| l.contains("slots"))
+                    && frame.iter().any(|l| l.contains("nightly-audit")),
+                "the slots and the jobs stay: {frame:#?}"
+            );
+            assert!(
+                !frame.iter().any(|l| l.contains("RECENT")),
+                "RECENT gives way to a table that does not fit: {frame:#?}"
+            );
+        }
+    }
+
+    /// At every cursor position and height, the cursor's row is drawn, each
+    /// task row drawn has its group's band above it in the view wherever the
+    /// table has a row to spare for one, and the
+    /// marker counts exactly the task rows that are not drawn — never a
+    /// band, a total line or a blank row.
+    #[test]
+    fn every_task_on_a_full_board_is_reached_and_counted() {
+        let (repo, _root_guard) = fixture("board-full-counts");
+        let ids: Vec<(&str, &str)> = FULL_BOARD
+            .iter()
+            .flat_map(|(group, ids)| ids.iter().map(move |id| (*group, *id)))
+            .collect();
+        for height in [21, 22, 25, 30, 40] {
+            for (k, (_, cursor)) in ids.iter().enumerate() {
+                let rows = table_rows(&full_frame(&repo, cursor, height));
+                let drawn: Vec<String> = rows.iter().map(|l| read_row(l)).collect();
+                let at = |id: &str| {
+                    drawn
+                        .iter()
+                        .position(|r| r.trim_start_matches(['▸', ' ']) == id)
+                };
+                assert!(
+                    drawn.contains(&format!("▸ {cursor}")),
+                    "{height} rows, cursor {k}: {drawn:#?}"
+                );
+                let shown: Vec<usize> =
+                    (0..ids.len()).filter(|&i| at(ids[i].1).is_some()).collect();
+                // A total line is never drawn without its group's band
+                // over it either.
+                assert!(
+                    rows.len() <= 2 || drawn.first().is_none_or(|first| first != "total"),
+                    "{height} rows, cursor {k}: the view opens on a bare total line: {drawn:#?}"
+                );
+                // A table of two rows holds the cursor's task and the
+                // marker, with no row left to pin a band in.
+                for &i in shown.iter().filter(|_| rows.len() > 2) {
+                    let band = format!("▌{}", ids[i].0);
+                    let band_at = drawn.iter().position(|r| *r == band);
+                    assert!(
+                        band_at.is_some_and(|b| b < at(ids[i].1).unwrap()),
+                        "{height} rows, cursor {k}: {} drawn without its band: {drawn:#?}",
+                        ids[i].1
+                    );
+                }
+                let above = (0..ids.len()).filter(|&i| i < shown[0]).count();
+                let below = (0..ids.len())
+                    .filter(|&i| i > *shown.last().unwrap())
+                    .count();
+                assert_eq!(
+                    shown.len(),
+                    shown.last().unwrap() - shown[0] + 1,
+                    "the drawn tasks run unbroken: {drawn:#?}"
+                );
+                let marker = crate::screen::pane::marker_row(above, below, Some("task"), 200);
+                match (above, below) {
+                    (0, 0) => assert!(
+                        !drawn.iter().any(|r| r.starts_with(['↑', '↓'])),
+                        "no marker with nothing hidden: {drawn:#?}"
+                    ),
+                    _ => assert_eq!(
+                        drawn.last().unwrap(),
+                        &marker,
+                        "{height} rows, cursor {k}: {drawn:#?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// A pane no taller than the lockup, the footer and the key line leaves
+    /// the table no rows at all, and the frame is still cut to the pane by
+    /// `clamp_rows` rather than scrolling the terminal.
+    #[test]
+    fn a_pane_shorter_than_the_fixed_parts_gives_the_table_nothing() {
+        let (repo, _root_guard) = fixture("board-full-short");
+        // Eighteen fixed rows and the one `clamp_rows` holds back.
+        for height in [19, 12, 3] {
+            let frame = full_frame(&repo, "cart-empty-state", height);
+            assert!(
+                frame.len() < height,
+                "{height} rows drew {} lines: {frame:#?}",
+                frame.len()
+            );
+            assert!(
+                !frame.iter().any(|l| l.contains("cart-") || l.contains('▌')),
+                "no table row at {height} rows: {frame:#?}"
+            );
+        }
+        let frame = full_frame(&repo, "cart-empty-state", 19);
+        assert!(
+            frame.last().unwrap().contains("[o] open task"),
+            "{frame:#?}"
+        );
+    }
+
+    /// The whole table fits, so nothing scrolls, no marker is drawn, and
+    /// RECENT takes the rows the table leaves.
+    #[test]
+    fn a_board_that_fits_draws_no_marker_and_keeps_recent() {
+        let (repo, _root_guard) = fixture("board-fits");
+        let snapshot = Snapshot {
+            rows: vec![row("alpha"), row("beta")],
+            ..Snapshot::empty()
+        };
+        let frame = strip(&paint_at(
+            &repo,
+            &Pipelines::builtin(),
+            false,
+            &snapshot,
+            Some("alpha"),
+            &arrivals(3),
+            None,
+            Some(30),
+        ));
+        assert!(frame.contains("RECENT"), "{frame}");
+        assert!(frame.contains("alpha") && frame.contains("beta"), "{frame}");
+        assert!(!frame.contains('↓') && !frame.contains('↑'), "{frame}");
+    }
+
+    /// The dispatch tab scrolls the same table inside its box: the marker
+    /// and the cursor's row are drawn above the bottom border, and the key
+    /// line under it.
+    #[test]
+    fn the_dispatch_tab_scrolls_a_full_board_inside_its_box() {
+        let (repo, _root_guard) = fixture("board-full-hosted");
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        // What `pane_height` leaves inside the box of a 35-row terminal: the
+        // strip's three rows and the box's two borders come off first.
+        let height = 30;
+        let frame = full_frame(&repo, "search-ranking", height);
+        assert_eq!(frame.len(), height + 1, "{frame:#?}");
+        assert!(
+            frame.last().unwrap().contains("[o] open task"),
+            "{frame:#?}"
+        );
+        assert!(frame[frame.len() - 2].starts_with('└'), "{frame:#?}");
+        let inside = |text: &str| frame.iter().any(|l| l.starts_with('│') && l.contains(text));
+        assert!(inside("▸ search-ranking"), "{frame:#?}");
+        assert!(inside("▌billing"), "{frame:#?}");
+        // One row more than the 30-row pane `spoolway dispatch` draws in:
+        // the box has no top margin over the lockup.
+        assert!(inside("↑ 6 tasks above · ↓ 18 tasks below"), "{frame:#?}");
+        assert!(inside("nightly-audit"), "{frame:#?}");
+        assert!(!inside("RECENT"), "{frame:#?}");
     }
 }

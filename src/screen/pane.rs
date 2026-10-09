@@ -1,7 +1,8 @@
 //! The scrolling window the queue and jobs screens cut a tall pane down to.
 //!
 //! The queue screen, its routines view and the jobs screen each draw a pane
-//! that can be taller than the terminal. This module decides which lines of
+//! that can be taller than the terminal, and the dispatch board's task table
+//! can outgrow the rows its pane leaves it. This module decides which lines of
 //! the pane stay in view and spends the pane's bottom row on a marker that
 //! says how many items are out of sight. It lives here, outside any one
 //! screen, so the screens' markers read the same and cannot drift apart.
@@ -51,15 +52,27 @@ pub(crate) fn window(
         return lines.to_vec();
     }
     let view = rows - 1;
-    let (start, end) = focus;
-    let offset = (end + 1)
-        .saturating_sub(view)
-        .min(start)
-        .min(lines.len() - view);
+    let offset = offset(lines.len(), view, focus);
     let mut shown = lines[offset..offset + view].to_vec();
     let (above, below) = hidden_items(lines, items.starts, offset, offset + view);
     shown.push(marker_row(above, below, items.noun, width));
     shown
+}
+
+/// The first of `len` lines a view `view` lines tall starts on, so the block
+/// `focus` spans — its first and last line — ends the view where it can, and
+/// the view never runs past the last line.
+///
+/// Worked out from the focus alone rather than carried between frames, so a
+/// pane whose lines come and go between redraws never keeps a stale scroll
+/// position. Public apart from [`window`] for the dispatch board, which
+/// counts the tasks out of view itself rather than through
+/// [`hidden_items`]: that would run a group's last task on over its total
+/// line and the next group's band, and call it below while its own row is
+/// still drawn. `view` must not exceed `len`.
+pub(crate) fn offset(len: usize, view: usize, focus: (usize, usize)) -> usize {
+    let (start, end) = focus;
+    (end + 1).saturating_sub(view).min(start).min(len - view)
 }
 
 /// How many items are not fully in view above and below the lines
