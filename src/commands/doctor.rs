@@ -1168,7 +1168,7 @@ fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
 fn worktree_root_note(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
     let configured = std::fs::read_to_string(Config::path_in(checkout))
         .ok()
-        .and_then(|raw| raw.parse::<toml::Value>().ok())
+        .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok())
         .and_then(|doc| {
             doc.get("dispatch")?
                 .get("worktree_root")?
@@ -2083,7 +2083,7 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
     let Ok(raw) = std::fs::read_to_string(Config::path_in(&repo.checkout)) else {
         return;
     };
-    let Ok(doc) = raw.parse::<toml::Value>() else {
+    let Ok(doc) = toml::from_str::<toml::Value>(&raw) else {
         return;
     };
 

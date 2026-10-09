@@ -1899,8 +1899,7 @@ fn all_workspaces() -> Workspaces {
             }
             Err(_) => continue,
         };
-        let has_clones_key = raw
-            .parse::<toml::Value>()
+        let has_clones_key = toml::from_str::<toml::Value>(&raw)
             .ok()
             .and_then(|value| value.get("clones").cloned())
             .is_some();
