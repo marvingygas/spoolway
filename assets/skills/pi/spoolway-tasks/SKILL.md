@@ -310,6 +310,9 @@ reading the file whole.
 
 - Never invent a goal, criterion or reference the shape it came from doesn't support, and
   never leave a task as the unfilled skeleton.
+- Never write down a claim about the code, a command, a file or upstream data you have not
+  checked — grep it, read it or run it first. A `## Context` line or criterion that turns out
+  false, or one that contradicts the task's intent, goes back to the person, not into the task.
 - Never write a task anywhere but the pending directory, and never write anything else
   there — it is a queue of tasks, not a scratch directory. The one other place this skill
   writes is `<home>/plans/<group>/`, and only a source file copied in

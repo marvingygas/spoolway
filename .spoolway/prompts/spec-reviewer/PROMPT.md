@@ -26,6 +26,9 @@ when it has one, and on a bug its account of how to see it. Read all of it befor
 - A change that carries a `## Mockup` matches it: the same keys, words, layout and order. A
   difference is a finding even when the result looks better. A task with no mockup is not held to
   one.
+- Where matching the mockup would break a rule this codebase keeps — most often a refusal drawn
+  without its "do this instead" — the two conflict. Block and name both; never send the fixer
+  to cut the remedy.
 
 ### Scope
 

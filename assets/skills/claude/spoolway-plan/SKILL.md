@@ -96,6 +96,8 @@ in prose about functions and line edits.
   a scratch script, a prototype, a measurement is implementation, and this session does not do
   that. Something that does not run yet has no output to capture, so its bar names the bound it
   was drawn to hold — and the task that builds it carries proving that bound as a criterion.
+- **A refusal or error drawn in a mockup is drawn whole**, with what to do instead. The spec
+  review holds a change to every word a mockup draws, so a remedy left out gets cut from the code.
 
 **Write in plain English.** One thing per sentence, in the shortest words that carry it.
 No story, no build-up, no buzzwords, and no reaching verbs — "reads", "writes", "moves", never

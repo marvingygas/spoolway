@@ -74,7 +74,7 @@ key_in_names = true
 
 [agents.claude]
 kind = "claude"
-concurrency = 3
+concurrency = 5
 session_reuse_ctx = 20
 session_blocked_ctx = 40
 permission_mode = "auto"

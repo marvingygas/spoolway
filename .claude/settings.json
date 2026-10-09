@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(spoolway report *)",
+      "Bash(spoolway task *)",
+      "Bash(spoolway queue route *)",
+      "Read(~/.spoolway/**)"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "A spoolway lane runs `spoolway report`, `spoolway task` and `spoolway queue route`, and reads its own task file under ~/.spoolway/. These are how the dispatcher briefs and hears from a lane, not secret-store writes."
+    ]
+  }
+}

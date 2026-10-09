@@ -2461,25 +2461,6 @@ mod tests {
         }
     }
 
-    /// `cargo test` for this whole crate runs in one process, and when that
-    /// process is itself a lane's own `test` step, the real dispatcher has
-    /// already exported `SPOOLWAY_TASK`, `SPOOLWAY_WORKTREE` and
-    /// `SPOOLWAY_HEAD` for *that* lane before a single `#[test]` runs. Left
-    /// alone, every fixture task id below — `stuck`, `task-1` and the rest —
-    /// would be compared against, or committed alongside, the real lane's own
-    /// task rather than a clean slate. Cleared once, here, rather than by
-    /// every test re-clearing what it never set in the first place; a test
-    /// that needs one of the three set for real sets it itself, on the
-    /// fixture id it is actually testing.
-    fn clear_lane_env() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            for key in ["SPOOLWAY_TASK", "SPOOLWAY_WORKTREE", "SPOOLWAY_HEAD"] {
-                crate::platform::remove_test_env(key);
-            }
-        });
-    }
-
     /// The rule that decides whether leftovers in a worktree are work to rescue
     /// or residue to leave alone.
     ///
@@ -2508,7 +2489,6 @@ mod tests {
     /// which commits the pipeline wrote from the ones a lane meant.
     #[test]
     fn a_settling_step_has_its_leftovers_committed_as_wip() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("auto-commit");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2547,7 +2527,6 @@ mod tests {
     /// outright, and nothing about `task-1` moves.
     #[test]
     fn a_report_is_refused_when_task_differs_from_spoolway_task() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("report-wrong-task");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2595,7 +2574,6 @@ mod tests {
     /// spoolway writing history, not to stop it telling you what is there.
     #[test]
     fn auto_commit_off_reports_the_leftovers_and_commits_nothing() {
-        clear_lane_env();
         let (mut repo, _root_guard) = fixture("auto-commit-off");
         repo.config.dispatch.auto_commit = false;
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
@@ -2648,7 +2626,6 @@ mod tests {
     /// show.
     #[test]
     fn a_report_leaves_its_verdict_for_the_ledger_tagged_with_its_step() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("report-leaves-verdict");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2696,7 +2673,6 @@ mod tests {
     /// that routes the task — repeatable, one line per flag.
     #[test]
     fn a_report_appends_each_handoff_line_credited_to_its_step() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("report-carries-handoff");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2751,7 +2727,6 @@ mod tests {
         // an unattended run's own resume. Read here in an attended run, where
         // the task really does come to rest on `blocked` and the trail is the
         // only thing that will ever say where it stopped.
-        clear_lane_env();
         let (repo, _root_guard) = fixture("block-records-step");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -2836,7 +2811,6 @@ mod tests {
     /// right back.
     #[test]
     fn resume_forgets_a_failed_queued_hooks_run() {
-        clear_lane_env();
         let (mut repo, _root_guard) = fixture("hook-resume-queued");
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "demo", &[]);
@@ -2883,7 +2857,6 @@ mod tests {
     /// `queued` with the marker cleared, and prints the usual line.
     #[test]
     fn resume_puts_a_missing_start_branch_pause_back_on_queued() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-missing-start-branch");
         add(&repo, "demo", &[]);
         let mut task = queued(&repo, "demo");
@@ -2914,7 +2887,6 @@ mod tests {
     /// takes, and forgets `started`'s own run rather than `queued`'s.
     #[test]
     fn resume_forgets_a_failed_started_hooks_run_and_goes_back_to_queued() {
-        clear_lane_env();
         let (mut repo, _root_guard) = fixture("hook-resume-started");
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "demo", &[]);
@@ -2969,7 +2941,6 @@ mod tests {
     /// know pipeline steps and `queued`, neither of which `done` is.
     #[test]
     fn resume_on_a_done_hook_pause_forgets_the_run_and_goes_back_to_done() {
-        clear_lane_env();
         let (mut repo, _root_guard) = fixture("hook-resume-done");
         write_hook(&repo, "fail.sh", "exit 1");
         add(&repo, "demo", &[]);
@@ -3062,7 +3033,6 @@ mod tests {
         outcome: Outcome,
         started_for: Option<&str>,
     ) {
-        clear_lane_env();
         report(
             repo,
             pipelines,
@@ -3159,7 +3129,6 @@ mod tests {
     /// way.
     #[test]
     fn a_late_report_from_a_parked_steps_own_lane_is_applied_as_if_it_never_parked() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("late-report-onto-a-park");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -3203,7 +3172,6 @@ mod tests {
     /// there to answer it.
     #[test]
     fn a_late_report_onto_a_stops_own_park_clears_its_mark_too() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("late-report-onto-a-stop-park");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -3239,7 +3207,6 @@ mod tests {
     /// never recorded (review finding 4).
     #[test]
     fn a_pass_to_a_cleanup_terminal_is_held_while_the_worktree_is_dirty() {
-        clear_lane_env();
         let (mut repo, _root_guard) = fixture("held-dirty");
         repo.config.dispatch.auto_commit = false;
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
@@ -3434,7 +3401,6 @@ mod tests {
         task.front.blocked_from = Some("look".into());
         task.save().unwrap();
 
-        clear_lane_env();
         report(
             &repo,
             &pipelines,
@@ -3487,7 +3453,6 @@ mod tests {
         task.front.blocked_from = Some("look".into());
         task.save().unwrap();
 
-        clear_lane_env();
         report(
             &repo,
             &pipelines,
@@ -3535,7 +3500,6 @@ mod tests {
         task.front.blocked_from = Some("look".into());
         task.save().unwrap();
 
-        clear_lane_env();
         let err = report(
             &repo,
             &pipelines,
@@ -3665,7 +3629,6 @@ mod tests {
         task.front.blocked_from = Some(stopped.into());
         task.save().unwrap();
 
-        clear_lane_env();
         let err = report(
             &repo,
             &pipelines,
@@ -3833,7 +3796,6 @@ mod tests {
         task.front.blocked_from = Some("look".into());
         task.save().unwrap();
 
-        clear_lane_env();
         report(
             &repo,
             &pipelines,
@@ -3878,7 +3840,6 @@ mod tests {
         task.set_stage("implement", None);
         task.save().unwrap();
 
-        clear_lane_env();
         let err = report(
             &repo,
             &pipelines,
@@ -3933,7 +3894,6 @@ mod tests {
         task.bank_launch("look", crate::pipeline::BLOCKED);
         task.save().unwrap();
 
-        clear_lane_env();
         let err = report(
             &repo,
             &pipelines,
@@ -4219,7 +4179,6 @@ mod tests {
     /// blocked step's work was done.
     #[test]
     fn resuming_a_pause_raised_from_blocked_itself_still_clears_the_block() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("blocked-pause-resume");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -4877,7 +4836,6 @@ mod tests {
     /// naming why, unless that step is `blocked`.
     #[test]
     fn resume_refuses_from_inside_a_lanes_own_environment() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-jumper");
         let pipelines = gate_pipelines();
         paused_at_deploy(&repo, "ship");
@@ -4907,7 +4865,6 @@ mod tests {
     /// often a question about another task.
     #[test]
     fn a_lane_on_blocked_may_resume_another_stopped_task() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("blocked-lane-resumes-sibling");
         let pipelines = gate_pipelines();
         add(&repo, "sibling", &[]);
@@ -4945,7 +4902,6 @@ mod tests {
     /// report refused.
     #[test]
     fn a_running_task_is_refused_by_resume_and_stays_where_it_is() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-running");
         let pipelines = gate_pipelines();
         add(&repo, "busy", &[]);
@@ -4966,7 +4922,6 @@ mod tests {
     /// not skip it past the steps in front of the one it names.
     #[test]
     fn a_still_queued_task_is_refused_by_resume_stage_and_skips_no_steps() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-queued");
         let pipelines = gate_pipelines();
         add(&repo, "waiting", &[]);
@@ -4990,7 +4945,6 @@ mod tests {
     /// not finished. The refusal names that task and its state.
     #[test]
     fn resume_stage_is_refused_while_a_task_it_depends_on_is_not_done() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-unmet-dependency");
         let pipelines = gate_pipelines();
         add(&repo, "parent", &[]);
@@ -5023,7 +4977,6 @@ mod tests {
     /// pipeline edited under it must still be reachable by hand.
     #[test]
     fn a_task_on_an_unknown_stage_stays_resumable() {
-        clear_lane_env();
         let pipelines = looping_pipelines(2);
         let (id, stage) = ("gone", "removed-step");
         let (repo, _root_guard) = fixture(&format!("resume-unknown-stage-{id}"));
@@ -5041,7 +4994,6 @@ mod tests {
     /// the dispatcher holds a task for, so `--stage` may not go past it.
     #[test]
     fn resume_stage_is_refused_for_a_dependency_that_is_not_a_task() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-unknown-dependency");
         let pipelines = gate_pipelines();
         add(&repo, "lgoin", &[]);
@@ -5072,7 +5024,6 @@ mod tests {
     /// refusal tells the person to wait instead of to resume it.
     #[test]
     fn resume_stage_tells_a_person_to_wait_for_a_running_parent() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-running-parent");
         let pipelines = gate_pipelines();
         add(&repo, "parent", &[]);
@@ -5102,7 +5053,6 @@ mod tests {
     /// task unfinished without explanation.
     #[test]
     fn resume_stage_explains_a_parent_that_is_done_but_not_archived() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-done-parent");
         let pipelines = gate_pipelines();
         add(&repo, "parent", &[]);
@@ -5134,7 +5084,6 @@ mod tests {
     /// it is itself working on.
     #[test]
     fn a_lane_on_blocked_may_not_resume_its_own_task() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("blocked-lane-resumes-itself");
         let pipelines = gate_pipelines();
         add(&repo, "mine", &[]);
@@ -5161,7 +5110,6 @@ mod tests {
     /// answer, and `--stage` is not a lane's to hand it either.
     #[test]
     fn a_lane_on_blocked_may_not_resume_past_a_gate_or_reroute() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("blocked-lane-cannot-cross-a-gate");
         let pipelines = gate_pipelines();
         paused_at_deploy(&repo, "ship");
@@ -5211,7 +5159,6 @@ mod tests {
     /// straight through.
     #[test]
     fn a_gated_steps_pass_waits_for_a_person_and_resume_lets_it_past() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-release");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5266,7 +5213,6 @@ mod tests {
     /// lane's account of its own pass was thrown away entirely.
     #[test]
     fn a_gated_pass_writes_the_arrival_note_and_the_lanes_own_message() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-hands-over-status-log");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5319,7 +5265,6 @@ mod tests {
     /// `caught_at` always inferred this from.
     #[test]
     fn a_gated_pass_with_no_paused_by_still_resumes_by_the_old_inference() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-release-no-paused-by");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5405,7 +5350,6 @@ mod tests {
     /// `deploy` for every other task on this pipeline.
     #[test]
     fn a_tasks_own_gate_at_pauses_a_step_the_pipeline_never_gated() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-at");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5513,7 +5457,6 @@ mod tests {
     /// own case, not this one.
     #[test]
     fn a_tasks_own_gate_at_catches_a_failing_step_and_resume_takes_on_pass() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-at-fail");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5577,7 +5520,6 @@ mod tests {
     /// where it would have landed unheld.
     #[test]
     fn a_tasks_own_gate_at_catches_a_block_and_resume_sends_it_to_blocked() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-at-block");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5640,7 +5582,6 @@ mod tests {
     /// the pass must still read as a pass.
     #[test]
     fn a_caught_pass_is_not_read_as_a_block_because_an_old_blocked_from_still_names_the_step() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-at-stale-blocked-from");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -5734,7 +5675,6 @@ mod tests {
     /// once, and a plain `resume` sends it on to `blocked` all the same.
     #[test]
     fn a_tasks_own_gate_at_catches_a_spent_loop_headed_for_blocked() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("gate-at-loop-max");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
@@ -5798,7 +5738,6 @@ mod tests {
     /// `spoolway resume` regardless of who is watching.
     #[test]
     fn an_unattended_gated_pass_still_parks_on_paused() {
-        clear_lane_env();
         let (repo, _root_guard) = unattended_fixture("gate-unattended");
         let pipelines = gate_pipelines();
         add(&repo, "ship", &[]);
@@ -6814,7 +6753,6 @@ mod tests {
         dependents: usize,
         hide: impl FnOnce(&mut Task),
     ) -> (Task, Routed) {
-        clear_lane_env();
         let (repo, _root_guard) = fixture(name);
         add(&repo, "demo", &[]);
         let mut task = queued(&repo, "demo");
@@ -6879,7 +6817,6 @@ mod tests {
     /// hidden step as a stage.
     #[test]
     fn the_report_writes_the_landing_step_and_names_the_hidden_one_after_the_message() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("report-walk-past");
         let mut pipelines = Pipelines::builtin();
         pipelines
@@ -6941,7 +6878,6 @@ mod tests {
     /// and that step is walked past too when it is hidden.
     #[test]
     fn a_cleared_block_lands_past_a_hidden_step() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("route-cleared-block");
         add(&repo, "demo", &[]);
         let mut task = queued(&repo, "demo");
@@ -6990,7 +6926,6 @@ mod tests {
     #[test]
     fn the_walk_is_bounded_and_a_hidden_step_with_no_way_on_is_where_it_lands() {
         let task = {
-            clear_lane_env();
             let (repo, _root_guard) = fixture("walk-bounded");
             add(&repo, "demo", &[]);
             let mut task = queued(&repo, "demo");
@@ -7024,7 +6959,6 @@ mod tests {
     /// and names the rule.
     #[test]
     fn resume_stage_refuses_a_step_the_task_walks_past() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-stage-hidden");
         let mut pipelines = Pipelines::builtin();
         pipelines
@@ -7082,7 +7016,6 @@ mod tests {
     /// runs, and the Status Log names the one passed.
     #[test]
     fn a_resume_lands_past_a_step_the_task_walks_past() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-walks-past");
         let mut pipelines = Pipelines::builtin();
         pipelines
@@ -7123,7 +7056,6 @@ mod tests {
     /// `blocked` rather than onto the step again.
     #[test]
     fn a_gate_resume_onto_a_landing_step_with_its_loop_spent_blocks() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-gate-spent");
         let mut pipelines = Pipelines::builtin();
         pipelines
@@ -7164,7 +7096,6 @@ mod tests {
     /// goes to `blocked`, and says it was the passed step that refused.
     #[test]
     fn a_gate_resume_past_a_hidden_step_with_its_loop_spent_blocks() {
-        clear_lane_env();
         let (repo, _root_guard) = fixture("resume-gate-hidden-spent");
         let mut pipelines = Pipelines::builtin();
         pipelines

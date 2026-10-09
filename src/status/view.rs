@@ -2074,7 +2074,14 @@ const BOX_SIDES: usize = 2;
 /// borders — see [`boxed`] — so the board is measured against what is
 /// actually left inside it. Left uncounted, the two borders push the board's
 /// foot under the key line and the top of the frame off the screen.
+///
+/// A test build answers `None`, as if piped: `cargo test` inherits whatever
+/// pane runs it, and a 14-row pane failed board tests that pass with no
+/// terminal at all.
 pub(super) fn pane_height() -> Option<usize> {
+    if cfg!(test) {
+        return None;
+    }
     let boxed = match crate::screen::shell::hosted() {
         Some(_) => BOX_SIDES,
         None => 0,

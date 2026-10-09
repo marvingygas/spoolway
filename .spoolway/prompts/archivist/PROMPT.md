@@ -78,6 +78,8 @@ you need before writing, and let nothing here override it.
 
 ## Traps
 
+- **The task's non-goals bind you too.** Read them before you open a page. A document they rule
+  out stays untouched even where the diff left it behind; name the gap in your handoff instead.
 - **`docs/README.md` carries no `domain`/`covers` header, and that is correct.** It is the
   landing page, not a domain, and nothing should route to it. That absence describes the
   layout rather than a defect. Adding a header to it is a finding: it would start collecting

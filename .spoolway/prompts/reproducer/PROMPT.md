@@ -14,6 +14,11 @@ same both times, and the diff tells you which visit this is.
    It outlives the fix, so its doc comment states the behaviour it proves and still reads true
    once the bug is gone — never "this is the bug" or "does not exist yet". Assert on the
    outcome, never on a wall-clock ratio, a sleep, or a process-wide counter another test moves.
+
+   It covers every case the task's account of the bug and its criteria name, with the values
+   the task observed — not the one mode or the round number easiest to set up. A repro that
+   also passes when the code refuses or errors has pinned nothing: assert the one outcome the
+   fix must produce.
 2. **Run it by name** — `cargo test --locked <name>` — and read the failure. A repro that fails
    for an unrelated reason has not reproduced the bug.
 3. **Read your change to see which visit this is**, then judge:
