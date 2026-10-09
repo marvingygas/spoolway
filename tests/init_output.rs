@@ -849,7 +849,7 @@ fn a_command_with_home_unset_or_empty_refuses_and_writes_nothing() {
 
 /// `sync` reads its config leniently, but a home that cannot be trusted is
 /// not a config problem: from a copied checkout it must refuse like every
-/// other command, and leave the original's `sync-stamp` alone.
+/// other command, and leave the original's home alone.
 #[test]
 fn sync_in_a_copied_checkout_refuses_and_leaves_the_original_home_alone() {
     let project = Project::new("sync-copy");
@@ -861,18 +861,26 @@ fn sync_in_a_copied_checkout_refuses_and_leaves_the_original_home_alone() {
     ));
     copy_dir_all(project.as_ref(), &copy);
 
-    let stamps = || -> Vec<(PathBuf, Option<String>)> {
-        std::fs::read_dir(home.join(".spoolway"))
-            .unwrap()
-            .flatten()
-            .map(|entry| {
-                let stamp = entry.path().join("sync-stamp");
-                let text = std::fs::read_to_string(&stamp).ok();
-                (stamp, text)
-            })
-            .collect()
+    // Every file under the home with its text, so a write of any kind into
+    // the original's home shows up, not only one of a known name.
+    let snapshot = || -> Vec<(PathBuf, String)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    out.push((path, text));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&home.join(".spoolway"), &mut files);
+        files.sort();
+        files
     };
-    let before = stamps();
+    let before = snapshot();
 
     let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
         .args(["sync"])
@@ -883,7 +891,7 @@ fn sync_in_a_copied_checkout_refuses_and_leaves_the_original_home_alone() {
     assert!(!output.status.success(), "sync ran in a copied checkout");
     let said = stderr(&output);
     assert!(said.contains("two checkouts carry the id"), "{said}");
-    assert_eq!(stamps(), before, "the original home's sync-stamp changed");
+    assert_eq!(snapshot(), before, "the original home changed");
 
     std::fs::remove_dir_all(&copy).ok();
 }

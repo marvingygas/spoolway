@@ -4,8 +4,8 @@
 # contracts (`task contract`, `pipeline contract`, `prompt contract`), the
 # queue tab of bare `spoolway` driven over a real pty, the archive's own rows,
 # `config`'s checkout/project asymmetry, the overrides layer resolved through
-# a linked worktree, housekeeping's retention sweep, and the notice a behind
-# checkout prints, driven over a real pty.
+# a linked worktree, housekeeping's retention sweep, and the silence of a
+# command run in a behind checkout, driven over a real pty.
 #
 # This suite used to also assert the `agent list`/`agent verify` output, the
 # transcript an ambient session is read from, and every refusal `pipeline
@@ -1345,52 +1345,22 @@ says "config set warns on a hook script that is not there yet" \
   "$SPOOLWAY" config set issue_tracking.hook nosuch.sh
 must "hook restored" "$SPOOLWAY" config set issue_tracking.hook "$BEFORE_HOOK"
 
-# ------------------------------------------------------------- sync notice
-# `Run spoolway sync to apply the last update.`: the line `main.rs` prints in
-# front of a project command once this checkout's stamp no longer matches
-# what this binary would write — `spoolway update` already having installed
-# a newer release is the scenario, forced here by hand since only one binary
-# is on `PATH` for a suite to run. It only informs: the command runs, no key
-# is read and no file is written, at a terminal or not. Only `spoolway sync`
-# writes.
-#
-# `override list` is the command under test: it is routed through the same
-# catch-all in `main.rs` every project command passes through, and its own
-# output ("no overrides") is fixed regardless of anything this suite queued
-# earlier, unlike `queue list` or `group list`.
+# ------------------------------------------------------------- sync panel
+# A checkout behind the binary is told nothing in front of a command: no line
+# on stderr, no stamp file. Only `spoolway sync` and `spoolway doctor` speak
+# of it. A deleted skill stands in for "behind" — it is a file `sync` would
+# write — and `override list` is the command under test, its own output
+# ("no overrides") being fixed whatever this suite queued earlier.
 SYNC_LINE="Run spoolway sync to apply the last update."
 STALE_SKILL=.claude/skills/spoolway-config/SKILL.md
-PROJECT_STAMP="$SPOOLWAY_PROJECT_HOME/sync-stamp"
 
-# One real file for a scan to find, and a stamp claiming a release that never
-# shipped — `stamp_behind` reads true on the version alone, whatever the
-# fingerprint says. Both conditions the notice needs, not either alone:
-# `src/gate.rs`'s own unit tests already cover a stale stamp with nothing for
-# a scan to do saying nothing, so this suite only has to prove the shape
-# where both fire, on the real binary.
 behind_checkout() {
   rm -f "$STALE_SKILL"
-  echo "0.0.0-behind-e2e deadbeef $(pwd)" > "$PROJECT_STAMP"
 }
 
-# Piped — every `says` runs under `$(...)`, so stderr is no terminal — the
-# line is for nobody, and is not printed.
-behind_checkout
-silent_about "a piped command with a behind checkout prints no sync notice" \
-  "$SYNC_LINE" \
-  "$SPOOLWAY" override list
-says "the command itself still ran" \
-  "no overrides" \
-  "$SPOOLWAY" override list
-works "and nothing was written back" \
-  test ! -e "$STALE_SKILL"
-
-# At a terminal, the line prints and the command runs straight after it, with
-# no key sent. `write_pty_driver` (`lib.sh`) gives the process a real
-# terminal on stdout and stderr without needing one behind this suite's own
-# process — already how `warmth.sh`, `jobs.sh` and `disaster.sh` drive a
-# check no shell built-in reaches. A process that still waited on a key
-# would hang here until the driver's own deadline and report a timeout.
+# Driven under a real terminal on stdout and stderr, which is the only place
+# the old line ever printed. `write_pty_driver` (`lib.sh`) gives the process
+# one without needing one behind this suite's own process.
 PTY_DRIVER="$LIVE/sync-notice-pty.py"
 write_pty_driver "$PTY_DRIVER"
 
@@ -1404,31 +1374,22 @@ else
   sed 's/^/        /' <<<"$TTY_OUT"
 fi
 if grep -qF "$SYNC_LINE" <<<"$TTY_OUT"; then
-  ok "the sync notice printed"
+  bad "a behind checkout prints no sync line"; sed 's/^/        /' <<<"$TTY_OUT"
 else
-  bad "the sync notice printed"; sed 's/^/        /' <<<"$TTY_OUT"
+  ok "a behind checkout prints no sync line"
 fi
 if grep -qF "no overrides" <<<"$TTY_OUT"; then
-  ok "and the command's own output followed"
+  ok "and the command's own output is there"
 else
-  bad "and the command's own output followed"
+  bad "and the command's own output is there"
   sed 's/^/        /' <<<"$TTY_OUT"
-fi
-if grep -qF "new version installed, apply updates" <<<"$TTY_OUT"; then
-  bad "no confirm panel is drawn in front of the command"
-  sed 's/^/        /' <<<"$TTY_OUT"
-else
-  ok "no confirm panel is drawn in front of the command"
 fi
 works "and nothing was written back" \
   test ! -e "$STALE_SKILL"
-if grep -q "0.0.0-behind-e2e" "$PROJECT_STAMP"; then
-  ok "the stamp was left alone"
-else
-  bad "the stamp was left alone"; sed 's/^/        /' "$PROJECT_STAMP"
-fi
+works "and no sync-stamp file exists" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/sync-stamp"
 
-# `spoolway sync`'s own confirm panel, proven the same way: 522b247 put it
+# `spoolway sync`'s own confirm panel, driven the same way: 522b247 put it
 # behind a blank alternate screen because it draws first and takes the
 # guard after, and nothing here ran it on a pty until now (gh-528). The
 # driver waits for the panel's title before sending `esc`, so the read is

@@ -4922,8 +4922,8 @@ fn available_label(installed: Option<&str>, published: Option<&str>) -> Option<S
 /// machine want to hear about one.
 ///
 /// `update_check` is `housekeeping.update_check` and `skipped` is whether
-/// [`crate::release::ENV_SKIP`] is set — the same two switches that silence
-/// the printed notice. Either one turned off means `read` is never called,
+/// [`crate::release::ENV_SKIP`] is set — the two switches that silence the
+/// header's version. Either one turned off means `read` is never called,
 /// so a board told to keep quiet does not start a cache reading, or the
 /// refresh child behind it, either. `read` is
 /// [`crate::release::published_newer`] on the board, and a stub in tests.

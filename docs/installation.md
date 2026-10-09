@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "src/gate.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
+covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
 ---
 
 # Installation and setup
@@ -336,7 +336,9 @@ If npm installed this binary and a newer release is out, `update` runs
 `npm install -g spoolway@<version> --ignore-scripts` and then hands over to the new binary. At
 a terminal it then prints the old and new versions, the highlights, every migration that
 applies, and links to the full notes. `update` installs the binary only. It runs from any
-directory, project or not, and writes no project file.
+directory, project or not, and writes no project file. After a successful install its last
+line tells you to run `spoolway sync` in each project. A run that installs nothing does not
+print it.
 
 `update` asks npm which release is out each time it runs. The wait is bounded. If npm does
 not answer in time, `update` says so and uses the last known version.
@@ -359,19 +361,10 @@ Two things stop the binary update:
 | npm did not install this binary | You are told which release is out. Upgrade the way you installed. |
 | A dispatcher is running | The binary is left alone until the run ends. |
 
-A newer release is announced by one line on stderr before the command's own output:
-
-```
-Update available: 0.2.0. Run "spoolway update"
-```
-
-Bare `spoolway` shows the same sentence as a popup over the tab it opens on instead, since a
-line on stderr ahead of the screen would be wiped by the screen's first frame. `[enter]` closes
-it.
-
-The line, or the popup, is not shown inside a lane, under `--json`, or when output is not a
-terminal. Turn it off with `housekeeping.update_check = false` in the config, or with
-`SPOOLWAY_SKIP_VERSION_CHECK=1` for one machine.
+The dispatcher header shows a newer published release in yellow, beside its own version. No
+other command and no popup announces one. Turn the header's version off with
+`housekeeping.update_check = false` in the config, or with `SPOOLWAY_SKIP_VERSION_CHECK=1` for
+one machine.
 
 ## Keeping a project's files current
 
@@ -470,11 +463,10 @@ A file `sync` refuses is listed first in the panel, with the reason and what to 
 A pipeline file carrying a step shape this release no longer loads, such as `loop: 0`, is
 refused too, naming the step and the edit. `sync` never edits a step for you.
 
-Enter writes the files, records the version stamp described next, and prints the report `sync`
-always prints. Esc, ctrl-c, or the terminal going away mid-question writes nothing, changes no
-stamp, and prints "Nothing was changed." With no terminal to answer, under `--json`, inside a
-lane, with `--dry-run`, with `--replace`, or with nothing to write, `sync` writes straight away
-and draws no panel.
+Enter writes the files and prints the report `sync` always prints. Esc, ctrl-c, or the terminal
+going away mid-question writes nothing and prints "Nothing was changed." With no terminal to
+answer, under `--json`, inside a lane, with `--dry-run`, with `--replace`, or with nothing to
+write, `sync` writes straight away and draws no panel.
 
 The report lists every refused file first, then every file written or removed, then one line
 for each replaced key block and each value `sync` set on its own:
@@ -494,46 +486,8 @@ Files were overwritten; your config values, prompts and task skeletons were kept
 With `--dry-run`, the words read `would write` and `would remove`. When only refused files are
 left, the last line says the refused files are still behind.
 
-On a run that refused nothing, `sync` records this binary's version and a fingerprint of the
-text it would write in a stamp under the project's home, one line per checkout. A run that
-refused a file removes that checkout's line, so the project stays behind until the file is
-fixed. `sync` also deletes a leftover per-skill-file stamp, if it finds one.
-
-`spoolway init` and `spoolway install` write the same stamp for a freshly scaffolded or newly
-installed project. `init` writes none when it kept an existing file or joined a workspace,
-because it did not write those files.
-
-Every other command that needs a project reads that stamp back first. When the stamp is
-missing or unreadable, the command prints one line on stderr and then runs. It does the same
-when the stamp no longer matches and a scan finds a file to write, remove or refuse:
-
-```
-Run spoolway sync to apply the last update.
-```
-
-That line prints only to a person at a terminal: never under `--json`, never inside a lane, and
-never when stderr is not a terminal. It never stops the command and never reads a key. Only
-`spoolway sync` writes the files.
-
-Bare `spoolway` shows the same sentence in a popup over the tab it opens on, since the screen's
-first frame would wipe a line printed ahead of it:
-
-```
-┌─ update installed ────────────────────────────┐
-│                                               │
-│  Run spoolway sync to apply the last update.  │
-│                                               │
-│  [enter] dismiss                              │
-└───────────────────────────────────────────────┘
-```
-
-Enter dismisses the popup and writes nothing. When the project's pipeline file cannot load, the
-screen cannot open to show the popup, so bare `spoolway` prints the line first and then ends on
-the pipeline refusal.
-
-`init`, `doctor`, `whats-new`, `update`, `config edit` and `config override` never print this
-line or show this popup. `sync` never does either: it asks its own version of the same question
-first, above.
+`sync` also deletes a leftover per-skill-file stamp, if it finds one. `spoolway doctor` notes a
+project that `sync` would change. Only `spoolway sync` writes the files.
 
 ## Platform notes
 

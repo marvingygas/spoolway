@@ -191,9 +191,7 @@ edit. `spoolway pipeline check` names any pipeline that no longer loads.
   an earlier `.bak`, prints the path it wrote and keeps the file's mode.
 - Update any script that parses the `spoolway sync` report. Refused files are listed first, and
   the report adds `(migrated: … replaced; edits are not kept)` and
-  `(set issue_tracking.key_in_names = true, the default)` lines. A missing or unreadable stamp now
-  counts as behind, so the `Run spoolway sync to apply the last update.` notice shows until you
-  run `spoolway sync`.
+  `(set issue_tracking.key_in_names = true, the default)` lines.
 - No edit is needed for `spoolway config set`, `spoolway init --tracker` and
   `spoolway override promote`; they now work on a 0.6.0 config that has not been synced, including
   retired keys inside inline tables.
@@ -211,8 +209,7 @@ edit. `spoolway pipeline check` names any pipeline that no longer loads.
 Upgrade every machine and CI job that reads the project first: once `sync` writes
 `housekeeping.archive_retention_days`, a 0.6.x binary refuses `config.toml` with `unknown field`.
 Then run `spoolway sync` (or `spoolway sync --dry-run` to read what it would do) and work through
-the list. Nothing applies an update by itself any more: a command in a checkout that is behind
-prints `Run spoolway sync to apply the last update.` and carries on.
+the list. Nothing applies an update by itself. Run `spoolway sync` in each project.
 
 - `sync` now only knows how to bring a project forward from 0.6.0. A project that was never
   brought to 0.6 — one whose pipeline files still carry a shape 0.6 retired, such as a

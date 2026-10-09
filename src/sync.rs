@@ -108,8 +108,7 @@ pub enum Outcome {
     /// one: a file nothing was done to is a file nothing has to say about it,
     /// and naming it was how the old report came to be mostly `kept` lines.
     Kept,
-    /// Ours, and changed by hand. The only outcome that is a refusal, and the
-    /// one that keeps a sync from stamping the project current.
+    /// Ours, and changed by hand. The only outcome that is a refusal.
     Blocked {
         path: String,
         why: String,
@@ -262,16 +261,7 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
         closing_line(args.dry_run, nothing_else, !refused.is_empty())
     );
 
-    // Only once the write has actually happened: the stamp records what a
-    // checkout was last brought to, and a dry run brings it to nothing.
-    // A refused file is one this run did not bring forward, so the project is
-    // not current: the checkout's stamp line is dropped, not just left
-    // unwritten, or an earlier "current" stamp would keep the notice off.
     if !args.dry_run {
-        match refused.is_empty() {
-            true => write_stamp(&repo.home, &repo.checkout)?,
-            false => forget_stamp(&repo.home, &repo.checkout)?,
-        }
         remove_skill_stamp(&repo.home);
     }
     Ok(())
@@ -538,8 +528,7 @@ pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>
 }
 
 /// Every refused file in a scan, once each, with the reason: what [`run`]'s
-/// report prints before anything else and what keeps the run from stamping
-/// the project current. Kept apart from [`dedup_paths`], whose two lists are
+/// report prints before anything else. Kept apart from [`dedup_paths`], whose two lists are
 /// the files a sync changes — a refused file is one it did not.
 pub(crate) fn refusals(outcomes: &[Outcome]) -> Vec<(&str, &str)> {
     let mut refused: Vec<(&str, &str)> = Vec::new();
@@ -1594,10 +1583,7 @@ fn provider_needs_codex_migration(
 /// file already on disk, a retired skill directory a rename left behind, or
 /// — Codex only — an old-root install waiting on [`provider_needs_codex_migration`].
 ///
-/// The one place this decision is made. [`text_fingerprint`] calls this too,
-/// so the fingerprint is taken over exactly the skill files [`skills`] would
-/// itself write for this checkout — not a looser stand-in that could disagree
-/// with it about which providers even count as installed.
+/// The one place this decision is made.
 fn provider_installed(
     provider: crate::cli::Provider,
     checkout: &Path,
@@ -1640,9 +1626,6 @@ fn installed_at(dir: &Path, planned: &[crate::install::Planned]) -> bool {
 /// person's own and is left alone; one holding even a single stale copy —
 /// installed by any release, with or without the marker releases from #593
 /// to this fix wrote — is spoolway's to refresh.
-///
-/// Read by [`skills`] and [`text_fingerprint`] alike, so the two can never
-/// disagree about which user folders count.
 fn user_skills() -> Vec<(PathBuf, Vec<crate::install::Planned>)> {
     let Some(home) = crate::install::user_home() else {
         return Vec::new();
@@ -1943,7 +1926,7 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
         // A shape this release stopped loading — `loop: 0` is the one an
         // earlier release still ran — is refused by name, fenced or not, and
         // the file is left as it is. `sync` never edits a step, but without
-        // this it would report the upgrade done and stamp the project current
+        // this it would report the upgrade done
         // over a pipeline the next command refuses to load.
         if let Ok(pipeline) = serde_norway::from_str::<crate::pipeline::Pipeline>(&on_disk) {
             let problems = pipeline.retired_shape_problems();
@@ -2024,152 +2007,6 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
 }
 
 // ---------------------------------------------------------------------------
-// The stamp: what a checkout was last brought to. Written here, by `sync` on
-// a run that refused nothing, and by `commands::init` once it has finished
-// placing a project's files and kept none of them — a project `init` wrote
-// whole is, by definition, exactly what this binary would write, so `init`
-// records the same fact `sync` would have recorded had it run instead. A
-// file `init` kept is whatever an older version left, which is for `sync`.
-// ---------------------------------------------------------------------------
-
-/// The stamp file's name, under [`Repo::home`] — never the checkout: a home is
-/// shared by the main checkout and every linked worktree cut from it, and
-/// each keeps its own line here rather than fighting over one shared value.
-pub const STAMP_FILE: &str = "sync-stamp";
-
-/// Where the stamp lives, given a project's home directory.
-pub fn stamp_path(home: &Path) -> PathBuf {
-    home.join(STAMP_FILE)
-}
-
-/// Record that `checkout` now stands at `version`/`fingerprint` — one line,
-/// `<version> <fingerprint> <checkout path>`, replacing any earlier line for
-/// the same checkout and leaving every other checkout's own line untouched.
-fn write_stamp_line(home: &Path, checkout: &Path, version: &str, fingerprint: &str) -> Result<()> {
-    let path = stamp_path(home);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let shown = checkout.display().to_string();
-    let mut lines: Vec<String> = existing
-        .lines()
-        .filter(|line| line.splitn(3, ' ').nth(2) != Some(shown.as_str()))
-        .map(str::to_string)
-        .collect();
-    lines.push(format!("{version} {fingerprint} {shown}"));
-    lines.sort();
-    let mut body = lines.join("\n");
-    body.push('\n');
-    write_atomic(&path, body)
-}
-
-/// Drop `checkout`'s line from the stamp, leaving every other checkout's own.
-///
-/// A sync that refused a file calls this rather than skipping its write: an
-/// earlier current stamp would otherwise stay and say the project is fine.
-fn forget_stamp(home: &Path, checkout: &Path) -> Result<()> {
-    let path = stamp_path(home);
-    let Ok(existing) = std::fs::read_to_string(&path) else {
-        return Ok(());
-    };
-    let shown = checkout.display().to_string();
-    let kept: Vec<&str> = existing
-        .lines()
-        .filter(|line| line.splitn(3, ' ').nth(2) != Some(shown.as_str()))
-        .collect();
-    let mut body = kept.join("\n");
-    if !body.is_empty() {
-        body.push('\n');
-    }
-    write_atomic(&path, body)
-}
-
-/// What the stamp says for `checkout`, if anything — `(version, fingerprint)`.
-///
-/// [`stamp_behind`] compares what this reads back against what this binary
-/// would write now, which is exactly what says a checkout is behind.
-/// `crate::gate` also asks it whether a stamp exists at all, since a missing
-/// one shows the notice without a scan.
-pub fn read_stamp(home: &Path, checkout: &Path) -> Option<(String, String)> {
-    let text = std::fs::read_to_string(stamp_path(home)).ok()?;
-    let shown = checkout.display().to_string();
-    text.lines().find_map(|line| {
-        let mut parts = line.splitn(3, ' ');
-        let version = parts.next()?;
-        let fingerprint = parts.next()?;
-        let path = parts.next()?;
-        (path == shown).then(|| (version.to_string(), fingerprint.to_string()))
-    })
-}
-
-/// The text this binary would write at `checkout` right now, fingerprinted —
-/// the rendered config (the project's own values, this binary's comments and
-/// key list), the pipeline key reference every tracked pipeline carries, and
-/// the current skill set for every provider actually installed here. This is
-/// what [`write_stamp`] records: a project reading its own stamp back can
-/// tell, in two string comparisons, whether this same binary would still
-/// write the same thing — the version and this fingerprint both settled
-/// exactly once, at the moment they were last brought current.
-fn text_fingerprint(checkout: &Path) -> String {
-    let mut material = String::new();
-    // Best-effort, like `version::layer_fingerprint`'s own read of a layer: a
-    // config that will not load or render at all is not a reason to fail the
-    // whole stamp — unlike `sync`'s own `config()`, which now fails the
-    // whole scan on exactly this (see `config`'s own doc) — so the
-    // fingerprint it produces here is taken over the pipeline key block and
-    // installed skills alone, which is still a real answer for whether
-    // *those* have drifted.
-    if let Ok(config) = crate::config::Config::load(checkout)
-        && let Ok(rendered) = config.render()
-    {
-        material.push_str(&rendered);
-    }
-    material.push_str(crate::pipeline::key_block());
-    for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
-        let planned = provider.plan(checkout);
-        if !provider_installed(*provider, checkout, &planned) {
-            continue;
-        }
-        for planned in planned {
-            material.push_str(planned.contents);
-        }
-    }
-    // The user-level copies [`skills`] also rewrites, so a user folder
-    // installed since the last sync reads as something to bring current.
-    for (_, planned) in user_skills() {
-        for planned in planned {
-            material.push_str(planned.contents);
-        }
-    }
-    crate::skeleton::fingerprint(&material)
-}
-
-/// Write the stamp for `checkout`, under `home` — [`run`]'s own call when it
-/// refused nothing, and `commands::init`'s once every file it placed was one
-/// it wrote itself.
-pub fn write_stamp(home: &Path, checkout: &Path) -> Result<()> {
-    let fingerprint = text_fingerprint(checkout);
-    write_stamp_line(home, checkout, crate::release::current(), &fingerprint)
-}
-
-/// Whether `checkout`'s stamp — what `sync` or `init` last recorded there —
-/// no longer matches what this binary would write now: a newer release, or
-/// a config whose own values have changed since. `crate::gate`'s notice
-/// reads this before paying for a full [`scan`], so an up-to-date project
-/// pays nothing beyond one file read and a few hashes per command.
-///
-/// No stamp, or one that cannot be read, reads as behind: nothing records
-/// that this project was ever brought current, and `init` stamps only the
-/// files it set up itself, so a project it claimed over an older setup has
-/// no stamp until a `sync` has really run.
-pub fn stamp_behind(home: &Path, checkout: &Path) -> bool {
-    match read_stamp(home, checkout) {
-        Some((version, fingerprint)) => {
-            version != crate::release::current() || fingerprint != text_fingerprint(checkout)
-        }
-        None => true,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The skill stamp is gone: a skill file belongs to spoolway outright now, so
 // there is no hand edit left to tell from a stale shipped copy, and nothing
 // here reads or writes one any more. [`remove_skill_stamp`] is the one thing
@@ -2182,9 +2019,8 @@ pub fn stamp_behind(home: &Path, checkout: &Path) -> bool {
 const SKILL_STAMP_FILE: &str = "skill-stamp";
 
 /// Delete a project's leftover skill stamp, if one is still there from
-/// before skill files became spoolway's outright. Best-effort, the same way
-/// [`write_stamp`] tolerates a home it cannot resolve: a stamp nobody reads
-/// any more is clutter, not a fact worth failing a sync over.
+/// before skill files became spoolway's outright. Best-effort: a stamp
+/// nobody reads any more is clutter, not a fact worth failing a sync over.
 pub(crate) fn remove_skill_stamp(home: &Path) {
     let _ = std::fs::remove_file(home.join(SKILL_STAMP_FILE));
 }
@@ -2615,7 +2451,7 @@ mod tests {
         }
     }
 
-    /// Enter at the panel writes the files, records the stamp and draws
+    /// Enter at the panel writes the files and draws
     /// nothing more than the panel itself; a stray key before it is ignored.
     #[test]
     fn asking_sync_writes_only_once_enter_is_pressed() {
@@ -2627,12 +2463,10 @@ mod tests {
         assert!(drawn.contains("[esc] cancel"), "{drawn}");
         assert!(!drawn.contains(CANCELLED), "{drawn}");
         assert!(Config::path_in(&repo.checkout).is_file());
-        assert!(stamp_path(&repo.home).is_file());
     }
 
     /// Esc, and ctrl-c — which reaches `read_key` as a read that failed,
-    /// the same `None` as input running out — write nothing, leave the
-    /// stamp alone and say so.
+    /// the same `None` as input running out — write nothing and say so.
     #[test]
     fn asking_sync_writes_nothing_on_esc_or_ctrl_c() {
         for (name, keys) in [("ask-esc", "\x1b"), ("ask-ctrl-c", "")] {
@@ -2644,7 +2478,6 @@ mod tests {
                 "{name}: {drawn}"
             );
             assert!(!Config::path_in(&repo.checkout).exists(), "{name}");
-            assert!(!stamp_path(&repo.home).exists(), "{name}");
         }
     }
 
@@ -2662,7 +2495,6 @@ mod tests {
             let drawn = ask(&repo, &args(), json, in_lane, tty, "");
             assert!(drawn.is_empty(), "{name}: {drawn}");
             assert!(Config::path_in(&repo.checkout).is_file(), "{name}");
-            assert!(stamp_path(&repo.home).is_file(), "{name}");
         }
     }
 
@@ -3968,40 +3800,6 @@ mod tests {
         );
     }
 
-    /// A project with no readable stamp has nothing recording that it was
-    /// ever brought current, so the "Run spoolway sync" notice keeps showing.
-    #[test]
-    fn a_missing_or_unreadable_stamp_counts_as_behind() {
-        let (repo, _root_guard) = fixture("stamp-missing");
-        std::fs::create_dir_all(&repo.home).unwrap();
-
-        assert!(stamp_behind(&repo.home, &repo.checkout), "no stamp at all");
-
-        std::fs::write(stamp_path(&repo.home), "garbage\n").unwrap();
-        assert!(stamp_behind(&repo.home, &repo.checkout), "unparsable stamp");
-
-        write_stamp(&repo.home, &repo.checkout).unwrap();
-        assert!(!stamp_behind(&repo.home, &repo.checkout), "a real stamp");
-    }
-
-    /// A sync that refused a file has not brought the project current, so the
-    /// stamp it leaves must still read as behind and the notice keeps showing.
-    #[test]
-    fn a_sync_that_refused_a_file_leaves_the_project_behind() {
-        let (repo, _root_guard) = fixture("stamp-refused");
-        write_stamp(&repo.home, &repo.checkout).unwrap();
-        assert!(!stamp_behind(&repo.home, &repo.checkout), "starts current");
-        let half = format!("{}\n# Top level\n", crate::assets::PIPELINE_KEYS_BEGIN);
-        pipeline_file(&repo, "half", &half);
-
-        run(&repo, &args(), false).unwrap();
-
-        assert!(
-            stamp_behind(&repo.home, &repo.checkout),
-            "a refused pipeline file must leave the project marked as behind"
-        );
-    }
-
     /// A refused file is listed with its reason once, however many outcomes
     /// name it, and a file that only changed is not a refusal.
     #[test]
@@ -4056,20 +3854,6 @@ mod tests {
             body.iter().all(|line| line.chars().count() <= MAX_LINE),
             "{body:?}"
         );
-    }
-
-    /// Dropping one checkout's stamp keeps a sibling's line.
-    #[test]
-    fn forgetting_a_stamp_leaves_a_siblings_line() {
-        let (repo, _root_guard) = fixture("stamp-forget");
-        let other = repo.checkout.join("other");
-        write_stamp(&repo.home, &other).unwrap();
-        write_stamp(&repo.home, &repo.checkout).unwrap();
-
-        forget_stamp(&repo.home, &repo.checkout).unwrap();
-
-        assert!(read_stamp(&repo.home, &repo.checkout).is_none());
-        assert!(read_stamp(&repo.home, &other).is_some());
     }
 
     /// Replacing the key block says so in a note of its own, since the
@@ -4998,27 +4782,6 @@ mod tests {
         assert_eq!(outcome_lines(&outcomes).len(), 3);
     }
 
-    /// The stamp: written on a real run, re-readable straight back, and
-    /// keeping a sibling checkout's own line untouched — the "one line per
-    /// checkout" the mockup shows for a project sharing its home between a
-    /// main checkout and a linked worktree.
-    #[test]
-    fn sync_writes_a_stamp_that_reads_back_and_keeps_a_siblings_line() {
-        let (repo, _root_guard) = fixture("stamp-roundtrip");
-        let other = repo.root.join("other-checkout");
-
-        write_stamp(&repo.home, &other).unwrap();
-        run(&repo, &args(), false).unwrap();
-
-        let (version, fingerprint) = read_stamp(&repo.home, &repo.checkout)
-            .expect("sync on success writes a stamp for this checkout");
-        assert_eq!(version, crate::release::current());
-        assert!(!fingerprint.is_empty());
-
-        // The sibling's own line is still there, untouched.
-        assert!(read_stamp(&repo.home, &other).is_some());
-    }
-
     /// A project brought forward from before this change may still carry the
     /// old per-skill stamp — a real sync clears it out, since nothing reads
     /// it any more.
@@ -5056,60 +4819,12 @@ mod tests {
         assert!(stamp.exists(), "a dry run must not remove the old stamp");
     }
 
-    /// `text_fingerprint` has to agree with `skills()` about which providers
-    /// count as installed — a `.claude/skills/` holding only a project's own
-    /// skill, with none of spoolway's own planned files anywhere under it,
-    /// is not an install, so the fingerprint must not change when one shows
-    /// up there. `provider_installed` is what both now share; this pins the
-    /// behaviour rather than the helper, so a future split of the two rules
-    /// would be caught here.
+    /// `sync` leaves no `sync-stamp` file in the project's home: nothing
+    /// reads one any more, so writing it would only be clutter.
     #[test]
-    fn the_fingerprint_ignores_a_directory_that_holds_no_installed_skill() {
-        let checkout = crate::scratch::root("sync-fingerprint-bystander-dir");
-        let _ = std::fs::remove_dir_all(&checkout);
-        std::fs::create_dir_all(&checkout).unwrap();
-        let before = text_fingerprint(&checkout);
-
-        let bystander = crate::cli::Provider::Claude
-            .skills_dir(&checkout)
-            .join("a-projects-own-skill");
-        std::fs::create_dir_all(&bystander).unwrap();
-        std::fs::write(bystander.join("SKILL.md"), "not spoolway's\n").unwrap();
-        assert_eq!(
-            text_fingerprint(&checkout),
-            before,
-            "a directory with no installed skill in it must not count as an install"
-        );
-
-        // A real install does change it.
-        let planned = crate::cli::Provider::Claude
-            .plan(&checkout)
-            .into_iter()
-            .next()
-            .unwrap();
-        std::fs::create_dir_all(planned.path.parent().unwrap()).unwrap();
-        std::fs::write(&planned.path, planned.contents).unwrap();
-        assert_ne!(
-            text_fingerprint(&checkout),
-            before,
-            "an actually installed provider must change the fingerprint"
-        );
-    }
-
-    /// A dry run brings nothing forward, so it must not claim a checkout was
-    /// synced either.
-    #[test]
-    fn a_dry_run_never_writes_the_stamp() {
-        let (repo, _root_guard) = fixture("stamp-dry-run");
-        run(
-            &repo,
-            &SyncArgs {
-                dry_run: true,
-                ..args()
-            },
-            false,
-        )
-        .unwrap();
-        assert!(read_stamp(&repo.home, &repo.checkout).is_none());
+    fn sync_writes_no_sync_stamp() {
+        let (repo, _root_guard) = fixture("no-sync-stamp");
+        run(&repo, &args(), false).unwrap();
+        assert!(!repo.home.join("sync-stamp").exists());
     }
 }

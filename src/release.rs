@@ -1,13 +1,13 @@
 //! Whether a newer spoolway has been published, and how to take it.
 //!
 //! Two halves of one question, kept in one module because they must agree.
-//! The **notice** is a line telling somebody a release is out; the **install**
-//! is what happens when they act on it. Ship those decoupled and the banner
-//! advises a command that refuses — which is exactly the bug pi carries
-//! (earendil-works/pi#5607, where a Nix install is told to run `pi update` and
-//! gets "cannot self-update this installation"). So [`Channel`] is resolved
-//! once and gates both: a binary that cannot be upgraded from here is told
-//! that, in the same breath as the version.
+//! The **published version** is what the board header shows when a release is
+//! out; the **install** is what happens when somebody acts on it. [`Channel`]
+//! is resolved once for the install, so a binary that cannot be upgraded from
+//! here is told so rather than handed a command that refuses — the bug pi
+//! carries (earendil-works/pi#5607, where a Nix install is told to run
+//! `pi update` and gets "cannot self-update this installation"). The header
+//! names the version and no command for that reason.
 //!
 //! Nothing here opens a socket. spoolway ships no HTTP client and gains none:
 //! the binary arrives through npm, so npm is asked what the latest version is
@@ -16,12 +16,11 @@
 //! executable is the one thing [`crate::config`]'s own documentation warns
 //! kills a dispatcher mid-pass.
 //!
-//! The passive check in front of every subcommand reads a **cache and only a
-//! cache**. A lookup older than [`MAX_AGE`] spawns a detached child that
-//! refreshes it for the *next* command; this one carries on. That is the
-//! whole reason a version check can sit in front of every subcommand without
-//! making any of them slower, and it means the worst case is an answer a day
-//! stale rather than a command that hangs on a plane.
+//! The passive check reads a **cache and only a cache**. A lookup older than
+//! [`MAX_AGE`] spawns a detached child that refreshes it for the *next* read;
+//! this one carries on. That is the whole reason a version check can sit
+//! behind the board without making anything slower, and it means the worst
+//! case is an answer a day stale rather than a command that hangs on a plane.
 //!
 //! [`upgrade`] is the one exception, because it is the one caller somebody
 //! ran specifically to get the newer binary: it asks npm directly, bounded by
@@ -58,7 +57,7 @@ pub const PACKAGE: &str = "spoolway";
 
 /// How stale a cached answer may be before a refresh is spawned behind the
 /// command. A day: releases are not hourly, and the cost of being wrong is a
-/// notice that arrives one command late.
+/// version that is announced one read late.
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Turns the check off for one machine, whatever a project's config says.
@@ -251,7 +250,7 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
 }
 
 /// The published version that is newer than this binary, if the cache knows of
-/// one — and a refresh spawned behind the command when the cache is old.
+/// one — and a refresh spawned in the background when the cache is old.
 ///
 /// Reads one file. Everything that can go wrong — no home directory, no cache,
 /// a corrupt cache, a clock that moved — comes back `None`.
@@ -286,15 +285,14 @@ pub fn newer() -> Option<String> {
 /// Through `libc::setsid()`, called in the child between fork and exec, for
 /// the reason [`crate::headless`] detaches lanes the same way: a child that
 /// merely has no terminal on its file descriptors is still in this session,
-/// and gets `SIGHUP` when the terminal closes. `spoolway queue list` in a
-/// window somebody shuts a second later is exactly the case — the lookup
-/// takes seconds and the window does not wait for it. Without a session of
-/// its own the cache would never fill on such a machine, and the notice would
-/// never appear.
+/// and gets `SIGHUP` when the terminal closes. A board opened and closed
+/// within seconds is exactly the case: the lookup takes seconds and the
+/// window does not wait for it. Without a session of its own the cache would never
+/// fill on such a machine, and the header would never show a newer version.
 ///
 /// Nothing is waited on, so the child is reaped by init once this process
 /// exits. A failure to spawn at all is the same as a failure to look up:
-/// silence, and the next command tries again.
+/// silence, and the board's next reading tries again.
 fn spawn_refresh() {
     // Not from inside the refresher itself, or a stale cache would fork
     // forever.
@@ -344,8 +342,8 @@ pub fn refresh() {
     let Some(version) = published() else {
         // Nothing published, no npm, no network. The cache is still stamped,
         // so a machine that cannot answer is asked once a day rather than on
-        // every command — which is the difference between a quiet failure and
-        // a fork on every invocation.
+        // every reading — which is the difference between a quiet failure and
+        // a fork on every board refresh.
         let stamp = Cached {
             version: current().to_string(),
             checked: now(),
@@ -391,70 +389,6 @@ fn npm(args: &[&str]) -> Option<String> {
     match out.status.success() {
         true => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
         false => None,
-    }
-}
-
-/// Everything that decides whether the line is printed, gathered so the
-/// decision is one pure function.
-///
-/// Assembled by the caller because every field comes from somewhere different
-/// — the environment, the parsed flags, the config, the terminal — and a
-/// function that reads all four itself cannot be tested against any of them.
-#[derive(Debug, Clone, Copy)]
-pub struct Audience {
-    /// Set by the dispatcher on every lane it launches. A lane that reads
-    /// "Run spoolway update" is a lane that runs it, mid-step, in a worktree.
-    pub in_lane: bool,
-    /// `--json` was asked for, so something is parsing this.
-    pub machine_readable: bool,
-    /// stderr is a terminal.
-    pub tty: bool,
-    /// `housekeeping.update_check`, from the project's config.
-    pub enabled: bool,
-    /// `SPOOLWAY_SKIP_VERSION_CHECK` is set.
-    pub skipped: bool,
-}
-
-impl Audience {
-    /// Is there a person here who wants to be told?
-    pub fn wants_notice(&self) -> bool {
-        !self.in_lane && !self.machine_readable && self.tty && self.enabled && !self.skipped
-    }
-}
-
-/// Print the one line, if there is anybody to print it to.
-///
-/// On stderr, deliberately: no command's stdout gains a line, so nothing that
-/// reads spoolway's output has to learn about this at all.
-pub fn notify(audience: Audience) {
-    if let Some(notice) = notice(audience) {
-        eprintln!("{notice}");
-    }
-}
-
-/// The line [`notify`] prints, or `None` when it would print nothing — for
-/// bare `spoolway`, which shows it as a popup over its screen instead: a
-/// line on stderr ahead of the screen is wiped by the screen's first frame
-/// before anybody could read it.
-pub fn notice(audience: Audience) -> Option<String> {
-    if !audience.wants_notice() {
-        return None;
-    }
-    let version = newer()?;
-    Some(line(&version, Channel::detect()))
-}
-
-/// The notice itself.
-///
-/// Two spellings, chosen by the same [`Channel`] that decides what `update`
-/// will do — so the line never advises a command that would refuse.
-pub fn line(version: &str, channel: Channel) -> String {
-    match channel {
-        Channel::Npm => format!("Update available: {version}. Run \"spoolway update\""),
-        Channel::Other => format!(
-            "Update available: {version}. This binary was not installed by npm, so upgrade \
-             it the way you installed it"
-        ),
     }
 }
 
@@ -547,7 +481,7 @@ fn decide_upgrade(
 ) -> Upgrade {
     println!("Checking npm for a newer spoolway...");
     // Asked live, because this is the one call somebody made specifically to
-    // get the newer binary — a cache the passive notice would happily wait a
+    // get the newer binary — a cache the passive check would happily wait a
     // day on is exactly what left `update` installing nothing on the run
     // that mattered. `live()` returning `None` is "npm could not answer"
     // (offline, not installed, npm itself erroring, or the deadline above
@@ -661,7 +595,7 @@ const PUBLISHED_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// How long [`newer`] gets before its reading is given up on. It reads one
 /// small file, so this only ever matters for a filesystem that has stopped
 /// answering — and then, as with [`PATH_CHECK_DEADLINE`], so the stalled
-/// reading hands the slot back rather than freezing the notice.
+/// reading hands the slot back rather than freezing the header.
 const PUBLISHED_CHECK_DEADLINE: Duration = Duration::from_secs(5);
 
 static PUBLISHED_VERSION: OnceLock<Mutex<Reading>> = OnceLock::new();
@@ -680,7 +614,7 @@ fn published_version_cell() -> &'static Mutex<Reading> {
 /// what it left. The first call of a run therefore says `None`, the same as
 /// [`installed_newer`]'s.
 ///
-/// Gates nothing itself: whether the notice is wanted at all —
+/// Gates nothing itself: whether the header wants it at all —
 /// `housekeeping.update_check` and [`ENV_SKIP`] — is the caller's to decide,
 /// before it calls, so a check that is turned off never starts a reading.
 pub fn published_newer() -> Option<String> {
@@ -835,11 +769,11 @@ fn upgraded_command(program: &Path, args: &[String]) -> Command {
 mod tests {
     use super::*;
 
-    /// The bug this module exists not to have: the notice and the installer
-    /// must read the same signal, or somebody is advised to run a command that
-    /// refuses. pi#5607 is that bug, shipped.
+    /// Which installs `update` may touch: only an npm global one, never a
+    /// Nix store, a hand-placed binary, a project-local install or an `npx`
+    /// run.
     #[test]
-    fn the_notice_and_the_installer_agree_on_the_channel() {
+    fn only_a_global_npm_install_is_on_the_npm_channel() {
         let npm = Path::new(
             "/home/x/.nvm/versions/node/v20.0.0/lib/node_modules/@spoolway/linux-x64/bin/spoolway",
         );
@@ -871,27 +805,6 @@ mod tests {
         assert_eq!(Channel::of(local), Channel::Other);
         assert_eq!(Channel::of(local_bin), Channel::Other);
         assert_eq!(Channel::of(npx), Channel::Other);
-
-        // And what each is told matches what each can do.
-        assert!(line("0.2.0", Channel::of(npm)).contains("Run \"spoolway update\""));
-        for outside in [hand, nix, local, npx] {
-            let said = line("0.2.0", Channel::of(outside));
-            assert!(
-                !said.contains("spoolway update"),
-                "an install that cannot self-update must not be told to: {said}"
-            );
-            assert!(said.contains("the way you installed it"), "{said}");
-        }
-    }
-
-    /// The sentence is dictated, and a version number is the only thing in it
-    /// that varies.
-    #[test]
-    fn the_npm_line_is_the_one_sentence() {
-        assert_eq!(
-            line("0.2.0", Channel::Npm),
-            "Update available: 0.2.0. Run \"spoolway update\""
-        );
     }
 
     #[test]
@@ -933,71 +846,6 @@ mod tests {
             assert!(!is_newer(latest, "0.1.0"), "{latest:?}");
         }
         assert!(!is_newer("0.2.0", "not a version"));
-    }
-
-    /// Every gate, one at a time: each is on its own sufficient to silence the
-    /// line, and the lane gate is the one that matters most.
-    #[test]
-    fn only_a_person_at_a_terminal_is_told() {
-        let person = Audience {
-            in_lane: false,
-            machine_readable: false,
-            tty: true,
-            enabled: true,
-            skipped: false,
-        };
-        assert!(person.wants_notice());
-
-        assert!(
-            !Audience {
-                in_lane: true,
-                ..person
-            }
-            .wants_notice(),
-            "a lane told to update will update, mid-step"
-        );
-        assert!(
-            !Audience {
-                machine_readable: true,
-                ..person
-            }
-            .wants_notice()
-        );
-        assert!(
-            !Audience {
-                tty: false,
-                ..person
-            }
-            .wants_notice()
-        );
-        assert!(
-            !Audience {
-                enabled: false,
-                ..person
-            }
-            .wants_notice()
-        );
-        assert!(
-            !Audience {
-                skipped: true,
-                ..person
-            }
-            .wants_notice()
-        );
-    }
-
-    /// `notice` answers to the same gates `notify` prints behind: nobody to
-    /// tell, no line — whatever the cache says, which this never reads.
-    #[test]
-    fn notice_is_none_for_an_audience_that_wants_none() {
-        let lane = Audience {
-            in_lane: true,
-            machine_readable: false,
-            tty: true,
-            enabled: true,
-            skipped: false,
-        };
-        assert_eq!(notice(lane), None);
     }
 
     /// A cache is two fields and survives a round trip; anything else parses

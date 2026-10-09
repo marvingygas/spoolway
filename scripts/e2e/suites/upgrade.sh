@@ -221,9 +221,9 @@ changed_on_disk() {
 # checked: unseeded, `release::newer()` finds no cache, decides it is stale,
 # and spawns a detached child that shells out to `npm view` — which nothing
 # here should ever do, and would run past this suite's own lifetime besides.
-# `notify()` runs ahead of `init` and `sync` alike, so both need the cache
-# seeded, even though neither one is `update` and neither ever reaches
-# `release::upgrade`'s own live npm call.
+# Neither `init` nor `sync` reads the cache today; only the board's header
+# does. The seed stays as a guard, so a command that starts reading it again
+# cannot reach npm from this suite.
 #
 # `release::cache_path()` reads `$XDG_STATE_HOME/spoolway/latest.json` in
 # preference to `$HOME/.local/state/...` — and an inherited `XDG_STATE_HOME`

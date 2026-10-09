@@ -98,9 +98,8 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 A home is always named with the clone's own id. A command that finds no id for the checkout
 refuses and tells you to run `spoolway init`.
 
-The update notice that most commands print looks up the project without writing. It stamps
-nothing and creates no home. `spoolway init` writes the stamp and the record together, after
-its last question. A cancelled `init` leaves `.git` and `~/.spoolway/` as they were.
+`spoolway init` writes the stamp and the record together, after its last question. A cancelled
+`init` leaves `.git` and `~/.spoolway/` as they were.
 
 A third file, `.git/spoolway-root`, sits beside the id stamp in the same common git directory.
 It records the checkout's own absolute path. Unlike the id, which is minted once, it is
@@ -256,7 +255,7 @@ price_max_age_days = 30
 
 | Key | Default | What it controls |
 |---|---|---|
-| `update_check` | `true` | Tell a person at a terminal when a newer release is out. The dispatcher header shows the published version in yellow. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
+| `update_check` | `true` | Show a newer release in the dispatcher header when one is out. The header shows the published version in yellow. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
 | `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
 | `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. A `scratch/` or `headless/` entry of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
 | `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
