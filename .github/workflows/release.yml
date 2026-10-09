@@ -29,7 +29,7 @@ jobs:
     outputs:
       targets: ${{ steps.read.outputs.targets }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
       - id: read
@@ -51,7 +51,7 @@ jobs:
         target: ${{ fromJSON(needs.matrix.outputs.targets) }}
     runs-on: ${{ matrix.target.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -71,7 +71,7 @@ jobs:
 
       # `if-no-files-found: error` means a missing binary fails here rather
       # than silently shipping a platform package with nothing in it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target.triple }}
           path: target/${{ matrix.target.triple }}/release/spoolway
@@ -88,7 +88,7 @@ jobs:
   notes:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -126,7 +126,7 @@ jobs:
           printf '%s\n' "$body" > release-body.md
           cat release-body.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-body
           path: release-body.md
@@ -140,18 +140,18 @@ jobs:
       contents: read
       id-token: write # npm provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       # Lands each target's binary at artifacts/<triple>/spoolway, which is where
       # build-npm.mjs looks for them.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -240,11 +240,11 @@ jobs:
     permissions:
       contents: write # creating the release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
 

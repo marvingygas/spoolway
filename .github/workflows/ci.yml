@@ -144,7 +144,7 @@ jobs:
     timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -252,7 +252,7 @@ jobs:
       # the comment there on why `/tmp/tmp.*` never matched anything.
       - name: keep the wreckage
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dress-rehearsal-scratch
           path: |
