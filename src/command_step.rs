@@ -432,9 +432,11 @@ impl Runs {
     /// Called once the exit code has been routed on. A task arriving at the
     /// step again starts clean anyway — see [`Runs::begin_visit`] — so this is
     /// not what keeps a revisit from routing on an old code. It matters for a
-    /// task that has left the step: [`crate::dispatch::Dispatcher`] rereads
-    /// the leftover code of a step the task is no longer on and reroutes the
-    /// task down that step's `on_fail`, on every pass, until it is gone.
+    /// task that has left a background step: [`crate::dispatch::Dispatcher`]
+    /// rereads the leftover code of a background step the task is no longer
+    /// on and reroutes the task down that step's `on_fail`, on every pass,
+    /// until it is gone. A foreground step's leftover code is cleared without
+    /// rerouting.
     ///
     /// That is why this answers with a result instead of swallowing one:
     /// forget has to have actually forgotten.

@@ -4841,17 +4841,22 @@ impl<'a> Dispatcher<'a> {
     ///
     /// A reroute is the one time this does touch that run: the task is being
     /// pulled off its current step, so the command on that step is stopped
-    /// and its run files forgotten before the task moves. Left alone, a
-    /// blocking command would run on after the task has gone, and this sweep
-    /// would later read its leftover non-zero code off a step the task is no
-    /// longer on, and pull the task back off its new step. Stopping before
-    /// the move is persisted is safe: if the write is dropped, the background step's exit code is
-    /// still on disk and pulls the task off again on the retry, so the
-    /// stopped command would have been abandoned anyway.
+    /// and its run files forgotten before the task moves. That stop matters
+    /// most when the destination is a reserved stage such as `blocked`, which
+    /// this sweep never visits: nothing else would stop the command, and it
+    /// would keep running for as long as the task sits there. Stopping before
+    /// the move is persisted is safe: if the write is dropped, the background step's exit
+    /// code is still on disk and pulls the task off again on the retry, so
+    /// the stopped command would have been abandoned anyway.
     ///
-    /// In practice this is the background ones — the step that started each
-    /// one has already walked away from it, so this is the only place left
-    /// that ever looks again. Two things can be found: a run that has
+    /// Only a background step's run is read for a timeout or an `on_fail`,
+    /// since the step that started it has already walked away from it and
+    /// this is the only place left that ever looks again. A run left behind
+    /// by a foreground step is stopped and forgotten without its exit being
+    /// read: the task moved on by some road that did not stop it, and the
+    /// step's `on_fail` no longer applies.
+    ///
+    /// Two things can be found in a background run: one that has
     /// outstayed its step's `timeout:`, stopped here because nothing else
     /// would; and a finished run whose step declared `on_fail`, which is
     /// routed on here because nowhere else asks. A step with no `on_fail`
@@ -4893,6 +4898,23 @@ impl<'a> Dispatcher<'a> {
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
+            // A foreground step's run belongs to the visit that started it.
+            // Once the task is anywhere else, the run is stopped and its files
+            // forgotten, and its exit is never routed on: `on_fail` of a
+            // foreground step only applies while the task sits on that step,
+            // and only a `background: true` step may pull the task off
+            // wherever it is. A manual `spoolway report` and the walk past a
+            // hidden `last:` step both move the stage without stopping the
+            // run, so without this a late non-zero exit would drag the task
+            // off a later step, even one an agent is mid-turn on.
+            if !step.background {
+                if let Some(pane) = runs.pane(key) {
+                    let _ = self.mux.close_pane(&pane);
+                    runs.forget_pane(key);
+                }
+                runs.stop(key);
+                continue;
+            }
             match runs.state(key) {
                 crate::command_step::RunState::Running => {
                     let limit = step.command_timeout();
@@ -19203,6 +19225,123 @@ mod tests {
                     && a.contains("moving to `blocked`")),
             "{:?}",
             report.actions
+        );
+    }
+
+    /// A foreground command's run can outlive its step when a person reports
+    /// past it by hand. Its late non-zero exit belongs to a step the task has
+    /// left, so it must not pull the task anywhere: only a `background: true`
+    /// step may route its task from wherever the task has got to.
+    #[test]
+    fn a_foreground_commands_late_failure_does_not_move_a_task_that_left_its_step() {
+        let (repo, _root_guard) = fixture("command-foreground-late-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let release = repo.root.join("release-fg");
+        let mut pipelines = pipelines_running(&format!("{}; exit 1", run_until(&release)), false);
+        let name = "default".to_string();
+        pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Running,
+            "the foreground command must still be running on its step"
+        );
+
+        // A person passes the step by hand: the stage moves, the run stays.
+        let mut task = reload(&path);
+        task.set_stage("review", None);
+
+        std::fs::write(&release, "go").unwrap();
+        for _ in 0..100 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
+
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        let keys = runs.keys_for_task(task.id());
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
+
+        assert!(
+            rerouted.is_none(),
+            "a foreground run's late exit must not reroute: {:?}",
+            report.actions
+        );
+        assert_eq!(task.stage(), "review");
+    }
+
+    /// A foreground command that is still running when its task leaves the
+    /// step is stopped, not just ignored: its process is killed, its run files
+    /// are forgotten and its pane is closed. Otherwise a long command would
+    /// run on after the task had gone, and could still exit non-zero later.
+    #[test]
+    fn a_foreground_run_still_going_when_its_task_leaves_is_stopped_and_its_pane_closed() {
+        let (repo, _root_guard) = fixture("command-foreground-left-running");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let release = repo.root.join("release-fg-running");
+        let pipelines = pipelines_running(&format!("{}; exit 1", run_until(&release)), false);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        let pane = runs.pane(&key).expect("the run must be in a pane");
+
+        // The stage moves while the run is still going, as a walk past a
+        // hidden `last:` step does.
+        let mut task = reload(&path);
+        task.set_stage("review", None);
+
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        let mut report = Report::default();
+        let keys = runs.keys_for_task(task.id());
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+            &keys,
+        );
+
+        assert!(rerouted.is_none(), "{:?}", report.actions);
+        assert_eq!(task.stage(), "review");
+        assert_ne!(
+            runs.state(&key),
+            crate::command_step::RunState::Running,
+            "the leftover run must be stopped"
+        );
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Fresh);
+        assert!(runs.pane(&key).is_none(), "the pane record must be gone");
+        assert!(
+            mux.did("close_pane")
+                .iter()
+                .any(|call| call == &format!("close_pane {pane}")),
+            "{:?}",
+            mux.calls()
         );
     }
 

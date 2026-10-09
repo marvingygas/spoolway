@@ -303,6 +303,9 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - A late background failure can move a task off a command step. That stops the step's running
   command and deletes its run files, including an exit code it already wrote. The next visit
   runs the command again.
+- A blocking command whose task leaves the step by another road, such as a `spoolway report`
+  typed by hand or a `last:` walk-past, is stopped on the dispatcher's next pass. Its run files
+  are deleted and its exit code never moves the task. Its pane closes.
 - The exit code stays on disk until the pass that read it has written the task's move to the
   destination step. A pass that cannot place that destination, for want of a free slot, leaves
   the task on the command step and routes on the same code next time, instead of running the
