@@ -1,0 +1,34 @@
+# Full reference: docs/pipelines.md
+
+description: >-
+  Review open Dependabot pull requests with an AI agent, merge the safe ones
+  behind the required checks, and queue a bugfix task for the ones that need
+  code changes.
+
+steps:
+  # A command step, so a run with nothing new to review ends here without
+  # starting an agent.
+  - id: check
+    description: Go on to the review only when a Dependabot pull request has not been reviewed at its current head.
+    run: scripts/dependabot-pending.sh
+    timeout: 5m
+    headless: true
+    on_pass: review
+    on_fail: done
+
+  - id: review
+    description: Give every open Dependabot pull request a verdict — merge, hold or fix — and queue a bugfix task for each fix.
+    agent: claude
+    prompt: dependency-reviewer
+    model: claude-opus-5-5
+    effort: high
+    on_pass: merge
+
+  # A command step, so Claude Code's auto mode never sees the merge, and so
+  # every approval is checked again by rules no review can talk its way past.
+  - id: merge
+    description: Re-check every approval, post each verdict as a comment, and turn on auto-merge for the approved pull requests.
+    run: scripts/dependabot-merge.sh
+    timeout: 15m
+    headless: true
+    on_pass: done
