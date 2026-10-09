@@ -438,6 +438,10 @@ pub(crate) fn policy(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step)
 /// craft is the line it runs, told to run again once this pass carries the
 /// task past it; an agent step's is the prompt it reads, pointed at rather
 /// than quoted, through the one command this file may name.
+///
+/// An agent step also gets the ready `--stage <step>` command that runs it
+/// again, for an unblocker that cleared only the cause; a command step gets
+/// none, since a plain pass already hands it back to itself.
 fn stands_in_for_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
     if step.id != crate::pipeline::BLOCKED {
         return String::new();
@@ -464,9 +468,21 @@ fn stands_in_for_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> Str
         .map(|d| format!("{d} "))
         .unwrap_or_default();
 
+    // A command step is handed back to itself by a plain pass (see
+    // `cleared_block_target`), so only an agent step needs the `--stage` line
+    // that sends the task back to it.
+    let send_back = match origin.run {
+        Some(_) => " ".to_string(),
+        None => format!(
+            " If you only cleared what stopped it, send it back to run again:\n\n    \
+             spoolway report --pass --stage {origin} -m \"<one line on what happened>\"\n\n",
+            origin = origin.id,
+        ),
+    };
+
     format!(
-        "`{task}` stopped at `{origin}`: {description}Your pass stands in for that step's \
-         work. {craft}",
+        "`{task}` stopped at `{origin}`: {description}A plain pass stands in for that step's \
+         work.{send_back}{craft}",
         task = task.id(),
         origin = origin.id,
     )
@@ -578,19 +594,21 @@ const BLOCK: Form = (
 
 const BLOCKED_PASS: Form = (
     "    spoolway report --pass  -m \"<one line on what happened>\"",
-    "  The way is clear. Your own work stands in for the step that got\n  \
-     stuck, so the task carries on from there.",
+    "  You did the stuck step's work yourself, and it came out right.\n  \
+     The task carries on past that step.",
 );
 
 const BLOCKED_PASS_STAGE: Form = (
     "    spoolway report --pass --stage <step> -m \"<one line on what happened>\"",
-    "  The same, except you name where the task goes next. Only a step\n  \
-     this task has already been through.",
+    "  You cleared what stopped the task, and checked it is gone, but\n  \
+     the stuck step's own work is not done. Name that step to run it\n  \
+     again, or any step this task has already been through.",
 );
 
 const BLOCKED_PAUSE: Form = (
     "    spoolway report --pause -m \"<what needs a person, and why>\"",
-    "  You could not clear it, and a person has to. Say plainly what they\n  \
+    "  The cause is still there, and only a person can clear it. Never\n  \
+     pause once the cause is gone. Say plainly what they\n  \
      need to do, and end with: then resume it on the board.",
 );
 
@@ -680,8 +698,10 @@ pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> 
     let forms = if blocked {
         let stage_explanation = match &stage_gate {
             Some(gate_step) => format!(
-                "  The same, except you name where the task goes next. Only a step\n  \
-                 this task has already been through, and never one past `{gate_step}`."
+                "  You cleared what stopped the task, and checked it is gone, but\n  \
+                 the stuck step's own work is not done. Name that step to run it\n  \
+                 again, or any step this task has already been through,\n  \
+                 and never one past `{gate_step}`."
             ),
             None => BLOCKED_PASS_STAGE.1.to_string(),
         };

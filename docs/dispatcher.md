@@ -543,12 +543,13 @@ names the pane in NEXT, and the task waits for `spoolway resume`. In an
 [unattended run](pipelines.md#unattended-runs) a lane starts on the `blocked` step instead, using
 the `[unattended]` `blocked_*` settings.
 
-A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when it
-cannot. A `--fail` or `--block` from it is read as `--pause`. A `--pass` carries the task past
-the blocked step to that step's `on_pass`, or back to itself for a command step. `--pass --stage
-<step>` sends it to `<step>` instead, bounded by the steps this task has already run. A
-`--pause`, `--fail` or `--block` puts the task on `paused`, and `spoolway resume` then hands it
-back to the step it blocked on.
+A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when the
+cause is still there and only a person can clear it. A `--fail` or `--block` from it is read as
+`--pause`. A `--pass` carries the task past the blocked step to that step's `on_pass`, or back to
+itself for a command step. `--pass --stage <step>` sends it to `<step>` instead, bounded by the
+steps this task has already run. A lane that cleared the cause but did not do the stuck step's
+work names that step, so the step runs again. A `--pause`, `--fail` or `--block` puts the task on
+`paused`, and `spoolway resume` then hands it back to the step it blocked on.
 
 A blocked task keeps its pane open until it is resumed.
 

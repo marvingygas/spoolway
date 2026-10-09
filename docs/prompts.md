@@ -82,7 +82,7 @@ Paragraphs sent only when they apply:
 | A command step failed into this one, and where its log is. | the previous step is a command step whose `on_fail` is here |
 | The task blocked and nobody is coming. Clear the obstacle. | the lane runs in an [unattended run](pipelines.md#unattended-runs) |
 | `spoolway queue list`, `spoolway queue show`, `spoolway lane`, `spoolway prompt show <name>` and `spoolway resume`. | the step is `blocked` |
-| Which step this pass stands in for, that step's own `description:` when it has one, and where to read its craft: `spoolway prompt show <name>` for an agent step, the command line itself for a command step. | the step is `blocked`, rendered against a real task whose `blocked_from` names a step this pipeline still has |
+| Which step this pass stands in for, that step's own `description:` when it has one, and where to read its craft: `spoolway prompt show <name>` for an agent step, the command line itself for a command step. For an agent step, also the ready `spoolway report --pass --stage <step>` command that runs that step again, for a lane that only cleared the cause. A command step gets no such command, because a plain pass already runs it again. | the step is `blocked`, rendered against a real task whose `blocked_from` names a step this pipeline still has |
 
 `WHAT YOU HAVE` lists the lane's diff command, log command, scratch path, and what its branch
 sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to: `Status Log`,
