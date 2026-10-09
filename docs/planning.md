@@ -62,6 +62,9 @@ Every page has three sections in this order: Context, Decisions and Mockup. Cont
 the one sentence a person can approve or reject, then two or three sentences on what is true
 today. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
 
+The page rail shows the plan name. A small copy icon sits right after it. Clicking the icon
+copies the name to the clipboard, and the icon shows a check mark for about 1.5 seconds.
+
 The page also carries a machine copy of its own words, in a `<script type="text/markdown"
 id="plan">` block at the foot of the page that a browser never shows. `/spoolway-plan` writes
 that block; `/spoolway-tasks` reads it instead of the page around it.
