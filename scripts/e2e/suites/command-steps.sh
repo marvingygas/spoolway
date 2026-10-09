@@ -535,7 +535,7 @@ must "a task with a background step" "$SPOOLWAY" queue add --from "$LIVE/quick.m
 # itself: that a pid was recorded at all is half of what this case is about.
 BENCH_PID=""
 if poll_until 300 test -s "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid"; then
-  BENCH_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid")
+  BENCH_PID=$(head -n1 "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid")
 fi
 
 if [ -n "$BENCH_PID" ]; then ok "the background command really was started"
@@ -707,7 +707,7 @@ must "a task with a headless step, dispatched with no setsid on PATH" \
 # taking `commands/` and this pid file with it.
 NOSETSID_PID=""
 if poll_until 60 test -s "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid"; then
-  NOSETSID_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid")
+  NOSETSID_PID=$(head -n1 "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid")
 fi
 
 if [ -n "$NOSETSID_PID" ]; then
