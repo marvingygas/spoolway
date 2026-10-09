@@ -263,8 +263,17 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // behaved before this task.
     let watch = crate::screen::open_dir_watch(&repo.commands_dir());
 
+    // The config this run is using. Starts as the one `main` loaded and is
+    // replaced at the top of every pass by whatever `config.toml` and the
+    // config override say then — see `reload_config`.
+    let mut live = repo.clone();
+    // The parse error the last reload reported, so a config that stays broken
+    // is announced on the pass that found it and not on every pass after.
+    let mut reload_error: Option<String> = None;
+
     loop {
-        let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
+        reload_config(&mut live, &mut reload_error);
+        let mut dispatcher = crate::dispatch::Dispatcher::new(&live, pipelines, mux.as_ref());
 
         let mut spent_out = None;
         // Whether this pass moved a task and so has more ready to try at
@@ -321,7 +330,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
         if let Some(ceiling) = spent_out {
-            stop(repo, pipelines, mux.as_ref())?;
+            stop(&live, pipelines, mux.as_ref())?;
             // The screen shows stderr as the reason its dispatcher stopped,
             // and prints nothing of stdout at all.
             if args.screen {
@@ -341,7 +350,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Asked for while the last pass was running. Unwound here rather than
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
-            stop(repo, pipelines, mux.as_ref())?;
+            stop(&live, pipelines, mux.as_ref())?;
             println!("  stopped.");
             return Ok(0);
         }
@@ -351,7 +360,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // Not for a run the screen started — see the same carve-out
                 // on the queue read before the loop.
                 if crate::jobs::enabled_count(repo) == 0 && !args.screen {
-                    stop(repo, pipelines, mux.as_ref())?;
+                    stop(&live, pipelines, mux.as_ref())?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
                 }
@@ -402,6 +411,46 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             let ready = crate::screen::poll_ready(&[watch.fd()], left);
             if ready[0] && watch.drain() {
                 break;
+            }
+        }
+    }
+}
+
+/// Re-read `config.toml` and the config override into `live`, so an edit such
+/// as a raised `agents.claude.concurrency` governs the next pass without a
+/// restart. This is the same load `spoolway config get` does, which is why the
+/// two agree.
+///
+/// A config that does not parse leaves `live` on the last good one: a typo
+/// typed mid-run must not stop the dispatcher or send it back to defaults.
+/// The error is printed when it first appears, or when it changes, and a
+/// successful reload clears it so the same breakage later is announced again.
+///
+/// Pipelines are not reloaded here. They follow the rule for pipeline files:
+/// the dispatcher keeps what it loaded at start. See `crate::pipeline_snapshot`.
+///
+/// Three groups of keys are fixed at start even though `config get` shows
+/// their new value at once: `unattended.blocked_agent`, `blocked_model`,
+/// `blocked_prompt`, `blocked_effort` and `blocked_session` are baked into
+/// the pipelines when they load; `unattended.enabled` is settled once into
+/// the lock; `dispatch.backend` picks the multiplexer once. A change to any
+/// of them needs a restart.
+fn reload_config(live: &mut Repo, reported: &mut Option<String>) {
+    match crate::config::Config::load(&live.root) {
+        Ok(config) => {
+            live.config = config;
+            *reported = None;
+        }
+        Err(err) => {
+            let message = format!("{err:#}");
+            if reported.as_deref() != Some(message.as_str()) {
+                let problem = format!(
+                    "config did not reload, still running on the last good one: {message} \
+                     (fix the file; the next pass picks it up)"
+                );
+                crate::problem_log::append(live, &problem);
+                println!("  ! {problem}");
+                *reported = Some(message);
             }
         }
     }

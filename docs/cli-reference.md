@@ -824,7 +824,7 @@ $ spoolway pipeline override impl --set implement.model=claude-opus-5
   wrote ~/.spoolway/spoolway/overrides/pipelines/impl.yml
     implement.model   claude-sonnet-5 -> claude-opus-5
 
-  active on the next dispatcher pass. `spoolway override drop impl` to clear it.
+  a running dispatcher uses it once restarted, as with an edit to the pipeline file. `spoolway override drop impl` to clear it.
 ```
 
 | Flag | Default | What it does |

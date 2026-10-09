@@ -302,7 +302,10 @@ else
   tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
 must "two slots again" "$SPOOLWAY" config set agents.pi.concurrency 2
-dispatcher_restart   # a running one is still holding the config it started with
+# The next pass reads the two slots on its own; the restart is so that no
+# pass already under way on one slot is still running when the drives below
+# start counting.
+dispatcher_restart
 # Those two `config set`s edited `.spoolway/config.toml` in the base checkout.
 # Nothing merges into it any more, but a task cut from it afterwards would
 # inherit an uncommitted change nobody put in its diff — so the suite that made

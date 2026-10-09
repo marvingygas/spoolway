@@ -1147,7 +1147,7 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
 
     // Refused by the exact rule the merge itself applies at load — see
     // `apply_step_patch` — so nothing it refuses can be accepted here and
-    // then rejected, silently, on the very next dispatcher pass. The
+    // then rejected, silently, the next time the pipelines are loaded. The
     // `session` check below is the one extra rule.
     let mut fields = serde_norway::Mapping::new();
     fields.insert(serde_norway::Value::String(key.to_string()), value.clone());
@@ -1205,7 +1205,8 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
         );
     } else {
         println!(
-            "  active on the next dispatcher pass. `spoolway override drop {name}` to clear it."
+            "  a running dispatcher uses it once restarted, as with an edit to the pipeline file. \
+             `spoolway override drop {name}` to clear it."
         );
     }
     Ok(())
@@ -4447,7 +4448,7 @@ mod tests {
     /// ignored for the life of the layer. It is the probe above that catches
     /// it — the same `apply_step_patch` the loader runs — which is what keeps
     /// the promise that nothing accepted here is rejected, or silently
-    /// dropped, on the next dispatcher pass.
+    /// dropped, the next time the pipelines are loaded.
     #[test]
     fn pipeline_override_refuses_the_retired_on_loop_max_key() {
         with_repo_and_pipeline("retired-key", "demo", DEMO_PIPELINE, |repo| {

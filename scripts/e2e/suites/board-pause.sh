@@ -576,7 +576,8 @@ has "and so does the dependent's" "id: chain-tail" \
 # The reach this task adds: the unblocker can be mid-turn on a `blocked` row
 # exactly as an implementer can be mid-turn on `implement`, once the run is
 # unattended, and `p` interrupts that turn the same way. This needs a
-# restart — config is read once at launch, not on every pass — so this task
+# restart — `unattended.enabled` is fixed in the lock at launch and
+# `blocked_agent` is baked into the pipelines when they load — so this task
 # is queued straight into the live queue directory, on `blocked` already,
 # with `blocked_from` set the way a real block leaves it; `routines.sh` and
 # `trials.sh` write straight into the live queue directory with `task_doc`

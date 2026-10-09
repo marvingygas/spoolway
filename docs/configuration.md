@@ -189,6 +189,19 @@ skipped override changes what lanes run. The before-start overrides popup (see [
 dispatch`](cli-reference.md#spoolway-dispatch)) draws the same entry's row as `ignored —
 <reason>` in place of its keys, with every other row unchanged.
 
+### When an override takes effect
+
+| Override | When a running dispatcher uses it |
+|---|---|
+| `config.toml` | On the next pass, with no restart. |
+| `prompts/<name>/PROMPT.md` | When a lane starts. |
+| `pipelines/<name>.yml` | After the dispatcher restarts, the same as an edit to a pipeline file. |
+
+The same rule holds for the tracked `.spoolway/config.toml`. `spoolway config get` shows a new
+value at once. The running dispatcher keeps the old value of `dispatch.backend`,
+`unattended.enabled` and the `unattended.blocked_*` keys until you restart it. See [Editing a
+pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).

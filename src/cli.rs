@@ -1682,9 +1682,11 @@ pub enum ConfigCommand {
 
 /// Manage the patch layer under `~/.spoolway/<project>/overrides/` — created
 /// by `pipeline override`, `prompt override` and `config override`, one
-/// entry per pipeline, prompt or config patched, and read live at every
-/// dispatcher pass, `pipeline show` and lane start alongside the tracked
-/// files. Nothing here touches the checkout, so `git status` never moves.
+/// entry per pipeline, prompt or config patched, and read alongside the
+/// tracked files: config at every dispatcher pass, prompts at lane start,
+/// pipeline patches by `pipeline show` at once but by a running dispatcher
+/// only after a restart. Nothing here touches the checkout, so `git status`
+/// never moves.
 #[derive(Debug, Subcommand)]
 pub enum OverrideCommand {
     /// Print the merge rule, what a patch may carry, and the four `override`

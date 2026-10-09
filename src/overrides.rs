@@ -354,8 +354,8 @@ pub(crate) fn apply_pipeline_patch(
 /// `on_loop_max:`, retired, which the round-trip would otherwise swallow
 /// without a word: the field is `skip_serializing`, so the step that comes
 /// back out has lost it — a key accepted here, written into
-/// `overrides/pipelines/<name>.yml`, and then silently doing nothing on every
-/// dispatcher pass after. `pipeline::refuse_retired_step_keys` is the
+/// `overrides/pipelines/<name>.yml`, and then silently doing nothing every
+/// time the pipelines are loaded after. `pipeline::refuse_retired_step_keys` is the
 /// same refusal for a tracked file, where the key survives long enough to be
 /// named; here it has to be caught before serde sees it. The third is
 /// `description:` on `blocked`: that step's description is fixed, and a
@@ -1286,8 +1286,8 @@ mod tests {
     /// way a tracked file naming it is — here rather than by the round-trip,
     /// which drops the `skip_serializing` field without a word. Left to
     /// serde, `spoolway pipeline override <name> --set review.on_loop_max=…`
-    /// would be accepted, written into the patch file, and then do nothing on
-    /// every dispatcher pass after, with `override promote` later dead-ending
+    /// would be accepted, written into the patch file, and then do nothing every
+    /// time the pipelines are loaded after, with `override promote` later dead-ending
     /// on a key the tracked step does not have.
     ///
     /// `apply_step_patch` is both halves of that at once: the merge the
