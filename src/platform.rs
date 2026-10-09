@@ -770,10 +770,21 @@ pub fn remove_test_env(key: &str) {
 /// it would mean any test setting one of these three while a neighbour's own
 /// `report()` call is mid-flight hands that neighbour a value it never asked
 /// for — the same class of failure [`test_home`] exists to close for `$HOME`.
+///
+/// A test build also reads those three as unset unless the thread set them
+/// itself. `cargo test` runs inside a lane's own worktree, where the real
+/// dispatcher exported them for *that* lane, so a fixture calling `report()`
+/// with no worktree of its own fell back on the lane's real one and committed
+/// its work as `wip(demo): release`.
 pub fn env_var(key: &str) -> Result<String, std::env::VarError> {
     #[cfg(test)]
-    if let Some(value) = test_env::current(key) {
-        return Ok(value);
+    {
+        if let Some(value) = test_env::current(key) {
+            return Ok(value);
+        }
+        if test_env::LANE_VARS.contains(&key) {
+            return Err(std::env::VarError::NotPresent);
+        }
     }
     std::env::var(key)
 }
@@ -788,6 +799,14 @@ pub fn env_var(key: &str) -> Result<String, std::env::VarError> {
 pub(crate) mod test_env {
     use std::cell::RefCell;
     use std::collections::HashMap;
+
+    /// The variables a dispatcher exports into a lane, which [`super::env_var`]
+    /// never reads from the real environment in a test build.
+    pub(crate) const LANE_VARS: [&str; 3] = [
+        crate::commands::TASK_ENV,
+        "SPOOLWAY_WORKTREE",
+        "SPOOLWAY_HEAD",
+    ];
 
     thread_local! {
         /// This thread's own overrides, empty everywhere outside a
