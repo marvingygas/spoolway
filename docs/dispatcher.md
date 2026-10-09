@@ -646,6 +646,11 @@ mode](concepts.md#home-mode). If somebody already has the task's branch checked 
 borrows that checkout and cleanup leaves it alone. See
 [Whose worktree](pipelines.md#whose-worktree).
 
+If you delete a task's worktree folder by hand, the dispatcher runs `git worktree prune` before the
+task's next start and cuts the worktree again. The task is not marked `borrowed`. If the prune
+fails, the start fails with a message that says to run `git worktree prune` in the repository and
+resume the task.
+
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
 When a task reaches `done`:

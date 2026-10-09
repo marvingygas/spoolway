@@ -5406,6 +5406,25 @@ fn ensure_workspace(
     if let Some(recorded) = task.front.worktree_path.clone()
         && !recorded.is_dir()
     {
+        // Git keeps its entry for a folder removed by hand until it is
+        // pruned, and `worktree_for` below would answer with that entry: the
+        // task would "borrow" a folder that is not there and be marked
+        // `borrowed`, so it would fail to start and cleanup would leave its
+        // branch behind. Pruning forgets only entries whose folder is gone,
+        // so a checkout a person really lent is untouched.
+        //
+        // This runs before the recorded fields are cleared. A failed prune is
+        // an error, and the task may be persisted on the way out of a failed
+        // start; had the path been cleared by then, the next attempt would
+        // skip this block and borrow the stale entry. Leaving the missing
+        // path recorded makes every retry prune again.
+        repo.git(&["worktree", "prune"]).with_context(|| {
+            format!(
+                "{}: its worktree folder {} is gone, and git could not forget the entry it kept for it; run `git worktree prune` in the repository, then resume the task",
+                task.id(),
+                recorded.display()
+            )
+        })?;
         task.front.worktree_path = None;
         task.front.workspace_id = None;
         task.front.pane_id = None;
@@ -16668,6 +16687,49 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A person can delete a task's worktree folder by hand without running
+    /// `git worktree prune`, which leaves git listing the folder as a stale
+    /// entry for the task's branch. That entry is not a checkout somebody lent
+    /// to the task: the worktree is cut again and the task is not borrowed.
+    #[test]
+    fn a_worktree_deleted_by_hand_is_cut_again_rather_than_borrowed() {
+        let (repo, _root_guard) = fixture("worktree-deleted-by-hand");
+        let worktree = crate::scratch::root("dispatch-deleted-by-hand-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.borrowed = false;
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.tab_id = Some("w1:t1".into());
+        }));
+
+        // Gone from disk, but git still lists it as a prunable entry.
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(
+            !task.front.borrowed,
+            "a stale entry git kept for a deleted folder is not a lent checkout"
+        );
+        assert!(
+            !mux.did("create_workspace").is_empty(),
+            "the worktree is cut again, not reused"
+        );
     }
 
     /// A multiplexer that restarted while the worktree survived — the whole
