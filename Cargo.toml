@@ -20,7 +20,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # (RUSTSEC-2024-0320). API-identical at 0.9; the swap is the import name.
 serde_norway = "0.9"
 terminal_size = "0.4.4"
-toml = "0.8"
+toml = "1.1"
 toml_edit = "0.22"
 # WHATWG-URL parsing, for validating the `url=` a tracker hook answers on the
 # `open` event — see `queue::is_absolute_http_url`. A hand-rolled authority
