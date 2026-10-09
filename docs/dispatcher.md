@@ -649,7 +649,18 @@ borrows that checkout and cleanup leaves it alone. See
 If you delete a task's worktree folder by hand, the dispatcher runs `git worktree prune` before the
 task's next start and cuts the worktree again. The task is not marked `borrowed`. If the prune
 fails, the start fails with a message that says to run `git worktree prune` in the repository and
-resume the task.
+resume the task. The new worktree uses the task's own branch, and `base_commit` keeps the value it
+had.
+
+A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
+the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
+The message names the branch. The branch is either left over from an earlier task with the same
+id, or it holds this task's own work saved by `spoolway queue unqueue --force`. Choose one:
+
+| Goal | Steps |
+|---|---|
+| Keep the branch | Run `git branch -m task/<id> <name>`. Set `starts_from: <name>` in the task. Resume the task. |
+| Drop the branch | Run `git branch -D task/<id>`. Resume the task. |
 
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 

@@ -342,8 +342,15 @@ spoolway resume cart-totals
 It prints `cart-totals: -> queued`. A pass that still finds no start branch pauses it again.
 
 Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolway queue unqueue
---force` removes that value, so a task sent again is cut afresh. A `starts_from:` you set before
-the cut stays.
+--force` removes that value, so a task sent again is cut again from its start branch. A
+`starts_from:` you set before the cut stays.
+
+`unqueue --force` keeps the task's branch when it has commits no remote has. A task sent again
+with that branch in place is refused and moves to `blocked`, because its first cut never uses a
+branch that already exists. Rename the branch with `git branch -m task/<id> <name>` and set
+`starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop it. Then resume
+the task. See [Where work happens on
+disk](dispatcher.md#where-work-happens-on-disk).
 
 ### The stop is yours to work in
 

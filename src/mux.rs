@@ -2389,7 +2389,9 @@ pub(crate) fn branch_slug(branch: &str) -> String {
 ///
 /// A branch left behind by an earlier run is reused rather than fought with:
 /// `-b` on a branch that already exists fails outright, and the task it belongs
-/// to would never start again.
+/// to would never start again. Only a re-cut should get here with a branch
+/// already in place: `ensure_workspace` refuses a task's first cut onto a
+/// branch that task did not make.
 ///
 /// The task id is safe to join onto the root, and [`crate::config::check_id`]
 /// is what makes it so — at `queue add` and again whenever a task file is read,

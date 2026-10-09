@@ -5394,6 +5394,14 @@ fn ensure_workspace(
     task: &mut Task,
     file_seen: &mut HashMap<String, u64>,
 ) -> Result<(PathBuf, Option<String>)> {
+    // Whether anything has set up a checkout for this task before, cut or
+    // borrowed. Read ahead of the block below that clears `worktree_path`,
+    // because a re-cut has to be told apart from a first cut once that field
+    // is gone.
+    let cut_before = task.front.worktree_path.is_some()
+        || task.front.run.is_some()
+        || task.front.base_commit.is_some();
+
     // Where a task's lane sits — its worktree, workspace and panes — is a fact
     // about one machine, and the only part of a task file that is. A task file
     // that arrives from somewhere else carries a path that does not exist here,
@@ -5569,6 +5577,34 @@ fn ensure_workspace(
                 // re-cut after a worktree deleted by hand reads back too —
                 // the branch it was first cut from.
                 let starts_from = start_branch(repo, task, &base)?;
+                // A task's first cut never adopts a branch it did not make.
+                // `cut_worktree` reuses any existing branch, which is right
+                // for re-cutting this task's own deleted worktree and wrong
+                // here: an earlier task with the same id (its id freed by
+                // archive retention, its branch kept) leaves `task/<id>`
+                // behind, and reusing it runs the new task on old commits
+                // while the task file below claims it started from
+                // `starts_from`. `cut_before` says whether this task has a
+                // checkout on record, so a re-cut still reuses its own branch.
+                let branch_exists = repo
+                    .git(&["rev-parse", "--verify", "--quiet", &branch])
+                    .is_ok();
+                if branch_exists && !cut_before {
+                    anyhow::bail!(
+                        "{}: the branch `{branch}` already exists and this task has no checkout on record. \
+                         It is either left over from an earlier task with the same id, or it holds this task's own saved work from before an unqueue. \
+                         To keep it, rename it with `git branch -m {branch} <name>` and set `starts_from: <name>` in the task. \
+                         To drop it, run `git branch -D {branch}`. Then resume the task",
+                        task.id()
+                    );
+                }
+                // Only a cut that creates the branch has a commit to pin. A
+                // re-cut that reuses this task's own branch checks out the
+                // branch's tip, which may be far from where `starts_from` has
+                // moved to since, so resolving `starts_from` again would name
+                // a commit the branch does not contain. The pin already on
+                // record stays.
+                //
                 // Resolved just before the cut, so it names the exact commit
                 // the new branch's history starts from — the one thing a
                 // replay of this task can pin to once `starts_from` itself has
@@ -5581,13 +5617,16 @@ fn ensure_workspace(
                 // pushed — so the same local-else-origin resolution the cut
                 // itself uses runs first, or this pins nothing at all
                 // (review finding 2).
-                let base_commit = repo
-                    .git(&[
+                let base_commit = if branch_exists {
+                    task.front.base_commit.clone()
+                } else {
+                    repo.git(&[
                         "rev-parse",
                         &crate::mux::resolve_cut_base(&repo.root, &starts_from),
                     ])
                     .ok()
-                    .map(|c| c.trim().to_string());
+                    .map(|c| c.trim().to_string())
+                };
                 let workspace = mux.create_workspace(
                     &repo.root,
                     &branch,
@@ -16732,6 +16771,47 @@ mod tests {
         );
     }
 
+    /// A re-cut that reuses the task's own branch checks out that branch's
+    /// tip, not the head of `starts_from`, which may have moved on. The
+    /// commit recorded at the first cut stays, so `base_commit` never names a
+    /// commit the branch does not contain.
+    #[test]
+    fn a_recut_onto_the_tasks_own_branch_keeps_the_recorded_base_commit() {
+        let (repo, _root_guard) = fixture("recut-keeps-base-commit");
+        let worktree = crate::scratch::root("dispatch-recut-keeps-base-commit-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.branch = Some("task/demo".into());
+            f.base = Some("work".into());
+            f.starts_from = Some("work".into());
+            f.base_commit = Some("0123456789abcdef".into());
+            f.borrowed = false;
+            f.worktree_path = Some(worktree.to_path_buf());
+        }));
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(
+            !mux.did("create_workspace").is_empty(),
+            "the worktree is cut again"
+        );
+        assert_eq!(
+            task.front.base_commit.as_deref(),
+            Some("0123456789abcdef"),
+            "the branch was reused, so the commit it was first cut from is kept"
+        );
+    }
+
     /// A multiplexer that restarted while the worktree survived — the whole
     /// point of this task. The directory is still there, so the existing
     /// missing-directory check never fires; only the recorded workspace is
@@ -17023,6 +17103,78 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A task's first cut never lands on a branch the task did not create.
+    /// A branch named `task/<id>` can be left over from an earlier task that
+    /// had the same id, and the new task must not run on its old commits while
+    /// its file claims it started from its base. Either the cut is refused, or
+    /// the worktree is made from the base's current head and `base_commit`
+    /// names exactly that commit.
+    #[test]
+    fn a_new_task_never_runs_on_a_leftover_branch_of_an_earlier_task_with_its_id() {
+        let (repo, _root_guard) = fixture("leftover-branch-first-cut");
+        let worktree = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug("task/demo"));
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        // The earlier task's branch, left behind at the base's old head.
+        repo.git(&["branch", "task/demo", "work"]).unwrap();
+        // The base moves on.
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        std::fs::write(repo.root.join("b.txt"), "newer than the leftover\n").unwrap();
+        crate::repo::run(&repo.root, "git", &["add", "b.txt"]).unwrap();
+        repo.git(&["commit", "-q", "-m", "base moves on"]).unwrap();
+
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |_| {}));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        if ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).is_ok() {
+            let head = |dir: &Path| {
+                crate::repo::run(dir, "git", &["rev-parse", "HEAD"])
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            };
+            let cut_from = head(task.front.worktree_path.as_deref().unwrap());
+            assert_eq!(
+                task.front.base_commit.as_deref(),
+                Some(cut_from.as_str()),
+                "`base_commit` is the commit the worktree was really cut from"
+            );
+            assert_eq!(
+                cut_from,
+                head(&repo.root),
+                "the worktree starts from the base's current head, not the leftover branch"
+            );
+            assert!(worktree.join("b.txt").exists());
+        }
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// The refusal itself: a leftover `task/<id>` stops the first cut, names
+    /// the branch, cuts nothing, and persists nothing that would make the
+    /// next pass look like a re-cut and adopt the branch.
+    #[test]
+    fn a_first_cut_onto_an_existing_branch_is_refused_and_stays_refused() {
+        let (repo, _root_guard) = fixture("first-cut-refused");
+        repo.git(&["branch", "task/demo", "work"]).unwrap();
+        let mut task = reload(&add_task_with(&repo, "demo", "implement", |_| {}));
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+
+        for _ in 0..2 {
+            let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
+                .expect_err("a branch the task did not create is not adopted");
+            assert!(
+                format!("{err:#}").contains("task/demo"),
+                "the message names the branch; got: {err:#}"
+            );
+            assert!(mux.did("create_workspace").is_empty(), "nothing is cut");
+            assert!(task.front.run.is_none() && task.front.base_commit.is_none());
+            assert!(task.front.worktree_path.is_none());
+        }
     }
 
     /// The cut reads a dependency's branch from that task, not by formatting
