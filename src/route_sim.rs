@@ -692,6 +692,56 @@ mod tests {
     /// budget below is watching.
     const GENERATED_SHAPES: usize = 150;
 
+    /// The shipped `default` pipeline, for a task whose trial `skip:` hides
+    /// `implement`, the only step on the review loop that carries a `loop:`.
+    /// A review that keeps failing walks past `implement` and lands on
+    /// `review` again, and must still stop at `implement`'s bound rather than
+    /// lap for ever. The walk above routes tasks with an empty `skip:`, so it
+    /// never sees a hidden step; this is the case that does.
+    #[test]
+    fn a_review_loop_bounded_only_on_a_skipped_step_still_stops() {
+        let shipped = Pipelines::shipped(&crate::config::Config::default())
+            .expect("assets/pipelines/*.yml must parse and validate");
+        let pipeline = shipped.pipelines.get("default").expect("default ships");
+        let limit = pipeline
+            .step("implement")
+            .and_then(|step| step.arrival_limit())
+            .expect("implement carries the loop this case relies on");
+
+        for unattended in [false, true] {
+            let mut task = fresh_task("review");
+            task.front.skip = vec!["implement".into()];
+            let mut hops = 0;
+            while task.stage() != crate::pipeline::BLOCKED {
+                hops += 1;
+                assert!(
+                    hops <= limit + 2,
+                    "review failed {hops} times past a skipped `implement` and was never \
+                     stopped (unattended: {unattended}): {:?}",
+                    task.front.arrivals
+                );
+                let current = task.stage().to_string();
+                let routed = route(
+                    &mut task,
+                    pipeline,
+                    &current,
+                    Outcome::Fail,
+                    unattended,
+                    None,
+                    0,
+                )
+                .expect("route accepts a failed review");
+                task.set_stage(&routed.destination, None);
+                // Unattended with `blocked` unstaffed, the bound is skipped by
+                // design (see `apply_loop_budget`); only the attended run owes
+                // a stop.
+                if unattended && !pipeline.blocked_is_staffed(unattended) {
+                    break;
+                }
+            }
+        }
+    }
+
     /// Every outcome at every step, over every pipeline this project ships
     /// and a few hundred generated shapes, asserting the four properties a
     /// routing bug breaks: every path reaches a terminal step within

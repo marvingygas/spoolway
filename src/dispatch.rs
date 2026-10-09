@@ -594,6 +594,12 @@ struct Candidate {
     /// where a move is one line. Rebuilt every pass and never saved, so a
     /// launch that fails and retries cannot leave a stale note behind.
     walked_past: Option<String>,
+    /// The steps this move passed that carry a `loop:`, whose arrival is
+    /// counted when the stage is written, with the walk note. Counting at
+    /// route time instead would persist the count while the old stage and
+    /// exit code stay on disk if the launch is refused, and the next pass
+    /// would route and count again.
+    to_bank: Vec<String>,
 }
 
 impl Candidate {
@@ -827,9 +833,10 @@ pub(crate) fn with_walk_note(carried: Option<&str>, note: Option<String>) -> Opt
 ///
 /// A move that wrote the hidden step as the task's stage would leave the task
 /// file naming a step that never runs, until the dispatcher's own
-/// [`fall_through`] moved it on at its next tick; and the hidden step would
-/// spend a `loop:` arrival it never used. So every move that writes a stage
-/// from a route resolves its destination through here first.
+/// [`fall_through`] moved it on at its next tick. So every move that writes a
+/// stage from a route resolves its destination through here first. A passed
+/// step that carries a `loop:` is still counted, once the move is written:
+/// see [`crate::commands::walked_past_budgets`].
 ///
 /// A name that is not a step (`blocked`, `paused`, `done`, `queued`) lands as
 /// it is. A hidden step with no `on_pass` is where the task lands, as it is
@@ -1527,12 +1534,21 @@ impl<'a> Dispatcher<'a> {
                     // follows `on_pass` to the first step it runs, so the
                     // task is never written onto the hidden one — see
                     // [`land_past_hidden`]. Its `loop:` below is then the
-                    // landing step's, and the hidden step spends none.
-                    let landing = land_past_hidden(
+                    // landing step's; a hidden step's own `loop:` is spent
+                    // by [`crate::commands::walked_past_budgets`], counted when the stage is
+                    // written.
+                    let mut landing = land_past_hidden(
                         &pipeline,
                         &tasks[index],
                         destination,
                         same_group_dependents(self.repo, tasks, graph, &tasks[index]),
+                    );
+                    let to_bank = crate::commands::walked_past_budgets(
+                        &pipeline,
+                        &mut tasks[index],
+                        &mut landing,
+                        &step.id,
+                        self.unattended,
                     );
                     let walked_past = landing.note();
                     let destination = landing.destination;
@@ -1631,6 +1647,7 @@ impl<'a> Dispatcher<'a> {
                                 pipeline: pipeline.name.clone(),
                                 command_forget,
                                 walked_past,
+                                to_bank,
                             });
                         }
                         false => {
@@ -1641,6 +1658,9 @@ impl<'a> Dispatcher<'a> {
                                 true => pause_note.map(str::to_string),
                                 false => with_walk_note(pause_note, walked_past),
                             };
+                            if destination != crate::pipeline::PAUSED {
+                                crate::commands::bank_walked_past(&mut tasks[index], &to_bank);
+                            }
                             tasks[index].set_stage(&destination, message.as_deref());
                             // `persist` answers `false` when something —
                             // a `spoolway report`, a `p`/`r`/`u` on the
@@ -1860,6 +1880,7 @@ impl<'a> Dispatcher<'a> {
                                 pipeline: pipeline.name.clone(),
                                 command_forget: None,
                                 walked_past: None,
+                                to_bank: Vec::new(),
                             })
                         }
                     }
@@ -2056,6 +2077,7 @@ impl<'a> Dispatcher<'a> {
                             pipeline: pipeline.name.clone(),
                             command_forget: None,
                             walked_past,
+                            to_bank: Vec::new(),
                         });
                     }
                     _ => {
@@ -4165,6 +4187,7 @@ impl<'a> Dispatcher<'a> {
                         &mut self.file_seen,
                         &pending[i].boot,
                         pending[i].candidate.walked_past.as_deref(),
+                        &pending[i].candidate.to_bank,
                     )?;
                     pending[i].persisted = Some(persisted);
                     ready.push(i);
@@ -5800,10 +5823,13 @@ fn finish_launch_bookkeeping(
     file_seen: &mut HashMap<String, u64>,
     boot: &Boot,
     walked_past: Option<&str>,
+    to_bank: &[String],
 ) -> Result<bool> {
     // Only record a transition when this is genuinely a new step. A retry of
-    // the same step arrived by the route that is already recorded.
+    // the same step arrived by the route that is already recorded, and its
+    // walked-past arrivals were counted with it.
     if task.stage() != step.id {
+        crate::commands::bank_walked_past(task, to_bank);
         task.set_stage(&step.id, walked_past);
     }
     // Spent, whether or not a session was found to continue: a resume that
@@ -8891,6 +8917,103 @@ mod tests {
             log.contains("`b` may not send this to `a` a 3rd time — `a` has `loop: 2`"),
             "{log}"
         );
+    }
+
+    /// A cycle whose only `loop:` sits on a step the task walks past still
+    /// stops at that bound: the task ends on `blocked` rather than going round
+    /// it forever. Here `a` is
+    /// the only step with a `loop:`, the task's own `skip:` names it, and `b`
+    /// always fails back to it.
+    #[test]
+    fn a_cycle_bounded_only_on_a_skipped_step_still_stops() {
+        let (repo, _root_guard) = fixture("loop-bound-walk-past");
+        let yaml = "steps:\n  \
+             - id: a\n    run: true\n    loop: 2\n    on_pass: b\n  \
+             - id: b\n    run: \"false\"\n    on_pass: done\n    on_fail: a\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml)
+            .expect("a cycle bounded only on a skippable step is a valid pipeline");
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        let path = add_task_with_worktree(&repo, "demo", "b");
+        let mut task = reload(&path);
+        task.front.skip = vec!["a".into()];
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        let started = std::time::Instant::now();
+        while reload(&path).stage() != crate::pipeline::BLOCKED
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            run_pass_with(&repo, &mux, &pipelines);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::BLOCKED,
+            "the task kept lapping a cycle bounded only on a skipped step: {:?}",
+            task.front.arrivals
+        );
+    }
+
+    /// A walked-past `loop:` arrival is counted when the lane actually starts,
+    /// not each time the route is read. `b` fails into `a`, which the task
+    /// skips, and lands on the agent step `c`; while `c`'s pane is busy the
+    /// command's exit code stays on disk and is routed again every pass, so
+    /// counting at route time would spend `a`'s `loop: 2` on one failure.
+    #[test]
+    fn a_walked_past_arrival_is_counted_once_the_lane_starts() {
+        let (repo, _root_guard) = fixture("loop-bound-deferred-start");
+        let yaml = "steps:\n  \
+             - id: a\n    run: true\n    loop: 2\n    on_pass: c\n  \
+             - id: b\n    run: \"false\"\n    on_pass: done\n    on_fail: a\n  \
+             - id: c\n    agent: pi\n    prompt: implementer\n    model: test-model\n    \
+             on_pass: done\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        let path = add_task_with_worktree(&repo, "demo", "b");
+        let mut task = reload(&path);
+        task.front.skip = vec!["a".into()];
+        task.save().unwrap();
+
+        // `b` runs detached, so its exit code only shows up on a later pass.
+        // Wait for it first: the busy passes below must each read that exit
+        // and try to start `c`, or they prove nothing.
+        let busy = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
+        let key = crate::command_step::Runs::key("b", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let started = std::time::Instant::now();
+        while runs.state(&key) != crate::command_step::RunState::Exited(1) {
+            assert!(started.elapsed() < Duration::from_secs(5), "b never exited");
+            run_pass_with(&repo, &busy, &pipelines);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        busy.clear_calls();
+
+        for attempt in 1..=4 {
+            run_pass_with(&repo, &busy, &pipelines);
+            assert!(
+                !busy.did("start ").is_empty(),
+                "attempt {attempt}: the pass never tried to start c"
+            );
+            busy.clear_calls();
+            let task = reload(&path);
+            assert_ne!(task.stage(), crate::pipeline::BLOCKED, "attempt {attempt}");
+            assert_eq!(
+                task.rounds_at("a"),
+                0,
+                "attempt {attempt}: nothing has started yet: {:?}",
+                task.front.arrivals
+            );
+        }
+
+        let free = FakeMux::new(vec![]);
+        run_pass_with(&repo, &free, &pipelines);
+        let task = reload(&path);
+        assert_eq!(task.stage(), "c");
+        assert_eq!(task.rounds_at("a"), 1, "{:?}", task.front.arrivals);
     }
 
     /// A task leaving `queued` onto an entry step it walks past starts on the
