@@ -1717,6 +1717,23 @@ pub(super) fn board_header(header: &str, pane: usize) -> String {
     format!("{pad}{DIM}{header}{RESET}\n")
 }
 
+/// `block` — a masthead or header row already laid out — with `available`,
+/// the header's `(<version> available)` notice, painted yellow.
+///
+/// Painted after the layout rather than carried in the header text, because
+/// [`board_masthead`] and [`board_header`] measure and clip the header by its
+/// characters, and a colour code inside it would count as columns it does not
+/// take. The header is drawn dim, so the notice resets that first and opens
+/// it again after: a dim yellow would read as one more grey cell rather than
+/// as news. A header clipped through the notice no longer holds it whole, and
+/// is left as drawn — a cut-off notice is not one to draw the eye to.
+pub(super) fn tint_available(block: &str, available: Option<&str>) -> String {
+    match available {
+        Some(notice) => block.replacen(notice, &format!("{RESET}{AMBER}{notice}{RESET}{DIM}"), 1),
+        None => block.to_string(),
+    }
+}
+
 /// What an empty board says under its lockup: hello by the local clock's
 /// `hour`, and by `name` when there is one — `Good morning, Marvin.`, or
 /// `Good morning.` without a name, so the sentence still ends right.

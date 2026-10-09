@@ -159,6 +159,9 @@ The header sits in the top-right corner of the board, on the first line of the w
 The header names the running dispatcher's version, next to its pid. If a
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
+Otherwise, if npm has published a newer release, the header adds `(<version> available)` in
+yellow, for example `v0.9.0 (0.10.0 available)`. The notice is the same for every install. The
+check is off when `housekeeping.update_check` is `false` or `SPOOLWAY_SKIP_VERSION_CHECK` is set.
 
 Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
 dispatch` child the tab starts on `enter` and stops behind a popup the next `enter` opens — the
