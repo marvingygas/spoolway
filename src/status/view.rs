@@ -2044,12 +2044,13 @@ fn spool_phase(elapsed_secs: u64) -> usize {
 /// The fallback is generous rather than tight: with no terminal to ask —
 /// output piped somewhere — clipping is not protecting any layout.
 ///
-/// Inside bare `spoolway`'s dispatch tab the board draws inside a box — see
-/// [`boxed`] — and the box's two side borders come off first, so every row
-/// is laid out against the columns between them.
+/// Inside bare `spoolway`'s dispatch tab the width is the drawing area's —
+/// see [`crate::screen::drawing_area`] — and the board draws inside a box
+/// there — see [`boxed`] — whose two side borders come off it too, so every
+/// row is laid out against the columns between them.
 pub(super) fn pane_width() -> usize {
-    let width = terminal_size::terminal_size()
-        .map(|(w, _)| w.0 as usize)
+    let width = crate::screen::drawing_area()
+        .map(|(width, _)| width)
         .unwrap_or(120);
     match crate::screen::shell::hosted() {
         Some(_) => width.saturating_sub(BOX_SIDES),
@@ -2068,40 +2069,41 @@ const BOX_SIDES: usize = 2;
 /// and a board redirected to a file should keep every line it was going to
 /// write rather than being cut to a guess.
 ///
-/// Inside bare `spoolway`'s dispatch tab the tab strip takes its own rows off
-/// the top first — see `crate::screen::shell::strip_rows`, zero everywhere
-/// else — and the box the board draws in there takes its top and bottom
-/// borders — see [`boxed`] — so the board is measured against what is
-/// actually left inside it. Left uncounted, the two borders push the board's
-/// foot under the key line and the top of the frame off the screen.
+/// Inside bare `spoolway`'s dispatch tab the height is the drawing area's —
+/// see [`crate::screen::drawing_area`] — the tab strip takes its own rows
+/// off the top of it — see `crate::screen::shell::strip_rows`, zero
+/// everywhere else — and the box the board draws in there takes its top and
+/// bottom borders — see [`boxed`] — so the board is measured against what
+/// is actually left inside it. Left uncounted, the two borders push the
+/// board's foot under the key line and the top of the frame off the screen.
+/// Each row the key line wraps onto past its first comes off as well, where
+/// the key line is built — see `paint_at`.
 ///
-/// A test build answers `None`, as if piped: `cargo test` inherits whatever
-/// pane runs it, and a 14-row pane failed board tests that pass with no
-/// terminal at all.
+/// A test build answers `None`, as if piped, unless the test names a
+/// terminal — see [`crate::screen::test_terminal`].
 pub(super) fn pane_height() -> Option<usize> {
-    if cfg!(test) {
-        return None;
-    }
     let boxed = match crate::screen::shell::hosted() {
         Some(_) => BOX_SIDES,
         None => 0,
     };
-    terminal_size::terminal_size()
-        .map(|(_, h)| (h.0 as usize).saturating_sub(crate::screen::shell::strip_rows() + boxed))
+    crate::screen::drawing_area()
+        .map(|(_, height)| height.saturating_sub(crate::screen::shell::strip_rows() + boxed))
 }
 
 /// The hosted board's `body` inside a box with no title, `inner` columns
-/// between its borders, with `keys` — the key line — under the bottom border,
-/// the way the queue, jobs and eval tabs draw theirs.
+/// between its borders, with `keys` — the key line, one row or several —
+/// under the bottom border, the way the queue, jobs and eval tabs draw
+/// theirs.
 ///
-/// `height` is [`pane_height`]'s own: the body gets every row of it but the
-/// one the key line takes and the spare row left under it, cut to fit or
-/// padded with blank rows so the box always reaches the same bottom row.
-/// `None` — no terminal to measure — keeps every body row and pads none.
+/// `height` is [`pane_height`]'s own, less any row `keys` wraps onto past
+/// its first: the body gets every row of it but the one the key line takes
+/// and the spare row left under it, cut to fit or padded with blank rows so
+/// the box always reaches the same bottom row. `None` — no terminal to
+/// measure — keeps every body row and pads none.
 ///
 /// Each row is fitted to `inner` by its visible width — see [`fit_visible`]
 /// — so a row carrying colour codes or a hyperlink still ends in `│` in the
-/// terminal's last column rather than as far right as its escape bytes
+/// drawing area's last column rather than as far right as its escape bytes
 /// would count.
 pub(super) fn boxed(body: &str, keys: &str, inner: usize, height: Option<usize>) -> String {
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};

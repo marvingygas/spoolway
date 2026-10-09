@@ -4207,37 +4207,42 @@ const MIN_WIDTH: usize = 60;
 /// see `render_lines` — so there is no separate space to account for here.
 const FRAME_CHROME: usize = 2;
 
-/// The frame's content width — the terminal's own width where one can be
-/// measured, clamped to [`MIN_WIDTH`]. With no terminal to measure, wide
+/// The frame's content width — the drawing area's width where a terminal can
+/// be measured (see [`crate::screen::drawing_area`]), clamped to
+/// [`MIN_WIDTH`]. With no terminal to measure, wide
 /// enough for `content` columns plus the one blank column the mockup leaves
 /// before the right border: the tables are wider than any fixed guess, and a
 /// piped screen cut down to one would lose the figures on the right.
 fn frame_width(content: usize) -> usize {
-    match terminal_size::terminal_size() {
-        Some((w, _)) => (w.0 as usize).saturating_sub(FRAME_CHROME).max(MIN_WIDTH),
+    match crate::screen::drawing_area() {
+        Some((width, _)) => width.saturating_sub(FRAME_CHROME).max(MIN_WIDTH),
         None => (content + 1).max(MIN_WIDTH),
     }
 }
 
-/// What `frame_rows` subtracts from the terminal's own height: two borders,
-/// the footer, one spare line — so the last line's own newline does not
-/// scroll the top of the frame away, the same reasoning `commands::queue`'s
-/// own `PANE_CHROME_ROWS` gives Pulled out of `frame_rows` so the count itself is a
-/// pure function a test can pin without a real terminal behind it.
+/// What `frame_rows` subtracts from the drawing area's height: two borders,
+/// the footer's first row, one spare line — so the last line's own newline
+/// does not scroll the top of the frame away, the same reasoning
+/// `commands::queue`'s own `PANE_CHROME_ROWS` gives. Pulled out of
+/// `frame_rows` so the count itself is a pure function a test can pin
+/// without a real terminal behind it.
 fn frame_chrome() -> usize {
     4
 }
 
-/// How many body rows a terminal `height` rows tall gives the frame once
-/// `frame_chrome` is counted — and, inside bare `spoolway`'s eval tab, once
-/// the strip's own rows are too (see `crate::screen::shell::strip_rows`,
-/// zero everywhere else). `None` where there is no terminal to measure,
-/// which is what lets a piped run keep every row rather than losing the ones
-/// past some guessed height.
-fn frame_rows(height: Option<usize>) -> Option<usize> {
+/// How many body rows a drawing area `height` rows tall gives the frame once
+/// `frame_chrome` is counted, and every one of the footer's `key_rows` past
+/// its first — and, inside bare `spoolway`'s eval tab, once the strip's own
+/// rows are too (see `crate::screen::shell::strip_rows`, zero everywhere
+/// else). `None` where there is no terminal to measure, which is what lets a
+/// piped run keep every row rather than losing the ones past some guessed
+/// height.
+fn frame_rows(height: Option<usize>, key_rows: usize) -> Option<usize> {
     height.map(|h| {
-        h.saturating_sub(frame_chrome() + crate::screen::shell::strip_rows())
-            .max(1)
+        h.saturating_sub(
+            frame_chrome() + crate::screen::shell::strip_rows() + key_rows.saturating_sub(1),
+        )
+        .max(1)
     })
 }
 
@@ -4453,14 +4458,14 @@ fn eval_frame_rows(
     loaded: Option<&Loaded>,
     state: &ScreenState,
 ) -> Vec<String> {
-    let height = terminal_size::terminal_size().map(|(_, h)| h.0 as usize);
+    let height = crate::screen::drawing_area().map(|(_, height)| height);
     eval_frame_rows_at(pipelines, loaded, state, height)
 }
 
-/// [`eval_frame_rows`] on a terminal `height` rows tall — `None` for none at
-/// all. Split out because `terminal_size` reads `None` under the test
-/// harness, and a test of what scrolls needs a terminal shorter than its
-/// table.
+/// [`eval_frame_rows`] in a drawing area `height` rows tall — `None` for no
+/// terminal at all. Split out because the drawing area reads `None` under
+/// the test harness, and a test of what scrolls needs a terminal shorter
+/// than its table.
 fn eval_frame_rows_at(
     pipelines: &Pipelines,
     loaded: Option<&Loaded>,
@@ -4489,7 +4494,10 @@ fn eval_frame_rows_at(
         + 1;
     let border = format!("─ eval · {title} ").chars().count() + right.chars().count() + 5;
     let width = frame_width(content.max(border));
-    let rows = frame_rows(height);
+    // Wrapped before the body is measured, because each row it wraps onto
+    // past its first comes off the body's.
+    let keys = crate::screen::key_rows(&footer(state.table, state.filters.figures));
+    let rows = frame_rows(height, keys.len());
     let mut body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
     // The `Total` line comes off before `clip` and goes back after it, so a
@@ -4583,7 +4591,7 @@ fn eval_frame_rows_at(
     }
 
     rows_out.extend(frame);
-    rows_out.push(footer(state.table, state.filters.figures));
+    rows_out.extend(keys);
     rows_out
 }
 

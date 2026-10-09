@@ -301,6 +301,19 @@ has "the full board is the dispatch tab's" "← [DISPATCH]       QUEUE" "$LAST"
 has "its cursor's row is drawn" "▸ " "$LAST"
 has "its last table row counts the tasks out of view" "tasks below" "$LAST"
 has "the key line is still drawn under it" "[o] open task" "$LAST"
+
+# The margin, read off a real pty rather than a test terminal: at 120 columns
+# no row of the full board touches column 0 or column 119. Each row ends in the
+# writer's save-cursor, clear-to-end, restore-cursor, which is taken out before
+# a row is measured, and its width is counted in characters, not bytes, since
+# the boxes are drawn in multi-byte glyphs. The rows stop at the key line's last
+# row, before `script`'s own closing lines. The two blank rows under the key
+# line are cleared rather than written, so a transcript cannot show them; the
+# unit test over every tab decides those.
+tr -d '\r' <"$LAST" | sed -e 's/\x1b7\x1b\[K\x1b8//g' -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' | sed '/\[q\] quit/q' >"$LAST.rows"
+EDGE=$(LC_ALL=C.UTF-8 awk '/[^[:space:]]/ && (substr($0, 1, 1) != " " || length($0) > 119) { n++ } END { print n + 0 }' "$LAST.rows")
+if [ "$EDGE" = 0 ]; then ok "no row of the full board touches either edge of a 120-column terminal"
+else bad "no row of the full board touches either edge of a 120-column terminal ($EDGE rows do)"; head -40 "$LAST.rows"; fi
 rm -f "$SPOOLWAY_PROJECT_HOME"/queue/full-*.md
 
 # Off a terminal: the grouped help, on stderr, the way it always was.

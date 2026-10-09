@@ -662,14 +662,20 @@ impl Board {
                 // `pane_width()`, gives every row the same floor to write
                 // onto and never truncates anything that already reached it.
                 let mut stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
-                // Hosted, the last row is the key line under the board's
-                // box — see `paint` — and a panel lands on the box, never
-                // on the key line: padded to one width with the box, a key
-                // line wider than the terminal would widen every row of
-                // the box past the terminal's last column along with it.
+                // Hosted, the rows under the box's bottom border are the
+                // key line — see `paint` — one row or several, as
+                // `hosted_keys` wrapped it, and a panel lands on the box,
+                // never on the key line: padded to one width with the box,
+                // a key line wider than the terminal would widen every row
+                // of the box past the terminal's last column along with it.
                 let keys = match crate::screen::shell::hosted() {
-                    Some(_) => stripped.pop(),
-                    None => None,
+                    Some(_) => {
+                        let bottom = stripped
+                            .iter()
+                            .rposition(|line| line.starts_with(crate::screen::corner::BOTTOM_LEFT));
+                        stripped.split_off(bottom.map_or(stripped.len(), |at| at + 1))
+                    }
+                    None => Vec::new(),
                 };
                 let width = stripped
                     .iter()
@@ -2915,7 +2921,7 @@ fn paint_at(
         crate::screen::shell::quit_hint(),
     ]
     .concat();
-    let keys = crate::screen::key_hint(&keys);
+    let (keys, height) = hosted_keys(crate::screen::key_hint(&keys), height);
 
     // The rows the table's body and RECENT share: everything under the
     // column header but the parse warnings, the footer, and the blank row
@@ -2971,6 +2977,26 @@ fn paint_at(
     clamp_rows(&frame, height)
 }
 
+/// The board's key line `keys`, and the pane `height` the rest of the frame
+/// gets beside it. Inside bare `spoolway`'s dispatch tab the line is broken
+/// between its pairs to the drawing area's width — see
+/// [`crate::screen::key_rows`] — rather than left for the terminal to wrap
+/// into the margin, and every row it takes past its first comes off
+/// `height`, or the box would push the strip off the top of the screen.
+/// Anywhere else both come back as they were: a board printed on its own
+/// keeps its one line.
+fn hosted_keys(keys: String, height: Option<usize>) -> (String, Option<usize>) {
+    if crate::screen::shell::hosted().is_none() {
+        return (keys, height);
+    }
+    let rows = crate::screen::key_rows(&keys);
+    let extra = rows.len() - 1;
+    (
+        rows.join("\n"),
+        height.map(|height| height.saturating_sub(extra)),
+    )
+}
+
 /// The key line's `enter` pair: what pressing it would do to the tab's own
 /// dispatcher, given whether it has one up.
 fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
@@ -3010,7 +3036,12 @@ fn paint_empty(
     name: Option<&str>,
 ) -> String {
     let hosted = crate::screen::shell::hosted().is_some();
-    let height = pane_height();
+    let (keys, height) = hosted_keys(
+        crate::screen::key_hint(
+            &[&[enter_hint(phase)][..], crate::screen::shell::quit_hint()].concat(),
+        ),
+        pane_height(),
+    );
     let mut frame = String::new();
     // The same top margin the busy board keeps — see `paint`.
     if !hosted {
@@ -3034,9 +3065,6 @@ fn paint_empty(
         pane,
         region,
     ));
-    let keys = crate::screen::key_hint(
-        &[&[enter_hint(phase)][..], crate::screen::shell::quit_hint()].concat(),
-    );
     if hosted {
         return boxed(&frame, &keys, pane, height);
     }

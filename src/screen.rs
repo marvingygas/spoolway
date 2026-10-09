@@ -379,15 +379,96 @@ pub(crate) fn read_escape(input: &mut impl PollableRead) -> Option<Key> {
 /// so nobody ever sees the width or height chosen here.
 const FALLBACK_PANE_SIZE: (usize, usize) = (100, 30);
 
+/// The columns bare `spoolway` keeps blank on each side of every tab.
+/// [`drawing_area`] takes them off the width, and
+/// [`frame_writer::FrameWriter`] writes the left one in front of every row,
+/// so a row as wide as the area still ends one column short of the
+/// terminal's last.
+pub(crate) const MARGIN: usize = 1;
+
+/// The rows [`drawing_area`] takes off the terminal's height. Each tab
+/// already holds back the area's last row for the cursor its last newline
+/// leaves there, so with this one too two blank rows sit under the key line.
+const MARGIN_ROWS: usize = 1;
+
+/// The terminal's own size in columns and rows, or `None` with no terminal
+/// to measure. The one place spoolway reads it: [`pane_size`] and
+/// [`drawing_area`] are both built on this, so a screen switch and the frame
+/// it draws next always measure the same terminal rather than two callers
+/// racing a resize between them.
+///
+/// A test build never reads the real terminal: `cargo test` inherits
+/// whatever pane runs it, and a 14-row pane once failed board tests that
+/// pass with no terminal at all. It answers `None`, as if piped, unless a
+/// test has named a size with [`test_terminal`].
+fn terminal() -> Option<(usize, usize)> {
+    #[cfg(test)]
+    {
+        TEST_TERMINAL.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        terminal_size::terminal_size().map(|(w, h)| (w.0 as usize, h.0 as usize))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The terminal a test on this thread draws to — see [`test_terminal`].
+    /// Thread-local for the same reason as `shell`'s own `HOSTED`: tests run
+    /// side by side, and one's size must never reach another's frame.
+    static TEST_TERMINAL: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Makes [`terminal`] answer `size` on this thread for as long as the guard
+/// lives, so a test can draw a tab at a terminal size it names.
+#[cfg(test)]
+pub(crate) fn test_terminal(size: (usize, usize)) -> TestTerminal {
+    TEST_TERMINAL.with(|cell| cell.set(Some(size)));
+    TestTerminal
+}
+
+/// Clears [`test_terminal`]'s size on drop, so a failed assertion cannot
+/// leave it behind for the next test this thread runs.
+#[cfg(test)]
+pub(crate) struct TestTerminal;
+
+#[cfg(test)]
+impl Drop for TestTerminal {
+    fn drop(&mut self) {
+        TEST_TERMINAL.with(|cell| cell.set(None));
+    }
+}
+
 /// The terminal's own size in columns and rows, for every redrawing screen
 /// to pass to [`frame_writer::FrameWriter::write_frame`] as the pane it
-/// drew for. One call, shared, so a screen switch and the frame it draws
-/// next always measure the same terminal rather than two callers racing a
-/// resize between them.
+/// drew for — the whole terminal, margin and all, since that is what the
+/// writer paints onto. A tab lays itself out against [`drawing_area`]
+/// instead.
 pub(crate) fn pane_size() -> (usize, usize) {
-    terminal_size::terminal_size()
-        .map(|(w, h)| (w.0 as usize, h.0 as usize))
-        .unwrap_or(FALLBACK_PANE_SIZE)
+    terminal().unwrap_or(FALLBACK_PANE_SIZE)
+}
+
+/// The columns and rows every tab of bare `spoolway` lays itself out
+/// against: the terminal less [`MARGIN`] on each side and [`MARGIN_ROWS`]
+/// at the foot. The tab strip, every tab's frame, its key line and every
+/// popup centred on that frame are all measured here, so the margin is
+/// decided in this one place rather than subtracted again by each tab.
+///
+/// With no shell hosting a screen — one a unit test draws on its own, say
+/// — this is the whole terminal, so nothing drawn outside bare `spoolway`
+/// gains a margin. `None` with no
+/// terminal to measure; see [`terminal`].
+pub(crate) fn drawing_area() -> Option<(usize, usize)> {
+    let (width, height) = terminal()?;
+    Some(match shell::hosted() {
+        Some(_) => (
+            width.saturating_sub(2 * MARGIN),
+            height.saturating_sub(MARGIN_ROWS),
+        ),
+        None => (width, height),
+    })
 }
 
 /// Pad `s` to exactly `width` visible characters, or cut it to fit — a screen
@@ -449,6 +530,70 @@ pub(crate) fn keys(pairs: &[(&str, &str)]) -> String {
         line.push_str(&format!("[{key}] {label}"));
     }
     line
+}
+
+/// A key line — [`key_hint`]'s or [`hint`]'s — broken between its key
+/// pairs into rows no wider than `width`, for a tab to draw under its frame.
+///
+/// Left to the terminal, a line wider than the pane wraps mid-word, and the
+/// rest starts in column 0, inside the margin [`MARGIN`] keeps. Each row
+/// here starts with the line's own lead — its colour and the spaces before
+/// its first key — and ends with its reset, so every row reads like the
+/// first. A pair wider than `width` on its own still gets a row of its own.
+pub(crate) fn key_rows_to(line: &str, width: usize) -> Vec<String> {
+    let reset = crate::status::RESET;
+    let (body, closed) = match line.strip_suffix(reset) {
+        Some(body) => (body, reset),
+        None => (line, ""),
+    };
+    // The lead is everything up to the first visible character that is not
+    // a space: colour codes take no column, so they are skipped whole.
+    let mut lead_len = body.len();
+    let mut chars = body.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\x1b' => {
+                chars.by_ref().find(|(_, c)| c.is_ascii_alphabetic());
+            }
+            ' ' => {}
+            _ => {
+                lead_len = at;
+                break;
+            }
+        }
+    }
+    let (lead, pairs) = body.split_at(lead_len);
+    let lead_width = crate::status::strip_ansi(lead).chars().count();
+    let gutter = crate::status::GUTTER;
+
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_width = lead_width;
+    for pair in pairs.split(gutter) {
+        let pair_width = crate::status::strip_ansi(pair).chars().count();
+        if !current.is_empty() && current_width + gutter.len() + pair_width > width {
+            rows.push(format!("{lead}{}{closed}", std::mem::take(&mut current)));
+            current_width = lead_width;
+        }
+        if !current.is_empty() {
+            current.push_str(gutter);
+            current_width += gutter.len();
+        }
+        current.push_str(pair);
+        current_width += pair_width;
+    }
+    rows.push(format!("{lead}{current}{closed}"));
+    rows
+}
+
+/// [`key_rows_to`] at [`drawing_area`]'s width — the rows a tab draws its
+/// key line in. With no terminal to measure the line stays one row: there
+/// is no edge for it to wrap at.
+pub(crate) fn key_rows(line: &str) -> Vec<String> {
+    match drawing_area() {
+        Some((width, _)) => key_rows_to(line, width),
+        None => vec![line.to_string()],
+    }
 }
 
 /// The four corners of every box spoolway draws, rounded: popups, printed
@@ -647,6 +792,56 @@ mod tests {
             key_hint(&[("o", "open"), ("r", "routines")]),
             "\x1b[2m [o] open   [r] routines\x1b[0m"
         );
+    }
+
+    // A key line wider than the area breaks between two pairs, never inside
+    // one, and every row it takes starts with the first row's own dim and
+    // space and ends with its reset — a row of its own, not a tail.
+    #[test]
+    fn a_key_line_breaks_between_pairs_and_each_row_keeps_its_lead() {
+        let line = key_hint(&[("a", "one"), ("b", "two"), ("c", "three")]);
+        assert_eq!(
+            key_rows_to(&line, 20),
+            [
+                "\x1b[2m [a] one   [b] two\x1b[0m",
+                "\x1b[2m [c] three\x1b[0m",
+            ]
+        );
+    }
+
+    // A line exactly as wide as the area is one row; a column narrower and
+    // its last pair moves down. An empty line is still a row.
+    #[test]
+    fn a_key_line_as_wide_as_the_area_stays_one_row() {
+        let line = key_hint(&[("a", "one"), ("b", "two")]);
+        let width = crate::status::strip_ansi(&line).chars().count();
+        assert_eq!(key_rows_to(&line, width), std::slice::from_ref(&line));
+        assert_eq!(key_rows_to(&line, width - 1).len(), 2);
+        assert_eq!(key_rows_to("", 10), [""]);
+    }
+
+    // The eval tab's key line carries a space of its own before the dim;
+    // every row it wraps onto keeps both, so its rows line up under the
+    // first.
+    #[test]
+    fn a_key_line_with_its_own_indent_keeps_it_on_every_row() {
+        let line = format!(" {}", key_hint(&[("a", "one"), ("b", "two")]));
+        assert_eq!(
+            key_rows_to(&line, 12),
+            [" \x1b[2m [a] one\x1b[0m", " \x1b[2m [b] two\x1b[0m",]
+        );
+    }
+
+    // Hosted, the drawing area is the terminal less one column each side
+    // and one row at the foot; with no shell around a screen it is the
+    // whole terminal, so nothing printed outside bare `spoolway` moves.
+    #[test]
+    fn the_drawing_area_keeps_the_margin_only_while_hosted() {
+        let _terminal = test_terminal((100, 30));
+        assert_eq!(drawing_area(), Some((100, 30)));
+        let _hosting = shell::Hosting::open(shell::Tab::Queue);
+        assert_eq!(drawing_area(), Some((98, 29)));
+        assert_eq!(pane_size(), (100, 30));
     }
 
     #[test]

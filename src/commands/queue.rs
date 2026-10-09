@@ -5606,33 +5606,36 @@ const MIN_RIGHT_PANE: usize = 24;
 /// `QUEUED_TAIL_COLUMNS`.
 const MAX_LEFT_PANE: usize = ROW_PREFIX_COLUMNS + 33 + QUEUED_TAIL_COLUMNS;
 
-/// What a frame spends on something other than pane content: six columns of
-/// border and padding on every row, and four lines — the two borders, the
-/// footer under them, and one spare, so the last line's own newline does not
-/// scroll the top of the frame away.
-const PANE_CHROME_COLUMNS: usize = 6;
+/// What a frame spends on something other than pane content: seven columns
+/// of border and padding on every row — `│ `, ` │ ` and ` │` around the two
+/// panes — and four lines — the two borders, the footer's first row under
+/// them, and one spare, so the last line's own newline does not scroll the
+/// top of the frame away.
+///
+/// The frame fills the drawing area's width exactly. The terminal's last
+/// column stays empty all the same, as the margin to the area's right —
+/// see [`crate::screen::drawing_area`] — so no row reaches the edge, where
+/// the newline after it would land on a wrap the terminal has already made.
+const PANE_CHROME_COLUMNS: usize = 7;
 const PANE_CHROME_ROWS: usize = 4;
 
-/// The last column is left empty for the same reason as the last row: a row
-/// that reaches the right edge is followed by a newline the terminal has
-/// already wrapped for, and the frame comes out double-spaced.
-const SPARE_COLUMN: usize = 1;
-
 /// The layout for this frame, measured fresh every draw so a resized
-/// terminal reflows on the next one — less the rows bare `spoolway`'s tab
-/// strip takes off the top when it hosts this screen or the jobs screen,
-/// which lays itself out through this too (zero everywhere else; see
-/// `crate::screen::shell::strip_rows`), and less every row past the first
-/// that `footer` wraps onto. The queue's own key line is wider than a
-/// 100-column terminal, and each row it wraps onto pushes the frame's top
-/// row — the strip, or the box's own border — off the top of the screen.
+/// terminal reflows on the next one, against the drawing area every tab
+/// shares (see [`crate::screen::drawing_area`]) — less the rows bare
+/// `spoolway`'s tab strip takes off the top when it hosts this screen or the
+/// jobs screen, which lays itself out through this too (zero everywhere
+/// else; see `crate::screen::shell::strip_rows`), and less every row past
+/// the first that `footer` wraps onto. The queue's own key line is wider
+/// than a 100-column terminal, and each row it wraps onto pushes the
+/// frame's top row — the strip, or the box's own border — off the top of
+/// the screen.
 pub(super) fn layout(footer: &str) -> Layout {
-    match terminal_size::terminal_size() {
+    match crate::screen::drawing_area() {
         Some((width, height)) => layout_for(
-            width.0 as usize,
-            (height.0 as usize)
+            width,
+            height
                 .saturating_sub(crate::screen::shell::strip_rows())
-                .saturating_sub(wrapped_rows(footer, width.0 as usize) - 1),
+                .saturating_sub(crate::screen::key_rows_to(footer, width).len() - 1),
         ),
         None => Layout {
             left: LEFT_PANE_WIDTH,
@@ -5642,22 +5645,13 @@ pub(super) fn layout(footer: &str) -> Layout {
     }
 }
 
-/// How many terminal rows `line` takes at `width` columns: one, plus one for
-/// every time its visible text runs past the right edge. A line exactly as
-/// wide as the terminal still takes one — its newline lands on the wrap the
-/// terminal was already holding back.
-fn wrapped_rows(line: &str, width: usize) -> usize {
-    let columns = crate::status::strip_ansi(line).chars().count();
-    columns.div_ceil(width.max(1)).max(1)
-}
-
-/// How a terminal that size is split between the two panes. The left pane
+/// How a drawing area that size is split between the two panes. The left pane
 /// takes two fifths of what the border leaves, within its own bounds, and
 /// the right pane takes the rest — a terminal too narrow for both minimums
 /// overflows rather than collapsing a pane to nothing.
 fn layout_for(width: usize, height: usize) -> Layout {
     let content = width
-        .saturating_sub(PANE_CHROME_COLUMNS + SPARE_COLUMN)
+        .saturating_sub(PANE_CHROME_COLUMNS)
         .max(MIN_LEFT_PANE + MIN_RIGHT_PANE);
     let left = (content * 2 / 5)
         .clamp(MIN_LEFT_PANE, MAX_LEFT_PANE)
@@ -6477,7 +6471,8 @@ fn compose(mut frame: Vec<String>, popup: Option<&[String]>, footer: String) -> 
         stretch(&mut frame, popup.len() + 4);
         overlay(&mut frame, popup);
     }
-    frame.push(footer);
+    // In as many rows as `layout` took off the panes for it.
+    frame.extend(crate::screen::key_rows(&footer));
     frame
 }
 
@@ -11340,8 +11335,9 @@ mod tests {
     }
 
     /// Every width the layout hands out leaves room for both panes, and the
-    /// two of them plus the border add up to the terminal they were measured
-    /// against — including at widths far narrower than the minimums.
+    /// two of them plus the border add up to the drawing area they were
+    /// measured against — including at widths far narrower than the
+    /// minimums.
     #[test]
     fn a_layout_splits_the_width_it_is_given_between_two_panes() {
         for width in [20usize, 40, 80, 100, 173, 400] {
@@ -11353,33 +11349,30 @@ mod tests {
                 "right too narrow at {width}"
             );
             assert_eq!(layout.rows, Some(24 - PANE_CHROME_ROWS));
-            if width >= MIN_LEFT_PANE + MIN_RIGHT_PANE + PANE_CHROME_COLUMNS + SPARE_COLUMN {
+            if width >= MIN_LEFT_PANE + MIN_RIGHT_PANE + PANE_CHROME_COLUMNS {
                 assert_eq!(
-                    layout.left + layout.right + PANE_CHROME_COLUMNS + SPARE_COLUMN,
+                    layout.left + layout.right + PANE_CHROME_COLUMNS,
                     width,
-                    "the panes and the border must fill the terminal at {width}"
+                    "the panes and the border must fill the area at {width}"
                 );
             }
         }
         assert_eq!(layout_for(100, 1).rows, Some(1), "one row is still a row");
     }
 
-    /// The queue's key line is wider than a 100-column terminal, and every
-    /// row it wraps onto has to come off the panes, or the frame's top row —
-    /// bare `spoolway`'s tab strip — is scrolled off the screen.
+    /// Hosted in a terminal 100 by 24, the queue tab lays out against the
+    /// drawing area, not the terminal: the frame is two columns narrower,
+    /// and its rows are what is left of 23 once the strip and the key line —
+    /// two rows at this width — have theirs.
     #[test]
-    fn wrapped_rows_counts_the_rows_a_key_line_wraps_onto() {
-        let line = footer(&ScreenState::new());
-        let columns = crate::status::strip_ansi(&line).chars().count();
-        assert!(columns > 100, "the key line fits in 100 columns now");
-        assert_eq!(wrapped_rows(&line, 100), 2);
-        assert_eq!(
-            wrapped_rows(&line, columns),
-            1,
-            "exactly as wide is one row"
-        );
-        assert_eq!(wrapped_rows(&line, columns - 1), 2);
-        assert_eq!(wrapped_rows("", 100), 1, "an empty line is still a row");
+    fn a_hosted_layout_fills_the_drawing_area_and_not_the_terminal() {
+        let _terminal = crate::screen::test_terminal((100, 24));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Queue);
+        let footer = footer(&ScreenState::new());
+        let layout = layout(&footer);
+        assert_eq!(layout.left + layout.right + PANE_CHROME_COLUMNS, 98);
+        assert_eq!(crate::screen::key_rows(&footer).len(), 2);
+        assert_eq!(layout.rows, Some(23 - 3 - 1 - PANE_CHROME_ROWS));
     }
 
     /// The groups pane counts groups: the blank row between two states and
@@ -12730,7 +12723,7 @@ mod tests {
         let frame = crate::screen::shell::under_strip(render(&groups, &panes, &state));
         // Wide enough that no row here reaches the pane's own edge, the same
         // as a real terminal this screen ever draws to — see
-        // `commands::queue`'s own `SPARE_COLUMN`.
+        // `commands::queue`'s own `PANE_CHROME_COLUMNS`.
         let pane_size = (200, 60);
 
         let mut old = Vec::new();

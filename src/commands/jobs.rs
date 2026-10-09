@@ -1168,7 +1168,8 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
         overlay(&mut frame, panel);
     }
 
-    frame.push(footer);
+    // In as many rows as `layout` took off the panes for it.
+    frame.extend(crate::screen::key_rows(&footer));
     frame
 }
 
