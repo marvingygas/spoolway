@@ -2488,6 +2488,50 @@ mod tests {
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     }
 
+    /// A failing task hook lands under `problems`, and a second failure
+    /// changes the popup's fingerprint, so a popup hidden with `x` over the
+    /// first asks again.
+    #[test]
+    fn a_second_hook_failure_brings_a_hidden_warnings_popup_back() {
+        let (repo, _root_guard) = fixture("warnings-popup-hook-failure");
+        let pipelines = Pipelines::builtin();
+        let fail = |task: &str| {
+            std::fs::create_dir_all(repo.queue_dir()).unwrap();
+            std::fs::write(
+                repo.queue_dir().join(format!("{task}.md")),
+                format!("---\nid: {task}\nstage: paused\n---\n"),
+            )
+            .unwrap();
+            std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+            std::fs::write(
+                repo.tracking_dir().join(format!("{task} · started.exit")),
+                "1\n",
+            )
+            .unwrap();
+        };
+
+        fail("first");
+        let popup = warnings_popup(&repo, &pipelines).expect("a failed hook to name");
+        let body: Vec<&str> = popup.panel.iter().map(|row| popup_row(row)).collect();
+        assert!(body.contains(&"problems"), "{body:#?}");
+        assert!(
+            body.contains(&"issue_tracking hooks: `started` failed for first (exit 1), so the"),
+            "{body:#?}"
+        );
+        let (_, _, problems) = cheap_sections(&repo, &pipelines);
+        let first = warnings_fingerprint(&[], &[], &problems);
+        popup.hide(&repo).unwrap();
+        assert!(warnings_popup(&repo, &pipelines).is_none());
+
+        fail("second");
+        let (_, _, problems) = cheap_sections(&repo, &pipelines);
+        assert_ne!(warnings_fingerprint(&[], &[], &problems), first);
+        assert!(
+            warnings_popup(&repo, &pipelines).is_some(),
+            "a new failure asks again"
+        );
+    }
+
     /// `x` on the overrides popup does the same for the overrides gate.
     #[test]
     fn hiding_the_overrides_popup_hides_the_cli_gate_too() {

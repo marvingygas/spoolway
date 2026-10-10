@@ -556,7 +556,10 @@ fn home_unavailable_findings(
                     Config::path_in(&repo.checkout).display()
                 ))),
             ));
-            findings.extend(issue_tracking_checks(repo, &config.issue_tracking));
+            // Not `issue_tracking_checks`: its hook-failure rows read
+            // `tracking/` and the queue, both under the home that just
+            // failed to resolve, and asking for either creates it.
+            findings.extend(issue_tracking_config_checks(repo, &config.issue_tracking));
             findings.push(Finding::Check(
                 "pipelines are valid".into(),
                 Pipelines::load_tracked(&repo.checkout, &config)
@@ -735,7 +738,7 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
         findings.extend(config_value_checks(config));
     }
     if key.starts_with("issue_tracking.") {
-        findings.extend(issue_tracking_checks(repo, &config.issue_tracking));
+        findings.extend(issue_tracking_config_checks(repo, &config.issue_tracking));
     }
     findings
         .into_iter()
@@ -814,18 +817,34 @@ fn price_table_age_note(max_age_days: u64, age_days: u64) -> Option<String> {
     })
 }
 
-/// Everything `[issue_tracking]` can get wrong on its own, independent of the
-/// pipeline or the branch: a hook named with nothing to hand it, a hook that
-/// cannot resolve to a real file, a hook file that was never written, a hook
-/// script too old to have a `fetch` branch, and — for the one hook that
-/// shells out — the binaries it needs beside it.
+/// Everything `[issue_tracking]` can get wrong, independent of the pipeline
+/// or the branch: [`issue_tracking_config_checks`], then one failing row per
+/// task hook run that exited non-zero (see [`hook_failure_checks`]).
 ///
 /// Also what `commands::dispatch::dispatch` runs once as it starts, through
 /// `cheap_findings`, which turns this function's own `FAIL` rows into a
-/// warning read before the run rather than doctor's own refusal, and what
-/// `spoolway config set` runs through [`failures_after_set`] to warn about
-/// the value just typed.
+/// warning read before the run rather than doctor's own refusal.
 pub(crate) fn issue_tracking_checks(
+    repo: &Repo,
+    tracking: &crate::config::IssueTrackingConfig,
+) -> Vec<Finding> {
+    let mut findings = issue_tracking_config_checks(repo, tracking);
+    findings.extend(hook_failure_checks(repo));
+    findings
+}
+
+/// What `[issue_tracking]`'s settings can get wrong on their own: a hook
+/// named with nothing to hand it, a hook that cannot resolve to a real file,
+/// a hook file that was never written, a hook script too old to have a
+/// `fetch` branch, and — for the one hook that shells out — the binaries it
+/// needs beside it.
+///
+/// Reads nothing under the project's home, so it is what [`doctor`] runs
+/// when that home did not resolve, and what `spoolway config set` runs
+/// through [`failures_after_set`] to warn about the value just typed — a
+/// failed hook run is a fact about a task, and no value typed there clears
+/// it.
+fn issue_tracking_config_checks(
     repo: &Repo,
     tracking: &crate::config::IssueTrackingConfig,
 ) -> Vec<Finding> {
@@ -946,6 +965,53 @@ pub(crate) fn issue_tracking_checks(
     findings
 }
 
+/// The label every [`hook_failure_checks`] row carries — the words before the
+/// colon in `spoolway doctor`'s `FAIL` line and in the "before dispatching"
+/// popup's `problems` section.
+pub(crate) const HOOK_FAILURE_LABEL: &str = "issue_tracking hooks";
+
+/// One failing check per task hook run that exited non-zero — see
+/// [`crate::tracking::failures`] for which runs those are. Each names the
+/// event, the task, the exit code, what clears it and the run's own log.
+///
+/// The text is also what the "before dispatching" popup fingerprints, so a
+/// second failure changes it and a popup hidden with `x` asks again.
+///
+/// The remedy depends on the event. A failing `queued`, `started` or `done`
+/// hook pauses its task and `spoolway resume` forgets the run, so the row
+/// says to resume. A `blocked` or `paused` hook only records its failure and
+/// an `open` one fails `queue add` itself, so nothing holds the task and
+/// resuming forgets nothing: those runs stay until the task is archived.
+fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
+    crate::tracking::failures(repo)
+        .into_iter()
+        .map(|failure| {
+            let crate::tracking::HookFailure {
+                task,
+                event,
+                exit_code,
+                log,
+            } = failure;
+            let remedy = match crate::tracking::PAUSING_EVENTS.contains(&event.as_str()) {
+                true => format!(
+                    "so the task is paused. Fix what its log names, then run `spoolway resume \
+                     {task}`."
+                ),
+                false => "which holds nothing, so `spoolway resume` does not clear it; it \
+                          clears once the task is done and archived."
+                    .to_string(),
+            };
+            Finding::Check(
+                HOOK_FAILURE_LABEL.into(),
+                Err(anyhow::anyhow!(
+                    "`{event}` failed for {task} (exit {exit_code}), {remedy} Its log: {}",
+                    crate::repo::shorten_home(&log)
+                )),
+            )
+        })
+        .collect()
+}
+
 /// The first run of `<digit>(.<digit>)*` in `text`, read as a version — every
 /// shape a shipped hook's own tool answers `--version` with: `gh`'s carries a
 /// build date in parens after it, `acli`'s a `-stable` suffix, `jq`'s a `jq-`
@@ -1007,8 +1073,8 @@ pub(crate) fn below_floor(found: &[u64], floor: &[u64]) -> bool {
 /// combining stdout and stderr the way a tool's own version banner may land
 /// on either; `None` when the tool could not even be asked — not on PATH, or
 /// its `--version` failed to run at all — and turns into no finding here at
-/// all: [`required_tool_checks`]'s own caller, `issue_tracking_checks`,
-/// already has a not-on-PATH row for `gh`, `acli` and `jq` (see
+/// all: [`required_tool_checks`]'s own caller,
+/// [`issue_tracking_config_checks`], already has a not-on-PATH row for `gh`, `acli` and `jq` (see
 /// `gh_status` and the jira PATH checks), and doubling that gap under a
 /// second name is exactly what the acceptance criteria rule out.
 fn tool_version_finding(
@@ -1065,7 +1131,7 @@ fn tool_version_finding(
 /// `None` from [`crate::tracking::hook_path_in`] — a blank or malformed
 /// `hook` — or a script that cannot be read produce no findings at all: both
 /// are a different check's failure already, reported elsewhere in
-/// `issue_tracking_checks`.
+/// [`issue_tracking_config_checks`].
 fn required_tool_checks(checkout: &Path, hook_name: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let Some(path) = crate::tracking::hook_path_in(checkout, hook_name) else {
@@ -2956,6 +3022,96 @@ mod tests {
             "{unattended:?}"
         );
         assert!(failures_after_set(&repo, &config, "housekeeping.retention_days").is_empty());
+    }
+
+    /// Writes `<task> · <event>.exit` holding `code` under `tracking/`, with
+    /// the task itself in the queue — the run files a settled hook leaves.
+    fn seed_hook_run(repo: &Repo, task: &str, event: &str, code: &str) {
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join(format!("{task}.md")),
+            format!("---\nid: {task}\nstage: paused\n---\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        std::fs::write(
+            repo.tracking_dir().join(format!("{task} · {event}.exit")),
+            format!("{code}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The text of each failing [`HOOK_FAILURE_LABEL`] row.
+    fn hook_rows(findings: &[Finding]) -> Vec<String> {
+        findings
+            .iter()
+            .filter_map(|finding| match finding {
+                Finding::Check(label, Err(err)) if label == HOOK_FAILURE_LABEL => {
+                    Some(format!("{err:#}"))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One failing row per failing task hook, naming the event, the task,
+    /// the exit code and the run's `.log` under `tracking/`. A passing run
+    /// and a failed `spoolway issue show` (`fetch-*`) produce none.
+    #[test]
+    fn issue_tracking_checks_names_each_failing_task_hook() {
+        let (repo, _root_guard) = scratch_repo("hook-failures");
+        seed_hook_run(&repo, "compact-ctx-launch", "started", "1");
+        seed_hook_run(&repo, "other", "queued", "0");
+        std::fs::write(
+            repo.tracking_dir().join("fetch-o-r-issues-42-0123.exit"),
+            "9\n",
+        )
+        .unwrap();
+
+        let rows = hook_rows(&issue_tracking_checks(&repo, &tracking("")));
+        let log = repo.tracking_dir().join("compact-ctx-launch · started.log");
+        assert_eq!(
+            rows,
+            vec![format!(
+                "`started` failed for compact-ctx-launch (exit 1), so the task is paused. Fix \
+                 what its log names, then run `spoolway resume compact-ctx-launch`. Its log: {}",
+                crate::repo::shorten_home(&log)
+            )]
+        );
+    }
+
+    /// A `blocked` hook only records its failure, so its row names no
+    /// resume: it says the task's archiving is what clears it.
+    #[test]
+    fn a_failing_blocked_hook_row_names_archiving_as_what_clears_it() {
+        let (repo, _root_guard) = scratch_repo("hook-failure-blocked");
+        seed_hook_run(&repo, "demo", "blocked", "2");
+        let rows = hook_rows(&issue_tracking_checks(&repo, &tracking("")));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].starts_with("`blocked` failed for demo (exit 2), which holds nothing"),
+            "{rows:?}"
+        );
+        assert!(rows[0].contains("done and archived"), "{rows:?}");
+        assert!(!rows[0].contains("`spoolway resume demo`"), "{rows:?}");
+
+        // What archiving does: the task leaves the queue and its run files go.
+        std::fs::remove_file(repo.queue_dir().join("demo.md")).unwrap();
+        crate::tracking::reclaim(&repo, "demo");
+        assert!(hook_rows(&issue_tracking_checks(&repo, &tracking(""))).is_empty());
+    }
+
+    /// `spoolway config set issue_tracking.*` warns about the value just
+    /// typed; a failed hook run is not one, so it is left out there.
+    #[test]
+    fn failures_after_set_leaves_out_failed_hook_runs() {
+        let (repo, _root_guard) = scratch_repo("hook-failure-after-set");
+        seed_hook_run(&repo, "demo", "queued", "1");
+        assert_eq!(
+            hook_rows(&issue_tracking_checks(&repo, &tracking(""))).len(),
+            1
+        );
+        assert!(failures_after_set(&repo, &Config::default(), "issue_tracking.hook").is_empty());
     }
 
     /// A hook named with nothing to hand it: `project_key` blank while

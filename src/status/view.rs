@@ -838,18 +838,6 @@ pub(super) fn footer(
         lines.push(format!("{BOLD}pipelines{RESET}  {notice}"));
     }
 
-    // One line, only when something has actually failed — absent entirely
-    // otherwise, the same as every other figure this footer only prints when
-    // there is something to say. Every hook failure counts here — whether or
-    // not it paused a task, a `blocked`/`paused` one only ever recorded —
-    // since a person still wants to see it.
-    let failures = crate::tracking::failure_count(repo);
-    if failures > 0 {
-        lines.push(format!(
-            "issue_tracking: {failures} hook failures — see tracking/"
-        ));
-    }
-
     // The job ledger, below the whole slots block: every enabled job, ordered
     // by next firing, naming what would still bring the dispatcher back to
     // life once nothing above it is running. Absent wherever no job is
@@ -3948,54 +3936,47 @@ mod tests {
         );
     }
 
-    /// The `issue_tracking:` line is absent with nothing failed, and reads
-    /// `N hook failures` once something has — see `crate::tracking`.
+    /// A failing hook draws nothing on the board: `spoolway doctor` and the
+    /// "before dispatching" popup name it, with its log and its remedy. The
+    /// footer is the same with a failure on disk as without one.
     #[test]
-    fn the_issue_tracking_line_only_appears_once_a_hook_has_failed() {
+    fn a_failing_hook_draws_no_line_in_the_footer() {
         let (repo, _root_guard) = fixture("footer-issue-tracking");
         let pipelines = Pipelines::builtin();
-        let empty: Vec<String> = footer(
-            &repo,
-            &pipelines,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &[],
-            &[],
-        )
-        .iter()
-        .map(|l| strip(l))
-        .collect();
-        assert!(
-            !empty.iter().any(|l| l.starts_with("issue_tracking")),
-            "{empty:#?}"
-        );
+        let draw = || -> Vec<String> {
+            footer(
+                &repo,
+                &pipelines,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &[],
+                &[],
+            )
+            .iter()
+            .map(|l| strip(l))
+            .collect()
+        };
+        let before = draw();
 
-        // `failure_count` only counts a key whose task is still in the queue.
+        // A failure `crate::tracking::failures` would name: the task is still
+        // in the queue and its `queued` hook exited non-zero.
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
         std::fs::write(
             repo.queue_dir().join("demo.md"),
-            "---\nid: demo\nstage: queued\n---\n",
+            "---\nid: demo\nstage: paused\n---\n",
         )
         .unwrap();
         std::fs::create_dir_all(repo.tracking_dir()).unwrap();
         std::fs::write(repo.tracking_dir().join("demo · queued.exit"), "1\n").unwrap();
-        std::fs::write(repo.tracking_dir().join("other · done.exit"), "0\n").unwrap();
+        assert_eq!(crate::tracking::failures(&repo).len(), 1);
 
-        let failing: Vec<String> = footer(
-            &repo,
-            &pipelines,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &[],
-            &[],
-        )
-        .iter()
-        .map(|l| strip(l))
-        .collect();
+        let failing = draw();
+        assert_eq!(failing, before);
         assert!(
-            failing.contains(&"issue_tracking: 1 hook failures — see tracking/".to_string()),
+            !failing
+                .iter()
+                .any(|l| l.contains("issue_tracking") || l.contains("hook")),
             "{failing:#?}"
         );
     }

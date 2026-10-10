@@ -357,7 +357,9 @@ flowchart LR
   B --> C[log in ~/.spoolway/project/tracking/]
   C -->|non-zero exit| D{queued, started or done?}
   D -->|yes| E[task paused]
-  D -->|no| F[failure counted on the board]
+  D -->|no| F[failure recorded]
+  E --> G[named by doctor and the before-dispatching popup]
+  F --> G
 ```
 
 Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOLWAY_EVENT`,
@@ -365,8 +367,19 @@ Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOL
 `SPOOLWAY_BRANCH`, `SPOOLWAY_TITLE`, `SPOOLWAY_TASK_FILE`, `SPOOLWAY_GROUP_SIZE`,
 `SPOOLWAY_LABELS` (its `labels:`, comma-joined, empty when it has none), `SPOOLWAY_EPIC` and
 `SPOOLWAY_TICKET`. The `done` event of a group's last open task also gets
-`SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`. The
-board prints `issue_tracking: N hook failures — see tracking/` while any hook has failed.
+`SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`.
+
+Each failed hook run of a task is named once by `spoolway doctor` and by the "before dispatching"
+popup, under `problems`. The row gives the event, the task, the exit code, what clears it and the
+log path:
+
+```
+issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
+```
+
+For a `queued`, `started` or `done` hook, `spoolway resume <task>` clears the row. A failed
+`blocked`, `paused` or `open` hook holds nothing, so the row says it clears once the task is done
+and archived. `spoolway issue show` runs produce no row.
 
 `spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
 file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes

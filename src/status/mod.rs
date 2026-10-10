@@ -3016,7 +3016,7 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 ///
 /// Everything else the busy board draws is left off, so an idle board reads
 /// as idle at a glance: the rule, the slots lines, the jobs ledger, the
-/// `pipelines` notice, hook failures and the parse warning. Each comes back
+/// `pipelines` notice and the parse warning. Each comes back
 /// once the board has a row again. A queue file that fails to parse makes no
 /// row, so a broken file on an otherwise empty queue is not named on the
 /// board at all. The keys that act on a row go too, since there is no row to

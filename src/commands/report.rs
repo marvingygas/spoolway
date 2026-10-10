@@ -2818,6 +2818,34 @@ mod tests {
         panic!("hook run for `{event}` never settled");
     }
 
+    /// The text of every `spoolway doctor` row naming a failed task hook —
+    /// the rows the "before dispatching" popup shows under `problems`.
+    fn hook_rows(repo: &Repo) -> Vec<String> {
+        crate::commands::doctor::issue_tracking_checks(repo, &repo.config.issue_tracking)
+            .into_iter()
+            .filter_map(|finding| match finding {
+                crate::commands::doctor::Finding::Check(label, Err(err))
+                    if label == crate::commands::doctor::HOOK_FAILURE_LABEL =>
+                {
+                    Some(format!("{err:#}"))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Asserts the one hook row there is names `spoolway resume demo` as its
+    /// remedy — what the three tests below then run, and prove clears it.
+    fn assert_row_says_resume(repo: &Repo, event: &str) {
+        let rows = hook_rows(repo);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].starts_with(&format!("`{event}` failed for demo (exit 1)")),
+            "{rows:?}"
+        );
+        assert!(rows[0].contains("`spoolway resume demo`"), "{rows:?}");
+    }
+
     /// Acceptance criterion: `spoolway resume` on a task a failing `queued`
     /// hook paused forgets that run, so the very next `fire` starts it over
     /// rather than reading the same stale exit code and pausing the task
@@ -2840,6 +2868,8 @@ mod tests {
             Some("issue_tracking hook exited 1 on `queued`"),
         );
         task.save().unwrap();
+
+        assert_row_says_resume(&repo, crate::pipeline::QUEUED);
 
         resume(
             &repo,
@@ -2864,6 +2894,50 @@ mod tests {
             None,
             "the failed run must be forgotten, or the very next pass pauses it right back"
         );
+        assert!(
+            hook_rows(&repo).is_empty(),
+            "the remedy the row names must clear it: {:?}",
+            hook_rows(&repo)
+        );
+    }
+
+    /// A failing `paused` hook only records its failure, so nothing holds the
+    /// task for it and `spoolway resume` forgets nothing: the row says so
+    /// rather than naming a resume, and is still there after one.
+    #[test]
+    fn resume_leaves_a_failed_paused_hooks_row_and_the_row_says_so() {
+        let (mut repo, _root_guard) = fixture("hook-resume-paused");
+        write_hook(&repo, "fail.sh", "exit 1");
+        add(&repo, "demo", &[]);
+        repo.config.issue_tracking.hook = "fail.sh".into();
+
+        let mut task = queued(&repo, "demo");
+        task.set_stage(crate::pipeline::PAUSED, Some("held by hand"));
+        task.save().unwrap();
+        crate::tracking::fire(&repo, &task, crate::pipeline::PAUSED, 1).unwrap();
+        assert_eq!(wait_for_exit_code(&repo, &task, crate::pipeline::PAUSED), 1);
+
+        let before = hook_rows(&repo);
+        assert_eq!(before.len(), 1, "{before:?}");
+        assert!(
+            before[0].contains("once the task is done and archived"),
+            "{before:?}"
+        );
+        assert!(!before[0].contains("`spoolway resume demo`"), "{before:?}");
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "demo".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(queued(&repo, "demo").stage(), crate::pipeline::QUEUED);
+        assert_eq!(hook_rows(&repo), before, "resume does not clear it");
     }
 
     /// A task paused over a start branch that does not exist goes back to
@@ -2920,6 +2994,8 @@ mod tests {
         );
         task.save().unwrap();
 
+        assert_row_says_resume(&repo, crate::pipeline::STARTED);
+
         resume(
             &repo,
             &Pipelines::builtin(),
@@ -2946,6 +3022,11 @@ mod tests {
             crate::tracking::exit_code(&repo, &task, crate::pipeline::STARTED),
             None,
             "the failed run must be forgotten, or the very next pass pauses it right back"
+        );
+        assert!(
+            hook_rows(&repo).is_empty(),
+            "the remedy the row names must clear it: {:?}",
+            hook_rows(&repo)
         );
     }
 
@@ -2981,6 +3062,8 @@ mod tests {
         );
         task.save().unwrap();
 
+        assert_row_says_resume(&repo, crate::pipeline::DONE);
+
         resume(
             &repo,
             &Pipelines::builtin(),
@@ -3004,6 +3087,11 @@ mod tests {
             crate::tracking::exit_code(&repo, &task, crate::pipeline::DONE),
             None,
             "the failed run must be forgotten so the hook fires again"
+        );
+        assert!(
+            hook_rows(&repo).is_empty(),
+            "the remedy the row names must clear it: {:?}",
+            hook_rows(&repo)
         );
     }
 
