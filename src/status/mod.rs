@@ -40,9 +40,9 @@ pub use view::{banner, plain_table};
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
-    clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, pane_height,
-    pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel, spool_frame,
-    table_laid_out, table_window, ticker, tint_available, unqueue_all_confirm_panel,
+    clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, jobs_ledger,
+    pane_height, pane_width, pause_confirm_panel, restart_confirm_panel, resume_picker_panel,
+    spool_frame, table_laid_out, table_window, ticker, tint_available, unqueue_all_confirm_panel,
     unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
@@ -2816,13 +2816,19 @@ fn paint_at(
     let header = header_cells(phase, snapshot.finishing, version);
     let pane = pane_width();
     if snapshot.rows.is_empty() {
+        // Jobs fire only inside a dispatcher's pass, so a board with nothing
+        // holding the lock would list firings that never come.
+        let jobs = match snapshot.holder {
+            Some(_) => snapshot.active_jobs.as_slice(),
+            None => &[],
+        };
         return paint_empty(
             &header.join(" · "),
             available.as_deref(),
             pane,
             phase,
-            recent,
             name,
+            jobs,
         );
     }
     // One blank row before the lockup, so its ascenders have a margin to sit
@@ -3013,18 +3019,18 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// [`paint`]'s frame for a board with no rows: the header alone in the
 /// top-right corner, then [`view::greeting_screen`] centred down the rest of
 /// the pane, and a key line of `enter` and, inside the dispatch tab, `q`.
+/// Under the greeting, `jobs` is drawn as the busy board's own job ledger —
+/// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
+/// the lock, and none is what a project with no enabled job has anyway.
 ///
 /// Everything else the busy board draws is left off, so an idle board reads
-/// as idle at a glance: the rule, the slots lines, the jobs ledger, the
+/// as idle at a glance: the rule, the slots lines, the
 /// `pipelines` notice, hook failures and the parse warning. Each comes back
 /// once the board has a row again. A queue file that fails to parse makes no
 /// row, so a broken file on an otherwise empty queue is not named on the
 /// board at all. The keys that act on a row go too, since there is no row to
-/// act on.
-///
-/// RECENT is the one exception, and only while no dispatcher holds the lock
-/// (`phase`'s `holder` is `None`): it is then the record of what the last
-/// run did before it stopped.
+/// act on. RECENT goes as well, whether or not a dispatcher holds the lock:
+/// the board still remembers it, and draws it again once a row is back.
 ///
 /// The lockup holds frame 0: nothing on an empty board is running.
 fn paint_empty(
@@ -3032,8 +3038,8 @@ fn paint_empty(
     available: Option<&str>,
     pane: usize,
     phase: Phase,
-    recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
+    jobs: &[crate::jobs::ActiveJob],
 ) -> String {
     let hosted = crate::screen::shell::hosted().is_some();
     let (keys, height) = hosted_keys(
@@ -3056,35 +3062,21 @@ fn paint_empty(
         true => height.saturating_sub(3),
         false => height.saturating_sub(4),
     });
-    let none = VecDeque::new();
-    let recent = empty_board_recent(phase, recent, &none);
     let hour = chrono::Timelike::hour(&chrono::Local::now());
+    // No profile names to line "jobs" up with here, so the ledger takes
+    // only the column its own label needs.
+    let ledger = jobs_ledger(jobs, 0);
     frame.push_str(&greeting_screen(
         &greeting(hour, name),
-        recent,
         pane,
         region,
+        &ledger,
     ));
     if hosted {
         return boxed(&frame, &keys, pane, height);
     }
     frame.push_str(&format!("{keys}\n"));
     clamp_rows(&frame, height)
-}
-
-/// The RECENT lines an empty board draws: `recent` while no dispatcher holds
-/// the lock, and `none` while one does. See [`paint_empty`].
-fn empty_board_recent<'a>(
-    phase: Phase,
-    recent: &'a VecDeque<RecentEvent>,
-    none: &'a VecDeque<RecentEvent>,
-) -> &'a VecDeque<RecentEvent> {
-    match phase {
-        Phase::Watching {
-            holder: Some(_), ..
-        } => none,
-        Phase::Watching { holder: None, .. } => recent,
-    }
 }
 
 /// The first word of git's `user.name` in `repo`, for an empty board's
@@ -5765,9 +5757,10 @@ mod tests {
         );
     }
 
-    /// An empty board is the greeting and nothing else: no rule, no slots
-    /// lines, no jobs ledger even with a job enabled, no `pipelines` notice
-    /// and no parse warning — and only `enter` on the key line.
+    /// An empty board with no dispatcher is the greeting and nothing else: no
+    /// rule, no slots lines, no jobs ledger even with a job enabled, no
+    /// `pipelines` notice and no parse warning — and only `enter` on the key
+    /// line.
     #[test]
     fn an_empty_board_draws_only_its_greeting() {
         let (repo, _root_guard) = fixture("board-empty-greeting");
@@ -5827,49 +5820,160 @@ mod tests {
         assert!(frame.contains("Nothing queued"), "{frame}");
     }
 
-    /// RECENT stays on an empty board while no dispatcher is running, and
-    /// goes while one is.
-    ///
-    /// Where RECENT lands, and how much of it a pane holds, depends on the
-    /// pane's height, which `paint` reads from the real terminal. That layout
-    /// is covered by `greeting_screen`'s own tests with a fixed region; this
-    /// one checks only what holds at any height.
+    /// An empty board draws no RECENT, whether a dispatcher holds the lock or
+    /// not, even with events remembered: the greeting and `Nothing queued`
+    /// stand alone under the header.
     #[test]
-    fn an_empty_board_keeps_recent_only_while_no_dispatcher_runs() {
+    fn an_empty_board_draws_no_recent_with_or_without_a_dispatcher() {
         let (repo, _root_guard) = fixture("board-empty-recent");
         let pipelines = Pipelines::builtin();
         let recent = arrivals(2);
-        let none = VecDeque::new();
-        let stopped = Phase::Watching {
-            holder: None,
-            dispatching: false,
-        };
-        let held = Phase::Watching {
-            holder: Some(4242),
-            dispatching: true,
-        };
-        assert_eq!(empty_board_recent(stopped, &recent, &none).len(), 2);
-        assert!(empty_board_recent(held, &recent, &none).is_empty());
+        for (dispatching, holder, header, enter) in [
+            (
+                false,
+                None,
+                "dispatcher stopped",
+                "[enter] start dispatching",
+            ),
+            (
+                true,
+                Some(4242),
+                "dispatcher running · pid 4242",
+                "[enter] stop dispatching",
+            ),
+        ] {
+            let frame = strip(&paint(
+                &repo,
+                &pipelines,
+                dispatching,
+                &Snapshot {
+                    holder,
+                    ..Snapshot::empty()
+                },
+                None,
+                &recent,
+                Some("Marvin"),
+            ));
+            assert!(frame.contains(header), "{frame}");
+            assert!(frame.contains(enter), "{frame}");
+            assert!(frame.contains("Nothing queued"), "{frame}");
+            assert!(!frame.contains("RECENT"), "{frame}");
+            assert!(!frame.contains("task-"), "{frame}");
+        }
+    }
 
-        let running = strip(&paint(
+    /// The jobs ledger an empty board draws, its lines with their spacing
+    /// collapsed: the busy board pads `jobs` to its profile names, which an
+    /// empty board has none of, so only the words and their order compare.
+    fn ledger_words(frame: &str) -> Vec<String> {
+        let lines: Vec<&str> = frame.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("jobs "))
+            .unwrap_or_else(|| panic!("no jobs ledger in {frame}"));
+        lines[start..]
+            .iter()
+            .take_while(|line| {
+                let line = line.trim_start();
+                line.starts_with("jobs ") || line.starts_with('○')
+            })
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// An empty board under a dispatcher holding the lock draws the jobs
+    /// ledger under `Nothing queued`, in the busy board's own words and
+    /// order for the same jobs — and none at all once nothing holds the lock.
+    #[test]
+    fn an_idle_dispatcher_draws_the_busy_boards_ledger() {
+        let (repo, _root_guard) = fixture("board-empty-ledger");
+        let pipelines = Pipelines::builtin();
+        let jobs = full_board().active_jobs;
+        let busy = strip(&paint_at(
             &repo,
             &pipelines,
             true,
             &Snapshot {
                 holder: Some(4242),
-                ..Snapshot::empty()
+                ..full_board()
             },
+            Some("cart-empty-state"),
+            &VecDeque::new(),
             None,
-            &recent,
-            Some("Marvin"),
+            Some(60),
         ));
-        assert!(
-            running.contains("dispatcher running · pid 4242"),
-            "{running}"
-        );
-        assert!(running.contains("[enter] stop dispatching"), "{running}");
-        assert!(!running.contains("RECENT"), "{running}");
-        assert!(!running.contains("task-1"), "{running}");
+        let empty = |holder: Option<u32>| {
+            strip(&paint(
+                &repo,
+                &pipelines,
+                holder.is_some(),
+                &Snapshot {
+                    holder,
+                    active_jobs: jobs.clone(),
+                    ..Snapshot::empty()
+                },
+                None,
+                &VecDeque::new(),
+                None,
+            ))
+        };
+
+        let idle = empty(Some(4242));
+        let ledger = ledger_words(&idle);
+        assert_eq!(ledger.len(), 3, "{idle}");
+        assert_eq!(ledger[0], "jobs 2 active", "{idle}");
+        assert_eq!(ledger, ledger_words(&busy), "{idle}\n{busy}");
+        let rows: Vec<&str> = idle.lines().map(str::trim).collect();
+        let queued = rows
+            .iter()
+            .position(|row| *row == "Nothing queued")
+            .unwrap();
+        assert_eq!(rows[queued + 1], "", "{idle}");
+        assert!(rows[queued + 2].starts_with("jobs "), "{idle}");
+
+        let stopped = empty(None);
+        assert!(stopped.contains("Nothing queued"), "{stopped}");
+        assert!(!stopped.contains("active"), "{stopped}");
+        assert!(!stopped.contains("nightly-audit"), "{stopped}");
+    }
+
+    /// A board that drew the greeting with its ledger switches to the busy
+    /// layout — table, footer and all — once its reading has rows: a job
+    /// firing queues its routine, and nothing else has to notice.
+    #[test]
+    fn an_idle_board_switches_to_the_progress_view_once_a_job_queues_rows() {
+        let (repo, _root_guard) = fixture("board-empty-fires");
+        let pipelines = Pipelines::builtin();
+        let draw = |snapshot: &Snapshot| {
+            strip(&paint_at(
+                &repo,
+                &pipelines,
+                true,
+                snapshot,
+                None,
+                &VecDeque::new(),
+                None,
+                Some(60),
+            ))
+        };
+        let idle = draw(&Snapshot {
+            holder: Some(4242),
+            active_jobs: full_board().active_jobs,
+            ..Snapshot::empty()
+        });
+        assert!(idle.contains("Nothing queued"), "{idle}");
+        assert!(idle.contains("2 active"), "{idle}");
+        assert!(!idle.contains("TASK"), "{idle}");
+
+        let busy = draw(&Snapshot {
+            holder: Some(4242),
+            ..full_board()
+        });
+        assert!(!busy.contains("Nothing queued"), "{busy}");
+        assert!(busy.contains("TASK"), "{busy}");
+        assert!(busy.contains("cart-empty-state"), "{busy}");
+        assert!(busy.contains("slots"), "{busy}");
+        assert!(busy.contains("2 active"), "{busy}");
     }
 
     /// The greeting's name is read off git once per board and kept: a name

@@ -693,7 +693,8 @@ struct Spend {
 /// still bring it back to life" — the two things a person needs the
 /// dispatcher resident to keep asking. Empty wherever no job is enabled,
 /// which is when this draws nothing at all. An empty board draws no footer
-/// at all — see `paint_empty` in the parent module.
+/// at all, only the same ledger under its greeting while a dispatcher holds
+/// the lock — see [`jobs_ledger`] and `paint_empty` in the parent module.
 ///
 /// `changed_pipelines` is every pipeline file edited since the running
 /// dispatcher started — see [`crate::pipeline_snapshot`]. Named on a
@@ -857,36 +858,55 @@ pub(super) fn footer(
     // "jobs" and every profile name share one column.
     if !jobs.is_empty() {
         lines.push(String::new());
-        lines.push(format!(
-            "{BOLD}{:<name_w$}{RESET}{GUTTER}{n} active",
-            "jobs",
-            n = jobs.len(),
-        ));
-        // Job names get their own column, separate from `name_w` above: a
-        // routine's name has no reason to share a width with an agent
-        // profile's, and the mockup this follows gives each block its own.
-        let job_name_w = jobs
-            .iter()
-            .map(|j| j.name.chars().count())
-            .max()
-            .unwrap_or(0);
-        let indent = format!("{:name_w$}{GUTTER}", "");
-        let now = chrono::Local::now();
-        for job in jobs {
-            let when = match job.next {
-                Some(at) => format!(
-                    "{}{GUTTER}({})",
-                    at.format("%a %-d %b %H:%M"),
-                    crate::jobs::until(at - now)
-                ),
-                // The same fact `doctor`'s own "schedule fires" check names —
-                // a job whose expression parses but never comes round — kept
-                // on the ledger rather than dropped, so a person still sees
-                // it is there and broken.
-                None => "will never fire — run `spoolway doctor`".to_string(),
-            };
-            lines.push(format!("{indent}○ {:<job_name_w$}{GUTTER}{when}", job.name,));
-        }
+        lines.extend(jobs_ledger(jobs, name_w));
+    }
+    lines
+}
+
+/// The job ledger: a `jobs   <n> active` line, then one
+/// `○ <name>   <next firing>   (<until>)` line per job in `jobs`, in the
+/// order given. Empty when `jobs` is.
+///
+/// One function for both boards that draw it — [`footer`] under the busy
+/// board's slots lines, and [`greeting_screen`] under an idle dispatcher's
+/// `Nothing queued` — so the two cannot word or order the ledger apart.
+/// `name_w` is the column "jobs" is padded to, so the footer can line it up
+/// with its profile names; it never pads to less than "jobs" itself, so the
+/// empty board, which has no profile names, passes 0.
+pub(super) fn jobs_ledger(jobs: &[crate::jobs::ActiveJob], name_w: usize) -> Vec<String> {
+    if jobs.is_empty() {
+        return Vec::new();
+    }
+    let name_w = name_w.max("jobs".chars().count());
+    let mut lines = vec![format!(
+        "{BOLD}{:<name_w$}{RESET}{GUTTER}{n} active",
+        "jobs",
+        n = jobs.len(),
+    )];
+    // Job names get their own column, separate from `name_w` above: a
+    // routine's name has no reason to share a width with an agent
+    // profile's, and the mockup this follows gives each block its own.
+    let job_name_w = jobs
+        .iter()
+        .map(|j| j.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let indent = format!("{:name_w$}{GUTTER}", "");
+    let now = chrono::Local::now();
+    for job in jobs {
+        let when = match job.next {
+            Some(at) => format!(
+                "{}{GUTTER}({})",
+                at.format("%a %-d %b %H:%M"),
+                crate::jobs::until(at - now)
+            ),
+            // The same fact `doctor`'s own "schedule fires" check names —
+            // a job whose expression parses but never comes round — kept
+            // on the ledger rather than dropped, so a person still sees
+            // it is there and broken.
+            None => "will never fire — run `spoolway doctor`".to_string(),
+        };
+        lines.push(format!("{indent}○ {:<job_name_w$}{GUTTER}{when}", job.name,));
     }
     lines
 }
@@ -1918,25 +1938,25 @@ const GREETING_BLOCK_ROWS: usize = 5 + 1 + 2;
 
 /// The empty board under its header: the lockup on frame 0, a blank row,
 /// `greeting` in bold and `Nothing queued` dim, each centred across a pane
-/// `pane` columns wide.
+/// `pane` columns wide. Then, when `ledger` has lines, a blank row and the
+/// ledger — [`jobs_ledger`]'s lines, which the caller passes only while a
+/// dispatcher holds the lock — centred as one block, so its own columns
+/// stay lined up under each other.
 ///
-/// `recent` is drawn under the two lines by [`ticker`], two blank rows down
-/// and at the frame's usual left margin, and the whole group is centred down
-/// `region`: the rows between the header and the key line. The block comes
-/// first and RECENT gets what is left of `region`, so a short pane loses
-/// RECENT's oldest lines first, and below [`GREETING_BLOCK_ROWS`] the lockup
-/// goes and the two lines stay alone, with no RECENT under them. A pane too narrow for the lockup drops it
-/// too, as [`masthead`] does. `region` is `None` with no terminal to measure:
-/// the block then starts one blank row under the header, RECENT is kept
-/// whole, and one blank row closes it.
+/// The group is centred down `region`: the rows between the header and the
+/// key line. A pane too short for the whole group gives up the ledger first,
+/// whole, then the lockup: below [`GREETING_BLOCK_ROWS`] the two lines stay
+/// alone. A pane too narrow for the lockup drops it too, as [`masthead`]
+/// does. `region` is `None` with no terminal to measure: the block then
+/// starts one blank row under the header, and one blank row closes it.
 ///
 /// Returns exactly `region` rows when it is known and the group fits, so the
 /// key line lands on the pane's own bottom.
 pub(super) fn greeting_screen(
     greeting: &str,
-    recent: &VecDeque<RecentEvent>,
     pane: usize,
     region: Option<usize>,
+    ledger: &[String],
 ) -> String {
     let lockup = &LOCKUP[0];
     let lockup_width = lockup.iter().map(|l| l.chars().count()).max().unwrap_or(0);
@@ -1945,6 +1965,15 @@ pub(super) fn greeting_screen(
     // right edge is one column from wrapping.
     let tall_enough = room >= GREETING_BLOCK_ROWS;
     let with_logo = lockup_width < pane && tall_enough;
+    // The ledger only ever draws under the lockup. A pane too short or too
+    // narrow for the lockup has no ledger either: were the ledger to stand
+    // without it, a pane a few rows under the full group's height would
+    // drop the ledger, then bring it back once the lockup went, and a
+    // person resizing the pane would watch it flicker in and out. Never a
+    // part of the ledger, either: half a list reads as jobs that do not
+    // exist.
+    let with_ledger =
+        !ledger.is_empty() && with_logo && room >= GREETING_BLOCK_ROWS + 1 + ledger.len();
 
     let mut group = String::new();
     if with_logo {
@@ -1961,26 +1990,20 @@ pub(super) fn greeting_screen(
         let left = " ".repeat(pane.saturating_sub(text.chars().count()) / 2);
         group.push_str(&format!("{left}{paint}{text}{RESET}\n"));
     }
-
-    // `ticker` opens on a blank row of its own; this is the second of the
-    // two between `Nothing queued` and the `RECENT` heading, so it comes off
-    // the rows the ticker is handed and is drawn only when the ticker is.
-    //
-    // A pane too short for the lockup has no rows for RECENT either. Counted
-    // against the two lines alone, a region of 6 or 7 rows would draw RECENT
-    // that a region of 8 to 11 has no room for, so shrinking the pane would
-    // bring it back after the lockup went.
-    let ticker_rows = match region {
-        None => recent.len() + 2,
-        Some(_) if !tall_enough => 0,
-        Some(region) => region
-            .saturating_sub(group.lines().count())
-            .saturating_sub(1),
-    };
-    let recent = ticker(recent, pane, ticker_rows);
-    if !recent.is_empty() {
+    if with_ledger {
+        // One margin for every line, off the widest, rather than each line
+        // centred on its own: the job lines sit indented under `jobs` by
+        // design, and centring them one by one would undo that.
+        let width = ledger
+            .iter()
+            .map(|line| strip_ansi(line).chars().count())
+            .max()
+            .unwrap_or(0);
+        let left = " ".repeat(pane.saturating_sub(width) / 2);
         group.push('\n');
-        group.push_str(&recent);
+        for line in ledger {
+            group.push_str(&format!("{left}{line}\n"));
+        }
     }
 
     let Some(region) = region else {
@@ -3632,7 +3655,7 @@ mod tests {
     /// queued`, centred both ways, row for row as the mockup draws it.
     #[test]
     fn an_empty_board_centres_its_greeting_as_drawn() {
-        let block = greeting_screen("Good afternoon, Marvin.", &VecDeque::new(), 96, Some(19));
+        let block = greeting_screen("Good afternoon, Marvin.", 96, Some(19), &[]);
         let mut expected = vec![String::new(); 5];
         expected.extend(
             [
@@ -3655,74 +3678,24 @@ mod tests {
         assert!(block.contains(LOCKUP[0][1]), "{block}");
     }
 
-    /// RECENT sits two blank rows under `Nothing queued`, at the frame's left
-    /// margin, and the logo, the two lines and RECENT centre down the pane
-    /// as one group — the mockup of a stopped dispatcher, row for row.
+    /// A short pane keeps the block whole and centred; below the block's
+    /// eight rows the lockup goes and the two lines stay.
     #[test]
-    fn recent_centres_with_the_greeting_as_one_group() {
-        let recent: VecDeque<RecentEvent> = [("15:12", "cart-totals"), ("15:41", "cart-discounts")]
-            .into_iter()
-            .map(|(at, id)| RecentEvent::Arrival {
-                at: at.to_string(),
-                id: id.to_string(),
-                change: Move::Passed {
-                    from: "review".to_string(),
-                    to: "done".to_string(),
-                    cause: None,
-                },
-            })
-            .collect();
-        let block = greeting_screen("Good afternoon, Marvin.", &recent, 96, Some(19));
-        let rows = trimmed(&block);
-        assert_eq!(rows.len(), 19, "{block}");
-        assert!(rows[..3].iter().all(String::is_empty), "{block}");
-        assert_eq!(rows[3].trim(), "█", "{block}");
-        assert_eq!(rows[9].trim(), "Good afternoon, Marvin.", "{block}");
-        assert_eq!(rows[10].trim(), "Nothing queued", "{block}");
-        assert_eq!(&rows[11..13], ["", ""], "{block}");
-        assert_eq!(rows[13], " RECENT", "{block}");
-        assert_eq!(
-            rows[14], " 15:41   cart-discounts   passed review, moved to done",
-            "{block}"
-        );
-        assert_eq!(
-            rows[15], " 15:12   cart-totals      passed review, moved to done",
-            "{block}"
-        );
-        assert!(rows[16..].iter().all(String::is_empty), "{block}");
-    }
+    fn a_short_pane_gives_up_the_lockup() {
+        for (region, top) in [(13, 2), (10, 1), (8, 0)] {
+            let block = greeting_screen("Good morning.", 96, Some(region), &[]);
+            let rows = trimmed(&block);
+            assert_eq!(rows.len(), region, "{block}");
+            assert_eq!(rows[top].trim(), "█", "{block}");
+            assert_eq!(rows[top + 6].trim(), "Good morning.", "{block}");
+            assert_eq!(rows[top + 7].trim(), "Nothing queued", "{block}");
+        }
 
-    /// A short pane keeps the block whole and takes RECENT's oldest lines
-    /// first; below the block's eight rows the lockup goes and the two lines
-    /// stay.
-    #[test]
-    fn a_short_pane_gives_up_recent_then_the_lockup() {
-        let recent = arrivals(3);
-        // Eight rows for the block, two blank, the heading and two arrivals.
-        let block = greeting_screen("Good morning.", &recent, 96, Some(13));
-        let rows = trimmed(&block);
-        assert_eq!(rows.len(), 13, "{block}");
-        assert_eq!(rows[0].trim(), "█", "{block}");
-        assert_eq!(rows[10], " RECENT", "{block}");
-        assert!(rows[11].contains("task-2"), "the newest stays — {block}");
-        assert!(rows[12].contains("task-1"), "{block}");
-        assert!(!block.contains("task-0"), "the oldest goes first — {block}");
-
-        // No room for RECENT at all: the block alone, still centred.
-        let block = greeting_screen("Good morning.", &recent, 96, Some(10));
-        let rows = trimmed(&block);
-        assert_eq!(rows.len(), 10, "{block}");
-        assert_eq!(rows[1].trim(), "█", "{block}");
-        assert!(!block.contains("RECENT"), "{block}");
-
-        // One row short of the block: the art goes, the two lines stay, and
-        // RECENT does not come back into the rows the art gave up.
+        // One row short of the block: the art goes and the two lines stay.
         for region in [6, 7] {
-            let block = greeting_screen("Good morning.", &recent, 96, Some(region));
+            let block = greeting_screen("Good morning.", 96, Some(region), &[]);
             let rows = trimmed(&block);
             assert!(!block.contains(LOCKUP[0][1]), "{block}");
-            assert!(!block.contains("RECENT"), "{block}");
-            assert!(!block.contains("task-"), "{block}");
             assert_eq!(rows.len(), region, "{block}");
             assert_eq!(rows[(region - 2) / 2].trim(), "Good morning.", "{block}");
             assert_eq!(
@@ -3733,34 +3706,157 @@ mod tests {
         }
     }
 
+    /// Two jobs, the sooner first, as the board reads them: firing 5h 12m and
+    /// 1d 11h from now, each with half a minute to spare so `until` reads the
+    /// same however long the test takes to reach it.
+    fn two_jobs() -> Vec<crate::jobs::ActiveJob> {
+        let now = chrono::Local::now();
+        let job = |name: &str, mins: i64| crate::jobs::ActiveJob {
+            name: name.to_string(),
+            next: Some(now + chrono::TimeDelta::minutes(mins) - chrono::TimeDelta::seconds(30)),
+        };
+        vec![
+            job("nightly-audit", 5 * 60 + 12),
+            job("weekly-deps", 35 * 60),
+        ]
+    }
+
+    /// An idle dispatcher's board inside the 70-column box, 14 rows under the
+    /// header: the greeting, then after one blank row the jobs ledger,
+    /// centred as one block with the job lines indented under `jobs`, row
+    /// for row as the mockup draws it.
+    #[test]
+    fn an_idle_dispatchers_board_draws_the_ledger_as_drawn() {
+        let jobs = two_jobs();
+        let ledger = jobs_ledger(&jobs, 0);
+        let block = greeting_screen("Good evening, Marvin.", 70, Some(14), &ledger);
+        let at = |i: usize| jobs[i].next.unwrap().format("%a %-d %b %H:%M");
+        // The block's margin follows its widest line, and that line holds a
+        // date whose day of the month is one digit or two, depending on when
+        // the test runs. So the margin is taken from the ledger as rendered,
+        // and the job lines sit `jobs` and a gutter further in.
+        let widest = ledger
+            .iter()
+            .map(|line| strip_ansi(line).chars().count())
+            .max()
+            .unwrap();
+        let left = " ".repeat((70 - widest) / 2);
+        let indent = format!("{left}{:4}{GUTTER}", "");
+        let mut expected = vec![String::new()];
+        expected.extend([
+            "                                        █".to_string(),
+            "            ▀█▀██▀   ▄▄▄ ▄▄▄   ▄▄   ▄▄  █  ▄   ▄  ▄▄  ▄  ▄".to_string(),
+            "             █▀▄█   ▀▄▄  █  █ █  █ █  █ █  █ ▄ █  ▄▄█ █  █".to_string(),
+            "            ▄██▄█▄  ▄▄▄▀ █▀▀  ▀▄▄▀ ▀▄▄▀ █▄ █▀ ▀█ ▀▄▄█  ▀▀█".to_string(),
+            "                         █                            ▄▄▄▀".to_string(),
+            String::new(),
+            "                        Good evening, Marvin.".to_string(),
+            "                            Nothing queued".to_string(),
+            String::new(),
+            format!("{left}jobs   2 active"),
+            format!("{indent}○ nightly-audit   {}   (in 5h 12m)", at(0)),
+            format!("{indent}○ weekly-deps     {}   (in 1d 11h)", at(1)),
+            String::new(),
+        ]);
+        assert_eq!(trimmed(&block), expected, "{block}");
+    }
+
+    /// Walking a pane from tall to short, every height draws the ledger whole
+    /// or not at all, and once it drops it never returns: it goes before the
+    /// lockup, and stays gone once the lockup has gone too.
+    #[test]
+    fn a_short_pane_gives_up_the_ledger_then_the_lockup() {
+        let ledger = jobs_ledger(&two_jobs(), 0);
+        let ledger_rows: Vec<String> = ledger
+            .iter()
+            .map(|line| strip_ansi(line).trim().to_string())
+            .collect();
+        let mut dropped_at = None;
+        let mut lockup_gone_at = None;
+        for region in (0..=30).rev() {
+            let block = greeting_screen("Good morning.", 96, Some(region), &ledger);
+            let rows: Vec<String> = trimmed(&block)
+                .iter()
+                .map(|r| r.trim().to_string())
+                .collect();
+            let shown = ledger_rows
+                .iter()
+                .filter(|line| rows.contains(line))
+                .count();
+            assert!(
+                shown == 0 || shown == ledger_rows.len(),
+                "{shown} of the ledger's lines at {region} rows:\n{block}"
+            );
+            let lockup = block.contains(LOCKUP[0][1]);
+            if shown > 0 {
+                assert!(
+                    dropped_at.is_none(),
+                    "the ledger came back at {region} rows:\n{block}"
+                );
+                assert!(lockup, "a ledger without the lockup at {region}:\n{block}");
+            } else if dropped_at.is_none() {
+                dropped_at = Some(region);
+            }
+            if !lockup && lockup_gone_at.is_none() {
+                lockup_gone_at = Some(region);
+            }
+            if lockup {
+                assert!(lockup_gone_at.is_none(), "the lockup came back at {region}");
+            }
+            // The two lines stay, whatever else gives way.
+            assert!(rows.contains(&"Good morning.".to_string()), "{block}");
+            assert!(rows.contains(&"Nothing queued".to_string()), "{block}");
+        }
+        // Twelve rows hold the whole group; eight the lockup and the lines.
+        assert_eq!(dropped_at, Some(11));
+        assert_eq!(lockup_gone_at, Some(7));
+    }
+
     /// With no pane height to centre in, the block starts one blank row under
-    /// the header and RECENT is kept whole.
+    /// the header and one blank row closes it.
     #[test]
     fn with_no_height_the_greeting_starts_one_row_down() {
-        let block = greeting_screen("Working late.", &arrivals(9), 120, None);
+        let block = greeting_screen("Working late.", 120, None, &[]);
         let rows = trimmed(&block);
+        assert_eq!(rows.len(), 10, "{block}");
         assert_eq!(rows[0], "", "{block}");
         assert_eq!(rows[1].trim(), "█", "{block}");
         assert_eq!(rows[7].trim(), "Working late.", "{block}");
         assert_eq!(rows[8].trim(), "Nothing queued", "{block}");
-        assert_eq!(
-            (0..9)
-                .filter(|i| block.contains(&format!("task-{i}")))
-                .count(),
-            9
-        );
+        assert_eq!(rows[9], "", "{block}");
     }
 
     /// A pane too narrow for the lockup keeps the two lines, and a greeting
     /// too long for the pane is clipped with `…` rather than wrapped.
     #[test]
     fn a_narrow_pane_drops_the_lockup_and_clips_the_greeting() {
-        let block = greeting_screen("Good morning, Bartholomew.", &VecDeque::new(), 20, None);
+        let block = greeting_screen("Good morning, Bartholomew.", 20, None, &[]);
         assert!(!block.contains(LOCKUP[0][1]), "{block}");
         let rows = trimmed(&block);
         assert_eq!(rows[1], " Good morning, Bar…", "{block}");
         assert_eq!(rows[2], "   Nothing queued", "{block}");
         assert!(rows.iter().all(|row| row.chars().count() < 20), "{block}");
+    }
+
+    /// A pane too narrow for the lockup draws no ledger either, however many
+    /// rows it has: the ledger only ever stands under the lockup.
+    #[test]
+    fn a_narrow_pane_drops_the_ledger_with_the_lockup() {
+        let ledger = jobs_ledger(&two_jobs(), 0);
+        let lockup_width = LOCKUP[0].iter().map(|l| l.chars().count()).max().unwrap();
+        let pane = lockup_width - 1;
+        let block = greeting_screen("Good morning.", pane, Some(30), &ledger);
+        assert!(!block.contains(LOCKUP[0][1]), "{block}");
+        let rows: Vec<String> = trimmed(&block)
+            .iter()
+            .map(|r| r.trim().to_string())
+            .collect();
+        assert!(rows.contains(&"Nothing queued".to_string()), "{block}");
+        for line in &ledger {
+            let line = strip_ansi(line).trim().to_string();
+            assert!(!rows.contains(&line), "{line:?} drawn:\n{block}");
+        }
+        assert!(!block.contains("2 active"), "{block}");
     }
 
     /// The empty board's header row is the busy board's, right-aligned one

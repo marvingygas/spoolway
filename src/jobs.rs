@@ -668,11 +668,12 @@ pub fn enabled_count(repo: &Repo) -> usize {
 }
 
 /// Every enabled job across both stores, ordered by next firing — the
-/// dispatcher board's job ledger, shown on every frame whether the queue is
-/// empty or busy. A job whose schedule will never come round sorts last,
-/// carrying `next: None`, rather than being dropped: a person still needs to
-/// see it is there and broken. A store that will not load counts as no
-/// jobs — the dispatcher then behaves exactly as it does with none.
+/// dispatcher board's job ledger, shown on every frame of a busy board, and
+/// of an empty one while a dispatcher holds the lock. A job whose schedule
+/// will never come round sorts last, carrying `next: None`, rather than
+/// being dropped: a person still needs to see it is there and broken. A
+/// store that will not load counts as no jobs — the dispatcher then behaves
+/// exactly as it does with none.
 pub fn active_jobs(repo: &Repo) -> Vec<ActiveJob> {
     let Ok(jobs) = load(repo) else {
         return Vec::new();
@@ -737,9 +738,10 @@ pub fn staying_up(repo: &Repo) -> StayingUp {
 /// The two lines the plain run prints on an empty queue kept resident by a
 /// job: `nothing queued`, then which job fires next and when — or that none
 /// ever will. The board says `Nothing queued` under its own greeting instead,
-/// and names no job at all while the queue is empty, its job ledger included
-/// — see `crate::status::view::greeting_screen`. The jobs tab still names
-/// every job's next firing. Assumes at least one job is enabled.
+/// and under that draws the busy board's job ledger, every enabled job and
+/// its next firing, while a dispatcher holds the lock — see
+/// `crate::status::view::greeting_screen`. Assumes at least one job is
+/// enabled.
 pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
     let next_line = match &jobs.next {
         Some((name, when)) => format!(

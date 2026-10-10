@@ -258,9 +258,20 @@ The greeting follows the local hour and ends in a full stop.
 
 The greeting adds a comma and the first word of `git config user.name` for the board's repo. With no git, no name set or a blank value, it reads `Good afternoon.` instead. The board reads the name once, when it opens.
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the job ledger, the `pipelines` notice, the hook failure line and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
+While a dispatcher holds the lock and at least one job is enabled, the job ledger follows `Nothing queued`, after one blank row. It uses the busy board's own words and order, and is centred as one block. Jobs fire only inside a dispatcher's pass, so a board with no dispatcher running lists no jobs. When a job fires and queues its routine, the board switches back to the busy layout by itself.
 
-`RECENT` shows under `Nothing queued`, after two blank rows, only while no dispatcher is running. The wordmark, the two lines and `RECENT` are centred together. On a short pane `RECENT` loses its oldest lines first. A pane too short for the wordmark drops it, along with `RECENT`, and keeps the two lines.
+```
+Good evening, Marvin.
+Nothing queued
+
+jobs   2 active
+       ○ nightly-audit   Sun 11 Oct 03:00   (in 5h 12m)
+       ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
+```
+
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `pipelines` notice, the hook failure line and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
+
+An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
 ### Columns
 
