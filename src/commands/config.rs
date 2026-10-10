@@ -95,19 +95,76 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
         );
     }
     crate::confkv::check_typed(key, value)?;
-    let updated = crate::confkv::set(&repo.config, key, value)?;
+    // Built from the tracked file alone. `repo.config` has the override
+    // layer merged in, so saving a key out of it checks the tracked text
+    // against values it never held and refuses every key but the overridden
+    // one — or writes the layer's value into the tracked file.
+    let tracked = Config::load_tracked(&repo.root)?;
+    let updated = crate::confkv::set(&tracked, key, value)?;
     updated.save_key(&repo.root, key)?;
     println!("{key} = {}", crate::confkv::get(&updated, key)?);
-    for warning in crate::confkv::warnings(&updated, key) {
-        eprintln!("warning: {warning}");
-    }
-    // The file-based checks `doctor` runs, on the config just saved. These
-    // are warnings, never refusals: a script sets keys in sequence, and the
-    // next command may be the one that makes the check pass.
-    for failure in super::doctor::failures_after_set(repo, &updated, key) {
-        eprintln!("warning: {failure}");
+    for line in follow_up_lines(repo, key, &updated)? {
+        eprintln!("{line}");
     }
     Ok(())
+}
+
+/// Every line `config set` prints on stderr after the save, read from the
+/// config the project now runs on rather than from `updated`.
+///
+/// `doctor` and the dispatcher judge the override-merged config, so the
+/// warnings and file checks must too: judged on the tracked file alone, a set
+/// that breaks a check only because a layer key enables it would pass in
+/// silence, and a layer key that already repairs it would draw a warning
+/// `doctor` never raises. The checks are warnings, never refusals: a script
+/// sets keys in sequence, and the next command may be the one that makes a
+/// check pass.
+fn follow_up_lines(repo: &Repo, key: &str, updated: &Config) -> Result<Vec<String>> {
+    let merged = Config::load(&repo.root)?;
+    let mut lines = Vec::new();
+    lines.extend(shadow_note(&repo.root, key, updated, &merged)?);
+    for warning in crate::confkv::warnings(&merged, key) {
+        lines.push(format!("warning: {warning}"));
+    }
+    for failure in super::doctor::failures_after_set(repo, &merged, key) {
+        lines.push(format!("warning: {failure}"));
+    }
+    Ok(lines)
+}
+
+/// The note `config set` prints when the override layer decides the value in
+/// effect for `key` once the set is saved, or `None` when it does not.
+///
+/// Compares the `merged` config with `updated` rather than reading which keys
+/// `overrides/config.toml` carries: a layer value that fails to apply (a
+/// cross-field pair it breaks, for one) is dropped on load, so a key the file
+/// names can still take the value just set. The advice starts with the
+/// one-key route because `override drop` and `override promote` act on the
+/// whole config layer: `drop` deletes every key in a file that lives outside
+/// git, and `promote` writes all of them into the tracked file, overwriting
+/// the value just set with the layer's.
+fn shadow_note(
+    root: &Path,
+    key: &str,
+    updated: &Config,
+    merged: &Config,
+) -> Result<Option<String>> {
+    let Some(overrides) = crate::overrides::dir_if_identified(root)? else {
+        return Ok(None);
+    };
+    let effective = crate::confkv::get(merged, key)?;
+    if effective == crate::confkv::get(updated, key)? {
+        return Ok(None);
+    }
+    let path = crate::overrides::config_patch_path(&overrides);
+    Ok(Some(format!(
+        "note: {} still sets `{key}`, so the value in effect is {effective}.\n  \
+         Remove `{key}` from that file to let the value just set apply. \
+         `spoolway override drop config.toml` clears the whole config layer, and \
+         `spoolway override promote config.toml` writes all of its keys, this one \
+         included, into the tracked file.",
+        path.display()
+    )))
 }
 
 /// `spoolway config path`: every place this project's own setup lives — the
@@ -931,5 +988,168 @@ mod tests {
         });
 
         std::fs::remove_dir_all(&fake_home).ok();
+    }
+
+    /// `config set` edits the tracked `config.toml` against the tracked
+    /// values, so an `overrides/config.toml` layer never makes it refuse an
+    /// unrelated key and never leaks its own values into the tracked file.
+    #[test]
+    fn config_set_beside_an_active_override_changes_only_its_own_key_in_the_tracked_file() {
+        let base = crate::scratch::root("config-set-beside-override");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        git(&root, &["init", "-q", "-b", "plan/demo"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "t"]);
+        std::fs::write(
+            Config::path_in(&root),
+            "[dispatch]\nauto_commit = true\nlane_quiet = \"10m\"\n",
+        )
+        .unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        crate::scratch::stamped(&root);
+
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonical().unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                overrides.join(crate::config::CONFIG_FILE),
+                "[dispatch]\nlane_quiet = \"5m\"\n",
+            )
+            .unwrap();
+            let repo = Repo {
+                borrowed: false,
+                checkout: root.clone(),
+                root: root.clone(),
+                config: Config::load(&root).unwrap(),
+                home: home.clone(),
+            };
+            assert_eq!(
+                crate::confkv::get(&repo.config, "dispatch.lane_quiet").unwrap(),
+                "5m"
+            );
+
+            config_set(&repo, "dispatch.auto_commit", "false")
+                .expect("an unrelated key must be settable beside an override");
+            let tracked = Config::load_tracked(&root).unwrap();
+            assert!(!tracked.dispatch.auto_commit);
+            assert_eq!(
+                crate::confkv::get(&tracked, "dispatch.lane_quiet").unwrap(),
+                "10m",
+                "the override's 5m must never be written into the tracked file"
+            );
+
+            config_set(&repo, "dispatch.lane_quiet", "20m").unwrap();
+            let tracked = Config::load_tracked(&root).unwrap();
+            assert_eq!(
+                crate::confkv::get(&tracked, "dispatch.lane_quiet").unwrap(),
+                "20m"
+            );
+            assert!(!tracked.dispatch.auto_commit);
+        });
+    }
+
+    /// Runs `body` over a project whose tracked `config.toml` holds `tracked`
+    /// and whose `overrides/config.toml` holds `layer`.
+    fn with_layer(name: &str, tracked: &str, layer: &str, body: impl FnOnce(&Path)) {
+        let base = crate::scratch::root(name);
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        git(&root, &["init", "-q", "-b", "plan/demo"]);
+        std::fs::write(Config::path_in(&root), tracked).unwrap();
+        crate::scratch::stamped(&root);
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonical().unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(overrides.join(crate::config::CONFIG_FILE), layer).unwrap();
+            body(&root);
+        });
+    }
+
+    /// A layer value that applies decides the value in effect, so setting the
+    /// same key in the tracked file gets a note naming that value.
+    #[test]
+    fn shadow_note_names_the_value_a_layer_key_keeps_in_effect() {
+        with_layer(
+            "shadow-note-applies",
+            "[dispatch]\nlane_quiet = \"10m\"\n",
+            "[dispatch]\nlane_quiet = \"5m\"\n",
+            |root| {
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated = crate::confkv::set(&tracked, "dispatch.lane_quiet", "20m").unwrap();
+                updated.save_key(root, "dispatch.lane_quiet").unwrap();
+                let merged = Config::load(root).unwrap();
+                let note = shadow_note(root, "dispatch.lane_quiet", &updated, &merged)
+                    .unwrap()
+                    .expect("the layer's 5m outranks the 20m just set");
+                assert!(note.contains("value in effect is 5m"), "{note}");
+            },
+        );
+    }
+
+    /// A layer value dropped on load (here a `session_blocked_ctx` at or under
+    /// `session_reuse_ctx`) decides nothing, so the set takes effect and no
+    /// note claims otherwise.
+    #[test]
+    fn shadow_note_is_silent_for_a_layer_key_that_does_not_apply() {
+        with_layer(
+            "shadow-note-ignored",
+            "[agents.claude]\nkind = \"claude\"\nsession_reuse_ctx = 20\nsession_blocked_ctx = 40\n",
+            "[agents.claude]\nsession_blocked_ctx = 15\n",
+            |root| {
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated =
+                    crate::confkv::set(&tracked, "agents.claude.session_blocked_ctx", "50")
+                        .unwrap();
+                updated
+                    .save_key(root, "agents.claude.session_blocked_ctx")
+                    .unwrap();
+                let merged = Config::load(root).unwrap();
+                assert_eq!(
+                    shadow_note(root, "agents.claude.session_blocked_ctx", &updated, &merged)
+                        .unwrap(),
+                    None
+                );
+            },
+        );
+    }
+
+    /// The checks after a set judge the merged config, as `doctor` does: a
+    /// layer that enables `unattended` makes blanking `blocked_model` a
+    /// failure the set itself causes, which the tracked file alone (where
+    /// `unattended` is off) would not show.
+    #[test]
+    fn follow_up_lines_judge_the_config_the_layer_is_merged_into() {
+        with_layer(
+            "follow-up-merged",
+            "[unattended]\nenabled = false\nblocked_model = \"opus\"\n",
+            "[unattended]\nenabled = true\n",
+            |root| {
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated = crate::confkv::set(&tracked, "unattended.blocked_model", "").unwrap();
+                updated.save_key(root, "unattended.blocked_model").unwrap();
+                let repo = Repo {
+                    borrowed: false,
+                    checkout: root.to_path_buf(),
+                    root: root.to_path_buf(),
+                    config: Config::load(root).unwrap(),
+                    home: root.join(".home"),
+                };
+                let lines = follow_up_lines(&repo, "unattended.blocked_model", &updated).unwrap();
+                assert!(
+                    lines.iter().any(|l| l.contains("blocked_model is blank")),
+                    "{lines:?}"
+                );
+            },
+        );
     }
 }

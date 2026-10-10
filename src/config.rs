@@ -1723,9 +1723,9 @@ impl Config {
     }
 
     /// [`Config::load`], with no patch layer applied — for a caller that
-    /// must see only the tracked file: `commands::override_promote`'s own
-    /// read of it, ahead of writing each patched key through
-    /// [`Config::save_key`].
+    /// edits the tracked file through [`Config::save_key`] and must compare
+    /// against that file alone: `override promote`, `config set` and
+    /// `init --tracker`.
     pub fn load_tracked(root: &Path) -> Result<Config> {
         Config::load_impl(root, None)
     }

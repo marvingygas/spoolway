@@ -76,6 +76,26 @@ Only a wrong value that the command itself introduces is refused. A wrong value 
 file does not stop `config set` from changing another key. The same holds for each key of the
 overrides layer.
 
+### With an active overrides layer
+
+`config set` writes the tracked `config.toml` and checks the new value against the other tracked
+values. A key in `overrides/config.toml` never reaches the tracked file. It does not make
+`config set` refuse another key.
+
+The warnings above are judged on the config the project runs on, which is the tracked file
+merged with the layer. `spoolway doctor` judges the same config.
+
+When the layer still decides the value in effect for the key just set, `config set` prints a
+note on stderr. The note names the value in effect. A layer value that fails to apply is
+dropped on load, so it draws no note.
+
+```
+$ spoolway config set dispatch.lane_quiet 20m
+dispatch.lane_quiet = 20m
+note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quiet`, so the value in effect is 5m.
+  Remove `dispatch.lane_quiet` from that file to let the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
+```
+
 ### Wrong values written by hand
 
 A line edited by hand in `config.toml` can hold a value that loads but that spoolway cannot run
