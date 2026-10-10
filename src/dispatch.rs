@@ -21382,6 +21382,32 @@ mod tests {
         );
     }
 
+    /// A gated `run:` step is not held for a person on an unblocker's pass:
+    /// `route` hands it straight back to run again. The contract therefore
+    /// leaves out the line that says a person opens the pane.
+    #[test]
+    fn the_unblockers_contract_does_not_hold_a_gated_command_steps_pass() {
+        let (repo, _root_guard) = fixture("unblocker-gated-command-contract");
+        let yaml = "steps:\n  \
+                     - id: deploy\n    run: 'exit 1'\n    gate: true\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("solo", yaml).unwrap();
+        let blocked_step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+
+        let task = reload(&add_task_with(
+            &repo,
+            "release-cut",
+            crate::pipeline::BLOCKED,
+            |f| f.blocked_from = Some("deploy".into()),
+        ));
+
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        assert!(
+            !contract.contains("A pass is held here for a person"),
+            "{contract}"
+        );
+    }
+
     /// The command-step half of the same contract: `blocked_from` names a
     /// step whose craft is a shell command rather than a prompt, and this
     /// pass is told the command runs again once it carries the task past it
