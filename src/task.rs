@@ -924,8 +924,8 @@ impl Task {
         // a person edits one, a plan writes several. The id names this task's
         // worktree and every file a lane of it writes under the project's
         // home directory, so it is checked on the way in rather than trusted
-        // because of where it came from. See [`crate::config::check_id`].
-        crate::config::check_id("task id", &front.id)?;
+        // because of where it came from. See [`crate::config::check_task_id`].
+        crate::config::check_task_id(&front.id)?;
 
         // `branch` is spoolway's alone — see `queue::RESERVED_KEYS`. `queue add`
         // stamps `task/<id>`, or `task/<slug>-<id>` when
@@ -1460,7 +1460,7 @@ fn writer_pid(file_name: &str) -> Option<u32> {
 }
 
 /// One `*.md` file in a task directory that would not load, with the reason
-/// it did not — a broken frontmatter fence, an `id:` that fails `check_id`,
+/// it did not — a broken frontmatter fence, an `id:` that fails `check_task_id`,
 /// a stray note that is not a task at all.
 #[derive(Debug, Clone)]
 pub struct LoadProblem {

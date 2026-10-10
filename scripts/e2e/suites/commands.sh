@@ -652,6 +652,19 @@ says "and the long id landed in the queue rather than being refused" "base: main
   "$SPOOLWAY" queue show "$LONG_ID"
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/$LONG_ID.md"
 
+# An id past the file-name budget is refused before anything is written: the
+# lock and the system prompt file built from it would fail with "File name too
+# long" otherwise, after `--dry-run` had said all was well.
+TOO_LONG_ID="a$(printf 'b%.0s' $(seq 1 239))"
+TOO_LONG_DOC="$LIVE/too-long-id.md"
+sed "s/^id: .*/id: $TOO_LONG_ID/" "$LONG_ID_DOC" > "$TOO_LONG_DOC"
+refuses "an over-long task id is refused by queue add --dry-run, naming the limit" \
+  "is 240 characters long, and the limit is 100" \
+  "$SPOOLWAY" queue add --dry-run --from "$TOO_LONG_DOC"
+refuses "and by task contract --from" \
+  "is 240 characters long, and the limit is 100" \
+  "$SPOOLWAY" task contract --from "$TOO_LONG_DOC"
+
 # ------------------------------------------------------ no pipelines/ at all
 # A missing `.spoolway/pipelines/` used to be answered from the pipelines
 # compiled into the binary; an empty one was already a hard `no pipelines

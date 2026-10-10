@@ -43,7 +43,7 @@ as JSON.
 
 | Field | Set by | Meaning |
 |---|---|---|
-| `id` | you | The task's name. Also the file name and the branch suffix. Required. |
+| `id` | you | The task's name, at most 100 characters. Also the file name and the branch suffix. Required. |
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
 | `group` | you | The group of work this task belongs to. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
@@ -106,8 +106,11 @@ and `spoolway task contract --from` refuse any other value, naming the task and 
 may name. `spoolway task contract` lists those steps under `.pipelines.<name>.gate_at`.
 
 An id follows the same path-safe rule as every other id on this project: lowercase letters,
-digits and hyphens, starting with a letter. No length budget applies. A lane whose name would
-outgrow the multiplexer's own limit gets a short internal alias instead of a refusal.
+digits and hyphens, starting with a letter. A task id may be at most 100 characters and a
+step id at most 64, because spoolway builds file names from the pair and a name past 255 bytes
+fails. `spoolway task contract --from`, `spoolway queue add --dry-run` and `spoolway queue add`
+refuse a longer id, naming it and the limit. A lane whose name would outgrow the
+multiplexer's own limit gets a short internal alias instead of a refusal.
 
 ### What only holds across a set
 

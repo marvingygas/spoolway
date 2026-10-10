@@ -104,8 +104,9 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "id",
         "A short, unique name for this task — becomes the filename, the branch \
-         suffix and half a lane name, so it holds only lowercase letters, digits \
-         and hyphens.",
+         suffix and half a lane name, so it starts with a lowercase letter, holds \
+         only lowercase letters, digits and hyphens, and is at most 100 characters \
+         long.",
     ),
     (
         "title",
@@ -521,7 +522,7 @@ pub fn task_contract(
 /// making them retry a benign race is a worse failure than the rare lost
 /// update this guards against.
 pub fn task_edit(repo: &Repo, args: &TaskEditArgs) -> Result<()> {
-    crate::config::check_id("task id", &args.task)?;
+    crate::config::check_task_id(&args.task)?;
 
     let task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&args.task));
     if task_lock.is_err() {
@@ -605,6 +606,21 @@ mod tests {
         let path = repo.root.join(name);
         std::fs::write(&path, text).unwrap();
         path.display().to_string()
+    }
+
+    /// The contract is all a plan writer reads about an id, so its sentence
+    /// has to carry the length limit `task contract --from` enforces.
+    #[test]
+    fn the_contract_sentence_for_an_id_states_the_length_limit() {
+        let sentence = FIELD_SENTENCES
+            .iter()
+            .find(|(key, _)| *key == "id")
+            .map(|(_, sentence)| *sentence)
+            .unwrap();
+        assert!(
+            sentence.contains(&format!("{} characters", crate::config::TASK_ID_MAX)),
+            "{sentence}"
+        );
     }
 
     fn contract_args(paths: &[&str]) -> TaskContractArgs {

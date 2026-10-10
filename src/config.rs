@@ -173,6 +173,11 @@ pub fn under_setup(setup_dir: &Path, full: &str) -> PathBuf {
 /// way a file gets into the project's `queue/`: a person edits one, and a plan
 /// writes several.
 ///
+/// This is the character rule alone. A task id or a step id is also held to a
+/// length, by [`check_task_id`] and [`check_step_id`], so the longest name built
+/// from a task and a step still fits a file name. Callers that check a task or
+/// step id use those two; `kind` here only names the thing in the message.
+///
 /// `kind` names what is being checked, for the message: `task id`, `step id`.
 pub fn check_id(kind: &str, id: &str) -> Result<()> {
     let mut chars = id.chars();
@@ -185,14 +190,56 @@ pub fn check_id(kind: &str, id: &str) -> Result<()> {
         ),
         Some(_) => {}
     }
-    match chars.find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')) {
-        Some(bad) => bail!(
+    if let Some(bad) = chars.find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+    {
+        bail!(
             "{kind} `{id}` contains `{bad}` — use lowercase letters, digits and hyphens, \
              which is all a name under the project's home directory may hold"
-        ),
-        None => Ok(()),
+        );
     }
+    Ok(())
 }
+
+/// [`check_id`] for a task id, plus the length limit [`TASK_ID_MAX`]. Every
+/// place that reads or accepts a task id calls this one, so `task contract`,
+/// `queue add` with and without `--dry-run`, and a task file read from disk
+/// all refuse the same ids in the same words.
+pub fn check_task_id(id: &str) -> Result<()> {
+    check_id_within("task id", id, TASK_ID_MAX)
+}
+
+/// [`check_id`] for a step id, plus the length limit [`STEP_ID_MAX`].
+pub fn check_step_id(id: &str) -> Result<()> {
+    check_id_within("step id", id, STEP_ID_MAX)
+}
+
+/// [`check_id`], then refuse an id past `max` bytes. The id is ASCII by then,
+/// so bytes and characters are the same count.
+fn check_id_within(kind: &str, id: &str, max: usize) -> Result<()> {
+    check_id(kind, id)?;
+    if id.len() > max {
+        bail!(
+            "{kind} `{id}` is {} characters long, and the limit is {max} — spoolway builds file \
+             names from it, and most file systems refuse a name past 255 bytes. Shorten it to \
+             {max} characters or fewer.",
+            id.len()
+        );
+    }
+    Ok(())
+}
+
+/// The longest task id [`check_task_id`] accepts.
+///
+/// The longest file name built from a task and a step is the hidden temp file
+/// `write_atomic` makes beside `<task> · <step>.json`:
+/// `.<task> · <step>.json.<pid>-<call>.tmp`. With this limit and
+/// [`STEP_ID_MAX`] that is 1 + 100 + 4 + 64 + 5 + 36 bytes at most, 210 in
+/// all, which leaves 45 bytes under the 255 a file system allows. The 36 is a
+/// pid of ten digits, a call counter of twenty and the separators.
+pub const TASK_ID_MAX: usize = 100;
+
+/// The longest step id [`check_step_id`] accepts. See [`TASK_ID_MAX`].
+pub const STEP_ID_MAX: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2375,6 +2422,44 @@ mod tests {
 
         assert!(check_id("step id", "reproduce-again").is_ok());
         assert!(check_id("task id", "slug-subcommand2").is_ok());
+    }
+
+    /// A task id is the stem of every file name spoolway builds for the task:
+    /// `<id> · <step>.md`, the lock file and the hidden temp name of an atomic
+    /// write. An id too long for those names under any step id is refused up
+    /// front, by name, instead of failing at the first write.
+    #[test]
+    fn a_task_id_too_long_for_the_file_names_built_from_it_is_refused_by_name() {
+        for len in [220, 240] {
+            let id = format!("a{}", "b".repeat(len - 1));
+            let err = check_task_id(&id)
+                .expect_err(&format!("a {len}-character task id was accepted"))
+                .to_string();
+            assert!(err.contains(&id), "the message does not name the id: {err}");
+            assert!(
+                !err.contains("again in a moment"),
+                "the message tells the person to retry: {err}"
+            );
+        }
+        assert!(check_task_id("fix-the-parser-for-quoted-heredocs").is_ok());
+    }
+
+    /// The limits are chosen so the longest name built from the longest task
+    /// id and the longest step id still fits a file name; a step id past its
+    /// own limit is refused by name too.
+    #[test]
+    fn the_longest_accepted_ids_fit_the_longest_file_name_built_from_them() {
+        let task = "t".repeat(TASK_ID_MAX);
+        let step = "s".repeat(STEP_ID_MAX);
+        assert!(check_task_id(&task).is_ok());
+        assert!(check_step_id(&step).is_ok());
+        let temp = format!(".{task} · {step}.json.{}-{}.tmp", u32::MAX, u64::MAX);
+        assert!(temp.len() <= 255, "{} bytes", temp.len());
+
+        let long_step = "s".repeat(STEP_ID_MAX + 1);
+        let err = check_step_id(&long_step).unwrap_err().to_string();
+        assert!(err.contains(&long_step) && err.contains(&STEP_ID_MAX.to_string()));
+        assert!(check_task_id(&"t".repeat(TASK_ID_MAX + 1)).is_err());
     }
 
     /// `~/.spoolway` is spoolway's own state directory, not a project's

@@ -192,7 +192,7 @@ pub fn for_task(repo: &Repo, task: Option<&str>) -> Option<Result<Pipelines>> {
     // Checked before it becomes a path: the command checks it again, and
     // refuses it in its own words.
     let name = task
-        .filter(|id| crate::config::check_id("task id", id).is_ok())
+        .filter(|id| crate::config::check_task_id(id).is_ok())
         .and_then(|id| repo.task(id).ok())
         .and_then(|task| task.front.pipeline);
     let names: Vec<&str> = name.as_deref().into_iter().collect();

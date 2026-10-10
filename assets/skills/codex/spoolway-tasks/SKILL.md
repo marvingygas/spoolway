@@ -233,9 +233,10 @@ reading the file whole.
    task itself said it:
 
    - `id` — the task id, and the file's own stem. Lowercase letters, digits and hyphens only,
-     starting with a letter — the same path-safe rule every id on this project follows. No
-     length budget: a lane too long for the multiplexer's own name limit gets a short internal
-     alias instead, so an id is sized for readability, not for fitting a lane name.
+     starting with a letter — the same path-safe rule every id on this project follows. At
+     most 100 characters, because spoolway builds file names from it and a name past 255
+     bytes fails. A lane too long for the multiplexer's own name limit gets a short
+     internal alias instead, so size an id for readability, not for fitting a lane name.
    - `title` — a Conventional Commits line: a type, the area of code in parentheses, a colon,
      and one short present-tense sentence. `feat(queue): add a --dry-run flag`. The type is
      `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci` or `chore`; the

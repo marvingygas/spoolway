@@ -2426,7 +2426,7 @@ fn past_the_gate(
 /// finding 10) — and is refused here, the same class of refusal as
 /// [`crate::commands::refuse_from_lane`].
 ///
-/// Whatever the id's source, it is run through [`crate::config::check_id`]
+/// Whatever the id's source, it is run through [`crate::config::check_task_id`]
 /// before it is handed on: `--task ../../other/queue/x` would otherwise be
 /// joined into a path and the file outside the queue read and rewritten.
 fn resolve_task_id(explicit: Option<&str>) -> Result<String> {
@@ -2444,7 +2444,7 @@ fn resolve_task_id(explicit: Option<&str>) -> Result<String> {
             bail!("no task given and ${TASK_ENV} is not set — pass the task id explicitly")
         }
     };
-    crate::config::check_id("task id", &id)?;
+    crate::config::check_task_id(&id)?;
     Ok(id)
 }
 
