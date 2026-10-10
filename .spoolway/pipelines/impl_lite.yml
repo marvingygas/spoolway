@@ -60,7 +60,8 @@
 
 # 1.1: one review split into `review-spec` and `review-code`, each with its own fixer.
 # 1.2: `fix-spec-review` and `fix-code-review` at high effort.
-version: 1.2
+# 1.3: a `fix-gate` step takes a red gate or suite, as in bugfix.
+version: 1.3
 
 description: >-
   Small feature work: implement against the acceptance criteria, review the
@@ -136,7 +137,7 @@ steps:
     run: scripts/gate-quick.sh
     timeout: 45m
     on_pass: suite
-    on_fail: implement
+    on_fail: fix-gate
 
   - id: suite
     description: The end-to-end suites, at the `smoke` tier, on the last task of the chain.
@@ -144,7 +145,21 @@ steps:
     run: scripts/e2e-smoke.sh
     timeout: 45m
     on_pass: document
-    on_fail: implement
+    on_fail: fix-gate
+
+  # A red gate goes to a fixer, not back to `implement`: that spent
+  # `implement`'s own loop, so a second red gate sent the task to `blocked`,
+  # and walked a gate fix through both reviews again. Its pass re-runs the
+  # gate, as bugfix's `fix-gate` re-runs its repro first.
+  - id: fix-gate
+    description: Clear what failed the gate or the end-to-end suites.
+    agent: claude
+    prompt: implementer
+    model: claude-sonnet-5-5
+    effort: medium
+    session: true
+    loop: 2
+    on_pass: test
 
   - id: document
     description: Bring the domain documents in line with what this task changed.
