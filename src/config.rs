@@ -1845,14 +1845,6 @@ impl Config {
                             path.display(),
                         ));
                     }
-                    if crate::agent::adapter(&profile.kind).is_none() {
-                        notices.push(format!(
-                            "note: [agents.{name}] in {} names kind `{}`, which spoolway no \
-                             longer knows how to launch. Dropped on the next save.",
-                            path.display(),
-                            profile.kind,
-                        ));
-                    }
                 }
                 config.migrate();
                 // Last, so the notices above read the config as the tracked
@@ -1860,8 +1852,7 @@ impl Config {
                 // leaf through `confkv::set`, which round-trips the whole
                 // config through `Value::try_from` -> `try_into` and re-runs
                 // `migrate()`. Every table those notices point at is
-                // `skip_serializing`, so the round-trip clears it and
-                // `migrate()` drops any profile on a retired kind — a patch
+                // `skip_serializing`, so the round-trip clears it — a patch
                 // applied any earlier silences the notices for a file that
                 // still spells those tables out.
                 let mut ignored = Vec::new();
@@ -1903,18 +1894,19 @@ impl Config {
     /// rest of spoolway is holding, and [`Config::save_key`] parses it back to
     /// check its own work.
     ///
-    /// A profile naming a kind `agent::ADAPTERS` no longer carries a row for
-    /// — one that was retired after a project's config was written — is
-    /// dropped outright, the same as any other retired setting: it parses on
-    /// the way in, `Config::load` says so, and it is simply absent on the way
-    /// back out.
+    /// A profile naming a kind `agent::ADAPTERS` has no row for is left
+    /// exactly as written, `permission_mode` included. Nothing in this
+    /// binary lists a kind that was really retired, so such a kind is a typo
+    /// (`Claude`) or one a newer spoolway adds, and a mistake is for whoever
+    /// wrote it to fix. Dropping the profile here made `spoolway sync` delete
+    /// it. `doctor` fails its kind check instead, and a lane that names it
+    /// refuses to start.
     pub(crate) fn migrate(&mut self) {
-        self.agents
-            .retain(|_, profile| crate::agent::adapter(&profile.kind).is_some());
         for profile in self.agents.values_mut() {
-            let permissions =
-                crate::agent::adapter(&profile.kind).and_then(|a| a.permissions.as_ref());
-            match permissions {
+            let Some(adapter) = crate::agent::adapter(&profile.kind) else {
+                continue;
+            };
+            match adapter.permissions.as_ref() {
                 Some(permissions) if profile.permission_mode.trim().is_empty() => {
                     profile.permission_mode = permissions.default_mode().to_string();
                 }
@@ -1984,20 +1976,37 @@ impl Config {
             return self.save(root);
         };
 
-        let parts = crate::confkv::parts(self, key);
         let value = toml::Value::try_from(self).context("serialising config")?;
 
-        // Absent from the serialised config means this key was just set to the
-        // value whose spelling is its absence — a `concurrency` of nothing, a
-        // rate of zero. The document edit for that is a removal, not a write:
-        // putting `= 0` back would be the file disagreeing with the struct it
-        // was rendered from, and `agrees_with` below would refuse it anyway.
-        let edited = match crate::confdoc::at(&value, &parts) {
-            Some(new) => crate::confdoc::set(&text, &parts, new, crate::confkv::note(key))
-                .with_context(|| format!("editing {}", path.display()))?,
-            None => crate::confdoc::remove(&text, &parts)
-                .with_context(|| format!("editing {}", path.display()))?,
-        };
+        // Switching a profile's `kind` settles its `permission_mode` onto the
+        // new kind (`confkv::set`), so the file has to carry that key too: a
+        // `kind = "codex"` beside the old kind's mode is a file `agrees_with`
+        // below would refuse, and one `set` would refuse on the next edit.
+        let mut keys = vec![key.to_string()];
+        if let Some(profile) = key
+            .strip_suffix(".kind")
+            .filter(|p| p.starts_with("agents."))
+        {
+            keys.push(format!("{profile}.permission_mode"));
+        }
+
+        let mut edited = text;
+        for key in &keys {
+            let parts = crate::confkv::parts(self, key);
+            // Absent from the serialised config means this key was just set
+            // to the value whose spelling is its absence — a `concurrency` of
+            // nothing, a rate of zero, the mode of a kind that has none. The
+            // document edit for that is a removal, not a write: putting
+            // `= 0` back would be the file disagreeing with the struct it
+            // was rendered from, and `agrees_with` below would refuse it
+            // anyway.
+            edited = match crate::confdoc::at(&value, &parts) {
+                Some(new) => crate::confdoc::set(&edited, &parts, new, crate::confkv::note(key))
+                    .with_context(|| format!("editing {}", path.display()))?,
+                None => crate::confdoc::remove(&edited, &parts)
+                    .with_context(|| format!("editing {}", path.display()))?,
+            };
+        }
 
         self.agrees_with(&edited).with_context(|| {
             format!(
@@ -3213,40 +3222,91 @@ mod tests {
         assert!(!rendered.contains("pipeline_local_models"));
     }
 
-    /// A profile naming a kind `agent::ADAPTERS` has no row for any more —
-    /// because the kind it named was retired, the way a real one once was —
-    /// parses as an ordinary but unrecognised kind. It has to survive
-    /// parsing, or every project whose config still names a kind spoolway
-    /// dropped stops loading its own config outright; and it has to be gone
-    /// once `Config::load` has migrated the file, the same as the retired
-    /// `args` and `model` fields on a profile that does still resolve.
+    /// A profile naming a kind `agent::ADAPTERS` has no row for — a typo, or
+    /// a kind a newer spoolway adds — loads and is kept as written. Dropping
+    /// it on migrate is what made `spoolway sync` delete a mistyped profile,
+    /// and nothing then said so.
     #[test]
-    fn a_profile_naming_a_retired_kind_parses_and_drops_on_the_next_save() {
-        let dir = crate::scratch::root("config-retired-agent-kind");
+    fn a_profile_naming_an_unknown_kind_is_kept_as_written() {
+        let dir = crate::scratch::root("config-unknown-agent-kind");
         std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
         std::fs::write(
             Config::path_in(&dir),
             "[agents.claude]\n\
              kind = \"claude\"\n\
-             [agents.gone]\n\
-             kind = \"a-kind-spoolway-no-longer-ships\"\n",
+             [agents.typo]\n\
+             kind = \"Claude\"\n\
+             permission_mode = \"auto\"\n",
         )
         .unwrap();
 
-        let config = Config::load(&dir).expect("a retired agent kind must still parse");
+        let (config, notices, _) = Config::load_with_notices(&dir, None).unwrap();
+        let typo = config.agents.get("typo").expect("an unknown kind is kept");
+        assert_eq!(typo.kind, "Claude");
+        assert_eq!(typo.permission_mode, "auto");
+        assert!(config.agents.contains_key("claude"));
         assert!(
-            !config.agents.contains_key("gone"),
-            "a profile naming a kind spoolway can no longer launch must not survive migrate()"
+            !notices.iter().any(|n| n.contains("Dropped")),
+            "nothing is dropped, so no note may say so: {notices:?}"
         );
-        assert!(
-            config.agents.contains_key("claude"),
-            "a profile naming a kind that still resolves is untouched"
-        );
-
-        let rendered = toml::to_string(&config).unwrap();
-        assert!(!rendered.contains("a-kind-spoolway-no-longer-ships"));
+        assert!(toml::to_string(&config).unwrap().contains("Claude"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Switching a profile between kinds is one `config set`: the mode the
+    /// old kind had, spelt out in the file, is replaced there by one the new
+    /// kind accepts, or removed for a kind with none.
+    #[test]
+    fn switching_a_profiles_kind_writes_a_mode_the_new_kind_accepts() {
+        for (from, to) in [
+            ("claude", "codex"),
+            ("codex", "claude"),
+            ("claude", "pi"),
+            ("pi", "claude"),
+            ("codex", "pi"),
+            ("pi", "codex"),
+        ] {
+            let dir = crate::scratch::root(&format!("config-switch-kind-{from}-{to}"));
+            std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+            // The old kind's mode is spelt out in the file, as an earlier
+            // switch or a hand edit leaves it: writing only `kind` beside it
+            // would leave a mode the new kind rejects.
+            let mode = match from {
+                "claude" => "permission_mode = \"auto\"\n",
+                "codex" => "permission_mode = \"never\"\n",
+                _ => "",
+            };
+            std::fs::write(
+                Config::path_in(&dir),
+                format!("[agents.p]\nkind = \"{from}\"\n{mode}"),
+            )
+            .unwrap();
+
+            let config = Config::load(&dir).unwrap();
+            let key = "agents.p.kind";
+            let config = crate::confkv::set(&config, key, to)
+                .unwrap_or_else(|e| panic!("{from} -> {to}: {e:#}"));
+            config
+                .save_key(&dir, key)
+                .unwrap_or_else(|e| panic!("{from} -> {to}: {e:#}"));
+
+            let reloaded = Config::load(&dir).unwrap();
+            let profile = &reloaded.agents["p"];
+            assert_eq!(profile.kind, to);
+            profile
+                .permission_mode_status()
+                .unwrap_or_else(|e| panic!("{from} -> {to}: {e:#}"));
+            let file = std::fs::read_to_string(Config::path_in(&dir)).unwrap();
+            let written = file.contains("permission_mode");
+            assert_eq!(
+                written,
+                !profile.permission_mode.is_empty(),
+                "{from} -> {to}: the file must spell the mode the config holds:\n{file}"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     /// A whole table missing from a config reads as its *shipped* defaults,
@@ -3542,7 +3602,6 @@ mod tests {
                    worktree_root = \"/elsewhere/worktrees\"\ntear_lanes_on_stop = true\n\
                    herdr_mode = \"split\"\nlane_quite = \"5m\"\n\n\
                    [issue_tracking]\non_fail = \"pause\"\n\n\
-                   [agents.old]\nkind = \"nonesuch\"\n\n\
                    [agents.envy]\nkind = \"claude\"\n\n[agents.envy.env]\nFOO = \"1\"\n\n\
                    [unatended]\nx = 1\n";
         let pairs: &[(&str, &[&str])] = &[
@@ -3578,10 +3637,6 @@ mod tests {
             (
                 "[agents.envy.env] in",
                 &["[agents.envy.env] in this checkout's config"],
-            ),
-            (
-                "[agents.old] in",
-                &["[agents.old] in this checkout's config names kind `nonesuch`"],
             ),
         ];
         with_override_fixture("note-rows", raw, |root| {
@@ -3934,16 +3989,15 @@ mod tests {
     /// last, after the notices and after `migrate()`.
     #[test]
     fn a_patch_on_disk_does_not_silence_the_retired_table_notices() {
-        let tracked = "[agents.leftover]\nkind = \"nosuchkind\"\n\
-                       [agents.pi]\nkind = \"pi\"\n\
+        let tracked = "[agents.pi]\nkind = \"pi\"\n\
                        [agents.pi.env]\nFOO = \"bar\"\n\
                        [unattended]\nenabled = false\n";
         with_override_fixture("keeps-notices", tracked, |root| {
             let bare = Config::load_with_notices(root, None).unwrap().1;
             assert_eq!(
                 bare.len(),
-                2,
-                "the tracked file alone earns both notices: {bare:?}"
+                1,
+                "the tracked file alone earns the one notice: {bare:?}"
             );
 
             let overrides = crate::overrides::dir_for(root).unwrap();
@@ -3961,12 +4015,10 @@ mod tests {
                 patched, bare,
                 "a patch on an unrelated key must not change which notices print"
             );
-            for table in ["[agents.pi.env]", "[agents.leftover]"] {
-                assert!(
-                    patched.iter().any(|n| n.contains(table)),
-                    "{table} notice missing with a patch on disk: {patched:?}"
-                );
-            }
+            assert!(
+                patched.iter().any(|n| n.contains("[agents.pi.env]")),
+                "[agents.pi.env] notice missing with a patch on disk: {patched:?}"
+            );
         });
     }
 

@@ -685,6 +685,22 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         .try_into()
         .with_context(|| format!("setting `{key}` to `{input}` produces an invalid config"))?;
 
+    // A profile switched onto another kind keeps the mode it had on the old
+    // one, which the new kind may not accept (`auto` is claude's, `never`
+    // is codex's). The mode is settled onto the new kind's default so the
+    // switch is one call; `migrate` below only fills a blank one.
+    let switched = key
+        .strip_prefix("agents.")
+        .and_then(|rest| rest.strip_suffix(".kind"))
+        .and_then(|name| config.agents.get_mut(name))
+        .filter(|profile| {
+            crate::agent::adapter(&profile.kind).is_some()
+                && profile.permission_mode_status().is_err()
+        });
+    if let Some(profile) = switched {
+        profile.permission_mode.clear();
+    }
+
     // A blank `permission_mode` is refused by name — only when that is the
     // key a person just typed. Any other edit (switching a profile's `kind`,
     // say) can leave a *different* profile's mode blank relative to its kind
@@ -714,9 +730,14 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         }
     }
     for (name, profile) in &config.agents {
-        profile
-            .permission_mode_status()
-            .with_context(|| format!("`agents.{name}.permission_mode`"))?;
+        // A kind with no adapter row is `doctor`'s to fail, not a reason to
+        // refuse an edit of some other key: a mode means nothing relative to
+        // a kind spoolway cannot read, and it is kept as written.
+        if crate::agent::adapter(&profile.kind).is_some() {
+            profile
+                .permission_mode_status()
+                .with_context(|| format!("`agents.{name}.permission_mode`"))?;
+        }
         if profile.session_reuse_ctx != 0 && !(1..=100).contains(&profile.session_reuse_ctx) {
             bail!(
                 "`agents.{name}.session_reuse_ctx` must be 0 (off) or between 1 and 100 \

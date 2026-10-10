@@ -565,7 +565,8 @@ spoolway pipeline contract  # every key, every rule, and a blank to copy
 ```
 
 `pipeline check` validates the graph, the agent profiles, the prompts, every `loop`, and every
-queued task's `skip:` list. It refuses an agent step with no `model:`.
+queued task's `skip:` list. It refuses an agent step with no `model:`, and a step whose agent profile
+names a `kind` spoolway cannot launch.
 
 The `spoolway-config` skill writes and edits pipelines with you, starting from the blank that
 `spoolway pipeline contract` prints.

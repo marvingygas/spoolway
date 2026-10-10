@@ -576,7 +576,7 @@ A profile says which agent binary runs and under what limits. Three ship: `pi`, 
 
 | Key | Default | What it controls |
 |---|---|---|
-| `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. |
+| `kind` | one per profile | Which agent binary runs: `pi`, `codex` or `claude`. The command line per kind is fixed in the binary. A kind spoolway has no row for, such as the typo `Claude`, keeps its profile as written. `sync` and `config set` leave it alone. `spoolway doctor` and `spoolway pipeline check` fail it until the kind is corrected. `spoolway config set agents.<profile>.kind` switches a profile between `pi`, `codex` and `claude` in one call. It sets `permission_mode` to the new kind's default when the old mode does not fit. |
 | `concurrency` | unset | Most lanes of this profile at once. Absent means no cap. `config set` writes it; setting it to `0` removes it. |
 | `session_reuse_ctx` | `20` | Percentage of the model's `context_window` (`1..=100`) above which a `session: true` step starts fresh instead of reusing its session. `0` never refuses on size. See [sessions](dispatcher.md#a-step-that-carries-its-own-session). |
 | `session_blocked_ctx` | `40` | Percentage of the model's `context_window` (`1..=100`) above which a running lane is stopped and its task escalated: to `blocked` in an unattended run, otherwise to `paused`. Checked at turn ends. `0` is off. Must be above `session_reuse_ctx` when both are set. |
@@ -666,6 +666,9 @@ it. It prints every setting it removes. Those are retired keys (see
 only renamed, such as `cache_write` or a `[pricing]` row, is written under its new name and
 not listed.
 
+A profile whose `kind` spoolway has no row for is treated the same way. It stays in the file
+with its comment, and `spoolway sync` does not list it as dropped.
+
 A key from a newer spoolway is read by that binary only. A spoolway that includes this
 handling still loads the file, names the key, and ignores it. 0.8.0 and 0.7.x do not: they
 refuse a key they do not know inside a table.
@@ -678,8 +681,7 @@ such as `spoolway config set`, `spoolway init --tracker` and `spoolway override 
 leave a retired key in the file. `spoolway sync` drops it. These keys load with a note:
 `dispatch.interval`, `issue_tracking.on_fail`, a non-blank `dispatch.worktree_root`,
 `dispatch.backend` set to `tmux` (which loads as `herdr` instead),
-`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode`, an `[agents.<profile>.env]` table, and an
-`[agents.<profile>]` naming a kind spoolway no longer knows how to launch. Only the notes for
+`dispatch.tear_lanes_on_stop`, `dispatch.herdr_mode` and an `[agents.<profile>.env]` table. Only the notes for
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
 rewritten or dropped on the next save. The rest of the table below load with no note.
