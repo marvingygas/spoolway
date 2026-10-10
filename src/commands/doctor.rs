@@ -1642,8 +1642,9 @@ fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
 /// Every check and note that reads a model's own settings rather than an
 /// agent profile's: the legacy/template placeholder, a name that resolves to nothing,
 /// a step nothing caps, a `slots` model that has not said whether it is
-/// `local`, and a `session_blocked_ctx` set against a model that cannot
-/// honour it. Grouped together because all five walk the same `pipelines`/`config.models` data,
+/// `local`, a `session_blocked_ctx` set against a model that cannot
+/// honour it, and a step whose `compact_ctx` cannot take effect. Grouped
+/// together because all six walk the same `pipelines`/`config.models` data,
 /// several of them by way of the same `named` map.
 fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -1816,6 +1817,37 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
             "agents.{agent}: session_blocked_ctx = {ceiling}, but `{model}` resolves to no \
              context_window"
         )));
+    }
+
+    // One check per step, from the function the dispatcher refuses the same
+    // step with: a profile's block and a model's compaction meet only in a step.
+    for (pipeline_name, pipeline) in &pipelines.pipelines {
+        for step in pipeline
+            .steps
+            .iter()
+            .filter(|step| step.kind() == StepKind::Agent)
+        {
+            let (Some(agent), Some(model)) = (
+                step.agent.as_deref(),
+                step.model.as_deref().filter(|m| !m.trim().is_empty()),
+            ) else {
+                continue;
+            };
+            let Some(profile) = config.agents.get(agent) else {
+                continue;
+            };
+            // A passing step is a counted check too, so the total reads the
+            // same whether or not any step is refused.
+            let outcome =
+                match crate::models::compaction_problem(&config.models, agent, profile, model) {
+                    Some(problem) => Err(anyhow::anyhow!(problem)),
+                    None => Ok(None),
+                };
+            findings.push(Finding::Check(
+                format!("pipeline `{pipeline_name}` step `{}`", step.id),
+                outcome,
+            ));
+        }
     }
 
     findings
@@ -2644,6 +2676,56 @@ mod tests {
                 .expect("the check exists")
                 .is_ok()
         );
+    }
+
+    /// A step whose profile blocks at or below its model's `compact_ctx` is
+    /// a `FAIL` row naming its pipeline and step, and the same config with
+    /// compaction below block draws none. Fails before the check exists.
+    // covers: models.<glob>.compact_ctx — doctor refuses a step blocked before it compacts
+    #[test]
+    fn a_step_blocked_before_it_compacts_fails_doctor() {
+        let pipelines = crate::pipeline::Pipelines::builtin();
+        let refused = |compact_ctx| -> (usize, Vec<String>) {
+            let mut config = Config::default();
+            config.models.insert(
+                "*".into(),
+                crate::usage::ModelPrice {
+                    compact_ctx,
+                    context_window: 1000,
+                    ..Default::default()
+                },
+            );
+            for profile in config.agents.values_mut() {
+                profile.kind = "claude".into();
+                profile.session_blocked_ctx = 40;
+            }
+            let steps: Vec<Finding> = model_health_checks(&pipelines, &config)
+                .into_iter()
+                .filter(
+                    |f| matches!(f, Finding::Check(label, _) if label.starts_with("pipeline `")),
+                )
+                .collect();
+            let failed = steps
+                .iter()
+                .filter_map(|f| match f {
+                    Finding::Check(label, Err(why)) => Some(format!("{label}: {why}")),
+                    _ => None,
+                })
+                .collect();
+            (steps.len(), failed)
+        };
+
+        // Every step is one check, passing or not, so the total is the same.
+        let (total, rows) = refused(50);
+        assert_eq!(total, refused(30).0);
+        assert!(!rows.is_empty(), "no step was refused");
+        assert!(
+            rows.iter()
+                .all(|row| row.contains("session_blocked_ctx = 40")
+                    && row.contains("compact_ctx = 50")),
+            "{rows:#?}"
+        );
+        assert_eq!(refused(30).1, Vec::<String>::new());
     }
 
     /// One note per `[models]` entry that sets `slots` without saying whether

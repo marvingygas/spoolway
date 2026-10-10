@@ -6331,6 +6331,15 @@ fn prepare_boot(
             step.id
         );
     }
+    // The backstop for `doctor`'s per-step compaction check, in the same
+    // words: a lane started anyway would be blocked before it compacts, or
+    // run without the threshold its model names.
+    if let Some(agent) = step.agent.as_deref()
+        && let Some(problem) =
+            crate::models::compaction_problem(&repo.config.models, agent, profile, &model)
+    {
+        anyhow::bail!("pipeline `{}` step `{}`: {problem}", pipeline.name, step.id);
+    }
 
     // Minted here rather than derived from the task and step, because a step
     // can be retried and each attempt is its own conversation: a deterministic
@@ -22276,6 +22285,12 @@ mod tests {
             let (mut repo, _root_guard) = fixture("compact-ctx-codex");
             let codex = repo.config.agents["codex"].clone();
             *repo.config.agents.get_mut("claude").unwrap() = codex;
+            // Compaction sits below block, as the dispatcher requires.
+            repo.config
+                .agents
+                .get_mut("claude")
+                .unwrap()
+                .session_blocked_ctx = 80;
             repo.config.models.insert(
                 "*".to_string(),
                 crate::usage::ModelPrice {
@@ -22321,6 +22336,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A step whose profile blocks at or below its model's `compact_ctx` does
+    /// not start a lane: the notice says why, and the task waits where it was.
+    /// Fails before the refusal exists, when the lane starts.
+    // covers: models.<glob>.compact_ctx — the dispatcher refuses a step blocked before it compacts
+    #[test]
+    fn a_step_blocked_before_it_compacts_refuses_to_start_a_lane() {
+        let (mut repo, _root_guard) = fixture("compact-below-block");
+        repo.config.models.insert(
+            "*".to_string(),
+            crate::usage::ModelPrice {
+                compact_ctx: 50,
+                context_window: 1000,
+                ..Default::default()
+            },
+        );
+        repo.config
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .session_blocked_ctx = 40;
+        let worktree = a_checkout("dispatch-compact-below-block");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("session_blocked_ctx = 40 is at or below")),
+            "{:?}",
+            report.actions
+        );
     }
 
     // --------------------------------------------------------- issue_tracking

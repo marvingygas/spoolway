@@ -665,6 +665,70 @@ pub(crate) fn resolved_row<'a>(
     crate::usage::best_match_key(config_models, suffix)
 }
 
+/// Why a step's model cannot be handed a compaction threshold, if it cannot.
+///
+/// Three configs are refused, each because the lane would otherwise run
+/// without the behaviour the model's `compact_ctx` promises:
+///
+/// - the profile's `session_blocked_ctx` is nonzero and at or below
+///   `compact_ctx`, so the lane is blocked before it ever compacts;
+/// - the profile's kind has no per-run compaction setting (pi), so the
+///   percentage would be silently dropped;
+/// - the kind takes a token count (codex) and the model resolves no
+///   `context_window`, so the percentage cannot become tokens.
+///
+/// Block lives on the profile and compaction on the model, so only a pipeline
+/// step pairs them; `confkv::set` cannot check the order. Doctor and the
+/// dispatcher both call this so they print the same words. The answer starts
+/// after the "pipeline `p` step `s`" prefix, which each caller adds. A model
+/// with no `compact_ctx` is never refused. A profile with
+/// `session_blocked_ctx = 0` skips only the order check: a pi step or a codex
+/// model with no window is still refused.
+pub fn compaction_problem(
+    config_models: &BTreeMap<String, ModelPrice>,
+    agent: &str,
+    profile: &crate::config::AgentProfile,
+    model: &str,
+) -> Option<String> {
+    let price = resolve(config_models, model).price?;
+    if price.compact_ctx == 0 {
+        return None;
+    }
+    let compact = price.compact_ctx;
+    // Named by the glob the project wrote when there is one, since that is the
+    // key a person edits; a built-in row they cannot edit falls back to the
+    // model's own name, which `config set models.<name>.…` creates a row for.
+    let key = resolved_row(config_models, model).unwrap_or(model);
+    let adapter = crate::agent::adapter(&profile.kind)?;
+    let Some(row) = adapter.compaction.as_ref() else {
+        return Some(format!(
+            "models.\"{key}\".compact_ctx = {compact}, but agents.{agent} runs kind `{}`, which \
+             takes no per-run compaction setting, so the threshold would be ignored. Remove \
+             models.\"{key}\".compact_ctx, or run this step on a claude or codex agent.",
+            profile.kind
+        ));
+    };
+    if matches!(row, crate::agent::Compaction::TokensArgs(_)) && price.context_window == 0 {
+        return Some(format!(
+            "models.\"{key}\".compact_ctx = {compact}, but `{model}` resolves to no \
+             context_window, and kind `{}` takes a token count, not a percentage. Set \
+             models.\"{key}\".context_window, or remove models.\"{key}\".compact_ctx.",
+            profile.kind
+        ));
+    }
+    let block = profile.session_blocked_ctx;
+    if block != 0 && u32::from(block) <= compact {
+        return Some(format!(
+            "agents.{agent}.session_blocked_ctx = {block} is at or below \
+             models.\"{key}\".compact_ctx = {compact}, so the lane is blocked before it ever \
+             compacts. Lower models.\"{key}\".compact_ctx below {block}, or raise \
+             agents.{agent}.session_blocked_ctx above {compact}. Setting session_blocked_ctx = 0 \
+             also clears it, but leaves no brake if compaction fails."
+        ));
+    }
+    None
+}
+
 /// Every model an agent step of this project's pipelines names, and which
 /// step ids name it. A model absent here is a model no lane will ever run —
 /// [`resolve`] is only worth asking about one that is.
@@ -1701,5 +1765,90 @@ mod tests {
     fn the_vendored_table_carries_haiku_5_5_with_its_tier() {
         let haiku = builtin()["claude-haiku-5-5"];
         assert_eq!(haiku.tier.map(|tier| tier.above_k), Some(100));
+    }
+
+    /// The profile and model pair the compaction check reads, built from the
+    /// default config's three agents.
+    fn compaction_case(
+        agent: &str,
+        block: u8,
+        price: ModelPrice,
+    ) -> (
+        String,
+        crate::config::AgentProfile,
+        BTreeMap<String, ModelPrice>,
+    ) {
+        let mut profile = crate::config::Config::default().agents[agent].clone();
+        profile.session_blocked_ctx = block;
+        (
+            agent.to_string(),
+            profile,
+            BTreeMap::from([("my-model".to_string(), price)]),
+        )
+    }
+
+    /// Block at or below compaction is refused, naming both keys, and block
+    /// above it, block 0 and an unset `compact_ctx` are not. Fails before the
+    /// check exists, which refuses nothing.
+    // covers: agents.<profile>.session_blocked_ctx — compaction must sit below block
+    #[test]
+    fn a_block_at_or_below_the_compaction_threshold_is_refused() {
+        let priced = |compact_ctx| ModelPrice {
+            compact_ctx,
+            context_window: 1000,
+            ..Default::default()
+        };
+        for (block, compact, refused) in [
+            (40, 50, true),
+            (40, 40, true),
+            (40, 30, false),
+            (0, 50, false),
+            (40, 0, false),
+        ] {
+            let (agent, profile, models) = compaction_case("claude", block, priced(compact));
+            let problem = compaction_problem(&models, &agent, &profile, "my-model");
+            assert_eq!(problem.is_some(), refused, "{block}/{compact}: {problem:?}");
+            if let Some(problem) = problem {
+                for want in [
+                    format!("agents.claude.session_blocked_ctx = {block}"),
+                    format!("models.\"my-model\".compact_ctx = {compact}"),
+                    "Lower".to_string(),
+                    "also clears it".to_string(),
+                ] {
+                    assert!(problem.contains(&want), "{want}: {problem}");
+                }
+            }
+        }
+    }
+
+    /// pi has no per-run compaction setting, and codex needs a window to turn
+    /// a percentage into tokens. Claude needs neither. Fails before the check
+    /// exists, where both are launched with the threshold silently dropped.
+    // covers: models.<glob>.compact_ctx — a kind that cannot take it refuses it
+    #[test]
+    fn a_kind_that_cannot_take_a_compaction_threshold_refuses_it() {
+        let price = |context_window| ModelPrice {
+            compact_ctx: 30,
+            context_window,
+            ..Default::default()
+        };
+        let (agent, profile, models) = compaction_case("pi", 0, price(1000));
+        let problem = compaction_problem(&models, &agent, &profile, "my-model").unwrap();
+        assert!(problem.contains("takes no per-run compaction"), "{problem}");
+
+        let (agent, profile, models) = compaction_case("codex", 0, price(0));
+        let problem = compaction_problem(&models, &agent, &profile, "my-model").unwrap();
+        assert!(problem.contains("context_window"), "{problem}");
+
+        let (agent, profile, models) = compaction_case("codex", 0, price(1000));
+        assert_eq!(
+            compaction_problem(&models, &agent, &profile, "my-model"),
+            None
+        );
+        let (agent, profile, models) = compaction_case("claude", 0, price(0));
+        assert_eq!(
+            compaction_problem(&models, &agent, &profile, "my-model"),
+            None
+        );
     }
 }

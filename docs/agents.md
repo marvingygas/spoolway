@@ -220,6 +220,22 @@ on a model with no `context_window` gets nothing. A model with no `compact_ctx` 
 Both backends, herdr and headless, send the same value. See
 [`compact_ctx`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
+`spoolway doctor` prints one `FAIL` row for each pipeline step that cannot take the threshold.
+The dispatcher refuses to start the same step with the same words and runs no lane for it.
+
+| Step | Why it is refused | What to change |
+|---|---|---|
+| The profile's `session_blocked_ctx` is nonzero and at or below the model's `compact_ctx` | The lane is blocked before it compacts | Lower `compact_ctx`, raise `session_blocked_ctx`, or set `session_blocked_ctx = 0` |
+| The step runs a `pi` agent and the model sets `compact_ctx` | `pi` takes no compaction setting | Remove `compact_ctx`, or run the step on a claude or codex agent |
+| The step runs a `codex` agent, the model sets `compact_ctx` and has no `context_window` | A percentage cannot become a token count | Set `context_window`, or remove `compact_ctx` |
+
+```
+  FAIL  pipeline `default` step `implement`: agents.claude.session_blocked_ctx = 40 is at or below models."claude-opus-5".compact_ctx = 50, so the lane is blocked before it ever compacts. Lower models."claude-opus-5".compact_ctx below 40, or raise agents.claude.session_blocked_ctx above 50. Setting session_blocked_ctx = 0 also clears it, but leaves no brake if compaction fails.
+```
+
+A model with no `compact_ctx` is never refused. `session_blocked_ctx = 0` skips the order
+check only. `session_reuse_ctx` may sit on either side of `compact_ctx`.
+
 ### Skills
 
 A step's `skills:` names skills the lane invokes. Each kind reads them from its own directory,
