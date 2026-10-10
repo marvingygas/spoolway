@@ -373,8 +373,8 @@ must "make the tracked pair wrong by hand: blocked 15 under reuse 20" \
   sed -i '/^\[agents.claude\]/,/^\[/ s/^session_blocked_ctx = .*/session_blocked_ctx = 15/' \
   "$TRACKED_CONFIG"
 
-# Before the layer exists: `config set` still reads the override-merged config
-# and would refuse any set over the layer's own key, which is a separate fault.
+# Before the layer exists, so the bad pair is the only thing `config set` has
+# to cope with.
 works "config set of an unrelated key succeeds beside the bad pair" \
   "$SPOOLWAY" config set dispatch.lane_quiet 5m
 refuses "a set that itself breaks the pair is still refused" \
@@ -414,6 +414,24 @@ printf '[agents.claude]\npermission_mode = "auto"\n' > "$CONFIG_LAYER"
 says "doctor still fails a tracked permission_mode a layer key corrects" \
   "\`agents.claude.permission_mode\`: " \
   "$SPOOLWAY" doctor --no-live
+
+# ------------------------------------- config set beside an active layer
+# `config set` used to build from the override-merged config, so with a layer
+# key present it refused every other key, and for the layer's own key it
+# printed a value that was not the one in effect.
+must "restore the tracked pair the cases above broke" \
+  sed -i '/^\[agents.claude\]/,/^\[/ s/^session_blocked_ctx = .*/session_blocked_ctx = 40/; /^\[agents.claude\]/,/^\[/ s/^permission_mode = .*/permission_mode = "auto"/' \
+  "$TRACKED_CONFIG"
+printf '[dispatch]\nlane_quiet = "7m"\n' > "$CONFIG_LAYER"
+works "config set of an unrelated key succeeds beside a layer key" \
+  "$SPOOLWAY" config set dispatch.auto_commit false
+has "and lands in the tracked file" "auto_commit = false" "$TRACKED_CONFIG"
+lacks "without the layer's value" "lane_quiet = \"7m\"" "$TRACKED_CONFIG"
+says "setting the layered key says the layer still sets it" \
+  "still sets \`dispatch.lane_quiet\`" \
+  "$SPOOLWAY" config set dispatch.lane_quiet 20m
+has "and writes the new value to the tracked file" "lane_quiet = \"20m\"" "$TRACKED_CONFIG"
+must "clean up: drop the config layer" "$SPOOLWAY" override drop config.toml
 
 # ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
