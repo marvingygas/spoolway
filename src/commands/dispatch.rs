@@ -1259,19 +1259,27 @@ pub(crate) fn check_backend_checkout(
 /// for a test double to get right for no reason a real backend needs.
 fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
     if mux.name() == "headless" {
-        if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
-            bail!(
-                "backend = headless is spoolway's own test backend — nothing draws it \
-                 anywhere a person can see, so only the end-to-end harness runs it, with \
-                 {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
-                 herdr",
-                crate::headless::TEST_BACKEND_ENV
-            );
-        }
-        return Ok(());
+        return check_headless_marker();
     }
     if !mux.in_own_pane() {
         bail!("Open herdr and start spoolway there:\n\n  herdr\n  spoolway");
+    }
+    Ok(())
+}
+
+/// Refuse `backend = headless` unless the end-to-end harness's marker is
+/// exported. Split out of [`check_dispatcher_visible`] so `doctor`'s "lanes
+/// can be started" row gives the very reason a start gives, rather than
+/// passing a backend `dispatch` then refuses.
+pub(crate) fn check_headless_marker() -> Result<()> {
+    if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
+        bail!(
+            "backend = headless is spoolway's own test backend — nothing draws it \
+             anywhere a person can see, so only the end-to-end harness runs it, with \
+             {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
+             herdr",
+            crate::headless::TEST_BACKEND_ENV
+        );
     }
     Ok(())
 }

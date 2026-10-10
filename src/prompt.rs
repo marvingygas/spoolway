@@ -215,8 +215,13 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // The file itself rather than a paraphrase of it, because the thing being
     // shown is exactly what the agent is handed, and a prompt is written
     // against what the lane actually reads.
-    let prompt = std::fs::read_to_string(&prompt_path)
-        .unwrap_or_else(|_| format!("[no prompt at {} — `spoolway init`]", prompt_path.display()));
+    let prompt = std::fs::read_to_string(&prompt_path).unwrap_or_else(|_| {
+        format!(
+            "[no prompt at {} — {}]",
+            prompt_path.display(),
+            missing_prompt_fix(step.prompt_name())
+        )
+    });
     for line in crate::compose::system_prompt(repo, &task, pipeline, step, &prompt)?.lines() {
         println!("   | {line}");
     }
@@ -540,7 +545,7 @@ pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
 /// message naming only the one path [`path_for`] happened to fall back to
 /// (always the tracked directory form) sends a person hunting in the wrong
 /// place, or only half the right one. For a private pipeline, in repo mode,
-/// this names both, and says plainly that the private layer only ever reads
+/// this names both files, and says plainly that the private layer only ever reads
 /// the directory form: a `local/prompts/<name>.md` written flat — the legacy
 /// shape the *tracked* side still accepts, see [`local_names_in`] — is never
 /// read there. Every other pipeline keeps the plain, one-path message: there
@@ -555,11 +560,15 @@ pub(crate) fn missing_prompt_message(
     if private_pipeline && crate::local::is_repo_mode(&repo.checkout) {
         let tracked_dir = directory_form(repo, prompt_name);
         let private_dir = crate::local::prompts_dir(&repo.local_dir()).join(prompt_name);
+        // Both candidates are named as the file to write, so a `tail` that
+        // sends the reader to "a path named here" points at something
+        // readable rather than at a directory or the flat shape that is not
+        // read.
         format!(
             "{label} needs prompt `{prompt_name}` — found at neither {} nor {} (the private \
              layer only reads the directory form; a flat {}.md is not read) — {tail}",
             tracked_dir.display(),
-            private_dir.display(),
+            private_dir.join(crate::assets::PROMPT_FILE).display(),
             private_dir.display(),
         )
     } else {
@@ -567,6 +576,20 @@ pub(crate) fn missing_prompt_message(
             "{label} needs prompt {} — {tail}",
             path_for(repo, prompt_name).display()
         )
+    }
+}
+
+/// What to do about a missing prompt, for the tail of
+/// [`missing_prompt_message`] and `doctor`'s prompt row.
+///
+/// `spoolway init` only writes the prompts in [`crate::assets::PROMPTS`]. A
+/// prompt named anywhere else, such as `unattended.blocked_prompt`, is the
+/// project's own, so advising `init` for it leaves the same failure standing.
+pub(crate) fn missing_prompt_fix(prompt_name: &str) -> &'static str {
+    if crate::assets::prompt(prompt_name).is_some() {
+        "run `spoolway init`"
+    } else {
+        "`spoolway init` does not ship it, so write it yourself, at a path named here"
     }
 }
 
@@ -1229,6 +1252,15 @@ mod tests {
         assert!(message.contains("default"), "{message}");
     }
 
+    /// `init` is advised only for a prompt it writes; any other name is the
+    /// project's own to write, and `init` would not fix it.
+    #[test]
+    fn missing_prompt_fix_advises_init_only_for_shipped_prompts() {
+        let shipped = crate::assets::PROMPTS[0].name;
+        assert_eq!(missing_prompt_fix(shipped), "run `spoolway init`");
+        assert!(!missing_prompt_fix("unblock-v2").contains("run `spoolway init`"));
+    }
+
     /// A private pipeline's own missing prompt is named by both layers —
     /// the tracked directory and the private one — with an explicit note
     /// that the private layer never reads the flat legacy shape, so a
@@ -1246,7 +1278,12 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains(&private.display().to_string()),
+            message.contains(
+                &private
+                    .join(crate::assets::PROMPT_FILE)
+                    .display()
+                    .to_string()
+            ),
             "{message}"
         );
         assert!(message.contains("flat"), "{message}");

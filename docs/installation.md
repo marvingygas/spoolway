@@ -317,6 +317,7 @@ spoolway doctor
 - each base branch the queue names can be pushed
 - each agent binary is on `PATH`, has a model set, and accepts the configured permission mode
 - every prompt a step names exists and passes its checks
+- the configured backend is one `spoolway dispatch` accepts
 
 Problems set a non-zero exit code. Notes do not. The `spoolway-config` skill's repair section
 reads both.

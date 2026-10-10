@@ -6308,7 +6308,7 @@ fn prepare_boot(
             pipeline.private_file.is_some(),
             step.prompt_name(),
             &format!("step `{}`", step.id),
-            "run `spoolway init`",
+            crate::prompt::missing_prompt_fix(step.prompt_name()),
         )
     })?;
 

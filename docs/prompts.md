@@ -27,15 +27,25 @@ A private prompt whose name matches a tracked one is refused, naming both: the p
 and the tracked one in whichever shape actually exists, the directory `<name>/PROMPT.md` or
 the flat `<name>.md`.
 
-A private pipeline's step whose prompt is in neither layer is told so by both paths at once —
-the tracked `.spoolway/prompts/<name>/` and the private `local/prompts/<name>/` — with a
-reminder that the private layer never reads a flat `local/prompts/<name>.md`.
+A private pipeline's step whose prompt is in neither layer is told so by both files at once,
+the tracked `.spoolway/prompts/<name>/PROMPT.md` and the private `local/prompts/<name>/PROMPT.md`.
+The message adds that the private layer never reads a flat `local/prompts/<name>.md`.
 
 `spoolway prompt list` and `spoolway prompt override` find a private prompt the same way
 `spoolway prompt show` does. `prompt list` marks its row `private`. `prompt override` forks it
 into the overrides layer, but the fork only starts applying once the pipeline that runs it is
 promoted, since an override patches a tracked file and a private prompt is not one. See [The
 overrides layer](configuration.md#the-overrides-layer).
+
+### A missing prompt
+
+`spoolway doctor`, `spoolway pipeline check`, `spoolway prompt contract` and the lane launch all
+report a step whose prompt file is missing. The advice depends on the prompt's name.
+
+| The prompt | The advice |
+|---|---|
+| One of the five that `spoolway init` ships | Run `spoolway init`. |
+| Any other, such as one named by `unattended.blocked_prompt` | `init` does not ship it, so write it yourself at a path the message names. |
 
 ## A prompt is prose, and nothing else
 
