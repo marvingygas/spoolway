@@ -7217,6 +7217,19 @@ mod tests {
         /// answers `None`, exactly the trait's own default, and a command
         /// step falls back to the detached run it always used.
         run_commands_in_pane: bool,
+        /// The process group each pane [`FakeMux::run_in_pane`] really ran a
+        /// command in, by pane id, so closing the pane ends it the way
+        /// closing a real one does.
+        ///
+        /// Needed because the fake cannot reproduce the group the run's own
+        /// pid file names. A real pane's interactive shell gives the typed
+        /// pipeline a group of its own, led by the `sh <file>` whose pid the
+        /// wrapper records, so `Runs::stop` reaches it. Here the line runs
+        /// under one non-interactive `sh` with no job control, so the whole
+        /// pipeline sits in *that* shell's group, and the recorded pid leads
+        /// nothing — `kill_group` finds no group and the run would outlive
+        /// the test.
+        pane_groups: Mutex<HashMap<String, u32>>,
         /// Lane names a caller has marked as still holding a process they
         /// started — a backend able to see a child of the lane's still
         /// running in the process table, independent of whatever
@@ -7254,6 +7267,7 @@ mod tests {
                 forgotten: Mutex::new(HashSet::new()),
                 unbound_workspace: false,
                 run_commands_in_pane: false,
+                pane_groups: Mutex::new(HashMap::new()),
                 busy_children: Mutex::new(HashSet::new()),
                 sweep_tabs: Vec::new(),
             }
@@ -7399,6 +7413,22 @@ mod tests {
         /// into the next one's assertions).
         fn clear_calls(&self) {
             self.calls.lock().unwrap().clear();
+        }
+    }
+
+    /// Whatever a test left running in a pane ends with the test, whether
+    /// it closed that pane or not — a failing assertion included, which
+    /// otherwise strands a `run_until` loop polling forever.
+    impl Drop for FakeMux {
+        fn drop(&mut self) {
+            let groups = std::mem::take(
+                self.pane_groups
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            for pid in groups.into_values() {
+                crate::headless::kill_group(pid);
+            }
         }
     }
 
@@ -7600,11 +7630,21 @@ mod tests {
             // pid/exit files a test drives the dispatcher against behave
             // exactly as they would under a real backend.
             let spawned = crate::headless::spawn_detached_shell(script, cwd)?;
+            self.pane_groups
+                .lock()
+                .unwrap()
+                .insert(pane.clone(), spawned.id());
             crate::headless::reap_when_it_ends(spawned);
             Ok(Some(pane))
         }
         fn close_pane(&self, pane_id: &str) -> Result<()> {
             self.log(format!("close_pane {pane_id}"));
+            // Whatever was still running in it goes with the pane, as it does
+            // when a real pane's terminal is closed under it.
+            let group = self.pane_groups.lock().unwrap().remove(pane_id);
+            if let Some(pid) = group {
+                crate::headless::kill_group(pid);
+            }
             Ok(())
         }
         fn start_lane(&self, spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {

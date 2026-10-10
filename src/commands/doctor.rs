@@ -4526,16 +4526,35 @@ mod tests {
         perms.set_mode(0o000);
         std::fs::set_permissions(&id_file, perms.clone()).unwrap();
 
-        let lenient = Repo::discover_lenient(&root);
+        // A scratch `$HOME`: a home that fails to resolve falls back to a
+        // path under `~/.spoolway/`, and anything below that touched it would
+        // otherwise create a stray home in the developer's own.
+        let home = crate::scratch::root("doctor-home-unavailable-real-cascade-dollar-home");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let (repo, findings) = crate::platform::test_home::with_home(&home, || {
+            let lenient = Repo::discover_lenient(&root);
 
-        perms.set_mode(0o644);
-        std::fs::set_permissions(&id_file, perms).unwrap();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&id_file, perms).unwrap();
 
-        let (repo, config_error, home_error) =
-            lenient.expect("a home resolution failure is a finding, not a fatal error");
-        let home_error = home_error.expect("the real read failure is handed back");
+            let (repo, config_error, home_error) =
+                lenient.expect("a home resolution failure is a finding, not a fatal error");
+            let home_error = home_error.expect("the real read failure is handed back");
+            let findings = home_unavailable_findings(&repo, config_error, &home_error);
+            (repo, findings)
+        });
+        assert!(
+            repo.home.starts_with(&home),
+            "the fallback home must sit under the scratch $HOME: {}",
+            repo.home.display()
+        );
+        assert!(
+            !repo.home.exists(),
+            "a home that did not resolve must not be created: {}",
+            repo.home.display()
+        );
 
-        let findings = home_unavailable_findings(&repo, config_error, &home_error);
         let has = |label: &str| {
             findings
                 .iter()
