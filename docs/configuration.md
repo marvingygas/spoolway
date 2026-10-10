@@ -120,7 +120,7 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 |---|---|---|
 | `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
-| `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | `retention_days` |
+| `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind. An entry of a task still in the queue is kept, except in `system-prompts/`. | `retention_days` |
 | `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
@@ -270,7 +270,7 @@ price_max_age_days = 30
 |---|---|---|
 | `update_check` | `true` | Show a newer release in the dispatcher header when one is out. The header shows the published version in yellow. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
 | `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
-| `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. A `scratch/` or `headless/` entry of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
+| `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `system-prompts/` is deleted. `0` keeps everything. An entry in `scratch/`, `headless/`, `commands/` or `tracking/` of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It does not touch `archive/`. |
 | `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on`. The sweep skips `archive/` while a file in `queue/` cannot be read, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
 | `price_max_age_days` | `30` | Days before `spoolway doctor` notes that the price table is old. `0` turns the note off. Refresh with `spoolway models refresh`. See [Pricing](cost.md#pricing). |
 

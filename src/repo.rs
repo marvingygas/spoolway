@@ -673,11 +673,11 @@ impl Repo {
     ///
     /// Two callers want exactly this, cheaply and without a parse skipping a
     /// task whose file happens not to load: [`crate::retain`]'s sweep, so it
-    /// never ages out the scratch directory or headless record of a task
-    /// still in flight — `paused` and `blocked` are stages a task can sit on
-    /// for longer than `housekeeping.retention_days` — and [`crate::tracking::failures`],
-    /// so `spoolway doctor` stops naming a hook failure once its task is
-    /// archived.
+    /// never ages out the scratch, headless, command and hook run state of a
+    /// task still in flight — `paused` and `blocked` are stages a task can sit
+    /// on for longer than `housekeeping.retention_days` — and
+    /// [`crate::tracking::failures`], so `spoolway doctor` stops naming a hook
+    /// failure once its task is archived.
     pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
         let mut ids = std::collections::BTreeSet::new();
         let Ok(entries) = std::fs::read_dir(self.queue_dir()) else {

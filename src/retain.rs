@@ -9,8 +9,8 @@
 //! `headless/` and `scratch/` hold what a pass left behind — a composed
 //! prompt, a command step's log, a hook run, a headless lane's record and
 //! log, a rebase's scratch worktree. Nobody reads any of those once the task
-//! they belong to has left the queue, and nothing this binary does depends
-//! on them still being there. This module ages them out under
+//! they belong to has left the queue. While it is still queued, four of them
+//! are depended on, as below. This module ages them out under
 //! `housekeeping.retention_days`; the first kind this never touches,
 //! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for the one
 //! place that split is written down.
@@ -20,16 +20,19 @@
 //! ages out only under its own `housekeeping.archive_retention_days`, which
 //! is `0` until a person sets it — `retention_days` never reaches it.
 //!
-//! Two of those carry state a task still in the queue needs.
+//! Four of those carry state a task still in the queue needs.
 //! `scratch/<id>` is what a lane is handed as `$SPOOLWAY_SCRATCH` — planner
 //! output and all — and `headless/` holds the records a running lane is read
-//! back through. An entry in either is spared for as long as its leading
-//! task id names a file still in `queue/`, whatever stage that file sits on:
-//! `paused` and `blocked` are stages a task rests on for longer than
-//! `housekeeping.retention_days`, and a directory's own modification time does not move
-//! while it only has files written *into* it. Only once the task is archived
-//! do its scratch directory and its headless record age out like anything
-//! else. See [`sweep_now`], which loads the queue once for this.
+//! back through. `commands/` and `tracking/` hold the exit code, pid, log and
+//! `.kills` counter of a command step or hook run, and a run whose files are
+//! gone reads as never started, so the command runs again and the hook fires
+//! a second time. An entry in any of them is spared for as long as its
+//! leading task id names a file still in `queue/`, whatever stage that file
+//! sits on: `paused` and `blocked` are stages a task rests on for longer than
+//! `housekeeping.retention_days`, and a directory's own modification time
+//! does not move while it only has files written *into* it. Only once the
+//! task leaves the queue do its entries age out like anything else. See
+//! [`sweep_now`], which loads the queue once for this.
 //!
 //! `.spoolway/prompts/` in the checkout is not the `system-prompts/`
 //! directory above, however alike the two names read. It holds the
@@ -125,20 +128,23 @@ fn sweep_now(repo: &Repo) {
 /// The directories under `housekeeping.retention_days`, within `limit`
 /// deletions in all. Returns how many went.
 fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
-    // `scratch/` and `headless/` hold a queued task's live state — see this
-    // module's own doc. Read the queue once, here, and pass it only to those
-    // two directories: an entry whose leading task id is still in the queue
-    // is spared, whatever its age.
+    // `scratch/`, `headless/`, `commands/` and `tracking/` hold a queued
+    // task's live state — see this module's own doc. Read the queue once,
+    // here, and pass it to those directories: an entry whose leading task id
+    // is still in the queue is spared, whatever its age.
     let queued = repo.queued_ids();
     let scratch = repo.scratch_dir();
     let headless = repo.headless_dir();
+    let commands = repo.commands_dir();
+    let tracking = repo.tracking_dir();
 
     let mut budget = limit;
     for dir in repo.byproduct_dirs() {
         if budget == 0 {
             break;
         }
-        let guard = (dir == scratch || dir == headless).then_some(&queued);
+        let guard = (dir == scratch || dir == headless || dir == commands || dir == tracking)
+            .then_some(&queued);
         let mut removed = sweep_dir(&dir, max_age, budget, guard);
         if dir == headless {
             removed += sweep_dir(
@@ -211,13 +217,13 @@ fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
 /// ceiling hold and lets [`sweep_now`] divide one budget across the
 /// directories.
 ///
-/// `spared` is `Some` for `scratch/`, `headless/` (and its `logs/`) and
-/// `archive/`. An entry whose name, cut at its first lane separator by
-/// [`crate::mux::lane_task`], is in that set is never swept, however old it
-/// reads. For `scratch/` and `headless/` the set holds the ids of queued
+/// `spared` is `Some` for `scratch/`, `headless/` (and its `logs/`),
+/// `commands/`, `tracking/` and `archive/`. An entry whose name, cut at its
+/// first lane separator by [`crate::mux::lane_task`], is in that set is never
+/// swept, however old it reads. For every one but `archive/` the set holds the ids of queued
 /// tasks, so the entry is a live task's. For `archive/` it holds the
 /// `<id>.md` file names of finished tasks a queued task depends on, which
-/// `lane_task` leaves whole. `None` everywhere else.
+/// `lane_task` leaves whole. `None` for `system-prompts/`.
 ///
 /// Not gated by `days == 0` itself — that check belongs to the one caller
 /// that means it as "retention is off"; a test driving this directly passes
@@ -237,11 +243,13 @@ fn sweep_dir(
         if removed >= limit {
             break;
         }
-        // A scratch directory or headless record whose task is still in the
-        // queue, or an archived task a queued task depends on, is spared
-        // before its age is ever looked at — `spoolway resume` continues a
-        // lane whose bookkeeping this would otherwise have deleted, and a
-        // dependent never starts without its dependency's file.
+        // A scratch directory, headless record, command or hook run file whose
+        // task is still in the queue, or an archived task a queued task
+        // depends on, is spared before its age is ever looked at —
+        // `spoolway resume` continues a lane whose bookkeeping this would
+        // otherwise have deleted, a command step or hook whose exit code is
+        // gone would run again, and a dependent never starts without its
+        // dependency's file.
         if let Some(spared) = spared
             && spared.contains(crate::mux::lane_task(
                 entry.file_name().to_string_lossy().as_ref(),
@@ -594,6 +602,70 @@ mod tests {
             !gone_record.exists(),
             "an archived task's headless record should have gone"
         );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A task still in the queue keeps the run files of its command steps and
+    /// hooks, whatever stage it rests on: a run whose files age out reads as
+    /// never having run, so its command runs again and its hook event fires
+    /// a second time. The `.kills` counters beside them are spared too.
+    /// Entries of a task that has left the queue age out as usual.
+    #[test]
+    fn the_sweep_spares_a_queued_tasks_command_and_hook_run_files() {
+        let base = crate::scratch::root("retain-live-runs");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.retention_days = 30;
+        let repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("held.md"),
+            "---\nid: held\nstage: paused\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+
+        let held = [
+            repo.commands_dir().join("held · check.exit"),
+            repo.commands_dir().join("held · check.pid"),
+            repo.commands_dir().join("held · check.log"),
+            repo.commands_dir().join("held · check.kills"),
+            repo.tracking_dir().join("held · paused.exit"),
+            repo.tracking_dir().join("held · paused.kills"),
+        ];
+        let gone = [
+            repo.commands_dir().join("gone · check.exit"),
+            repo.tracking_dir().join("gone · paused.exit"),
+            repo.tracking_dir().join("gone · paused.kills"),
+        ];
+        for path in held.iter().chain(&gone) {
+            std::fs::write(path, "0").unwrap();
+            age(path, 60 * SECS_PER_DAY);
+        }
+
+        sweep_now(&repo);
+
+        for path in &held {
+            assert!(
+                path.exists(),
+                "a queued task's run file was swept: {path:?}"
+            );
+        }
+        for path in &gone {
+            assert!(
+                !path.exists(),
+                "a task that left the queue should have aged out: {path:?}"
+            );
+        }
 
         std::fs::remove_dir_all(&base).ok();
     }
