@@ -1677,6 +1677,42 @@ impl Config {
         setup_dir_in(root).join(CONFIG_FILE)
     }
 
+    /// [`Config::load`] for a reader that must not take a missing file for
+    /// the built-in defaults: the dispatcher's reload and
+    /// [`crate::repo::Repo::discover_live`] both treat a `config.toml` that
+    /// has gone as a failed load, the same as one that does not parse, so
+    /// the caps the run started with are not dropped without a word.
+    pub fn load_present(root: &Path) -> Result<Config> {
+        if !Config::path_in(root).exists() {
+            return Err(Config::missing_error(root));
+        }
+        Config::load(root)
+    }
+
+    /// Why `root` has no `config.toml`, and what to do about it. When the
+    /// whole `.spoolway/` directory is gone the checkout is on a branch that
+    /// does not carry it, and checking the branch back out is the fix: a
+    /// `spoolway sync` from there is refused, and one that did run would
+    /// write defaults over the caps the file held.
+    pub fn missing_error(root: &Path) -> anyhow::Error {
+        let path = Config::path_in(root);
+        if setup_dir_in(root).is_dir() {
+            anyhow::anyhow!(
+                "{} does not exist (restore it from git, or run `spoolway sync` to write a \
+                 fresh one, which holds the defaults and none of the settings the old file had)",
+                path.display()
+            )
+        } else {
+            anyhow::anyhow!(
+                "{} does not exist because `.spoolway/` is not on branch `{}`, the one checked \
+                 out in {} (check out the branch that carries it)",
+                path.display(),
+                crate::repo::branch_or_detached(root),
+                root.display()
+            )
+        }
+    }
+
     /// Load config from a directory holding `.spoolway/`, falling back to
     /// defaults if absent, with `overrides/config.toml` merged onto it by
     /// dotted key — see [`crate::overrides`]. See [`Self::path_in`] for

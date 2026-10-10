@@ -60,6 +60,15 @@ impl Repo {
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
+        // `root` carries no `.spoolway/` only when a lane found its project's
+        // main checkout on a branch without it (see `root`). Everything this
+        // command would read from there is the built-in defaults, which is
+        // not the config the run is on, so it stops and says where the
+        // directory went. `report` and `stack` take the dispatcher's record
+        // instead — see `discover_live`.
+        if !crate::config::setup_dir_in(&root).is_dir() {
+            return Err(Config::missing_error(&root));
+        }
         let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         // Checked here, once, rather than in every accessor that creates a
         // directory under a home on demand: `bind` is what decides which
@@ -84,11 +93,67 @@ impl Repo {
         })
     }
 
+    /// [`Repo::discover`] for a command that runs inside a dispatched task
+    /// — a lane's `report`, a `spoolway stack` step — and so may start while
+    /// `config.toml` or the override layer is mid-edit.
+    ///
+    /// A config that does not parse, or a `config.toml` that is gone, would
+    /// otherwise end the command before it did anything, and the task would
+    /// be parked as having produced no output. While a dispatcher is running
+    /// and has recorded a config that loaded cleanly (see
+    /// [`crate::pipeline_snapshot::record_config`]) the command runs on that
+    /// one and says on stderr which file it could not read. Without one, the
+    /// error stands: it names the file, and the command runs again once the
+    /// file is fixed. The record is written on the first pass whose reload
+    /// succeeds, so a lane launched before that — by a dispatcher started
+    /// over a broken or missing `config.toml` — has none.
+    ///
+    /// A missing file with no record is the defaults only where no
+    /// dispatcher holds the lock and the checkout still has its
+    /// `.spoolway/`, as it is for every other command: a project no
+    /// dispatcher has run in has no config to fall back on. Under a live
+    /// dispatcher it is the missing-file error, because the defaults would
+    /// drop the caps that run holds. A record that cannot be decoded is an
+    /// error, never "no record".
+    pub fn discover_live(start: &Path) -> Result<Repo> {
+        let (mut repo, config_error, home_error) = Repo::discover_lenient(start)?;
+        if let Some(err) = home_error {
+            return Err(err);
+        }
+        let missing = config_error.is_none() && !Config::path_in(&repo.root).exists();
+        let problem = match config_error {
+            Some(err) => err,
+            None if missing => Config::missing_error(&repo.root),
+            None => return Ok(repo),
+        };
+        match crate::pipeline_snapshot::recorded_config(&repo) {
+            Ok(Some(config)) => {
+                eprintln!(
+                    "note: running on the last good config, because it cannot be read now: \
+                     {problem:#}"
+                );
+                repo.config = config;
+                Ok(repo)
+            }
+            Ok(None)
+                if missing
+                    && crate::config::setup_dir_in(&repo.root).is_dir()
+                    && crate::lock::Lock::holder(&repo.lock_file())?.is_none() =>
+            {
+                Ok(repo)
+            }
+            Ok(None) => Err(problem),
+            Err(record) => bail!("{problem:#}; and {record:#}"),
+        }
+    }
+
     /// The project, plus the reason its config could not be read, if it could
     /// not be read.
     ///
-    /// `doctor` is the reason this exists — every other command is right to
-    /// die on a config it cannot parse, but `doctor` is the command you
+    /// `doctor` is the reason this exists — most commands are right to die on
+    /// a config they cannot parse (all but `report` and `stack`, which fall
+    /// back on the dispatcher's last good one: see [`Repo::discover_live`]),
+    /// but `doctor` is the command you
     /// reach for *because* the config is wrong, so it takes the parse error
     /// as a finding rather than a reason not to start — but `main` reaches
     /// for it from several other places too, wherever opening a broken file
@@ -182,6 +247,29 @@ impl Repo {
             return Ok(main.to_path_buf());
         }
 
+        // The main checkout is a registered project but sits on a branch with
+        // no `.spoolway/`, and `start` is in a linked worktree that carries
+        // its own. The walk below would take that copy as a second root, and
+        // `bind` would then refuse the lane's command for sharing the main
+        // checkout's id, advising a `spoolway init` that detaches the project.
+        // The project is still the main checkout. It has no config to read
+        // there, so `discover` stops on that and `discover_live` reads the
+        // dispatcher's record. The worktree's own top is what is compared,
+        // not `start`: a subdirectory of the bare main checkout, or a
+        // worktree on a branch without `.spoolway/`, gets the refusal below.
+        // A worktree nested inside the main checkout is left to the walk as
+        // well: `checkout_of` takes everything under the main checkout for
+        // the main checkout itself, so a command writing to `checkout` would
+        // put a stray `.spoolway/` there.
+        let top = git_toplevel(start).ok();
+        if let (Some(main), Some(top)) = (main, top.as_deref())
+            && !top.starts_with(main)
+            && crate::config::tracked_setup_dir_in(top).is_dir()
+            && registered_at(main)
+        {
+            return Ok(main.to_path_buf());
+        }
+
         // The walk stops at the checkout's own top. Left unbounded, it
         // climbed out of the repository and on up to `$HOME`, where the
         // global `~/.spoolway/` — every project's state, not a project's
@@ -190,7 +278,6 @@ impl Repo {
         // into `~/.spoolway/<user>/`. Outside any repository there is no top
         // to stop at, and the two identity checks below are what stand
         // between the walk and that same directory.
-        let top = git_toplevel(start).ok();
         let state_root = global_state_root();
         let found = start
             .ancestors()
@@ -873,6 +960,16 @@ pub(crate) fn main_checkout(dir: &Path) -> Option<PathBuf> {
         .ok()
         .flatten()
         .and_then(|common| recorded_or_parent(&common))
+}
+
+/// Whether `dir` is the checkout its project's binding names as the root. Any
+/// failure reading the binding answers no, so the caller falls on to the
+/// ordinary search and its own errors.
+fn registered_at(dir: &Path) -> bool {
+    crate::mux::project_home(dir)
+        .ok()
+        .and_then(|home| read_binding(&home).ok().flatten())
+        .is_some_and(|binding| binding.root == dir)
 }
 
 /// The checkout a common git directory belongs to: whatever [`stamped_id`]
@@ -3689,7 +3786,7 @@ fn global_state_root() -> PathBuf {
 /// The branch `dir` has out, for an error message only: `branch_at` refuses
 /// a detached HEAD with advice of its own, and the message this feeds wants
 /// to name what is checked out rather than stop on it.
-fn branch_or_detached(dir: &Path) -> String {
+pub(crate) fn branch_or_detached(dir: &Path) -> String {
     match run(dir, "git", &["branch", "--show-current"]) {
         Ok(branch) if !branch.trim().is_empty() => branch.trim().to_string(),
         _ => "(detached HEAD)".to_string(),
@@ -6014,6 +6111,211 @@ mod tests {
         assert!(
             said.contains("check out a branch that carries it"),
             "the error says what to do: {said}"
+        );
+    }
+
+    /// Add a linked worktree at `lane` on `task/x`, then drop `.spoolway/`
+    /// from the main checkout's branch: the state a lane meets when the
+    /// person switched the main checkout to a branch from before `init`.
+    fn leave_main_on_a_bare_branch(work: &Path, lane: &Path) {
+        let _ = std::fs::remove_dir_all(lane);
+        git(
+            work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/x",
+                lane.to_str().unwrap(),
+            ],
+        );
+        git(work, &["checkout", "-q", "-b", "bare"]);
+        git(work, &["rm", "-q", "-r", crate::config::STATE_DIR]);
+        git(work, &["commit", "-q", "-m", "drop the control plane"]);
+    }
+
+    /// A dispatcher's lock over `repo`'s home, with `claude` capped at
+    /// `concurrency` in the config it recorded.
+    fn dispatcher_recording(repo: &Repo, concurrency: usize) -> crate::lock::Lock {
+        let lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let mut config = Config::default();
+        config.agents.get_mut("claude").unwrap().concurrency = concurrency;
+        crate::pipeline_snapshot::record_config(repo, &config).unwrap();
+        lock
+    }
+
+    /// A lane's worktree still carries `.spoolway/` while the main checkout
+    /// sits on a branch without it. The project is the main checkout, so the
+    /// lane resolves to it rather than to its own worktree, which `bind`
+    /// would refuse for sharing the main checkout's id — and a command that
+    /// would read the config there is told where `.spoolway/` went instead
+    /// of running on the defaults.
+    #[test]
+    fn a_lane_resolves_to_the_main_checkout_while_it_is_on_a_bare_branch() {
+        let (_origin, work, _base_guard) = fixture("lane-while-main-is-bare");
+        let (home, _home_guard) = scratch_home("lane-while-main-is-bare");
+        let lane = crate::scratch::root("repo-test-lane-while-main-is-bare-lane");
+        let (root, strict) = crate::platform::test_home::with_home(&home, || {
+            Repo::discover(&work).expect("binds on the branch that carries .spoolway/");
+            leave_main_on_a_bare_branch(&work, &lane);
+            let (repo, _, home_error) = Repo::discover_lenient(&lane).unwrap();
+            assert!(
+                home_error.is_none(),
+                "a lane must not be told to delete the id stamp: {home_error:?}"
+            );
+            (repo.root, Repo::discover(&lane))
+        });
+        assert_eq!(root, work.canonical().unwrap());
+        let said = format!(
+            "{:#}",
+            strict.expect_err("defaults are not the run's config")
+        );
+        assert!(
+            said.contains("`.spoolway/` is not on branch `bare`"),
+            "{said}"
+        );
+        assert!(!said.contains("spoolway-id"), "{said}");
+    }
+
+    /// A subdirectory of the bare main checkout, and a worktree cut from that
+    /// bare branch, so with no `.spoolway/` of its own, are not lanes of the kind the
+    /// branch above is for: both get the refusal that names the branch.
+    #[test]
+    fn only_a_worktree_with_its_own_setup_borrows_a_bare_main_checkout() {
+        let (_origin, work, _base_guard) = fixture("bare-main-guard");
+        let (home, _home_guard) = scratch_home("bare-main-guard");
+        let lane = crate::scratch::root("repo-test-bare-main-guard-lane");
+        let other = crate::scratch::root("repo-test-bare-main-guard-other");
+        let _ = std::fs::remove_dir_all(&other);
+        let (sub, bare_worktree) = crate::platform::test_home::with_home(&home, || {
+            Repo::discover(&work).expect("binds on the branch that carries .spoolway/");
+            leave_main_on_a_bare_branch(&work, &lane);
+            std::fs::create_dir_all(work.join("src")).unwrap();
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/y",
+                    other.to_str().unwrap(),
+                ],
+            );
+            (Repo::discover(&work.join("src")), Repo::discover(&other))
+        });
+        for result in [sub, bare_worktree] {
+            let said = format!(
+                "{:#}",
+                result.expect_err("no .spoolway/ under this checkout")
+            );
+            assert!(said.contains("is a spoolway project, but"), "{said}");
+            assert!(said.contains("is not on branch"), "{said}");
+        }
+    }
+
+    /// A worktree nested inside the bare main checkout is not borrowed
+    /// either: `checkout_of` would name the main checkout as its checkout,
+    /// and `sync` or `config edit` would write a `.spoolway/` there.
+    #[test]
+    fn a_worktree_nested_in_a_bare_main_checkout_is_not_taken_for_the_main_checkout() {
+        let (_origin, work, _base_guard) = fixture("nested-in-bare-main");
+        let (home, _home_guard) = scratch_home("nested-in-bare-main");
+        let lane = crate::scratch::root("repo-test-nested-in-bare-main-lane");
+        let nested = work.join("wt").join("lane");
+        let root = crate::platform::test_home::with_home(&home, || {
+            Repo::discover(&work).expect("binds on the branch that carries .spoolway/");
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/n",
+                    nested.to_str().unwrap(),
+                ],
+            );
+            leave_main_on_a_bare_branch(&work, &lane);
+            Repo::discover_lenient(&nested).map(|(repo, _, _)| repo.root)
+        });
+        assert_ne!(
+            root.ok(),
+            Some(work.canonical().unwrap()),
+            "the nested worktree resolved to the bare main checkout"
+        );
+    }
+
+    /// While a dispatcher runs, a lane whose main checkout is on a bare
+    /// branch runs on the config the dispatcher recorded, caps included. With
+    /// no record it stops naming the branch, never on the defaults.
+    #[test]
+    fn discover_live_reads_the_record_while_main_is_on_a_bare_branch() {
+        let (_origin, work, _base_guard) = fixture("live-while-main-is-bare");
+        let (home, _home_guard) = scratch_home("live-while-main-is-bare");
+        let lane = crate::scratch::root("repo-test-live-while-main-is-bare-lane");
+        let (without, with) = crate::platform::test_home::with_home(&home, || {
+            let repo = Repo::discover(&work).unwrap();
+            leave_main_on_a_bare_branch(&work, &lane);
+            let without = Repo::discover_live(&lane);
+            let _recording = dispatcher_recording(&repo, 7);
+            (without, Repo::discover_live(&lane))
+        });
+        let said = format!("{:#}", without.expect_err("nothing recorded to run on"));
+        assert!(
+            said.contains("`.spoolway/` is not on branch `bare`"),
+            "{said}"
+        );
+        assert_eq!(with.unwrap().config.agents["claude"].concurrency, 7);
+    }
+
+    /// A `config.toml` that has gone missing is read as a broken one: the
+    /// recorded config answers while a dispatcher runs, and the defaults
+    /// stand only where no dispatcher has run. An unreadable record is an
+    /// error naming the file, and a record from a run that has ended is not
+    /// used.
+    #[test]
+    fn discover_live_treats_a_missing_config_as_a_broken_one() {
+        let (_origin, work, _base_guard) = fixture("live-missing-config");
+        let (home, _home_guard) = scratch_home("live-missing-config");
+        let outcomes = crate::platform::test_home::with_home(&home, || {
+            let repo = Repo::discover(&work).unwrap();
+            std::fs::remove_file(Config::path_in(&work)).unwrap();
+            let no_dispatcher = Repo::discover_live(&work);
+            // A dispatcher that never recorded one — its record write
+            // failed, or it started over this missing file — holds the lock.
+            let unrecorded = {
+                let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+                Repo::discover_live(&work)
+            };
+            let lock = dispatcher_recording(&repo, 7);
+            let recorded = Repo::discover_live(&work);
+            let record = crate::pipeline_snapshot::config_record_path(&repo);
+            std::fs::write(&record, "lock = [").unwrap();
+            let unreadable = Repo::discover_live(&work);
+            drop(lock);
+            let _ = std::fs::remove_file(&record);
+            drop(dispatcher_recording(&repo, 7));
+            let ended = Repo::discover_live(&work);
+            (no_dispatcher, unrecorded, recorded, unreadable, ended)
+        });
+        let (no_dispatcher, unrecorded, recorded, unreadable, ended) = outcomes;
+        let said = format!("{:#}", unrecorded.expect_err("the defaults drop the caps"));
+        assert!(said.contains("config.toml does not exist"), "{said}");
+        assert_eq!(
+            no_dispatcher.unwrap().config.agents["claude"].concurrency,
+            Config::default().agents["claude"].concurrency,
+            "a project no dispatcher has run in keeps the defaults"
+        );
+        assert_eq!(recorded.unwrap().config.agents["claude"].concurrency, 7);
+        let said = format!("{:#}", unreadable.expect_err("a record nothing can decode"));
+        assert!(said.contains("config.toml does not exist"), "{said}");
+        assert!(said.contains("dispatch-config.toml"), "{said}");
+        assert_eq!(
+            ended.unwrap().config.agents["claude"].concurrency,
+            Config::default().agents["claude"].concurrency,
+            "a record from a run that has ended is not current"
         );
     }
 

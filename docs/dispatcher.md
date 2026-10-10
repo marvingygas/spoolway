@@ -491,9 +491,17 @@ tells you to restart the dispatcher and try again.
 
 Configuration is the exception. The dispatcher reads `config.toml` and the config override again
 at the start of every pass, so a change such as a higher `agents.claude.concurrency` applies on
-the next pass with no restart. If the file stops parsing, the dispatcher keeps running on the
-last good config and prints the error once. It reads the file again every pass, so the error
-clears as soon as the file is valid.
+the next pass with no restart. If the file stops parsing or goes missing, the dispatcher keeps
+running on the last good config. It prints the error once.
+It starts no lane beyond the `concurrency` caps of that config. It reads the file again every
+pass, so the error clears as soon as the file is valid.
+
+After each good load, the dispatcher writes the merged config to `<home>/dispatch-config.toml`.
+A lane's `spoolway report` and a `spoolway stack` step run on this record when `config.toml` or
+`overrides/config.toml` cannot be read. See
+[When the config will not parse](configuration.md#when-the-config-will-not-parse). A record is
+used only while the dispatcher that wrote it is running. The dispatcher writes it on the first
+pass whose load succeeds. If it cannot write the record, it prints that once, and lanes then stop on a broken config.
 
 Three groups of keys are fixed when the dispatcher starts. `spoolway config get` shows a new
 value for them at once, but the running dispatcher keeps the old one until you restart it.

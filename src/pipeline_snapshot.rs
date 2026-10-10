@@ -20,6 +20,10 @@
 //! since the run started: the edit is real on disk and waiting, and the only
 //! thing that applies it is a restart.
 //!
+//! The config the dispatcher last loaded cleanly is kept beside it, under
+//! the same lock, for a lane's `report` and a `spoolway stack` step to run
+//! on when `config.toml` breaks or goes missing — see [`recorded_config`].
+//!
 //! Read only while the lock names a live dispatcher, and only when that lock
 //! is the one this snapshot was written under — see [`LoadedPipelines::live`].
 //! A snapshot a crashed dispatcher left behind is never current, and with
@@ -88,6 +92,85 @@ pub fn write(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     let path = path(repo);
     crate::task::write_atomic(&path, serde_json::to_string(&written)?)
         .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Beside the snapshot, the config the dispatcher last loaded cleanly.
+pub const CONFIG_RECORD_FILE: &str = "dispatch-config.toml";
+
+/// Where this project's record of the last good config lives.
+pub fn config_record_path(repo: &Repo) -> PathBuf {
+    repo.home().join(CONFIG_RECORD_FILE)
+}
+
+/// The record as written: the config, headed by the lock text of the
+/// dispatcher that loaded it. `lock` comes first because TOML wants plain
+/// values ahead of tables.
+#[derive(Serialize)]
+struct RecordedConfig<'a> {
+    lock: String,
+    config: &'a crate::config::Config,
+}
+
+/// Record `config` as the last one that loaded cleanly under the dispatcher
+/// holding `repo`'s lock.
+///
+/// The merged result is written, override layer included, so a reader needs
+/// no second file. It is skipped when the file already holds the same text,
+/// so an idle dispatcher does not rewrite it every pass. A command that runs
+/// while `config.toml` is broken or gone reads it back through
+/// [`recorded_config`].
+pub fn record_config(repo: &Repo, config: &crate::config::Config) -> Result<()> {
+    let lock_file = repo.lock_file();
+    let lock = std::fs::read_to_string(&lock_file)
+        .with_context(|| format!("reading {}", lock_file.display()))?;
+    let path = config_record_path(repo);
+    let rendered = toml::to_string_pretty(&RecordedConfig { lock, config })
+        .context("serialising the last good config")?;
+    if std::fs::read_to_string(&path).is_ok_and(|held| held == rendered) {
+        return Ok(());
+    }
+    crate::task::write_atomic(&path, rendered)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// The config the running dispatcher recorded, or `None` when no dispatcher
+/// is running, or the record was written under another lock, or none was
+/// written yet. A record from a run that has ended is never current, for the
+/// same reason a snapshot is not: its settings belong to a run that is gone.
+///
+/// A record that is there under the live lock but cannot be decoded is an
+/// error naming the file, not `None`: a record written by a newer
+/// dispatcher with a value this build does not know would otherwise read
+/// as "nothing recorded", and the caller would fall back to defaults and
+/// drop every cap.
+pub fn recorded_config(repo: &Repo) -> Result<Option<crate::config::Config>> {
+    let lock_file = repo.lock_file();
+    if crate::lock::Lock::holder(&lock_file)?.is_none() {
+        return Ok(None);
+    }
+    let lock = std::fs::read_to_string(&lock_file)
+        .with_context(|| format!("reading {}", lock_file.display()))?;
+    let path = config_record_path(repo);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let unreadable = || {
+        format!(
+            "the running dispatcher's record of the last good config, {}, cannot be read \
+             (delete it; the dispatcher writes it again on its next pass)",
+            path.display()
+        )
+    };
+    let mut table: toml::Table = toml::from_str(&raw).with_context(unreadable)?;
+    if table.get("lock").and_then(toml::Value::as_str) != Some(lock.as_str()) {
+        return Ok(None);
+    }
+    let value = table.remove("config").with_context(unreadable)?;
+    let mut config: crate::config::Config = value.try_into().with_context(unreadable)?;
+    config.migrate();
+    Ok(Some(config))
 }
 
 /// A snapshot whose writer is the dispatcher running now.
@@ -340,6 +423,47 @@ mod tests {
         // even when it is handed the dead one's pid.
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), true, None).unwrap();
         assert!(LoadedPipelines::live(&repo).is_none());
+    }
+
+    /// The recorded config is current only under the lock it was written
+    /// under, and a record that cannot be decoded under that lock is an
+    /// error, not an absent record.
+    #[test]
+    fn a_recorded_config_is_current_only_under_its_own_lock() {
+        let (repo, _root, _pipelines) = project("snapshot-config");
+        let mut config = crate::config::Config::default();
+        config.agents.get_mut("claude").unwrap().concurrency = 7;
+
+        // No dispatcher, so nothing to record under or to read back.
+        assert!(record_config(&repo, &config).is_err());
+        assert!(recorded_config(&repo).unwrap().is_none());
+
+        {
+            let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+            assert!(recorded_config(&repo).unwrap().is_none(), "nothing yet");
+            record_config(&repo, &config).unwrap();
+            let back = recorded_config(&repo).unwrap().expect("recorded");
+            assert_eq!(back.agents["claude"].concurrency, 7);
+        }
+
+        // The run ended and left its record: never current again, and not
+        // current for a new run under another lock either.
+        assert!(config_record_path(&repo).exists());
+        assert!(recorded_config(&repo).unwrap().is_none());
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), true, None).unwrap();
+        assert!(recorded_config(&repo).unwrap().is_none());
+
+        // Under the live lock, a record this build cannot decode names itself.
+        let lock = std::fs::read_to_string(repo.lock_file()).unwrap();
+        let broken = toml::to_string(&toml::toml! {
+            lock = lock
+            [config.agents.claude]
+            concurrency = "many"
+        })
+        .unwrap();
+        std::fs::write(config_record_path(&repo), broken).unwrap();
+        let said = format!("{:#}", recorded_config(&repo).unwrap_err());
+        assert!(said.contains("dispatch-config.toml"), "{said}");
     }
 
     #[test]

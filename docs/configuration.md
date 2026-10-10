@@ -700,5 +700,28 @@ Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for eac
 
 ## When the config will not parse
 
-Every command stops on a config error except `spoolway doctor`. It prints the error with its
-line and still runs the checks that read no settings.
+Every command stops on a config error except `spoolway doctor`, `spoolway report` and
+`spoolway stack`.
+
+`spoolway doctor` prints the error with its line and still runs the checks that read no
+settings.
+
+A lane's `spoolway report` and a `spoolway stack` step run while a dispatcher is running, so
+they can start while `config.toml` or `overrides/config.toml` is being edited. Both use the last
+good config that the dispatcher recorded. Each prints a note naming the file it could not read:
+
+```
+note: running on the last good config, because it cannot be read now: …
+```
+
+Both stop with an error naming the file in these cases:
+
+- No dispatcher is running and the file does not parse.
+- The dispatcher has not recorded a good config yet.
+- The recorded config cannot be read.
+- `config.toml` is missing while a dispatcher is running.
+
+A task that stops this way carries on when you run the command again after fixing the file.
+
+A missing `config.toml` is also an error when the whole `.spoolway/` directory is gone because
+the main checkout is on a branch that does not carry it. Check out the branch that carries it.
