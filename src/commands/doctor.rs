@@ -1553,12 +1553,18 @@ fn branch_and_forge_checks(
 
 /// Whether a lane can be started at all — the one check that never depends on
 /// the pipeline or the config, only on whether the terminal multiplexer this
-/// machine has is one spoolway knows how to drive.
+/// machine has is one spoolway knows how to drive, and whether `dispatch`
+/// would accept it: `headless` is available everywhere but refused outside
+/// the end-to-end harness, and a pass here must not contradict that.
 fn mux_check(mux: &dyn Mux) -> Finding {
     Finding::Check(
         "lanes can be started".into(),
         if mux.is_available() {
-            Ok(Some(mux.name().into()))
+            if mux.name() == "headless" {
+                crate::commands::dispatch::check_headless_marker().map(|()| Some(mux.name().into()))
+            } else {
+                Ok(Some(mux.name().into()))
+            }
         } else {
             Err(anyhow::anyhow!("{}", mux.unavailable()))
         },
@@ -2098,8 +2104,9 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
                 Ok(None)
             } else {
                 Err(anyhow::anyhow!(
-                    "{} is missing, but {steps:?} run it — run `spoolway init`",
-                    path.display()
+                    "{} is missing, but {steps:?} run it — {}",
+                    path.display(),
+                    crate::prompt::missing_prompt_fix(prompt)
                 ))
             },
         ));
@@ -3012,6 +3019,54 @@ mod tests {
         assert!(notes[0].contains("prompt `summariser`"), "{}", notes[0]);
         assert!(notes[0].contains("summariser"), "{}", notes[0]);
         assert!(!notes[0].contains("`worker`"), "{}", notes[0]);
+    }
+
+    /// A missing prompt `init` ships is still met with "run `spoolway init`";
+    /// one it does not ship names the path to write instead, since `init`
+    /// would leave the row failing.
+    #[test]
+    fn a_missing_prompt_advises_init_only_when_init_ships_it() {
+        let (repo, _root_guard) = scratch_repo("missing-prompt-advice");
+        let shipped = crate::assets::PROMPTS[0].name;
+        let pipelines = single_step_pipelines(&format!(
+            "  - id: build\n    agent: pi\n    prompt: {shipped}\n    model: m\n    \
+             on_pass: unblock\n  - id: unblock\n    agent: pi\n    prompt: unblock-v2\n    \
+             model: m\n    on_pass: done\n"
+        ));
+
+        let reasons: std::collections::BTreeMap<String, String> = prompt_checks(&repo, &pipelines)
+            .into_iter()
+            .filter_map(|f| match f {
+                Finding::Check(label, Err(err)) => Some((label, format!("{err:#}"))),
+                _ => None,
+            })
+            .collect();
+
+        let ours = &reasons[&format!("prompt `{shipped}`")];
+        assert!(ours.contains("run `spoolway init`"), "{ours}");
+        let custom = &reasons["prompt `unblock-v2`"];
+        assert!(!custom.contains("run `spoolway init`"), "{custom}");
+        assert!(custom.contains("write it yourself"), "{custom}");
+        assert!(custom.contains("unblock-v2"), "{custom}");
+    }
+
+    /// `headless` answers as available everywhere, but `dispatch` refuses it
+    /// outside the end-to-end harness, so the row must fail with that
+    /// refusal unless the marker is exported.
+    #[test]
+    fn lanes_row_fails_for_headless_unless_the_test_marker_is_set() {
+        let (repo, _root_guard) = scratch_repo("headless-row");
+        let mux = crate::headless::Headless::new(&repo.root, &repo.home, repo.root.join("lanes"));
+        let marker = crate::headless::TEST_BACKEND_ENV;
+
+        let finding = mux_check(&mux);
+        let Finding::Check(_, Err(err)) = finding else {
+            panic!("headless without the marker must fail the row");
+        };
+        assert!(format!("{err:#}").contains(marker), "{err:#}");
+
+        let finding = crate::platform::test_env::with_env(marker, "1", || mux_check(&mux));
+        assert!(matches!(finding, Finding::Check(_, Ok(Some(name))) if name == "headless"));
     }
 
     #[test]

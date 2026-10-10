@@ -1480,6 +1480,9 @@ its event, task, exit code, remedy and log path.
 A note names every key in `config.toml` that this spoolway does not know. See
 [Unknown keys](configuration.md#unknown-keys).
 
+The `lanes can be started` check fails for `dispatch.backend = "headless"` unless
+`SPOOLWAY_TEST_BACKEND` is set. It gives the same reason `spoolway dispatch` gives.
+
 The throwaway-pane check only opens a pane when `doctor` runs inside the herdr pane it would
 open one in. From any other shell — a script, a test sandbox, another agent's terminal — it
 skips the check with a note instead. A running herdr server answers even without `HERDR_*`
