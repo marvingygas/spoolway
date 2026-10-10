@@ -395,11 +395,37 @@ impl Repo {
         Ok(None)
     }
 
+    /// Whether git still holds `checkout` under its `initializing` lock.
+    ///
+    /// `git worktree add` locks the entry it is making with that reason and
+    /// drops the lock only after the files are checked out, so the lock
+    /// surviving is the one sign that the cut was killed before it finished.
+    /// A checkout that is merely dirty, or whose lane has not started, never
+    /// carries it.
+    ///
+    /// Git writes the reason in the language it is run in, so the word is only
+    /// ever the English one because [`crate::mux::cut_worktree`] runs its
+    /// `git worktree add` with `LC_ALL=C`. A lock a person set on purpose
+    /// gives another reason and is never taken for an unfinished cut.
+    pub fn worktree_initializing(&self, checkout: &Path) -> Result<bool> {
+        let listing = self.git(&["worktree", "list", "--porcelain"])?;
+        let mut in_checkout = false;
+        for line in listing.lines() {
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                in_checkout = Path::new(rest) == checkout;
+            } else if in_checkout && line.trim() == "locked initializing" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// `~/.spoolway/<label>-<id>/` — every runtime file this project's
     /// spoolway writes: the queue, the archive, pending tasks, scratch
     /// worktrees, composed prompts, the headless backend's records, command-step logs,
-    /// `lanes.json`, `usage.jsonl`, `dispatch.pid`, and the two scratch queue
-    /// indexes.
+    /// `lanes.json`, `usage.jsonl`, `dispatch.pid`, the two scratch queue
+    /// indexes, and the `removing/` markers that tell cleanup a checkout's
+    /// removal was begun.
     ///
     /// Created silently the moment anything is asked to resolve under it —
     /// a fresh clone nobody has bound to a home yet gets one, empty, rather
@@ -3954,12 +3980,25 @@ pub fn toplevel_raw(cwd: &Path) -> Result<PathBuf> {
 /// processes, such as a lane's agent started by `herdr agent start` or a
 /// `kill`, are started elsewhere and are not counted.
 pub fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
+    run_with_env(cwd, program, args, &[])
+}
+
+/// [`run`] with `envs` set on the command, for the one caller whose output is
+/// read back later by a program of ours and so must not depend on the
+/// person's locale.
+pub fn run_with_env(
+    cwd: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<String> {
     #[cfg(test)]
     if let Ok(mut runs) = PROCESS_RUNS.lock() {
         runs.push((cwd.to_path_buf(), std::thread::current().id()));
     }
     let output = Command::new(program)
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(cwd)
         .output()
         .with_context(|| format!("running `{program} {}`", args.join(" ")))?;

@@ -12,6 +12,14 @@
 //! lacks a commit of it — the keep is named on the run's problem list — see
 //! the push check in [`Dispatcher::tear_down_checkout`] below.
 //!
+//! A removal can be cut short by a kill, and the half-removed tree must never
+//! be committed as the task's work. So [`Dispatcher::clean_up`] writes a marker
+//! naming the task's run under the project home before it removes a checkout
+//! and clears it only once the checkout is gone; a pass that finds the marker
+//! skips the commit and removes the checkout again. A removal that fails holds
+//! the task at `done` and is named on the run's problem list, rather than
+//! archiving a task whose worktree is still registered or on disk.
+//!
 //! The other is [`discard_trial`], called from `spoolway eval --discard` for
 //! a trial arm that has not finished and never will: a person has seen
 //! enough and wants it gone now. [`Dispatcher::discard_arm`] shares
@@ -31,7 +39,7 @@
 //! moving it along a pipeline — reconciling stage against pipeline is
 //! `dispatch`'s job, and undoing what a checkout holds is this module's.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -45,6 +53,14 @@ use crate::task::Task;
 /// final report's last turn to finish and short enough that a hung agent does
 /// not hold a worktree and branch for ever.
 const CLEANUP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The file whose presence says a checkout's removal has begun. It lives in
+/// the project home rather than in the task, which is renamed into the
+/// archive and so would carry a stale flag with it. Removed again wherever a
+/// task starts a step, since a task running one is not mid-removal.
+pub(crate) fn removal_marker(repo: &crate::repo::Repo, task_id: &str) -> PathBuf {
+    repo.home().join("removing").join(task_id)
+}
 
 impl<'a> Dispatcher<'a> {
     /// Stop a lane, drop its record and bank what it spent, returning the
@@ -156,7 +172,15 @@ impl<'a> Dispatcher<'a> {
         // from by the time cleanup runs, and an unknown one makes `auto_commit`
         // sweep rather than treat the leftovers as residue — the same call
         // `spoolway stack` already makes at `handover`.
-        if let Some(worktree) = task.front.worktree_path.clone() {
+        //
+        // Not when an earlier pass already began removing the checkout. A
+        // dispatcher killed in the middle of `git worktree remove` leaves a
+        // tree with most of its tracked files gone, and sweeping that up would
+        // commit them as deletions on the task's branch, which a dependent is
+        // then cut from. The work was committed before the removal began, so
+        // there is nothing left in that tree to record.
+        let removal_began = self.removal_began(task);
+        if !removal_began && let Some(worktree) = task.front.worktree_path.clone() {
             let step = task
                 .front
                 .last_report
@@ -225,8 +249,13 @@ impl<'a> Dispatcher<'a> {
         // with no `base_commit` (a borrowed checkout, or one archived before
         // this was recorded) has nothing to measure against and is left
         // without a `patch` rather than guessed at.
-        if let (Some(base_commit), Some(worktree)) =
-            (&task.front.base_commit, &task.front.worktree_path)
+        //
+        // Not on a retry after the removal began: the folder is half gone or
+        // no longer registered, the measurement would come back empty, and
+        // saving that would erase the patch the first pass recorded.
+        if !removal_began
+            && let (Some(base_commit), Some(worktree)) =
+                (&task.front.base_commit, &task.front.worktree_path)
         {
             task.front.patch = measure_patch(worktree, base_commit);
             // The file on disk is what gets renamed into the archive below —
@@ -234,7 +263,37 @@ impl<'a> Dispatcher<'a> {
             task.save()?;
         }
 
-        self.tear_down_checkout(task, report);
+        // Written before the removal and cleared only once it succeeded, so a
+        // pass that finds it knows the tree may be half gone. Owned checkouts
+        // only: a borrowed one is never removed here.
+        if !task.front.borrowed && task.front.worktree_path.is_some() {
+            self.mark_removal(task)?;
+        }
+        if !self.tear_down_checkout(task, report) {
+            // Archiving now would report the task cleaned up with its worktree
+            // still on disk or registered, and nothing would ever come back
+            // for it. It stays on its terminal step instead, and the next pass
+            // removes the checkout again without committing it.
+            //
+            // Said here and not in `tear_down_checkout`'s own problem line,
+            // because that has other callers that do not hold the task:
+            // `unqueue --force` carries it to pending and `discard_arm`
+            // deletes it, and nothing would try again for either.
+            report.problems.push(format!(
+                "{}: stays at `done`; cleanup removes its worktree again on the next pass",
+                task.id()
+            ));
+            //
+            // The lanes were stopped and banked above and are gone from
+            // `self.lanes`, so the retry cannot find their records again. The
+            // per-session agent homes they were given are reclaimed here,
+            // before the records are dropped, or nothing ever would.
+            for record in &banked {
+                record.reclaim_session_home();
+            }
+            return Ok(false);
+        }
+        let _ = std::fs::remove_file(removal_marker(self.repo, task.id()));
 
         // The lock spans the currency check, the rename and the append: the
         // rename moves the folder's modification time, and without the lock
@@ -404,8 +463,11 @@ impl<'a> Dispatcher<'a> {
     /// exactly where it stood.
     ///
     /// `report` is where a branch kept because it is not fully pushed gets
-    /// named — see the comment on the delete itself, below.
-    pub(crate) fn tear_down_checkout(&mut self, task: &mut Task, report: &mut Report) {
+    /// named — see the comment on the delete itself, below. It is also where a
+    /// worktree that could not be removed is named, in which case this returns
+    /// `false` and leaves the branch alone, since git will not delete a branch
+    /// that is still checked out.
+    pub(crate) fn tear_down_checkout(&mut self, task: &mut Task, report: &mut Report) -> bool {
         // The checkout this task cut for itself, if it cut one. A borrowed
         // checkout is somebody else's and is never removed here, whatever else
         // happens below. Read from what was recorded when the lane was set up,
@@ -415,6 +477,9 @@ impl<'a> Dispatcher<'a> {
             true => None,
             false => task.front.worktree_path.clone(),
         };
+        // The last error a removal call gave. It holds the task on its own, and
+        // is named in the problem line whenever the removal is held.
+        let mut removal_error: Option<anyhow::Error> = None;
 
         // A task an earlier release left in the shared dispatch workspace has
         // no workspace or tab of its own: both ids name ones every other
@@ -477,7 +542,7 @@ impl<'a> Dispatcher<'a> {
                     // then the row on its own.
                     if self.mux.remove_workspace(&workspace).is_err() {
                         if let Some(checkout) = &own_checkout {
-                            let _ = self.mux.remove_checkout(checkout);
+                            removal_error = self.mux.remove_checkout(checkout).err();
                         }
                         let _ = self.mux.close_workspace(&workspace);
                     }
@@ -506,7 +571,48 @@ impl<'a> Dispatcher<'a> {
             // of its own to go with — none recorded at all, which used to
             // leak for want of anywhere to hang the removal, or only the
             // shared one an earlier release grouped tasks into.
-            let _ = self.mux.remove_checkout(checkout);
+            removal_error = self.mux.remove_checkout(checkout).err();
+        }
+
+        // Three signs that the checkout is not gone, any one of which holds the
+        // task. Git still lists a worktree on the branch. The folder is still
+        // on disk, which git can leave behind after it has already dropped
+        // its entry: `git worktree remove` unregisters the worktree before it
+        // deletes the folder, so a read-only subdirectory fails the delete
+        // with nothing listed any more. Or the last removal call gave an
+        // error that no later call made good. A backend whose removal is a
+        // no-op returns success without removing anything, which is why the
+        // answer is read from git and the disk rather than from the calls. A
+        // task that cut no checkout of its own has nothing to hold it.
+        if let Some(checkout) = &own_checkout {
+            // This checkout's own entry, not the branch: a person may have the
+            // task's branch out in a checkout of theirs once the task's own is
+            // gone, and that must not hold the task for ever.
+            let still_listed = task.front.branch.as_deref().is_some_and(|branch| {
+                match self.repo.worktree_for(branch) {
+                    Ok(Some(listed)) => {
+                        crate::platform::resolve_through_existing(&listed)
+                            == crate::platform::resolve_through_existing(checkout)
+                    }
+                    _ => false,
+                }
+            });
+            let still_on_disk = crate::platform::is_within(checkout, &self.repo.worktree_root())
+                && checkout.exists();
+            if still_listed || still_on_disk || removal_error.is_some() {
+                let why = removal_error
+                    .map(|e| format!(": {e:#}"))
+                    .unwrap_or_default();
+                report.problems.push(format!(
+                    "{}: its worktree {} could not be removed{why}. To do it by hand, run \
+                     `git worktree remove --force --force {}` and delete the folder if it is \
+                     still there",
+                    task.id(),
+                    checkout.display(),
+                    checkout.display()
+                ));
+                return false;
+            }
         }
 
         self.reclaim_scratch(task.id());
@@ -555,6 +661,37 @@ impl<'a> Dispatcher<'a> {
                 ));
             }
         }
+        true
+    }
+
+    /// Whether an earlier pass of this task's life began removing its checkout.
+    /// The marker holds the run it was written for, so one left behind by an
+    /// earlier life of a task with the same id does not count.
+    fn removal_began(&self, task: &Task) -> bool {
+        std::fs::read_to_string(removal_marker(self.repo, task.id()))
+            .is_ok_and(|written| written == task.front.run.as_deref().unwrap_or_default())
+    }
+
+    /// Record that the removal is about to begin. Refusing to go on without it
+    /// is the point: with no marker a kill mid-removal would be committed as
+    /// the task's work on the next pass.
+    fn mark_removal(&self, task: &Task) -> Result<()> {
+        let task_id = task.id();
+        let marker = removal_marker(self.repo, task_id);
+        if let Some(dir) = marker.parent() {
+            std::fs::create_dir_all(dir).with_context(|| {
+                format!(
+                    "{task_id}: could not create {}, which cleanup needs to remember a half-done worktree removal; check the project home is writable",
+                    dir.display()
+                )
+            })?;
+        }
+        std::fs::write(&marker, task.front.run.as_deref().unwrap_or_default()).with_context(|| {
+            format!(
+                "{task_id}: could not write {}, which cleanup needs to remember a half-done worktree removal; check the project home is writable",
+                marker.display()
+            )
+        })
     }
 
     /// Whether every commit reachable from `branch` is also reachable from

@@ -4214,7 +4214,7 @@ impl<'a> Dispatcher<'a> {
             }
             claims.release(task.id());
             let _ = self.mux.close_pane(&lane.boot.pane_id);
-            take_back_fresh_cut(self.mux, self.repo, task, task.stage());
+            take_back_fresh_cut(self.mux, self.repo, task, task.stage(), report);
             false
         });
 
@@ -4275,7 +4275,7 @@ impl<'a> Dispatcher<'a> {
                         claims.release(task.id());
                         let boot = &pending[i].boot;
                         let _ = self.mux.stop_lane(&boot.name, &boot.pane_id);
-                        take_back_fresh_cut(self.mux, self.repo, task, &stage_before);
+                        take_back_fresh_cut(self.mux, self.repo, task, &stage_before, report);
                         continue;
                     }
                     pending[i].persisted = Some(persisted);
@@ -5438,7 +5438,16 @@ pub(crate) fn persist_task(
 /// task came back to `queued`. So the branch is deleted only while it still
 /// sits at the commit it was cut from: work committed on it is never thrown
 /// away. A borrowed checkout is a person's own and stays.
-fn take_back_fresh_cut(mux: &dyn Mux, repo: &Repo, task: &Task, stage_before: &str) {
+///
+/// A checkout that cannot be removed is named in `report`: left standing under
+/// `worktrees/`, it would be found again by the next task cut with this id.
+fn take_back_fresh_cut(
+    mux: &dyn Mux,
+    repo: &Repo,
+    task: &Task,
+    stage_before: &str,
+    report: &mut Report,
+) {
     if stage_before != crate::pipeline::QUEUED || task.front.borrowed {
         return;
     }
@@ -5446,8 +5455,16 @@ fn take_back_fresh_cut(mux: &dyn Mux, repo: &Repo, task: &Task, stage_before: &s
         return;
     };
     if mux.remove_workspace(workspace).is_err() {
-        if let Some(path) = task.front.worktree_path.as_deref() {
-            let _ = mux.remove_checkout(path);
+        if let Some(path) = task.front.worktree_path.as_deref()
+            && let Err(err) = mux.remove_checkout(path)
+        {
+            report.problems.push(format!(
+                "{}: its worktree {} could not be removed after the task was unqueued: {err:#}. \
+                 Run `git worktree remove --force --force {}` and delete the folder if it is still there",
+                task.id(),
+                path.display(),
+                path.display()
+            ));
         }
         let _ = mux.close_workspace(workspace);
     }
@@ -5641,6 +5658,12 @@ fn ensure_workspace(
         || task.front.run.is_some()
         || task.front.base_commit.is_some();
 
+    // A task that is about to run a step is not in the middle of a removal. A
+    // marker left from an earlier pass at `done` that was never finished, for
+    // a task a person then sent back to a step, would make its next cleanup
+    // skip the commit of work done since — see `Dispatcher::clean_up`.
+    let _ = std::fs::remove_file(crate::teardown::removal_marker(repo, task.id()));
+
     // Where a task's lane sits — its worktree, workspace and panes — is a fact
     // about one machine, and the only part of a task file that is. A task file
     // that arrives from somewhere else carries a path that does not exist here,
@@ -5771,17 +5794,66 @@ fn ensure_workspace(
         .unwrap_or_else(|| crate::task::default_branch(task.id()));
 
     if task.front.workspace_id.is_none() {
-        match repo.worktree_for(&branch)? {
-            // Borrowed. There is no worktree of ours under this workspace, and
+        let mut found = repo.worktree_for(&branch)?;
+        // A checkout of this task's branch inside spoolway's own `worktrees/`
+        // folder, found for a task that has set up a checkout before, is the
+        // task's own and not a person's: it is what an earlier pass's cut
+        // left behind. A dispatcher killed inside `git worktree add` records
+        // `run` and `base_commit` first and `workspace_id` only after the cut,
+        // so this is exactly the state it leaves — and borrowing it would run
+        // the steps on a half checkout, hold the task on the cut's stale
+        // `index.lock`, and sweep the missing files into a commit as
+        // deletions at cleanup.
+        //
+        // Whether it is unfinished is git's to say, not the task file's: the
+        // entry of a cut that was killed still carries git's `initializing`
+        // lock, which `git worktree add` drops only once the files are out.
+        // Such a checkout is removed and cut again onto the same branch. Any
+        // other is a finished cut, and is taken back as the task's own, which
+        // is what keeps its cleanup removing it. The recorded path cannot
+        // tell the two apart: the failed pane split in `prepare_boot` clears
+        // it on a complete checkout that may hold a lane's uncommitted work,
+        // and removing that would delete the work.
+        //
+        // Both sides are compared resolved, because git lists the real path
+        // while the project home is spelled as given.
+        let mut own_cut = false;
+        if let Some(checkout) = found.clone()
+            && cut_before
+            && crate::platform::is_within(&checkout, &repo.worktree_root())
+        {
+            match repo.worktree_initializing(&checkout)? {
+                false => own_cut = true,
+                true => {
+                    crate::mux::remove_worktree(&repo.root, &repo.worktree_root(), &checkout)
+                        .with_context(|| {
+                        format!(
+                            "{}: a worktree cut for it was left half done at {} and could not be removed; run `git worktree remove --force --force {}`, then resume the task",
+                            task.id(),
+                            checkout.display(),
+                            checkout.display()
+                        )
+                    })?;
+                    found = None;
+                }
+            }
+        }
+        match found {
+            // Borrowed, or our own cut taken back (`own_cut`). A borrowed
+            // checkout has no worktree of ours under its workspace, and
             // cleanup has to know that, so it is written down rather than
             // guessed at later — by then our own worktree would look the same.
             Some(checkout) => {
-                let workspace = mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?;
+                let label = format!("spoolway/{}", task.id());
+                let workspace = match own_cut {
+                    true => mux.reopen_owned_pane(&checkout, &label)?,
+                    false => mux.create_pane(&checkout, &label)?,
+                };
                 task.front.workspace_id = Some(workspace.workspace_id);
                 task.front.pane_id = Some(workspace.pane_id.clone());
                 task.front.tab_id = workspace.tab_id;
                 fresh_pane = Some(workspace.pane_id);
-                task.front.borrowed = true;
+                task.front.borrowed = !own_cut;
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
                 task.front.worktree_path = Some(checkout);
@@ -5791,7 +5863,9 @@ fn ensure_workspace(
                 // checkout was cut from something before this task ever
                 // touched it, at a moment nothing here witnessed, so there is
                 // no honest commit to pin.
-                task.front.run = Some(crate::usage::new_run_id());
+                if !own_cut {
+                    task.front.run = Some(crate::usage::new_run_id());
+                }
                 persist_task(repo, task, file_seen)?;
             }
             // Cut. One worktree per task, created once and reused by every
@@ -7191,6 +7265,14 @@ mod tests {
         /// worktree with git under it instead of answering with the one
         /// stand-in path every other test shares.
         cuts_real_worktrees: Option<PathBuf>,
+        /// The repository to run git in when `remove_checkout` really removes
+        /// the worktree, as the real backends do, instead of only logging it.
+        removes_real_worktrees_from: Option<(PathBuf, PathBuf)>,
+        /// A `remove_checkout` that drops git's entry for the worktree and
+        /// leaves the folder standing, as `git worktree remove` does when
+        /// deleting the folder fails. `Some(true)` also answers with the
+        /// error that real failure gives; `Some(false)` answers success.
+        leaves_folder_behind: Option<bool>,
         /// Whether `create_workspace` makes the branch and then fails before
         /// answering — the state a dispatcher killed mid-cut leaves, since
         /// `git worktree add -b` creates the branch first.
@@ -7261,6 +7343,8 @@ mod tests {
                 resident: true,
                 shared_workspace: None,
                 cuts_real_worktrees: None,
+                removes_real_worktrees_from: None,
+                leaves_folder_behind: None,
                 dies_mid_cut: false,
                 shared_lookup_fails: false,
                 screen: Mutex::new(HashMap::new()),
@@ -7299,6 +7383,19 @@ mod tests {
         /// under `root`, for a test about what the worktree contains.
         fn cutting_real_worktrees(mut self, root: PathBuf) -> FakeMux {
             self.cuts_real_worktrees = Some(root);
+            self
+        }
+        /// A backend whose `remove_checkout` really removes the worktree with
+        /// git run in the repository's root, as the real backends do.
+        fn removing_real_worktrees(mut self, repo: &Repo) -> FakeMux {
+            self.removes_real_worktrees_from = Some((repo.root.clone(), repo.worktree_root()));
+            self
+        }
+        /// A backend whose `remove_checkout` forgets the worktree in git and
+        /// leaves its folder behind; see [`FakeMux::leaves_folder_behind`].
+        fn removing_only_git_entries(mut self, repo: &Repo, reports_error: bool) -> FakeMux {
+            self.removes_real_worktrees_from = Some((repo.root.clone(), repo.worktree_root()));
+            self.leaves_folder_behind = Some(reports_error);
             self
         }
         /// A backend whose `create_workspace` dies after making the branch
@@ -7501,7 +7598,24 @@ mod tests {
 
         fn remove_checkout(&self, path: &Path) -> Result<()> {
             self.log(format!("remove_checkout {}", path.display()));
-            Ok(())
+            match &self.removes_real_worktrees_from {
+                Some((repo_root, _)) if self.leaves_folder_behind.is_some() => {
+                    let entry = repo_root
+                        .join(".git/worktrees")
+                        .join(path.file_name().unwrap());
+                    std::fs::remove_dir_all(entry).unwrap();
+                    match self.leaves_folder_behind == Some(true) {
+                        true => {
+                            anyhow::bail!("failed to delete {}: Permission denied", path.display())
+                        }
+                        false => Ok(()),
+                    }
+                }
+                Some((repo_root, worktree_root)) => {
+                    crate::mux::remove_worktree(repo_root, worktree_root, path)
+                }
+                None => Ok(()),
+            }
         }
 
         fn create_workspace(
@@ -11121,7 +11235,13 @@ mod tests {
         };
 
         repo.git(&["branch", "task/demo"]).unwrap();
-        take_back_fresh_cut(&mux, &repo, &task, crate::pipeline::QUEUED);
+        take_back_fresh_cut(
+            &mux,
+            &repo,
+            &task,
+            crate::pipeline::QUEUED,
+            &mut Report::default(),
+        );
         assert!(!exists(), "a branch still at its base is deleted");
 
         let tree = format!("{base}^{{tree}}");
@@ -11129,7 +11249,13 @@ mod tests {
             .git(&["commit-tree", &tree, "-p", &base, "-m", "work"])
             .unwrap();
         repo.git(&["branch", "task/demo", ahead.trim()]).unwrap();
-        take_back_fresh_cut(&mux, &repo, &task, crate::pipeline::QUEUED);
+        take_back_fresh_cut(
+            &mux,
+            &repo,
+            &task,
+            crate::pipeline::QUEUED,
+            &mut Report::default(),
+        );
         assert!(exists(), "a branch with a commit beyond its base is kept");
     }
 
@@ -17880,7 +18006,9 @@ mod tests {
             f.worktree_path = Some(worktree.to_path_buf());
         });
 
-        let mux = FakeMux::new(vec![]);
+        let mux = FakeMux::new(vec![])
+            .with_unbound_workspace()
+            .removing_real_worktrees(&repo);
         run_pass(&repo, &mux);
 
         let archived = crate::task::Task::load(&repo.archive_dir().join("demo.md")).unwrap();
@@ -18110,6 +18238,443 @@ mod tests {
             "the branch is reused as it was, not re-cut from the moved base"
         );
         std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// Cut a real worktree for `task/<id>` under the run's worktree root with
+    /// three tracked files, the way an earlier pass's cut would have.
+    fn cut_own_worktree(repo: &Repo, id: &str) -> PathBuf {
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(repo.root.join(name), name).unwrap();
+        }
+        repo.git(&["add", "-A"]).unwrap();
+        repo.git(&["commit", "-qm", "files"]).unwrap();
+        let path = repo
+            .worktree_root()
+            .join(crate::mux::branch_slug(&format!("task/{id}")));
+        crate::mux::cut_worktree(&repo.root, &path, &format!("task/{id}"), "work").unwrap();
+        path
+    }
+
+    /// A dispatcher killed inside `git worktree add` leaves the worktree
+    /// registered and half populated, with git's `initializing` lock on the
+    /// entry and a stale `index.lock`. `run` and `base_commit` are on record
+    /// and `workspace_id` is not. That checkout is the task's own, so the
+    /// next pass must cut it again rather than borrow it.
+    #[test]
+    fn a_half_cut_worktree_under_our_own_root_is_recut_not_borrowed() {
+        let (repo, _root_guard) = fixture("half-cut-recut");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.run = Some("rb0".into());
+            f.base_commit = Some("0".repeat(40));
+        });
+        let worktree = cut_own_worktree(&repo, "demo");
+        std::fs::remove_file(worktree.join("b.txt")).unwrap();
+        std::fs::remove_file(worktree.join("c.txt")).unwrap();
+        let admin = repo.root.join(".git/worktrees").join("task-demo");
+        std::fs::write(admin.join("index.lock"), "").unwrap();
+        std::fs::write(admin.join("locked"), "initializing").unwrap();
+
+        let mut task = reload(&path);
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
+            .expect("a half cut of its own is redone, not held on its stale lock");
+
+        assert!(!task.front.borrowed, "the checkout is the task's own cut");
+        assert_eq!(mux.did("create_workspace").len(), 1, "it is cut again");
+        let checkout = task.front.worktree_path.clone().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert!(checkout.join(name).exists(), "{name} is back");
+        }
+        assert!(!admin.join("index.lock").exists());
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    /// A checkout under `worktrees/` whose path the task recorded is its own
+    /// finished cut: it is taken back as owned, not removed and not marked
+    /// borrowed.
+    #[test]
+    fn a_recorded_worktree_under_our_own_root_is_taken_back_as_owned() {
+        let (repo, _root_guard) = fixture("recorded-own-root");
+        let worktree = cut_own_worktree(&repo, "demo");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.run = Some("rb0".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+
+        let mut task = reload(&path);
+        let mux = FakeMux::new(vec![]);
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(!task.front.borrowed);
+        assert!(mux.did("create_workspace").is_empty());
+        assert!(worktree.join("a.txt").exists(), "nothing was removed");
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// The failed pane split clears `worktree_path` on a checkout that is
+    /// complete and may already hold a lane's uncommitted work. With `run` and
+    /// `base_commit` still on record, the next pass finds that checkout under
+    /// `worktrees/` with no path recorded. Only git's `initializing` lock says
+    /// a cut is unfinished, so this one is taken back as owned with every file
+    /// it holds, instead of being removed to be cut again.
+    #[test]
+    fn a_complete_checkout_whose_path_was_cleared_keeps_its_uncommitted_work() {
+        let (repo, _root_guard) = fixture("cleared-path-dirty");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.run = Some("rb0".into());
+            f.base_commit = Some("0".repeat(40));
+        });
+        let worktree = cut_own_worktree(&repo, "demo");
+        std::fs::write(worktree.join("a.txt"), "edited").unwrap();
+        std::fs::write(worktree.join("new.txt"), "untracked").unwrap();
+
+        let mut task = reload(&path);
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(!task.front.borrowed);
+        assert!(
+            mux.did("create_workspace").is_empty(),
+            "it is not cut again"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("a.txt")).unwrap(),
+            "edited"
+        );
+        assert!(worktree.join("new.txt").exists());
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A task about to run a step is not mid-removal, so a marker an earlier,
+    /// unfinished cleanup left for it is cleared; otherwise the cleanup that
+    /// follows the step would skip the commit of the work it did.
+    #[test]
+    fn starting_a_step_clears_a_leftover_removal_marker() {
+        let (repo, _root_guard) = fixture("marker-cleared-on-start");
+        let path = add_task_with(&repo, "demo", "implement", |_| {});
+        let marker = crate::teardown::removal_marker(&repo, "demo");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+
+        let mut task = reload(&path);
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
+
+        assert!(!marker.exists());
+        if let Some(worktree) = &task.front.worktree_path {
+            std::fs::remove_dir_all(worktree).ok();
+        }
+    }
+
+    /// A marker is honoured only for the run it was written under. One left
+    /// by an earlier life of a task with the same id must not make this
+    /// cleanup skip the commit of work the lane left uncommitted.
+    #[test]
+    fn a_removal_marker_from_another_run_does_not_skip_the_commit() {
+        let (repo, _root_guard) = fixture("marker-other-run");
+        let worktree = cut_own_worktree(&repo, "demo");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.branch = Some("task/demo".into());
+            f.workspace_id = Some("w9".into());
+            f.worktree_path = Some(worktree.clone());
+            f.run = Some("rb2".into());
+        });
+        // A dependent keeps the branch, so the commit can be read back.
+        add_task_with(&repo, "next", "queued", |f| {
+            f.depends_on = vec!["demo".into()];
+        });
+        let marker = crate::teardown::removal_marker(&repo, "demo");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "rb1").unwrap();
+        std::fs::write(worktree.join("late.txt"), "work").unwrap();
+
+        let mux = FakeMux::new(vec![])
+            .with_unbound_workspace()
+            .removing_real_worktrees(&repo);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut reload(&path), &[], &mut report)
+            .unwrap();
+
+        assert_eq!(
+            repo.git(&["show", "task/demo:late.txt"]).unwrap(),
+            "work",
+            "the uncommitted file was committed before the tree went"
+        );
+    }
+
+    /// The measurement of the patch happens once. A retry after the removal
+    /// began finds a tree that is half gone, and must not save an empty
+    /// measurement over the patch the first pass recorded.
+    #[test]
+    fn a_retry_after_the_removal_began_keeps_the_recorded_patch() {
+        let (repo, _root_guard) = fixture("retry-keeps-patch");
+        let worktree = cut_own_worktree(&repo, "demo");
+        let base = repo
+            .git(&["rev-parse", "work~1"])
+            .unwrap()
+            .trim()
+            .to_string();
+        let recorded = crate::task::Patch {
+            files: 3,
+            insertions: 3,
+            deletions: 0,
+        };
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.branch = Some("task/demo".into());
+            f.workspace_id = Some("w9".into());
+            f.worktree_path = Some(worktree.clone());
+            f.base_commit = Some(base.clone());
+            f.run = Some("rb1".into());
+            f.patch = Some(recorded);
+        });
+        let marker = crate::teardown::removal_marker(&repo, "demo");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "rb1").unwrap();
+        std::fs::remove_dir_all(&worktree).unwrap();
+        repo.git(&["worktree", "prune"]).unwrap();
+
+        let mux = FakeMux::new(vec![]).with_unbound_workspace();
+        let mut task = reload(&path);
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut task, &[], &mut Report::default())
+            .unwrap();
+
+        assert_eq!(task.front.patch, Some(recorded));
+    }
+
+    /// A person may check the task's branch out in a checkout of their own
+    /// once the task's worktree is gone. That checkout is not the task's, so
+    /// it must not hold the task at `done`.
+    #[test]
+    fn the_branch_out_in_a_persons_checkout_does_not_hold_a_removed_worktree() {
+        let (repo, _root_guard) = fixture("branch-out-elsewhere");
+        let worktree = cut_own_worktree(&repo, "demo");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.branch = Some("task/demo".into());
+            f.workspace_id = Some("w9".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+        repo.git(&[
+            "worktree",
+            "remove",
+            "--force",
+            &worktree.display().to_string(),
+        ])
+        .unwrap();
+        let theirs = repo.root.join("theirs");
+        repo.git(&[
+            "worktree",
+            "add",
+            &theirs.display().to_string(),
+            "task/demo",
+        ])
+        .unwrap();
+
+        let mux = FakeMux::new(vec![]).with_unbound_workspace();
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut reload(&path), &[], &mut report)
+            .unwrap();
+
+        assert!(archived, "{:?}", report.problems);
+        assert!(theirs.join("a.txt").exists(), "their checkout is untouched");
+    }
+
+    /// The direct delete that finishes a removal git refused applies only
+    /// under `worktrees/`. A task file can record any path, and git refuses
+    /// the main checkout and a plain folder alike.
+    #[test]
+    fn removing_a_worktree_never_deletes_a_folder_outside_our_root() {
+        let (repo, _root_guard) = fixture("remove-outside-root");
+        let stray = repo.root.join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("keep.txt"), "mine").unwrap();
+
+        for path in [&stray, &repo.root] {
+            let err = crate::mux::remove_worktree(&repo.root, &repo.worktree_root(), path)
+                .expect_err("git refuses it and nothing else may delete it");
+            assert!(format!("{err:#}").contains("where spoolway cuts its worktrees"));
+        }
+        assert!(stray.join("keep.txt").exists());
+        assert!(repo.root.join(".git").exists());
+    }
+
+    /// A checkout the unqueue take-back cannot remove is named, because left
+    /// under `worktrees/` it would be found again by the next task of that id.
+    #[test]
+    fn taking_back_a_cut_names_a_worktree_it_could_not_remove() {
+        let (repo, _root_guard) = fixture("take-back-names-failure");
+        let worktree = cut_own_worktree(&repo, "demo");
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |f| {
+            f.branch = Some("task/demo".into());
+            f.workspace_id = Some("w9".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+        let mux = FakeMux::new(vec![])
+            .with_unbound_workspace()
+            .removing_only_git_entries(&repo, true);
+        let mut report = Report::default();
+
+        take_back_fresh_cut(
+            &mux,
+            &repo,
+            &reload(&path),
+            crate::pipeline::QUEUED,
+            &mut report,
+        );
+
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("could not be removed")
+                    && p.contains(&worktree.display().to_string())),
+            "{:?}",
+            report.problems
+        );
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A dispatcher killed inside `git worktree remove` leaves a tree with
+    /// most tracked files gone. The next cleanup must finish removing it
+    /// without committing the missing files as deletions to the branch a
+    /// dependent is cut from.
+    #[test]
+    fn cleanup_after_a_removal_cut_short_commits_nothing() {
+        let (repo, _root_guard) = fixture("removal-cut-short");
+        let worktree = cut_own_worktree(&repo, "first");
+        let tip = repo.git(&["rev-parse", "task/first"]).unwrap();
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.workspace_id = Some("w9".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+        add_task_with(&repo, "second", "queued", |f| {
+            f.depends_on = vec!["first".into()];
+        });
+        // What the first, killed attempt left behind.
+        std::fs::create_dir_all(repo.home().join("removing")).unwrap();
+        std::fs::write(repo.home().join("removing/first"), "").unwrap();
+        std::fs::remove_file(worktree.join("b.txt")).unwrap();
+        std::fs::remove_file(worktree.join("c.txt")).unwrap();
+
+        let mux = FakeMux::new(vec![])
+            .with_unbound_workspace()
+            .removing_real_worktrees(&repo);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+
+        assert!(archived, "{:?}", report.problems);
+        assert_eq!(
+            repo.git(&["rev-parse", "task/first"]).unwrap(),
+            tip,
+            "the half-deleted tree was not committed"
+        );
+        assert!(!worktree.exists());
+        assert!(repo.worktree_for("task/first").unwrap().is_none());
+        assert!(!repo.home().join("removing/first").exists());
+    }
+
+    /// A removal that fails is named, and the task is held at `done` rather
+    /// than archived as cleaned up with its worktree still registered.
+    #[test]
+    fn a_worktree_that_cannot_be_removed_holds_the_task_and_is_named() {
+        let (repo, _root_guard) = fixture("removal-fails");
+        let worktree = cut_own_worktree(&repo, "demo");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.branch = Some("task/demo".into());
+            f.workspace_id = Some("w9".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+
+        // Every removal call answers, and none of them removes anything.
+        let mux = FakeMux::new(vec![]).with_unbound_workspace();
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut reload(&path), &[], &mut report)
+            .unwrap();
+
+        assert!(!archived);
+        assert!(path.exists(), "the task file stays in the queue");
+        // The hold is said by cleanup alone. The line naming the worktree is
+        // shared with callers that do not hold the task.
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("stays at `done`")),
+            "{:?}",
+            report.problems
+        );
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|p| p.contains("could not be removed") && p.contains("stays at")),
+            "{:?}",
+            report.problems
+        );
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("could not be removed")
+                    && p.contains(&worktree.display().to_string())),
+            "{:?}",
+            report.problems
+        );
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|a| a.contains("cleaned up and archived"))
+        );
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// Git unregisters a worktree before it deletes the folder, so a removal
+    /// that fails on the folder leaves it on disk with nothing listing it. The
+    /// task is held and the worktree named whether or not the backend said
+    /// so.
+    #[test]
+    fn a_folder_left_standing_after_git_forgot_it_holds_the_task_and_is_named() {
+        for reports_error in [true, false] {
+            let (repo, _root_guard) = fixture(&format!("folder-left-{reports_error}"));
+            let worktree = cut_own_worktree(&repo, "demo");
+            let path = add_task_with(&repo, "demo", "done", |f| {
+                f.branch = Some("task/demo".into());
+                f.workspace_id = Some("w9".into());
+                f.worktree_path = Some(worktree.clone());
+            });
+
+            let mux = FakeMux::new(vec![])
+                .with_unbound_workspace()
+                .removing_only_git_entries(&repo, reports_error);
+            let mut report = Report::default();
+            let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .clean_up(&mut reload(&path), &[], &mut report)
+                .unwrap();
+
+            assert!(
+                repo.worktree_for("task/demo").unwrap().is_none(),
+                "git no longer lists it, which is the case under test"
+            );
+            assert!(!archived, "reports_error: {reports_error}");
+            assert!(path.exists());
+            assert!(
+                report
+                    .problems
+                    .iter()
+                    .any(|p| p.contains("could not be removed")
+                        && p.contains(&worktree.display().to_string())),
+                "{:?}",
+                report.problems
+            );
+            std::fs::remove_dir_all(&worktree).ok();
+        }
     }
 
     /// The refusal itself: a leftover `task/<id>` stops the first cut, names

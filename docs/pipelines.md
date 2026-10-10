@@ -556,6 +556,10 @@ Every lane runs in a git worktree. A branch cannot be checked out twice.
 The task file records which it was as `borrowed:`. A borrowed checkout and its branch are never
 removed.
 
+A checkout in spoolway's own `worktrees/` folder is never borrowed by a task that has started
+before. It is that task's own cut. See [A cut that was stopped part
+way](dispatcher.md#a-cut-that-was-stopped-part-way).
+
 ## Working with pipelines
 
 ```
