@@ -9698,6 +9698,7 @@ mod tests {
             step: "implement".into(),
             outcome: "pass".into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.save().unwrap();

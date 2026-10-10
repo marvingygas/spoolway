@@ -257,10 +257,12 @@ pub fn report(
     // Left for the dispatcher to bank into this lane's ledger line. Recorded
     // with the step it belongs to, so that a later lane which dies without
     // reporting is banked as having no outcome rather than inheriting this one.
+    let now = chrono::Utc::now();
     task.front.last_report = Some(crate::task::LastReport {
         step: current.clone(),
         outcome: outcome.as_str().to_string(),
-        at: chrono::Utc::now().timestamp(),
+        at: now.timestamp(),
+        at_ms: now.timestamp_millis(),
         blocked: destination == crate::pipeline::BLOCKED,
     });
 
@@ -2679,6 +2681,11 @@ mod tests {
              lane's own started_at from: {}",
             left.at
         );
+        // The millisecond clock is what tells a report from the lane before
+        // this one in the same second. Left at 0 the dispatcher falls back
+        // to whole seconds and the same-second bug returns.
+        assert!(left.at_ms > 0, "at_ms has to be stamped");
+        assert_eq!(left.at_ms / 1000, left.at, "both clocks name one instant");
     }
 
     /// `--handoff` is independent of the outcome: it lands under `##
@@ -3049,6 +3056,7 @@ mod tests {
             step: "work".to_string(),
             outcome: "pass".to_string(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.set_stage(crate::pipeline::DONE, None);
@@ -4163,6 +4171,7 @@ mod tests {
             step: "work".into(),
             outcome: "block".into(),
             at: 1,
+            at_ms: 0,
             blocked: false,
         });
 
@@ -4210,6 +4219,7 @@ mod tests {
             step: crate::pipeline::BLOCKED.into(),
             outcome: "block".into(),
             at: 1,
+            at_ms: 0,
             blocked: false,
         });
 
@@ -5433,6 +5443,7 @@ mod tests {
             step: "build".into(),
             outcome: "pass".into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.set_stage(crate::pipeline::PAUSED, None);
@@ -7489,6 +7500,7 @@ mod tests {
             step: "deploy".into(),
             outcome: outcome.into(),
             at: 0,
+            at_ms: 0,
             blocked: false,
         });
         task.set_stage(crate::pipeline::PAUSED, None);

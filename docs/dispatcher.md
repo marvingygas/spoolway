@@ -543,7 +543,8 @@ go back to. `spoolway resume` forgets the hook's failed run, so it fires again. 
 
 ## A lane that settles without reporting
 
-A lane can end its turn without calling `spoolway report`. If the lane still has opening
+A lane can end its turn without calling `spoolway report`. A report filed after the lane
+started counts, however soon after, and the lane is not reminded. If the lane still has opening
 messages to receive, the pass types the next one instead. Otherwise:
 
 1. The next pass sends the report contract into the pane again.
