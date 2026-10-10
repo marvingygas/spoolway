@@ -427,3 +427,12 @@ list points at it.
 On `done` the dispatcher removes the worktree and the branch and moves the task file to the
 archive directory. The branch is kept while a remote still lacks one of its commits. The usage
 ledger keeps its lines after the task is archived.
+
+A task whose pipeline has a handover step keeps its pull request and predicted conflicts in the
+archived file, under `## Handover`:
+
+```
+## Handover
+- conflicts   none open
+- pull req    #42 — https://github.com/acme/shop/pull/42
+```

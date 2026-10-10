@@ -764,8 +764,9 @@ When a task reaches `done`:
    task's run. Then the worktree is removed, unless it was borrowed.
 5. The branch is deleted, unless a queued task still depends on it or it has commits no remote
    has.
-6. The `removing/<task>` file is deleted. The task file moves to `archive/`, and its run files
-   and session homes are deleted.
+6. The `removing/<task>` file is deleted. The `conflicts` and `pull req` lines that the handover
+   step printed are copied into a `## Handover` section of the task file. The task file moves to
+   `archive/`. The task's run files and every codex session home made for it are deleted.
 7. One line for the task is appended to `archive/index.jsonl`.
 
 ### A removal that was stopped or failed
