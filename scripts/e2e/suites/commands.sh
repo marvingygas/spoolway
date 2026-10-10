@@ -862,6 +862,54 @@ fi
 has "and reports only the pipeline this project actually loaded" '["default"]' "$PICHECK_OUT"
 lacks "with no mention of the bundled sample it dropped" "bugfix" "$PICHECK_OUT"
 
+# ------------------------------------- pipeline check: pipeline edits under live tasks
+# Deleting a pipeline, or renaming a step, under a task already in the queue
+# used to pass `pipeline check` and then stop the whole queue at the next
+# dispatcher start, or send a plain resume back to the entry step. The same
+# project, now with two live tasks: one on a pipeline that is then deleted,
+# and one blocked on `review`, a step of `default` that is then renamed.
+must "a git identity for the live-task case" \
+  env -C "$PICHECK" git config user.email t@example.com
+must "a git identity for the live-task case" \
+  env -C "$PICHECK" git config user.name t
+must "a seed commit for the live-task case" \
+  env -C "$PICHECK" git commit -q --allow-empty -m seed
+cp "$PICHECK/.spoolway/pipelines/default.yml" "$PICHECK/.spoolway/pipelines/doomed.yml"
+for T in pic-gone pic-renamed; do
+  {
+    echo "---"
+    echo "id: $T"
+    echo "title: $T, done"
+    echo "group: $T"
+    if [ "$T" = pic-gone ]; then echo "pipeline: doomed"; else echo "pipeline: default"; fi
+    echo "---"
+    cat "$BODY"
+  } > "$PICHECK/$T.md"
+  must "$T queued" env -C "$PICHECK" "$SPOOLWAY" queue add --from "$PICHECK/$T.md" --base main
+done
+PIC_RENAMED=$(find "$HOME/.spoolway" -path '*/queue/pic-renamed.md' | head -1)
+must "pic-renamed blocked on the real step \`review\`" \
+  sed -i 's/^stage: .*/stage: blocked\nblocked_from: review/' "$PIC_RENAMED"
+must "the pipeline's \`review\` step renamed to \`audit\`, and the step before it pointed at the new name" \
+  sed -i -e 's/^  - id: review$/  - id: audit/' -e 's/^    on_pass: review$/    on_pass: audit/' \
+    "$PICHECK/.spoolway/pipelines/default.yml"
+rm -f "$PICHECK/.spoolway/pipelines/doomed.yml"
+
+PICHECK_LIVE_OUT="$LIVE/picheck-live.out"
+if env -C "$PICHECK" "$SPOOLWAY" pipeline check >"$PICHECK_LIVE_OUT" 2>&1; then
+  bad "pipeline check fails over live tasks the pipeline edits stranded"
+  sed 's/^/        /' "$PICHECK_LIVE_OUT"
+else
+  ok "pipeline check fails over live tasks the pipeline edits stranded"
+fi
+has "and names the task on the deleted pipeline and that pipeline" \
+  "live task \`pic-gone\` names pipeline \`doomed\`" "$PICHECK_LIVE_OUT"
+has "and names the task, step and pipeline of the renamed step" \
+  "live task \`pic-renamed\` has \`blocked_from: review\`, and pipeline \`default\` has no such step" \
+  "$PICHECK_LIVE_OUT"
+refuses "a plain resume of the stranded task is refused, naming --stage" "--stage" \
+  env -C "$PICHECK" "$SPOOLWAY" resume pic-renamed
+
 # --------------------------------------------- copy commands refuse escaping names
 # `pipeline copy` and `prompt copy` join `<from>`/`<to>` straight onto a
 # directory with nothing else standing between the string and the

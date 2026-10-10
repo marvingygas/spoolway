@@ -658,8 +658,11 @@ These tasks are refused, each with a message that names the reason and what to d
 | Depends on a task that is not `done` | With `--stage` | Resume that task first if it is `blocked` or `paused`, otherwise wait for it to finish |
 | Depends on a task that is not in the queue or the archive | With `--stage` | Correct or remove it in `depends_on` |
 | Names a step the task walks past | With `--stage` | Nothing is resumed. The message names the rule: `it is not last in its chain`, `it is not the root of its chain`, or `its own skip: names it` |
+| Stands on, is parked on, is held at the gate of, or is blocked on a step its pipeline does not define | Without `--stage` | The message names the missing step. Run `spoolway resume <task> --stage <step>` |
 
-A task on a step the pipeline no longer defines can still be resumed.
+A plain resume of such a task would restart it at the first step or put it back on a step nothing
+runs. `--stage <step>` resumes it on the step you name. A task that stopped before it ever
+reported has no recorded step and resumes at the first step.
 
 A resume that sends the task to another step lands on the first step the task runs. When that destination is one the task [walks past](pipelines.md#steps-a-task-walks-past), the task lands on the step after it, and its `## Status Log` names the step passed. `--stage` refuses such a step instead: `` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. Nothing was resumed. ``
 
@@ -801,6 +804,12 @@ from the first step reaches.
 While a dispatcher runs, the check first prints a line naming each pipeline file edited since
 it started. That line is not a failure. See [Editing a pipeline while it
 runs](dispatcher.md#editing-a-pipeline-while-it-runs).
+
+The check also reads every task in the queue. It fails, naming the task, when the task's
+`pipeline:` names a pipeline the project does not define. It fails, naming the task, the step
+and the pipeline, when the task's `stage:`, `paused_at`, `blocked_from` or `parked_from` names
+a step its pipeline does not have. The stages `queued`, `paused`, `blocked` and `done` are never
+reported. Pending tasks and routines are not read.
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
