@@ -20,8 +20,8 @@
 # pull request, and on a laptop with no model server and no multiplexer.
 #
 # **Only what a unit test cannot reach.** Anything decidable from files and
-# exit codes belongs in `src/*.rs`, where about seven hundred tests already
-# decide it against the code rather than against a fixture. What is left here
+# exit codes belongs in `src/*.rs`, where thousands of tests already decide
+# it against the code rather than against a fixture. What is left here
 # needs a real git repository, a real detached process, or a real forge: a task
 # walking the pipeline as processes (`flow`), a rebase onto a base that moved
 # (`stacking`, `conflicts`), a command step's pid, log and exit file
@@ -31,8 +31,7 @@
 # coverage: `queue`, `config`, `settings`, `pipelines`, `personas`, `plan`,
 # `plans`, `gates`, `sessions`, `eval`, `bugfix`, `kinds`, `parallel`,
 # `escalation` and `large` all asserted things a unit test decides, through a
-# slower path, in seven thousand lines of shell. The `pr` tier went from
-# nineteen suites and about eleven minutes to five.
+# slower path, in seven thousand lines of shell.
 #
 # The other question — *what does a real run actually do?* — is not this
 # harness's, and never was. It is answered by the plans under
