@@ -772,7 +772,7 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
 
 /// Every disk-dependent problem `pipeline_check` finds in the project's own
 /// loaded pipelines: an agent profile a step names but config does not
-/// define, a task skeleton a `task_template:` names but nobody wrote, and —
+/// define or whose kind spoolway cannot launch, a task skeleton a `task_template:` names but nobody wrote, and —
 /// per agent step — a missing prompt file, a blank model, an
 /// `effort:`/`session:`/`skills:` the step's agent kind cannot carry.
 ///
@@ -784,10 +784,22 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
     let mut problems = Vec::new();
 
     for (agent, steps) in pipelines.referenced_agents() {
-        if !config.agents.contains_key(agent) {
-            problems.push(format!(
+        match config.agents.get(agent) {
+            None => problems.push(format!(
                 "agent profile `{agent}` is not defined in config, and {steps:?} run on it"
-            ));
+            )),
+            // A profile naming a kind with no adapter row is kept by `migrate`
+            // so a typo is not deleted, which leaves this check the place to
+            // refuse it: the dispatcher would otherwise refuse the launch of
+            // each of these steps.
+            Some(profile) if crate::agent::adapter(&profile.kind).is_none() => {
+                problems.push(format!(
+                    "agent profile `{agent}` names kind `{}`, which spoolway cannot launch, \
+                     and {steps:?} run on it — set `kind` to `pi`, `codex` or `claude`",
+                    profile.kind
+                ))
+            }
+            Some(_) => {}
         }
     }
 
@@ -3591,8 +3603,10 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
+        // Two: the profile's own unknown kind, and the step's `session:` that no
+        // adapter row can carry.
         let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
-        assert!(err.to_string().contains("1 problem"), "{err}");
+        assert!(err.to_string().contains("2 problem"), "{err}");
     }
 
     /// The same shape, on a kind that does resume — `pi`, what `pi`
@@ -3763,6 +3777,35 @@ mod tests {
 
         pipeline_check(&repo, Ok(pipelines), false)
             .expect("a prompt only the embedded bugfix sample needs must not leak in");
+    }
+
+    /// A profile naming a kind spoolway has no adapter for is kept in the
+    /// config, so the check a person runs before dispatching has to refuse a
+    /// step on it, naming the kinds that do launch. Otherwise the step passes
+    /// here and is refused only when its lane is launched.
+    #[test]
+    fn pipeline_check_refuses_a_step_on_a_profile_with_an_unknown_kind() {
+        let (repo, _root_guard) = repo_for("check-unknown-kind");
+        let pipeline = Pipeline::parse(
+            "solo",
+            "steps:\n  - id: a\n    agent: typo\n    prompt: implementer\n    \
+             model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
+        };
+        let config: Config = toml::from_str("[agents.typo]\nkind = \"Claude\"\n").unwrap();
+
+        let problems = step_problems(&repo, &pipelines, &config);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`typo` names kind `Claude`")
+                    && p.contains("`pi`, `codex` or `claude`")),
+            "{problems:?}"
+        );
     }
 
     /// `step_problems` used to look for a `task_template:` skeleton in the
@@ -3990,8 +4033,10 @@ mod tests {
             ignored_overrides: Vec::new(),
         };
 
+        // Two: the profile's own unknown kind, and the step's `skills:` that no
+        // adapter row can carry.
         let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
-        assert!(err.to_string().contains("1 problem"), "{err}");
+        assert!(err.to_string().contains("2 problem"), "{err}");
     }
 
     /// A name found in neither place spoolway can see — a project's own

@@ -124,7 +124,7 @@ pub fn remove(text: &str, parts: &[&str]) -> Result<String> {
 /// because that is the only spelling the rewrite writes.
 ///
 /// A path whose parent table is not in `new` is skipped: its parent was
-/// itself dropped, a retired agent profile say, and a key with no table to
+/// itself dropped, a retired table say, and a key with no table to
 /// sit in has nowhere to go. [`compare`] then lists it as dropped.
 ///
 /// Returns the rewritten text and the paths, as they now stand in it, that
