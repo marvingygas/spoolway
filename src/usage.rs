@@ -413,6 +413,21 @@ pub struct ModelPrice {
     #[serde(skip_serializing_if = "unset_slots")]
     pub slots: u32,
 
+    /// The percentage of context at which a lane on this model compacts, from
+    /// 1 to 100. `0` means unset and the agent keeps its own default (about
+    /// 95% for claude); there is no value that turns compaction off.
+    ///
+    /// A fact about the model rather than the agent profile: how early a model
+    /// needs compacting depends on the model, since a small local model
+    /// degrades long before a large hosted one. `dispatch::prepare_boot` hands
+    /// it to a claude lane as a percentage of claude's own window, and to a
+    /// codex lane as that percentage of [`Self::context_window`], rounded down;
+    /// see [`crate::agent::Compaction`]. Claude only ever moves compaction
+    /// earlier, so a value above its default changes nothing. The range is
+    /// held by `confkv`, where a person types it.
+    #[serde(skip_serializing_if = "unset_compact_ctx")]
+    pub compact_ctx: u32,
+
     /// The retired `exclusive` flag, read only so a config that still sets it
     /// parses past `deny_unknown_fields`. Nothing reads it and it is never
     /// written back; `spoolway sync` drops it from a private override.
@@ -625,6 +640,10 @@ fn unset_slots(slots: &u32) -> bool {
     *slots == 0
 }
 
+fn unset_compact_ctx(compact_ctx: &u32) -> bool {
+    *compact_ctx == 0
+}
+
 fn not_local(local: &bool) -> bool {
     !*local
 }
@@ -669,6 +688,7 @@ impl ModelPrice {
             cache_write_1h: 1.0,
             prompt_cache_ttl: Some(std::time::Duration::from_secs(1)),
             slots: 1,
+            compact_ctx: 1,
             retired_exclusive: None,
             local: true,
             tier: Some(PriceTier {
@@ -4200,6 +4220,7 @@ mod tests {
                     cache_write_1h: 6.0,
                     prompt_cache_ttl: None,
                     slots: 0,
+                    compact_ctx: 0,
                     retired_exclusive: None,
                     local: false,
                     tier: None,
@@ -4216,6 +4237,7 @@ mod tests {
                     cache_write_1h: 10.0,
                     prompt_cache_ttl: None,
                     slots: 0,
+                    compact_ctx: 0,
                     retired_exclusive: None,
                     local: false,
                     tier: None,
@@ -4326,6 +4348,7 @@ mod tests {
                 cache_write_1h: 0.0,
                 prompt_cache_ttl: None,
                 slots: 0,
+                compact_ctx: 0,
                 retired_exclusive: None,
                 local: false,
                 tier: None,

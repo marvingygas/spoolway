@@ -12,6 +12,9 @@ E2E_CTL=${E2E_CTL:-}
 SPOOLWAY=${E2E_SPOOLWAY:-spoolway}
 
 echo "stand-in argv: $*"
+# The compaction threshold a lane on this model was handed, if any: the one
+# observable of a model's `compact_ctx` that a stand-in can see.
+echo "stand-in compact: ${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-unset}"
 
 # Sourced by an absolute path out of the environment, never off `$0`: a lane is
 # launched as `claude ...` through PATH, so `$0` is the bare name and `dirname` is

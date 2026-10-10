@@ -6331,6 +6331,15 @@ fn prepare_boot(
             step.id
         );
     }
+    // The backstop for `doctor`'s per-step compaction check, in the same
+    // words: a lane started anyway would be blocked before it compacts, or
+    // run without the threshold its model names.
+    if let Some(agent) = step.agent.as_deref()
+        && let Some(problem) =
+            crate::models::compaction_problem(&repo.config.models, agent, profile, &model)
+    {
+        anyhow::bail!("pipeline `{}` step `{}`: {problem}", pipeline.name, step.id);
+    }
 
     // Minted here rather than derived from the task and step, because a step
     // can be retried and each attempt is its own conversation: a deterministic
@@ -6442,6 +6451,14 @@ fn prepare_boot(
     ]);
     let mut args = profile.render_args(&values)?;
     args.extend(profile.effort_args(step.effort.as_deref()));
+    // The model's compaction threshold, in the spelling this kind reads: an
+    // environment variable below, or argv items here.
+    let (compact_env, compact_args) = adapter
+        .and_then(|adapter| adapter.compaction.as_ref())
+        .zip(price.as_ref())
+        .map(|(row, price)| row.render(price.compact_ctx, price.context_window))
+        .unwrap_or_default();
+    args.extend(compact_args);
     // Rendered first and rewritten after, so a resumed lane and a fresh one are
     // launched by the same code with the same flags — only the one that names
     // the session differs.
@@ -6454,16 +6471,18 @@ fn prepare_boot(
 
     // What a lane's environment carries. `agents.<profile>.env` is retired —
     // every agent it fronted has a config file of its own for the same job —
-    // so the only layer left is, for a kind that mints its own session id and
-    // will not take one, the home that pins its session instead. Made here
+    // so two layers are left. One is, for a kind that mints its own session id
+    // and will not take one, the home that pins its session instead. Made here
     // rather than at first read, because the agent is about to be told to
-    // use it. An empty vec for every other kind, which is why this needs no
-    // branch on `kind`.
+    // use it. The other is the model's compaction variable, for a kind that
+    // reads its threshold from the environment. Each is an empty map for every
+    // other kind, which is why this needs no branch on `kind`.
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     if let Some(adapter) = adapter {
         crate::agent::prepare_session_home(&profile.kind, &session, &worktree);
         env.extend(adapter.session_env(&session));
     }
+    env.extend(compact_env);
     env.insert(crate::commands::TASK_ENV.to_string(), task.front.id.clone());
     env.insert("SPOOLWAY_REPO".to_string(), repo.root.display().to_string());
     env.insert(ENV_STEP.to_string(), step.id.clone());
@@ -7610,6 +7629,15 @@ mod tests {
             let mut names: Vec<&str> = spec.env.keys().map(String::as_str).collect();
             names.sort_unstable();
             self.log(format!("env {} {}", spec.name, names.join(" ")));
+            // One value too, since a name alone cannot tell a threshold of 30
+            // from one of 60.
+            self.log(format!(
+                "compact {} {}",
+                spec.name,
+                spec.env
+                    .get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+                    .map_or("-", String::as_str)
+            ));
             if self.refuse_start {
                 anyhow::bail!("agent_start_failed");
             }
@@ -22208,6 +22236,148 @@ mod tests {
             .position(|a| a == "--effort")
             .expect("claude carries an effort flag, so the step's `effort: high` must render");
         assert_eq!(args[0].split_whitespace().nth(at + 1), Some("high"));
+    }
+
+    /// A model's `compact_ctx` reaches a claude lane on that model as its
+    /// environment variable, and a lane on a model that sets none has no such
+    /// variable. Fails without the wiring in `prepare_boot`, where the lane's
+    /// environment never carries the variable.
+    // covers: models.<glob>.compact_ctx — a claude lane's environment carries the model's compaction percentage
+    #[test]
+    fn a_models_compact_ctx_reaches_a_claude_lanes_environment() {
+        for (compact_ctx, want) in [(30, "30"), (0, "-")] {
+            let (mut repo, _root_guard) = fixture("compact-ctx-env");
+            repo.config.models.insert(
+                "*".to_string(),
+                crate::usage::ModelPrice {
+                    compact_ctx,
+                    ..Default::default()
+                },
+            );
+            let worktree = a_checkout("dispatch-compact-ctx-env");
+            add_task_with(&repo, "demo", "review", |f| {
+                f.workspace_id = Some("w1".into());
+                f.tab_id = Some("w1:t1".into());
+                f.pane_id = Some("w1:p1".into());
+                f.worktree_path = Some(worktree.to_path_buf());
+            });
+            let mux = FakeMux::new(vec![]);
+
+            run_pass(&repo, &mux);
+
+            assert_eq!(
+                mux.did("compact demo · review"),
+                vec![format!("compact demo · review {want}")],
+                "compact_ctx = {compact_ctx}: {:?}",
+                mux.calls()
+            );
+        }
+    }
+
+    /// A model's `compact_ctx` and `context_window` reach a codex lane as the
+    /// `-c model_auto_compact_token_limit` argument, fresh and resumed alike:
+    /// 60% of 100096 is 60057, rounded down. Fails without the wiring in
+    /// `prepare_boot`, where a codex lane's args never carry the pair.
+    // covers: models.<glob>.compact_ctx — a codex lane's argv carries the model's compaction token limit
+    #[test]
+    fn a_models_compact_ctx_reaches_a_codex_lanes_arguments() {
+        for resumed in [false, true] {
+            let (mut repo, _root_guard) = fixture("compact-ctx-codex");
+            let codex = repo.config.agents["codex"].clone();
+            *repo.config.agents.get_mut("claude").unwrap() = codex;
+            // Compaction sits below block, as the dispatcher requires.
+            repo.config
+                .agents
+                .get_mut("claude")
+                .unwrap()
+                .session_blocked_ctx = 80;
+            repo.config.models.insert(
+                "*".to_string(),
+                crate::usage::ModelPrice {
+                    compact_ctx: 60,
+                    context_window: 100096,
+                    ..Default::default()
+                },
+            );
+            let worktree = a_checkout("dispatch-compact-ctx-codex");
+            add_task_with(&repo, "demo", "review", |f| {
+                f.workspace_id = Some("w1".into());
+                f.tab_id = Some("w1:t1".into());
+                f.pane_id = Some("w1:p1".into());
+                f.worktree_path = Some(worktree.to_path_buf());
+                if resumed {
+                    f.resume = Some("review".into());
+                }
+            });
+            if resumed {
+                record_lane(&repo, "demo · review", "earlier-session", "codex");
+            }
+            let mux = FakeMux::new(vec![]);
+
+            run_pass(&repo, &mux);
+
+            let args = mux.did("args demo · review");
+            assert_eq!(
+                args.len(),
+                1,
+                "resumed = {resumed}: the review lane did not start: {:?}",
+                mux.calls()
+            );
+            assert!(
+                args[0].contains("-c model_auto_compact_token_limit=60057"),
+                "resumed = {resumed}: {}",
+                args[0]
+            );
+            if resumed {
+                assert!(
+                    args[0].contains("resume"),
+                    "the lane was meant to be a resumed one: {}",
+                    args[0]
+                );
+            }
+        }
+    }
+
+    /// A step whose profile blocks at or below its model's `compact_ctx` does
+    /// not start a lane: the notice says why, and the task waits where it was.
+    /// Fails before the refusal exists, when the lane starts.
+    // covers: models.<glob>.compact_ctx — the dispatcher refuses a step blocked before it compacts
+    #[test]
+    fn a_step_blocked_before_it_compacts_refuses_to_start_a_lane() {
+        let (mut repo, _root_guard) = fixture("compact-below-block");
+        repo.config.models.insert(
+            "*".to_string(),
+            crate::usage::ModelPrice {
+                compact_ctx: 50,
+                context_window: 1000,
+                ..Default::default()
+            },
+        );
+        repo.config
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .session_blocked_ctx = 40;
+        let worktree = a_checkout("dispatch-compact-below-block");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(mux.did("start").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("session_blocked_ctx = 40 is at or below")),
+            "{:?}",
+            report.actions
+        );
     }
 
     // --------------------------------------------------------- issue_tracking

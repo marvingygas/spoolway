@@ -277,6 +277,50 @@ says "a lane's transcript outlives it" "stand-in argv" "$SPOOLWAY" lane "land ·
 says "and is headed by the turn and the lane's own name" "=== turn 1 (land · implement) ===" \
   "$SPOOLWAY" lane "land · implement"
 
+# ------------------------------------------------------ the compaction threshold
+# A model's `compact_ctx` reaches its claude lanes as an environment variable.
+# `land` ran above on a model that sets none, so its reviewer saw nothing; a
+# second task, run after the key is set on that model, sees the percentage.
+says "a claude lane on a model with no compact_ctx has no compaction variable" \
+  "stand-in compact: unset" "$SPOOLWAY" lane "land · review"
+must "a compaction threshold on the cloud model" \
+  "$SPOOLWAY" config set models.fake-cloud.compact_ctx 30
+task_doc "$LIVE/compacts.md" compacts "$BODY" "group: compacts"
+must "a task queued after it" "$SPOOLWAY" queue add --from "$LIVE/compacts.md"
+if drive compacts gone; then ok "a task on a model with compact_ctx runs to the end"
+else bad "a task on a model with compact_ctx runs to the end (stuck at \`$(stage_of compacts)\`)"; fi
+says "a claude lane on that model has the percentage in its environment" \
+  "stand-in compact: 30" "$SPOOLWAY" lane "compacts · review"
+
+# A profile that blocks at or below its model's compaction threshold would stop
+# every lane before it compacted. Doctor says so, and the dispatcher leaves the
+# step unstarted: the task's pi `implement` step runs, and its claude `review`
+# step waits. Compaction goes back below block afterwards, and the task then
+# runs to the end, so the refusal is shown to be the only thing holding it.
+must "a block ceiling on the claude agent" \
+  "$SPOOLWAY" config set agents.claude.session_blocked_ctx 40
+must "a compaction threshold above it" \
+  "$SPOOLWAY" config set models.fake-cloud.compact_ctx 50
+says "doctor refuses a step blocked before it compacts" \
+  "session_blocked_ctx = 40 is at or below models.\"fake-cloud\".compact_ctx = 50" \
+  "$SPOOLWAY" doctor
+task_doc "$LIVE/blocked-first.md" blocked-first "$BODY" "group: blocked-first"
+must "a task queued under it" "$SPOOLWAY" queue add --from "$LIVE/blocked-first.md"
+dispatcher_restart
+if wait_for_text 60 "$E2E_DISPATCH_LOG" "session_blocked_ctx = 40 is at or below"; then
+  ok "the dispatcher says why the step cannot start"
+else
+  bad "the dispatcher says why the step cannot start"
+  tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+if grep -qF "started blocked-first · review" "$E2E_DISPATCH_LOG"; then
+  bad "no lane starts for the step that would be blocked before it compacts"
+else ok "no lane starts for the step that would be blocked before it compacts"; fi
+must "compaction back below block" \
+  "$SPOOLWAY" config set models.fake-cloud.compact_ctx 30
+if drive blocked-first gone; then ok "the task runs to the end once compaction sits below block"
+else bad "the task runs to the end once compaction sits below block (stuck at \`$(stage_of blocked-first)\`)"; fi
+
 # --------------------------------------------------------------- the slot counter
 # One local slot, two runnable tasks: exactly one lane starts and the pass says
 # what the other is waiting for.
