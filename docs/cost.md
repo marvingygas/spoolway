@@ -28,6 +28,11 @@ directory named after the id. See [Two ways to pin a session](agents.md#two-ways
 Every launchable agent kind is metered. `spoolway agent verify <kind>` shows how a kind is
 read back.
 
+A lane's wall time is the time it spent working. The dispatcher adds it up each time it checks
+the lane, about every ten seconds. Time a lane spends held for a person adds nothing. A lane
+that starts and finishes between two checks still counts the seconds it ran. The count runs to
+the check that sees the lane finished, so a lane of a few seconds can show up to ten seconds.
+
 ### Settled lanes
 
 A transcript can grow after the lane is torn down. Every `spoolway eval` reads settled sessions
