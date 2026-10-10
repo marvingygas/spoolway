@@ -612,7 +612,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `--per-run` | | Print each token, cost and time figure divided by the row's runs. Not with `--csv`, `--json` or `--discard` |
 | `--sort <column>[:asc\|:desc]` | | Sort the rows by one column, descending when the direction is left off. Not with `--discard` |
 
-`--json` prints `{"by", "rows", "total"}` rather than a bare array.
+`--json` prints `{"by", "rows", "total", "commands"}`. `commands` holds the command steps table. `--csv` prints the lanes table only.
 
 See [Comparing pipelines](eval.md).
 

@@ -7,7 +7,10 @@
 //! calls to find and bound that ledger — it groups nothing itself.
 //!
 //! There are two tables, because the ledger holds two populations that never
-//! share a row — see [`Entry::is_lane`] and [`Entry::dir`]. The lanes table
+//! share a row — see [`Entry::is_lane`] and [`Entry::dir`]. A third population,
+//! a command step's run — see [`Entry::command`] — has no tokens to compare,
+//! so the printed lanes table is followed by a small command steps table of
+//! its own, and `--json` carries it under `commands`. The lanes table
 //! groups dispatched lanes by one [`EvalBy`]; the directory table groups the
 //! sessions a person ran by hand in a watched root, by directory or one row
 //! per session. The screen adds a third, the trials table, which is not a
@@ -102,6 +105,16 @@ fn run_to(
     let (mut entries, scope) =
         crate::spend::collect_scoped(repo, args.project.as_deref(), args.all)?;
 
+    // A command step's run is the third population: it spent no tokens and
+    // belongs to no session, so it gets a table of its own below the lanes
+    // table and takes no part in any lane figure. Set aside before the
+    // lanes filter below drops it.
+    let mut commands: Vec<Entry> = entries
+        .iter()
+        .filter(|entry| entry.command.is_some())
+        .cloned()
+        .collect();
+
     // An interactive line is a conversation, not a lane: it reports no
     // outcome and belongs to no task, so counting it would put a session in
     // the table that nothing in the table's columns describes. A directory
@@ -116,12 +129,18 @@ fn run_to(
 
     let window = crate::spend::window_of(args.since.as_deref(), args.until.as_deref())?;
     entries.retain(|entry| window.contains(&entry.ts));
+    commands.retain(|entry| window.contains(&entry.ts));
 
     if let Some(step) = &args.step {
-        let before = entries.len();
+        let before = entries.len() + commands.len();
         entries.retain(|entry| &entry.step == step);
-        if entries.is_empty() && before > 0 {
-            bail!("no lanes ran step `{step}` in that window");
+        commands.retain(|entry| &entry.step == step);
+        if entries.is_empty() && commands.is_empty() && before > 0 {
+            bail!(
+                "no lane or command step ran step `{step}` in that window. `spoolway eval \
+                 --by step` lists the steps that did, and `--since` and `--until` widen the \
+                 window"
+            );
         }
     }
 
@@ -134,8 +153,9 @@ fn run_to(
         trial: args.trial.as_deref(),
     };
     entries.retain(|entry| lane_filters.admits(entry));
+    commands.retain(|entry| lane_filters.admits(entry));
 
-    if entries.is_empty() {
+    if entries.is_empty() && commands.is_empty() {
         if args.trial.is_some() {
             writeln!(out, "No runs recorded for that trial yet.")?;
             return Ok(());
@@ -163,21 +183,34 @@ fn run_to(
     // Named before `--sort` reorders the rows, which may put a later arm on
     // top: every delta line still reads against the arm that started first.
     // A run id is unique to its arm, so it finds that arm again afterwards.
-    let baseline_run = trial_arms.then(|| rows[0].keys[0].clone());
+    let baseline_run = (trial_arms && !rows.is_empty()).then(|| rows[0].keys[0].clone());
     if let Some(sort) = &sort {
         sort_lane_rows(args.by, &mut rows, sort);
     }
     let total = LaneTotal::of(&refs, &fallback, &repo.config.models);
 
+    commands.sort_by(|a, b| a.ts.cmp(&b.ts));
+    let command_refs: Vec<&Entry> = commands.iter().collect();
+    let command_rows = command_rows(&command_refs, args.by, &fallback, pipelines);
+    let command_total = CommandMetrics::for_matching(&command_refs);
+
     if json {
-        writeln!(
-            out,
-            "{}",
-            serde_json::to_string_pretty(&lanes_json(args.by, &rows, &total))?
-        )?;
+        let mut value = lanes_json(args.by, &rows, &total);
+        value["commands"] = commands_json(args.by, &command_rows, &command_total);
+        writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
         return Ok(());
     }
     if args.csv {
+        // The CSV export is the lanes table alone. Where only command steps
+        // matched, a header and a Total of zeros would read as lanes that
+        // cost nothing, as the printed table above explains.
+        if rows.is_empty() {
+            bail!(
+                "only command steps matched, and `--csv` exports lanes alone. Run `spoolway \
+                 eval --json` to read their runs under `commands`, or drop `--csv` to print \
+                 the command steps table"
+            );
+        }
         writeln!(out, "{}", lanes_csv_header(args.by))?;
         for row in &rows {
             writeln!(out, "{}", lanes_csv_row(args.by, row))?;
@@ -189,12 +222,17 @@ fn run_to(
     // No lead column here to carry a sorted first column's mark — see
     // `mark_column` — so a printed table leaves that one column unmarked
     // rather than shift every column by one.
-    let table = lanes_table(args.by, &rows, &total, sort.as_ref(), figures);
-    writeln!(out, "{}", dim(&table.header))?;
-    for row in &table.rows {
-        writeln!(out, "{row}")?;
+    // A window or a `--step` that only command steps ran has no lane to
+    // draw, and a lanes table of zeros above the one that has rows would
+    // read as lanes that cost nothing.
+    if !rows.is_empty() {
+        let table = lanes_table(args.by, &rows, &total, sort.as_ref(), figures);
+        writeln!(out, "{}", dim(&table.header))?;
+        for row in &table.rows {
+            writeln!(out, "{row}")?;
+        }
+        writeln!(out, "{}", table.total)?;
     }
-    writeln!(out, "{}", table.total)?;
 
     // `--trial` asks the question a trial exists to answer: its own
     // comparison, not just a narrower version of the same table. Only under
@@ -211,6 +249,19 @@ fn run_to(
         for row in rows.iter().filter(|row| row.keys[0] != run) {
             writeln!(out, "{}", trial_delta_line(baseline, row))?;
         }
+    }
+
+    if !command_rows.is_empty() {
+        if !rows.is_empty() {
+            writeln!(out)?;
+        }
+        let table = commands_table(args.by, &command_rows, &command_total);
+        writeln!(out, "Command steps")?;
+        writeln!(out, "{}", dim(&table.header))?;
+        for row in &table.rows {
+            writeln!(out, "{row}")?;
+        }
+        writeln!(out, "{}", table.total)?;
     }
 
     Ok(())
@@ -989,10 +1040,35 @@ fn lane_rows(
     models: &BTreeMap<String, ModelPrice>,
     pipelines: Option<&Pipelines>,
 ) -> Vec<LaneRow> {
+    grouped_rows(entries, by, fallback, pipelines)
+        .into_iter()
+        .map(|(mut row, lanes)| {
+            row.metrics = Metrics::for_matching(&lanes, fallback, models);
+            row
+        })
+        .collect()
+}
+
+/// A row with its figures still blank, beside the lines it stands for.
+type GroupedRow<'a> = (LaneRow, Vec<&'a Entry>);
+
+/// The rows `by` makes of `entries`, in the order the lanes table draws them,
+/// each beside the lines it stands for and with its figures still blank.
+///
+/// Shared by the lanes table, which fills the figures in from [`Metrics`],
+/// and the command steps table, which fills them in from [`CommandMetrics`]:
+/// both name their rows and order them the same way, so a step reads the same
+/// in either table.
+fn grouped_rows<'a>(
+    entries: &[&'a Entry],
+    by: EvalBy,
+    fallback: &HashMap<(String, String), String>,
+    pipelines: Option<&Pipelines>,
+) -> Vec<GroupedRow<'a>> {
     // Insertion-ordered grouping: `entries` arrive oldest first, so each
     // group's first line is its earliest and its last line its latest.
     let mut order: Vec<Vec<String>> = Vec::new();
-    let mut groups: HashMap<Vec<String>, Vec<&Entry>> = HashMap::new();
+    let mut groups: HashMap<Vec<String>, Vec<&'a Entry>> = HashMap::new();
     for entry in entries {
         let key = match by {
             EvalBy::Group => vec![entry.plan.clone().unwrap_or_else(|| NO_GROUP.to_string())],
@@ -1007,7 +1083,7 @@ fn lane_rows(
         groups.entry(key).or_default().push(entry);
     }
 
-    let mut rows: Vec<(Vec<String>, LaneRow)> = order
+    let mut rows: Vec<(Vec<String>, GroupedRow<'a>)> = order
         .into_iter()
         .map(|key| {
             let lanes = groups.remove(&key).unwrap_or_default();
@@ -1020,7 +1096,6 @@ fn lane_rows(
                 .iter()
                 .min_by(|a, b| a.ts.cmp(&b.ts))
                 .expect("a group always has a line");
-            let metrics = Metrics::for_matching(&lanes, fallback, models);
             let (cells, keys) = match by {
                 EvalBy::Group | EvalBy::Pipeline => (key.clone(), key.clone()),
                 EvalBy::Step => (key.clone(), key.clone()),
@@ -1051,15 +1126,15 @@ fn lane_rows(
                 project: first.project.clone(),
                 first_ts: earliest.ts.clone(),
                 last_ts: latest.ts.clone(),
-                metrics,
+                metrics: Metrics::default(),
             };
-            (key, row)
+            (key, (row, lanes))
         })
         .collect();
 
     match by {
         EvalBy::Group | EvalBy::Task | EvalBy::Pipeline => {
-            rows.sort_by(|a, b| b.1.last_ts.cmp(&a.1.last_ts));
+            rows.sort_by(|a, b| b.1.0.last_ts.cmp(&a.1.0.last_ts));
         }
         EvalBy::Step | EvalBy::Version => {
             let pipeline_rank = newest_first_rank(entries, |e| e.pipeline.as_str());
@@ -1742,6 +1817,189 @@ fn lanes_json(by: EvalBy, rows: &[LaneRow], total: &LaneTotal) -> serde_json::Va
             "cost_per_run": total_priced.then_some(total.per_run(total.cost)),
             "time_s": total.time_s,
             "time_per_run_s": total.per_run(total.time_s as f64),
+        },
+    })
+}
+
+// ----------------------------------------------------------- command steps
+
+/// What one row of the command steps table came to: every run of a command
+/// step the row stands for. A run is one ledger line — see
+/// [`Entry::command`] — so unlike a lanes row's `RUNS`, which counts the
+/// task runs a row touched, this counts runs of the command itself.
+#[derive(Default, Clone)]
+struct CommandMetrics {
+    runs: usize,
+    /// Runs that got a verdict, and those among them that exited 0. A run
+    /// that vanished without an exit code is left out of both, as a lane
+    /// nobody heard from is in [`Metrics`]. A timeout stop is a failed
+    /// verdict.
+    judged: usize,
+    passed: usize,
+    /// Runs whose move landed on `blocked`.
+    blocked: usize,
+    /// Each run's wall time, summed — see [`Entry::wall_s`].
+    time_s: i64,
+}
+
+impl CommandMetrics {
+    fn for_matching(matching: &[&Entry]) -> Self {
+        let mut out = CommandMetrics::default();
+        for entry in matching {
+            out.runs += 1;
+            out.time_s += entry.wall_s;
+            out.blocked += usize::from(entry.blocked);
+            match entry.outcome.as_deref() {
+                Some("pass") => {
+                    out.judged += 1;
+                    out.passed += 1;
+                }
+                Some(_) => out.judged += 1,
+                None => {}
+            }
+        }
+        out
+    }
+
+    fn pass_share(&self) -> Option<f64> {
+        (self.judged > 0).then(|| 100.0 * self.passed as f64 / self.judged as f64)
+    }
+}
+
+/// One row of the command steps table: named the way the lanes table names
+/// its rows under the same `by`, with its own figures.
+struct CommandRow {
+    naming: LaneRow,
+    metrics: CommandMetrics,
+}
+
+/// Every row the command lines make under `by`, in the order the lanes table
+/// would draw them.
+fn command_rows(
+    entries: &[&Entry],
+    by: EvalBy,
+    fallback: &HashMap<(String, String), String>,
+    pipelines: Option<&Pipelines>,
+) -> Vec<CommandRow> {
+    grouped_rows(entries, by, fallback, pipelines)
+        .into_iter()
+        .map(|(naming, lines)| CommandRow {
+            naming,
+            metrics: CommandMetrics::for_matching(&lines),
+        })
+        .collect()
+}
+
+/// The command steps table over `rows`, drawn like [`lanes_table`]: the
+/// naming columns of `by`, the four figures `RUNS`, `PASS`, `BLOCKS` and `TIME` padded as
+/// the lanes table's totals view pads them, and a `Total` line. `PASS` stays
+/// blank on that line, as it does there: a share is not a figure that adds
+/// up.
+fn commands_table(by: EvalBy, rows: &[CommandRow], total: &CommandMetrics) -> Table {
+    let show_project = rows
+        .iter()
+        .map(|r| r.naming.project.as_str())
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
+    let mut headers: Vec<String> = lane_columns(by)
+        .iter()
+        .map(|(h, _)| h.to_string())
+        .collect();
+    let mut body: Vec<Vec<String>> = rows.iter().map(|r| r.naming.cells.clone()).collect();
+    if show_project {
+        headers.insert(0, "PROJECT".to_string());
+        for (cells, row) in body.iter_mut().zip(rows) {
+            cells.insert(0, row.naming.project.clone());
+        }
+    }
+    let mut total_cells = vec![String::new(); headers.len()];
+    total_cells[0] = total_line_label(Figures::Totals).to_string();
+    let widths: Vec<usize> = (0..headers.len())
+        .map(|i| {
+            std::iter::once(&headers[i])
+                .chain(body.iter().map(|cells| &cells[i]))
+                .chain(std::iter::once(&total_cells[i]))
+                .map(|c| c.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let figures = |runs: &str, pass: &str, blocks: &str, time: &str| {
+        format!("{SEP}{runs:>5}{SEP}{pass:>4}{SEP}{blocks:>6}{SEP}{time:>8}")
+    };
+    let header = format!(
+        "{}{}",
+        naming(&headers, &widths),
+        figures("RUNS", "PASS", "BLOCKS", "TIME")
+    );
+    let lines = body
+        .iter()
+        .zip(rows)
+        .map(|(cells, row)| {
+            let m = &row.metrics;
+            format!(
+                "{}{}",
+                naming(cells, &widths),
+                figures(
+                    &m.runs.to_string(),
+                    &percent(m.pass_share()),
+                    &m.blocked.to_string(),
+                    &crate::status::human_secs(m.time_s),
+                )
+            )
+        })
+        .collect();
+    let total = format!(
+        "{}{}",
+        naming(&total_cells, &widths),
+        figures(
+            &total.runs.to_string(),
+            "",
+            &total.blocked.to_string(),
+            &crate::status::human_secs(total.time_s),
+        )
+    )
+    .trim_end()
+    .to_string();
+    Table {
+        header,
+        lead: ' ',
+        rows: lines,
+        total,
+    }
+}
+
+/// `--json`'s `commands` key: the rows and the total, in the same shape as
+/// the lanes table's `rows` and `total`. `pass` is a fraction of the runs that
+/// got a verdict, `null` when none did, and `judged` is how many that was.
+fn commands_json(by: EvalBy, rows: &[CommandRow], total: &CommandMetrics) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            let m = &row.metrics;
+            let mut obj = serde_json::Map::new();
+            obj.insert("project".into(), row.naming.project.clone().into());
+            for (name, value) in lane_csv_keys(by).iter().zip(&row.naming.keys) {
+                obj.insert((*name).into(), value.clone().into());
+            }
+            obj.insert("runs".into(), m.runs.into());
+            obj.insert("judged".into(), m.judged.into());
+            obj.insert("pass".into(), m.pass_share().map(|p| p / 100.0).into());
+            obj.insert("blocks".into(), m.blocked.into());
+            obj.insert("time_s".into(), m.time_s.into());
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::json!({
+        "by": by.label(),
+        "rows": rows,
+        "total": {
+            "runs": total.runs,
+            "judged": total.judged,
+            "pass": total.pass_share().map(|p| p / 100.0),
+            "blocks": total.blocked,
+            "time_s": total.time_s,
         },
     })
 }
@@ -5583,6 +5841,7 @@ mod tests {
             trial_group: None,
             dir: None,
             hand: false,
+            command: None,
             project: "demo".into(),
         }
     }
@@ -6799,6 +7058,7 @@ mod tests {
             trial_group: None,
             dir: Some(dir.into()),
             hand: false,
+            command: None,
             project: "demo".into(),
         }
     }
@@ -7486,6 +7746,7 @@ mod screen_tests {
                 trial_group: None,
                 dir: None,
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -7586,6 +7847,7 @@ mod screen_tests {
                 trial_group: None,
                 dir: None,
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -8170,6 +8432,7 @@ mod screen_tests {
             trial_group: None,
             dir: None,
             hand: false,
+            command: None,
             project: "demo".into(),
         }
     }
@@ -8589,6 +8852,7 @@ mod screen_tests {
                 trial_group: None,
                 dir: Some(dir.to_string()),
                 hand: false,
+                command: None,
                 project: String::new(),
             },
         )
@@ -9212,6 +9476,7 @@ mod screen_tests {
             trial_group: None,
             dir: None,
             hand: false,
+            command: None,
             project: String::new(),
         }
     }
@@ -9493,6 +9758,274 @@ mod screen_tests {
         let mut out = Vec::new();
         run_to(repo, &args, false, Some(&Pipelines::builtin()), &mut out)?;
         Ok(String::from_utf8(out).unwrap())
+    }
+
+    /// A command step's run as the dispatcher banks it: no session, no
+    /// tokens, no cost, and `command` set.
+    fn command_line(
+        task: &str,
+        step: &str,
+        ts: &str,
+        ended: crate::usage::CommandEnd,
+        exit: Option<i32>,
+        wall_s: i64,
+        blocked: bool,
+    ) -> Entry {
+        let outcome = match (ended, exit) {
+            (crate::usage::CommandEnd::Exited, Some(0)) => Some("pass"),
+            (crate::usage::CommandEnd::Exited | crate::usage::CommandEnd::Timeout, _) => {
+                Some("fail")
+            }
+            _ => None,
+        };
+        Entry {
+            kind: String::new(),
+            model: String::new(),
+            session: String::new(),
+            agent: String::new(),
+            ts: ts.into(),
+            wall_s,
+            cost_usd: None,
+            outcome: outcome.map(str::to_string),
+            blocked,
+            command: Some(crate::usage::CommandRun {
+                id: format!("{task} · {step}@{ts}"),
+                ended,
+                exit,
+            }),
+            ..lane_entry(task, step)
+        }
+    }
+
+    /// Four runs of `test` and one of `suite`, banked in `repo`: a pass, a
+    /// failure that blocked, a timeout and a run that vanished.
+    fn bank_commands(repo: &Repo) {
+        use crate::usage::CommandEnd::{Exited, Interrupted, Timeout};
+        for line in [
+            command_line(
+                "a",
+                "test",
+                "2026-08-01T12:00:00+00:00",
+                Exited,
+                Some(0),
+                10,
+                false,
+            ),
+            command_line(
+                "b",
+                "test",
+                "2026-08-01T12:10:00+00:00",
+                Exited,
+                Some(1),
+                20,
+                true,
+            ),
+            command_line(
+                "c",
+                "test",
+                "2026-08-01T12:20:00+00:00",
+                Timeout,
+                None,
+                30,
+                false,
+            ),
+            command_line(
+                "d",
+                "test",
+                "2026-08-01T12:30:00+00:00",
+                Interrupted,
+                None,
+                0,
+                false,
+            ),
+            command_line(
+                "a",
+                "suite",
+                "2026-08-01T12:40:00+00:00",
+                Exited,
+                Some(0),
+                90,
+                false,
+            ),
+        ] {
+            crate::usage::append(repo, &line).unwrap();
+        }
+    }
+
+    /// A ledger holding command lines draws every lane figure as one without
+    /// them does: the lanes table and its `Total` line print the same text,
+    /// and `--json`'s `by`, `rows` and `total` hold the same values. The
+    /// command lines have no session and no tokens, so counted as lanes they
+    /// would add rows and runs.
+    #[test]
+    fn command_lines_leave_every_lane_figure_as_it_was() {
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-leave-lanes");
+        let json_of = |repo: &Repo| -> serde_json::Value {
+            let mut out = Vec::new();
+            run_to(
+                repo,
+                &no_args(),
+                true,
+                Some(&Pipelines::builtin()),
+                &mut out,
+            )
+            .unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+        let table_before = print(&repo, &[]).unwrap();
+        let json_before = json_of(&repo);
+
+        bank_commands(&repo);
+
+        let table_after = print(&repo, &[]).unwrap();
+        assert!(
+            table_after.starts_with(&table_before),
+            "the lanes table changed:\n{table_before}\n{table_after}"
+        );
+        let json_after = json_of(&repo);
+        for key in ["by", "rows", "total"] {
+            assert_eq!(json_after[key], json_before[key], "`{key}` changed");
+        }
+    }
+
+    /// The command steps table counts each run once, takes `PASS` over the
+    /// runs that got a verdict — a timeout is a failed one, a run that
+    /// vanished is none — counts the moves that landed on `blocked`, and
+    /// sums the wall time. It is printed under every `by`, below the lanes
+    /// table, and `--json` holds it under `commands`.
+    #[test]
+    fn the_command_steps_table_counts_runs_pass_blocks_and_time() {
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-table");
+        bank_commands(&repo);
+
+        let table = print(&repo, &["--by", "step"]).unwrap();
+        let (lanes, commands) = table.split_once("Command steps\n").expect(&table);
+        assert!(lanes.contains("implement"), "{table}");
+        let test_row = commands
+            .lines()
+            .find(|l| l.starts_with("default") && l.contains("test"))
+            .unwrap_or_else(|| panic!("{table}"));
+        assert_eq!(
+            test_row.split_whitespace().collect::<Vec<_>>(),
+            ["default", "test", "4", "33%", "1", "1m", "00s"],
+            "{table}"
+        );
+        assert!(
+            commands.lines().last().unwrap().starts_with("Total"),
+            "{table}"
+        );
+
+        let mut out = Vec::new();
+        let args = EvalArgs {
+            by: EvalBy::Step,
+            ..no_args()
+        };
+        run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let rows = json["commands"]["rows"].as_array().unwrap();
+        let test = rows.iter().find(|r| r["step"] == "test").unwrap();
+        assert_eq!(test["runs"], 4);
+        assert_eq!(test["judged"], 3);
+        assert_eq!(test["blocks"], 1);
+        assert_eq!(test["time_s"], 60);
+        assert!((test["pass"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9);
+        let suite = rows.iter().find(|r| r["step"] == "suite").unwrap();
+        assert_eq!(suite["pass"], 1.0);
+        assert_eq!(json["commands"]["total"]["runs"], 5);
+        assert_eq!(json["commands"]["by"], "step");
+
+        // Named the way the lanes table names its rows, under every `by`.
+        for by in ["group", "task", "pipeline", "step", "version"] {
+            let table = print(&repo, &["--by", by]).unwrap();
+            assert!(table.contains("Command steps\n"), "--by {by}: {table}");
+        }
+    }
+
+    /// `--step` names a command step as readily as a lane's step: its rows
+    /// are shown, and the lanes table, which has none for it, is left out.
+    /// A step nothing ran is still refused, with the way to find one.
+    #[test]
+    fn step_filters_the_command_steps_table_instead_of_refusing() {
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-step");
+        bank_commands(&repo);
+
+        let table = print(&repo, &["--by", "step", "--step", "suite"]).unwrap();
+        assert!(table.starts_with("Command steps\n"), "{table}");
+        assert!(table.contains("suite"), "{table}");
+        assert!(
+            !table.contains("implement") && !table.contains("test  "),
+            "{table}"
+        );
+
+        let mut out = Vec::new();
+        let args = EvalArgs {
+            by: EvalBy::Step,
+            step: Some("suite".into()),
+            ..no_args()
+        };
+        run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["rows"], serde_json::json!([]));
+        assert_eq!(json["commands"]["rows"].as_array().unwrap().len(), 1);
+
+        let err = print(&repo, &["--step", "nothing"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no lane or command step ran step `nothing`") && err.contains("--by step"),
+            "{err}"
+        );
+    }
+
+    /// `--csv` exports lanes only. Where only command steps matched it
+    /// refuses and points at `--json`, rather than print a header and a Total
+    /// of zeros for lanes that never ran.
+    #[test]
+    fn csv_refuses_where_only_command_steps_matched() {
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-csv");
+        bank_commands(&repo);
+
+        let err = print(&repo, &["--csv", "--step", "suite"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("only command steps matched") && err.contains("--json"),
+            "{err}"
+        );
+    }
+
+    /// The other filters narrow the command steps table as they narrow the
+    /// lanes table.
+    #[test]
+    fn the_filters_narrow_the_command_steps_table() {
+        let (repo, _root_guard) = fixture_to_sort("cli-commands-filters");
+        bank_commands(&repo);
+
+        let table = print(&repo, &["--by", "step", "--task", "a"]).unwrap();
+        assert!(table.contains("Command steps\n"), "{table}");
+        let json = |argv: &[&str]| -> serde_json::Value {
+            use clap::Parser;
+            let full = ["spoolway", "eval", "--by", "step"].iter().chain(argv);
+            let crate::cli::Command::Eval(args) =
+                crate::cli::Cli::try_parse_from(full).unwrap().command
+            else {
+                panic!("parsed as `eval`");
+            };
+            let mut out = Vec::new();
+            run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+        let runs = |value: &serde_json::Value| value["commands"]["total"]["runs"].clone();
+        assert_eq!(runs(&json(&["--task", "a"])), 2);
+        assert_eq!(runs(&json(&["--pipeline", "default"])), 5);
+        for argv in [
+            ["--since", "2026-08-02"],
+            ["--until", "2026-07-31"],
+            ["--pipeline-version", "2.0"],
+        ] {
+            let text = print(&repo, &argv).unwrap();
+            assert!(text.starts_with("Nothing to compare"), "{argv:?}: {text}");
+        }
     }
 
     /// `--sort pass:asc --csv` writes the rows the screen's `PASS` sort

@@ -17,7 +17,8 @@
 //!
 //! The result is one line per finished lane in the project's own
 //! `usage.jsonl` — see [`crate::repo::Repo::usage_file`] — appended
-//! and never rewritten. Append-only means there is no state to reconcile and
+//! and never rewritten. A command step's run banks a line too, with no tokens
+//! or session — see [`Entry::command`]. Append-only means there is no state to reconcile and
 //! nothing a crash mid-pass can corrupt; it also means the record outlives the
 //! task file, which `cleanup` archives.
 
@@ -117,7 +118,11 @@ impl Tokens {
     }
 }
 
-/// One finished lane, as written to the ledger.
+/// One finished lane, as written to the ledger — or, when [`Entry::command`]
+/// is set, one finished run of a command step, which spent no tokens and has
+/// no session. A command line leaves `kind`, `model`, `session` and `tokens`
+/// at their defaults; every reader that looks a lane up by `session` already
+/// skips an empty one, and [`Entry::is_lane`] is false for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub ts: String,
@@ -144,8 +149,11 @@ pub struct Entry {
     #[serde(default)]
     pub agent: String,
     /// Agent kind: the CLI that ran, and so which transcript format was read.
+    #[serde(default)]
     pub kind: String,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub session: String,
     #[serde(default)]
     pub round: u32,
@@ -161,6 +169,7 @@ pub struct Entry {
     /// Assistant turns in the transcript.
     #[serde(default)]
     pub turns: u32,
+    #[serde(default)]
     pub tokens: Tokens,
     /// The part of `tokens` that came from turns over their model's price
     /// threshold, which `spoolway eval` prices at the tier's rates. Left out of
@@ -275,12 +284,47 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hand: bool,
 
+    /// Set on the line a command step's run banked, and on no other: how the
+    /// run ended, and the identity that keeps a result read twice from
+    /// banking twice. See [`CommandRun`] and [`bank_command_run`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandRun>,
+
     /// Which project this lane ran in. Never written to disk — a ledger lives
     /// inside its project, so storing the answer in every line would be a
     /// thousand copies of the file's own path. Filled in at load time, and only
     /// interesting once more than one ledger is being read at once.
     #[serde(skip)]
     pub project: String,
+}
+
+/// How a command step's run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandEnd {
+    /// The wrapper wrote an exit code, which [`CommandRun::exit`] holds.
+    Exited,
+    /// The run outstayed the step's `timeout:` and was stopped.
+    Timeout,
+    /// The run vanished without an exit code and was started over.
+    Interrupted,
+    /// The run vanished without an exit code for the third time in a row,
+    /// which blocks the task instead of starting it over.
+    Killed,
+}
+
+/// What a command step's run came to, carried on a ledger line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRun {
+    /// The run's identity: its key and the moment its pid file was written,
+    /// so two runs of one step never share one. [`bank_command_run`] skips a
+    /// result whose id is already on the ledger, because the dispatcher reads
+    /// an exit code on every pass until the move it routed has landed.
+    pub id: String,
+    pub ended: CommandEnd,
+    /// The exit code. Absent unless the run [`CommandEnd::Exited`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
 }
 
 /// What a ledger line with no `pipeline_version` key at all reads as. Kept
@@ -308,14 +352,17 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 impl Entry {
     /// Whether this line belongs to a lane, and so is worth a row in
-    /// `spoolway eval`, the one reader of the ledger that asks this. Two
-    /// populations are excluded: historical interactive lines —
-    /// nothing writes one any more, but the ledger is append-only, so old
-    /// ones stay on disk — and a directory line [`sweep`]'s watched-root walk
-    /// banked, told apart by [`Entry::dir`] rather than by a fixed agent name
-    /// the way the interactive population is.
+    /// `spoolway eval`'s lanes table, the board's eval tab and the session
+    /// catch-up, each of which asks this. Three populations are excluded:
+    /// historical interactive lines — nothing writes one any more, but the
+    /// ledger is append-only, so old ones stay on disk — a directory line
+    /// [`sweep`]'s watched-root walk banked, told apart by [`Entry::dir`]
+    /// rather than by a fixed agent name the way the interactive population
+    /// is, and a command step's run, told apart by [`Entry::command`]: it has
+    /// no tokens and no session, so it would add a lane to every figure that
+    /// counts them.
     pub fn is_lane(&self) -> bool {
-        self.agent != INTERACTIVE_AGENT && self.dir.is_none()
+        self.agent != INTERACTIVE_AGENT && self.dir.is_none() && self.command.is_none()
     }
 }
 
@@ -2374,6 +2421,25 @@ pub fn append(repo: &Repo, entry: &Entry) -> Result<()> {
     Ok(())
 }
 
+/// Bank one command step run, unless the ledger already holds a line for that
+/// run. Answers whether a line was appended.
+///
+/// The dispatcher reads a finished run's exit code on every pass until the
+/// move it chose has landed, and `reap_stale_runs` reads a background run's
+/// code on every pass for as long as nothing routes on it: a zero exit, or a
+/// step with no `on_fail`. Each read reaches this function, so the run's own
+/// id — see [`CommandRun::id`] — is what keeps one run from being banked once
+/// per pass.
+pub fn bank_command_run(repo: &Repo, entry: &Entry) -> bool {
+    let Some(run) = &entry.command else {
+        return false;
+    };
+    let seen = read_cached(repo)
+        .iter()
+        .any(|line| line.command.as_ref().is_some_and(|c| c.id == run.id));
+    !seen && append(repo, entry).is_ok()
+}
+
 /// Every entry, oldest first. A line that will not parse is skipped rather than
 /// fatal — one bad line must not cost you the rest of the history.
 pub fn read(repo: &Repo) -> Result<Vec<Entry>> {
@@ -3055,6 +3121,7 @@ fn bank_lane_at(
         // line stays a hand line, and [`sweep_dirs`] marks the first one by
         // handing in a carry it has already marked — see [`Entry::hand`].
         hand: carry.is_some_and(|c| c.hand),
+        command: None,
         project: String::new(),
     };
     append(repo, &entry).ok()?;
@@ -3424,6 +3491,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
                 // [`Entry::hand`].
                 let carry = Entry {
                     hand: true,
+                    command: None,
                     ..carry.clone()
                 };
                 if let Some(entry) = bank_lane_at(
@@ -3768,6 +3836,7 @@ fn bank_dir_session(
         trial_group: None,
         dir: Some(dir.to_string()),
         hand: false,
+        command: None,
         project: String::new(),
     };
     append(repo, &entry).ok()?;
@@ -5420,6 +5489,7 @@ mod tests {
             trial_group: None,
             dir: None,
             hand: false,
+            command: None,
             project: String::new(),
         };
         let line = serde_json::to_string(&entry).unwrap();
@@ -5483,6 +5553,7 @@ mod tests {
             trial_group: None,
             dir: None,
             hand: false,
+            command: None,
             project: String::new(),
         }
     }
@@ -6324,6 +6395,7 @@ mod tests {
             trial_group: None,
             dir: None,
             hand: false,
+            command: None,
             project: String::new(),
         }
     }
@@ -7432,6 +7504,7 @@ mod tests {
             step: "implement".into(),
             session: "s".into(),
             hand: true,
+            command: None,
             tokens: Tokens {
                 output: 100,
                 ..Tokens::default()
@@ -7445,6 +7518,7 @@ mod tests {
         let lane_line = Entry {
             ts: (chrono::Utc::now() - chrono::Duration::seconds(200)).to_rfc3339(),
             hand: false,
+            command: None,
             tokens: Tokens::default(),
             ..hand_line.clone()
         };
@@ -7803,6 +7877,45 @@ mod tests {
             ..plain_entry()
         };
         assert!(lane.is_lane());
+    }
+
+    /// A command step's run is neither a lane nor a session: its line leaves
+    /// `kind`, `model`, `session` and `tokens` out, reads back with them
+    /// empty, and `is_lane` is false for it so no lane count takes it in.
+    #[test]
+    fn a_command_line_reads_back_without_a_session_and_is_not_a_lane() {
+        let line = r#"{"ts":"2026-08-01T12:00:00+00:00","task":"t","step":"test","pipeline":"default","command":{"id":"t · test@1","ended":"exited","exit":1},"outcome":"fail","blocked":true}"#;
+        let entry: Entry = serde_json::from_str(line).unwrap();
+        assert!(entry.session.is_empty() && entry.kind.is_empty() && entry.tokens.is_zero());
+        assert_eq!(entry.command.as_ref().unwrap().exit, Some(1));
+        assert!(!entry.is_lane());
+        let back = serde_json::to_string(&entry).unwrap();
+        assert!(back.contains(r#""ended":"exited""#), "{back}");
+    }
+
+    /// The same run read on every pass banks one line, and a second run of
+    /// the same step banks its own.
+    #[test]
+    fn bank_command_run_skips_a_run_the_ledger_already_holds() {
+        let (repo, _, _root_guard) = fixture("bank-command-run");
+        let line = |id: &str| Entry {
+            session: String::new(),
+            command: Some(CommandRun {
+                id: id.into(),
+                ended: CommandEnd::Exited,
+                exit: Some(0),
+            }),
+            ..minimal_entry("t")
+        };
+
+        assert!(bank_command_run(&repo, &line("t · test@1")));
+        assert!(!bank_command_run(&repo, &line("t · test@1")));
+        assert!(bank_command_run(&repo, &line("t · test@2")));
+        assert!(
+            !bank_command_run(&repo, &minimal_entry("t")),
+            "a lane line is not a command run"
+        );
+        assert_eq!(read(&repo).unwrap().len(), 2);
     }
 
     /// pi shards by [`FileShape::AfterUnderscore`], not [`FileShape::Exact`]
