@@ -277,6 +277,21 @@ says "a lane's transcript outlives it" "stand-in argv" "$SPOOLWAY" lane "land ·
 says "and is headed by the turn and the lane's own name" "=== turn 1 (land · implement) ===" \
   "$SPOOLWAY" lane "land · implement"
 
+# ------------------------------------------------------ the compaction threshold
+# A model's `compact_ctx` reaches its claude lanes as an environment variable.
+# `land` ran above on a model that sets none, so its reviewer saw nothing; a
+# second task, run after the key is set on that model, sees the percentage.
+says "a claude lane on a model with no compact_ctx has no compaction variable" \
+  "stand-in compact: unset" "$SPOOLWAY" lane "land · review"
+must "a compaction threshold on the cloud model" \
+  "$SPOOLWAY" config set models.fake-cloud.compact_ctx 30
+task_doc "$LIVE/compacts.md" compacts "$BODY" "group: compacts"
+must "a task queued after it" "$SPOOLWAY" queue add --from "$LIVE/compacts.md"
+if drive compacts gone; then ok "a task on a model with compact_ctx runs to the end"
+else bad "a task on a model with compact_ctx runs to the end (stuck at \`$(stage_of compacts)\`)"; fi
+says "a claude lane on that model has the percentage in its environment" \
+  "stand-in compact: 30" "$SPOOLWAY" lane "compacts · review"
+
 # --------------------------------------------------------------- the slot counter
 # One local slot, two runnable tasks: exactly one lane starts and the pass says
 # what the other is waiting for.

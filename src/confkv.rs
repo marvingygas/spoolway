@@ -261,6 +261,15 @@ pub const REFERENCE: &[Reference] = &[
                     against a model with this unset never reuses or blocks on size.",
     },
     Reference {
+        key: "models.<glob>.compact_ctx",
+        values: "1..=100",
+        default: "(unset)",
+        sentence: "Percentage of the agent's own window at which its auto-compaction \
+                    fires. Unset keeps the agent's default. Must be below \
+                    `session_blocked_ctx` on every step that pairs them. Claude and codex \
+                    only.",
+    },
+    Reference {
         key: "models.<glob>.input",
         values: "<USD per 1M tokens>",
         default: "0",
@@ -691,6 +700,19 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
     // typing the value and can fix it. Everything else here is caught by
     // deserialising, but a permission mode is only wrong relative to the `kind`
     // beside it, so it would otherwise be written happily and fail much later.
+    // Not a cross-field check: a file edited by hand to a `compact_ctx` over
+    // 100 still loads, so `set` refuses it on the next edit rather than
+    // writing it back out.
+    for (glob, price) in &config.models {
+        if price.compact_ctx > 100 {
+            bail!(
+                "`models.{glob}.compact_ctx` must be between 1 and 100 (1..=100), got {}; \
+                 `spoolway config set` cannot unset a key, so correct the line with \
+                 `spoolway config edit`, or delete it to keep the agent's own default",
+                price.compact_ctx
+            );
+        }
+    }
     for (name, profile) in &config.agents {
         profile
             .permission_mode_status()
@@ -743,6 +765,20 @@ pub fn check_typed(key: &str, input: &str) -> Result<()> {
     // different value from the one typed.
     if key == "dispatch.backend" {
         crate::config::Backend::parse_typed(input).with_context(|| key.to_string())?;
+    }
+    // Zero is how the struct spells "unset", so the range cannot be held there:
+    // a typed `0` would be saved as a key left out, a different statement from
+    // the one made.
+    if key.starts_with("models.") && key.ends_with(".compact_ctx") {
+        match input.trim().parse::<u32>() {
+            Ok(1..=100) => {}
+            _ => bail!(
+                "`{key}` must be a whole percentage between 1 and 100, got `{input}`; \
+                 there is no value that turns compaction off, and `spoolway config set` \
+                 cannot unset a key, so to keep the agent's own default delete the line \
+                 with `spoolway config edit`"
+            ),
+        }
     }
     // A hook that is not a bare filename can never run, whatever else is set
     // later, so it is refused rather than left for `doctor` to fail.
@@ -1320,6 +1356,48 @@ mod tests {
 
         let updated = set(&config, "agents.pi.concurrency", "4").unwrap();
         assert_eq!(updated.agents["pi"].concurrency, 4);
+    }
+
+    /// `compact_ctx` is a whole percentage from 1 to 100. A typed `0` is
+    /// refused rather than saved as the key left out, and it is not written at
+    /// all while unset.
+    // covers: models.<glob>.compact_ctx — a model's compaction percentage is 1..=100 and omitted when unset
+    #[test]
+    fn a_models_compact_ctx_takes_one_to_a_hundred_and_is_omitted_when_unset() {
+        let key = "models.claude-opus-5.compact_ctx";
+        for typed in ["0", "101", "-1", "half", "30.5"] {
+            let err = format!("{:#}", check_typed(key, typed).unwrap_err());
+            assert!(err.contains("between 1 and 100"), "{typed}: {err}");
+        }
+        for typed in ["1", "30", "100"] {
+            check_typed(key, typed).unwrap();
+        }
+        // A file edited by hand to 101 is refused the next time `set` runs.
+        let mut config = Config::default();
+        config.models.insert(
+            "m".to_string(),
+            crate::usage::ModelPrice {
+                compact_ctx: 101,
+                ..Default::default()
+            },
+        );
+        let err = set(&config, "models.m.input", "1.0")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("compact_ctx") && err.contains("between 1 and 100"),
+            "{err}"
+        );
+
+        let config = set(&Config::default(), key, "30").unwrap();
+        assert_eq!(config.models["claude-opus-5"].compact_ctx, 30);
+        assert_eq!(get(&config, key).unwrap(), "30");
+        let written = toml::to_string(&config).unwrap();
+        assert!(written.contains("compact_ctx = 30"), "{written}");
+
+        let unset = set(&Config::default(), "models.claude-opus-5.input", "5.0").unwrap();
+        let written = toml::to_string(&unset).unwrap();
+        assert!(!written.contains("compact_ctx"), "{written}");
     }
 
     /// `[models]` ships empty, so — like `[pricing]` before it — a glob is

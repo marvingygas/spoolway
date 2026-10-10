@@ -39,6 +39,11 @@ pub struct Adapter {
     /// simply not rendered into its args.
     pub effort: Option<Effort>,
 
+    /// How this kind is told when to compact its own context, if it can be told
+    /// per run at all. `None` on a kind with no such per-run setting — a model's
+    /// `compact_ctx` is then simply not handed to its lanes.
+    pub compaction: Option<Compaction>,
+
     /// Whether this kind loads skills at all. `false` on a kind with no notion
     /// of a skill: a step's `skills:` is then refused outright by
     /// `pipeline_check` rather than launched and quietly ignored.
@@ -412,6 +417,56 @@ pub struct Effort {
     pub args: &'static [&'static str],
 }
 
+/// How one agent kind is told at what size to compact its own context.
+///
+/// A model's `compact_ctx` is one percentage, but the two kinds that can take
+/// it measure differently, so each spells it in the form its own binary reads.
+/// Both spellings live in the rows below and nowhere else.
+pub enum Compaction {
+    /// A percentage, exported as this environment variable to the lane. It is
+    /// the percentage as written, measured by the agent against its own
+    /// window: spoolway does not know that window and never rescales it.
+    PercentEnv(&'static str),
+    /// An absolute token count, rendered into the argv from this template with
+    /// `{tokens}` substituted. The count is `compact_ctx` percent of the
+    /// model's `context_window`, rounded down, so it can only be rendered for a
+    /// model that has a window.
+    TokensArgs(&'static [&'static str]),
+}
+
+impl Compaction {
+    /// What a lane on a model with this `compact_ctx` and `context_window`
+    /// carries: the environment variable to set, and the argv to add.
+    ///
+    /// Both are empty when `compact_ctx` is unset (zero), and a token-counted
+    /// kind also renders nothing for a model with no `context_window`, since
+    /// there is no window to take a percentage of.
+    pub fn render(
+        &self,
+        compact_ctx: u32,
+        context_window: usize,
+    ) -> (Vec<(String, String)>, Vec<String>) {
+        if compact_ctx == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        match self {
+            Self::PercentEnv(var) => (
+                vec![((*var).to_string(), compact_ctx.to_string())],
+                Vec::new(),
+            ),
+            Self::TokensArgs(template) if context_window > 0 => {
+                let tokens = (context_window as u128 * u128::from(compact_ctx) / 100).to_string();
+                let args = template
+                    .iter()
+                    .map(|arg| arg.replace("{tokens}", &tokens))
+                    .collect();
+                (Vec::new(), args)
+            }
+            Self::TokensArgs(_) => (Vec::new(), Vec::new()),
+        }
+    }
+}
+
 pub const ADAPTERS: &[Adapter] = &[
     Adapter {
         kind: "pi",
@@ -423,6 +478,10 @@ pub const ADAPTERS: &[Adapter] = &[
         // `--thinking` takes a token budget, not a named level — a different
         // axis from what a step's `effort:` means, so it is not wired here.
         effort: None,
+        // pi takes no per-run compaction setting: only a settings file reaches
+        // it, and lanes run with `--no-approve`, which ignores project
+        // settings.
+        compaction: None,
         skills: true,
         headless: Some(Headless {
             print: Print(&["--print"]),
@@ -490,6 +549,15 @@ pub const ADAPTERS: &[Adapter] = &[
         effort: Some(Effort {
             args: &["--effort", "{effort}"],
         }),
+        // claude reads `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, a percentage from 1
+        // to 100 of its own window. It only ever moves compaction earlier: a
+        // value above its default of about 95 changes nothing.
+        //
+        // Settled by running it: a lane on a 200k-token model with
+        // `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=30` compacted three times on its
+        // root session, at 61k, 59k and 60k tokens, and went on to report. A
+        // forked subagent ignores the variable, so only the root is measured.
+        compaction: Some(Compaction::PercentEnv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")),
         skills: true,
         headless: Some(Headless {
             print: Print(&["--print"]),
@@ -600,6 +668,16 @@ pub const ADAPTERS: &[Adapter] = &[
         effort: Some(Effort {
             args: &["-c", "model_reasoning_effort={effort}"],
         }),
+        // codex takes an absolute token count, as a config override like the
+        // effort row's: `-c model_auto_compact_token_limit=<tokens>`.
+        //
+        // Settled by running it: the key is accepted under `--strict-config`,
+        // which rejects a misspelt one as an unknown configuration field, so a
+        // rename in a later release fails loudly rather than being ignored.
+        compaction: Some(Compaction::TokensArgs(&[
+            "-c",
+            "model_auto_compact_token_limit={tokens}",
+        ])),
         skills: true,
         // codex mints its own session id and refuses any other: `codex exec
         // resume <a fresh uuid>` fails with "no rollout found for thread id",
@@ -1276,6 +1354,44 @@ mod tests {
                 row.kind
             );
         }
+    }
+
+    /// The two kinds that take a compaction threshold spell it differently,
+    /// and the spelling is the row's. Fails if a row hardcodes a percentage, a
+    /// window, or the wrong rounding: 60% of 100096 is 60057.6, and codex must
+    /// be handed 60057.
+    // covers: models.<glob>.compact_ctx — each kind spells the threshold in its own row
+    #[test]
+    fn each_kind_spells_a_compaction_threshold_in_its_own_row() {
+        let render = |kind: &str, pct, window| {
+            adapter(kind)
+                .and_then(|a| a.compaction.as_ref())
+                .map(|row| row.render(pct, window))
+        };
+        assert_eq!(
+            render("claude", 60, 100096),
+            Some((
+                vec![(
+                    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+                    "60".to_string()
+                )],
+                Vec::new()
+            ))
+        );
+        assert_eq!(
+            render("codex", 60, 100096),
+            Some((
+                Vec::new(),
+                vec![
+                    "-c".to_string(),
+                    "model_auto_compact_token_limit=60057".to_string()
+                ]
+            ))
+        );
+        // Nothing is rendered unset, and codex needs a window to take a share of.
+        assert_eq!(render("claude", 0, 100096), Some((Vec::new(), Vec::new())));
+        assert_eq!(render("codex", 60, 0), Some((Vec::new(), Vec::new())));
+        assert!(render("pi", 60, 100096).is_none());
     }
 
     /// codex resumes by a subcommand appended *after* the print form, which is

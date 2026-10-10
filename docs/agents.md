@@ -39,8 +39,8 @@ context window is a `[models]` key. The argv is fixed per kind.
 ## Agent kinds
 
 A kind is one row in spoolway's adapter table. The row says how the binary is launched, which
-permission modes it accepts, how it takes an effort level, and where its transcripts are read
-from.
+permission modes it accepts, how it takes an effort level and a compaction threshold, and
+where its transcripts are read from.
 
 | Kind | Permission modes | Effort | Skills directory | Transcripts |
 |---|---|---|---|---|
@@ -200,6 +200,25 @@ A step's `effort:` is a free string, handed to the kind's effort flag:
 
 spoolway keeps no list of levels. `pipeline check` refuses `effort:` on a kind that cannot
 carry one, and refuses the literal `auto`. No `effort:` sends nothing.
+
+### Compaction threshold
+
+A model's `compact_ctx` sets the context percentage at which its lanes compact. The step's
+model picks the value. Each kind takes it in its own form:
+
+| Kind | How it is sent |
+|---|---|
+| `claude` | environment variable `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<compact_ctx>` |
+| `codex` | `-c model_auto_compact_token_limit=<tokens>` |
+| `pi` | not supported |
+
+Claude takes the percentage as written and measures it against its own window. It only
+compacts earlier, so a value above its default of about 95 changes nothing. Codex takes a
+token count. spoolway sends `compact_ctx` percent of the model's `context_window`, rounded
+down. With `context_window = 100096` and `compact_ctx = 60`, codex gets `60057`. A codex lane
+on a model with no `context_window` gets nothing. A model with no `compact_ctx` sends nothing.
+Both backends, herdr and headless, send the same value. See
+[`compact_ctx`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
 ### Skills
 

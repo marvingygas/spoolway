@@ -607,6 +607,7 @@ local model. An unpriced model is reported as unpriced, not counted as free. See
 | `prompt_cache_ttl` | `5m`, none if `local` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. `"0"` turns it off. The old names `session_reuse_idle` and `cache_ttl` still parse. See [cache warmth](agents.md#cache-warmth-is-a-models-fact). |
 | `slots` | `0` | Most lanes running at once on all the model names this row matches, across every profile. `0` falls back to the profile's `concurrency`. Different from a step's `slot:` key. |
 | `local` | `false` | The model runs on your own hardware. It removes the `5m` `prompt_cache_ttl` default from this model. `spoolway doctor` also reads it. |
+| `compact_ctx` | unset | Percentage of the agent's own window at which its auto-compaction fires, from `1` to `100`. Unset keeps the agent's default. Must be below `session_blocked_ctx` on every step that pairs them. Claude and codex only. Claude takes the percentage as written, against its own window. Codex takes that percentage of this row's `context_window`, rounded down, so it needs the window set. Claude only ever compacts earlier, so a value above its default of about 95 changes nothing. |
 
 A row can also carry one higher tier: the rates a request pays once its prompt passes a
 threshold. The tier is a sub-table named `above_<N>k_tokens` with the five rate keys above.

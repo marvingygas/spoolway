@@ -162,6 +162,7 @@ prompt_cache_ttl = "1h"
 | `cache_read` | USD per 1M tokens read from the prompt cache |
 | `cache_write_5m`, `cache_write_1h` | USD per 1M tokens written to a five-minute or one-hour cache |
 | `prompt_cache_ttl` | How long a session's prompt cache is trusted to stay warm. A carried session older than this opens fresh. Defaults to `5m`, and to no limit on a `local` model. `"0"` turns it off. |
+| `compact_ctx` | Percentage of context at which a lane on this model compacts, from `1` to `100`. See [Compaction threshold](agents.md#compaction-threshold). |
 | `slots`, `local` | See [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is) |
 
 A model can carry one higher tier: the rates a request pays once its prompt passes a
