@@ -676,7 +676,27 @@ impl<'a> Dispatcher<'a> {
             // (see `Dispatcher::record_usage`, called above), so an unpushed
             // branch is not the only copy of anything worth keeping — it is
             // exactly the debris the trial boundary exists to remove.
-            if task.front.trial.is_some() || self.branch_fully_pushed(&branch) {
+            //
+            // A branch that was never made is neither kept nor deleted:
+            // `queue add` stamps `task/<id>` on a task before anything is cut,
+            // so a task unqueued before its worktree existed still names one.
+            // Reporting that as kept would send a person to rename or delete
+            // a branch that is not there. Any ref git cannot resolve counts
+            // as absent, since git could neither keep nor delete it; a branch
+            // that resolves but whose push state cannot be read still takes
+            // the keep path in `branch_fully_pushed`.
+            if self
+                .repo
+                .git(&[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ])
+                .is_err()
+            {
+                // Nothing to delete and nothing to keep.
+            } else if task.front.trial.is_some() || self.branch_fully_pushed(&branch) {
                 let _ = self.repo.git(&["branch", "-D", &branch]);
             } else {
                 report.problems.push(format!(

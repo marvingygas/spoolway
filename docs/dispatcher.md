@@ -763,7 +763,7 @@ When a task reaches `done`:
 4. The dispatcher writes the file `removing/<task>` in the project home. The file holds the
    task's run. Then the worktree is removed, unless it was borrowed.
 5. The branch is deleted, unless a queued task still depends on it or it has commits no remote
-   has.
+   has. A branch that does not exist is skipped without a message.
 6. The `removing/<task>` file is deleted. The `conflicts` and `pull req` lines that the handover
    step printed are copied into a `## Handover` section of the task file. The task file moves to
    `archive/`. The task's run files and every codex session home made for it are deleted.
