@@ -195,6 +195,15 @@ works "eval prices a line's tier_tokens at the tier's rates in the four class co
     .total | near(.in_usd; 0.26) and near(.out_usd; 0.9)
       and near(.cache_read_usd; 0.12) and near(.cache_write_usd; 0.375)
       and .cost_usd == 1.5"' "$SPOOLWAY"
+# A filter nothing matches leaves no rows. A script reading the output still
+# gets data: the object with empty rows, or the CSV header alone.
+works "eval --json with no rows prints the object with empty rows and nothing else" \
+  bash -c '"$0" eval --pipeline no-such-pipeline --json 2>/dev/null | jq -e "
+    (keys | sort) == [\"by\", \"rows\", \"total\"] and .rows == []"' "$SPOOLWAY"
+works "eval --csv with no rows prints the header and no prose" \
+  bash -c 'out=$("$0" eval --pipeline no-such-pipeline --csv 2>/dev/null) &&
+    [ "$(wc -l <<<"$out")" -le 2 ] && head -n 1 <<<"$out" | grep -q "," &&
+    ! grep -qi "nothing to compare" <<<"$out"' "$SPOOLWAY"
 if [ "$LEDGER_HAD" = 1 ]; then cp "$LIVE/usage.jsonl.keep" "$LEDGER"; else rm -f "$LEDGER"; fi
 # A claude session banks Claude Code's own `cost-state` total. The claude
 # stand-in's transcript writer appends one for a turn whose model nothing
