@@ -2816,14 +2816,7 @@ fn paint_at(
     let header = header_cells(phase, snapshot.finishing, version);
     let pane = pane_width();
     if snapshot.rows.is_empty() {
-        return paint_empty(
-            &header.join(" · "),
-            available.as_deref(),
-            pane,
-            phase,
-            recent,
-            name,
-        );
+        return paint_empty(&header.join(" · "), available.as_deref(), pane, phase, name);
     }
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. The row is
@@ -3020,11 +3013,8 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// once the board has a row again. A queue file that fails to parse makes no
 /// row, so a broken file on an otherwise empty queue is not named on the
 /// board at all. The keys that act on a row go too, since there is no row to
-/// act on.
-///
-/// RECENT is the one exception, and only while no dispatcher holds the lock
-/// (`phase`'s `holder` is `None`): it is then the record of what the last
-/// run did before it stopped.
+/// act on. RECENT goes as well, whether or not a dispatcher holds the lock:
+/// the board still remembers it, and draws it again once a row is back.
 ///
 /// The lockup holds frame 0: nothing on an empty board is running.
 fn paint_empty(
@@ -3032,7 +3022,6 @@ fn paint_empty(
     available: Option<&str>,
     pane: usize,
     phase: Phase,
-    recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
 ) -> String {
     let hosted = crate::screen::shell::hosted().is_some();
@@ -3056,35 +3045,13 @@ fn paint_empty(
         true => height.saturating_sub(3),
         false => height.saturating_sub(4),
     });
-    let none = VecDeque::new();
-    let recent = empty_board_recent(phase, recent, &none);
     let hour = chrono::Timelike::hour(&chrono::Local::now());
-    frame.push_str(&greeting_screen(
-        &greeting(hour, name),
-        recent,
-        pane,
-        region,
-    ));
+    frame.push_str(&greeting_screen(&greeting(hour, name), pane, region));
     if hosted {
         return boxed(&frame, &keys, pane, height);
     }
     frame.push_str(&format!("{keys}\n"));
     clamp_rows(&frame, height)
-}
-
-/// The RECENT lines an empty board draws: `recent` while no dispatcher holds
-/// the lock, and `none` while one does. See [`paint_empty`].
-fn empty_board_recent<'a>(
-    phase: Phase,
-    recent: &'a VecDeque<RecentEvent>,
-    none: &'a VecDeque<RecentEvent>,
-) -> &'a VecDeque<RecentEvent> {
-    match phase {
-        Phase::Watching {
-            holder: Some(_), ..
-        } => none,
-        Phase::Watching { holder: None, .. } => recent,
-    }
 }
 
 /// The first word of git's `user.name` in `repo`, for an empty board's
@@ -5827,49 +5794,46 @@ mod tests {
         assert!(frame.contains("Nothing queued"), "{frame}");
     }
 
-    /// RECENT stays on an empty board while no dispatcher is running, and
-    /// goes while one is.
-    ///
-    /// Where RECENT lands, and how much of it a pane holds, depends on the
-    /// pane's height, which `paint` reads from the real terminal. That layout
-    /// is covered by `greeting_screen`'s own tests with a fixed region; this
-    /// one checks only what holds at any height.
+    /// An empty board draws no RECENT, whether a dispatcher holds the lock or
+    /// not, even with events remembered: the greeting and `Nothing queued`
+    /// stand alone under the header.
     #[test]
-    fn an_empty_board_keeps_recent_only_while_no_dispatcher_runs() {
+    fn an_empty_board_draws_no_recent_with_or_without_a_dispatcher() {
         let (repo, _root_guard) = fixture("board-empty-recent");
         let pipelines = Pipelines::builtin();
         let recent = arrivals(2);
-        let none = VecDeque::new();
-        let stopped = Phase::Watching {
-            holder: None,
-            dispatching: false,
-        };
-        let held = Phase::Watching {
-            holder: Some(4242),
-            dispatching: true,
-        };
-        assert_eq!(empty_board_recent(stopped, &recent, &none).len(), 2);
-        assert!(empty_board_recent(held, &recent, &none).is_empty());
-
-        let running = strip(&paint(
-            &repo,
-            &pipelines,
-            true,
-            &Snapshot {
-                holder: Some(4242),
-                ..Snapshot::empty()
-            },
-            None,
-            &recent,
-            Some("Marvin"),
-        ));
-        assert!(
-            running.contains("dispatcher running · pid 4242"),
-            "{running}"
-        );
-        assert!(running.contains("[enter] stop dispatching"), "{running}");
-        assert!(!running.contains("RECENT"), "{running}");
-        assert!(!running.contains("task-1"), "{running}");
+        for (dispatching, holder, header, enter) in [
+            (
+                false,
+                None,
+                "dispatcher stopped",
+                "[enter] start dispatching",
+            ),
+            (
+                true,
+                Some(4242),
+                "dispatcher running · pid 4242",
+                "[enter] stop dispatching",
+            ),
+        ] {
+            let frame = strip(&paint(
+                &repo,
+                &pipelines,
+                dispatching,
+                &Snapshot {
+                    holder,
+                    ..Snapshot::empty()
+                },
+                None,
+                &recent,
+                Some("Marvin"),
+            ));
+            assert!(frame.contains(header), "{frame}");
+            assert!(frame.contains(enter), "{frame}");
+            assert!(frame.contains("Nothing queued"), "{frame}");
+            assert!(!frame.contains("RECENT"), "{frame}");
+            assert!(!frame.contains("task-"), "{frame}");
+        }
     }
 
     /// The greeting's name is read off git once per board and kept: a name

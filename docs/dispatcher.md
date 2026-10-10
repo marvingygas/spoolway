@@ -260,7 +260,7 @@ The greeting adds a comma and the first word of `git config user.name` for the b
 
 An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the job ledger, the `pipelines` notice, the hook failure line and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
 
-`RECENT` shows under `Nothing queued`, after two blank rows, only while no dispatcher is running. The wordmark, the two lines and `RECENT` are centred together. On a short pane `RECENT` loses its oldest lines first. A pane too short for the wordmark drops it, along with `RECENT`, and keeps the two lines.
+An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark and the two lines are centred together. A pane too short for the wordmark drops it and keeps the two lines.
 
 ### Columns
 

@@ -1920,24 +1920,16 @@ const GREETING_BLOCK_ROWS: usize = 5 + 1 + 2;
 /// `greeting` in bold and `Nothing queued` dim, each centred across a pane
 /// `pane` columns wide.
 ///
-/// `recent` is drawn under the two lines by [`ticker`], two blank rows down
-/// and at the frame's usual left margin, and the whole group is centred down
-/// `region`: the rows between the header and the key line. The block comes
-/// first and RECENT gets what is left of `region`, so a short pane loses
-/// RECENT's oldest lines first, and below [`GREETING_BLOCK_ROWS`] the lockup
-/// goes and the two lines stay alone, with no RECENT under them. A pane too narrow for the lockup drops it
-/// too, as [`masthead`] does. `region` is `None` with no terminal to measure:
-/// the block then starts one blank row under the header, RECENT is kept
-/// whole, and one blank row closes it.
+/// The group is centred down `region`: the rows between the header and the
+/// key line. Below [`GREETING_BLOCK_ROWS`] the lockup goes and the two lines
+/// stay alone. A pane too narrow for the lockup drops it too, as
+/// [`masthead`] does. `region` is `None` with no terminal to measure: the
+/// block then starts one blank row under the header, and one blank row
+/// closes it.
 ///
 /// Returns exactly `region` rows when it is known and the group fits, so the
 /// key line lands on the pane's own bottom.
-pub(super) fn greeting_screen(
-    greeting: &str,
-    recent: &VecDeque<RecentEvent>,
-    pane: usize,
-    region: Option<usize>,
-) -> String {
+pub(super) fn greeting_screen(greeting: &str, pane: usize, region: Option<usize>) -> String {
     let lockup = &LOCKUP[0];
     let lockup_width = lockup.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let room = region.unwrap_or(usize::MAX);
@@ -1960,27 +1952,6 @@ pub(super) fn greeting_screen(
         let text = clip(text, pane.saturating_sub(2));
         let left = " ".repeat(pane.saturating_sub(text.chars().count()) / 2);
         group.push_str(&format!("{left}{paint}{text}{RESET}\n"));
-    }
-
-    // `ticker` opens on a blank row of its own; this is the second of the
-    // two between `Nothing queued` and the `RECENT` heading, so it comes off
-    // the rows the ticker is handed and is drawn only when the ticker is.
-    //
-    // A pane too short for the lockup has no rows for RECENT either. Counted
-    // against the two lines alone, a region of 6 or 7 rows would draw RECENT
-    // that a region of 8 to 11 has no room for, so shrinking the pane would
-    // bring it back after the lockup went.
-    let ticker_rows = match region {
-        None => recent.len() + 2,
-        Some(_) if !tall_enough => 0,
-        Some(region) => region
-            .saturating_sub(group.lines().count())
-            .saturating_sub(1),
-    };
-    let recent = ticker(recent, pane, ticker_rows);
-    if !recent.is_empty() {
-        group.push('\n');
-        group.push_str(&recent);
     }
 
     let Some(region) = region else {
@@ -3632,7 +3603,7 @@ mod tests {
     /// queued`, centred both ways, row for row as the mockup draws it.
     #[test]
     fn an_empty_board_centres_its_greeting_as_drawn() {
-        let block = greeting_screen("Good afternoon, Marvin.", &VecDeque::new(), 96, Some(19));
+        let block = greeting_screen("Good afternoon, Marvin.", 96, Some(19));
         let mut expected = vec![String::new(); 5];
         expected.extend(
             [
@@ -3655,74 +3626,24 @@ mod tests {
         assert!(block.contains(LOCKUP[0][1]), "{block}");
     }
 
-    /// RECENT sits two blank rows under `Nothing queued`, at the frame's left
-    /// margin, and the logo, the two lines and RECENT centre down the pane
-    /// as one group — the mockup of a stopped dispatcher, row for row.
+    /// A short pane keeps the block whole and centred; below the block's
+    /// eight rows the lockup goes and the two lines stay.
     #[test]
-    fn recent_centres_with_the_greeting_as_one_group() {
-        let recent: VecDeque<RecentEvent> = [("15:12", "cart-totals"), ("15:41", "cart-discounts")]
-            .into_iter()
-            .map(|(at, id)| RecentEvent::Arrival {
-                at: at.to_string(),
-                id: id.to_string(),
-                change: Move::Passed {
-                    from: "review".to_string(),
-                    to: "done".to_string(),
-                    cause: None,
-                },
-            })
-            .collect();
-        let block = greeting_screen("Good afternoon, Marvin.", &recent, 96, Some(19));
-        let rows = trimmed(&block);
-        assert_eq!(rows.len(), 19, "{block}");
-        assert!(rows[..3].iter().all(String::is_empty), "{block}");
-        assert_eq!(rows[3].trim(), "█", "{block}");
-        assert_eq!(rows[9].trim(), "Good afternoon, Marvin.", "{block}");
-        assert_eq!(rows[10].trim(), "Nothing queued", "{block}");
-        assert_eq!(&rows[11..13], ["", ""], "{block}");
-        assert_eq!(rows[13], " RECENT", "{block}");
-        assert_eq!(
-            rows[14], " 15:41   cart-discounts   passed review, moved to done",
-            "{block}"
-        );
-        assert_eq!(
-            rows[15], " 15:12   cart-totals      passed review, moved to done",
-            "{block}"
-        );
-        assert!(rows[16..].iter().all(String::is_empty), "{block}");
-    }
+    fn a_short_pane_gives_up_the_lockup() {
+        for (region, top) in [(13, 2), (10, 1), (8, 0)] {
+            let block = greeting_screen("Good morning.", 96, Some(region));
+            let rows = trimmed(&block);
+            assert_eq!(rows.len(), region, "{block}");
+            assert_eq!(rows[top].trim(), "█", "{block}");
+            assert_eq!(rows[top + 6].trim(), "Good morning.", "{block}");
+            assert_eq!(rows[top + 7].trim(), "Nothing queued", "{block}");
+        }
 
-    /// A short pane keeps the block whole and takes RECENT's oldest lines
-    /// first; below the block's eight rows the lockup goes and the two lines
-    /// stay.
-    #[test]
-    fn a_short_pane_gives_up_recent_then_the_lockup() {
-        let recent = arrivals(3);
-        // Eight rows for the block, two blank, the heading and two arrivals.
-        let block = greeting_screen("Good morning.", &recent, 96, Some(13));
-        let rows = trimmed(&block);
-        assert_eq!(rows.len(), 13, "{block}");
-        assert_eq!(rows[0].trim(), "█", "{block}");
-        assert_eq!(rows[10], " RECENT", "{block}");
-        assert!(rows[11].contains("task-2"), "the newest stays — {block}");
-        assert!(rows[12].contains("task-1"), "{block}");
-        assert!(!block.contains("task-0"), "the oldest goes first — {block}");
-
-        // No room for RECENT at all: the block alone, still centred.
-        let block = greeting_screen("Good morning.", &recent, 96, Some(10));
-        let rows = trimmed(&block);
-        assert_eq!(rows.len(), 10, "{block}");
-        assert_eq!(rows[1].trim(), "█", "{block}");
-        assert!(!block.contains("RECENT"), "{block}");
-
-        // One row short of the block: the art goes, the two lines stay, and
-        // RECENT does not come back into the rows the art gave up.
+        // One row short of the block: the art goes and the two lines stay.
         for region in [6, 7] {
-            let block = greeting_screen("Good morning.", &recent, 96, Some(region));
+            let block = greeting_screen("Good morning.", 96, Some(region));
             let rows = trimmed(&block);
             assert!(!block.contains(LOCKUP[0][1]), "{block}");
-            assert!(!block.contains("RECENT"), "{block}");
-            assert!(!block.contains("task-"), "{block}");
             assert_eq!(rows.len(), region, "{block}");
             assert_eq!(rows[(region - 2) / 2].trim(), "Good morning.", "{block}");
             assert_eq!(
@@ -3734,28 +3655,24 @@ mod tests {
     }
 
     /// With no pane height to centre in, the block starts one blank row under
-    /// the header and RECENT is kept whole.
+    /// the header and one blank row closes it.
     #[test]
     fn with_no_height_the_greeting_starts_one_row_down() {
-        let block = greeting_screen("Working late.", &arrivals(9), 120, None);
+        let block = greeting_screen("Working late.", 120, None);
         let rows = trimmed(&block);
+        assert_eq!(rows.len(), 10, "{block}");
         assert_eq!(rows[0], "", "{block}");
         assert_eq!(rows[1].trim(), "█", "{block}");
         assert_eq!(rows[7].trim(), "Working late.", "{block}");
         assert_eq!(rows[8].trim(), "Nothing queued", "{block}");
-        assert_eq!(
-            (0..9)
-                .filter(|i| block.contains(&format!("task-{i}")))
-                .count(),
-            9
-        );
+        assert_eq!(rows[9], "", "{block}");
     }
 
     /// A pane too narrow for the lockup keeps the two lines, and a greeting
     /// too long for the pane is clipped with `…` rather than wrapped.
     #[test]
     fn a_narrow_pane_drops_the_lockup_and_clips_the_greeting() {
-        let block = greeting_screen("Good morning, Bartholomew.", &VecDeque::new(), 20, None);
+        let block = greeting_screen("Good morning, Bartholomew.", 20, None);
         assert!(!block.contains(LOCKUP[0][1]), "{block}");
         let rows = trimmed(&block);
         assert_eq!(rows[1], " Good morning, Bar…", "{block}");
