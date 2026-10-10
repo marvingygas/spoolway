@@ -740,6 +740,14 @@ pub(crate) fn failures_after_set(repo: &Repo, config: &Config, key: &str) -> Vec
     if key.starts_with("issue_tracking.") {
         findings.extend(issue_tracking_config_checks(repo, &config.issue_tracking));
     }
+    // Block lives on the profile and compaction on the model, so only a
+    // pipeline step pairs them and `confkv::set` cannot order them. Pipelines
+    // that do not load are `doctor`'s to report, not a reason to say more here.
+    let sets_compaction = key.ends_with(".session_blocked_ctx")
+        || (key.starts_with("models.") && key.ends_with(".compact_ctx"));
+    if sets_compaction && let Ok(pipelines) = Pipelines::load(&repo.root, config) {
+        findings.extend(step_compaction_checks(&pipelines, config));
+    }
     findings
         .into_iter()
         .filter_map(|finding| match finding {
@@ -1979,8 +1987,16 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         )));
     }
 
-    // One check per step, from the function the dispatcher refuses the same
-    // step with: a profile's block and a model's compaction meet only in a step.
+    findings.extend(step_compaction_checks(pipelines, config));
+    findings
+}
+
+/// One check per agent step, from the function the dispatcher refuses the
+/// same step with: a profile's block and a model's compaction meet only in a
+/// step. Shared with `spoolway config set`, which runs it after a
+/// `compact_ctx` or `session_blocked_ctx` is saved.
+fn step_compaction_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
+    let mut findings = Vec::new();
     for (pipeline_name, pipeline) in &pipelines.pipelines {
         for step in pipeline
             .steps

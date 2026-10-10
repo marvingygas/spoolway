@@ -681,9 +681,40 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
 
     *slot = coerce(slot, input).with_context(|| format!("`{key}` cannot be set to `{input}`"))?;
 
+    let models_glob = (parts.first() == Some(&"models") && parts.len() >= 3).then(|| parts[1]);
+    let had_row = models_glob.is_some_and(|glob| config.models.contains_key(glob));
+    let had_tier = models_glob.is_some()
+        && parts.len() == 4
+        && config
+            .models
+            .get(parts[1])
+            .is_some_and(|row| row.tier.is_some());
     let mut config: Config = value
         .try_into()
         .with_context(|| format!("setting `{key}` to `{input}` produces an invalid config"))?;
+
+    // A rate typed as zero on a glob that had no row, or a tier rate typed as
+    // zero where the row had no tier, leaves an empty row (or an empty tier)
+    // behind. Both serialise to no table at all, so the saved file would
+    // differ from this config by a table it cannot spell, and `save_key`
+    // would refuse the write for it. They are dropped here, as the file never
+    // had them; zero means unset, so nothing is lost.
+    // Only a `models.*` key can have made one: any other key's second part is
+    // not a glob, and a row that happens to share its name is not ours to drop.
+    if let Some(glob) = models_glob {
+        if parts.len() == 4
+            && !had_tier
+            && let Some(row) = config.models.get_mut(glob)
+            && row
+                .tier
+                .is_some_and(|tier| tier.rates == crate::usage::Rates::default())
+        {
+            row.tier = None;
+        }
+        if !had_row && config.models.get(glob) == Some(&crate::usage::ModelPrice::default()) {
+            config.models.remove(glob);
+        }
+    }
 
     // A profile switched onto another kind keeps the mode it had on the old
     // one, which the new kind may not accept (`auto` is claude's, `never`
@@ -801,6 +832,21 @@ pub fn check_typed(key: &str, input: &str) -> Result<()> {
             ),
         }
     }
+    // A price or a spending limit below zero, or one that is not a finite
+    // number, can never be right. `coerce` takes any `f64`, so `-5` and `inf`
+    // would be saved: a negative `max_cost_usd` reads as no limit, and an
+    // infinite rate prices every run at infinity. `models refresh` already
+    // drops such a rate from the shared table. Text that is not a number at
+    // all is left for `coerce` to word.
+    if is_money_key(key)
+        && let Ok(number) = input.trim().parse::<f64>()
+        && !(number.is_finite() && number >= 0.0)
+    {
+        bail!(
+            "`{key}` must be a finite number of dollars, 0 or more, got `{input}`; \
+             a negative or infinite value is never a price or a limit"
+        );
+    }
     // A hook that is not a bare filename can never run, whatever else is set
     // later, so it is refused rather than left for `doctor` to fail.
     if key == "issue_tracking.hook"
@@ -811,15 +857,128 @@ pub fn check_typed(key: &str, input: &str) -> Result<()> {
     Ok(())
 }
 
+/// What a rate saved as zero means.
+///
+/// Zero is how a row spells "unset", and `config set` prints the saved `= 0.0`
+/// and nothing else, which reads as "free". A base rate is filled from the
+/// price table by [`crate::models::resolve`], so for a model the table knows
+/// the table's rate stays in effect. A tier rate is not: a row's tier replaces
+/// the table's tier whole, so a zero inside it is charged as zero (the
+/// one-hour cache rate excepted, which follows the five-minute one).
+///
+/// What is named as in effect is read from `resolve` over the project's own
+/// rows, never from the table alone: when no row of the glob's own is left, a
+/// broader `[models]` row such as `claude-*` answers the model, and the table's
+/// figure would be the wrong one.
+fn zero_rate_note(config: &Config, key: &str) -> Option<String> {
+    let parts = split_models_key(key)?;
+    let (glob, field) = (parts[1], *parts.last()?);
+    if !MODEL_RATES.contains(&field) {
+        return None;
+    }
+    let rate_of = |rates: &crate::usage::Rates| match field {
+        "input" => rates.input,
+        "output" => rates.output,
+        "cache_read" => rates.cache_read,
+        "cache_write_5m" => rates.cache_write_5m,
+        _ => rates.cache_write_1h,
+    };
+    let row = config.models.get(glob).copied().unwrap_or_default();
+    let table = crate::models::resolve(&Default::default(), glob).price;
+    if parts.len() == 4 {
+        let Some(tier) = row.tier else {
+            // The empty tier was dropped before saving (see `set`), so the
+            // row carries none, and `overlay` takes the table's tier only
+            // when the row sets no base rate of its own.
+            let answer = crate::models::resolve(&config.models, glob).price?;
+            let from = if answer.tier == table.and_then(|price| price.tier) {
+                "the price table's"
+            } else {
+                "the matching `[models]` row's"
+            };
+            return Some(match answer.tier {
+                Some(tier) => format!(
+                    "`{key}` = 0 sets no tier: `{glob}` keeps {from} tier above {}k tokens",
+                    tier.above_k
+                ),
+                None => format!(
+                    "`{key}` = 0 sets no tier: `{glob}` is priced at its base rates at any size"
+                ),
+            });
+        };
+        if rate_of(&tier.rates) != 0.0 {
+            return None;
+        }
+        return Some(
+            if field == "cache_write_1h" && tier.rates.cache_write_5m != 0.0 {
+                format!(
+                    "`{key}` = 0 means unset: the hourly cache is priced at the tier's \
+                     five-minute rate"
+                )
+            } else {
+                format!(
+                    "`{key}` = 0 is charged as zero, not filled from the price table: \
+                     above {}k tokens that part of a request is free",
+                    tier.above_k
+                )
+            },
+        );
+    }
+    if rate_of(&row.rates()) != 0.0 {
+        return None;
+    }
+    // An hourly cache-write rate beside a five-minute one is priced like it,
+    // and never from the table (see `overlay`).
+    if field == "cache_write_1h" && row.cache_write_5m != 0.0 {
+        return Some(format!(
+            "`{key}` = 0 means unset: the hourly cache is priced at the five-minute rate"
+        ));
+    }
+    let rate = rate_of(&crate::models::resolve(&config.models, glob).price?.rates());
+    if rate == 0.0 {
+        return None;
+    }
+    let from = if table.is_some_and(|price| rate_of(&price.rates()) == rate) {
+        "the price table's rate"
+    } else {
+        "the rate of the `[models]` row that matches it"
+    };
+    Some(format!(
+        "`{key}` = 0 means unset, not free: {from} for `{glob}` \
+         (${rate} per million tokens) stays in effect"
+    ))
+}
+
+/// Whether `key` holds dollars: a `models.*` rate, tier rates included, or the
+/// unattended cost ceiling.
+fn is_money_key(key: &str) -> bool {
+    key == "unattended.max_cost_usd"
+        || split_models_key(key)
+            .and_then(|parts| parts.last().copied())
+            .is_some_and(|field| MODEL_RATES.contains(&field))
+}
+
+/// The `models.<glob>` fields that are a price per million tokens.
+const MODEL_RATES: [&str; 5] = [
+    "input",
+    "output",
+    "cache_read",
+    "cache_write_5m",
+    "cache_write_1h",
+];
+
 /// What `doctor` would fail on because of the agent `key` just named, for a
-/// value that is valid but not yet usable.
+/// value that is valid but not yet usable, and what a zero rate really means
+/// (see [`zero_rate_note`]).
 ///
 /// These are warnings rather than refusals: a script sets keys in sequence, so
-/// `unattended.blocked_agent` may name an agent the next command adds. Each
-/// line comes from `Config::agent`, the lookup `doctor`'s agent rows make. The
+/// `unattended.blocked_agent` may name an agent the next command adds. The
+/// blocked-agent line comes from `Config::agent`, the lookup `doctor`'s agent
+/// rows make; the zero-rate line is a note `doctor` does not fail on. The
 /// other file-based checks are run by [`crate::commands::doctor::failures_after_set`].
 pub fn warnings(config: &Config, key: &str) -> Vec<String> {
     let mut out = Vec::new();
+    out.extend(zero_rate_note(config, key));
     if key == "unattended.blocked_agent" && config.agent(&config.unattended.blocked_agent).is_err()
     {
         out.push(format!(
@@ -1305,6 +1464,92 @@ mod tests {
         let group = set(&any, "dispatch.priority", "group").unwrap();
         assert_eq!(group.dispatch.priority, Priority::Group);
         assert!(!toml::to_string(&group).unwrap().contains("priority"));
+    }
+
+    /// A negative or non-finite price or cost limit is refused by name; zero
+    /// and an ordinary figure are not. Fails before the check: `check_typed`
+    /// let all of them through.
+    #[test]
+    fn a_negative_or_infinite_price_or_limit_is_refused() {
+        for key in [
+            "models.m.input",
+            "models.m.cache_write_1h",
+            "models.m.above_200k_tokens.output",
+            "unattended.max_cost_usd",
+        ] {
+            for typed in ["-5", "-0.01", "inf", "-inf", "NaN"] {
+                let err = format!("{:#}", check_typed(key, typed).unwrap_err());
+                assert!(err.contains(key) && err.contains("0 or more"), "{err}");
+            }
+            for typed in ["0", "2.5", "abc"] {
+                check_typed(key, typed).unwrap();
+            }
+        }
+        // Not a dollar amount.
+        check_typed("models.m.slots", "-5").unwrap();
+    }
+
+    /// A zero rate on a glob with no row saves, instead of being refused for
+    /// the empty row it leaves behind, and notes that a known model keeps the
+    /// table's rate. Fails before the fix: `set` kept the empty row.
+    #[test]
+    fn a_zero_rate_on_a_fresh_glob_saves_and_names_the_table_rate() {
+        let config = set(&Config::default(), "models.claude-opus-5-5.input", "0").unwrap();
+        assert!(!config.models.contains_key("claude-opus-5-5"));
+        let note = zero_rate_note(&config, "models.claude-opus-5-5.input").unwrap();
+        assert!(note.contains("price table's rate") && note.contains("stays in effect"));
+        assert_eq!(zero_rate_note(&config, "models.no-such-model.input"), None);
+
+        let priced = set(&Config::default(), "models.claude-opus-5-5.input", "3").unwrap();
+        assert_eq!(
+            zero_rate_note(&priced, "models.claude-opus-5-5.input"),
+            None
+        );
+    }
+
+    /// A zero tier rate saves and says what it means, instead of being refused
+    /// for the empty tier it leaves behind. Fails before the fix: the empty
+    /// tier stayed in the config and `save_key` refused the write.
+    #[test]
+    fn a_zero_tier_rate_saves_and_says_what_it_means() {
+        let key = "models.claude-haiku-5-5.above_100k_tokens.input";
+        let fresh = set(&Config::default(), key, "0").unwrap();
+        assert_eq!(fresh.models.get("claude-haiku-5-5"), None);
+        let note = zero_rate_note(&fresh, key).unwrap();
+        assert!(note.contains("keeps the price table's tier"), "{note}");
+
+        let tiered = set(&Config::default(), key, "2").unwrap();
+        let zeroed = set(&tiered, key, "0").unwrap();
+        let note = zero_rate_note(&zeroed, key).unwrap();
+        assert!(note.contains("charged as zero"), "{note}");
+    }
+
+    /// Zeroing a models rate must not drop an unrelated empty row that shares
+    /// a name with the second segment of a non-models key. Fails before the
+    /// guard: `issue_tracking.hook` removed the empty `models.hook` row and
+    /// `save_key` then refused the write.
+    #[test]
+    fn a_non_models_key_leaves_an_empty_models_row_alone() {
+        let mut config = Config::default();
+        config.models.insert("hook".into(), Default::default());
+        let after = set(&config, "issue_tracking.hook", "").unwrap();
+        assert!(after.models.contains_key("hook"));
+    }
+
+    /// With a broader row answering the model, the zero-rate note names that
+    /// row's rate, not the price table's. Fails before: the note quoted the
+    /// table's $4 while `claude-*` priced the model at $7.
+    #[test]
+    fn a_zero_rate_note_names_the_row_that_answers_not_the_table() {
+        let covered = set(&Config::default(), "models.claude-*.input", "7").unwrap();
+        let key = "models.claude-opus-5-5.input";
+        let zeroed = set(&covered, key, "0").unwrap();
+        let note = zero_rate_note(&zeroed, key).unwrap();
+        assert!(
+            note.contains("`[models]` row") && note.contains("$7"),
+            "{note}"
+        );
+        assert!(!note.contains("price table's"), "{note}");
     }
 
     #[test]

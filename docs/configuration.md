@@ -36,19 +36,21 @@ a linked worktree the command refuses and prints the `-C` form to run instead.
 ### What `config set` checks
 
 `config set` checks the value's type. It also runs the checks of `spoolway doctor` that read only
-the config and the hook files. It treats the result in one of two ways.
+the config, the hook files and the pipeline files. It treats the result in one of two ways.
 
 | Value | Result |
 |---|---|
 | One that can never be right | The command refuses, names the values that are allowed, and saves nothing. |
 | One that names something not set up yet | The command saves the value and prints a warning on stderr. `spoolway doctor` fails until the missing piece is added. |
 
-These two keys are refused:
+These keys are refused:
 
 | Key | Refused when | Allowed |
 |---|---|---|
 | `dispatch.backend` | The value is not `herdr` or `headless`, such as `tmux` or `zellij` | `herdr`, `headless` |
 | `issue_tracking.hook` | The value is not a bare filename | A bare filename in `.spoolway/hooks/`, or blank |
+| `models.<glob>.input`, `output`, `cache_read`, `cache_write_5m`, `cache_write_1h`, and the same rates under an `above_<N>k_tokens` tier | The value is negative, `inf` or `NaN` | A finite number of dollars per million tokens, 0 or more |
+| `unattended.max_cost_usd` | The value is negative, `inf` or `NaN` | A finite number of dollars, 0 or more |
 
 Warnings come from the same checks `doctor` runs. They cover only the keys you set:
 
@@ -57,8 +59,18 @@ Warnings come from the same checks `doctor` runs. They cover only the keys you s
 | `unattended.blocked_agent` | The name has no profile in `[agents]` |
 | `unattended.*` | `unattended.enabled` is on and `unattended.blocked_model` is blank |
 | `issue_tracking.*` | Any issue-tracking check of `doctor` fails, such as a missing hook script or a blank `project_key` beside a hook |
+| `models.<glob>.compact_ctx`, `agents.<profile>.session_blocked_ctx` | A pipeline step would be blocked before it compacts. The warning is the line `doctor` fails that step with. |
 
 A warning does not fail the command, so a script can set keys one after another.
+
+A base rate set to `0` also prints a `warning:` line on stderr. `doctor` does not fail on it. A zero
+base rate means unset, so for a model that the price table or another `[models]` row prices, the
+line names the rate that stays in effect. For a model nothing prices, there is no line.
+
+A zero rate inside an `above_<N>k_tokens` tier is charged as zero, because a tier you write
+replaces the table's tier whole. The line says that part of a request is free above the threshold.
+Setting a tier rate to `0` where the row has no tier writes no tier. The line names the tier the
+model keeps.
 
 ```
 $ spoolway config set dispatch.backend tmux

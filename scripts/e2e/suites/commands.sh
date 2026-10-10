@@ -1364,6 +1364,35 @@ says "config set warns on a hook script that is not there yet" \
   "$SPOOLWAY" config set issue_tracking.hook nosuch.sh
 must "hook restored" "$SPOOLWAY" config set issue_tracking.hook "$BEFORE_HOOK"
 
+# A price or a limit that can never be right is refused and nothing is saved.
+BEFORE_COST=$("$SPOOLWAY" config get unattended.max_cost_usd)
+refuses "config set refuses a negative price, naming what is allowed" \
+  "0 or more" "$SPOOLWAY" config set models.e2e-priced.input -- -5
+refuses "config set refuses an infinite max_cost_usd" \
+  "must be a finite number of dollars" "$SPOOLWAY" config set unattended.max_cost_usd inf
+works "and the cost limit is still what it was" \
+  test "$("$SPOOLWAY" config get unattended.max_cost_usd)" = "$BEFORE_COST"
+works "and the refused price was not saved" \
+  test "$("$SPOOLWAY" config get models.e2e-priced.input)" = "0.0"
+
+# A compaction threshold at or above the profile's block ceiling blocks the
+# step before it compacts. `set` saves it and warns in doctor's own words.
+COMPACT_PIPELINE=.spoolway/pipelines/default.yml
+cp "$COMPACT_PIPELINE" "$LIVE/default.yml.before-compact"
+sed -i '0,/model: ""/s//model: "e2e-compact"/' "$COMPACT_PIPELINE"
+must "a block ceiling on the claude agent" \
+  "$SPOOLWAY" config set agents.claude.session_blocked_ctx 40
+says "config set warns when a compaction threshold leaves a step blocked first" \
+  'fails its check "pipeline `default` step `implement`": agents.claude.session_blocked_ctx = 40 is at or below models."e2e-compact".compact_ctx = 50' \
+  "$SPOOLWAY" config set models.e2e-compact.compact_ctx 50
+works "and the value is saved" \
+  test "$("$SPOOLWAY" config get models.e2e-compact.compact_ctx)" = "50"
+says "and doctor fails the step with the same words" \
+  'agents.claude.session_blocked_ctx = 40 is at or below models."e2e-compact".compact_ctx = 50' \
+  "$SPOOLWAY" doctor --no-live
+must "compaction put back below block" "$SPOOLWAY" config set models.e2e-compact.compact_ctx 30
+cp "$LIVE/default.yml.before-compact" "$COMPACT_PIPELINE"
+
 # Calls that run at the same time, as an agent issuing several tool calls at
 # once does, each save their own key. A call that lost the race may be
 # refused, but none may print success and leave its value out of the file.
