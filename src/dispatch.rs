@@ -4672,7 +4672,10 @@ impl<'a> Dispatcher<'a> {
             crate::command_step::RunState::Interrupted => {
                 // Not a verdict, so it routes nowhere. Clearing the run leaves
                 // the task on this step with nothing started, which the next
-                // pass reads as `Fresh` and runs again.
+                // pass reads as `Fresh` and runs again. The clearing also
+                // stops the run's process group, once its files are gone: a
+                // wrapper killed on its own leaves its command running, and
+                // the second run must not start beside it.
                 //
                 // Running it again is the only honest answer: the command was
                 // never allowed to finish, so nothing knows whether it would
@@ -4697,6 +4700,10 @@ impl<'a> Dispatcher<'a> {
                     // write) would leave the task here with no count, and the
                     // next pass would run the command again for good.
                     self.pending_command_forget = Some(key.clone());
+                    // The files stay, the processes do not: the wrapper died
+                    // without its command, and a blocked task has no later
+                    // step that would stop what the first run left behind.
+                    runs.stop_the_group(&key);
                     if let Some(pane) = runs.pane(&key) {
                         let _ = self.mux.close_pane(&pane);
                         runs.forget_pane(&key);

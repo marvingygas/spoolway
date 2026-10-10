@@ -562,7 +562,7 @@ fn settles_within(pid: u32, patience: std::time::Duration) -> bool {
 /// every time — the leader is this process's own child, so nothing reaps it
 /// until the test or the dispatcher does.
 #[cfg(target_os = "linux")]
-fn group_alive(pid: u32) -> bool {
+pub(crate) fn group_alive(pid: u32) -> bool {
     let group = pid.to_string();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
@@ -597,7 +597,7 @@ fn group_alive(pid: u32) -> bool {
 /// Without this, `kill_group` read every group as already gone on a Mac and
 /// returned before sending a single signal.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn group_alive(pid: u32) -> bool {
+pub(crate) fn group_alive(pid: u32) -> bool {
     // `kill(-0, 0)` is `kill(0, 0)`: the caller's own group, which is always
     // there. A pid that does not fit an `i32` would wrap negative and name
     // some other group, or all of them.

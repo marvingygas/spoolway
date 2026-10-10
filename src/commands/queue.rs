@@ -746,12 +746,18 @@ fn queue_unqueue_forced(
         let _ = mux.interrupt_lane(&name);
         println!("interrupted lane {stage}/{id}");
     }
+    // Every run the task left, not only the step it is on: a background step
+    // started earlier is still going, and a `.group` record names a process a
+    // finished step backgrounded. The worktree comes down below, and anything
+    // left running would keep its cwd in a directory that is gone — the same
+    // reason `Dispatcher::clean_up` stops them all.
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
-    for run in crate::status::running_command_steps(repo, &tasks, pipelines)
-        .into_iter()
-        .filter(|run| run.task == id)
-    {
-        runs.stop(&crate::command_step::Runs::key(&run.step, &run.task));
+    for key in runs.keys_for_task(id) {
+        if let Some(pane) = runs.pane(&key) {
+            let _ = mux.close_pane(&pane);
+            runs.forget_pane(&key);
+        }
+        runs.stop(&key);
     }
 
     let mut task = repo.task(id)?;
@@ -9808,6 +9814,51 @@ mod tests {
         let said = format!("{err:#}");
         assert!(!said.contains("--force\n"), "{said}");
         assert!(said.contains("Unqueue `child` first"), "{said}");
+    }
+
+    /// A forced unqueue brings the worktree down, so a process a finished
+    /// command step backgrounded — recorded only in a `.group` file — has to
+    /// be stopped first, or it keeps its cwd in a directory that is gone.
+    #[test]
+    fn a_forced_unqueue_stops_what_a_finished_command_step_backgrounded() {
+        let (repo, _root_guard) = fixture("unqueue-forced-group");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "implement".to_string();
+        task.save().unwrap();
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("check", "solo");
+        let child_file = repo.root.join("child.pid");
+        runs.start(
+            &key,
+            &format!("(sleep 60 & echo $! >{})", child_file.display()),
+            &repo.root,
+            &Default::default(),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let child = loop {
+            let text = std::fs::read_to_string(&child_file).unwrap_or_default();
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+            assert!(started.elapsed().as_secs() < 20, "the child never started");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        while runs.state(&key) != crate::command_step::RunState::Exited(0) {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        runs.forget(&key).unwrap();
+        assert!(crate::headless::alive(child));
+
+        queue_unqueue_forced(&repo, &pipelines, "solo", "implement", None).unwrap();
+
+        assert!(
+            !crate::headless::alive(child),
+            "the backgrounded process outlived the unqueue"
+        );
     }
 
     #[test]

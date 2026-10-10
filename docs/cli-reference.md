@@ -352,7 +352,7 @@ spoolway queue unqueue <task> --force
 | Flag | Default | What it does |
 |---|---|---|
 | `--all` | | Every not-started task, the way the board's `U` does. Refused together with `--force` |
-| `--force` | | Interrupt any live lane, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
+| `--force` | | Interrupt any live lane, stop every command run the task left, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
 
 A task that has started is refused, naming its stage, its checkout when it has one, and both
 routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
