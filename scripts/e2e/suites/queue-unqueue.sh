@@ -194,6 +194,58 @@ refuses "in the other flag order too" "--all --force" \
 works "paused-route's checkout is untouched by either refusal" \
   test -n "$(worktree_of paused-route)"
 
+# ------------------------------------------------- a hook-paused task, requeued
+# A failing `queued` hook pauses the task and leaves `hook_paused:` and the
+# hook's exit file behind. Unqueued and queued again, the task has to start
+# over: no pause record in the pending copy, no exit file under `tracking/`,
+# and both `queued` and `started` hooks fired anew rather than the old exit
+# code being read as the new run's answer.
+HOOKLOG="$LIVE/requeue-hook.log"
+HOOK_OK="$LIVE/requeue-hook.ok"
+TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
+mkdir -p "$LIVE/proj/.spoolway/hooks"
+cat > "$LIVE/proj/.spoolway/hooks/requeue.sh" <<HOOK
+#!/bin/sh
+[ "\$SPOOLWAY_EVENT" = open ] && exit 0
+echo "\$SPOOLWAY_EVENT \$SPOOLWAY_TASK" >> "$HOOKLOG"
+[ -f "$HOOK_OK" ] && exit 0
+exit 1
+HOOK
+chmod +x "$LIVE/proj/.spoolway/hooks/requeue.sh"
+must "a hook that fails until told otherwise" \
+  "$SPOOLWAY" config set issue_tracking.hook requeue.sh
+
+echo hang > "$CTL/hook-requeue"
+task_doc "$LIVE/hook-requeue.md" hook-requeue "$BODY" "group: hook-requeue" \
+  "group_description: a task under a hook that fails until told otherwise"
+must "a task queues under it" "$SPOOLWAY" queue add --from "$LIVE/hook-requeue.md"
+if drive hook-requeue paused 60; then ok "the failing queued hook pauses it"
+else bad "the failing queued hook pauses it (at \`$(stage_of hook-requeue)\`)"; fi
+has "with the pause recorded as a hook's" "hook_paused: queued" \
+  "$SPOOLWAY_PROJECT_HOME/queue/hook-requeue.md"
+works "and the hook's exit file on disk" \
+  test -f "$TRACKING/hook-requeue · queued.exit"
+dispatcher_stop
+
+must "a hook-paused task unqueues" \
+  "$SPOOLWAY" queue unqueue hook-requeue --force
+lacks "the pending copy carries no hook_paused" "hook_paused:" \
+  "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"
+lacks "and no missing_start_branch" "missing_start_branch:" \
+  "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"
+works "and no hook run file of the old run is left" \
+  test -z "$(find "$TRACKING" -name 'hook-requeue · *' 2>/dev/null)"
+
+touch "$HOOK_OK"
+: > "$HOOKLOG"
+must "it queues again" "$SPOOLWAY" queue add --from \
+  "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"
+if drive hook-requeue implement 60; then ok "and now gets past the hook to implement"
+else bad "and now gets past the hook to implement (at \`$(stage_of hook-requeue)\`)"; fi
+has "the queued hook fired again" "queued hook-requeue" "$HOOKLOG"
+has "and so did the started hook" "started hook-requeue" "$HOOKLOG"
+dispatcher_stop
+
 # ------------------------------------------------ the tool-requirements gate
 # The one route the mockup itself draws: the queue screen's own `enter`,
 # gated over a hook whose declared `gh` floor this machine's `gh` cannot

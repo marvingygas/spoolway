@@ -2004,9 +2004,10 @@ pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
 }
 
 /// The move itself, shared with `spoolway queue unqueue`: `task`'s task
-/// written to pending with every reserved key dropped, then its queue file
-/// removed. The caller decides whether `task` may go — the board's `u` and
-/// [`unqueue_task`] only carry a task that has not started, `queue unqueue
+/// written to pending with every reserved key and the dispatcher's pause
+/// records dropped, then its queue file removed and its hook runs under
+/// `tracking/` stopped and reclaimed. The caller decides whether `task` may
+/// go — the board's `u` and [`unqueue_task`] only carry a task that has not started, `queue unqueue
 /// --force` one whose checkout it has just torn down — and holds the task's
 /// lock while it does.
 ///
@@ -2036,6 +2037,11 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         if task.front.run.is_some() || task.front.base_commit.is_some() {
             map.remove("starts_from");
         }
+        // The dispatcher's records of why it paused this task. They describe
+        // the run being left behind, and a copy that kept `hook_paused` would
+        // be sent straight to `done` by its first `resume`.
+        map.remove("hook_paused");
+        map.remove("missing_start_branch");
     }
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
@@ -2047,6 +2053,12 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
     // than lost between the two directories.
     std::fs::remove_file(&task.path)
         .with_context(|| format!("removing {}", task.path.display()))?;
+    // The hook runs belong to the run just left, and one still going is
+    // stopped first (see [`crate::tracking::stop_and_reclaim`]). Kept, the next queue would
+    // find an exit code for `queued` and `started` already on disk, and
+    // `tracking_gate` would read that old code as the new run's answer
+    // without firing the hook again.
+    crate::tracking::stop_and_reclaim(repo, task.id());
     Ok(Some(dest))
 }
 
