@@ -699,4 +699,55 @@ else
   printf '        exit %s: %s\n' "$unpub_status" "$unpub_out"
 fi
 
+# ------------------------------------- an origin behind an SSH host alias
+# Two GitHub accounts on one machine are usually told apart by an SSH host
+# alias such as `github.com-work`, so `origin` reads `git@github.com-work:o/r`.
+# `owner_repo()` has to name the stack API's `{owner}/{repo}` from the path
+# after the alias, not from the alias itself. The alias is redirected to the
+# bare repo with `insteadOf`, as the plain URL above is.
+ALIAS_URL="git@github.com-work:e2e/spoolway.git"
+must "origin, behind an SSH host alias" git remote set-url origin "$ALIAS_URL"
+must "the alias, redirected to the local bare repo" \
+  git config "url.$ORIGIN.insteadOf" "$ALIAS_URL"
+
+must "aliasbase's branch, off main" git branch task/aliasbase main
+must "its worktree" git worktree add -q "$WORKTREES/aliasbase" task/aliasbase
+(
+  cd "$WORKTREES/aliasbase" || exit 1
+  mkdir -p notes
+  echo "# aliasbase" > notes/aliasbase.md
+  git add -A
+  git commit -qm "wip(aliasbase): implement"
+)
+queue_task aliasbase "base: main" "branch: task/aliasbase"
+must "aliasbase's pull request" bash -c \
+  "cd '$WORKTREES/aliasbase' && '$SPOOLWAY' stack aliasbase"
+
+must "aliastop's branch, off task/aliasbase" git branch task/aliastop task/aliasbase
+must "its worktree" git worktree add -q "$WORKTREES/aliastop" task/aliastop
+(
+  cd "$WORKTREES/aliastop" || exit 1
+  mkdir -p notes
+  echo "# aliastop" > notes/aliastop.md
+  git add -A
+  git commit -qm "wip(aliastop): implement"
+)
+queue_task aliastop "depends_on: [aliasbase]" \
+  "base: main" "starts_from: task/aliasbase" "branch: task/aliastop"
+
+# Earlier sections already registered stacks under `repos/e2e/spoolway`, so
+# only a line this case added can tell the alias was read correctly.
+alias_before=$(wc -l < "$LIVE/stacks.repos" 2>/dev/null || echo 0)
+alias_out=$(cd "$WORKTREES/aliastop" && "$SPOOLWAY" stack aliastop 2>&1)
+alias_status=$?
+if [ "$alias_status" -eq 0 ] \
+   && [ "$(wc -l < "$LIVE/stacks.repos" 2>/dev/null || echo 0)" -gt "$alias_before" ] \
+   && tail -1 "$LIVE/stacks.repos" | grep -qxE '[0-9]+ repos/e2e/spoolway'; then
+  ok "an origin behind an SSH host alias registers the stack for the repo after the alias"
+else
+  bad "an origin behind an SSH host alias registers the stack for the repo after the alias"
+  printf '        exit %s: %s\n' "$alias_status" "$alias_out"
+  sed 's/^/        /' "$LIVE/stacks.repos" 2>/dev/null
+fi
+
 finish

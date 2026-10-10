@@ -436,6 +436,17 @@ flowchart LR
   request is opened. A base that cannot be published refuses before the task's own branch is
   force-pushed, so a failed run leaves nothing published.
 - An empty diff against the cut point opens no pull request.
+- The owner and repo come from the `origin` URL. These shapes are read:
+
+  | `origin` | Owner and repo |
+  |---|---|
+  | `git@github.com:o/r.git` | `o`, `r` |
+  | `https://github.com/o/r` | `o`, `r` |
+  | `git@github.com-work:o/r.git` | `o`, `r` |
+
+  The last shape is an SSH host alias, the usual way to use two GitHub accounts. An `origin`
+  that is not on GitHub, such as a gitlab URL or a bare repository path, is refused with
+  `is not a github.com remote`.
 - A git or `gh` failure exits non-zero. Calling the command again reuses the existing pull
   request.
 - Two tasks that depend on the same task are siblings. A GitHub stack is one line, so only the

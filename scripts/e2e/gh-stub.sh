@@ -416,6 +416,11 @@ case "${1:-}" in
           [ "$b" -ge "$n" ] && n=$((b + 1))
         done
         cat | grep -oE '[0-9]+' > "$STACKS/$n"
+        # The `repos/<owner>/<repo>` the stack was registered under, one line
+        # per stack, so a suite can check which repository the caller named.
+        # A sibling file of `$STACKS`, since a glob over the stacks themselves
+        # must never meet it.
+        echo "$n ${path%/stacks}" >> "$STACKS.repos"
         exit 0
         ;;
       */stacks/*)
