@@ -1047,6 +1047,55 @@ pub fn prepare_session_home(
     Some(home)
 }
 
+/// The file in a session home that names the task it was made for.
+const HOME_TASK_FILE: &str = ".spoolway-task";
+
+/// What [`tag_session_home`] writes: the project's home and the task id, one
+/// to a line. Session homes live in one machine-wide directory, shared by every
+/// project, and task ids are slugs two projects can both use, so the id alone
+/// would let one project's archive delete another's live lane's home.
+fn home_tag(project: &std::path::Path, task: &str) -> String {
+    format!("{}\n{task}", project.display())
+}
+
+/// Record in `session`'s home which task of which project it was made for.
+///
+/// The home is made before the agent writes anything, so a lane that dies
+/// first leaves no transcript, no usage line and, on headless, no lane record:
+/// nothing else says whose home it is. Without this, archiving the task could
+/// not find it. Best-effort, like the home itself.
+pub fn tag_session_home(kind: &str, session: &str, project: &std::path::Path, task: &str) {
+    if let Some(home) = session_home(kind, session)
+        && home.is_dir()
+    {
+        let _ = std::fs::write(home.join(HOME_TASK_FILE), home_tag(project, task));
+    }
+}
+
+/// Remove every session home, of any kind, that [`tag_session_home`] marked
+/// for `task` of `project`. A home with no mark, or another task's or
+/// project's, is left alone.
+pub fn reclaim_task_session_homes(project: &std::path::Path, task: &str) {
+    let want = home_tag(project, task);
+    for adapter in ADAPTERS {
+        let Some(home) = adapter.home.as_ref() else {
+            continue;
+        };
+        let Some(root) = crate::usage::state_root().map(|root| root.join(home.dir)) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let tagged = std::fs::read_to_string(entry.path().join(HOME_TASK_FILE));
+            if tagged.is_ok_and(|tagged| tagged == want) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
 /// Write the lane's copy of the kind's config, with `cwd` trusted in it.
 ///
 /// The person's own file first, so the lane keeps the provider config and

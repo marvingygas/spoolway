@@ -295,6 +295,29 @@ impl<'a> Dispatcher<'a> {
         }
         let _ = std::fs::remove_file(removal_marker(self.repo, task.id()));
 
+        // The handover's log is deleted below, and it is the only place the
+        // pull request's URL and the predicted conflicts were ever written.
+        // Copied into the task file first, so the archive still answers
+        // "where did this land".
+        //
+        // Replaced rather than appended to when the section is already there:
+        // a pass that saved this and then failed to rename, or was killed
+        // between the two, runs again on the same logs, and appending would
+        // list the pull request twice.
+        let handover = handover_summary(&self.repo.commands_dir(), task.id());
+        if !handover.is_empty() {
+            if task
+                .body
+                .lines()
+                .any(|line| line.trim_end() == "## Handover")
+            {
+                task.replace_section("## Handover", &handover)?;
+            } else {
+                task.append_to_section("## Handover", &handover);
+            }
+            task.save()?;
+        }
+
         // The lock spans the currency check, the rename and the append: the
         // rename moves the folder's modification time, and without the lock
         // another process's change could land between and be stamped as this
@@ -360,6 +383,7 @@ impl<'a> Dispatcher<'a> {
                 record.reclaim_session_home();
             }
         }
+        self.reclaim_freed_session_homes(task.id());
 
         // `task` itself just moved to the archive, so this reread is what
         // lets a branch retained for *its* sake, earlier in the chain, be
@@ -1073,6 +1097,7 @@ impl<'a> Dispatcher<'a> {
         // Every session home this arm was ever given, not just the lane
         // banked above: a copied `auth.json` under one outlives every
         // credential rotation otherwise (review finding 63).
+        self.reclaim_freed_session_homes(task.id());
         let stale: Vec<String> = self
             .lanes
             .keys()
@@ -1085,6 +1110,70 @@ impl<'a> Dispatcher<'a> {
             }
         }
     }
+}
+
+impl Dispatcher<'_> {
+    /// Remove the session homes of this task's lanes that no record in
+    /// `self.lanes` names any more.
+    ///
+    /// A headless lane's record is dropped the moment its step finishes, so
+    /// the records alone miss every lane that already ended. Every home
+    /// carries the project and task it was made for, which finds even a lane
+    /// that died before writing a transcript. The usage ledger covers homes
+    /// made before they were marked: every session a lane of this task ran
+    /// under was banked there with its kind. It is read fresh, as the cached
+    /// copy may predate lines banked earlier in this pass. The caller calls
+    /// this once the task's lanes are stopped, so none of these homes is still
+    /// in use.
+    fn reclaim_freed_session_homes(&self, task_id: &str) {
+        crate::agent::reclaim_task_session_homes(self.repo.home(), task_id);
+        for entry in crate::usage::read(self.repo).unwrap_or_default() {
+            if entry.task == task_id
+                && !entry.session.is_empty()
+                && let Some(home) = crate::agent::session_home(&entry.kind, &entry.session)
+            {
+                let _ = std::fs::remove_dir_all(home);
+            }
+        }
+    }
+}
+
+/// The `conflicts` and `pull req` lines `spoolway stack` printed for `task`,
+/// read from its command-step logs, each as a `- ` bullet line.
+///
+/// Matched on the label `stack` prints each under (`report_line` in
+/// `commands/stack.rs`), whichever step's log holds it, since the step's id is
+/// the pipeline's to name. The `.prev.log` of an earlier attempt is skipped:
+/// the run after it is the one whose pull request stands. Empty when no run
+/// printed either, which is every task whose pipeline has no handover.
+fn handover_summary(commands_dir: &Path, task: &str) -> String {
+    let prefix = format!("{task} · ");
+    let Ok(entries) = std::fs::read_dir(commands_dir) else {
+        return String::new();
+    };
+    let mut logs: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with(&prefix) && n.ends_with(".log") && !n.ends_with(".prev.log")
+            })
+        })
+        .collect();
+    logs.sort();
+    let mut out = String::new();
+    for path in logs {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with("conflicts ") || line.starts_with("pull req ") {
+                out.push_str(&format!("- {line}\n"));
+            }
+        }
+    }
+    out
 }
 
 /// The task that recorded `branch` as its own `branch:` — matched exactly,

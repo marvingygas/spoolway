@@ -10,7 +10,11 @@
 //! prompt, a command step's log, a hook run, a headless lane's record and
 //! log, a rebase's scratch worktree. Nobody reads any of those once the task
 //! they belong to has left the queue, and nothing this binary does depends
-//! on them still being there. This module ages them out under
+//! on them still being there. Archiving a task deletes its own `commands/`
+//! and `tracking/` files at once, handover log included, after copying the
+//! pull request and conflicts lines into the archived task file; what is left
+//! in those two is a run of a task that never reached the archive. This
+//! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
 //! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for the one
 //! place that split is written down.

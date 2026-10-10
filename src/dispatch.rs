@@ -6554,6 +6554,7 @@ fn prepare_boot(
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     if let Some(adapter) = adapter {
         crate::agent::prepare_session_home(&profile.kind, &session, &worktree);
+        crate::agent::tag_session_home(&profile.kind, &session, repo.home(), &task.front.id);
         env.extend(adapter.session_env(&session));
     }
     env.extend(compact_env);
@@ -19406,6 +19407,204 @@ mod tests {
 
         repo.git(&["worktree", "remove", "--force", worktree.to_str().unwrap()])
             .ok();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// On headless a finished lane's record is dropped at once, so archiving
+    /// finds no record for its codex session home. The usage ledger still
+    /// names the session, and that is what lets the archive remove the home.
+    /// Fails before the change: the home is left under the codex state
+    /// directory, which is what a headless task did.
+    #[test]
+    fn archiving_removes_the_session_home_of_a_lane_already_freed() {
+        let (repo, _root_guard) = fixture("cleanup-freed-home");
+        let path = add_task(&repo, "demo", "implement");
+        let home = crate::scratch::root("dispatch-cleanup-freed-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let session = "cleanup-freed-s1";
+            let session_home = crate::agent::session_home("codex", session).unwrap();
+            std::fs::create_dir_all(&session_home).unwrap();
+            std::fs::write(session_home.join("auth.json"), "{}").unwrap();
+            crate::usage::append(
+                &repo,
+                &crate::usage::Entry {
+                    tier_tokens: Default::default(),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    task: "demo".to_string(),
+                    plan: None,
+                    step: "implement".to_string(),
+                    pipeline: "default".to_string(),
+                    agent: "codex".to_string(),
+                    kind: "codex".to_string(),
+                    model: "m".to_string(),
+                    session: session.to_string(),
+                    round: 0,
+                    wall_s: 1,
+                    turns: 1,
+                    tokens: Default::default(),
+                    cost_usd: None,
+                    reported_usd: None,
+                    ctx_peak: None,
+                    pipeline_version: "1.0".into(),
+                    outcome: None,
+                    blocked: false,
+                    run: None,
+                    trial: None,
+                    trial_group: None,
+                    dir: None,
+                    hand: false,
+                    project: String::new(),
+                },
+            )
+            .unwrap();
+
+            let mux = FakeMux::new(vec![]);
+            let mut report = Report::default();
+            let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .clean_up(&mut reload(&path), &[], &mut report)
+                .unwrap();
+
+            assert!(archived);
+            assert!(
+                !session_home.exists(),
+                "a freed lane's session home outlived its archived task"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A headless codex lane that dies before its agent writes a transcript
+    /// leaves a home, no usage line and no lane record. The mark written at
+    /// launch is what lets the archive remove it, and only for its own task of
+    /// its own project.
+    /// Fails before the change: the home is left under the codex state
+    /// directory.
+    #[test]
+    fn archiving_removes_a_tagged_session_home_with_no_ledger_line() {
+        let (repo, _root_guard) = fixture("cleanup-tagged-home");
+        let path = add_task(&repo, "demo", "implement");
+        let home = crate::scratch::root("dispatch-cleanup-tagged-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let ours = crate::agent::session_home("codex", "tagged-ours").unwrap();
+            let theirs = crate::agent::session_home("codex", "tagged-theirs").unwrap();
+            for dir in [&ours, &theirs] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            let elsewhere = crate::agent::session_home("codex", "tagged-elsewhere").unwrap();
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            crate::agent::tag_session_home("codex", "tagged-ours", repo.home(), "demo");
+            crate::agent::tag_session_home("codex", "tagged-theirs", repo.home(), "demo-two");
+            // The same task id in another project: a live lane there.
+            crate::agent::tag_session_home(
+                "codex",
+                "tagged-elsewhere",
+                Path::new("/another/project/home"),
+                "demo",
+            );
+
+            let mux = FakeMux::new(vec![]);
+            let mut report = Report::default();
+            let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .clean_up(&mut reload(&path), &[], &mut report)
+                .unwrap();
+
+            assert!(archived);
+            assert!(!ours.exists(), "a never-banked lane's home was left behind");
+            assert!(theirs.exists(), "another task's home was removed");
+            assert!(
+                elsewhere.exists(),
+                "another project's home for a task of the same name was removed"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The handover's `pull req` and `conflicts` lines are printed to a log
+    /// that archiving deletes, so they are copied into the archived file.
+    /// Fails before the change: the archived file names neither.
+    #[test]
+    fn archiving_keeps_the_handover_pull_request_and_conflicts() {
+        let (repo, _root_guard) = fixture("cleanup-handover");
+        let path = add_task(&repo, "demo", "implement");
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::write(
+            repo.commands_dir().join("demo · handover.log"),
+            "  push        task/demo → origin\n  conflicts   none open\n  pull req    #7 — https://example.test/pull/7\n",
+        )
+        .unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut reload(&path), &[], &mut report)
+            .unwrap();
+
+        assert!(archived);
+        let kept = std::fs::read_to_string(repo.archive_dir().join("demo.md")).unwrap();
+        assert!(
+            kept.contains(
+                "\n## Handover\n- conflicts   none open\n- pull req    #7 — https://example.test/pull/7\n"
+            ),
+            "{kept}"
+        );
+        assert!(!repo.commands_dir().join("demo · handover.log").exists());
+    }
+
+    /// A pass that copied the handover and then failed to archive runs again
+    /// on the same logs, and the pull request must still be listed once.
+    /// Fails before the fix: the second copy appended the lines again.
+    #[test]
+    fn a_repeated_cleanup_lists_the_handover_once() {
+        let (repo, _root_guard) = fixture("cleanup-handover-twice");
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.append_to_section(
+            "## Handover",
+            "- pull req    #7 — https://example.test/pull/7\n",
+        );
+        task.save().unwrap();
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::write(
+            repo.commands_dir().join("demo · handover.log"),
+            "  pull req    #7 — https://example.test/pull/7\n",
+        )
+        .unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .clean_up(&mut reload(&path), &[], &mut report)
+            .unwrap();
+
+        let kept = std::fs::read_to_string(repo.archive_dir().join("demo.md")).unwrap();
+        assert_eq!(kept.matches("pull req").count(), 1, "{kept}");
+    }
+
+    /// Discarding a trial arm removes the session homes of its lanes that
+    /// already ended, as archiving does: on headless their records are gone.
+    /// Fails before the fix: only homes named by a lane record were removed.
+    #[test]
+    fn discarding_an_arm_removes_a_tagged_session_home_with_no_lane_record() {
+        let (repo, _root_guard) = fixture("trial-discard-home");
+        add_task_with(&repo, "beta-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+        });
+        let home = crate::scratch::root("dispatch-discard-tagged-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let ours = crate::agent::session_home("codex", "discard-ours").unwrap();
+            std::fs::create_dir_all(&ours).unwrap();
+            crate::agent::tag_session_home("codex", "discard-ours", repo.home(), "beta-1");
+
+            let mux = FakeMux::new(vec![]);
+            crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false)
+                .unwrap();
+
+            assert!(!ours.exists(), "a discarded arm's home was left behind");
+        });
         let _ = std::fs::remove_dir_all(&home);
     }
 
