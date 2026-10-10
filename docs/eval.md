@@ -143,7 +143,7 @@ each count in full, so it is not the calendar time the work took.
 Runs are counted once per table. Under `by step`, one run spans several rows, so `RUNS` on the
 line is less than the sum of the rows' `RUNS`.
 
-With `--all`, a `PROJECT` column appears when the rows span more than one project.
+With `--all`, each project gets its own row for a group, pipeline, step or version name. A `PROJECT` column appears when the rows span more than one project.
 
 ### The filter panel
 
@@ -322,6 +322,8 @@ token columns, the four class-cost columns and their `_per_run` twins, `cost_per
 both views export the same row. `--json` prints an object, `{"by", "rows",
 "total"}`, rather than a bare array, so the `Total` line cannot be mistaken for a row. Its own
 `by` column reads `total`. `--csv` and `--json` are not allowed together.
+
+When no lane matches the filters, `--json` prints the same object with an empty `rows`. `--csv` prints the header and the total row. Both exit 0 with nothing else on stdout. The plain table prints a sentence instead.
 
 `unpriced` counts how many lanes have no price. `cost_usd` is blank in CSV, and `null` in
 `--json`, when every lane on the row is unpriced.

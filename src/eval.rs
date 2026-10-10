@@ -135,7 +135,9 @@ fn run_to(
     };
     entries.retain(|entry| lane_filters.admits(entry));
 
-    if entries.is_empty() {
+    // Data output prints even with no rows, so a script reading it gets the
+    // header or the empty object instead of prose it cannot parse.
+    if entries.is_empty() && !json && !args.csv {
         if args.trial.is_some() {
             writeln!(out, "No runs recorded for that trial yet.")?;
             return Ok(());
@@ -156,7 +158,7 @@ fn run_to(
     // the arm that started first — not whichever finished last, which is
     // what the newest-first order every other `--by task` reads in would put
     // on top.
-    let trial_arms = args.trial.is_some() && args.by == EvalBy::Task;
+    let trial_arms = args.trial.is_some() && args.by == EvalBy::Task && !rows.is_empty();
     if trial_arms {
         rows.sort_by(|a, b| a.first_ts.cmp(&b.first_ts));
     }
@@ -772,9 +774,9 @@ struct LaneRow {
     /// run id a screen has no room for, and raw values where the screen
     /// abbreviates.
     keys: Vec<String>,
-    /// The project of the row's earliest lane. Shown rather than used to
-    /// split rows — two projects sharing a pipeline name is a fact worth
-    /// seeing, not a reason to fork the table.
+    /// The project every lane in the row comes from. Part of the grouping
+    /// key in [`lane_rows`], so two projects sharing a group, pipeline, step
+    /// or version name are two rows, each naming its own.
     project: String,
     /// The row's earliest and latest lane.
     first_ts: String,
@@ -994,13 +996,20 @@ fn lane_rows(
     let mut order: Vec<Vec<String>> = Vec::new();
     let mut groups: HashMap<Vec<String>, Vec<&Entry>> = HashMap::new();
     for entry in entries {
-        let key = match by {
+        let mut key = match by {
             EvalBy::Group => vec![entry.plan.clone().unwrap_or_else(|| NO_GROUP.to_string())],
             EvalBy::Task => vec![entry.project.clone(), run_key(entry, fallback)],
             EvalBy::Pipeline => vec![entry.pipeline.clone()],
             EvalBy::Step => vec![entry.pipeline.clone(), entry.step.clone()],
             EvalBy::Version => vec![entry.pipeline.clone(), entry.pipeline_version.clone()],
         };
+        // Under `--all` the same group, pipeline, step or version name in two
+        // projects is two rows, each labelled with its own project. The
+        // project goes last so the indexes the sort and the cells read by
+        // stay where they were; a task's key already leads with it.
+        if by != EvalBy::Task {
+            key.push(entry.project.clone());
+        }
         if !groups.contains_key(&key) {
             order.push(key.clone());
         }
@@ -1022,8 +1031,9 @@ fn lane_rows(
                 .expect("a group always has a line");
             let metrics = Metrics::for_matching(&lanes, fallback, models);
             let (cells, keys) = match by {
-                EvalBy::Group | EvalBy::Pipeline => (key.clone(), key.clone()),
-                EvalBy::Step => (key.clone(), key.clone()),
+                // Without the project this key ends with, which is not a cell.
+                EvalBy::Group | EvalBy::Pipeline => (key[..1].to_vec(), key[..1].to_vec()),
+                EvalBy::Step => (key[..2].to_vec(), key[..2].to_vec()),
                 // A run's pipeline and version are its latest lane's: a run
                 // re-routed mid-way is described by where it ended up.
                 EvalBy::Task => (
@@ -5638,6 +5648,34 @@ mod tests {
         lane_rows(&refs, by, &fallback, models, Some(&Pipelines::builtin()))
     }
 
+    /// Two projects that share a group, pipeline, step and version name get
+    /// one row each under every `--by`, each carrying its own project.
+    /// Fails before the project joined the grouping key: the two merged into
+    /// one row carrying the first project's name.
+    #[test]
+    fn same_name_in_two_projects_makes_two_rows_under_every_key() {
+        let mut a = lane("t1", "implement", 1, Some("pass"));
+        a.project = "alpha".into();
+        a.plan = Some("g".into());
+        let mut b = lane("t2", "implement", 1, Some("pass"));
+        b.project = "beta".into();
+        b.plan = Some("g".into());
+        let entries = [a, b];
+        for by in [
+            EvalBy::Group,
+            EvalBy::Pipeline,
+            EvalBy::Step,
+            EvalBy::Version,
+            EvalBy::Task,
+        ] {
+            let rows = rows_by(&entries, by);
+            let mut projects: Vec<&str> = rows.iter().map(|r| r.project.as_str()).collect();
+            projects.sort();
+            assert_eq!(projects, ["alpha", "beta"], "{by:?}");
+            assert!(spans_more_than_one_project(&rows), "{by:?}");
+        }
+    }
+
     fn one_row(entries: &[Entry]) -> Metrics {
         let rows = rows_by(entries, EvalBy::Pipeline);
         assert_eq!(rows.len(), 1, "one pipeline, one row");
@@ -9550,6 +9588,35 @@ mod screen_tests {
             .collect();
         assert_eq!(named, ["beta", "gamma", "alpha"]);
         assert_eq!(json["total"]["runs"], 4);
+    }
+
+    /// A trial nothing ran under, read by task, still prints data: the empty
+    /// object for `--json`, the header and total for `--csv`. Fails without
+    /// the empty-rows guard on the trial baseline, which indexes row zero.
+    #[test]
+    fn an_empty_trial_by_task_prints_data_under_json_and_csv() {
+        let (repo, _root_guard) = fixture("cli-empty-trial");
+        let args = EvalArgs {
+            by: EvalBy::Task,
+            trial: Some("no-such-trial".into()),
+            ..no_args()
+        };
+        let mut out = Vec::new();
+        run_to(&repo, &args, true, Some(&Pipelines::builtin()), &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["rows"], serde_json::json!([]));
+        assert!(json.get("total").is_some() && json.get("by").is_some());
+
+        let args = EvalArgs { csv: true, ..args };
+        let mut out = Vec::new();
+        run_to(&repo, &args, false, Some(&Pipelines::builtin()), &mut out).unwrap();
+        let csv = String::from_utf8(out).unwrap();
+        assert_eq!(
+            csv.lines().next(),
+            Some(lanes_csv_header(EvalBy::Task).as_str()),
+            "{csv}"
+        );
+        assert!(!csv.contains("No runs recorded"), "{csv}");
     }
 
     /// A sort can put a later arm on top; every delta line still reads
