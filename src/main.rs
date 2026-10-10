@@ -302,8 +302,8 @@ fn run() -> Result<()> {
             // `Repo` still cannot even parse as TOML is a different case:
             // `sync::config` fails loudly on that one itself, naming the
             // file, rather than leaving it to look like nothing was wrong.
-            // Every other command reaching this arm still dies on a config
-            // it cannot read.
+            // Every other command reaching this arm, bar `report` and
+            // `stack` below, still dies on a config it cannot read.
             let repo = if matches!(command, Command::Sync(_)) {
                 let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
                 // The lenient read is for a config, not a home: a copied
@@ -314,6 +314,10 @@ fn run() -> Result<()> {
                     return Err(err);
                 }
                 repo
+            } else if matches!(command, Command::Report(_) | Command::Stack(_)) {
+                // Both run inside a dispatched task, so a config being edited
+                // under the run must not end them: see `discover_live`.
+                Repo::discover_live(&cwd)?
             } else {
                 Repo::discover(&cwd)?
             };
