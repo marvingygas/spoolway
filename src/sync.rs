@@ -968,7 +968,7 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
             // seeds a missing skeleton from `skeleton.shipped` rather than
             // from anything read out of the main checkout.
             acts.push(Act::write(
-                path.clone(),
+                crate::config::write_target(&path),
                 &shown,
                 crate::config::Config::default().render()?,
             ));
@@ -1244,7 +1244,13 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         outcomes.push(Outcome::wrote(&shown, "relaid out"));
     }
 
-    acts.push(Act::write(path, &shown, rewritten));
+    // Through the link, if `config.toml` is one: `sync` runs after every
+    // upgrade, and a rename over a linked shared file would replace the link.
+    acts.push(Act::write(
+        crate::config::write_target(&path),
+        &shown,
+        rewritten,
+    ));
     Ok(())
 }
 
@@ -2668,6 +2674,34 @@ mod tests {
             "{:?}",
             outcome_lines(&outcomes)
         );
+    }
+
+    /// A `config.toml` that is a symlink is brought forward in the file it
+    /// points at, and stays a link: `sync` runs after every upgrade, and a
+    /// rename over the link would leave the shared copy behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_sync_brings_a_symlinked_config_forward_in_its_target() {
+        let (repo, _root_guard) = fixture("config-symlinked");
+        let path = crate::config::Config::path_in(&repo.root);
+        let target = repo.root.join("shared-config.toml");
+        std::fs::write(&target, "[dispatch]\nlane_quiet = \"45m\"\n").unwrap();
+        std::fs::remove_file(&path).ok();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "config.toml is no longer a symlink"
+        );
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert!(after.contains("lane_quiet = \"45m\""), "{after}");
+        assert!(after.contains("auto_commit"), "{after}");
     }
 
     /// The other half of the contract: a comment is spoolway's, so one

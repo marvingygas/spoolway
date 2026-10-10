@@ -395,6 +395,9 @@ What `sync` replaces, file by file:
 In home mode, this leaves the checkout untouched: nothing under it is read, written or
 removed. See [Home mode](concepts.md#home-mode).
 
+When `config.toml` is a symlink, `sync` and `init --force` write into the file the link points at
+and leave the link in place.
+
 A `config.toml` that `sync` cannot read fails the whole command, naming the file and pointing
 at `spoolway doctor`. One it cannot parse as TOML does the same, pointing at `spoolway config
 edit` instead.

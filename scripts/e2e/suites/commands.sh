@@ -1433,6 +1433,28 @@ for n in 0 1 2; do
 done
 rm -rf "$SPOOLWAY_PROJECT_HOME/overrides"
 
+# A config.toml that is a symlink into a shared dotfiles folder keeps being
+# one: `config set` writes the new value into the file the link points at.
+# Replacing the link would leave the shared copy without the edit and print
+# nothing about it.
+LINK_DIR="$LIVE/config-set-symlink"
+mkdir -p "$LINK_DIR"
+LINK_KEY=unattended.max_cost_usd
+BEFORE_LINK_COST=$("$SPOOLWAY" config get "$LINK_KEY")
+must "a cost limit written to the regular file first, so the key is on a line" \
+  "$SPOOLWAY" config set "$LINK_KEY" 11
+cp .spoolway/config.toml "$LINK_DIR/before.toml"
+mv .spoolway/config.toml "$LINK_DIR/shared.toml"
+ln -s "$LINK_DIR/shared.toml" .spoolway/config.toml
+must "config set on a symlinked config.toml" "$SPOOLWAY" config set "$LINK_KEY" 12
+works "and config.toml is still a symlink" test -L .spoolway/config.toml
+works "and the value reads back" test "$("$SPOOLWAY" config get "$LINK_KEY")" = "12.0"
+works "and the shared file differs from before in that one line only" \
+  test "$(diff "$LINK_DIR/before.toml" "$LINK_DIR/shared.toml" | grep -c '^[<>]')" = "2"
+rm .spoolway/config.toml
+mv "$LINK_DIR/shared.toml" .spoolway/config.toml
+must "cost limit restored" "$SPOOLWAY" config set "$LINK_KEY" "$BEFORE_LINK_COST"
+
 # ------------------------------------------------------------- sync panel
 # A checkout behind the binary is told nothing in front of a command: no line
 # on stderr, no stamp file. Only `spoolway sync` and `spoolway doctor` speak
