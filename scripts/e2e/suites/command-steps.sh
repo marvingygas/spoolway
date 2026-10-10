@@ -440,6 +440,35 @@ else
   bad "nor does the problem log grow while it sits blocked (found $PROBLEM_HITS_AFTER)"
 fi
 
+# ------------------------------------------- a launch that fails for another reason
+# The other kind of launch that never succeeds: the step is fine, and what
+# stops it is around it. Here `task/branch-taken` already exists and the task
+# has no checkout on record, so the worktree cannot be cut. `implement` is
+# given an `on_fail` for this case, which is what tells the two roads apart:
+# sent down it, the task would be routed as though `implement` had run and
+# failed. It belongs in front of a person on `blocked`, with `blocked_from`
+# naming the step that could not start.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+sed -i '0,/^    loop: 2$/s//    loop: 2\n    on_fail: review/' .spoolway/pipelines/default.yml
+works "a pipeline whose first step names an on_fail checks out" \
+  "$SPOOLWAY" pipeline check
+git branch task/branch-taken HEAD
+
+task_doc "$LIVE/branch-taken.md" branch-taken "$BODY" "group: branch-taken"
+must "a task whose branch name is already taken" \
+  "$SPOOLWAY" queue add --from "$LIVE/branch-taken.md"
+if drive branch-taken blocked 120; then
+  ok "three failed launches that are not the step's fault park the task on blocked"
+else
+  bad "three failed launches that are not the step's fault park the task on blocked \
+(at \`$(stage_of branch-taken)\`)"
+fi
+has "blocked_from names the step that could not start" \
+  "blocked_from: implement" $SPOOLWAY_PROJECT_HOME/queue/branch-taken.md
+lacks "and the task never went down the step's on_fail" \
+  "→ \`review\`" $SPOOLWAY_PROJECT_HOME/queue/branch-taken.md
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+
 # --------------------------------------------------- report --pass --stage, off blocked
 # `spoolway report --pass --stage <step>` names where a cleared block lands,
 # bounded by the steps this task has actually run — its own `steps:`, the
