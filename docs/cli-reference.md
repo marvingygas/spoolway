@@ -1318,6 +1318,12 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 | `--yes` | | Let a run with no terminal write. Without it, a run with nobody to answer writes nothing and exits 0. A run at a terminal does not need it |
 | `--force` | | Overwrite existing config, pipeline and prompt files. Keeps the project's provider, tracker and project key unless `--provider` or `--tracker` is passed. In a home-mode clone, names the other clones that share that config before rewriting it |
 
+A project whose `.spoolway/spoolway-version` names a newer spoolway than the one you run is
+refused before `init` writes anything, `--force` included. In home mode the agent's user-level
+marker is checked too. The error names the version. See [Files a newer spoolway
+wrote](installation.md#files-a-newer-spoolway-wrote). A run that writes the marker lists it as a
+`wrote` row, such as `wrote    .spoolway/spoolway-version`.
+
 Run again in a project that already has a config, it installs skills for the project's own
 configured provider, restores any example file that went missing, and otherwise changes
 nothing: with no `--provider`, it keeps the provider already configured rather than falling
@@ -1351,8 +1357,13 @@ skills](installation.md#the-pipeline-skills).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--force` | | Overwrite files that already exist |
+| `--force` | | Overwrite files that already exist. Does not override a version marker naming a newer spoolway |
 | `--user` | | Install into the agent's user folder instead of the project's |
+
+When the folder's version marker names a newer spoolway than the one you run, `install` writes
+nothing and fails, naming the version and the marker file. A run that writes the marker lists it
+as a `wrote` row. See [Files a newer spoolway
+wrote](installation.md#files-a-newer-spoolway-wrote).
 
 ### `spoolway update`
 
@@ -1405,6 +1416,12 @@ for the messages.
 
 `sync` refuses a copied checkout, one that carries the same id as another checkout, the way every
 other command does.
+
+`sync` also refuses to write a scope whose version marker names a newer spoolway than the one
+you run. The scopes are the project's setup folder with its skills, and each agent's user-level
+skills folder. A refused scope is left as it is, and the report names the newer version. A sync
+that writes anything also writes the marker. See [Files a newer spoolway
+wrote](installation.md#files-a-newer-spoolway-wrote).
 
 The report lists refused files first. It then lists each file written or removed, and a line
 for each replaced key block, each value `sync` set on its own, each group of unknown settings

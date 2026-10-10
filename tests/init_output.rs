@@ -240,6 +240,142 @@ fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
     assert_scaffold(&project, "claude");
 }
 
+/// The version marker is a file `init` leaves for the person to commit, so
+/// it gets a `wrote` row like every other file: on a fresh run, and again when
+/// a repeat run brings an older marker up to this binary's version, but not
+/// when the marker already names it.
+#[test]
+fn init_names_the_version_marker_it_writes_and_only_then() {
+    let project = Project::new("marker-row");
+    let marker = ".spoolway/spoolway-version";
+    let wrote = row("wrote", marker);
+
+    let fresh = stdout(&project.init("claude"));
+    assert!(fresh.contains(&wrote), "{fresh}");
+
+    let repeat = stdout(&project.init("claude"));
+    assert!(!repeat.contains(&wrote), "{repeat}");
+
+    std::fs::write(project.as_ref().join(marker), "0.0.1\n").unwrap();
+    let older = stdout(&project.init("claude"));
+    assert!(older.contains(&wrote), "{older}");
+}
+
+/// `init` rewrites every skill that differs from the shipped copy, and with
+/// `--force` every scaffold file too, so run over a project a newer spoolway
+/// set up it would downgrade them, which `sync` refuses to do. It stops before
+/// it writes anything, names the version, and leaves every file as it was.
+#[test]
+fn init_refuses_to_rewrite_a_project_a_newer_spoolway_wrote() {
+    let project = Project::new("marker-newer");
+    project.init("claude");
+    let skill = project
+        .as_ref()
+        .join(".claude/skills/spoolway-config/SKILL.md");
+    let config = project.as_ref().join(".spoolway/config.toml");
+    std::fs::write(&skill, "written by a newer spoolway\n").unwrap();
+    std::fs::write(&config, "# written by a newer spoolway\n").unwrap();
+    std::fs::write(
+        project.as_ref().join(".spoolway/spoolway-version"),
+        "999.0.0\n",
+    )
+    .unwrap();
+
+    for extra in [&[][..], &["--force"][..]] {
+        let mut args = vec!["init", "--yes", "--provider", "claude"];
+        args.extend_from_slice(extra);
+        let result = project.run_allowing_failure(&args);
+
+        assert!(!result.status.success(), "{}", stdout(&result));
+        let err = stderr(&result);
+        assert!(err.contains("999.0.0"), "{err}");
+        assert!(!stdout(&result).contains("  wrote "), "{}", stdout(&result));
+        assert_eq!(
+            std::fs::read_to_string(&skill).unwrap(),
+            "written by a newer spoolway\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "# written by a newer spoolway\n",
+            "{extra:?} rewrote the config before refusing"
+        );
+    }
+}
+
+/// A home-mode `init` keeps its skills in the user folder every project
+/// shares, so a newer marker there stops it before it makes a workspace, and
+/// the marker row it prints for a workspace's setup folder is spelled with
+/// `~` like the rows around it, not with the full path.
+#[test]
+fn home_mode_init_checks_the_user_folder_first_and_spells_its_marker_with_a_tilde() {
+    // The home directory sits beside the checkout rather than inside it, as
+    // a real one does: inside, every workspace path would read as relative.
+    let base = std::env::temp_dir().join(format!(
+        "spoolway-init-output-marker-home-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = base.join("home");
+    let checkout = base.join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&checkout)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let user_marker = home.join(".claude/skills/.spoolway-version");
+    std::fs::create_dir_all(user_marker.parent().unwrap()).unwrap();
+    std::fs::write(&user_marker, "999.0.0\n").unwrap();
+    let init = || {
+        Command::new(env!("CARGO_BIN_EXE_spoolway"))
+            .args([
+                "init",
+                "--yes",
+                "--setup",
+                "home",
+                "--workspace",
+                "new",
+                "--provider",
+                "claude",
+                "--tracker",
+                "none",
+            ])
+            .current_dir(&checkout)
+            .env("HOME", &home)
+            .output()
+            .expect("run spoolway")
+    };
+
+    let refused = init();
+
+    assert!(!refused.status.success(), "{}", stdout(&refused));
+    assert!(stderr(&refused).contains("999.0.0"), "{}", stderr(&refused));
+    assert!(
+        !home.join(".spoolway").exists(),
+        "a refused init still made a workspace"
+    );
+
+    std::fs::remove_file(&user_marker).unwrap();
+    let done = init();
+    assert!(done.status.success(), "{}", stderr(&done));
+    let out = stdout(&done);
+    let marker_row = out
+        .lines()
+        .find(|line| line.starts_with("  wrote    ") && line.ends_with("/spoolway-version"))
+        .unwrap_or_else(|| panic!("no marker row in:\n{out}"));
+    assert!(
+        marker_row.starts_with("  wrote    ~/.spoolway/"),
+        "{marker_row}"
+    );
+    std::fs::remove_dir_all(&base).ok();
+}
+
 #[test]
 fn repeat_init_that_adds_skills_omits_project_success() {
     let project = Project::new("repeat");
