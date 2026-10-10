@@ -228,6 +228,44 @@ impl Runs {
         Some(started.elapsed().unwrap_or(Duration::ZERO))
     }
 
+    /// When this run started, as the pid file's timestamp, or the exit file's
+    /// when only that is left. `None` if neither is on disk.
+    fn started_at(&self, key: &str) -> Option<std::time::SystemTime> {
+        let modified = |path: PathBuf| std::fs::metadata(path).ok()?.modified().ok();
+        modified(self.pid_path(key)).or_else(|| modified(self.exit_path(key)))
+    }
+
+    /// A name for this run that no other run of the same key shares: the key
+    /// and the nanosecond its pid file was written. The ledger line banked
+    /// for the run carries it, so a result read again on a later pass is
+    /// recognised instead of banked twice. Runs of one key start at least a
+    /// pass apart, so nanoseconds never collide; `0` stands for a run whose
+    /// files are already gone.
+    pub fn run_id(&self, key: &str) -> String {
+        let nanos = self
+            .started_at(key)
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_nanos());
+        format!("{key}@{nanos}")
+    }
+
+    /// How long a finished run took, from its pid file to its exit file.
+    ///
+    /// The wrapper writes the first as its opening act and the second as its
+    /// last, so the two timestamps bracket the command. Zero when the run has
+    /// no exit file: a run that vanished or was stopped has no moment its
+    /// command ended at, and a guess would bank the time a machine spent
+    /// switched off.
+    pub fn wall(&self, key: &str) -> Duration {
+        let end = std::fs::metadata(self.exit_path(key))
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        match (self.started_at(key), end) {
+            (Some(start), Some(end)) => end.duration_since(start).unwrap_or(Duration::ZERO),
+            _ => Duration::ZERO,
+        }
+    }
+
     /// The wrapper's own pid, which is the process group everything the
     /// command started belongs to.
     pub fn read_pid(&self, key: &str) -> Option<u32> {

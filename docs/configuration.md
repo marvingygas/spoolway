@@ -291,7 +291,7 @@ dirs = ["~/notes"]
 |---|---|---|
 | `dirs` | `[]` | Directories, beside the project root, whose own agent sessions count as this project's spend |
 
-The ledger holds one line per settled lane. A person also runs agent sessions by hand, and this
+The ledger holds one line per settled lane, plus one line per command step run. A person also runs agent sessions by hand, and this
 project pays for those too. This list names the directories those sessions run in. See
 [Directory spend](cost.md#directory-spend).
 

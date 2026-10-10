@@ -4248,7 +4248,9 @@ fn archived_pipeline_name(pipelines: &Pipelines, declared: Option<&str>) -> Stri
 fn lane_time_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<i64> {
     let mut wall = None;
     for entry in ledger {
-        if entry.task == task && entry.step == stage {
+        // A command step's run is timed on its own wall clock, not by a
+        // lane's busy time, and the board's TIME has never held it.
+        if entry.task == task && entry.step == stage && entry.command.is_none() {
             *wall.get_or_insert(0) += entry.wall_s;
         }
     }
@@ -4280,10 +4282,14 @@ fn percent_of(repo: &Repo, session: &Reading, step: Option<&crate::pipeline::Ste
 /// Not bounded to this run, unlike the footer: a task's spend at the step it
 /// is sitting on is a fact about the task, and a run that picked the task up
 /// again inherits what the last one already spent getting it there.
+///
+/// A command step's run is not counted. It spent no tokens, and counting it
+/// would turn a step that was never paid for into `Some(0)`, so the board
+/// would show `0` where it shows `—`.
 fn spent_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<u64> {
     let mut spent = None;
     for entry in ledger {
-        if entry.task == task && entry.step == stage {
+        if entry.task == task && entry.step == stage && entry.command.is_none() {
             *spent.get_or_insert(0) += entry.tokens.output;
         }
     }
@@ -4297,7 +4303,8 @@ fn spent_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<u
 /// that came back round to a step has spent both rounds getting through it, and
 /// a run that picked the task up again inherits what the last one spent there.
 /// An entry with no `cost_usd` is a lane nothing could price — a local worker —
-/// and adds nothing rather than adding zero.
+/// and adds nothing rather than adding zero. A command step's run is such an
+/// entry: it carries no `cost_usd`, so it adds nothing here without a guard.
 fn cost_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Option<f64> {
     let mut cost = None;
     for entry in ledger {
@@ -7069,6 +7076,21 @@ mod tests {
         assert_eq!(spent_at(&ledger, "login", "implement"), Some(2_000));
         assert_eq!(spent_at(&ledger, "login", "review"), Some(400));
         assert_eq!(spent_at(&ledger, "login", "handover"), None);
+    }
+
+    /// A command step's run holds no tokens, so a task sitting at a command
+    /// step has not been paid for there, and OUT stays `—` for it.
+    #[test]
+    fn a_command_steps_run_does_not_make_the_out_column_zero() {
+        let mut run = banked("login", "test", "", None);
+        run.command = Some(crate::usage::CommandRun {
+            id: "test@1".into(),
+            ended: crate::usage::CommandEnd::Exited,
+            exit: Some(1),
+        });
+
+        assert_eq!(spent_at(&[run.clone()], "login", "test"), None);
+        assert_eq!(cost_at(&[run], "login", "test"), None);
     }
 
     /// COST is the step's, not the task's. A task deep in a pipeline has spent
