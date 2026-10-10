@@ -33,9 +33,10 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # The board's job ledger is read off bare `spoolway`'s dispatch tab, kept open
-# by `lib.sh`'s `screen_start` and walked onto the tab by `screen_board`. The
-# ledger is drawn whether or not the tab is dispatching, so it never starts a
-# run of its own.
+# by `lib.sh`'s `screen_start` and walked onto the tab by `screen_board`. A
+# busy board draws the ledger whether or not anything is dispatching, so the
+# tab starts no run for it; an empty board draws it only while a dispatcher
+# holds the lock, so the tab starts one there with `screen_dispatch`.
 BOARD_LOG="$LIVE/board.out"
 board_open() {
   screen_start "$BOARD_LOG"
@@ -112,14 +113,15 @@ dispatcher_stop
 
 # ------------- the dispatcher board's job ledger, busy and empty
 # Every enabled job is on the board's own ledger — beneath the slot lines,
-# above the key controls — while the queue has work in it, and the ledger
-# goes with the rest of the footer once it is empty. No `covers:` tag here
-# either, for the same reason the top of this file gives.
+# above the key controls — while the queue has work in it. Once it is empty,
+# the ledger stays under the greeting only while a dispatcher holds the lock,
+# since no job fires without one. No `covers:` tag here either, for the same
+# reason the top of this file gives.
 #
-# Read off the dispatch tab with nothing dispatching, so the ledger is all
-# that is being watched. `nightly-audit` still moves off `* * * * *` first,
+# The busy board is read with nothing dispatching, so the ledger is all that
+# is being watched. `nightly-audit` still moves off `* * * * *` first,
 # straight in the store the same way it was written, so no job is due while
-# the board is read at all.
+# the board is read at all — not even once the dispatcher below is up.
 cat > "$SPOOLWAY_PROJECT_HOME/jobs.toml" <<TOML
 [jobs.nightly-audit]
 schedule = "0 3 * * *"
@@ -161,18 +163,41 @@ rm -f "$SPOOLWAY_PROJECT_HOME"/queue/*.md
 BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
 board_open
 if poll_until 15 screen_drew_since "$BEFORE" "Nothing queued"; then
-  ok "an empty board still says Nothing queued while a job keeps it resident"
+  ok "an empty board still says Nothing queued with jobs enabled"
 else
-  bad "an empty board still says Nothing queued while a job keeps it resident"
+  bad "an empty board still says Nothing queued with jobs enabled"
+fi
+tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/stopped-board.out"
+# With no dispatcher up nothing will fire, so the stopped board lists no job;
+# the jobs tab still lists every job and its next firing.
+lacks "the stopped empty board leaves the job ledger off" "2 active" \
+  "$LIVE/stopped-board.out"
+
+screen_stop
+
+# The same empty board, once a dispatcher holds the lock: the ledger comes
+# back under the greeting, in the busy board's words. The tab starts the
+# dispatcher itself — a `spoolway dispatch` of the suite's own is refused while
+# the screen is open — and it stays up on the empty queue.
+BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
+screen_start "$BOARD_LOG"
+screen_dispatch
+if poll_until 15 screen_drew_since "$BEFORE" "2 active"; then
+  ok "an idle dispatcher's empty board draws the job ledger"
+else
+  bad "an idle dispatcher's empty board draws the job ledger"
 fi
 tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/empty-board.out"
-# An empty board is its greeting and nothing else, so the ledger the busy
-# board drew above is gone with the rest of the footer; the jobs tab still
-# lists every job and its next firing.
-lacks "the empty board leaves the job ledger off" "2 active" "$LIVE/empty-board.out"
+if grep -qaF "nightly-audit" "$LIVE/empty-board.out" \
+   && grep -qaF "release-readiness" "$LIVE/empty-board.out"; then
+  ok "the idle board's ledger names both enabled jobs"
+else
+  bad "the idle board's ledger names both enabled jobs"
+  sed 's/^/        /' "$LIVE/empty-board.out"
+fi
 # The plain run prints a "next: ..." line under its own "nothing queued"
-# line; the board draws no such line either.
-lacks "the empty board does not name a job's next firing" \
+# line; the board draws the ledger instead, never that line.
+lacks "the empty board does not draw the plain run's next line" \
   "next: nightly-audit," "$LIVE/empty-board.out"
 screen_stop
 
