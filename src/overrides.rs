@@ -132,12 +132,10 @@ impl Ignored {
 
 /// Whether this process should say anything about an ignored override at
 /// all — `false` inside a lane, per `commands::TASK_ENV`'s own doc: a lane's
-/// prompt never carries a notice a person did not ask to see, and bare
-/// `spoolway`'s own "override ignored" popup —
-/// [`crate::commands::ignored_popup`] — is the screen's way of saying the
-/// same thing to a person watching it instead. Its own function,
-/// pulled out of [`print_ignored_notices`], so a test can drive the decision
-/// directly rather than trying to catch a real `eprintln!` on the way past.
+/// prompt never carries a notice a person did not ask to see. Its own
+/// function, pulled out of [`print_ignored_notices`], so a test can drive the
+/// decision directly rather than trying to catch a real `eprintln!` on the
+/// way past.
 pub(crate) fn should_announce_ignored_overrides() -> bool {
     crate::platform::env_var(crate::commands::TASK_ENV).is_err()
 }
@@ -169,19 +167,57 @@ pub(crate) fn first_time_this_process(line: &str) -> bool {
         .insert(line.to_string())
 }
 
+/// Set once by `main` for bare `spoolway` and for the `dispatch --from-screen`
+/// child it starts: every note [`print_note`] would write goes nowhere for
+/// the rest of the process. Bare `spoolway` takes the terminal a moment after
+/// it loads its config, so a note printed then is wiped by the first frame,
+/// and one printed while the screen is up smears across it until the next.
+/// The child's stderr becomes the board's "the dispatcher did not start"
+/// popup, where a note stacked above the refusal buries it. Both still reach
+/// the person: `commands::doctor::cheap_findings` names each config and
+/// workspace note in the "before dispatching" popup, and the overrides gate
+/// names each ignored override. Process-wide for the same reason
+/// [`printed_notices`] is: the loads that print run from every corner of the
+/// screen, and nothing threads one value through all of them. A fatal error
+/// never passes through here — `main` prints it itself — so it still shows.
+static QUIET_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Silence every later [`print_note`] in this process — see [`QUIET_NOTES`].
+pub(crate) fn quiet_notes() {
+    QUIET_NOTES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a note `line` goes to stderr now: never once [`quiet_notes`] has
+/// run, and otherwise only the first time this process sees it, per
+/// [`first_time_this_process`]. Marks the line printed as a side effect, so a
+/// caller that asks must print it.
+pub(crate) fn note_due(line: &str) -> bool {
+    note_due_with(QUIET_NOTES.load(std::sync::atomic::Ordering::Relaxed), line)
+}
+
+/// [`note_due`] with the switch handed in, so a test can drive the quiet
+/// branch without silencing every other test in the process.
+fn note_due_with(quiet: bool, line: &str) -> bool {
+    !quiet && first_time_this_process(line)
+}
+
+/// Write one note to stderr when [`note_due`] says so — the one printer every
+/// config, override and workspace note goes through.
+pub(crate) fn print_note(line: &str) {
+    if note_due(line) {
+        eprintln!("{line}");
+    }
+}
+
 /// Print one stderr line per entry in `ignored`, in the Mockup's wording —
 /// unless [`should_announce_ignored_overrides`] says this process is a
-/// lane's own, and at most once per exact line per process, per
-/// [`first_time_this_process`]'s own doc.
+/// lane's own, and only as [`print_note`] lets it.
 pub(crate) fn print_ignored_notices(ignored: &[Ignored]) {
     if !should_announce_ignored_overrides() {
         return;
     }
     for item in ignored {
-        let line = item.notice();
-        if first_time_this_process(&line) {
-            eprintln!("{line}");
-        }
+        print_note(&item.notice());
     }
 }
 
@@ -535,10 +571,11 @@ pub(crate) fn prompt_override(overrides: &Path, name: &str) -> Option<PathBuf> {
 
 // ---------------------------------------------------------------------------
 // The gate: `commands::dispatch`'s standing consent check reads and writes
-// an acknowledgement here, keyed on `version::layer_fingerprint` rather than
-// on anything the merge above computes — an override is allowed to be
+// an acknowledgement here, keyed on `version::layer_fingerprint` together
+// with the set of entries the merge above left out — see
+// `commands::dispatch::overrides_fingerprint`. An override is allowed to be
 // permanent, so this carries no timer and returns the moment a byte of the
-// layer changes underneath it.
+// layer changes underneath it, or an entry stops fitting the project.
 // ---------------------------------------------------------------------------
 
 /// Whether a gate keyed on the acknowledgement file at `home.join(file)`
@@ -565,8 +602,9 @@ pub(crate) fn ack_needed(home: &Path, fingerprint: &str) -> bool {
 }
 
 /// Record that a person has agreed to run under `fingerprint` — the layer's
-/// own, from [`crate::version::layer_fingerprint`]: a tracked-file edit
-/// alone must not reopen a gate the layer itself has not moved.
+/// own, from [`crate::version::layer_fingerprint`], with its ignored entries
+/// folded in: a tracked-file edit alone must not reopen a gate the layer
+/// itself has not moved, unless it changes which entries are left out.
 pub(crate) fn ack_write(home: &Path, fingerprint: &str) -> Result<()> {
     ack_write_at(home, ACK_FILE, fingerprint)
 }
@@ -1091,6 +1129,17 @@ mod tests {
             !first_time_this_process(&line),
             "a second mention of the identical line must not repeat"
         );
+    }
+
+    /// Once the switch is on, no note is due, not even one never said
+    /// before. A quiet ask must not use up the line either, so the same line
+    /// is still due the first time it is asked about with the switch off.
+    #[test]
+    fn a_quiet_process_prints_no_note() {
+        let line = "note: a line only quiet-test-4b7e2a ever writes".to_string();
+        assert!(!note_due_with(true, &line), "quiet says nothing");
+        assert!(note_due_with(false, &line), "the line was never used up");
+        assert!(!note_due_with(false, &line), "and is said once");
     }
 
     /// The Mockup's own shape names the pipeline and the missing prompt the

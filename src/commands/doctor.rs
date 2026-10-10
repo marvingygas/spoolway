@@ -773,6 +773,7 @@ fn config_checks(
             crate::repo::shorten_home(&workspace),
         )));
     }
+    findings.extend(workspace_record_notes(&repo.checkout));
     findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(
@@ -1272,7 +1273,113 @@ fn retired_key_notes(checkout: &Path, tasks: &[Task]) -> Vec<Finding> {
         ));
     }
     findings.extend(worktree_root_note(checkout, tasks));
+    findings.extend(load_note_rows(checkout));
     findings
+}
+
+/// One row for each note a config load prints to stderr that no other row
+/// here already names: two hard-retired keys, the gone tmux backend, two
+/// retired `dispatch` settings, and an agent profile's retired `env` table
+/// or unknown kind. Bare `spoolway` prints none of those notes — see
+/// `overrides::QUIET_NOTES` — so these rows are where it says them, in the
+/// "before dispatching" popup. Read off the raw file, as
+/// [`worktree_root_note`] is: the loaded [`Config`] has already stripped or
+/// dropped every one of them. A file that does not parse earns nothing here;
+/// `config parses` already fails over it.
+fn load_note_rows(checkout: &Path) -> Vec<Finding> {
+    let Some(doc) = std::fs::read_to_string(Config::path_in(checkout))
+        .ok()
+        .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok())
+    else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    let dispatch = doc.get("dispatch");
+    for (table, key) in [("dispatch", "interval"), ("issue_tracking", "on_fail")] {
+        if doc.get(table).and_then(|t| t.get(key)).is_some() {
+            notes.push(format!(
+                "{table}.{key} is retired in this checkout's config — run `spoolway sync` to \
+                 drop the key"
+            ));
+        }
+    }
+    if dispatch
+        .and_then(|d| d.get("backend"))
+        .and_then(toml::Value::as_str)
+        == Some("tmux")
+    {
+        notes.push(
+            "dispatch.backend = \"tmux\" in this checkout's config — the tmux backend is gone, \
+             so it loads as \"herdr\"; the key is rewritten on the next save"
+                .into(),
+        );
+    }
+    if dispatch.and_then(|d| d.get("tear_lanes_on_stop")).is_some() {
+        notes.push(
+            "dispatch.tear_lanes_on_stop in this checkout's config is no longer read — \
+             stopping the dispatcher leaves every interrupted lane standing; the key is \
+             dropped on the next save"
+                .into(),
+        );
+    }
+    if dispatch.and_then(|d| d.get("herdr_mode")).is_some() {
+        notes.push(
+            "dispatch.herdr_mode in this checkout's config is no longer read — every task runs \
+             in a herdr workspace of its own; run `spoolway sync` to drop the key"
+                .into(),
+        );
+    }
+    let agents = doc.get("agents").and_then(toml::Value::as_table);
+    for (name, profile) in agents.into_iter().flatten() {
+        if profile
+            .get("env")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|env| !env.is_empty())
+        {
+            notes.push(format!(
+                "[agents.{name}.env] in this checkout's config is no longer read — a lane \
+                 inherits the dispatcher's environment; dropped on the next save"
+            ));
+        }
+        // `kind` defaults to blank when a profile leaves it out, the same as
+        // `AgentProfile`'s own `#[serde(default)]`, and a blank kind is one
+        // no adapter knows either.
+        let kind = profile
+            .get("kind")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        if crate::agent::adapter(kind).is_none() {
+            notes.push(format!(
+                "[agents.{name}] in this checkout's config names kind `{kind}`, which spoolway \
+                 no longer knows how to launch; dropped on the next save"
+            ));
+        }
+    }
+    notes.into_iter().map(Finding::Note).collect()
+}
+
+/// One row per workspace record `bind` skips with a note on stderr — a
+/// dispatcher that is not one plain name, or a record that does not read as
+/// a workspace — so bare `spoolway`, which prints neither note, still names
+/// them in the "before dispatching" popup. An error here is
+/// [`registration_check`]'s to report, so it earns no row of its own.
+fn workspace_record_notes(checkout: &Path) -> Vec<Finding> {
+    let Ok((_, broken, skipped)) = crate::repo::workspace_clone_lenient(checkout) else {
+        return Vec::new();
+    };
+    let skipped = skipped.iter().map(|record| {
+        format!(
+            "workspace record {} names a dispatcher that is not one plain name, so it is skipped",
+            crate::repo::shorten_home(record),
+        )
+    });
+    let broken = broken.iter().map(|record| {
+        format!(
+            "workspace record {} does not read as a workspace, so it is skipped",
+            crate::repo::shorten_home(record),
+        )
+    });
+    skipped.chain(broken).map(Finding::Note).collect()
 }
 
 /// `dispatch.worktree_root` is retired, dropped unconditionally by the next
@@ -4505,6 +4612,43 @@ mod tests {
             }),
             "no network or live-pane check may appear on this path: {warnings:?}"
         );
+    }
+
+    /// `bind` notes on stderr each workspace record it skips: one whose
+    /// dispatcher is not one plain name, and one that does not read as a
+    /// workspace. Bare `spoolway` prints neither, so each needs a row in
+    /// [`cheap_findings`] naming the same record.
+    #[test]
+    fn each_workspace_note_has_a_row_in_the_warnings_popup() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-workspace-notes");
+        let home = repo.root.join(".dollar-home");
+        let state = home.join(".spoolway");
+        std::fs::create_dir_all(state.join("ws-broken/config")).unwrap();
+        std::fs::create_dir_all(state.join("ws-bad")).unwrap();
+        std::fs::write(
+            state.join("ws-bad/project.toml"),
+            "id = \"bad\"\n\n[[clones]]\nroot = \"/nowhere\"\ndispatcher = \"../up\"\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let (_, broken, skipped) =
+                crate::repo::workspace_clone_lenient(&repo.checkout).unwrap();
+            assert_eq!(broken.len(), 1, "{broken:?}");
+            assert_eq!(skipped.len(), 1, "{skipped:?}");
+            let warnings = cheap_findings(&repo, &Pipelines::builtin(), &Config::default());
+            let said = |record: &Path, why: &str| {
+                let record = crate::repo::shorten_home(record);
+                warnings.iter().any(
+                    |w| matches!(w, Warning::Setting(t) if t.contains(&record) && t.contains(why)),
+                )
+            };
+            assert!(
+                said(&broken[0], "does not read as a workspace"),
+                "{warnings:#?}"
+            );
+            assert!(said(&skipped[0], "is not one plain name"), "{warnings:#?}");
+        });
     }
 
     /// A `[models]` row no step routes to is dead config that costs nothing at

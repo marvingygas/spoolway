@@ -127,6 +127,11 @@ its first pass, including under the `Starting dispatcher` popup, shows that reas
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
+Bare `spoolway` and the dispatcher its dispatch tab starts print no note on stderr, before,
+during or after the screen. A fatal error, such as no project found, still prints as
+`spoolway: <error>`. The notes about config keys, ignored overrides and workspace records appear
+in the dispatch tab's overrides and "before dispatching" popups instead.
+
 With stdout not a terminal — `spoolway | cat`, a script — it prints the grouped help instead,
 the same as `spoolway --help`.
 
@@ -447,11 +452,13 @@ patched and waits for a key:
 An entry the load left out draws its own row instead of its keys, labelled the same way:
 
 ```
-    pipelines/release.yml  step publish  ignored — names both `run:` and `agent:`
+    pipelines/release.yml  publish  ignored — names both `run:` and `agent:`
 ```
 
-Every other row, the title and the three keys, `[x]` included, are unchanged. See [the
-overrides layer](configuration.md#the-overrides-layer).
+Every other row, the title and the three keys, `[x]` included, are unchanged. `[x]` hides the
+screen until the layer changes or the set of ignored entries changes. An entry that stops fitting
+with no override file touched brings the screen back. See [the overrides
+layer](configuration.md#the-overrides-layer).
 
 It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
 a key:

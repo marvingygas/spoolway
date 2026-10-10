@@ -295,10 +295,12 @@ says "while the entry beside it in the same file is still listed as applying" \
   "patch  implement.model" \
   "$SPOOLWAY" override list
 
-# Bare `spoolway` says the same thing as a popup over the tab it opens on:
-# the stderr line above is printed ahead of the screen, and its first frame
-# paints over it before anybody could read it. `frame N` pulls the Nth frame
-# out of a screen's typescript — every frame opens with the shared frame
+# Bare `spoolway` says nothing about the ignored override: it prints no note
+# before the screen, and the queue tab opens with no popup. The override
+# shows up where a person starts dispatching instead (the overrides gate).
+# The typescript from `script` merges stderr into the screen, so a note
+# printed anywhere would be found by reading the whole file. `frame N`
+# pulls the Nth frame out of it — every frame opens with the shared frame
 # writer's own start code (`\x1b[?2026h\x1b[H`) — with the colour codes taken
 # out, so a row reads as the plain line the Mockup draws.
 frame() {
@@ -314,29 +316,17 @@ IGNORED_SCREEN="$LIVE/ignored-screen.txt"
 git commit -qm "settle config.toml the way sync writes it" -- .spoolway/config.toml >/dev/null 2>&1 || true
 on_screen '\r' "$IGNORED_SCREEN"
 frame "$IGNORED_SCREEN" 1 >"$IGNORED_SCREEN.first"
-frame "$IGNORED_SCREEN" 2 >"$IGNORED_SCREEN.second"
-has "bare spoolway opens on the override ignored popup" \
-  "╭─ override ignored " "$IGNORED_SCREEN.first"
-has "over the queue tab it opens on" \
+has "bare spoolway opens on the queue tab" \
   "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$IGNORED_SCREEN.first"
-has "naming the file, the step and the keys it set" \
-  "pipelines/default.yml   step review   agent" "$IGNORED_SCREEN.first"
-# The reason is wrapped to the queue tab's frame, so only its first row is
-# read whole: the part after the em dash is what `override list` leaves out.
-has "with the whole reason under them" \
-  "names both \`run:\` and \`agent:\` — a step runs a process or a model," \
-  "$IGNORED_SCREEN.first"
-has "and enter to confirm it" "[enter] confirm" "$IGNORED_SCREEN.first"
-lacks "enter closes it" "override ignored" "$IGNORED_SCREEN.second"
-has "and the queue tab is drawn again under the strip" \
-  "DISPATCH       [QUEUE]       ROUTINES        JOBS        EVAL" "$IGNORED_SCREEN.second"
+lacks "with no override ignored popup over it" \
+  "override ignored" "$IGNORED_SCREEN.first"
+lacks "and no ignored-override note anywhere in the session's output" \
+  "override ignored" "$IGNORED_SCREEN"
 
-# Never acknowledged: the next open asks again while the override is still
-# ignored.
+# Opening it again changes nothing: there is no popup to be shown again.
 on_screen '\r' "$IGNORED_SCREEN.again"
-frame "$IGNORED_SCREEN.again" 1 >"$IGNORED_SCREEN.again.first"
-has "the next open shows it again" \
-  "╭─ override ignored " "$IGNORED_SCREEN.again.first"
+lacks "the next open is just as quiet" \
+  "override ignored" "$IGNORED_SCREEN.again"
 
 must "clean up: drop the layer entry" \
   "$SPOOLWAY" override drop pipelines/default.yml
@@ -347,12 +337,6 @@ must "clean up: drop the layer entry" \
 must "and restore the tracked step from the committed copy" \
   git checkout -- "$TRACKED"
 works "the checkout is clean again" git_clean
-
-# With nothing in the layer ignored any more, the screen opens on no popup.
-on_screen '' "$IGNORED_SCREEN.gone"
-frame "$IGNORED_SCREEN.gone" 1 >"$IGNORED_SCREEN.gone.first"
-lacks "once nothing is ignored the screen opens without the popup" \
-  "override ignored" "$IGNORED_SCREEN.gone.first"
 
 # ------------------------------------------------- the four new contracts
 # Each one is a unit-tested render in src/commands/{config,override,template,

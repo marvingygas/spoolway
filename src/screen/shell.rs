@@ -22,10 +22,11 @@
 //! its popups, keep its own meaning without this module knowing what any of
 //! them are.
 //!
-//! What the screen has to say the moment it opens — any override the load
-//! left out — is handed to the queue tab, the one the screen opens on, to show
-//! as a popup over it: printed ahead of the screen, the first frame would wipe
-//! it before anybody could read it. See [`OnOpen`].
+//! The screen opens with nothing to say about the project's setup. A note
+//! printed ahead of it would be wiped by the first frame before anybody could
+//! read it, so `main` silences every config, override and workspace note for
+//! this process — see [`crate::overrides::quiet_notes`] — and they wait for
+//! the dispatch tab's "before dispatching" popup and overrides gate instead.
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
 //! through every screen's own `render`: the strip, the three rows it takes
@@ -48,14 +49,6 @@ use anyhow::Result;
 use super::{Key, PollableRead, RawStdin, read_key};
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-
-/// What the screen shows the moment it opens, over the queue tab — see the
-/// module doc. Each is `None` when there is nothing to say.
-#[derive(Debug, Default)]
-pub(crate) struct OnOpen {
-    /// The "override ignored" popup — [`crate::commands::ignored_popup`].
-    pub(crate) ignored: Option<crate::commands::IgnoredPopup>,
-}
 
 /// One tab of the shell, in strip order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,8 +264,7 @@ fn strip_line(open: Tab, width: usize) -> String {
 /// Holds the one [`crate::platform::TermGuard`] every tab draws under and
 /// installs the one `ctrl-c` handler ahead of it: a `ctrl-c` between the two
 /// would otherwise kill the process with the terminal already raw and
-/// nothing left to restore it. Opens on the queue tab, with the "override
-/// ignored" popup over it when there is one.
+/// nothing left to restore it. Opens on the queue tab.
 ///
 /// A dispatcher the dispatch tab started stops when this returns, however it
 /// returns — see [`super::dispatcher::Dispatcher`]'s own `Drop`.
@@ -287,17 +279,12 @@ pub(crate) fn run(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> 
         return Ok(());
     }
     let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None)?;
-    // Asked before the terminal is taken, so a failure is reported as this
-    // command's own error.
-    let on_open = OnOpen {
-        ignored: crate::commands::ignored_popup(repo)?,
-    };
 
     crate::platform::stop::catch_interrupt();
     let _term = crate::platform::TermGuard::screen();
     let mut stdin = RawStdin;
     let mut stdout = std::io::stdout();
-    host(repo, pipelines, cwd, on_open, &mut stdin, &mut stdout)
+    host(repo, pipelines, cwd, &mut stdin, &mut stdout)
 }
 
 /// The tab loop, apart from the terminal it runs on so a test can drive it
@@ -306,7 +293,6 @@ fn host(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &Path,
-    mut on_open: OnOpen,
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -342,17 +328,9 @@ fn host(
                     input,
                     out,
                 )?,
-                // Taken on the first visit, so a notice is shown once and
-                // not again on every return to the tab.
-                Tab::Queue => crate::commands::queue_tab(
-                    repo,
-                    pipelines,
-                    cwd,
-                    std::mem::take(&mut on_open),
-                    &mut writer,
-                    input,
-                    out,
-                )?,
+                Tab::Queue => {
+                    crate::commands::queue_tab(repo, pipelines, cwd, &mut writer, input, out)?
+                }
                 // Its routine folders are read again on every visit, so a
                 // routine saved with `s` on the queue tab is already listed.
                 Tab::Routines => {
@@ -1010,7 +988,6 @@ mod tests {
             repo,
             &Pipelines::builtin(),
             &repo.root,
-            OnOpen::default(),
             &mut input,
             &mut out,
         )
@@ -1063,7 +1040,6 @@ mod tests {
             repo,
             &Pipelines::builtin(),
             &repo.root,
-            OnOpen::default(),
             &mut input,
             &mut out,
         )

@@ -112,6 +112,18 @@ fn exit_dispatch(result: Result<i32>) -> Result<()> {
 fn run() -> Result<()> {
     let cli = cli::parse();
 
+    // Bare `spoolway` and the dispatcher its dispatch tab starts print no
+    // note at all: the screen's first frame would wipe one, and the child's
+    // stderr is the popup that names why it stopped. Each note waits for the
+    // "before dispatching" popup or the overrides gate instead — see
+    // `overrides::QUIET_NOTES`. Set before the first config load. A fatal
+    // error still prints, from `main`.
+    if matches!(&cli.command, Command::Screen)
+        || matches!(&cli.command, Command::Dispatch(args) if args.screen)
+    {
+        overrides::quiet_notes();
+    }
+
     // Before anything else, and before a repo is looked for: this is the
     // detached child a stale cache spawned, not a command anybody ran. It has
     // no project, wants no notice of its own, and its whole job is one npm
