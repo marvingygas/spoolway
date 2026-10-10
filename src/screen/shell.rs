@@ -28,13 +28,15 @@
 //! it before anybody could read it. See [`OnOpen`].
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
-//! through every screen's own `render`: the strip and the three rows it takes
-//! off the terminal's height are read deep inside each screen's own layout
-//! code — `commands::queue::layout`, `eval::frame_rows`, the board's own
+//! through every screen's own `render`: the strip, the three rows it takes
+//! off the height, and the margin `crate::screen::drawing_area` keeps around
+//! every tab are read deep inside each screen's own layout code —
+//! `commands::queue::layout`, `eval::frame_rows`, the board's own
 //! `pane_height` — and a screen drawn with no shell around it, from its CLI
-//! command or a unit test, must draw exactly what it drew before. Thread-local
-//! rather than process-global, so a test that hosts a screen on its own thread
-//! never leaks a strip into another test's frame running beside it.
+//! command or a unit test, must draw exactly what it drew before.
+//! Thread-local rather than process-global, so a test that hosts a screen on
+//! its own thread never leaks a strip into another test's frame running
+//! beside it.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -180,9 +182,9 @@ pub(crate) fn quit_hint() -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// How wide the strip is drawn with no terminal to measure: the width every
-/// mockup of this screen is drawn to.
-const FALLBACK_WIDTH: usize = 100;
+/// How wide the strip is drawn with no terminal to measure: the drawing
+/// area of the 100-column terminal every mockup of this screen is drawn to.
+const FALLBACK_WIDTH: usize = 100 - 2 * super::MARGIN;
 
 /// The gap between two neighbouring tab slots on the strip. A slot is a
 /// label with one column either side for the open tab's brackets, so with
@@ -200,8 +202,8 @@ const SLOT_GAP: &str = "      ";
 pub(crate) fn strip() -> Vec<String> {
     match hosted() {
         Some(open) => {
-            let width = terminal_size::terminal_size()
-                .map(|(w, _)| w.0 as usize)
+            let width = super::drawing_area()
+                .map(|(width, _)| width)
                 .unwrap_or(FALLBACK_WIDTH);
             vec![String::new(), strip_line(open, width), String::new()]
         }
@@ -225,12 +227,16 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
 /// into the row under it. Nothing is coloured or dim, and the open tab is not
 /// bolder than the rest — the brackets alone say which tab is open.
 ///
-/// At least two columns stay before `←` however narrow the terminal, and
-/// nothing is written past the `→`: a row that reaches the terminal's last
-/// column is followed by a newline the terminal has already wrapped for, and
-/// the frame under it comes out one row lower than it was measured for. The
-/// bold and reset codes take no column, so they are left out of every width
-/// measured here.
+/// `width` is the drawing area's, not the terminal's: the frame writer's
+/// one-column indent moves the line in by the margin, which keeps it centred
+/// on the terminal as the margin keeps every tab's frame.
+///
+/// At least two columns of the area stay before `←` however narrow the
+/// terminal, and nothing is written past the `→`: a row that reaches the
+/// terminal's last column is followed by a newline the terminal has already
+/// wrapped for, and the frame under it comes out one row lower than it was
+/// measured for. The bold and reset codes take no column, so they are left
+/// out of every width measured here.
 fn strip_line(open: Tab, width: usize) -> String {
     use crate::status::{BOLD, RESET};
 
@@ -869,13 +875,14 @@ fn message_frame_rows(message: &str) -> Vec<String> {
     let mut rows = strip();
     rows.push(format!(" {message}"));
     rows.push(String::new());
-    rows.push(super::key_hint(&[("q", "quit")]));
+    rows.extend(super::key_rows(&super::key_hint(&[("q", "quit")])));
     rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     /// `line` with every escape code taken out — the colour a tab's own
     /// frame paints under the strip, the strip's own bold, and the frame
@@ -1036,7 +1043,7 @@ mod tests {
         assert!(!last.contains("─ groups"), "{last}");
         assert!(last.contains("Nothing queued"), "{last}");
         assert!(
-            last.contains("\n [enter] start dispatching   [q] quit\n"),
+            last.contains("\n  [enter] start dispatching   [q] quit\n"),
             "{last}"
         );
     }
@@ -1096,9 +1103,9 @@ mod tests {
         const QUEUE: &str = "─ groups";
         const ROUTINES: &str = "[ROUTINES]";
         const JOBS: &str = "no jobs yet";
-        const EVAL: &str = "┌─ eval ·";
+        let eval: &str = &format!("{TOP_LEFT}─ eval ·");
         let visited = [
-            QUEUE, DISPATCH, QUEUE, ROUTINES, JOBS, EVAL, JOBS, ROUTINES, QUEUE, DISPATCH, QUEUE,
+            QUEUE, DISPATCH, QUEUE, ROUTINES, JOBS, eval, JOBS, ROUTINES, QUEUE, DISPATCH, QUEUE,
         ];
         assert_eq!(frames.len(), visited.len(), "{frames:?}");
 
@@ -1120,6 +1127,63 @@ mod tests {
                     visited[i - 1]
                 );
             }
+        }
+    }
+
+    /// Every tab, drawn at a terminal size the test names, keeps the margin:
+    /// nothing in column 0 or the terminal's last column on any row, and
+    /// two blank rows under the key line. The board has a row, so its key
+    /// line is the long one — wider than the area at 100 columns, like the
+    /// queue's — and each must wrap inside the area with every extra row
+    /// taken off the tab's body, or the frame runs past the bottom and the
+    /// strip off the top.
+    #[test]
+    fn every_tab_keeps_a_column_each_side_and_two_blank_rows_under_its_keys() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-margin");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let (width, height) = (100, 24);
+        let _terminal = crate::screen::test_terminal((width, height));
+        // Queue (open) → Dispatch → Queue → Routines → Jobs → Eval.
+        let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C");
+        let names = ["queue", "dispatch", "queue", "routines", "jobs", "eval"];
+        assert_eq!(frames.len(), names.len(), "{frames:?}");
+
+        for (frame, name) in frames.iter().zip(names) {
+            let mut parser = vt100::Parser::new(height as u16, width as u16, 0);
+            parser.process(&crate::screen::frame_writer::as_terminal_would_receive(
+                frame.as_bytes(),
+            ));
+            let screen = parser.screen();
+            let shown = screen.contents();
+            // The indent is a written space, which `vt100` counts as
+            // contents, so a cell is filled only by something visible.
+            let filled = |row: usize, col: usize| {
+                screen
+                    .cell(row as u16, col as u16)
+                    .is_some_and(|cell| !cell.contents().trim().is_empty())
+            };
+            for row in 0..height {
+                assert!(!filled(row, 0), "{name}: column 0 of row {row}:\n{shown}");
+                assert!(
+                    !filled(row, width - 1),
+                    "{name}: the last column of row {row}:\n{shown}"
+                );
+            }
+            let blank = |row: usize| (0..width).all(|col| !filled(row, col));
+            assert!(
+                blank(height - 1) && blank(height - 2),
+                "{name}: the last two rows must be blank:\n{shown}"
+            );
+            assert!(
+                screen
+                    .contents_between(height as u16 - 3, 0, height as u16 - 3, width as u16)
+                    .contains("[q] quit"),
+                "{name}: the key line ends on the row above them:\n{shown}"
+            );
+            assert!(
+                shown.lines().nth(1).is_some_and(|line| line.contains('←')),
+                "{name}: the strip is still on its own row:\n{shown}"
+            );
         }
     }
 
@@ -1367,7 +1431,9 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[D\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("┌─ overrides are active for this project "),
+            last.contains(&format!(
+                "{TOP_LEFT}─ overrides are active for this project "
+            )),
             "{last}"
         );
         assert!(last.contains("pipelines/default.yml"), "{last}");
@@ -1574,9 +1640,9 @@ mod tests {
         assert_eq!(
             popup.panel(),
             [
-                "┌─ Starting dispatcher ─────────┐",
+                format!("{TOP_LEFT}─ Starting dispatcher ─────────{TOP_RIGHT}").as_str(),
                 "│  checking herdr, git, queue…  │",
-                "└───────────────────────────────┘",
+                format!("{BOTTOM_LEFT}───────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
         // Nothing has claimed yet, so a redraw leaves it up.
@@ -1680,7 +1746,10 @@ mod tests {
         let mut tab = running_tab();
         tab.enter(&repo, &repo.root);
         assert!(matches!(tab.popup, Some(Popup::Stop(_))));
-        assert!(tab.popup.as_ref().unwrap().panel()[0].starts_with("┌─ stop dispatching "));
+        assert!(
+            tab.popup.as_ref().unwrap().panel()[0]
+                .starts_with(&format!("{TOP_LEFT}─ stop dispatching "))
+        );
         assert!(!stopping(&tab), "nothing is stopped before it is answered");
 
         // A key the popup does not read leaves it up.

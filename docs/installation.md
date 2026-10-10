@@ -447,7 +447,7 @@ At a terminal, with something to write or remove, `sync` lists it and waits befo
 anything:
 
 ```
-┌─ new version installed, apply updates ───────────────────────┐
+╭─ new version installed, apply updates ───────────────────────╮
 │                                                                │
 │  write   .spoolway/config.toml                                │
 │  remove  .spoolway/templates/task-log.md                      │
@@ -456,7 +456,7 @@ anything:
 │  Your config values, prompts and task skeletons are kept.     │
 │                                                                │
 │  [enter] apply   [esc] cancel                                  │
-└─────────────────────────────────────────────────────────────┘
+╰─────────────────────────────────────────────────────────────╯
 ```
 
 A file `sync` refuses is listed first in the panel, with the reason and what to do about it.

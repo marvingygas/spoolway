@@ -80,8 +80,13 @@ above the strip and one below it.
 Inside the eval tab's filter panel and any popup drawn over a tab, `←` and `→` keep their own
 meaning instead.
 
+Every tab keeps column 0 and the last column empty, and leaves two blank rows under its key
+line. The tab strip stays centred, and every popup stays centred on its tab. A key line wider
+than the tab breaks between two keys, and each broken row starts one column in. Every row it
+adds comes off the tab's body.
+
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box
-with no title, as wide and as tall as the terminal allows, from a `spoolway dispatch` child
+with no title, as wide and as tall as the margin allows, from a `spoolway dispatch` child
 it starts and stops. The key line draws under the box, the same as under the queue, routines,
 jobs and eval screens. The queue, jobs and eval tabs draw the queue, jobs and eval screens
 described below; the routines tab draws the routine list, see

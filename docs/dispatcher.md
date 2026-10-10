@@ -186,7 +186,7 @@ anything, the tab covers the board with a keyless `Starting dispatcher` popup. S
 `enter` over a running dispatcher always opens the stop popup, even with nothing running:
 
 ```
-┌─ stop dispatching ──────────────────────────────────────────────────┐
+╭─ stop dispatching ──────────────────────────────────────────────────╮
 │                                                                     │
 │  No new steps will be started.                                      │
 │  Interrupting stops agents and commands. When resumed, agents pick  │
@@ -194,7 +194,7 @@ anything, the tab covers the board with a keyless `Starting dispatcher` popup. S
 │                                                                     │
 │  [enter] let running steps finish                                   │
 │  [i] interrupt them now   [esc] back                                │
-└─────────────────────────────────────────────────────────────────────┘
+╰─────────────────────────────────────────────────────────────────────╯
 ```
 
 `enter` there stops the child the way `ctrl-c` does: nothing is interrupted, and every lane
@@ -410,7 +410,7 @@ row that already has a scheduled pause to clear it.
 `s` on a row opens a panel titled `restart <task>`. It names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
 
 ```
-┌─ restart login ─────────────────────────────────────┐
+╭─ restart login ─────────────────────────────────────╮
 │                                                     │
 │ step      review                                    │
 │ lane      login · review                            │
@@ -420,7 +420,7 @@ row that already has a scheduled pause to clear it.
 │ scratch. Its conversation is not kept.              │
 │                                                     │
 │ [s] restart   [esc] cancel                          │
-└─────────────────────────────────────────────────────┘
+╰─────────────────────────────────────────────────────╯
 ```
 
 | Key | What it does |

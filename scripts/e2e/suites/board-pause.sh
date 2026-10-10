@@ -406,7 +406,7 @@ if [ -n "$BUSY_PID" ]; then ok "a second lane is mid-turn"
 else bad "a second lane is mid-turn"; fi
 
 press $'\r'
-draws "\`enter\` over a running dispatcher opens the stop popup" "┌─ stop dispatching"
+draws "\`enter\` over a running dispatcher opens the stop popup" "╭─ stop dispatching"
 draws "saying no new steps will start" "No new steps will be started."
 draws "offering enter to let running steps finish" "[enter] let running steps finish"
 draws "and i to interrupt them, or esc" "[i] interrupt them now   [esc] back"
@@ -707,7 +707,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   press s
   next_frame 3
   SINCE=$(tail -n "+$((MARK + 1))" "$BOARD_LOG")
-  if grep -qF -- "┌─ restart stuck ─" <<<"$SINCE"; then
+  if grep -qF -- "╭─ restart stuck ─" <<<"$SINCE"; then
     SAW_RESTART=stuck
     for want in "step      implement" "lane      stuck · implement" \
       "is briefed from" "[s] restart   [esc] cancel"; do
@@ -717,7 +717,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     press s
     next_frame 3
     break
-  elif grep -qF -- "┌─ restart " <<<"$SINCE"; then
+  elif grep -qF -- "╭─ restart " <<<"$SINCE"; then
     press $'\x1b'
     next_frame 3
   fi

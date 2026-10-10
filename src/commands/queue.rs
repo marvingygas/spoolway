@@ -5606,33 +5606,36 @@ const MIN_RIGHT_PANE: usize = 24;
 /// `QUEUED_TAIL_COLUMNS`.
 const MAX_LEFT_PANE: usize = ROW_PREFIX_COLUMNS + 33 + QUEUED_TAIL_COLUMNS;
 
-/// What a frame spends on something other than pane content: six columns of
-/// border and padding on every row, and four lines — the two borders, the
-/// footer under them, and one spare, so the last line's own newline does not
-/// scroll the top of the frame away.
-const PANE_CHROME_COLUMNS: usize = 6;
+/// What a frame spends on something other than pane content: seven columns
+/// of border and padding on every row — `│ `, ` │ ` and ` │` around the two
+/// panes — and four lines — the two borders, the footer's first row under
+/// them, and one spare, so the last line's own newline does not scroll the
+/// top of the frame away.
+///
+/// The frame fills the drawing area's width exactly. The terminal's last
+/// column stays empty all the same, as the margin to the area's right —
+/// see [`crate::screen::drawing_area`] — so no row reaches the edge, where
+/// the newline after it would land on a wrap the terminal has already made.
+const PANE_CHROME_COLUMNS: usize = 7;
 const PANE_CHROME_ROWS: usize = 4;
 
-/// The last column is left empty for the same reason as the last row: a row
-/// that reaches the right edge is followed by a newline the terminal has
-/// already wrapped for, and the frame comes out double-spaced.
-const SPARE_COLUMN: usize = 1;
-
 /// The layout for this frame, measured fresh every draw so a resized
-/// terminal reflows on the next one — less the rows bare `spoolway`'s tab
-/// strip takes off the top when it hosts this screen or the jobs screen,
-/// which lays itself out through this too (zero everywhere else; see
-/// `crate::screen::shell::strip_rows`), and less every row past the first
-/// that `footer` wraps onto. The queue's own key line is wider than a
-/// 100-column terminal, and each row it wraps onto pushes the frame's top
-/// row — the strip, or the box's own border — off the top of the screen.
+/// terminal reflows on the next one, against the drawing area every tab
+/// shares (see [`crate::screen::drawing_area`]) — less the rows bare
+/// `spoolway`'s tab strip takes off the top when it hosts this screen or the
+/// jobs screen, which lays itself out through this too (zero everywhere
+/// else; see `crate::screen::shell::strip_rows`), and less every row past
+/// the first that `footer` wraps onto. The queue's own key line is wider
+/// than a 100-column terminal, and each row it wraps onto pushes the
+/// frame's top row — the strip, or the box's own border — off the top of
+/// the screen.
 pub(super) fn layout(footer: &str) -> Layout {
-    match terminal_size::terminal_size() {
+    match crate::screen::drawing_area() {
         Some((width, height)) => layout_for(
-            width.0 as usize,
-            (height.0 as usize)
+            width,
+            height
                 .saturating_sub(crate::screen::shell::strip_rows())
-                .saturating_sub(wrapped_rows(footer, width.0 as usize) - 1),
+                .saturating_sub(crate::screen::key_rows_to(footer, width).len() - 1),
         ),
         None => Layout {
             left: LEFT_PANE_WIDTH,
@@ -5642,22 +5645,13 @@ pub(super) fn layout(footer: &str) -> Layout {
     }
 }
 
-/// How many terminal rows `line` takes at `width` columns: one, plus one for
-/// every time its visible text runs past the right edge. A line exactly as
-/// wide as the terminal still takes one — its newline lands on the wrap the
-/// terminal was already holding back.
-fn wrapped_rows(line: &str, width: usize) -> usize {
-    let columns = crate::status::strip_ansi(line).chars().count();
-    columns.div_ceil(width.max(1)).max(1)
-}
-
-/// How a terminal that size is split between the two panes. The left pane
+/// How a drawing area that size is split between the two panes. The left pane
 /// takes two fifths of what the border leaves, within its own bounds, and
 /// the right pane takes the rest — a terminal too narrow for both minimums
 /// overflows rather than collapsing a pane to nothing.
 fn layout_for(width: usize, height: usize) -> Layout {
     let content = width
-        .saturating_sub(PANE_CHROME_COLUMNS + SPARE_COLUMN)
+        .saturating_sub(PANE_CHROME_COLUMNS)
         .max(MIN_LEFT_PANE + MIN_RIGHT_PANE);
     let left = (content * 2 / 5)
         .clamp(MIN_LEFT_PANE, MAX_LEFT_PANE)
@@ -6209,6 +6203,7 @@ pub(super) fn two_pane_frame(
     right_title: &str,
     layout: Layout,
 ) -> Vec<String> {
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     // Both halves of the top border have to reach exactly as far as a row
     // does: a row's own pane is `" " + layout.<side> + " │"`, which is
     // `layout.<side> + 2` characters wide including its closing corner. Each
@@ -6224,7 +6219,7 @@ pub(super) fn two_pane_frame(
         .take(layout.right + 2)
         .collect();
     let mut frame = vec![format!(
-        "┌{}{}┬{}{}┐",
+        "{TOP_LEFT}{}{}┬{}{}{TOP_RIGHT}",
         top_left,
         "─".repeat((layout.left + 2).saturating_sub(top_left.chars().count())),
         top_right,
@@ -6243,7 +6238,7 @@ pub(super) fn two_pane_frame(
         ));
     }
     frame.push(format!(
-        "└{}┴{}┘",
+        "{BOTTOM_LEFT}{}┴{}{BOTTOM_RIGHT}",
         "─".repeat(layout.left + 2),
         "─".repeat(layout.right + 2)
     ));
@@ -6476,7 +6471,8 @@ fn compose(mut frame: Vec<String>, popup: Option<&[String]>, footer: String) -> 
         stretch(&mut frame, popup.len() + 4);
         overlay(&mut frame, popup);
     }
-    frame.push(footer);
+    // In as many rows as `layout` took off the panes for it.
+    frame.extend(crate::screen::key_rows(&footer));
     frame
 }
 
@@ -6489,6 +6485,7 @@ fn compose(mut frame: Vec<String>, popup: Option<&[String]>, footer: String) -> 
 /// lose its key row and its bottom border. A real terminal's frame already
 /// fills the rows it has, and is left as it is.
 fn stretch(frame: &mut Vec<String>, lines: usize) {
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT};
     let Some(bottom) = frame.last() else {
         return;
     };
@@ -6497,7 +6494,7 @@ fn stretch(frame: &mut Vec<String>, lines: usize) {
     let empty: String = bottom
         .chars()
         .map(|c| match c {
-            '└' | '┴' | '┘' => '│',
+            BOTTOM_LEFT | '┴' | BOTTOM_RIGHT => '│',
             _ => ' ',
         })
         .collect();
@@ -8260,6 +8257,7 @@ fn begin_routine_solo(
 mod tests {
     use super::*;
     use crate::commands::testutil::*;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     /// While a dispatcher runs, `queue add` routes on the pipelines it
     /// loaded: a task on one of them is queued, and a task on a pipeline
@@ -10992,7 +10990,10 @@ mod tests {
 
         let (exit, drawn) = routines_exit(&repo, "\to\x1b[C\x1b[Dq");
         assert_eq!(exit, ScreenExit::Quit, "the input ran out under the popup");
-        assert!(last_frame(&drawn).contains("┌─ open task "), "{drawn}");
+        assert!(
+            last_frame(&drawn).contains(&format!("{TOP_LEFT}─ open task ")),
+            "{drawn}"
+        );
     }
 
     /// Inside a sub-mode the arrows and `q` stay with it even when hosted:
@@ -11043,7 +11044,10 @@ mod tests {
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let drawn = String::from_utf8(out).unwrap();
         let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
-        assert!(first.contains("┌─ nothing to queue "), "{first}");
+        assert!(
+            first.contains(&format!("{TOP_LEFT}─ nothing to queue ")),
+            "{first}"
+        );
         assert!(first.contains("no-group.md"), "{first}");
         assert!(first.contains("[enter] confirm"), "{first}");
         assert!(first.contains("─ groups"), "the tab under it: {first}");
@@ -11089,7 +11093,11 @@ mod tests {
         assert_eq!(leave, Leave::Switch(Toward::Left), "the tab works again");
         let drawn = String::from_utf8(out).unwrap();
         let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
-        assert!(frames[0].contains("┌─ override ignored "), "{}", frames[0]);
+        assert!(
+            frames[0].contains(&format!("{TOP_LEFT}─ override ignored ")),
+            "{}",
+            frames[0]
+        );
         assert!(
             frames[0].contains("pipelines/release.yml   step publish   agent, model"),
             "{}",
@@ -11100,9 +11108,9 @@ mod tests {
         let rows: Vec<&str> = frames[0].lines().collect();
         let top = rows
             .iter()
-            .find(|r| r.contains("┌─ override ignored "))
+            .find(|r| r.contains(&format!("{TOP_LEFT}─ override ignored ")))
             .unwrap();
-        assert!(top.contains('┐'), "{}", frames[0]);
+        assert!(top.contains(TOP_RIGHT), "{}", frames[0]);
         assert!(
             frames[0].contains("─ groups"),
             "over the tab: {}",
@@ -11294,7 +11302,7 @@ mod tests {
         let rendered = two_pane_frame(&left, &right, "pending", &long_title, layout).join("\n");
         let mut lines = rendered.lines();
         let top = lines.next().unwrap();
-        assert!(top.ends_with('┐'));
+        assert!(top.ends_with(TOP_RIGHT));
         assert_eq!(
             top.chars().count(),
             lines.next().unwrap().chars().count(),
@@ -11327,8 +11335,9 @@ mod tests {
     }
 
     /// Every width the layout hands out leaves room for both panes, and the
-    /// two of them plus the border add up to the terminal they were measured
-    /// against — including at widths far narrower than the minimums.
+    /// two of them plus the border add up to the drawing area they were
+    /// measured against — including at widths far narrower than the
+    /// minimums.
     #[test]
     fn a_layout_splits_the_width_it_is_given_between_two_panes() {
         for width in [20usize, 40, 80, 100, 173, 400] {
@@ -11340,33 +11349,30 @@ mod tests {
                 "right too narrow at {width}"
             );
             assert_eq!(layout.rows, Some(24 - PANE_CHROME_ROWS));
-            if width >= MIN_LEFT_PANE + MIN_RIGHT_PANE + PANE_CHROME_COLUMNS + SPARE_COLUMN {
+            if width >= MIN_LEFT_PANE + MIN_RIGHT_PANE + PANE_CHROME_COLUMNS {
                 assert_eq!(
-                    layout.left + layout.right + PANE_CHROME_COLUMNS + SPARE_COLUMN,
+                    layout.left + layout.right + PANE_CHROME_COLUMNS,
                     width,
-                    "the panes and the border must fill the terminal at {width}"
+                    "the panes and the border must fill the area at {width}"
                 );
             }
         }
         assert_eq!(layout_for(100, 1).rows, Some(1), "one row is still a row");
     }
 
-    /// The queue's key line is wider than a 100-column terminal, and every
-    /// row it wraps onto has to come off the panes, or the frame's top row —
-    /// bare `spoolway`'s tab strip — is scrolled off the screen.
+    /// Hosted in a terminal 100 by 24, the queue tab lays out against the
+    /// drawing area, not the terminal: the frame is two columns narrower,
+    /// and its rows are what is left of 23 once the strip and the key line —
+    /// two rows at this width — have theirs.
     #[test]
-    fn wrapped_rows_counts_the_rows_a_key_line_wraps_onto() {
-        let line = footer(&ScreenState::new());
-        let columns = crate::status::strip_ansi(&line).chars().count();
-        assert!(columns > 100, "the key line fits in 100 columns now");
-        assert_eq!(wrapped_rows(&line, 100), 2);
-        assert_eq!(
-            wrapped_rows(&line, columns),
-            1,
-            "exactly as wide is one row"
-        );
-        assert_eq!(wrapped_rows(&line, columns - 1), 2);
-        assert_eq!(wrapped_rows("", 100), 1, "an empty line is still a row");
+    fn a_hosted_layout_fills_the_drawing_area_and_not_the_terminal() {
+        let _terminal = crate::screen::test_terminal((100, 24));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Queue);
+        let footer = footer(&ScreenState::new());
+        let layout = layout(&footer);
+        assert_eq!(layout.left + layout.right + PANE_CHROME_COLUMNS, 98);
+        assert_eq!(crate::screen::key_rows(&footer).len(), 2);
+        assert_eq!(layout.rows, Some(23 - 3 - 1 - PANE_CHROME_ROWS));
     }
 
     /// The groups pane counts groups: the blank row between two states and
@@ -12717,7 +12723,7 @@ mod tests {
         let frame = crate::screen::shell::under_strip(render(&groups, &panes, &state));
         // Wide enough that no row here reaches the pane's own edge, the same
         // as a real terminal this screen ever draws to — see
-        // `commands::queue`'s own `SPARE_COLUMN`.
+        // `commands::queue`'s own `PANE_CHROME_COLUMNS`.
         let pane_size = (200, 60);
 
         let mut old = Vec::new();
@@ -12767,7 +12773,7 @@ mod tests {
             frame.join("\n")
         );
         assert!(
-            frame.last().unwrap().starts_with('└'),
+            frame.last().unwrap().starts_with(BOTTOM_LEFT),
             "the frame's own bottom border stays:\n{}",
             frame.join("\n")
         );
@@ -13128,10 +13134,10 @@ mod tests {
     fn popup_borders(frame: &[String]) -> (Option<usize>, Option<usize>) {
         let top = frame
             .iter()
-            .position(|line| line.contains("┌─ trial") && !line.contains('┬'));
-        let bottom = frame
-            .iter()
-            .position(|line| line.contains('└') && line.contains('┘') && !line.contains('┴'));
+            .position(|line| line.contains(&format!("{TOP_LEFT}─ trial")) && !line.contains('┬'));
+        let bottom = frame.iter().position(|line| {
+            line.contains(BOTTOM_LEFT) && line.contains(BOTTOM_RIGHT) && !line.contains('┴')
+        });
         (top, bottom)
     }
 
@@ -13142,11 +13148,14 @@ mod tests {
         let (Some(top), Some(bottom)) = popup_borders(frame) else {
             return false;
         };
-        let x = frame[top].chars().position(|c| c == '┌').unwrap();
+        let x = frame[top].chars().position(|c| c == TOP_LEFT).unwrap();
         let right = x + panel[0].chars().count() - 1;
-        frame[top..=bottom]
-            .iter()
-            .all(|line| matches!(line.chars().nth(right), Some('┐' | '│' | '┘')))
+        frame[top..=bottom].iter().all(|line| {
+            matches!(
+                line.chars().nth(right),
+                Some(TOP_RIGHT | '│' | BOTTOM_RIGHT)
+            )
+        })
     }
 
     /// The height bound the plan proves against: `release`'s seventeen steps
@@ -13419,7 +13428,9 @@ mod tests {
             assert!(
                 frame.iter().any(|line| {
                     let body = line.trim();
-                    body.starts_with('└') && body.ends_with('┘') && !body.contains('┬')
+                    body.starts_with(BOTTOM_LEFT)
+                        && body.ends_with(BOTTOM_RIGHT)
+                        && !body.contains('┬')
                 }),
                 "{stage:?} lost the popup's own bottom border:\n{drawn}"
             );
@@ -14244,7 +14255,10 @@ mod tests {
 
         assert_eq!(exit, ScreenExit::Quit, "the input ran out");
         let frame = last_frame(&drawn);
-        assert!(frame.contains("┌─ submission refused "), "{frame}");
+        assert!(
+            frame.contains(&format!("{TOP_LEFT}─ submission refused ")),
+            "{frame}"
+        );
         assert!(frame.contains("[enter] confirm"), "{frame}");
         assert!(frame.contains("─ groups"), "the tab under it: {frame}");
     }
@@ -14271,9 +14285,12 @@ mod tests {
         // With issue tracking off nothing is asked: the popup says what was
         // queued, and `enter` closes it.
         let frame = last_frame(&drawn);
-        assert!(frame.contains("┌─ queued "), "{frame}");
+        assert!(frame.contains(&format!("{TOP_LEFT}─ queued ")), "{frame}");
         assert!(frame.contains("queued 1 task"), "{frame}");
-        assert!(!drawn.contains("┌─ issue tracking "), "{drawn}");
+        assert!(
+            !drawn.contains(&format!("{TOP_LEFT}─ issue tracking ")),
+            "{drawn}"
+        );
         // No dispatcher holds this fixture's lock, so the popup ends by
         // saying one has to be started.
         assert!(
@@ -14308,7 +14325,7 @@ mod tests {
         assert_eq!(
             panel,
             [
-                "┌─ queued ─────────────────────────────────────────────────┐",
+                format!("{TOP_LEFT}─ queued ─────────────────────────────────────────────────{TOP_RIGHT}").as_str(),
                 "│                                                          │",
                 "│  queued 4 tasks                                          │",
                 "│    hook-failure-pauses                                   │",
@@ -14319,7 +14336,7 @@ mod tests {
                 "│  Start the dispatcher to begin working                   │",
                 "│                                                          │",
                 "│  [enter] confirm                                         │",
-                "└──────────────────────────────────────────────────────────┘",
+                format!("{BOTTOM_LEFT}──────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
     }
@@ -14352,7 +14369,10 @@ mod tests {
         else {
             panic!("a landed batch is Mode::Queued");
         };
-        assert!(panel[0].starts_with("┌─ queued "), "{panel:#?}");
+        assert!(
+            panel[0].starts_with(&format!("{TOP_LEFT}─ queued ")),
+            "{panel:#?}"
+        );
         let body: Vec<&str> = panel[1..panel.len() - 1]
             .iter()
             .map(|row| {
@@ -14398,7 +14418,10 @@ mod tests {
             panic!("a batch that left everything out is still Mode::Queued");
         };
         let all = panel.join("\n");
-        assert!(panel[0].starts_with("┌─ not queued "), "{all}");
+        assert!(
+            panel[0].starts_with(&format!("{TOP_LEFT}─ not queued ")),
+            "{all}"
+        );
         assert!(!all.contains("queued 0"), "{all}");
         assert!(all.contains("wire starts from task/gone"), "{all}");
     }
@@ -14418,7 +14441,10 @@ mod tests {
             .iter()
             .map(|line| line.trim_matches(['│', ' ']))
             .collect();
-        assert!(panel[0].starts_with("┌─ issues created "), "{panel:?}");
+        assert!(
+            panel[0].starts_with(&format!("{TOP_LEFT}─ issues created ")),
+            "{panel:?}"
+        );
         assert_eq!(
             body[1..panel.len() - 1],
             [
@@ -14672,7 +14698,7 @@ mod tests {
         let drawn = screen(&repo, groups, "o");
 
         assert!(
-            !drawn.contains("┌─ open task "),
+            !drawn.contains(&format!("{TOP_LEFT}─ open task ")),
             "`o` with the groups pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
     }
@@ -14695,7 +14721,10 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
-        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ open task ")),
+            "in a popup: {last}"
+        );
         assert!(last.contains("─ groups"), "over the tab: {last}");
     }
 
@@ -14933,7 +14962,7 @@ mod tests {
         let drawn = routines_screen(&repo, "o");
 
         assert!(
-            !drawn.contains("┌─ open task "),
+            !drawn.contains(&format!("{TOP_LEFT}─ open task ")),
             "`o` with the folders pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
     }
@@ -14959,7 +14988,10 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
-        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ open task ")),
+            "in a popup: {last}"
+        );
         assert!(last.contains("─ routines"), "over the pane: {last}");
     }
 
@@ -17060,7 +17092,10 @@ depends_on: [cart-empty-state]
                 let (repo, _root_guard) = cart("issue-question-asks");
                 let drawn = screen(&repo, listed(&repo), " \r");
                 let frame = last_frame(&drawn);
-                assert!(frame.contains("┌─ issue tracking "), "{frame}");
+                assert!(
+                    frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
+                    "{frame}"
+                );
                 assert!(
                     frame.contains("create 2 issues on open for cart"),
                     "{frame}"
@@ -17088,7 +17123,7 @@ depends_on: [cart-empty-state]
                 assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
 
                 let frame = last_frame(&drawn);
-                assert!(frame.contains("┌─ queued "), "{frame}");
+                assert!(frame.contains(&format!("{TOP_LEFT}─ queued ")), "{frame}");
                 assert!(frame.contains("queued 2 tasks"), "{frame}");
                 assert!(frame.contains("    cart-empty-state"), "{frame}");
                 assert!(frame.contains("[enter] confirm"), "{frame}");
@@ -17125,7 +17160,7 @@ depends_on: [cart-empty-state]
                 let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").collect();
                 let opening: Vec<&&str> = frames
                     .iter()
-                    .filter(|frame| frame.contains("┌─ opening issues "))
+                    .filter(|frame| frame.contains(&format!("{TOP_LEFT}─ opening issues ")))
                     .collect();
                 assert!(
                     opening
@@ -17150,7 +17185,10 @@ depends_on: [cart-empty-state]
                 );
 
                 let frame = last_frame(&drawn);
-                assert!(frame.contains("┌─ issues created "), "{frame}");
+                assert!(
+                    frame.contains(&format!("{TOP_LEFT}─ issues created ")),
+                    "{frame}"
+                );
                 assert!(
                     frame.contains("task issue   created   #412   cart-totals"),
                     "{frame}"
@@ -17197,7 +17235,7 @@ depends_on: [cart-empty-state]
                 let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").collect();
                 let last_opening = frames
                     .iter()
-                    .rposition(|frame| frame.contains("┌─ opening issues "))
+                    .rposition(|frame| frame.contains(&format!("{TOP_LEFT}─ opening issues ")))
                     .unwrap();
                 assert!(
                     frames[last_opening].contains("#412   cart-totals"),
@@ -17209,9 +17247,9 @@ depends_on: [cart-empty-state]
                 assert!(!frame.contains("names prefixed"), "{frame}");
                 let body: Vec<String> = frame
                     .lines()
-                    .skip_while(|line| !line.contains("┌─ issues created "))
+                    .skip_while(|line| !line.contains(&format!("{TOP_LEFT}─ issues created ")))
                     .skip(1)
-                    .take_while(|line| !line.contains('└') || line.contains('│'))
+                    .take_while(|line| !line.contains(BOTTOM_LEFT) || line.contains('│'))
                     .map(|line| line.split('│').nth(2).unwrap_or("").trim().to_string())
                     .collect();
                 assert_eq!(
@@ -17229,12 +17267,12 @@ depends_on: [cart-empty-state]
                 );
                 let top = frame
                     .lines()
-                    .find(|line| line.contains("┌─ issues created "))
+                    .find(|line| line.contains(&format!("{TOP_LEFT}─ issues created ")))
                     .unwrap();
                 let width = top
                     .chars()
-                    .skip_while(|c| *c != '┌')
-                    .take_while(|c| *c != '┐')
+                    .skip_while(|c| *c != TOP_LEFT)
+                    .take_while(|c| *c != TOP_RIGHT)
                     .count()
                     + 1;
                 assert_eq!(width, 60, "held to the question's width: {frame}");
@@ -17259,7 +17297,10 @@ group_description: audit
                 );
                 let drawn = routines_screen(&repo, " \r");
                 let frame = last_frame(&drawn);
-                assert!(frame.contains("┌─ issue tracking "), "{frame}");
+                assert!(
+                    frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
+                    "{frame}"
+                );
                 assert!(
                     frame.contains("create 1 issue on open for nightly"),
                     "{frame}"
@@ -17444,7 +17485,10 @@ group_description: audit
         fn the_screen_draws_the_gate_in_a_popup_over_the_tab() {
             let (repo, drawn, _root_guard) = submit_over_the_gate("tool-gate-popup", "");
             let frame = last_frame(&drawn);
-            assert!(frame.contains("┌─ issue tracking "), "{frame}");
+            assert!(
+                frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
+                "{frame}"
+            );
             assert!(frame.contains("versioned.sh"), "{frame}");
             assert!(frame.contains("cargo >= 999.0.0"), "{frame}");
             assert!(

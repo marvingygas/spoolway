@@ -1302,6 +1302,7 @@ fn print_staying_up(jobs: &crate::jobs::StayingUp) {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+    use crate::screen::corner::TOP_LEFT;
 
     /// The dispatch tab's step-30 popup body, from the ceiling a pass
     /// reports: the key's own figures, not the run log's long sentence.
@@ -2412,7 +2413,9 @@ mod tests {
             .panel;
         let n = panel.len();
         assert!(
-            panel[0].starts_with("┌─ overrides are active for this project "),
+            panel[0].starts_with(&format!(
+                "{TOP_LEFT}─ overrides are active for this project "
+            )),
             "{panel:?}"
         );
         assert_eq!(popup_row(&panel[1]), "", "{panel:?}");
@@ -2440,7 +2443,10 @@ mod tests {
             .expect("unattended with no ceiling is worth a warning")
             .panel;
         let n = panel.len();
-        assert!(panel[0].starts_with("┌─ before dispatching "), "{panel:?}");
+        assert!(
+            panel[0].starts_with(&format!("{TOP_LEFT}─ before dispatching ")),
+            "{panel:?}"
+        );
         assert_eq!(popup_row(&panel[1]), "", "{panel:?}");
         assert_eq!(popup_row(&panel[2]), "settings", "{panel:?}");
         assert_eq!(

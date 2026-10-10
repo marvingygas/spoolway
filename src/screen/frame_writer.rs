@@ -3,8 +3,9 @@
 //! by one write per line is N+1 writes a slow terminal (WSL, behind Herdr
 //! and the Windows console) can paint between, showing a blank or
 //! half-drawn frame. This writer sends the whole frame as bytes:
-//! `ESC[?2026h ESC[H`, then each row followed by `ESC7 ESC[0m ESC[K ESC8`
-//! and `\n` (a row whose visible text fills the pane gets no clear at all),
+//! `ESC[?2026h ESC[H`, then each row, moved one column in, followed by
+//! `ESC7 ESC[0m ESC[K ESC8` and `\n` (a row whose visible text, indent and
+//! all, fills the pane gets no clear at all),
 //! then `ESC7 ESC[0m ESC[J ESC8 ESC[?2026l`. The `ESC7`/`ESC8` pair around
 //! each clear is explained at [`CLEAR_TO_END`]. The `?2026` pair is synchronized
 //! output: a terminal that understands it holds its paint until the closing
@@ -13,13 +14,20 @@
 //! `paint`, `commands::jobs`'s `draw_jobs`, `eval`'s `draw`, and
 //! `screen::shell`'s `draw_board` and `message_frame` — now calls this
 //! instead of erasing and writing its own rows.
+//!
+//! The one-column indent is the left half of the margin bare `spoolway`
+//! keeps around every tab — see [`crate::screen::MARGIN`]. Each tab lays its
+//! rows out against [`crate::screen::drawing_area`], which leaves room for
+//! it, and writing it here rather than in each tab means no tab can draw in
+//! column 0 by forgetting to.
 
 /// Moves the cursor home and tells a terminal that understands synchronized
 /// output to hold its paint until [`FRAME_END`] arrives.
 const FRAME_START: &str = "\x1b[?2026h\x1b[H";
 
 /// Clears the rest of a row past its own text — every row gets this except
-/// one whose visible text already reaches the pane's right edge, where the
+/// one whose visible text, with its indent, already reaches the pane's right
+/// edge, where the
 /// terminal itself would eat the last character sitting under the cursor.
 ///
 /// A row may leave a colour or weight open, with no reset before it ends.
@@ -40,6 +48,17 @@ const CLEAR_TO_END: &str = "\x1b7\x1b[0m\x1b[K\x1b8";
 /// and a colour the last row left open still reaches the next frame's
 /// first row, as it does today, since `ESC[2J` never reset it either.
 const FRAME_END: &str = "\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l";
+
+/// Written in front of every row: [`crate::screen::MARGIN`] blank columns.
+/// A plain space rather than a cursor move, so a column-0 character some
+/// earlier write left there is painted over. No row leaves a background
+/// colour open, so the space a colour carried into it shows nothing.
+const INDENT: &str = " ";
+
+// The indent and the margin the drawing area leaves for it are one width;
+// a margin widened without the indent would leave a tab's rows short of
+// the right edge by the difference.
+const _: () = assert!(INDENT.len() == crate::screen::MARGIN);
 
 /// A frame's rows together with the pane size they were drawn for — what
 /// [`FrameWriter`] compares a new frame against to decide whether there is
@@ -86,8 +105,12 @@ impl FrameWriter {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(FRAME_START.as_bytes());
         for row in rows {
+            bytes.extend_from_slice(INDENT.as_bytes());
             bytes.extend_from_slice(row.as_bytes());
-            let visible = crate::status::strip_ansi(row).chars().count();
+            // Measured with the indent: a row as wide as the drawing area
+            // never reaches the pane's edge, but one a column wider would,
+            // and a clear there erases its last character.
+            let visible = INDENT.len() + crate::status::strip_ansi(row).chars().count();
             if visible != pane_size.0 {
                 bytes.extend_from_slice(CLEAR_TO_END.as_bytes());
             }
@@ -111,7 +134,9 @@ impl FrameWriter {
 }
 
 /// Today's write, frozen exactly as `commands::queue::paint` still did it —
-/// erase the whole screen, then one `writeln!` per row — copied here rather
+/// erase the whole screen, then one `writeln!` per row — with each row
+/// moved in by the same [`INDENT`] the writer gives it, so the proofs
+/// compare two ways of painting the same indented frame. Copied here rather
 /// than called anywhere in production, so nothing outside tests ever runs
 /// the shape this writer replaces. `pub(crate)` and outside `mod tests`
 /// below so every redrawing screen's own test module can hold the same
@@ -122,7 +147,7 @@ impl FrameWriter {
 pub(crate) fn todays_write(rows: &[String], out: &mut impl std::io::Write) {
     let _ = write!(out, "\x1b[2J\x1b[H");
     for row in rows {
-        let _ = writeln!(out, "{row}");
+        let _ = writeln!(out, "{INDENT}{row}");
     }
 }
 
@@ -230,7 +255,7 @@ mod tests {
 
     #[test]
     fn a_full_width_row_paints_the_same_picture_as_todays_write() {
-        assert_writer_matches_todays_write(&["a".repeat(10)], (10, 3));
+        assert_writer_matches_todays_write(&["a".repeat(9)], (10, 3));
     }
 
     /// The board's own green (`State::Running`'s own colour, in
@@ -328,18 +353,50 @@ mod tests {
         assert_same_picture(&old, &new, pane_size);
     }
 
-    // A row exactly as wide as the pane gets no `ESC[K`: the cursor is still
-    // sitting on that row's own last column, and `ESC[K` there erases it in
-    // most terminals rather than leaving it be.
+    // A row exactly as wide as the pane, with its indent, gets no `ESC[K`:
+    // the cursor is still sitting on that row's own last column, and `ESC[K`
+    // there erases it in most terminals rather than leaving it be.
     #[test]
     fn a_full_width_row_gets_no_clear_to_end() {
+        let mut out = Vec::new();
+        let mut writer = FrameWriter::new();
+        writer.write_frame(&["abcd".to_string()], (5, 3), &mut out);
+        assert_eq!(
+            out,
+            b"\x1b[?2026h\x1b[H abcd\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l".to_vec()
+        );
+    }
+
+    // A row as wide as the pane without its indent is one column past the
+    // edge once indented, so it still gets its clear: measured without the
+    // indent it would read as full width and lose it.
+    #[test]
+    fn a_row_as_wide_as_the_pane_before_its_indent_is_still_cleared() {
         let mut out = Vec::new();
         let mut writer = FrameWriter::new();
         writer.write_frame(&["abcde".to_string()], (5, 3), &mut out);
         assert_eq!(
             out,
-            b"\x1b[?2026h\x1b[Habcde\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l".to_vec()
+            b"\x1b[?2026h\x1b[H abcde\x1b7\x1b[0m\x1b[K\x1b8\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l"
+                .to_vec()
         );
+    }
+
+    // Every row starts one column in, so column 0 stays blank on screen —
+    // the left half of the margin no tab has to draw for itself.
+    #[test]
+    fn every_row_is_drawn_one_column_in() {
+        let pane_size = (10, 4);
+        let mut out = Vec::new();
+        FrameWriter::new().write_frame(
+            &["one".to_string(), "two".to_string()],
+            pane_size,
+            &mut out,
+        );
+        let mut parser = vt100::Parser::new(pane_size.1 as u16, pane_size.0 as u16, 0);
+        parser.process(&as_terminal_would_receive(&out));
+        let rows: Vec<String> = parser.screen().rows(0, pane_size.0 as u16).collect();
+        assert_eq!(rows[..2], [" one", " two"]);
     }
 
     // Visible width is counted with escape codes left out, the same way
@@ -351,9 +408,9 @@ mod tests {
     fn a_coloured_full_width_row_is_measured_by_its_visible_width() {
         let mut out = Vec::new();
         let mut writer = FrameWriter::new();
-        let row = format!("{}abcde{}", crate::status::DIM, crate::status::RESET);
+        let row = format!("{}abcd{}", crate::status::DIM, crate::status::RESET);
         writer.write_frame(std::slice::from_ref(&row), (5, 3), &mut out);
-        let expected = format!("\x1b[?2026h\x1b[H{row}\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l");
+        let expected = format!("\x1b[?2026h\x1b[H {row}\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l");
         assert_eq!(out, expected.into_bytes());
     }
 
@@ -556,7 +613,7 @@ mod tests {
         writer.write_frame(&["one".to_string(), "two".to_string()], (10, 5), &mut out);
         assert_eq!(
             out.bytes,
-            b"\x1b[?2026h\x1b[Hone\x1b7\x1b[0m\x1b[K\x1b8\ntwo\x1b7\x1b[0m\x1b[K\x1b8\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l"
+            b"\x1b[?2026h\x1b[H one\x1b7\x1b[0m\x1b[K\x1b8\n two\x1b7\x1b[0m\x1b[K\x1b8\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l"
                 .to_vec()
         );
     }
@@ -568,7 +625,7 @@ mod tests {
         writer.write_frame(&["one".to_string(), "two".to_string()], (10, 5), &mut out);
         assert_eq!(
             out,
-            b"\x1b[?2026h\x1b[Hone\x1b7\x1b[0m\x1b[K\x1b8\ntwo\x1b7\x1b[0m\x1b[K\x1b8\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l"
+            b"\x1b[?2026h\x1b[H one\x1b7\x1b[0m\x1b[K\x1b8\n two\x1b7\x1b[0m\x1b[K\x1b8\n\x1b7\x1b[0m\x1b[J\x1b8\x1b[?2026l"
                 .to_vec()
         );
     }

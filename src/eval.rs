@@ -4207,52 +4207,62 @@ const MIN_WIDTH: usize = 60;
 /// see `render_lines` — so there is no separate space to account for here.
 const FRAME_CHROME: usize = 2;
 
-/// The frame's content width — the terminal's own width where one can be
-/// measured, clamped to [`MIN_WIDTH`]. With no terminal to measure, wide
+/// The frame's content width — the drawing area's width where a terminal can
+/// be measured (see [`crate::screen::drawing_area`]), clamped to
+/// [`MIN_WIDTH`]. With no terminal to measure, wide
 /// enough for `content` columns plus the one blank column the mockup leaves
 /// before the right border: the tables are wider than any fixed guess, and a
 /// piped screen cut down to one would lose the figures on the right.
 fn frame_width(content: usize) -> usize {
-    match terminal_size::terminal_size() {
-        Some((w, _)) => (w.0 as usize).saturating_sub(FRAME_CHROME).max(MIN_WIDTH),
+    match crate::screen::drawing_area() {
+        Some((width, _)) => width.saturating_sub(FRAME_CHROME).max(MIN_WIDTH),
         None => (content + 1).max(MIN_WIDTH),
     }
 }
 
-/// What `frame_rows` subtracts from the terminal's own height: two borders,
-/// the footer, one spare line — so the last line's own newline does not
-/// scroll the top of the frame away, the same reasoning `commands::queue`'s
-/// own `PANE_CHROME_ROWS` gives Pulled out of `frame_rows` so the count itself is a
-/// pure function a test can pin without a real terminal behind it.
+/// What `frame_rows` subtracts from the drawing area's height: two borders,
+/// the footer's first row, one spare line — so the last line's own newline
+/// does not scroll the top of the frame away, the same reasoning
+/// `commands::queue`'s own `PANE_CHROME_ROWS` gives. Pulled out of
+/// `frame_rows` so the count itself is a pure function a test can pin
+/// without a real terminal behind it.
 fn frame_chrome() -> usize {
     4
 }
 
-/// How many body rows a terminal `height` rows tall gives the frame once
-/// `frame_chrome` is counted — and, inside bare `spoolway`'s eval tab, once
-/// the strip's own rows are too (see `crate::screen::shell::strip_rows`,
-/// zero everywhere else). `None` where there is no terminal to measure,
-/// which is what lets a piped run keep every row rather than losing the ones
-/// past some guessed height.
-fn frame_rows(height: Option<usize>) -> Option<usize> {
+/// How many body rows a drawing area `height` rows tall gives the frame once
+/// `frame_chrome` is counted, and every one of the footer's `key_rows` past
+/// its first — and, inside bare `spoolway`'s eval tab, once the strip's own
+/// rows are too (see `crate::screen::shell::strip_rows`, zero everywhere
+/// else). `None` where there is no terminal to measure, which is what lets a
+/// piped run keep every row rather than losing the ones past some guessed
+/// height.
+fn frame_rows(height: Option<usize>, key_rows: usize) -> Option<usize> {
     height.map(|h| {
-        h.saturating_sub(frame_chrome() + crate::screen::shell::strip_rows())
-            .max(1)
+        h.saturating_sub(
+            frame_chrome() + crate::screen::shell::strip_rows() + key_rows.saturating_sub(1),
+        )
+        .max(1)
     })
 }
 
 fn frame_top(title: &str, right: &str, width: usize) -> String {
+    use crate::screen::corner::{TOP_LEFT, TOP_RIGHT};
     let left = format!("─ eval · {title} ");
     let right = match right.is_empty() {
         true => "─".to_string(),
         false => format!(" {right} ─"),
     };
     let dashes = width.saturating_sub(left.chars().count() + right.chars().count());
-    format!("┌{left}{}{right}┐", "─".repeat(dashes.max(1)))
+    format!(
+        "{TOP_LEFT}{left}{}{right}{TOP_RIGHT}",
+        "─".repeat(dashes.max(1))
+    )
 }
 
 fn frame_bottom(width: usize) -> String {
-    format!("└{}┘", "─".repeat(width))
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT};
+    format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(width))
 }
 
 /// `panel`'s own overhead beyond a body line's text: the box border on
@@ -4448,14 +4458,14 @@ fn eval_frame_rows(
     loaded: Option<&Loaded>,
     state: &ScreenState,
 ) -> Vec<String> {
-    let height = terminal_size::terminal_size().map(|(_, h)| h.0 as usize);
+    let height = crate::screen::drawing_area().map(|(_, height)| height);
     eval_frame_rows_at(pipelines, loaded, state, height)
 }
 
-/// [`eval_frame_rows`] on a terminal `height` rows tall — `None` for none at
-/// all. Split out because `terminal_size` reads `None` under the test
-/// harness, and a test of what scrolls needs a terminal shorter than its
-/// table.
+/// [`eval_frame_rows`] in a drawing area `height` rows tall — `None` for no
+/// terminal at all. Split out because the drawing area reads `None` under
+/// the test harness, and a test of what scrolls needs a terminal shorter
+/// than its table.
 fn eval_frame_rows_at(
     pipelines: &Pipelines,
     loaded: Option<&Loaded>,
@@ -4484,7 +4494,10 @@ fn eval_frame_rows_at(
         + 1;
     let border = format!("─ eval · {title} ").chars().count() + right.chars().count() + 5;
     let width = frame_width(content.max(border));
-    let rows = frame_rows(height);
+    // Wrapped before the body is measured, because each row it wraps onto
+    // past its first comes off the body's.
+    let keys = crate::screen::key_rows(&footer(state.table, state.filters.figures));
+    let rows = frame_rows(height, keys.len());
     let mut body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
     // The `Total` line comes off before `clip` and goes back after it, so a
@@ -4578,7 +4591,7 @@ fn eval_frame_rows_at(
     }
 
     rows_out.extend(frame);
-    rows_out.push(footer(state.table, state.filters.figures));
+    rows_out.extend(keys);
     rows_out
 }
 
@@ -7422,6 +7435,7 @@ mod tests {
 mod screen_tests {
     use super::*;
     use crate::commands::testutil::fixture;
+    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     fn keys(s: &str) -> std::io::Cursor<Vec<u8>> {
         std::io::Cursor::new(s.as_bytes().to_vec())
@@ -7691,11 +7705,15 @@ mod screen_tests {
         text.split("\x1b[?2026h\x1b[H").skip(1).collect()
     }
 
-    /// The loading popup, exactly as the mockup draws it.
-    const LOADING: [&str; 3] = ["┌─ eval ─────┐", "│  Loading…  │", "└────────────┘"];
-
+    /// Whether `frame` carries the loading popup, exactly as the mockup
+    /// draws it.
     fn shows_loading(frame: &str) -> bool {
-        LOADING.iter().all(|line| frame.contains(line))
+        let loading = [
+            format!("{TOP_LEFT}─ eval ─────{TOP_RIGHT}"),
+            "│  Loading…  │".to_string(),
+            format!("{BOTTOM_LEFT}────────────{BOTTOM_RIGHT}"),
+        ];
+        loading.iter().all(|line| frame.contains(line.as_str()))
     }
 
     type Senders = std::rc::Rc<std::cell::RefCell<Vec<std::sync::mpsc::Sender<Result<Loaded>>>>>;
@@ -7742,10 +7760,16 @@ mod screen_tests {
         assert_eq!(all.len(), 1, "no frame changed, so nothing was repainted");
         for frame in &all {
             assert!(frame.contains("DISPATCH"), "under the strip: {frame}");
-            assert!(frame.contains("┌─ eval · by pipeline "), "{frame}");
+            assert!(
+                frame.contains(&format!("{TOP_LEFT}─ eval · by pipeline ")),
+                "{frame}"
+            );
             assert!(shows_loading(frame), "{frame}");
             assert!(!frame.contains("PIPELINE"), "no table yet: {frame}");
-            assert!(!frame.contains("┌─ filters"), "`f` was not read: {frame}");
+            assert!(
+                !frame.contains(&format!("{TOP_LEFT}─ filters")),
+                "`f` was not read: {frame}"
+            );
             assert!(
                 frame.contains(
                     "[↑↓] move   [a] ascending   [d] descending   [t] per run   [tab] dirs"
@@ -7854,7 +7878,10 @@ mod screen_tests {
             let last = last_frame(&drawn);
             assert!(shows_loading(last), "{script:?}: {last}");
             assert!(last.contains("│ PIPELINE"), "{script:?}: {last}");
-            assert!(!last.contains("┌─ filters"), "{script:?}: {last}");
+            assert!(
+                !last.contains(&format!("{TOP_LEFT}─ filters")),
+                "{script:?}: {last}"
+            );
             assert_eq!(senders.borrow().len(), 1, "{script:?}: one reload");
         }
     }
@@ -7973,7 +8000,7 @@ mod screen_tests {
         let last_body_lines = |frame: &[String]| -> (String, String) {
             let bottom = frame
                 .iter()
-                .rposition(|l| l.starts_with('└'))
+                .rposition(|l| l.starts_with(BOTTOM_LEFT))
                 .expect("the frame's own bottom border");
             (frame[bottom - 2].clone(), frame[bottom - 1].clone())
         };
@@ -7986,7 +8013,7 @@ mod screen_tests {
             assert!(last.starts_with("│ Total "), "{}", frame.join("\n"));
             assert!(last.contains(" 270 "), "{last}");
             assert!(above.starts_with(&format!("│ {indicator}")), "{above}");
-            let top = frame.iter().position(|l| l.starts_with('┌')).unwrap();
+            let top = frame.iter().position(|l| l.starts_with(TOP_LEFT)).unwrap();
             assert!(
                 frame[top + 1].starts_with("│ TASK "),
                 "the header stays at the top at {cursor}: {}",
@@ -8005,7 +8032,7 @@ mod screen_tests {
         let text = frame.join("\n");
         assert!(text.contains("[enter] apply   [esc] back"), "{text}");
         assert_eq!(
-            frame.iter().filter(|l| l.contains('└')).count(),
+            frame.iter().filter(|l| l.contains(BOTTOM_LEFT)).count(),
             2,
             "the panel's bottom border and the frame's: {text}"
         );
@@ -8220,7 +8247,10 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-opens");
         let text = screen(&repo, "q");
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by pipeline · totals "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · totals ")),
+            "{last}"
+        );
         assert!(last.contains("│ PIPELINE"), "{last}");
         assert!(last.contains("│>default"), "{last}");
         assert!(last.contains("│ Total"), "{last}");
@@ -8239,7 +8269,10 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-tab");
         let text = screen(&repo, "\t");
         let dirs = last_frame(&text);
-        assert!(dirs.contains("┌─ eval · by dir "), "{dirs}");
+        assert!(
+            dirs.contains(&format!("{TOP_LEFT}─ eval · by dir ")),
+            "{dirs}"
+        );
         assert!(dirs.contains("│ DIR"), "{dirs}");
         assert!(dirs.contains("[tab] trials"), "{dirs}");
         let root = repo.root.canonicalize().unwrap();
@@ -8249,7 +8282,10 @@ mod screen_tests {
         );
 
         let trials = last_frame(&screen(&repo, "\t\t")).to_string();
-        assert!(trials.contains("┌─ eval · trials "), "{trials}");
+        assert!(
+            trials.contains(&format!("{TOP_LEFT}─ eval · trials ")),
+            "{trials}"
+        );
         assert!(trials.contains("No trials in this window."), "{trials}");
         assert!(
             trials.contains(
@@ -8260,7 +8296,7 @@ mod screen_tests {
 
         let text = screen(&repo, "\t\t\t");
         assert!(
-            last_frame(&text).contains("┌─ eval · by pipeline "),
+            last_frame(&text).contains(&format!("{TOP_LEFT}─ eval · by pipeline ")),
             "{text}"
         );
     }
@@ -8274,7 +8310,7 @@ mod screen_tests {
         let shown = std::path::PathBuf::from(".spoolway")
             .join("evals")
             .join("eval-by-pipeline-");
-        assert!(text.contains("┌─ exported "), "{text}");
+        assert!(text.contains(&format!("{TOP_LEFT}─ exported ")), "{text}");
         assert!(text.contains("1 row, by pipeline"), "{text}");
         assert!(text.contains(&shown.display().to_string()), "{text}");
 
@@ -8340,7 +8376,7 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-short-table");
         let last = last_frame(&screen(&repo, "fq")).to_string();
         assert!(last.contains("[enter] apply   [esc] back"), "{last}");
-        assert!(last.contains("└───"), "{last}");
+        assert!(last.contains(&format!("{BOTTOM_LEFT}───")), "{last}");
     }
 
     /// The lanes panel draws its seven rows in order, `by` first, every one
@@ -8439,7 +8475,10 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-by-step");
         let text = screen(&repo, &format!("f{RIGHT}\rq"));
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by step "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by step ")),
+            "{last}"
+        );
         assert!(last.contains("│ PIPELINE  STEP"), "{last}");
         assert!(last.contains("│>default   implement"), "{last}");
     }
@@ -8498,7 +8537,7 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-short-table-calendar");
         let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(5)));
         let last = last_frame(&text);
-        assert!(last.contains("┌─ since ─"), "{last}");
+        assert!(last.contains(&format!("{TOP_LEFT}─ since ─")), "{last}");
         assert!(last.contains("[enter] pick   [esc] back"), "{last}");
     }
 
@@ -8509,7 +8548,10 @@ mod screen_tests {
     fn typing_on_a_date_row_does_nothing_and_enter_still_opens_the_calendar() {
         let (repo, _root_guard) = fixture("screen-bad-since");
         let text = screen(&repo, &format!("f{}notadate\rq", DOWN.repeat(5)));
-        assert!(last_frame(&text).contains("┌─ since ─"), "{text}");
+        assert!(
+            last_frame(&text).contains(&format!("{TOP_LEFT}─ since ─")),
+            "{text}"
+        );
         assert!(!text.contains("notadate"), "{text}");
     }
 
@@ -8596,7 +8638,10 @@ mod screen_tests {
             screen(&repo, &format!("\tf{RIGHT}\rq"))
         });
         let sessions = last_frame(&text);
-        assert!(sessions.contains("┌─ eval · by session "), "{sessions}");
+        assert!(
+            sessions.contains(&format!("{TOP_LEFT}─ eval · by session ")),
+            "{sessions}"
+        );
         assert!(sessions.contains("SKILL"), "{sessions}");
         assert!(sessions.contains("spoolway-plan"), "{sessions}");
         assert!(sessions.contains(" notes "), "{sessions}");
@@ -8606,8 +8651,14 @@ mod screen_tests {
             screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
-        assert!(filtered.contains("┌─ eval · by dir "), "{filtered}");
-        assert!(filtered.contains("skill /spoolway-plan ─┐"), "{filtered}");
+        assert!(
+            filtered.contains(&format!("{TOP_LEFT}─ eval · by dir ")),
+            "{filtered}"
+        );
+        assert!(
+            filtered.contains(&format!("skill /spoolway-plan ─{TOP_RIGHT}")),
+            "{filtered}"
+        );
         assert!(filtered.contains("/w/spoolway"), "{filtered}");
         assert!(!filtered.contains("/w/notes"), "{filtered}");
 
@@ -8657,8 +8708,14 @@ mod screen_tests {
             screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
-        assert!(filtered.contains("┌─ eval · by dir "), "{filtered}");
-        assert!(filtered.contains("skill spoolway-plan ─┐"), "{filtered}");
+        assert!(
+            filtered.contains(&format!("{TOP_LEFT}─ eval · by dir ")),
+            "{filtered}"
+        );
+        assert!(
+            filtered.contains(&format!("skill spoolway-plan ─{TOP_RIGHT}")),
+            "{filtered}"
+        );
         assert!(filtered.contains("/w/spoolway"), "{filtered}");
         assert!(!filtered.contains("/w/notes"), "{filtered}");
 
@@ -8719,7 +8776,10 @@ mod screen_tests {
             screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
-        assert!(filtered.contains("skill /spoolway-plan ─┐"), "{filtered}");
+        assert!(
+            filtered.contains(&format!("skill /spoolway-plan ─{TOP_RIGHT}")),
+            "{filtered}"
+        );
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -8779,7 +8839,10 @@ mod screen_tests {
             screen(&repo, &format!("\tf{RIGHT}\rq"))
         });
         let sessions = last_frame(&text);
-        assert!(sessions.contains("┌─ eval · by session "), "{sessions}");
+        assert!(
+            sessions.contains(&format!("{TOP_LEFT}─ eval · by session ")),
+            "{sessions}"
+        );
         assert!(!sessions.contains(subagent), "{sessions}");
         assert!(
             sessions.contains("0.70"),
@@ -9206,7 +9269,7 @@ mod screen_tests {
         let popup = all
             .iter()
             .rev()
-            .find(|f| f.contains("┌─ sort ascending "))
+            .find(|f| f.contains(&format!("{TOP_LEFT}─ sort ascending ")))
             .expect("`a` opened the popup");
         let listed: Vec<usize> = [
             "│    default order",
@@ -9234,7 +9297,7 @@ mod screen_tests {
         let before = all[0..all.len() - 1]
             .iter()
             .rev()
-            .find(|f| !f.contains("┌─ sort ") && f.contains("│ PIPELINE"))
+            .find(|f| !f.contains(&format!("{TOP_LEFT}─ sort ")) && f.contains("│ PIPELINE"))
             .unwrap();
         assert_eq!(row_order(before), ["alpha", "gamma", "beta"], "{before}");
 
@@ -9250,7 +9313,7 @@ mod screen_tests {
         );
         assert!(last.contains(" ▲PASS  BLOCKS"), "{last}");
         assert!(
-            !last.contains("┌─ sort "),
+            !last.contains(&format!("{TOP_LEFT}─ sort ")),
             "`enter` closed the popup: {last}"
         );
     }
@@ -9262,7 +9325,10 @@ mod screen_tests {
         let text = screen(&repo, &format!("d{DOWN}\x1bq"));
         let last = last_frame(&text);
         assert_eq!(row_order(last), ["alpha", "gamma", "beta"], "{last}");
-        assert!(!last.contains('▼') && !last.contains("┌─ sort "), "{last}");
+        assert!(
+            !last.contains('▼') && !last.contains(&format!("{TOP_LEFT}─ sort ")),
+            "{last}"
+        );
     }
 
     /// A sort on `USD` outlives `tab` round every table, `r`, and a change of
@@ -9279,7 +9345,7 @@ mod screen_tests {
 
         let dirs = all
             .iter()
-            .find(|f| f.contains("┌─ eval · by dir "))
+            .find(|f| f.contains(&format!("{TOP_LEFT}─ eval · by dir ")))
             .expect("`tab` reached the directory table");
         assert!(
             !dirs.contains('▼'),
@@ -9287,12 +9353,22 @@ mod screen_tests {
         );
 
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by step "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by step ")),
+            "{last}"
+        );
         assert!(sorted(last), "{last}");
         let lanes_frames: Vec<&&str> = all
             .iter()
-            .filter(|f| f.contains("┌─ eval · by pipeline ") || f.contains("┌─ eval · by step "))
-            .filter(|f| !shows_loading(f) && !f.contains("┌─ filters") && !f.contains("┌─ sort "))
+            .filter(|f| {
+                f.contains(&format!("{TOP_LEFT}─ eval · by pipeline "))
+                    || f.contains(&format!("{TOP_LEFT}─ eval · by step "))
+            })
+            .filter(|f| {
+                !shows_loading(f)
+                    && !f.contains(&format!("{TOP_LEFT}─ filters"))
+                    && !f.contains(&format!("{TOP_LEFT}─ sort "))
+            })
             .collect();
         let after_pick = lanes_frames
             .iter()
@@ -9734,8 +9810,14 @@ mod screen_tests {
         run_now(&repo, &args, &mut input, &mut out);
         let text = String::from_utf8(out).unwrap();
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by pipeline "), "{last}");
-        assert!(last.contains(" trial retire-worktree-root ─┐"), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline ")),
+            "{last}"
+        );
+        assert!(
+            last.contains(&format!(" trial retire-worktree-root ─{TOP_RIGHT}")),
+            "{last}"
+        );
         assert!(last.contains("│>impl "), "{last}");
         assert!(last.contains("│ impl_ui "), "{last}");
         assert!(!last.contains("impl_tdd"), "the other trial: {last}");
@@ -9770,7 +9852,10 @@ mod screen_tests {
         );
 
         let last = last_frame(&screen(&repo, "\t\tq")).to_string();
-        assert!(last.contains("┌─ eval · trials "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · trials ")),
+            "{last}"
+        );
         let newer = last.find("retire-worktree-root").expect("t1's row");
         let older = last.find("board-step-grace-window").expect("t2's row");
         assert!(newer < older, "newest first: {last}");
@@ -9813,7 +9898,10 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_to_sort("screen-t");
         let opened = screen(&repo, "q");
         let last = last_frame(&opened);
-        assert!(last.contains("┌─ eval · by pipeline · totals "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · totals ")),
+            "{last}"
+        );
         assert!(
             header_of(last).contains(
                 "IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       \
@@ -9825,7 +9913,10 @@ mod screen_tests {
 
         let text = screen(&repo, "tq");
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by pipeline · per run "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · per run ")),
+            "{last}"
+        );
         assert!(
             header_of(last).contains(
                 "IN/RUN  IN USD/RUN  OUT/RUN  OUT USD/RUN  CACHE R/RUN  CACHE R USD/RUN  \
@@ -9840,7 +9931,10 @@ mod screen_tests {
 
         let text = screen(&repo, "ttq");
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by pipeline · totals "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · totals ")),
+            "{last}"
+        );
         assert!(
             last.contains("[d] descending   [t] per run   [tab] dirs"),
             "{last}"
@@ -9856,17 +9950,26 @@ mod screen_tests {
 
         let text = screen(&repo, "t\tq");
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by dir · per run "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by dir · per run ")),
+            "{last}"
+        );
         assert!(header_of(last).contains("IN/SESSION"), "{last}");
 
         let text = screen(&repo, "t\t\tq");
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · trials "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · trials ")),
+            "{last}"
+        );
         assert!(!last.contains("[t]"), "{last}");
 
         let text = screen(&repo, "t\t\t\trq");
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by pipeline · per run "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · per run ")),
+            "{last}"
+        );
         assert!(header_of(last).contains("TIME/RUN"), "{last}");
 
         let text = screen(&repo, &format!("tf{RIGHT}\rq"));
@@ -10044,17 +10147,26 @@ mod screen_tests {
 
         let text = screen(&repo, &format!("\ttd{to_in}\r{to_session}t{to_dir}q"));
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by dir · totals "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by dir · totals ")),
+            "{last}"
+        );
         assert!(header_of(last).contains("▼IN  "), "{last}");
 
         let text = screen(&repo, &format!("\td{to_in}\r{to_session}q"));
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by session "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by session ")),
+            "{last}"
+        );
         assert!(last.contains("▼IN  "), "a sort on IN reads as one: {last}");
 
         let text = screen(&repo, &format!("\td{to_in}\r{to_session}t{to_dir}q"));
         let last = last_frame(&text);
-        assert!(last.contains("┌─ eval · by dir · per run "), "{last}");
+        assert!(
+            last.contains(&format!("{TOP_LEFT}─ eval · by dir · per run ")),
+            "{last}"
+        );
         assert!(header_of(last).contains("▼IN/SESSION"), "{last}");
     }
 }
