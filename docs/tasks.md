@@ -154,7 +154,7 @@ Four sections are appended as the task runs. spoolway creates them if they are m
 |---|---|
 | `## Status Log` | Every step. One timestamped line per transition. |
 | `## Handoff` | Any step, with `spoolway report --handoff`. What the next step should know. |
-| `## Blocker` | The dispatcher. Why the task needs a person. |
+| `## Blocker` | The dispatcher. Why the task needs a person. When the task is put back, spoolway adds a dated `- Cleared` line below the entries. |
 | `## Hook error` | The dispatcher, on a failing `[issue_tracking]` hook. The run's own last output. |
 
 The wording under each heading is fixed and built into spoolway. It is sent to the lane as
@@ -271,6 +271,16 @@ The board reads a stacked group's line as `after <group>`. See [Rows are grouped
 A task moves to `blocked` when a step reports `block`, when a step spends its `loop` budget
 and routes to `blocked`, or when a lane fails to start three times. The reason is written to
 `## Blocker`, and the board pins the task at the top of its group.
+
+A person puts the task back with `spoolway resume`, with `r` or restart on the board, or by answering a gate. Each adds one line under the entries in `## Blocker`:
+
+```
+- Cleared 2026-10-09 22:31: the task was put back; the entries above are past.
+```
+
+Entries above a `Cleared` line belong to a stop that is over. A later stop appends its entry
+below the line, so the last entry with no `Cleared` line under it is the current one. A task
+that goes back onto `blocked` gets no line.
 
 Press `r` on the blocked row. The picker preselects the step the task stopped on, and `enter`
 continues the blocked lane's own session there, if that session's last reply is within the
