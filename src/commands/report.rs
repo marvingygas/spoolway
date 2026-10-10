@@ -590,7 +590,13 @@ pub fn route(
         // counters never park a task — only the unblocker's judgement does.
         task.reset_loop_counts();
         let routed_target = apply_loop_budget(pipeline, task, current, target.clone(), unattended);
-        if gated_at.is_none() && routed_target == target {
+        // `gate_at: blocked` is about to hold this pass, and the resume that
+        // lets it go finds the step the task stopped at through
+        // `blocked_from`. Clearing it here would leave that resume nothing to
+        // read, so it would fall back to the pipeline's entry and take the
+        // entry's `on_pass` whatever step the task actually stopped at.
+        let held_here = task.front.gate_at.as_deref() == Some(crate::pipeline::BLOCKED);
+        if gated_at.is_none() && routed_target == target && !held_here {
             resume_at(task, &target);
         }
         routed_target
@@ -690,7 +696,16 @@ pub fn route(
     // of it. `spoolway resume` is what tells a caught pass from a caught fail
     // or block apart again, from `last_report` and `blocked_from` — see
     // `resume_road`.
-    let hold = gate_hold(task, step, outcome, &destination);
+    let mut hold = gate_hold(task, step, outcome, &destination);
+    // The stopped step's own gate already holds this pass in front of a
+    // person, at that step, so a `gate_at: blocked` has what it asked for.
+    // Holding it again at `blocked` would overwrite `paused_at` and lose the
+    // step whose `on_pass` the resume must take. The schedule is spent, as
+    // any that fires is.
+    if gated_at.is_some() && hold == Some(Gate::Schedule) {
+        hold = None;
+        task.front.gate_at = None;
+    }
     let gated = hold.is_some() || gated_at.is_some();
     // What the status log's arrival line says, in place of the lane's own
     // `-m` message — the Mockup draws this note on the arrival, not the
@@ -1522,11 +1537,13 @@ fn steps_run(task: &Task, pipeline: &Pipeline) -> Vec<String> {
 ///
 /// `takes_over` is the reported verb, not a setting: [`report`]'s own pass
 /// from `blocked` passes `true` unconditionally, because a `--pass` is the
-/// only outcome that reaches this function directly — the work is done, on
-/// the unblocker's word. [`past_the_gate`] passes `false`, because reaching
-/// it through a cleared block means a person is resuming a task that landed
-/// on `paused` by `--pause`, `--fail` or `--block` — none of which claim the
-/// step's work is done, so nothing here is carried past it.
+/// only outcome that reaches this function unheld — the work is done, on
+/// the unblocker's word. So does [`resume_road`], and the board's `(next)`
+/// row, for a pass `gate_at: blocked` held, see [`held_unblocker_pass`].
+/// Resuming a cleared block any other way passes `false`, because it means a
+/// person is resuming a task that landed on `paused` by `--pause`, `--fail`
+/// or `--block` — none of which claim the step's work is done, so nothing
+/// here is carried past it.
 ///
 /// Two cases hand back whatever `takes_over` says, because there is nothing to
 /// carry the task to: an origin the pipeline no longer has, and an origin that
@@ -1543,6 +1560,23 @@ pub fn cleared_block_target(task: &Task, pipeline: &Pipeline, takes_over: bool) 
         return origin;
     }
     step.on_pass.clone().unwrap_or(origin)
+}
+
+/// Whether `gated` is `blocked` and the pause holds its unblocker's `--pass`.
+///
+/// [`caught_at`] calls a `--block` from `blocked` a pass too, since it only
+/// separates fails; the banked outcome is what tells them apart. A held
+/// `--block` says the work could not be done, so it must not be carried past
+/// the step it stopped at. [`resume_road`] and the board's `(next)` row both
+/// ask this, so the road and the row name the same step.
+pub fn held_unblocker_pass(task: &Task, gated: &str) -> bool {
+    gated == crate::pipeline::BLOCKED
+        && caught_at(task, gated) == Some(Caught::Pass)
+        && task
+            .front
+            .last_report
+            .as_ref()
+            .is_some_and(|report| matches!(report.outcome.parse::<Outcome>(), Ok(Outcome::Pass)))
 }
 
 /// Whether `gated`, a command step, holds a pass its own command never gave.
@@ -1573,8 +1607,11 @@ pub fn command_pass_handed_back(task: &Task, step: &crate::pipeline::Step, gated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caught {
     /// A plain pass, whatever gated it — a step's own `gate: true` or a
-    /// schedule that happened to catch one. Resuming reads exactly as an
-    /// ordinary gate always has.
+    /// schedule that happened to catch one. Resuming takes the gated step's
+    /// own `on_pass`. The exception is a schedule on `blocked`: it has no
+    /// `on_pass`, so [`held_unblocker_pass`] sends the pass down
+    /// [`cleared_block_target`] to the `on_pass` of the step the task stopped
+    /// at.
     Pass,
     /// A fail a schedule caught before it could go round the loop the
     /// pipeline drew. Resuming an agent step's still takes `on_pass`: taking
@@ -1782,6 +1819,13 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
             gated.clone()
         } else if cleared_block {
             cleared_block_target(task, pipeline, false)
+        } else if held_unblocker_pass(task, &gated) {
+            // `gate_at: blocked` held the unblocker's own pass. `blocked` has
+            // no `on_pass` to read, so the plain branch below would send the
+            // task back onto `blocked` for a second unblocker lane. The pass
+            // goes where it would have gone unheld, which is the same
+            // `cleared_block_target` a pass from `blocked` reads.
+            cleared_block_target(task, pipeline, true)
         } else if caught == Some(Caught::Blocked) {
             // What `set_blocked_from` already ran for on the way here — a
             // `--block`, a step's own `on_fail: blocked`, or a spent loop's
@@ -2532,7 +2576,11 @@ fn past_the_gate(
     destination: String,
     walked_past: Option<String>,
 ) -> Result<()> {
-    if cleared_block {
+    // A held unblocker pass kept `blocked_from` for this resume to read — see
+    // `route`'s `held_here`. Letting it go is the resume an unheld pass from
+    // `blocked` makes there, so it clears the field the same way; left
+    // standing, it would read as a caught block at that step's next gate.
+    if cleared_block || held_unblocker_pass(&task, gated) {
         resume_at(&mut task, &destination);
     }
     // A gate can sit over a caught block, whose entry is over once a person
@@ -3906,6 +3954,150 @@ mod tests {
             "no gate holds a pass nobody gave"
         );
         assert_eq!(task.front.paused_at, None);
+    }
+
+    /// A task whose own `gate_at` names `blocked` is held after its unblocker
+    /// passes, and resuming it carries it where that pass would have gone
+    /// unheld: the `on_pass` of the step it stopped at, not back onto
+    /// `blocked` for a second unblocker lane. `resume_road`, which `queue
+    /// route` and the board's `(next)` row read, names the same step.
+    #[test]
+    fn a_caught_unblocker_pass_resumes_where_the_pass_would_have_gone() {
+        let (repo, _root_guard) = unattended_fixture("gate-at-blocked-pass");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("implement".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "tab-shell", Outcome::Pass);
+
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.paused_at.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            "review",
+            "an unheld pass from `blocked` at `implement` goes to its `on_pass`"
+        );
+
+        resume(&repo, &pipelines, &resume_args("tab-shell", None), None).unwrap();
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), "review");
+        assert_eq!(task.front.paused_at, None);
+    }
+
+    /// The held pass keeps the step the task stopped at, so a task blocked
+    /// past the entry resumes to that step's `on_pass`, not the entry's.
+    #[test]
+    fn a_caught_unblocker_pass_keeps_a_stopped_step_past_the_entry() {
+        let (repo, _root_guard) = unattended_fixture("gate-at-blocked-mid");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "review");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("review".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "tab-shell", Outcome::Pass);
+
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            "look",
+            "an unheld pass from `blocked` at `review` goes to its `on_pass`"
+        );
+
+        resume(&repo, &pipelines, &resume_args("tab-shell", None), None).unwrap();
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), "look");
+        assert_eq!(
+            task.front.blocked_from, None,
+            "the resume clears `blocked_from` as an unheld pass from `blocked` does"
+        );
+    }
+
+    /// A held unblocker pass whose stopped step has its own `gate: true` waits
+    /// at that step's gate, as the unheld pass does, rather than at `blocked`.
+    /// Held at `blocked`, the resume lost the stopped step and took the
+    /// entry's `on_pass`.
+    #[test]
+    fn a_caught_unblocker_pass_at_a_gated_step_waits_at_that_gate() {
+        let (repo, _root_guard) = unattended_fixture("gate-at-blocked-gated");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "tab-shell", Outcome::Pass);
+
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("look"));
+        assert_eq!(task.front.gate_at, None, "the schedule is spent");
+        assert_eq!(resume_road(&task, &pipelines).unwrap().destination(), "e2e");
+
+        resume(&repo, &pipelines, &resume_args("tab-shell", None), None).unwrap();
+        assert_eq!(queued(&repo, "tab-shell").stage(), "e2e");
+    }
+
+    /// An unblocker that reports `--block` under `gate_at: blocked` said the
+    /// work could not be done, so resuming that pause must not carry the task
+    /// past the step it stopped at. It goes back onto `blocked`, as it did
+    /// before a held pass had a road of its own.
+    #[test]
+    fn a_caught_unblocker_block_is_not_carried_past_the_stopped_step() {
+        let (repo, _root_guard) = unattended_fixture("gate-at-blocked-block");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("implement".into());
+        task.front.gate_at = Some(crate::pipeline::BLOCKED.into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "tab-shell", Outcome::Block);
+
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            resume_road(&task, &pipelines).unwrap().destination(),
+            crate::pipeline::BLOCKED,
+        );
     }
 
     /// A pipeline whose `deploy` is a gated `run:` step that goes on to `done`

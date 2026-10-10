@@ -768,6 +768,24 @@ must "resuming it sends the caught fail on to blocked, exactly where it would ha
   "$SPOOLWAY" resume pause-fail-catch
 stage_reaches "and it lands there" pause-fail-catch blocked 25
 
+# ------------------- a schedule on `blocked` holds the unblocker's own pass
+# `unattended.blocked_agent` is still `pi` here, whose default turn reports a
+# pass. The task is seeded stopped on `blocked` the way a real block leaves
+# it, with the schedule on `blocked` itself. `blocked` declares no `on_pass`,
+# so the held pass has to go where it would have gone unheld: the `on_pass` of
+# `review`, the step it stopped at (not the entry, whose `on_pass` is a
+# different step), and not back onto `blocked` for a second unblocker lane
+# whose verdict would be thrown away.
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/hold-unblock.md" hold-unblock "$BODY" \
+  "stage: blocked" "blocked_from: review" "gate_at: blocked" "group: hold-unblock"
+stage_reaches "the unblocker's pass is held on paused" hold-unblock paused 30
+has "at blocked, the step whose pass it caught" "paused_at: blocked" \
+  "$SPOOLWAY_PROJECT_HOME/queue/hold-unblock.md"
+draws "the board's NEXT column names review's on_pass, not blocked" "[r] → document" 30
+must "resuming it carries the pass on" "$SPOOLWAY" resume hold-unblock
+stage_reaches "and it lands on review's on_pass, with no second unblocker" \
+  hold-unblock document 25
+
 # --------------------------- a gated stop offers a key before every command
 # The mockup this task built: a report that lands a task on `paused` names
 # what it offers key first, then the command — never a bare key with nothing

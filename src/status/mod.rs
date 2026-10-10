@@ -1435,8 +1435,17 @@ fn picker_header(
         let handed_back = pipeline
             .step(step)
             .is_some_and(|s| crate::commands::command_pass_handed_back(task, s, step));
+        // `gate_at: blocked` holds an unblocker's pass with `paused_at` on
+        // `blocked` and `blocked_from` still naming the step the task stopped
+        // at. `caught_at` reads that step as a caught block, but the
+        // unblocker cleared it, so the header says that instead.
+        let held_unblocker = task
+            .front
+            .paused_at
+            .as_deref()
+            .is_some_and(|gated| crate::commands::held_unblocker_pass(task, gated));
         let caught = match crate::commands::caught_at(task, step) {
-            _ if handed_back => " — its block was cleared",
+            _ if handed_back || held_unblocker => " — its block was cleared",
             Some(crate::commands::Caught::Pass) => " — it passed",
             Some(crate::commands::Caught::Fail) => " — it failed",
             Some(crate::commands::Caught::Blocked) => " — it blocked",
@@ -3362,7 +3371,9 @@ fn blocked_next(
 /// resumes straight to `blocked` — exactly where it would have landed
 /// unheld — a command step's caught fail resumes by its own `on_fail`, a
 /// command step held on a pass `blocked` gave rather than its own exit
-/// resumes onto the step itself, and everything else, a plain gated pass or a
+/// resumes onto the step itself, an unblocker's pass held by `gate_at:
+/// blocked` resumes through `cleared_block_target` to the `on_pass` of the
+/// step the task stopped at, and everything else, a plain gated pass or a
 /// schedule's caught fail at an agent step, resumes by the step's own
 /// `on_pass`. A `parked_from` with no
 /// gate — a person's own keypress, or a lane `escalate_clock` gave up on —
@@ -3387,6 +3398,13 @@ fn paused_next(
             _ if crate::commands::command_pass_handed_back(task, step, gated) => gated.to_string(),
             None if task.front.blocked_from.as_deref() == Some(gated) => {
                 crate::commands::cleared_block_target(task, pipeline, false)
+            }
+            // `gate_at: blocked` held an unblocker's pass: it resumes where the
+            // pass would have gone unheld — see `resume_road`.
+            Some(crate::commands::Caught::Pass)
+                if crate::commands::held_unblocker_pass(task, gated) =>
+            {
+                crate::commands::cleared_block_target(task, pipeline, true)
             }
             Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
             // A command step's held failure resumes down the `on_fail` its
@@ -9959,6 +9977,70 @@ mod tests {
 
         task.front.last_report.as_mut().unwrap().step = "deploy".into();
         assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("done"));
+    }
+
+    /// A `gate_at: blocked` hold on an unblocker's pass shows the step the
+    /// pass would have reached unheld, not `blocked` again, which has no
+    /// `on_pass` for the row to read.
+    #[test]
+    fn the_next_column_names_where_a_held_unblocker_pass_goes() {
+        let (repo, _root_guard) = fixture("next-gate-at-blocked");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        add(&repo, "login", &[], Some("blocked"));
+        let mut task = repo.task("login").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.front.paused_at = Some("blocked".into());
+        task.front.paused_by = Some("gate".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "pass".into(),
+            at: 1,
+            blocked: false,
+        });
+
+        assert_eq!(paused_next(&task, &pipeline, 0).as_deref(), Some("review"));
+    }
+
+    /// The picker's header on a `gate_at: blocked` hold of an unblocker's pass
+    /// says the block was cleared. `blocked_from` still names the stopped step
+    /// for the resume to read, which `caught_at` reads as a caught block, so
+    /// without the check the header says the unblocker blocked while the
+    /// `(next)` row names the step it passed to.
+    #[test]
+    fn the_picker_header_says_a_held_unblocker_pass_cleared_the_block() {
+        let (repo, _root_guard) = fixture("picker-gate-at-blocked");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        add(&repo, "login", &[], Some("blocked"));
+        let mut task = repo.task("login").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.front.paused_at = Some("blocked".into());
+        task.front.paused_by = Some("schedule".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "blocked".into(),
+            outcome: "pass".into(),
+            at: 1,
+            blocked: false,
+        });
+
+        assert_eq!(
+            picker_header(&task, &pipeline, Some("implement")),
+            format!("{} at implement — its block was cleared", task.stage())
+        );
+
+        // An unblocker that blocked again is still a caught block.
+        task.front.last_report.as_mut().unwrap().outcome = "block".into();
+        assert_eq!(
+            picker_header(&task, &pipeline, Some("implement")),
+            format!("{} at implement — it blocked", task.stage())
+        );
     }
 
     /// The picker's header for the same task says the block was cleared, not
