@@ -1692,6 +1692,26 @@ pub(crate) fn interrupt_for_stop(repo: &Repo, pipelines: &Pipelines) -> Result<(
     Ok(())
 }
 
+/// Whether anything is running that [`interrupt_for_stop`] would act on —
+/// the dispatch tab's `enter` opens its stop popup only when this is true,
+/// since with nothing running the popup's two answers do the same thing.
+/// It reads the set [`live_aborts`] builds, so the two cannot disagree. When
+/// the tasks or the lane list cannot be read, this says `true`: a popup that
+/// was not needed costs a keypress, a stop that skipped a live step costs
+/// the step.
+pub(crate) fn anything_running_for_stop(repo: &Repo, pipelines: &Pipelines) -> bool {
+    let Ok(tasks) = repo.tasks() else {
+        return true;
+    };
+    let Ok(mux) = crate::mux::backend(repo) else {
+        return true;
+    };
+    let Ok(lanes) = mux.list_lanes() else {
+        return true;
+    };
+    !live_aborts(repo, &tasks, pipelines, &lanes).is_empty()
+}
+
 /// Resume every task a stop's `i` parked — [`crate::task::Frontmatter::
 /// parked_by_stop`] set and still on `paused` — through [`resume_task`],
 /// the same code the board's `r` sends one row through, which spends the
