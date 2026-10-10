@@ -3397,10 +3397,6 @@ enum Mode {
         panel: Vec<String>,
         routines: Option<RoutineNav>,
     },
-    /// The overrides bare `spoolway` opens on that the load left out —
-    /// [`crate::commands::ignored_popup`]. `enter` closes it, the only key
-    /// it reads, the same as [`Mode::Queued`].
-    Ignored(crate::commands::IgnoredPopup),
     /// The routines tab's own screen: the left pane swapped for the routines
     /// under `.spoolway/routines/`, one row each — see [`RoutineNav`] for
     /// what it tracks between keys. Only [`routines_tab`] opens it, and no
@@ -3986,8 +3982,8 @@ pub(crate) struct ScreenState {
     /// screen with no checkout behind it.
     board_branch: Option<String>,
     /// Popups waiting behind the one on screen, each opened in turn as the
-    /// one before it closes — the notices bare `spoolway` opens with, which
-    /// can be more than one at once.
+    /// one before it closes — the queue tab's opening message, the one
+    /// notice bare `spoolway` opens with.
     waiting: std::collections::VecDeque<Mode>,
 }
 
@@ -4166,16 +4162,11 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
 /// is held on the tab as its [`Mode::Outcome`] instead, closed like any
 /// other.
 ///
-/// `on_open` is what the screen has to say the moment it opens — the ignored
-/// overrides, see [`crate::screen::shell::OnOpen`] — shown as a popup over
-/// this tab, the one the screen opens on, ahead of the opening message.
-///
 /// [`Leave`]: crate::screen::shell::Leave
 pub(crate) fn queue_tab(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &std::path::Path,
-    on_open: crate::screen::shell::OnOpen,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
@@ -4185,7 +4176,6 @@ pub(crate) fn queue_tab(
     let groups = super::pending::list_groups(repo)?;
     let routines = super::routines::list_routines(repo)?;
     let mut state = ScreenState::new();
-    state.waiting.extend(on_open.ignored.map(Mode::Ignored));
     if let Some(msg) = opening_message(repo, &groups) {
         state.waiting.push_back(outcome("nothing to queue", msg));
     }
@@ -4429,11 +4419,6 @@ fn run_screen_from(
                         None => Mode::Browsing,
                     };
                     state.mode = state.after_popup(closed);
-                }
-            }
-            Mode::Ignored(_) => {
-                if key == Key::Enter {
-                    state.mode = state.after_popup(Mode::Browsing);
                 }
             }
             Mode::ToolGate { then, .. } => match key {
@@ -6534,10 +6519,6 @@ fn popup(
         Mode::ToolGate { panel, .. }
         | Mode::IssueQuestion { panel, .. }
         | Mode::Queued { panel, .. } => Some(panel.clone()),
-        // Wrapped to the frame the same way as `Mode::Outcome` above.
-        Mode::Ignored(popup) => {
-            Some(popup.panel(crate::commands::IGNORED_POPUP_WRAP.min(checkbox_row_cap(layout))))
-        }
         Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
     }
 }
@@ -11035,7 +11016,6 @@ mod tests {
             &repo,
             &Pipelines::builtin(),
             &repo.root,
-            crate::screen::shell::OnOpen::default(),
             &mut crate::screen::frame_writer::FrameWriter::new(),
             &mut input,
             &mut out,
@@ -11052,72 +11032,6 @@ mod tests {
         assert!(first.contains("[enter] confirm"), "{first}");
         assert!(first.contains("─ groups"), "the tab under it: {first}");
         assert!(first.contains("DISPATCH"), "under the strip: {first}");
-    }
-
-    /// The "override ignored" popup the screen opens on takes every key
-    /// until `enter` closes it — `q` and `←` behind it must not quit or leave
-    /// with the popup unread — and the tab is the person's again after it.
-    #[test]
-    fn the_queue_tab_opens_with_the_ignored_overrides_and_enter_closes_them() {
-        use crate::screen::shell::{Hosting, Leave, OnOpen, Tab, Toward};
-        let (repo, _root_guard) = fixture("queue-tab-ignored");
-        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
-        let _hosting = Hosting::open(Tab::Queue);
-        let on_open = OnOpen {
-            ignored: crate::commands::IgnoredPopup::from_rows(&[crate::commands::OverrideRow {
-                target: "pipelines/release.yml".into(),
-                kind: "patch",
-                overrides: String::new(),
-                ignored: vec![crate::overrides::Ignored {
-                    target: "pipelines/release.yml step `publish`".into(),
-                    fields: "publish.agent, publish.model".into(),
-                    reason: "names both `run:` and `agent:` — a step runs a process or a \
-                             model, not both"
-                        .into(),
-                }],
-            }]),
-        };
-
-        let mut input = keys("q\x1b[D\r\x1b[D");
-        let mut out = Vec::new();
-        let leave = queue_tab(
-            &repo,
-            &Pipelines::builtin(),
-            &repo.root,
-            on_open,
-            &mut crate::screen::frame_writer::FrameWriter::new(),
-            &mut input,
-            &mut out,
-        )
-        .unwrap();
-        assert_eq!(leave, Leave::Switch(Toward::Left), "the tab works again");
-        let drawn = String::from_utf8(out).unwrap();
-        let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
-        assert!(
-            frames[0].contains(&format!("{TOP_LEFT}─ override ignored ")),
-            "{}",
-            frames[0]
-        );
-        assert!(
-            frames[0].contains("pipelines/release.yml   step publish   agent, model"),
-            "{}",
-            frames[0]
-        );
-        // Wrapped to the frame it is drawn over, so its right border is
-        // still on screen however narrow the tab is drawn.
-        let rows: Vec<&str> = frames[0].lines().collect();
-        let top = rows
-            .iter()
-            .find(|r| r.contains(&format!("{TOP_LEFT}─ override ignored ")))
-            .unwrap();
-        assert!(top.contains(TOP_RIGHT), "{}", frames[0]);
-        assert!(
-            frames[0].contains("─ groups"),
-            "over the tab: {}",
-            frames[0]
-        );
-        let last = frames.last().unwrap();
-        assert!(!last.contains("override ignored"), "closed: {last}");
     }
 
     /// Driven through [`run_screen`] directly rather than through the tab,

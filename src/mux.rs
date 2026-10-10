@@ -2517,7 +2517,7 @@ pub fn parse_lane_name<'a>(name: &'a str, steps: &[&str]) -> Option<(&'a str, &'
 ///
 /// Unlike [`parse_lane_name`] this needs no list of valid steps: the callers
 /// that reach for it — [`crate::retain`]'s sweep and
-/// [`crate::tracking::failure_count`] — only want to know *which task* a
+/// [`crate::tracking::failures`] — only want to know *which task* a
 /// scratch directory, headless record or hook run file belongs to, and do
 /// not care whether the step half is one a pipeline still defines. A scratch
 /// entry carries no separator at all and is named for its task outright, so

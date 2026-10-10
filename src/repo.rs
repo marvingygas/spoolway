@@ -675,8 +675,9 @@ impl Repo {
     /// task whose file happens not to load: [`crate::retain`]'s sweep, so it
     /// never ages out the scratch directory or headless record of a task
     /// still in flight — `paused` and `blocked` are stages a task can sit on
-    /// for longer than `housekeeping.retention_days` — and [`crate::tracking::failure_count`],
-    /// so the board stops counting a hook failure once its task is archived.
+    /// for longer than `housekeeping.retention_days` — and [`crate::tracking::failures`],
+    /// so `spoolway doctor` stops naming a hook failure once its task is
+    /// archived.
     pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
         let mut ids = std::collections::BTreeSet::new();
         let Ok(entries) = std::fs::read_dir(self.queue_dir()) else {
@@ -1439,25 +1440,22 @@ fn bind_as(root: &Path, mode: Bind) -> Result<PathBuf> {
             "  note  {} names a dispatcher that is not one plain name; skipped",
             record_path.display(),
         );
-        if crate::overrides::first_time_this_process(&line) {
-            eprintln!("{line}");
-        }
+        crate::overrides::print_note(&line);
     }
     for record_path in &broken {
         // A command can discover its project, and so run `bind`, more than
         // once, so printing unconditionally here could say the same broken
-        // file twice. `first_time_this_process` is the same
-        // process-wide dedup `overrides::print_ignored_notices` already
-        // uses for the identical reason. Stderr, not stdout: this is a
-        // notice about the machine, not part of a command's own output —
-        // `--json` output must still be the one thing on stdout.
+        // file twice. `print_note` is the same process-wide dedup
+        // `overrides::print_ignored_notices` already uses for the identical
+        // reason, and the same switch that keeps bare `spoolway` quiet.
+        // Stderr, not stdout: this is a notice about the machine, not part
+        // of a command's own output — `--json` output must still be the one
+        // thing on stdout.
         let line = format!(
             "  note  {} does not read as a workspace; skipped",
             record_path.display(),
         );
-        if crate::overrides::first_time_this_process(&line) {
-            eprintln!("{line}");
-        }
+        crate::overrides::print_note(&line);
     }
     if let Some(clone) = clone {
         let tracked = crate::config::tracked_setup_dir_in(root);

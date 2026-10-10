@@ -770,58 +770,91 @@ pub fn reclaim(repo: &Repo, task_id: &str) {
     runs(repo).reclaim_task(task_id);
 }
 
-/// How many distinct task-and-event keys, across every one `tracking/`
-/// holds, are currently failing. What the board's own
-/// `issue_tracking: N hook failures` line counts.
+/// One task hook run whose `.exit` file holds a non-zero code — what
+/// `spoolway doctor`, and through it the "before dispatching" popup, names a
+/// row for. See [`failures`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookFailure {
+    pub task: String,
+    pub event: String,
+    pub exit_code: i32,
+    /// The run's own `.log`, which holds the hook's stdout and stderr.
+    pub log: PathBuf,
+}
+
+/// The events whose failing hook pauses its task, so `spoolway resume` is
+/// what clears it: [`forget`] is called for exactly the event
+/// `crate::task::Frontmatter::hook_paused` names. The other events —
+/// `blocked` and `paused`, which only record a failure, and `open`, which
+/// fails `queue add` itself — hold nothing, and their run files stay until
+/// [`reclaim`] takes them when the task is archived.
+/// `crate::dispatch::Dispatcher::tracking_gate` is the gate these three
+/// share.
+pub const PAUSING_EVENTS: &[&str] = &[
+    crate::pipeline::QUEUED,
+    crate::pipeline::STARTED,
+    crate::pipeline::DONE,
+];
+
+/// Every task hook run under `tracking/` that exited non-zero, in key order.
 ///
-/// A hook run is left exactly as it exited until `spoolway resume` reads and
-/// forgets it (see [`forget`]), so its `.exit` file staying non-zero is the
-/// count's only evidence now: nothing forgets a run behind the board's back
-/// the way the old retry ladder once did.
+/// A hook run is left exactly as it exited until something removes it, so
+/// its `.exit` file staying non-zero is the only evidence of a failure. For
+/// one of [`PAUSING_EVENTS`] that is `spoolway resume`, which reads and
+/// forgets the run (see [`forget`]); a `blocked`, `paused` or `open` run
+/// stays until [`reclaim`] takes it when the task is archived.
 ///
 /// A `<task> · <event>` key whose task is no longer in the queue does not
 /// count. [`reclaim`] already deletes those files when a task is archived;
-/// this filter is what keeps the board honest when a task was archived by an
-/// earlier build that did not, so one failed `open` hook does not read as
-/// "1 hook failure" for the life of the project (review finding 64).
+/// this filter is what keeps the list honest when a task was archived by an
+/// earlier build that did not, so one failed `open` hook is not named for
+/// the life of the project (review finding 64).
 ///
 /// A `fetch` run's key names an issue reference, not a task (see
-/// [`fetch_key`]) — it carries no `" · "` at all — so it is never subject to
-/// that filter: a failed `spoolway issue show` still counts, and nothing
-/// reclaims a `fetch` run file.
-pub fn failure_count(repo: &Repo) -> usize {
-    let Ok(entries) = std::fs::read_dir(repo.tracking_dir()) else {
-        return 0;
+/// [`fetch_key`]), so it carries no `" · "` and is left out. A failed
+/// `spoolway issue show` already printed its own error to whoever ran it,
+/// and nothing ever clears a `fetch` run, so naming one would name it for
+/// good.
+pub fn failures(repo: &Repo) -> Vec<HookFailure> {
+    let dir = repo.tracking_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
     };
     let queued = repo.queued_ids();
-    let mut failing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut failing: BTreeMap<String, HookFailure> = BTreeMap::new();
     for entry in entries.filter_map(|entry| entry.ok()) {
         let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("exit") {
+            continue;
+        }
         let Some(key) = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
         else {
             continue;
         };
-        // Only a real `<task> · <event>` key is dropped once its task leaves
-        // the queue; a separator-less `fetch-*` key belongs to no task and
-        // stays.
-        if let Some((task, _)) = key.split_once(" · ")
-            && !queued.contains(task)
-        {
+        let Some((task, event)) = key.split_once(" · ") else {
+            continue;
+        };
+        if !queued.contains(task) {
             continue;
         }
-        if path.extension().and_then(|ext| ext.to_str()) == Some("exit") {
-            let failed = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|raw| raw.trim().parse::<i32>().ok())
-                .is_some_and(|code| code != 0);
-            if failed {
-                failing.insert(key);
-            }
+        let code = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
+        if let Some(code) = code.filter(|code| *code != 0) {
+            failing.insert(
+                key.clone(),
+                HookFailure {
+                    task: task.to_string(),
+                    event: event.to_string(),
+                    exit_code: code,
+                    log: runs(repo).log_path(&key),
+                },
+            );
         }
     }
-    failing.len()
+    failing.into_values().collect()
 }
 
 /// Every variable [`build_env`] adds beyond [`COMMON_EVENT_VARS`], for the
@@ -1144,7 +1177,7 @@ mod tests {
         fire(&repo, &t, crate::pipeline::QUEUED, 1).unwrap();
         assert!(!repo.tracking_dir().join("demo · queued.exit").exists());
         assert_eq!(exit_code(&repo, &t, crate::pipeline::QUEUED), None);
-        assert_eq!(failure_count(&repo), 0);
+        assert!(failures(&repo).is_empty());
     }
 
     /// The hook actually runs, with the environment the acceptance criteria
@@ -1153,8 +1186,8 @@ mod tests {
     fn a_configured_hook_runs_with_the_full_environment() {
         let (mut repo, _root_guard) = fixture("env");
         with_hook(&mut repo, "echo.sh", "env | sort; exit 3");
-        // `failure_count` only counts a key whose task is still in the
-        // queue — so the task has to actually be there.
+        // `failures` only names a key whose task is still in the queue — so
+        // the task has to actually be there.
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
         std::fs::write(
             repo.queue_dir().join("demo.md"),
@@ -1179,7 +1212,15 @@ mod tests {
             RunState::Exited(3)
         );
         assert_eq!(exit_code(&repo, &t, crate::pipeline::QUEUED), Some(3));
-        assert_eq!(failure_count(&repo), 1);
+        assert_eq!(
+            failures(&repo),
+            vec![HookFailure {
+                task: "demo".into(),
+                event: "queued".into(),
+                exit_code: 3,
+                log: runs(&repo).log_path(&Runs::key("queued", "demo")),
+            }]
+        );
 
         let log =
             std::fs::read_to_string(runs(&repo).log_path(&Runs::key("queued", "demo"))).unwrap();
@@ -1201,12 +1242,12 @@ mod tests {
         assert!(!log.contains("SPOOLWAY_GROUP_LAST"));
     }
 
-    /// A failed hook from a task that has since left the queue stops
-    /// counting, and [`reclaim`] takes its run files with it at archive time
-    /// — so "1 hook failure" does not sit on the board for the life of the
-    /// project (review finding 64).
+    /// A failed hook from a task that has since left the queue stops being
+    /// named, and [`reclaim`] takes its run files with it at archive time —
+    /// so one failure is not reported for the life of the project (review
+    /// finding 64).
     #[test]
-    fn a_failure_from_an_archived_task_stops_showing_on_the_board() {
+    fn a_failure_from_an_archived_task_stops_being_named() {
         let (mut repo, _root_guard) = fixture("archived-failure");
         with_hook(&mut repo, "fail.sh", "exit 1");
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
@@ -1223,16 +1264,15 @@ mod tests {
             RunState::Exited(1)
         );
         assert_eq!(
-            failure_count(&repo),
+            failures(&repo).len(),
             1,
             "a failing hook of a queued task counts"
         );
 
         // The task is archived: its file leaves the queue.
         std::fs::remove_file(repo.queue_dir().join("demo.md")).unwrap();
-        assert_eq!(
-            failure_count(&repo),
-            0,
+        assert!(
+            failures(&repo).is_empty(),
             "a failure from a task no longer in the queue must not count"
         );
 
@@ -1251,17 +1291,25 @@ mod tests {
         );
     }
 
-    /// A `fetch` run's key names an issue reference, not a task, so it carries
-    /// no `" · "` and the queued-task filter leaves it alone — a failed
-    /// `spoolway issue show` still shows on the board even with nothing in
-    /// the queue.
+    /// A `fetch` run's key names an issue reference, not a task, so a failed
+    /// `spoolway issue show` is never named: nothing would ever clear it.
+    /// A failing task hook beside it still is, so the list is not empty
+    /// merely because nothing was read.
     #[test]
-    fn a_failed_fetch_still_counts_though_it_names_no_task() {
-        let (repo, _root_guard) = fixture("fetch-counts");
+    fn a_failed_fetch_is_never_named() {
+        let (repo, _root_guard) = fixture("fetch-skipped");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("demo.md"),
+            "---\nid: demo\nstage: paused\n---\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(repo.tracking_dir()).unwrap();
         let key = fetch_key("https://github.com/o/r/issues/42");
         std::fs::write(repo.tracking_dir().join(format!("{key}.exit")), "9\n").unwrap();
-        assert_eq!(failure_count(&repo), 1);
+        std::fs::write(repo.tracking_dir().join("demo · started.exit"), "1\n").unwrap();
+        let named: Vec<String> = failures(&repo).into_iter().map(|f| f.task).collect();
+        assert_eq!(named, vec!["demo".to_string()]);
     }
 
     /// A hook fires once per task per event for the run's whole lifetime — a

@@ -640,8 +640,8 @@ impl Runs {
     /// Called when a task is archived. Nothing routes on a run of a task that
     /// has left the queue, and left in place these files accumulate for the
     /// life of the project — for `tracking/` that also means
-    /// [`crate::tracking::failure_count`] goes on counting a long-archived
-    /// task's failed hook (review finding 64). Matched on the full file name
+    /// [`crate::tracking::failures`] goes on naming a long-archived task's
+    /// failed hook (review finding 64). Matched on the full file name
     /// against the `<task> · ` prefix, so `"demo-two · x.log"` is never taken
     /// for `"demo"`'s.
     pub fn reclaim_task(&self, task: &str) {

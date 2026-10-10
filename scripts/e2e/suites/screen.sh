@@ -236,6 +236,42 @@ lacks "never that one is running" "Dispatcher is running" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
 
+# A failed task hook is named once, when a dispatcher is asked for, and never
+# on the board. `billing-export` is queued above, so a non-zero `.exit` for
+# its `started` hook under `tracking/` is a failure the popup has to name
+# under `problems`. `fetch-*` runs belong to `spoolway issue show` and give
+# no row. The pipe sends `←` to reach the dispatch tab and `enter` to ask,
+# then runs out with the popup still up, so the last frame holds both the
+# popup and the board footer under it. Wording is checked, not line breaks:
+# the row wraps at the pane's width.
+TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
+mkdir -p "$TRACKING"
+printf '1\n' >"$TRACKING/billing-export · started.exit"
+printf 'hook said no\n' >"$TRACKING/billing-export · started.log"
+printf '1\n' >"$TRACKING/fetch-acme-app-7.exit"
+HOOKFAIL="$LIVE/hookfail.txt"
+works "asking to dispatch with a failed hook on a queued task ends when its keys run out" \
+  script -qec "{ printf '\\033[D'; sleep 1; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$HOOKFAIL"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$HOOKFAIL" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+# Words wrap between lines, with the popup's border and the cursor save,
+# erase and restore codes and carriage returns between them, so the frame is joined into one line
+# with those taken out first.
+HOOKFLAT="$LIVE/hookfail.flat"
+sed -e 's/\x1b[78]//g' -e 's/\x1b\[K//g' -e 's/│//g' "$LAST" | tr '\r\n' '  ' | tr -s ' ' >"$HOOKFLAT"
+has "the before-dispatching popup is drawn" "─ before dispatching " "$LAST"
+has "it has a problems section" "problems" "$LAST"
+has "it names the hook that failed" "issue_tracking hooks" "$HOOKFLAT"
+has "and the event" '`started` failed for billing-export' "$HOOKFLAT"
+has "and the exit code" "(exit 1)" "$HOOKFLAT"
+has "and what clears it" '`spoolway resume billing-export`' "$HOOKFLAT"
+has "and where its log is" "started.log" "$HOOKFLAT"
+lacks "the board draws no hook-failure line" "hook failures" "$LAST"
+lacks "and no pointer at tracking/" "see tracking/" "$LAST"
+lacks "a fetch run gives no row" "fetch-acme-app-7" "$LAST"
+rm -f "$TRACKING/billing-export · started.exit" "$TRACKING/billing-export · started.log" \
+  "$TRACKING/fetch-acme-app-7.exit"
+
 # Every tab, both directions, on a real pty — the acceptance criterion the
 # task `frames-onto-writer` exists for: no redrawing screen erases the whole
 # terminal any more, all five of them painting through the shared frame

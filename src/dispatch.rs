@@ -18648,8 +18648,8 @@ mod tests {
     }
 
     /// Archiving a task takes its hook and command run files with it, so
-    /// `tracking::failure_count` stops counting a long-gone task's failed
-    /// hook (review finding 64). Another task's files are left untouched.
+    /// `tracking::failures` stops naming a long-gone task's failed hook
+    /// (review finding 64). Another task's files are left untouched.
     #[test]
     fn cleanup_reclaims_a_tasks_tracking_and_command_run_files() {
         let (repo, _root_guard) = fixture("cleanup-reclaim");
@@ -22834,7 +22834,7 @@ exit 0"#,
 
         for _ in 0..200 {
             run_pass(&repo, &mux);
-            if crate::tracking::failure_count(&repo) > 0 {
+            if !crate::tracking::failures(&repo).is_empty() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));

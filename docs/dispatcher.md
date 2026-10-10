@@ -269,7 +269,7 @@ jobs   2 active
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `pipelines` notice, the hook failure line and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `pipelines` notice and the parse warning. The keys that act on a row are left off the key line. The wordmark does not turn.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
@@ -445,9 +445,7 @@ The panel opens for a task that `spoolway restart` accepts. A queued, done or ho
 
 A board with at least one task ends with a footer. One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
 its own figure appended after the profile's, model name then `<live>/<cap>`, so a profile
-running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line
-`issue_tracking: N hook failures — see tracking/` appears while any hook
-has failed. A line `pipelines  <files> changed since this run started — restart the dispatcher
+running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line `pipelines  <files> changed since this run started — restart the dispatcher
 to use it` appears while a pipeline file differs from the copy the dispatcher loaded. See
 [Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). Then the job ledger lists every enabled job with its next firing:
 

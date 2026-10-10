@@ -127,6 +127,11 @@ its first pass, including under the `Starting dispatcher` popup, shows that reas
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
+Bare `spoolway` and the dispatcher its dispatch tab starts print no note on stderr, before,
+during or after the screen. A fatal error, such as no project found, still prints as
+`spoolway: <error>`. The notes about config keys, ignored overrides and workspace records appear
+in the dispatch tab's overrides and "before dispatching" popups instead.
+
 With stdout not a terminal — `spoolway | cat`, a script — it prints the grouped help instead,
 the same as `spoolway --help`.
 
@@ -447,11 +452,13 @@ patched and waits for a key:
 An entry the load left out draws its own row instead of its keys, labelled the same way:
 
 ```
-    pipelines/release.yml  step publish  ignored — names both `run:` and `agent:`
+    pipelines/release.yml  publish  ignored — names both `run:` and `agent:`
 ```
 
-Every other row, the title and the three keys, `[x]` included, are unchanged. See [the
-overrides layer](configuration.md#the-overrides-layer).
+Every other row, the title and the three keys, `[x]` included, are unchanged. `[x]` hides the
+screen until the layer changes or the set of ignored entries changes. An entry that stops fitting
+with no override file touched brings the screen back. See [the overrides
+layer](configuration.md#the-overrides-layer).
 
 It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
 a key:
@@ -468,12 +475,17 @@ files
 
 problems
   prompt `archivist`: missing
+  issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is
+    paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log:
+    ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 
 [enter] start the run   [esc] back   [x] hide until these change
 ```
 
 A line names the setting and its state, and nothing else. What to do about it is in
-[Configuration](configuration.md). Each section is skipped when it has nothing to say, and the
+[Configuration](configuration.md). A failed task hook is the exception: its row under `problems`
+also names the event, the task, the exit code, the command that clears it and the log path. See
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Each section is skipped when it has nothing to say, and the
 whole screen is skipped, with nothing drawn, when all three are empty. `x` stores its own
 fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
 as soon as any line differs from it.
@@ -1440,6 +1452,9 @@ whether the project runs in repo mode or home mode. A note names each workspace 
 A note names each project home under `~/.spoolway/` whose recorded checkout is gone, by path,
 so you can delete the folder. A workspace is named only when all of its clones are gone.
 `doctor` deletes nothing.
+
+A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
+its event, task, exit code, remedy and log path.
 
 ```
   note  2 project home(s) under ~/.spoolway/ record a checkout that is gone; delete a folder to remove it: /home/you/.spoolway/scratch-1a2b, /home/you/.spoolway/demo-3c4d

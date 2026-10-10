@@ -1708,13 +1708,14 @@ impl Config {
         // after — and every one of those loads runs the same notices. Without
         // this, `queue list` over a config still naming `issue_tracking.
         // on_fail` prints the same note twice, and `doctor` three times.
-        // `first_time_this_process` is the exact dedup `print_ignored_notices`
-        // already leans on for the override layer's own notices, keyed by
-        // the rendered line rather than by which notice it was, so it works
-        // here unchanged.
+        // `note_due` is the exact dedup `print_ignored_notices` already leans
+        // on for the override layer's own notices, keyed by the rendered line
+        // rather than by which notice it was, so it works here unchanged. It
+        // also says nothing at all under bare `spoolway` — see
+        // `overrides::QUIET_NOTES`.
         let mut printed = Vec::new();
         for notice in notices {
-            if crate::overrides::first_time_this_process(&notice) {
+            if crate::overrides::note_due(&notice) {
                 eprintln!("{notice}");
                 printed.push(notice);
             }
@@ -1814,14 +1815,14 @@ impl Config {
                 // their worktrees kept across a stop, and that is now what
                 // every stop does.
                 if config.dispatch.tear_lanes_on_stop.is_some() {
-                    eprintln!(
+                    notices.push(format!(
                         "note: dispatch.tear_lanes_on_stop in {} is no longer read — stopping \
                          the dispatcher never removes a worktree, workspace, pane or tab any \
                          more: every interrupted lane is left standing, its spend banked and \
                          its launch counter forgiven, so the next run resumes it where it \
                          stood. The key is dropped on the next save.",
                         path.display(),
-                    );
+                    ));
                 }
                 // A person who chose `grouped` wanted every task in one tab per
                 // project; one who chose `split` already has what every task now
@@ -3520,6 +3521,104 @@ mod tests {
                         .iter()
                         .any(|n| n.starts_with("note: ") && n.contains(name)),
                     "no note named {name}: {notices:?}"
+                );
+            }
+        });
+    }
+
+    /// Bare `spoolway` prints none of a load's notes, so each one must have a
+    /// row in doctor's cheap findings, which the "before dispatching" popup
+    /// shows. Each pair names a note and the row that says it there. The test
+    /// covers the notes its fixture `raw` earns, and every one of them must
+    /// match a pair. A note added to `load_with_notices` later needs a line in
+    /// `raw` that earns it and a pair here. The ignored-override note's row is
+    /// the overrides gate instead —
+    /// `commands::dispatch::tests::a_newly_ignored_override_brings_a_hidden_gate_back`
+    /// — and the workspace notes' rows are
+    /// `commands::doctor::tests::each_workspace_note_has_a_row_in_the_warnings_popup`.
+    #[test]
+    fn each_load_note_has_a_row_in_the_warnings_popup() {
+        let raw = "[dispatch]\ninterval = \"5m\"\nbackend = \"tmux\"\n\
+                   worktree_root = \"/elsewhere/worktrees\"\ntear_lanes_on_stop = true\n\
+                   herdr_mode = \"split\"\nlane_quite = \"5m\"\n\n\
+                   [issue_tracking]\non_fail = \"pause\"\n\n\
+                   [agents.old]\nkind = \"nonesuch\"\n\n\
+                   [agents.envy]\nkind = \"claude\"\n\n[agents.envy.env]\nFOO = \"1\"\n\n\
+                   [unatended]\nx = 1\n";
+        let pairs: &[(&str, &[&str])] = &[
+            (
+                "dispatch.interval in",
+                &["dispatch.interval is retired in this checkout's config"],
+            ),
+            (
+                "issue_tracking.on_fail in",
+                &["issue_tracking.on_fail is retired in this checkout's config"],
+            ),
+            ("`unatended` in", &["does not know:", "unatended"]),
+            (
+                "`dispatch.lane_quite` in",
+                &["does not know:", "dispatch.lane_quite"],
+            ),
+            (
+                "dispatch.backend = \"tmux\" in",
+                &["dispatch.backend = \"tmux\" in this checkout's config"],
+            ),
+            (
+                "dispatch.worktree_root in",
+                &["dispatch.worktree_root in this checkout's config names"],
+            ),
+            (
+                "dispatch.tear_lanes_on_stop in",
+                &["dispatch.tear_lanes_on_stop in this checkout's config"],
+            ),
+            (
+                "dispatch.herdr_mode in",
+                &["dispatch.herdr_mode in this checkout's config"],
+            ),
+            (
+                "[agents.envy.env] in",
+                &["[agents.envy.env] in this checkout's config"],
+            ),
+            (
+                "[agents.old] in",
+                &["[agents.old] in this checkout's config names kind `nonesuch`"],
+            ),
+        ];
+        with_override_fixture("note-rows", raw, |root| {
+            let (_, notices, _) = Config::load_with_notices(root, None).unwrap();
+            for notice in &notices {
+                assert!(
+                    pairs.iter().any(|(note, _)| notice.contains(note)),
+                    "a note with no row paired here: {notice}"
+                );
+            }
+            let repo = crate::repo::Repo {
+                borrowed: false,
+                checkout: root.to_path_buf(),
+                root: root.to_path_buf(),
+                config: Config::default(),
+                home: root.join(".home"),
+            };
+            let rows: Vec<String> = crate::commands::cheap_findings(
+                &repo,
+                &crate::pipeline::Pipelines::builtin(),
+                &repo.config,
+            )
+            .into_iter()
+            .map(|warning| match warning {
+                crate::commands::Warning::Setting(t)
+                | crate::commands::Warning::File(t)
+                | crate::commands::Warning::Problem(t) => t,
+            })
+            .collect();
+            for (note, row) in pairs {
+                assert!(
+                    notices.iter().any(|n| n.contains(note)),
+                    "the fixture never earns {note}: {notices:?}"
+                );
+                assert!(
+                    rows.iter().any(|r| row.iter().all(|part| r.contains(part))),
+                    "no row says {note}: {rows:#?}"
                 );
             }
         });

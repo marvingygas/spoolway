@@ -179,14 +179,14 @@ spoolway: override ignored — pipelines/release.yml step `publish`: names both 
 A command running inside a lane prints nothing. `spoolway override list`, its `--json` form
 and `spoolway doctor`'s standing note mark the same entries and reasons.
 
-Bare `spoolway` shows the same thing as an "override ignored" popup over the tab it opens on
-instead, since the stderr line would be wiped by the screen's first frame. The popup has one
-row per entry left out: the file, the step and the keys it set, or the config key, or "the
-whole file" for a prompt, then the whole reason under it. `[enter]` closes it. The popup comes
-back on the next open while the entry is still left out; nothing silences it for good, since a
-skipped override changes what lanes run. The before-start overrides popup (see [`spoolway
-dispatch`](cli-reference.md#spoolway-dispatch)) draws the same entry's row as `ignored —
-<reason>` in place of its keys, with every other row unchanged.
+Bare `spoolway` and the dispatcher its dispatch tab starts print no such line. The dispatch tab
+names each ignored entry in the overrides popup it asks before it starts a dispatcher. The popup
+draws the entry's row as `ignored — <reason>` in place of its keys, with every other row
+unchanged. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch).
+
+The popup's `[x]` hides it until the layer changes or the set of ignored entries changes. An
+entry that stops fitting with no override file touched, such as a step a pull renamed, brings the
+popup back.
 
 ### When an override takes effect
 
@@ -357,7 +357,9 @@ flowchart LR
   B --> C[log in ~/.spoolway/project/tracking/]
   C -->|non-zero exit| D{queued, started or done?}
   D -->|yes| E[task paused]
-  D -->|no| F[failure counted on the board]
+  D -->|no| F[failure recorded]
+  E --> G[named by doctor and the before-dispatching popup]
+  F --> G
 ```
 
 Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOLWAY_EVENT`,
@@ -365,8 +367,19 @@ Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOL
 `SPOOLWAY_BRANCH`, `SPOOLWAY_TITLE`, `SPOOLWAY_TASK_FILE`, `SPOOLWAY_GROUP_SIZE`,
 `SPOOLWAY_LABELS` (its `labels:`, comma-joined, empty when it has none), `SPOOLWAY_EPIC` and
 `SPOOLWAY_TICKET`. The `done` event of a group's last open task also gets
-`SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`. The
-board prints `issue_tracking: N hook failures — see tracking/` while any hook has failed.
+`SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`.
+
+Each failed hook run of a task is named once by `spoolway doctor` and by the "before dispatching"
+popup, under `problems`. The row gives the event, the task, the exit code, what clears it and the
+log path:
+
+```
+issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
+```
+
+For a `queued`, `started` or `done` hook, `spoolway resume <task>` clears the row. A failed
+`blocked`, `paused` or `open` hook holds nothing, so the row says it clears once the task is done
+and archived. `spoolway issue show` runs produce no row.
 
 `spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
 file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes
@@ -639,7 +652,8 @@ too. It is left out, so that model is priced at its base rate until the name is 
 
 Each unknown key loads with a note that names it, for example ``note: `dispatch.lane_quite` in
 <file> is not a setting this spoolway knows``, and `spoolway doctor` lists them all in one
-row. The key is otherwise ignored, so a typo does nothing until you fix it.
+row. The key is otherwise ignored, so a typo does nothing until you fix it. Bare `spoolway`
+prints no note. Its dispatch tab shows the same row in the "before dispatching" popup.
 
 The file keeps them. `spoolway config set` edits one key in place. `spoolway sync` rewrites
 the whole file, and carries every unknown key and unknown table over with the comment above
@@ -665,6 +679,8 @@ leave a retired key in the file. `spoolway sync` drops it. These keys load with 
 `dispatch.interval`, `issue_tracking.on_fail`, `dispatch.worktree_root` and `dispatch.herdr_mode`
 name `spoolway sync` as the command that drops the key for good. The others say the key is
 rewritten or dropped on the next save. The rest of the table below load with no note.
+Bare `spoolway` prints none of these notes. Its dispatch tab shows a row for each in the
+"before dispatching" popup.
 `spoolway sync` lists every setting it drops. It also drops a retired key it finds in the [overrides layer](#the-overrides-layer).
 
 | Key | Replaced by |

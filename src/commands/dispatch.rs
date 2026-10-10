@@ -536,8 +536,9 @@ fn overrides_gate(repo: &Repo) -> Result<bool> {
 /// log, because the layer is otherwise invisible in a `git status` and a run
 /// nobody is watching is exactly the one that most needs it on record, but
 /// the run proceeds without waiting on an answer nobody can give. With a
-/// layer already acknowledged and unmoved since, this says nothing at all —
-/// "don't ask again until this changes" means exactly that.
+/// layer already acknowledged, and neither it nor its set of ignored entries
+/// changed since, this says nothing at all — "don't ask again until this
+/// changes" means exactly that. See [`overrides_fingerprint`].
 ///
 /// `term` is `None` for a caller that already holds a
 /// [`crate::platform::TermGuard`] of its own, and `Some` for one that does
@@ -563,13 +564,10 @@ fn overrides_gate_with(
         return Ok(true);
     }
 
-    // The layer's own fingerprint — a tracked-file edit alone must not
-    // reopen a gate the layer itself has not moved. `unwrap_or_default`
-    // only stands in for the moment between
-    // `rows` being non-empty and the same directory being read a second
-    // time; an empty string never equals a real fingerprint, so this still
-    // asks rather than silently trusting a layer it could not re-read.
-    let fingerprint = crate::version::layer_fingerprint(repo).unwrap_or_default();
+    // The layer's own fingerprint with its ignored entries folded in — see
+    // `overrides_fingerprint` for why a tracked-file edit alone reopens this
+    // only when it changes which entries are left out.
+    let fingerprint = overrides_fingerprint(repo, &rows);
     if !crate::overrides::ack_needed(&repo.home, &fingerprint) {
         return Ok(true);
     }
@@ -601,6 +599,38 @@ fn overrides_gate_with(
     }
 }
 
+/// What the overrides gate keys its "don't ask again" on, shared by
+/// [`overrides_gate_with`] and [`overrides_popup`] so `x` in either hides
+/// both. The layer's own fingerprint first: a tracked-file edit alone must
+/// not reopen a gate the layer itself has not moved. An entry can stop
+/// fitting with no override file touched, though — a pull renames the step
+/// a patch names — and that changes what lanes run, so every entry `rows`
+/// says the load left out is folded in too, and a newly ignored entry asks
+/// again. With nothing ignored this is the layer's fingerprint unchanged, so
+/// a gate hidden before the ignored set counted stays hidden.
+///
+/// An empty string when the layer cannot be re-read — the moment between
+/// `rows` being non-empty and the same directory being read a second time.
+/// It never equals a real fingerprint, so the gate still asks rather than
+/// silently trusting a layer it could not re-read.
+fn overrides_fingerprint(repo: &Repo, rows: &[OverrideRow]) -> String {
+    let Some(layer) = crate::version::layer_fingerprint(repo) else {
+        return String::new();
+    };
+    let ignored: Vec<String> = rows
+        .iter()
+        .flat_map(|row| {
+            row.ignored
+                .iter()
+                .map(move |item| format!("{}\t{}\t{}", row.target, item.fields, item.reason))
+        })
+        .collect();
+    if ignored.is_empty() {
+        return layer;
+    }
+    crate::skeleton::fingerprint(&format!("{layer}\n{}", ignored.join("\n")))
+}
+
 /// The layer's own summary, one line per overridden artifact — the mockup's
 /// "N keys" / "whole file" column, derived from [`OverrideRow`] rather than
 /// `override list`'s own `patch` / `whole file` kind, since a person reading
@@ -620,7 +650,9 @@ fn print_overrides_notice(out: &mut impl std::io::Write, rows: &[OverrideRow]) -
 /// the dispatch tab's popup of the same notice, [`overrides_popup`].
 ///
 /// An override the load left out reads `ignored — <reason>` on a row of its
-/// own, labelled with the step or key it set, in place of its keys. A row
+/// own, labelled with the bare step id or the key it set, in place of its
+/// keys — `review`, not `override list`'s `step review`, since this column
+/// already reads as the step or key a row is about. A row
 /// with nothing left applying — a whole file ignored, or every step entry
 /// in the patch — draws only its ignored rows, never a `0 keys` row for
 /// what does not apply. The kind column's width is taken from the rows that
@@ -653,7 +685,11 @@ fn overrides_lines(rows: &[OverrideRow]) -> Vec<String> {
         }
         for item in &row.ignored {
             let (step, keys) = crate::commands::ignored_columns(row, item);
-            let label = if step.is_empty() { keys } else { step };
+            let label = match step.strip_prefix("step ") {
+                Some(id) => id.to_string(),
+                None if step.is_empty() => keys,
+                None => step,
+            };
             lines.push(format!(
                 "{:<target_w$}  {label:<kind_w$}  ignored — {}",
                 row.target,
@@ -813,15 +849,14 @@ impl GatePopup {
 }
 
 /// The overrides popup, or `None` when [`overrides_gate`] would not ask:
-/// no layer at all, or one already acknowledged and unmoved since.
+/// no layer at all, or one already acknowledged with neither it nor its set
+/// of ignored entries changed since.
 pub(crate) fn overrides_popup(repo: &Repo) -> Result<Option<GatePopup>> {
     let rows = collect_override_rows(repo)?;
     if rows.is_empty() {
         return Ok(None);
     }
-    // The same stand-in `overrides_gate_with` takes for a layer it could
-    // not re-read: an empty fingerprint never matches, so it still asks.
-    let fingerprint = crate::version::layer_fingerprint(repo).unwrap_or_default();
+    let fingerprint = overrides_fingerprint(repo, &rows);
     if !crate::overrides::ack_needed(&repo.home, &fingerprint) {
         return Ok(None);
     }
@@ -2270,8 +2305,8 @@ mod tests {
         assert_eq!(overrides_gate_kind(&prompt), "whole file");
     }
 
-    /// An ignored override's row reads `ignored — <reason>` under the step
-    /// it named, in place of its keys; every row that still applies reads
+    /// An ignored override's row reads `ignored — <reason>` under the bare
+    /// id of the step it named, in place of its keys; every row that still applies reads
     /// byte for byte as it did with nothing ignored, and a row with nothing
     /// left applying draws no `0 keys` row of its own.
     #[test]
@@ -2320,7 +2355,7 @@ mod tests {
         assert_eq!(after[0], before[0], "the row still applying is unchanged");
         assert_eq!(
             after[1],
-            "pipelines/release.yml  step publish  ignored — names both `run:` and `agent:`"
+            "pipelines/release.yml  publish     ignored — names both `run:` and `agent:`"
         );
         assert_eq!(after[2], before[1], "the prompt row is unchanged");
         assert_eq!(
@@ -2488,6 +2523,50 @@ mod tests {
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     }
 
+    /// A failing task hook lands under `problems`, and a second failure
+    /// changes the popup's fingerprint, so a popup hidden with `x` over the
+    /// first asks again.
+    #[test]
+    fn a_second_hook_failure_brings_a_hidden_warnings_popup_back() {
+        let (repo, _root_guard) = fixture("warnings-popup-hook-failure");
+        let pipelines = Pipelines::builtin();
+        let fail = |task: &str| {
+            std::fs::create_dir_all(repo.queue_dir()).unwrap();
+            std::fs::write(
+                repo.queue_dir().join(format!("{task}.md")),
+                format!("---\nid: {task}\nstage: paused\n---\n"),
+            )
+            .unwrap();
+            std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+            std::fs::write(
+                repo.tracking_dir().join(format!("{task} · started.exit")),
+                "1\n",
+            )
+            .unwrap();
+        };
+
+        fail("first");
+        let popup = warnings_popup(&repo, &pipelines).expect("a failed hook to name");
+        let body: Vec<&str> = popup.panel.iter().map(|row| popup_row(row)).collect();
+        assert!(body.contains(&"problems"), "{body:#?}");
+        assert!(
+            body.contains(&"issue_tracking hooks: `started` failed for first (exit 1), so the"),
+            "{body:#?}"
+        );
+        let (_, _, problems) = cheap_sections(&repo, &pipelines);
+        let first = warnings_fingerprint(&[], &[], &problems);
+        popup.hide(&repo).unwrap();
+        assert!(warnings_popup(&repo, &pipelines).is_none());
+
+        fail("second");
+        let (_, _, problems) = cheap_sections(&repo, &pipelines);
+        assert_ne!(warnings_fingerprint(&[], &[], &problems), first);
+        assert!(
+            warnings_popup(&repo, &pipelines).is_some(),
+            "a new failure asks again"
+        );
+    }
+
     /// `x` on the overrides popup does the same for the overrides gate.
     #[test]
     fn hiding_the_overrides_popup_hides_the_cli_gate_too() {
@@ -2510,6 +2589,73 @@ mod tests {
         .unwrap();
         assert!(proceed);
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    }
+
+    /// An override can stop fitting with no override file touched: here the
+    /// tracked pipeline the patch names is renamed away, as a pull might do.
+    /// That newly ignored entry must reopen a gate hidden with `x`, on the
+    /// dispatch tab and on `spoolway dispatch`'s own screen alike, though
+    /// the layer's own fingerprint has not moved.
+    #[test]
+    fn a_newly_ignored_override_brings_a_hidden_gate_back() {
+        let (repo, _root_guard) = fixture_with_layer("overrides-gate-newly-ignored");
+        let tracked = repo.checkout.join(".spoolway/pipelines");
+        std::fs::create_dir_all(&tracked).unwrap();
+        std::fs::write(
+            tracked.join("default.yml"),
+            include_str!("../../assets/pipelines/default.yml"),
+        )
+        .unwrap();
+        let ignored = || {
+            collect_override_rows(&repo)
+                .unwrap()
+                .iter()
+                .map(|row| row.ignored.len())
+                .sum::<usize>()
+        };
+        assert_eq!(ignored(), 0, "the patch fits the tracked pipeline");
+        let layer = crate::version::layer_fingerprint(&repo).unwrap();
+        overrides_popup(&repo)
+            .unwrap()
+            .expect("a layer to name")
+            .hide(&repo)
+            .unwrap();
+        assert!(overrides_popup(&repo).unwrap().is_none(), "hidden");
+
+        std::fs::rename(tracked.join("default.yml"), tracked.join("renamed.yml")).unwrap();
+        assert_eq!(ignored(), 1, "the patch names a pipeline that is gone");
+        assert_eq!(
+            crate::version::layer_fingerprint(&repo).unwrap(),
+            layer,
+            "no override file changed"
+        );
+        let popup = overrides_popup(&repo)
+            .unwrap()
+            .expect("a newly ignored entry asks again");
+        assert!(
+            popup
+                .panel
+                .iter()
+                .any(|row| popup_row(row).contains("ignored — names pipeline `default`")),
+            "{:#?}",
+            popup.panel
+        );
+
+        let mut out = Vec::new();
+        let proceed = overrides_gate_with(
+            &repo,
+            true,
+            &mut keys("\r"),
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        assert!(proceed);
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("overrides are active"),
+            "the CLI gate asks again too: {printed}"
+        );
     }
 
     /// A fresh project has never been initialised, so `doctor_sync`'s own

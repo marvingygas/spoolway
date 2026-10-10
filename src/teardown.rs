@@ -278,8 +278,8 @@ impl<'a> Dispatcher<'a> {
 
         // The task has left the queue for good. Its hook and command run
         // files under `tracking/` and `commands/` are litter now, and left
-        // in place `tracking::failure_count` would go on counting a failed
-        // hook of a task nobody can reach any more (review finding 64).
+        // in place `tracking::failures` would go on naming a failed hook of
+        // a task nobody can reach any more (review finding 64).
         runs.reclaim_task(task.id());
         crate::tracking::reclaim(self.repo, task.id());
 
