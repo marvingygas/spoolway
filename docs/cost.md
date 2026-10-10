@@ -155,6 +155,9 @@ cache_write_1h = 10.0   # 2x input
 prompt_cache_ttl = "1h"
 ```
 
+In a glob, `*` matches any run of characters, and the glob has to match the whole model name.
+`*-5` matches `claude-opus-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`.
+
 | Key | What it is |
 |---|---|
 | `context_window` | The model's window in tokens. `session_reuse_ctx` in the agent profile is a percentage of it. |

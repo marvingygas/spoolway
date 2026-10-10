@@ -781,32 +781,30 @@ pub(crate) fn best_match_key<'a>(
 /// model names, and small enough to read. Crate-visible because the known
 /// context windows in `config` match model names the same way prices do.
 pub(crate) fn glob_match(pattern: &str, value: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let Some(first) = parts.next() else {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    // No `*` at all: the literal had to be the whole thing.
+    let [first, middle @ .., last] = parts.as_slice() else {
         return pattern == value;
     };
-    if !value.starts_with(first) {
+    // The first and last literals are pinned to the two ends of the name. The
+    // last one cannot be searched for from the left: `*-5` against
+    // `claude-sonnet-5-5` would stop at the first `-5` and leave `-5` unmatched.
+    let Some(inner) = value
+        .strip_prefix(first)
+        .and_then(|rest| rest.strip_suffix(last))
+    else {
         return false;
-    }
-    let mut rest = &value[first.len()..];
-    let mut last: Option<&str> = None;
-    for part in parts {
-        last = Some(part);
-        if part.is_empty() {
-            continue;
-        }
+    };
+    // The literals between two `*` can take their earliest occurrence: that
+    // leaves the most room for the ones after them.
+    let mut rest = inner;
+    for part in middle {
         match rest.find(part) {
             Some(at) => rest = &rest[at + part.len()..],
             None => return false,
         }
     }
-    // A pattern not ending in `*` has to consume the rest of the value.
-    match last {
-        // No `*` at all: the literal had to be the whole thing.
-        None => rest.is_empty(),
-        Some("") => true,
-        Some(_) => rest.is_empty(),
-    }
+    true
 }
 
 /// How the transcript for a session spoolway pinned is found again.
@@ -4413,6 +4411,18 @@ mod tests {
         assert!(glob_match("claude-opus-5", "claude-opus-5"));
         assert!(!glob_match("claude-opus-5", "claude-opus-51"));
         assert!(!glob_match("gpt-*", "claude-opus-5"));
+    }
+
+    /// A trailing literal matches where the name ends, even when the same text
+    /// also occurs earlier in the name.
+    #[test]
+    fn a_glob_matches_a_literal_that_occurs_more_than_once() {
+        for model in ["claude-opus-5", "claude-sonnet-5-5", "claude-haiku-5-5"] {
+            assert!(glob_match("*-5", model), "`*-5` should match {model}");
+        }
+        assert!(glob_match("claude-*-5", "claude-sonnet-5-5"));
+        // Still anchored at the end: the name has to finish with the literal.
+        assert!(!glob_match("*-5", "claude-sonnet-5-51"));
     }
 
     #[test]
