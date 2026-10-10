@@ -910,6 +910,35 @@ mod tests {
         }
     }
 
+    /// This repo carries installed copies of the shipped skills, and CI runs
+    /// `spoolway init` and then fails on any diff it leaves. An edit made to an
+    /// installed copy and not to `assets/skills/` passes every other test and
+    /// fails only there, minutes into a CI run. This catches it in
+    /// `cargo test`. A provider whose folder this checkout does not carry is
+    /// skipped, because nothing here can drift from it.
+    #[test]
+    fn this_repos_installed_skills_match_the_shipped_copies() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for provider in <Provider as clap::ValueEnum>::value_variants() {
+            if !provider.skills_dir(root).is_dir() {
+                continue;
+            }
+            for planned in provider.plan(root) {
+                let shown = planned.path.strip_prefix(root).unwrap().display();
+                let on_disk = std::fs::read_to_string(&planned.path)
+                    .unwrap_or_else(|e| panic!("{shown}: {e}"));
+                assert!(
+                    on_disk == planned.contents,
+                    "{shown} differs from its {} copy under assets/skills/. Edit the \
+                     shipped copy there, then run `spoolway install {} --force` to \
+                     refresh this one",
+                    provider.name(),
+                    provider.name(),
+                );
+            }
+        }
+    }
+
     /// A fresh install leaves nothing for a sync right afterwards to do: every
     /// skill file it just wrote already matches the shipped copy, so a
     /// dry-run scan reads every one of them as kept, not as a rewrite.
