@@ -44,6 +44,32 @@ no pipeline. When you approve the shape, it calls `/spoolway-tasks`.
 task, chooses ids, and writes the dependency order. You can also run it directly when the
 shape is already agreed.
 
+`/spoolway-tasks` first decides how many groups the shape needs. It leans towards fewer. It
+offers that count and up to three counts below it, largest first, with the recommended count
+marked. The question names every count, such as `Split checkout into groups: 1, 2 or 3`. Each
+smaller count merges neighbouring groups of the larger split. When one group is enough, it
+says `Keeping one group.` and asks nothing.
+
+Each option draws its groups numbered, in dependency order:
+
+```
+1  checkout-pricing           base  main
+   Cart totals and the discount rules
+   that change them.
+   holds    cart totals, discount rules
+   touches  src/cart/, src/pricing/
+
+2  checkout-empty             after checkout-pricing
+   The empty-cart screen and its
+   redirect.
+   holds    empty-cart screen
+   touches  src/ui/cart/
+```
+
+`holds` names the subjects in the group. `touches` names the areas of code it changes. Claude
+asks with a question and a preview per option. Codex and pi print each option as a lettered
+section and wait for your letter.
+
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
 URL goes into each task's `source:`.
 
