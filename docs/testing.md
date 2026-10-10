@@ -103,7 +103,7 @@ with a `// covers:` line.
 | `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, the title prefixed with a bare `ticket:` key and left alone for a GitHub `ticket:` URL, a base branch that exists locally and nowhere else, a deleted `starts_from` followed to its merged pull request's base, also when a stale local branch or `origin/` ref survives, a base nobody has published still pushed, one closed without merging named instead, and one with no pull request at all |
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
 | `forge` | The `gh` test double, including an empty change |
-| `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention |
+| `disaster` | A hard kill with lanes live, a kill during a worktree cut, a kill during a worktree removal, a stale lock, a restart over a running lane, a stop with live lanes, retention |
 | `lock` | A second `--tier pr` run waits for the first |
 | `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |
 | `routines` | The routines tab, and the `s` save panel on the queue screen |

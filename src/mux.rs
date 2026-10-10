@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use crate::repo::run;
+use crate::repo::{run, run_with_env};
 
 /// What a lane is doing right now, as the multiplexer sees it.
 ///
@@ -992,11 +992,6 @@ impl Herdr {
         self.call::<serde_json::Value>(&["pane", "current"]).is_ok()
     }
 
-    /// git, in the repository this backend was built on.
-    fn git(&self, args: &[&str]) -> Result<String> {
-        run(&self.cwd, "git", args)
-    }
-
     /// The name herdr knows `lane` by: its own readable wire spelling,
     /// [`to_agent_name`], when that already fits herdr's 32-character rule —
     /// exactly what every lane crossed the wire as before this — or the short
@@ -1715,8 +1710,7 @@ impl Mux for Herdr {
     }
 
     fn remove_checkout(&self, path: &Path) -> Result<()> {
-        self.git(&["worktree", "remove", "--force", &path.display().to_string()])?;
-        Ok(())
+        remove_worktree(&self.cwd, &self.worktree_root, path)
     }
 
     // `lane_process_alive` is deliberately left at the trait's own default,
@@ -2380,6 +2374,10 @@ pub(crate) fn branch_slug(branch: &str) -> String {
     branch.replace('/', "-")
 }
 
+/// The environment `git worktree add` runs in; see the comment in
+/// [`cut_worktree`].
+const CUT_ENV: &[(&str, &str)] = &[("LC_ALL", "C")];
+
 /// Cut a worktree with git, at exactly the path asked for.
 ///
 /// Shared by the headless backend, which has never had a multiplexer to ask,
@@ -2427,8 +2425,56 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
             ]
         }
     };
-    run(repo, "git", &args)
+    // `LC_ALL=C`: git writes the reason of its `initializing` lock into the
+    // entry in the language it runs in, and a cut killed part way leaves that
+    // word behind for [`crate::repo::Repo::worktree_initializing`] to look for
+    // in English. A person on a translated git would otherwise have the
+    // half checkout taken for a finished one and run on.
+    run_with_env(repo, "git", &args, CUT_ENV)
         .with_context(|| format!("could not cut a worktree for `{branch}` at {path_arg}"))?;
+    Ok(())
+}
+
+/// Take a worktree away with git, whatever state it was left in.
+///
+/// A dispatcher killed in the middle of `git worktree add` or `git worktree
+/// remove` leaves a checkout that the plain `remove --force` refuses: the
+/// first holds git's `initializing` lock on the entry, which only a doubled
+/// `--force` overrides, and the second may have lost its `.git` file, so git no
+/// longer recognises the folder as a working tree. The folder is then deleted
+/// directly and the entry pruned, which is all `remove` would have done.
+///
+/// That direct delete happens only under `worktree_root`, the folder spoolway
+/// cuts its checkouts in. Git also refuses a path that is the main checkout or
+/// not a working tree at all, and a path recorded in a task file can name
+/// either; there git's refusal is the answer, and nothing is deleted.
+///
+/// An error means the folder is still standing, or git still lists it; a
+/// folder that was already gone and unlisted is a success.
+pub(crate) fn remove_worktree(repo: &Path, worktree_root: &Path, path: &Path) -> Result<()> {
+    let path_arg = path.display().to_string();
+    let removed = run(
+        repo,
+        "git",
+        &["worktree", "remove", "--force", "--force", &path_arg],
+    );
+    let Err(first) = removed else {
+        return Ok(());
+    };
+    if path.exists() {
+        if !crate::platform::is_within(path, worktree_root) {
+            return Err(first.context(format!(
+                "{path_arg} is not under {}, where spoolway cuts its worktrees, so it was not deleted; remove it by hand if it is a leftover",
+                worktree_root.display()
+            )));
+        }
+        std::fs::remove_dir_all(path).with_context(|| {
+            format!("git could not remove the worktree at {path_arg} ({first:#}), and neither could deleting it")
+        })?;
+    }
+    run(repo, "git", &["worktree", "prune"]).with_context(|| {
+        format!("removed the folder {path_arg} but git kept its worktree entry")
+    })?;
     Ok(())
 }
 
@@ -3531,6 +3577,21 @@ mod tests {
         );
         assert!(path.starts_with(&project_home), "{path:?}");
         assert!(!path.starts_with(home().join(".herdr")), "{path:?}");
+    }
+
+    /// A cut killed part way leaves git's `initializing` lock, and cleanup
+    /// finds it by that English word. Git writes the word in the language it
+    /// runs in, so the cut pins the locale. A translated git cannot be relied
+    /// on in a test, so what is checked is the environment the cut's command
+    /// is given and that `run_with_env` hands it to the process.
+    #[test]
+    fn the_cut_runs_git_in_the_c_locale() {
+        assert_eq!(CUT_ENV, &[("LC_ALL", "C")]);
+        let dir = crate::scratch::root("cut-env");
+        std::fs::create_dir_all(&dir).unwrap();
+        let seen = run_with_env(&dir, "sh", &["-c", "printf %s \"$LC_ALL\""], CUT_ENV).unwrap();
+        assert_eq!(seen, "C");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The worktree root for a home-mode checkout is the workspace's own

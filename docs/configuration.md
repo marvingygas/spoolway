@@ -118,7 +118,7 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 
 | Directory | Holds | Swept by |
 |---|---|---|
-| `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
+| `queue/`, `pending/`, `worktrees/`, `removing/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
 | `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | `retention_days` |
 | `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |

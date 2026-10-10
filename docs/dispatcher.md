@@ -733,6 +733,23 @@ so the next dispatcher re-cuts onto it. Otherwise, choose one:
 | Keep the branch | Run `git branch -m task/<id> <name>`. Set `starts_from: <name>` in the task. Resume the task. |
 | Drop the branch | Run `git branch -D task/<id>`. Resume the task. |
 
+### A cut that was stopped part way
+
+A dispatcher killed while `git worktree add` runs leaves a half checkout under `worktrees/`. Git
+marks that checkout as locked with the reason `initializing` until the files are out. The
+dispatcher cuts every worktree with `LC_ALL=C`, so the reason is always that English word.
+
+On the task's next start, the dispatcher looks at a checkout of the task's branch under
+`worktrees/`:
+
+| The checkout is | The dispatcher |
+|---|---|
+| locked `initializing` | removes it and cuts it again onto the same branch |
+| any other checkout of a task that has started before | takes it back as the task's own, and not as borrowed |
+
+A checkout under `worktrees/` is never marked `borrowed` for a task that has started before. A
+checkout that a person locked for another reason is never removed.
+
 Each worktree builds into its own `target/` directory. Lanes never share a build directory.
 
 When a task reaches `done`:
@@ -743,11 +760,42 @@ When a task reaches `done`:
 2. Leftover work is committed as `wip(<task>): <step>`. If that fails, the task is held on
    `blocked` and keeps every pane open.
 3. Every lane of the task is stopped, its pane closes, and its spend is banked.
-4. The worktree is removed, unless it was borrowed.
+4. The dispatcher writes the file `removing/<task>` in the project home. The file holds the
+   task's run. Then the worktree is removed, unless it was borrowed.
 5. The branch is deleted, unless a queued task still depends on it or it has commits no remote
    has.
-6. The task file moves to `archive/`, and its run files and session homes are deleted.
+6. The `removing/<task>` file is deleted. The task file moves to `archive/`, and its run files
+   and session homes are deleted.
 7. One line for the task is appended to `archive/index.jsonl`.
+
+### A removal that was stopped or failed
+
+A dispatcher killed during step 4 leaves a tree with most of its files gone. On the next pass the
+dispatcher finds `removing/<task>` with the task's run. It skips the commit of step 2 and the
+measuring of the patch. It removes the worktree again. The branch tip stays at the task's last
+real commit.
+
+The `removing/<task>` file is ignored when it names another run. It is deleted when the task
+starts a step.
+
+The worktree counts as not removed when any of these is true:
+
+- Git still lists the task's own worktree.
+- The folder is still on disk under `worktrees/`.
+- A removal call gave an error.
+
+The dispatcher then prints this problem and keeps the task at `done`:
+
+```
+! <task>: its worktree <path> could not be removed. To do it by hand, run `git worktree remove --force --force <path>` and delete the folder if it is still there
+! <task>: stays at `done`; cleanup removes its worktree again on the next pass
+```
+
+The task is archived on the first pass after the worktree is gone. Removing a worktree deletes
+the folder directly only when it sits under `worktrees/`.
+
+`spoolway queue unqueue --force` prints the first message on standard error and carries the task
+to `pending`. It does not try again.
 
 ### The archive index
 

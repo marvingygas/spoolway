@@ -381,10 +381,6 @@ impl Headless {
             kill_group(pid);
         }
     }
-
-    fn git(&self, args: &[&str]) -> Result<String> {
-        crate::repo::run(&self.root, "git", args)
-    }
 }
 
 /// Collect a detached child once its turn is over, without waiting here.
@@ -775,8 +771,14 @@ impl Mux for Headless {
                  somebody else's worktree"
             );
         }
-        self.git(&["worktree", "remove", "--force", &path.display().to_string()])?;
-        Ok(())
+        crate::mux::remove_worktree(&self.root, &self.worktree_root, &path)
+    }
+
+    /// The fallback cleanup takes when [`Mux::remove_workspace`] fails. The
+    /// trait's default does nothing, which on this backend left a worktree
+    /// registered while the task archived as cleaned up.
+    fn remove_checkout(&self, path: &Path) -> Result<()> {
+        crate::mux::remove_worktree(&self.root, &self.worktree_root, path)
     }
 
     /// Nothing to close: a workspace that owns no worktree is a directory

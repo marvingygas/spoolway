@@ -781,11 +781,12 @@ fn queue_unqueue_forced(
     let mut report = crate::dispatch::Report::default();
     let borrowed = task.front.borrowed;
     dispatcher.tear_down_checkout(&mut task, &mut report);
-    // `tear_down_checkout` reports neither success nor failure — every
-    // removal inside it is `let _ = …`, and a borrowed checkout is spared
-    // on purpose (see this task's own non-goals) — so what actually
-    // happened is read back off the filesystem rather than assumed from
-    // having called the function at all.
+    // `tear_down_checkout` returns `false` and names the failure in `report`
+    // when the worktree is still listed, still on disk or a removal call
+    // failed. That is not enough for the line printed here: a borrowed
+    // checkout is spared on purpose and returns `true` with its folder
+    // standing, so what actually happened to the folder is read back off the
+    // filesystem and told to the person.
     if let Some(path) = checkout {
         if path.exists() {
             let why = if borrowed {
