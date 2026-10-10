@@ -487,9 +487,10 @@ run_with_fake_gh() {
   SPOOLWAY_GH="$FAKEGH/bin/gh" SPOOLWAY_E2E_FORGE="$FAKEGH" "$SPOOLWAY" "$@"
 }
 
-# A pull request recorded for a branch this suite never creates at all — a
-# deleted `starts_from` never resolving is exactly what `gh pr list --head`
-# still has to answer about, so nothing here needs the branch to exist.
+# A pull request recorded for a branch whose own pull request this suite never
+# opens — a deleted `starts_from` is exactly what `gh pr list --head` still has
+# to answer about, so the branch need not exist, and may survive as a stale
+# local copy.
 # Numbered well past anything `pr create` will assign on its own below, so a
 # real pull request opened during this section can never collide with one of
 # these.
@@ -612,6 +613,90 @@ if [ "$dependent_status" -eq 0 ] \
 else
   bad "a deleted \`starts_from\` with its own \`base:\` still lands on that base"
   printf '        exit %s: %s\n' "$dependent_status" "$dependent_out"
+fi
+
+# ---- a `starts_from` the remote no longer has, though a stale ref survives.
+# Once the dependency's pull request merges, GitHub deletes its branch. A copy
+# left behind here — a local branch, an `origin/` tracking ref, or both — must
+# not be taken for a live base: `stack` opens against the base it landed in.
+# The refs are made stale the way they go stale for real: published, fetched,
+# then deleted on the remote alone.
+stale_dependency() {
+  local branch=$1 keep_local=$2
+  must "the dependency, published" git branch "$branch" main
+  must "the dependency, on the remote" git push -q origin "$branch"
+  must "its tracking ref, fetched" git fetch -q origin "$branch"
+  must "the dependency, deleted on the remote alone" git -C "$ORIGIN" branch -D "$branch"
+  case $keep_local in
+    yes | only) ;;
+    *) must "the local copy, dropped" git branch -D "$branch" ;;
+  esac
+  # `only`: the tracking ref is pruned too, as `git fetch --prune` does, so
+  # nothing but the local branch says the dependency was ever published.
+  [ "$keep_local" != only ] || must "the tracking ref, pruned" \
+    git update-ref -d "refs/remotes/origin/$branch"
+}
+
+stale_case() {
+  local id=$1 dep=$2 keep_local=$3 label=$4
+  stale_dependency "$dep" "$keep_local"
+  must "the branch, off main" git branch "task/$id" main
+  must "its worktree" git worktree add -q "$WORKTREES/$id" "task/$id"
+  (
+    cd "$WORKTREES/$id" || exit 1
+    mkdir -p notes
+    echo "# $id" > "notes/$id.md"
+    git add -A
+    git commit -qm "wip($id): implement"
+  )
+  queue_task "$id" "base: main" "starts_from: $dep" "branch: task/$id"
+  local out status pr
+  out=$(cd "$WORKTREES/$id" && run_with_fake_gh stack "$id" 2>&1)
+  status=$?
+  pr=$(grep -l "^head=task/$id\$" "$FAKEGH/prs"/[0-9]* 2>/dev/null | head -1)
+  if [ "$status" -eq 0 ] \
+     && grep -qF "\`$dep\` has landed — against \`main\`" <<<"$out" \
+     && [ -n "$pr" ] && [ "$(sed -n 's/^base=//p' "$pr")" = main ]; then
+    ok "$label"
+  else
+    bad "$label"
+    printf '        exit %s: %s\n' "$status" "$out"
+    [ -n "$pr" ] && sed 's/^/        /' "$pr"
+  fi
+}
+
+stale_case stalebase task/gh415-gone yes \
+  "a \`starts_from\` deleted on the remote lands on \`base\` though a local branch and \`origin/\` ref survive"
+# Only the local branch survives, so the one evidence left that the branch
+# landed is its merged pull request.
+record_pr 9003 main task/gh417-gone MERGED
+stale_case stalelocal task/gh417-gone only \
+  "a \`starts_from\` deleted on the remote lands on \`base\` though only a local branch survives"
+stale_case staletrack task/gh416-gone no \
+  "a \`starts_from\` deleted on the remote lands on \`base\` though its \`origin/\` tracking ref survives"
+
+# A base nobody has published has no pull request either: it is still pushed,
+# and the pull request still opens against it.
+must "an unpublished base" git branch task/gh418-local main
+must "the branch, off it" git branch task/unpub task/gh418-local
+must "its worktree" git worktree add -q "$WORKTREES/unpub" task/unpub
+(
+  cd "$WORKTREES/unpub" || exit 1
+  mkdir -p notes
+  echo "# unpub" > notes/unpub.md
+  git add -A
+  git commit -qm "wip(unpub): implement"
+)
+queue_task unpub "base: main" "starts_from: task/gh418-local" "branch: task/unpub"
+unpub_out=$(cd "$WORKTREES/unpub" && run_with_fake_gh stack unpub 2>&1)
+unpub_status=$?
+unpub_pr=$(grep -l "^head=task/unpub\$" "$FAKEGH/prs"/[0-9]* 2>/dev/null | head -1)
+if [ "$unpub_status" -eq 0 ] \
+   && [ -n "$unpub_pr" ] && [ "$(sed -n 's/^base=//p' "$unpub_pr")" = task/gh418-local ]; then
+  ok "a \`starts_from\` nobody has published is still pushed and used"
+else
+  bad "a \`starts_from\` nobody has published is still pushed and used"
+  printf '        exit %s: %s\n' "$unpub_status" "$unpub_out"
 fi
 
 finish

@@ -133,8 +133,22 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // own work — the same answer the dependency's branch would have given
     // while it still existed. Without this fall-through, `handover` fails
     // permanently the moment a dependency merges, which is the one thing
-    // every stacked task is waiting for.
-    let (starts_from, cut_ref) = match resolved_ref(&worktree, &starts_from) {
+    // every stacked task is waiting for. A stale `origin/<starts_from>`
+    // tracking ref, or a local branch beside it, does not count as the branch
+    // resolving: see `deleted_on_remote`. Only a task stacked on a branch of
+    // its own is asked: with no `starts_from`, or one equal to `base`, the
+    // branch is the base itself, and how it is picked is not changed here.
+    let stacked_on_branch = task
+        .front
+        .starts_from
+        .as_ref()
+        .is_some_and(|from| task.front.base.as_ref() != Some(from));
+    let direct = if stacked_on_branch && deleted_on_remote(&gh_program(), &worktree, &starts_from) {
+        None
+    } else {
+        resolved_ref(&worktree, &starts_from)
+    };
+    let (starts_from, cut_ref) = match direct {
         Some(cut_ref) => (starts_from, cut_ref),
         None => {
             let base = task.front.base.clone().filter(|base| base != &starts_from);
@@ -340,6 +354,52 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
 
     println!("\ndone. exit 0");
     Ok(())
+}
+
+/// Whether `branch` is gone from the remote though a copy of it survives here.
+///
+/// The fetch above prunes nothing when its one branch is gone, so a branch
+/// deleted on GitHub after its pull request merged leaves a local branch, an
+/// `origin/<branch>` tracking ref, or both, that `resolved_ref` would take for
+/// a live base. Opening a pull request against it fails, because GitHub no
+/// longer has that branch — and `stack` would re-publish a local copy to do it.
+///
+/// Two signals say the branch was once published, and so is not merely a base
+/// nobody has pushed yet, which `stack` publishes on purpose below: the
+/// tracking ref, or a merged pull request for that head. Only the second
+/// reaches a copy whose tracking ref was already pruned. A remote that cannot
+/// be asked (offline, no `origin`) or a lookup that fails reports the branch
+/// as not gone, which leaves the old behaviour.
+fn deleted_on_remote(gh: &str, worktree: &Path, branch: &str) -> bool {
+    let listed = crate::repo::run(
+        worktree,
+        "git",
+        &[
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{branch}"),
+        ],
+    );
+    if !listed.is_ok_and(|listed| listed.trim().is_empty()) {
+        return false;
+    }
+    let tracked = crate::repo::run(
+        worktree,
+        "git",
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("refs/remotes/origin/{branch}"),
+        ],
+    )
+    .is_ok();
+    tracked
+        || matches!(
+            head_pr(gh, worktree, branch),
+            Ok(Some(HeadPr::Merged { .. }))
+        )
 }
 
 /// `origin/<branch>` when it actually exists there, the bare local branch
@@ -773,10 +833,11 @@ fn parse_pr_view(stdout: &[u8]) -> Result<Option<Pr>> {
     Ok(Some(Pr { number, url, state }))
 }
 
-/// What became of the pull request that once had `branch` for a head, once
-/// `branch` itself is gone and `resolved_ref` can no longer find it — asked
+/// What became of the pull request that once had `branch` for a head — asked
 /// by name (`gh pr list --head`) rather than by ref, since a deleted branch
-/// still names the pull request GitHub opened for it.
+/// still names the pull request GitHub opened for it. Asked once `branch`
+/// resolves nowhere, and also of a local copy that survives the remote
+/// branch's deletion, to tell it from a base nobody has published yet.
 #[derive(Debug, PartialEq, Eq)]
 enum HeadPr {
     /// The branch it merged into — where `stack` should open against instead.
@@ -786,9 +847,9 @@ enum HeadPr {
     ClosedUnmerged { number: u64 },
 }
 
-/// `gh pr list --head <branch> --state all`'s answer for a branch that no
-/// longer resolves anywhere, or `None` when that branch never had a pull
-/// request at all. A merged pull request outranks a closed one for the same
+/// `gh pr list --head <branch> --state all`'s answer for a branch that is
+/// gone from the remote, or `None` when that branch never had a pull request
+/// at all. A merged pull request outranks a closed one for the same
 /// head — the shape of a branch whose first attempt was closed and a later
 /// one landed.
 fn head_pr(gh: &str, worktree: &Path, branch: &str) -> Result<Option<HeadPr>> {
