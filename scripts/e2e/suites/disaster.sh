@@ -409,6 +409,8 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/broken.md"
 forget survivor
 
 # --------- the retention sweep spares a queued task's scratch and headless state
+# (and its `commands/` and `tracking/` run files: a swept exit code makes a
+# finished command step or hook run again)
 # `retain::sweep_now` runs on every command's startup and deletes byproduct
 # entries older than `housekeeping.retention_days`. `scratch/<id>` is what a
 # lane is handed as `$SPOOLWAY_SCRATCH` — planner output and all — and
@@ -423,32 +425,45 @@ queue_hang retained
 mkdir -p "$HOME_DIR/scratch/retained" "$HOME_DIR/headless"
 echo 'planner output' > "$HOME_DIR/scratch/retained/plan.md"
 echo '{}' > "$HOME_DIR/headless/retained · implement.json"
+mkdir -p "$HOME_DIR/commands" "$HOME_DIR/tracking"
+echo 0 > "$HOME_DIR/commands/retained · check.exit"
+echo 0 > "$HOME_DIR/tracking/retained · paused.exit"
 # Backdated well past the window — a directory's own mtime does not move while
 # a lane only writes files into it, which is the whole trap.
 touch -d '3 days ago' \
   "$HOME_DIR/scratch/retained" "$HOME_DIR/scratch/retained/plan.md" \
-  "$HOME_DIR/headless/retained · implement.json"
+  "$HOME_DIR/headless/retained · implement.json" \
+  "$HOME_DIR/commands/retained · check.exit" \
+  "$HOME_DIR/tracking/retained · paused.exit"
 "$SPOOLWAY" queue list >/dev/null 2>&1 || true
 if [ -f "$HOME_DIR/scratch/retained/plan.md" ] \
-   && [ -f "$HOME_DIR/headless/retained · implement.json" ]; then
-  ok "the sweep spares a queued task's scratch and headless state"
+   && [ -f "$HOME_DIR/headless/retained · implement.json" ] \
+   && [ -f "$HOME_DIR/commands/retained · check.exit" ] \
+   && [ -f "$HOME_DIR/tracking/retained · paused.exit" ]; then
+  ok "the sweep spares a queued task's scratch, headless, commands and tracking state"
 else
-  bad "the sweep spares a queued task's scratch and headless state"
-  printf '        scratch: %s, headless: %s\n' \
+  bad "the sweep spares a queued task's scratch, headless, commands and tracking state"
+  printf '        scratch: %s, headless: %s, commands: %s, tracking: %s\n' \
     "$([ -f "$HOME_DIR/scratch/retained/plan.md" ] && echo present || echo gone)" \
-    "$([ -f "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)"
+    "$([ -f "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)" \
+    "$([ -f "$HOME_DIR/commands/retained · check.exit" ] && echo present || echo gone)" \
+    "$([ -f "$HOME_DIR/tracking/retained · paused.exit" ] && echo present || echo gone)"
 fi
 # Once the task leaves the queue the same aged entries do age out.
 forget retained
 "$SPOOLWAY" queue list >/dev/null 2>&1 || true
 if [ ! -e "$HOME_DIR/scratch/retained" ] \
-   && [ ! -e "$HOME_DIR/headless/retained · implement.json" ]; then
+   && [ ! -e "$HOME_DIR/headless/retained · implement.json" ] \
+   && [ ! -e "$HOME_DIR/commands/retained · check.exit" ] \
+   && [ ! -e "$HOME_DIR/tracking/retained · paused.exit" ]; then
   ok "and once its task is gone from the queue they age out as before"
 else
   bad "and once its task is gone from the queue they age out as before"
-  printf '        scratch: %s, headless: %s\n' \
+  printf '        scratch: %s, headless: %s, commands: %s, tracking: %s\n' \
     "$([ -e "$HOME_DIR/scratch/retained" ] && echo present || echo gone)" \
-    "$([ -e "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)"
+    "$([ -e "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)" \
+    "$([ -e "$HOME_DIR/commands/retained · check.exit" ] && echo present || echo gone)" \
+    "$([ -e "$HOME_DIR/tracking/retained · paused.exit" ] && echo present || echo gone)"
 fi
 must "retention back to the default" "$SPOOLWAY" config set housekeeping.retention_days 30
 
