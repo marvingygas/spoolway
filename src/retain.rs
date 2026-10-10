@@ -23,8 +23,8 @@
 //! Four of those carry state a task still in the queue needs.
 //! `scratch/<id>` is what a lane is handed as `$SPOOLWAY_SCRATCH` — planner
 //! output and all — and `headless/` holds the records a running lane is read
-//! back through. `commands/` and `tracking/` hold the exit code, pid, log and
-//! `.kills` counter of a command step or hook run, and a run whose files are
+//! back through. `commands/` and `tracking/` hold the exit code, pid, log,
+//! `.kills` counter and `.group` record of a command step or hook run, and a run whose files are
 //! gone reads as never started, so the command runs again and the hook fires
 //! a second time. An entry in any of them is spared for as long as its
 //! leading task id names a file still in `queue/`, whatever stage that file

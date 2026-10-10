@@ -61,6 +61,13 @@ pub enum RunState {
     /// `stop` sends first; `HUP` and `INT` come from a closed pane or a
     /// Ctrl-C.
     ///
+    /// The exception is `TERM` reaching a wrapper whose command has already
+    /// started and finished with `0`: that code is real and is still
+    /// written. The wrapper cannot tell why the `TERM` came, so the same
+    /// holds for a `TERM` sent to the whole group from outside, such as a
+    /// machine shutdown, when the command catches it and exits `0`. A stop
+    /// by [`Runs::stop`] never takes the exception. `HUP` and `INT` have none.
+    ///
     /// None of these is the command's verdict, and reading them as one is expensive.
     /// A dispatcher stopping at its output ceiling kills in-flight commands
     /// before it releases their worktrees; every one of those used to surface
@@ -282,17 +289,46 @@ impl Runs {
     /// report every wrapper closes with — shared by [`Runs::start`]'s
     /// detached wrapper and [`Runs::script_for_pane`]'s piped one.
     fn wrapper_body(&self, key: &str, run: &str, env: &BTreeMap<String, String>) -> String {
-        let pid_path = crate::platform::quote(&self.pid_path(key).display().to_string());
         let exit_path = crate::platform::quote(&self.exit_path(key).display().to_string());
         let mut body = String::new();
         // Set before anything else, so no stop can land while the EXIT trap
         // below exists and this one does not. A signal that ends the wrapper
-        // leaves no code, on every `sh`: dash dies on it without running the
+        // leaves no code on `HUP` and `INT`, and on `TERM` unless the
+        // exception below applies. dash dies on a signal without running the
         // EXIT trap, so a stopped run reads as interrupted; macOS's `sh` is
         // bash, which does run the trap and writes `0` — a run that `stop`
         // killed would read as one that passed. Clearing the trap and exiting
         // here makes the two agree.
-        body.push_str("trap 'trap - EXIT; exit 143' HUP INT TERM\n");
+        //
+        // The exception is `TERM` arriving after the command has started and
+        // finished with `0`: `$?` in the trap is then the status of the
+        // command the shell had been waiting for, and its code is real.
+        // Discarding it ran the command a second time. The "started" test is
+        // a line the command's own shell appends to the pid file (see
+        // below), because `$?` alone cannot tell a command that finished
+        // from a `TERM` that landed while the wrapper was still setting up:
+        // every builtin there leaves `0`, and the step would route on_pass
+        // for a command that never ran.
+        //
+        // A stop never takes the exception, because `stop` removes the pid
+        // file before it signals, so a run being stopped finds no file to
+        // read the mark from — whatever status a command that caught `TERM`
+        // itself exits with.
+        // The wrapper cannot tell a stop from any other `TERM`, though. A
+        // `TERM` sent to the whole group from outside — a machine shutdown,
+        // a container stop, `kill -TERM -<pgid>` — reaches a command that
+        // catches it and exits `0` while the pid file is still there, and
+        // that `0` is kept. `HUP` and `INT` never take the exception: they
+        // arrive with a closed pane or a Ctrl-C, which reach the command
+        // too, and a command that catches them and exits `0` was cut short,
+        // not finished.
+        let pid_path = crate::platform::quote(&self.pid_path(key).display().to_string());
+        body.push_str(&format!(
+            "__spoolway_pid={pid_path}\n\
+             trap '[ \"$?\" = 0 ] && grep -qx started \"$__spoolway_pid\" \
+             && exit 0; trap - EXIT; exit 143' TERM\n\
+             trap 'trap - EXIT; exit 143' HUP INT\n"
+        ));
         // The wrapper's start time goes on the file's second line, so a pid
         // file that outlives a reboot cannot be mistaken for whatever process
         // now holds the number (see `lock::is_same_process`). The time is
@@ -327,7 +363,16 @@ impl Runs {
         // above and the wrapper's process group, so `stop` still reaches it,
         // and the wrapper's own status — what the trap records — is the
         // child's.
-        body.push_str(&format!("sh -c {}\n", crate::platform::quote(run)));
+        //
+        // The child's first act is to append `started` to the pid file, which
+        // is what the `TERM` trap above looks for. It is the child that writes it,
+        // so the mark exists only once the command has really been forked. It
+        // appends only to a pid file that is still there, because a stop
+        // removes the file and a late append would put a pid file back for a
+        // run that is already over. An `if` rather than `&&`, so the line
+        // leaves `$?` at `0` for the `run:` line that follows it.
+        let started = format!("if [ -e {pid_path} ]; then echo started >>{pid_path}; fi\n{run}");
+        body.push_str(&format!("sh -c {}\n", crate::platform::quote(&started)));
         body
     }
 
@@ -457,14 +502,13 @@ impl Runs {
     /// it invisible to every other check. Membership is the guard, and it is
     /// also what makes a recycled pid safe: a reused number is only a group
     /// again if something new leads one — and a new leader that is alive
-    /// right now is caught by its start time, see [`Runs::signal_the_run`].
+    /// right now is caught by its start time, see [`Runs::signal_the_group`].
     pub fn stop(&self, key: &str) {
-        self.signal_the_run(key);
         // Nowhere to report a clearing that failed, and nothing that needs it
         // to have succeeded: this run is over either way, and the next arrival
         // at this key goes through [`Runs::prepare`], which does not carry on
         // past it.
-        let _ = self.files.clear(key);
+        let _ = self.end(key);
     }
 
     /// Forget a finished run's bookkeeping, keeping its log.
@@ -480,9 +524,39 @@ impl Runs {
     ///
     /// That is why this answers with a result instead of swallowing one:
     /// forget has to have actually forgotten.
+    ///
+    /// One record is kept on purpose: a `<key>.group` file, while something
+    /// of the run's process group is still going — see [`Runs::group_path`].
     pub fn forget(&self, key: &str) -> Result<()> {
+        self.keep_the_group(key);
         self.files.clear(key)?;
         self.clear_kills(key)
+    }
+
+    /// Where the process group of a run that was forgotten while something
+    /// of it was still going is kept — see [`Runs::forget`].
+    fn group_path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.group"))
+    }
+
+    /// Copy the pid file to [`Runs::group_path`] when anything is still
+    /// running in its group, so a later [`Runs::stop`] can still reach it.
+    ///
+    /// A `run:` line may background a process and return, and that process
+    /// is left running on purpose for the steps after this one. Forgetting
+    /// the run removes the pid file, and cleanup finds a task's runs by
+    /// the files in this directory, so without this copy the process would
+    /// outlive the task and keep running in a worktree that is gone. Nothing
+    /// is kept for a group that has already emptied, which is the ordinary
+    /// case. A copy that cannot be written is not worth failing the forget
+    /// for: the loss is the stop at cleanup, not the routing the caller is
+    /// in the middle of.
+    fn keep_the_group(&self, key: &str) {
+        if let Some((pid, _)) = self.files.read_run(key)
+            && crate::headless::group_alive(pid)
+        {
+            let _ = std::fs::copy(self.pid_path(key), self.group_path(key));
+        }
     }
 
     /// Start a visit to this step from nothing: stop any run still going and
@@ -494,8 +568,29 @@ impl Runs {
     /// An error means the old code may still be on disk, so the move must not
     /// go ahead as if the step were clean.
     pub fn begin_visit(&self, key: &str) -> Result<()> {
-        self.signal_the_run(key);
-        self.forget(key)
+        self.end(key)?;
+        self.clear_kills(key)
+    }
+
+    /// Stop the run and whatever it left behind, then drop its pid and exit
+    /// code and the record of its group. The log and the kill count stay.
+    ///
+    /// The pid file is removed *before* anything is signalled. The wrapper's
+    /// `TERM` trap reads the command's `started` mark from it to tell a
+    /// finished command from a stop, and a stop that signalled first could
+    /// let a command that caught `TERM` and exited `0` write that code before
+    /// the file was gone — a stopped run reading as one that passed. The clearing's
+    /// error is held back until the signals are sent, because a run that
+    /// could not be cleared still has to be stopped.
+    fn end(&self, key: &str) -> Result<()> {
+        let run = self.files.read_run(key);
+        let group = crate::runfiles::read_run_at(&self.group_path(key));
+        let cleared = self.files.clear(key);
+        let _ = std::fs::remove_file(self.group_path(key));
+        for record in [run, group].into_iter().flatten() {
+            Self::signal_the_group(record);
+        }
+        cleared
     }
 
     /// Kill the process group the pid file names, unless a live process there
@@ -505,18 +600,34 @@ impl Runs {
     /// across a reboot, and its group is a stranger's. A pid that is not alive
     /// at all passes the check on purpose: the group may still have members
     /// behind a leader that has exited, which is what [`Runs::stop`] is for.
-    fn signal_the_run(&self, key: &str) {
-        if let Some((pid, recorded)) = self.files.read_run(key)
-            && crate::lock::is_same_process(pid, &recorded)
-        {
+    fn signal_the_group((pid, recorded): (u32, String)) {
+        if crate::lock::is_same_process(pid, &recorded) {
             crate::headless::kill_group(pid);
         }
     }
 
     /// Drop a killed run's pid and exit code but keep its kill count, so the
     /// run that replaces it still knows how many came before it.
+    ///
+    /// Also stops the run's process group, once its files are cleared: a
+    /// wrapper that died without its command — a `SIGKILL` to the wrapper
+    /// alone — leaves the command and everything it started running, and the
+    /// run that replaces it would share the worktree with them.
     pub fn discard(&self, key: &str) -> Result<()> {
-        self.files.clear(key)
+        self.end(key)
+    }
+
+    /// Stop what a run that has lost its wrapper left running, keeping its
+    /// files for the caller to clear.
+    ///
+    /// The wrapper's death does not take its command with it: a `SIGKILL` to
+    /// the wrapper alone leaves the command and everything it started in the
+    /// wrapper's process group. Run again without this, the command would
+    /// share the worktree with its own first run.
+    pub fn stop_the_group(&self, key: &str) {
+        if let Some(record) = self.files.read_run(key) {
+            Self::signal_the_group(record);
+        }
     }
 
     /// Where the count of runs killed in a row is kept. A file of its own,
@@ -560,6 +671,10 @@ impl Runs {
     /// four steps ago is still going, and the step that started it is not where
     /// the task is now.
     ///
+    /// A `.group` file answers too: it is what is left of a run whose exit was
+    /// routed while a process it backgrounded was still going — see
+    /// [`Runs::forget`].
+    ///
     /// A `.pane` file answers here too, not only a `.pid` — a paned run a
     /// step's own `timeout:` stopped already dropped its pid the moment
     /// `stop()` cleared it, but the pane that run left standing, for the
@@ -580,7 +695,7 @@ impl Runs {
                 entry
                     .path()
                     .extension()
-                    .is_some_and(|e| e == "pid" || e == "pane")
+                    .is_some_and(|e| e == "pid" || e == "pane" || e == "group")
             })
             .filter_map(|entry| {
                 entry
@@ -603,6 +718,13 @@ impl Runs {
     /// own clock. This reads the directory exactly once and hands back each
     /// task's own keys, so a caller wanting more than one task's worth pays
     /// for the walk a single time.
+    ///
+    /// It does not list a `.group` file, which `keys_for_task` does, and that
+    /// is deliberate. Its caller `reap_stale_runs` stops every key it is given
+    /// for a foreground step the task has left, and a `.group` file is what
+    /// records a process a foreground step backgrounded for the steps after
+    /// it. Listing it here would stop that process on the very next pass.
+    /// Only cleanup, which wants everything stopped, reads the wider answer.
     pub fn keys_by_task(&self) -> std::collections::HashMap<String, Vec<String>> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return std::collections::HashMap::new();
@@ -1127,7 +1249,7 @@ mod tests {
         assert_eq!(
             by_task.get("demo").cloned().unwrap_or_default(),
             vec!["demo · bench".to_string(), "demo · build".to_string()],
-            "grouped exactly as keys_for_task would answer for this one task"
+            "grouped as keys_for_task would answer for this one task, bar a .group file"
         );
         assert_eq!(
             by_task.get("other").cloned().unwrap_or_default(),
@@ -1220,6 +1342,200 @@ mod tests {
             "stop must reach a backgrounded child even though the run's own \
              wrapper had already exited"
         );
+    }
+
+    /// Waits until `path` holds a pid, so a test signals the command rather
+    /// than a shell that has not started it yet.
+    fn pid_in(path: &Path) -> u32 {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(20) {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("{} never got a pid", path.display());
+    }
+
+    /// A wrapper that dies on its own leaves its command running in the same
+    /// group. Discarding the run has to stop that command, or the run that
+    /// replaces it starts beside the first.
+    #[test]
+    fn discarding_a_run_that_lost_its_wrapper_stops_its_command() {
+        let f = Fixture::new("lost-wrapper");
+        let child_file = f.root.join("child.pid");
+        let wrapper = f.start(
+            "build-demo",
+            &format!("sleep 60 & echo $! >{}; wait", child_file.display()),
+        );
+        let child = pid_in(&child_file);
+
+        // SAFETY: a plain signal to a pid this test started.
+        unsafe { libc::kill(wrapper as i32, libc::SIGKILL) };
+        let started = std::time::Instant::now();
+        while f.runs.state("build-demo") != RunState::Interrupted {
+            assert!(started.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            crate::headless::alive(child),
+            "the first run's command should outlive its wrapper"
+        );
+
+        f.runs.discard("build-demo").unwrap();
+        assert!(
+            !crate::headless::alive(child),
+            "the first run was still going when the second would start"
+        );
+    }
+
+    /// Only the wrapper is signalled, and the command it was waiting for
+    /// finishes with `0`. That result is real, so the step reads it instead of
+    /// running the command again.
+    #[test]
+    fn a_wrapper_alone_sent_term_keeps_the_code_of_a_command_that_finished() {
+        let f = Fixture::new("wrapper-term");
+        let marker = f.root.join("started");
+        let wrapper = f.start(
+            "build-demo",
+            &format!("echo $$ >{}; sleep 2", marker.display()),
+        );
+        pid_in(&marker);
+
+        // SAFETY: a plain signal to a pid this test started.
+        unsafe { libc::kill(wrapper as i32, libc::SIGTERM) };
+        assert_eq!(f.settle("build-demo"), RunState::Exited(0));
+    }
+
+    /// A stop must not read as a pass: a command that catches `TERM` and
+    /// exits `0` is stopped, and the stopped run leaves no code behind.
+    #[test]
+    fn a_stopped_run_never_reads_as_passed() {
+        let f = Fixture::new("stop-not-passed");
+        let marker = f.root.join("started");
+        f.start(
+            "build-demo",
+            &format!(
+                "trap 'exit 0' TERM; echo $$ >{}; sleep 60 & wait",
+                marker.display()
+            ),
+        );
+        pid_in(&marker);
+
+        f.runs.stop("build-demo");
+        assert_eq!(f.runs.state("build-demo"), RunState::Fresh);
+        assert!(!f.runs.exit_path("build-demo").exists());
+    }
+
+    /// The pid file is what tells a stop from a `TERM` that reached a finished
+    /// command, and a reader between a stop's kill and its clearing must not
+    /// see a code. With the pid file gone, a command that catches `TERM` and
+    /// exits `0` leaves no exit file, however the `TERM` was sent.
+    #[test]
+    fn a_term_with_the_pid_file_gone_never_leaves_a_zero_behind() {
+        let f = Fixture::new("term-no-pid-file");
+        let marker = f.root.join("started");
+        let wrapper = f.start(
+            "build-demo",
+            &format!(
+                "trap 'exit 0' TERM; echo $$ >{}; sleep 60 & wait",
+                marker.display()
+            ),
+        );
+        pid_in(&marker);
+        std::fs::remove_file(f.runs.pid_path("build-demo")).unwrap();
+
+        // SAFETY: a plain signal to the group this test started.
+        unsafe { libc::kill(-(wrapper as i32), libc::SIGTERM) };
+        while crate::headless::group_alive(wrapper) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!f.runs.exit_path("build-demo").exists());
+    }
+
+    /// A `TERM` that lands while the wrapper is still setting up, before the
+    /// command has been forked, finds `$?` at `0` from the last builtin. It
+    /// must not be taken for a command that finished with `0`.
+    #[test]
+    fn a_term_before_the_command_starts_never_reads_as_passed() {
+        let f = Fixture::new("term-before-start");
+        f.runs.prepare("build-demo").unwrap();
+        let body = f
+            .runs
+            .wrapper_body("build-demo", "exit 1", &BTreeMap::new())
+            .replace("sh -c ", "kill -TERM $$\nsh -c ");
+        let log = f.runs.log_path("build-demo").display().to_string();
+        let script = format!("exec </dev/null >>'{log}' 2>&1\n{body}");
+        let spawned = spawn_wrapper(&script, &f.root).unwrap();
+        crate::headless::reap_when_it_ends(spawned);
+        f.runs.await_started("build-demo").unwrap();
+
+        assert_eq!(f.settle("build-demo"), RunState::Interrupted);
+        assert!(!f.runs.exit_path("build-demo").exists());
+    }
+
+    /// `HUP` and `INT` come with a closed pane or a Ctrl-C, which reach the
+    /// whole group. A command that catches one and exits `0` was cut short, so
+    /// the run reads as interrupted, not as passed.
+    #[test]
+    fn an_interrupt_never_reads_as_passed_even_when_the_command_exits_zero() {
+        let f = Fixture::new("int-not-passed");
+        let marker = f.root.join("started");
+        let wrapper = f.start(
+            "build-demo",
+            &format!(
+                "trap 'exit 0' INT; echo $$ >{}; sleep 60 & wait",
+                marker.display()
+            ),
+        );
+        pid_in(&marker);
+
+        // SAFETY: a plain signal to the group this test started.
+        unsafe { libc::kill(-(wrapper as i32), libc::SIGINT) };
+        assert_eq!(f.settle("build-demo"), RunState::Interrupted);
+        assert!(!f.runs.exit_path("build-demo").exists());
+    }
+
+    /// A process the `run:` line backgrounded outlives the run's exit being
+    /// routed, and cleanup still has to find and stop it.
+    #[test]
+    fn a_forgotten_run_with_a_backgrounded_child_is_still_found_and_stopped() {
+        let f = Fixture::new("forget-group");
+        let child_file = f.root.join("child.pid");
+        f.start(
+            "demo · build",
+            &format!("(sleep 60 & echo $! >{})", child_file.display()),
+        );
+        assert_eq!(f.settle("demo · build"), RunState::Exited(0));
+        let child = pid_in(&child_file);
+
+        f.runs.forget("demo · build").unwrap();
+        assert_eq!(f.runs.state("demo · build"), RunState::Fresh);
+        assert_eq!(f.runs.keys_for_task("demo"), vec!["demo · build"]);
+        assert!(
+            f.runs.keys_by_task().is_empty(),
+            "the foreground reap would stop a listed .group on the next pass"
+        );
+
+        for key in f.runs.keys_for_task("demo") {
+            f.runs.stop(&key);
+        }
+        assert!(!crate::headless::alive(child), "the child outlived cleanup");
+        assert!(f.runs.keys_for_task("demo").is_empty());
+    }
+
+    /// Nothing is kept for a run whose group has emptied, so the directory
+    /// does not fill with records of runs that left nothing behind.
+    #[test]
+    fn forgetting_a_run_that_left_nothing_running_keeps_no_group() {
+        let f = Fixture::new("forget-empty");
+        f.start("demo · build", "true");
+        assert_eq!(f.settle("demo · build"), RunState::Exited(0));
+        f.runs.forget("demo · build").unwrap();
+        assert!(f.runs.keys_for_task("demo").is_empty());
     }
 
     /// A run whose process is gone without an exit code — killed, or the machine
@@ -1497,8 +1813,9 @@ mod tests {
         let env = BTreeMap::from([("SPOOLWAY_TASK".to_string(), "add-endpoint".to_string())]);
         let body = f.runs.wrapper_body("build-demo", "true", &env);
         assert!(
-            body.contains("export SPOOLWAY_TASK='add-endpoint'\nsh -c 'true'\n"),
+            body.contains("export SPOOLWAY_TASK='add-endpoint'\nsh -c '"),
             "{body}"
         );
+        assert!(body.ends_with("\ntrue'\n"), "{body}");
     }
 }

@@ -302,16 +302,29 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
 - Every arrival at a command step runs the command in full. The move onto the step stops any old
-  run still going and deletes its exit code, pid and kill count. The log stays. This holds for
+  run still going, with every process it started, and deletes its exit code, pid, group record
+  and kill count. The log stays. This holds for
   every way a task reaches the step, including a lane's report and a resume.
 - A dispatcher restart is not an arrival. The restarted dispatcher adopts the run it finds on
   the step, or routes on the exit code that run wrote.
-- The run's pid file holds the pid and the process start time. After a reboot, a live process
+- The run's pid file holds the pid, the process start time, and a `started` line the command's
+  shell adds as the command begins. After a reboot, a live process
   with the same pid but a different start time is not the run. The step reads as interrupted and
   runs again, and neither the timeout nor a cleanup signals that process. A pid file with no
   start time is read as the pid alone. Only Linux records a start time.
-- A run killed without writing an exit code runs again. A run killed three times in a row
-  blocks the task. The task's `## Status Log` names the run's log.
+- A run killed without writing an exit code runs again. spoolway first stops every process the
+  killed run left running, so two runs of a command are never alive at once. A run killed three
+  times in a row blocks the task. The task's `## Status Log` names the run's log.
+- A signal that ends the wrapper before the command exits leaves no exit code, so a stopped run
+  never reads as passed. The one exception is a `TERM` that reaches the wrapper after the
+  command started and exited 0. The step keeps that 0 and routes on it. A `TERM` sent to the
+  whole process group from outside spoolway, such as a machine shutdown, keeps a 0 the same
+  way when the command catches it and exits 0. A `HUP` or `INT`, from a closed pane or a
+  Ctrl-C, never keeps a code. The run reads as interrupted and runs again.
+- A process a blocking `run:` line starts in the background, such as `(sleep 98 &) ; true`,
+  keeps running after the command exits. A `<task> · <step>.group` record under `commands/`
+  names its process group. The next arrival at the step stops it. So does cleanup, which
+  stops it before the worktree is deleted. `spoolway queue unqueue --force` stops it too.
 - A late background failure can move a task off a command step. That stops the step's running
   command and deletes its run files, including an exit code it already wrote. The next visit
   runs the command again.

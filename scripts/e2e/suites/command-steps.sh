@@ -1564,5 +1564,95 @@ fi
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 
+# ---------------------------------------------------- a process left behind
+# `pipeline check` is not run on these two pipelines: the `walked` task above
+# is still queued, blocked, and names steps these pipelines do not have.
+#
+# A blocking step whose line backgrounds a process and returns: the step passes
+# at once, its exit is routed and its run files are forgotten, and the process
+# is still running in the task's worktree. Cleanup has to find it without those
+# files, or it outlives the task and keeps a deleted directory as its cwd.
+#
+# Held on a release file for the same reason the `bench` case is: the pid this
+# case reads is written under `commands/`, which goes when the task does.
+LEFT_CHILD="$LIVE/left.child"
+LEFT_RELEASE="$LIVE/left.release"
+rm -f "$LEFT_CHILD" "$LEFT_RELEASE"
+add_command_step default left \
+  "(sleep 98 & echo \$! > \"$LEFT_CHILD\") ; true" review
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$LEFT_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+
+dispatcher_restart
+task_doc "$LIVE/left.md" left "$BODY" "group: left"
+must "a task whose command step leaves a process running" \
+  "$SPOOLWAY" queue add --from "$LIVE/left.md"
+
+if poll_until 120 test -s "$LEFT_CHILD"; then
+  ok "the command left a process running behind its own exit"
+else
+  bad "the command left a process running behind its own exit"
+fi
+LEFT_PID=$(cat "$LEFT_CHILD" 2>/dev/null)
+touch "$LEFT_RELEASE"
+if drive left gone 300; then
+  ok "the task reached done with a process still running behind its step"
+else
+  bad "the task reached done with a process still running behind its step (at \`$(stage_of left)\`)"
+fi
+if [ -n "$LEFT_PID" ] && poll_while 20 kill -0 "$LEFT_PID"; then
+  ok "cleanup stops a process a finished command step left behind"
+else
+  bad "cleanup stops a process a finished command step left behind (pid $LEFT_PID)"
+  [ -n "$LEFT_PID" ] && kill "$LEFT_PID" 2>/dev/null
+fi
+
+# ------------------------------------------------------- a killed wrapper
+# Only the wrapper is killed, with SIGKILL, so the command under it carries on.
+# The run reads as interrupted and the command starts again, and the first run
+# must be gone by then: two runs of one command side by side share a worktree.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+KILLED_RUNS="$LIVE/killed.runs"
+KILLED_RELEASE="$LIVE/killed.release"
+rm -f "$KILLED_RUNS" "$KILLED_RELEASE"
+add_command_step default killed \
+  "sleep 15 & echo \$! >> \"$KILLED_RUNS\"; wait" review
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$KILLED_RELEASE\" ] && break; sleep 0.1; done" \
+  review
+
+dispatcher_restart
+task_doc "$LIVE/killed.md" killed "$BODY" "group: killed"
+must "a task whose command step will lose its wrapper" \
+  "$SPOOLWAY" queue add --from "$LIVE/killed.md"
+
+KILLED_PIDFILE="$SPOOLWAY_PROJECT_HOME/commands/killed · killed.pid"
+poll_until 120 test -s "$KILLED_RUNS"
+FIRST_CHILD=$(head -n1 "$KILLED_RUNS" 2>/dev/null)
+WRAPPER=$(head -n1 "$KILLED_PIDFILE" 2>/dev/null)
+if [ -n "$WRAPPER" ] && kill -9 "$WRAPPER" 2>/dev/null; then
+  ok "the wrapper alone was killed"
+else
+  bad "the wrapper alone was killed (pid $WRAPPER)"
+fi
+# A function, because `poll_until` runs a command and the count has to be read
+# again on every try.
+runs_started() { [ "$(wc -l < "$KILLED_RUNS")" -ge 2 ]; }
+if poll_until 60 runs_started; then
+  ok "the command started again"
+else
+  bad "the command started again"
+fi
+if [ -n "$FIRST_CHILD" ] && ! kill -0 "$FIRST_CHILD" 2>/dev/null; then
+  ok "and the first run was gone by the time the second started"
+else
+  bad "and the first run was gone by the time the second started (pid $FIRST_CHILD)"
+fi
+touch "$KILLED_RELEASE"
+drive killed gone 300 || true
+
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+
 
 finish
