@@ -345,7 +345,8 @@ fn render_config_contract() -> String {
 /// Runs on a lenient discovery, because a config that no longer parses is
 /// exactly when you want to open it. The validation afterwards uses the same
 /// deserialiser every command loads through, so what this accepts is what the
-/// next command will.
+/// next command will. It then reports the values that load but that `doctor`
+/// fails, which loading alone does not catch.
 ///
 /// Takes `checkout`, not `root`, and deliberately never refuses the way
 /// `config_set` does: opening the file in front of you is the point, and a
@@ -357,6 +358,22 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
 
     match Config::load(checkout) {
         Ok(_) => {
+            // Loading skips the range and cross-field checks `config set`
+            // makes, so "parses" alone would approve a line that `doctor`
+            // fails. Read without the override layer: a layer key that
+            // corrects a bad value would hide it while this file still
+            // holds it.
+            let problems = crate::confkv::value_problems(&Config::load_tracked(checkout)?);
+            if !problems.is_empty() {
+                let all: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+                bail!(
+                    "{} parses, but holds {} value(s) spoolway cannot run on: {} — reopen it \
+                     with `spoolway config edit`",
+                    path.display(),
+                    problems.len(),
+                    all.join("; ")
+                );
+            }
             println!("{} — parses", path.display());
             Ok(())
         }
