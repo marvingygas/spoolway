@@ -22,10 +22,14 @@ or both.
 - Read `## Status Log`, `## Handoff` and `## Blocker` — the three fixed sections a lane writes to
   in every archived task — and follow the sequence of events. Work out why review sent work
   back, why a session blocked, what an agent misunderstood, and what later cleared it.
+- Collect every `Follow-up:` and `Sibling:` line lanes left in a Handoff. Each is a defect a lane
+  saw outside its task; one that no later task fixed is a finding of its own.
 - Read `spoolway eval --by step --per-run --since <window>`. Check pass rates, block counts,
   context pressure, tokens per run, cost and time. Use `--step` to inspect a troubled step and
   `spoolway eval --by task --since <window>` to connect its figures to task records. Use
-  figures where they help; do not make them a gate for findings.
+  figures where they help; do not make them a gate for findings. `eval` has no rows for command
+  steps, and BLOCKS counts lane blocks only: count gate and suite failures and arrivals at
+  `blocked` from each archived task's `steps:` edges and Status Log.
 - Read the pipelines, prompts, templates and settings involved in those runs. Compare what the
   agents did with what the control plane asked them to do.
 - Read every skill named in `skills:` on a step those runs passed through. A skill lives in the

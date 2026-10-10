@@ -327,6 +327,9 @@ reading the file whole.
 
 - Never invent a goal, criterion or reference the shape it came from doesn't support, and
   never leave a task as the unfilled skeleton.
+- Never park a known defect in a non-goal. A sibling bug the source names, or one a task's
+  non-goals would rule out, gets a task of its own in the same breakdown, unless the person
+  says in so many words that it will not be fixed.
 - Never write down a claim about the code, a command, a file or upstream data you have not
   checked — grep it, read it or run it first. A `## Context` line or criterion that turns out
   false, or one that contradicts the task's intent, goes back to the person, not into the task.
