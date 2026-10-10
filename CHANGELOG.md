@@ -17,6 +17,64 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.9.0
+
+### Highlights
+- A config key one binary does not know no longer stops it: an unknown key in any table, `[models]` rows included, and a misspelt table such as `[unatended]` load with a note that names them, `spoolway doctor` lists them, and `spoolway config set` and `spoolway sync` keep them with their comments. A running dispatcher now re-reads `config.toml` and the config override on every pass, so raising `agents.claude.concurrency` takes effect without a restart. (#811, #824)
+- Costs read closer to the bill: a lane's line counts its subagents, every claude session is banked at no less than Claude Code's own `cost-state` total, a `[models]` row that sets only `slots`, `context_window` or `prompt_cache_ttl` keeps the price table's rates and window instead of zeroing them, and `slots` caps every model name that resolves to one row. (#799, #803, #816, #820)
+- `models."<glob>".compact_ctx` sets the percentage of a model's window at which claude and codex lanes compact, and `spoolway doctor` and the dispatcher refuse a step whose `session_blocked_ctx` would stop the lane before it ever compacts. (#846, #847)
+- The dispatcher loses fewer tasks to races and leftovers: a dependent starts only once its dependency is archived, a worktree deleted by hand is cut again, a killed tracking hook runs again, a foreground command whose task moved on is stopped, a recycled pid is never killed, an unqueue or a duplicate `queue add` racing a pass no longer runs work twice or loses it, and an unattended run sends a lane that ended without reporting to the unblocker instead of stalling. (#796, #800, #801, #805, #813, #819, #821, #825)
+- The board tells you more and prints nothing over the screen: a full task table scrolls under the cursor, the header shows a newer published version, an empty board lists the jobs a running dispatcher will fire, failing hooks and config notes appear in the popup before dispatching and in `spoolway doctor`, bare `spoolway` prints no notes, and every box has rounded corners. (#789, #798, #833, #840, #843, #844, #849, #850)
+
+### Breaking changes and migration
+- A `[jobs.<name>]` table may hold only `schedule`, `pipeline`, `routine` and `enabled`, matched case by case, and a table with any other key never fires, where 0.8.0 dropped the key and fired the job. The dispatcher, `spoolway jobs list` and `spoolway doctor` say ``job `<name>` has unknown key `<key>` in <file> — it will not fire until it is removed or corrected``. Correct or remove the key; a misspelt `enable = false` meant to pause a job is now the one that stops it. (#802)
+- A task's first cut never reuses an existing `task/<id>` branch, where 0.8.0 silently ran the new task on it. Such a task blocks with ``<id>: the branch `task/<id>` already exists and this task has no checkout on record.``, followed by the `git branch -m` and `git branch -D` commands that clear it. Rename or delete leftover `task/<id>` branches before queueing a task with an earlier task's id, including one sent again after `spoolway queue unqueue --force` kept its branch, and stop creating them in scripts. (#807, #842)
+- Nothing tells you about a release or an unrun sync any more: the `Run spoolway sync to apply the last update.` and `Update available: …` lines and the update popups are gone, and the board header's `(<version> available)` is the one notice. `spoolway update` ends with `Run spoolway sync in each project to apply the update.` Run `spoolway sync` in each project after every upgrade; `spoolway doctor` still notes a project that is behind. Nothing reads `~/.spoolway/<label>-<id>/sync-stamp` now, so delete it. (#789, #795)
+- Hook failures are no longer shown on the board. Each failing task hook is a `FAIL` row labelled `issue_tracking hooks` in `spoolway doctor` and in the popup before dispatching, so `spoolway doctor` now exits non-zero while a hook run has failed. A script that gates on `doctor` must expect it; resume the task to clear a `queued`, `started` or `done` hook, and the others clear once the task is archived. (#849)
+- A `[models]` row that sets some fields now takes the rest from the price table, where 0.8.0 read them as 0. A row such as 0.8.0's own `prompt_cache_ttl = "1h"` on `claude-*`, or a `slots`-only row, therefore costs real money in `spoolway eval` and against `unattended.max_cost_usd`, and gets a context window, so `session_reuse_ctx` and `session_blocked_ctx` now apply to it. Review `max_cost_usd` and `session_blocked_ctx` for those models. (#799)
+- `slots` now caps every model name that resolves to one `[models]` row together, so `[models."claude-*"] slots = 2` allows two lanes across every matching model, not two per model, and the wait line reads ``<task>: waiting for a `claude-*` slot (2/2)``. Write one row per model to keep separate caps. (#803)
+- Recorded costs rise for the same work: a lane's line includes its subagents, and a claude session is banked at no less than Claude Code's own total, which counts side calls such as the auto-mode classifier and WebSearch. `unattended.max_cost_usd` can trip sooner, a ledger line gains `reported_usd`, and costs before and after the upgrade cannot be compared. (#816, #820)
+- A `spoolway pipeline override <pipeline> --set blocked.<key>=…` that 0.8.0 reported active but never applied now takes effect, so an unblocker may switch model after the upgrade. Read `spoolway override list` and drop what you do not want with `spoolway override drop <pipeline>`. `blocked.description`, and `blocked.session=false` while `unattended.blocked_session` is true, are refused with exit 1. (#818)
+- A config edit now reaches a running dispatcher on its next pass, so a mid-run edit takes effect mid-run; `dispatch.backend`, `unattended.enabled` and the `unattended.blocked_*` keys still need a restart, and pipeline files and pipeline overrides still load only when the dispatcher starts. A config that stops parsing keeps the last good one with ``config did not reload, still running on the last good one: <error> (fix the file; the next pass picks it up)``. `spoolway pipeline override` now ends with `a running dispatcher uses it once restarted, as with an edit to the pipeline file.`; update any script that matched `active on the next dispatcher pass.` (#824)
+- A misspelt key that 0.8.0 refused now loads with a note and does nothing, so read the notes `spoolway doctor` prints after upgrading. Upgrade every machine and CI job that reads the project before anyone sets `compact_ctx` or writes a TOML 1.1 form such as a multi-line inline table, because 0.8.0 refuses the whole `config.toml` over either, and over any unknown key 0.9.0 keeps. (#783, #784, #811, #846)
+- In an `--unattended` run, a lane that ended without reporting, held a child past `lane_child_ceiling` or crossed `session_blocked_ctx` now sends its task to `blocked`, reading `stopped on <step>, moved to blocked (escalated)`, where 0.8.0 parked it on `paused`. Expect unblocker lanes to run on these tasks. Attended runs still park on `paused`. (#819)
+- A dependent now starts only once its dependency is done, cleaned up and archived, so a dependency held on `blocked` or `paused` by a failed `done` hook or cleanup holds every dependent until a person resumes it. `spoolway resume --stage` on such a dependent is refused, naming the dependency. (#796)
+- A walk-past by `skip:`, `first:` or `last:` now spends an arrival at each skipped step that has a `loop:`, so a cycle bounded only there blocks at the limit instead of looping forever. A custom pipeline that walks past a `loop:` step more often than its limit now blocks there; raise that `loop:` if it should not. (#812)
+- Job windows that passed while no dispatcher ran, or while a job was disabled, no longer fire when one starts or the job is enabled again; only a window between two passes of one running dispatcher is caught up, up to an hour back. (#797)
+- An issue-tracking hook run killed without an exit code, by a reboot or `wsl --shutdown`, is now run again, up to three times in a row before the task pauses. Make `queued`, `started` and `done` hooks safe to run twice, because the killed run may already have opened a ticket. (#801)
+- A hook `slug=` longer than 64 characters is ignored with a note and the task is queued without it, where 0.8.0 used it in the branch name. Keep hook slugs to 64 lowercase letters, digits and hyphens. (#810)
+- Command-step pid files under `commands/*.pid` now hold the process start time on a second line. A script that reads them must take the first line only, for example with `head -n1`. (#813)
+- spoolway never types more than 512 bytes into a herdr pane, and refuses with ``refusing to type <n> bytes into pane <pane>; a pane takes 512 intact``. A command step's `run:` line is no longer typed at all, so only a very long project path, task id or `$EDITOR` behind `o` can reach the limit. (#790)
+- The bundled price table no longer has `openrouter/` models, because litellm removed them and lets OpenRouter report its own cost. A step on an `openrouter/<vendor>/<model>` model keeps the cost its agent reports, but has no context window, so a `session: true` step opens a fresh session every time and `session_blocked_ctx` never stops it. Set `context_window` under `[models."openrouter/<vendor>/<model>"]`, with rates if the agent reports no cost.
+
+### Features
+- `spoolway doctor` notes project homes under `~/.spoolway/` whose checkout is gone, with each path, and deletes nothing. (#831)
+- `spoolway sync` lists every retired setting it drops and every unknown setting it keeps. (#811)
+- The unblocker's briefing hands it the exact `spoolway report --pass --stage <step>` line for a task whose cause it cleared, and keeps `--pause` for a cause only a person can clear, so fewer tasks wait on a person. (#788)
+- The `spoolway-tasks` skill offers a recommended group count and the counts below it, drawing each option's groups with what they hold and touch; the `spoolway-plan` skill explains a question asked in a free-text answer before asking again, and its page has a copy button beside the plan name. Run `spoolway sync` to install them. (#830, #832, #834)
+- Every command that puts a task back appends a `Cleared` line under `## Blocker`, so later lanes know the entries above it are past. (#837)
+
+### Fixes
+- `housekeeping.archive_retention_days` keeps an archived task that a queued task depends on, so the dependent no longer waits forever. (#792)
+- A task paused twice keeps the step it stopped on, so `spoolway resume` returns it there. (#815)
+- A worktree cut that fails holds only its own task instead of stopping the whole pass. (#810)
+- `spoolway stack` treats a base branch deleted on the remote as landed even when a stale local or `origin/` ref survives, and opens against the base it landed in. (#839)
+- A `[models]` row no step routes to is still named by `spoolway doctor` but no longer opens the warnings popup before a run. (#836)
+
+### Platform and packaging
+- macOS works for command steps and stops: the command wrapper runs from a file instead of being typed into the pane, process and group checks ask the kernel instead of `/proc`, and an interrupted run no longer records exit 0. Every pull request now runs the tests and the command-steps suite on macOS. (#790, #793, #826)
+- `config.toml`, overrides, jobs and workspace files accept TOML 1.1, such as multi-line inline tables, and nothing 0.8.0 accepted is refused. (#783, #784)
+- Security reports go through GitHub's private vulnerability reporting, described in `SECURITY.md`, and the release workflow pins third-party actions to commit SHAs. (#776, #781)
+- The bundled model price table was refreshed from litellm.
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.9.0`, or run it without installing via `npx spoolway@0.9.0`.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64; the GitHub release carries one archive per platform and `SHA256SUMS`.
+- After upgrading, run `spoolway sync` in each project, since nothing reminds you any more, then read the notes `spoolway doctor` prints and work through the breaking changes above; restart the dispatcher once so it loads the synced pipelines. The 0.8.0 to 0.9.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.9.0
+
 ## 0.8.0
 
 ### Highlights
