@@ -362,6 +362,35 @@ pub struct Outcome {
     /// the first time does not also claim there was "nothing to install" —
     /// see the `home-mode-messages` task.
     pub(crate) wrote: bool,
+    /// Version markers this run wrote, as a person would type them back.
+    /// A marker is a file the person finds in `git status`, so [`report`]
+    /// gives each its own `wrote` row.
+    markers: Vec<String>,
+}
+
+impl Outcome {
+    /// Add a marker a caller wrote on this install's behalf, so [`report`]
+    /// names it too.
+    fn also_wrote_marker(&mut self, shown: Option<String>) {
+        self.markers.extend(shown);
+    }
+}
+
+/// Fail when a scope `install`, `install --user` or `init` would write skills
+/// into carries a version marker naming a newer spoolway: the project's
+/// always, and the provider's user-level folder when `user_level`.
+///
+/// `init` calls this before it writes anything, because it lays down a whole
+/// scaffold ahead of the skills and `--force` rewrites files that are already
+/// there: a refusal that only came with the skills would arrive after the
+/// downgrade it names. `install` and `install_user` call the same checks
+/// themselves, so a caller that reaches them directly is still refused.
+pub(crate) fn ensure_not_newer(root: &Path, provider: Provider, user_level: bool) -> Result<()> {
+    crate::sync::ensure_project_not_newer(root)?;
+    if user_level && let Some(home) = user_home() {
+        crate::sync::ensure_user_not_newer(&provider.user_skills_dir(&home))?;
+    }
+    Ok(())
 }
 
 /// Write the provider's skill files, rewriting any that differ from the
@@ -370,18 +399,25 @@ pub struct Outcome {
 /// nested file-by-file transcript.
 ///
 /// Skill files belong to spoolway outright: `spoolway sync` rewrites every
-/// installed one that differs from the shipped copy on every run (see
-/// [`crate::sync::skills`]), so there is nothing here for a per-file record
-/// to protect any more.
+/// installed one that differs from the shipped copy, so there is nothing here
+/// for a per-file record to protect any more. The one thing that is
+/// protected is a newer spoolway's work: a project whose version marker names
+/// a spoolway newer than this binary is refused, `force` or not, exactly as
+/// `sync` refuses it (see [`crate::sync::ensure_not_newer`]).
 pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
+    crate::sync::ensure_project_not_newer(root)?;
     let dest = crate::fmt::relative(root, &provider.skills_dir(root));
-    write_planned(&provider.plan(root), provider.caveat(), force, dest)
+    let mut outcome = write_planned(&provider.plan(root), provider.caveat(), force, dest)?;
+    outcome.also_wrote_marker(crate::sync::record_project_version(root)?);
+    Ok(outcome)
 }
 
 /// [`install`], into the provider's user-level folder rather than a
 /// project's — a home-mode `init`, and `spoolway install --user`. Refused
 /// when there is no home directory to install under, rather than writing a
-/// `.claude/` into whatever directory a relative path would land in.
+/// `.claude/` into whatever directory a relative path would land in. Refused
+/// too when the folder's version marker names a newer spoolway, since every
+/// project on the machine shares these skills.
 pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
     let Some(home) = user_home() else {
         anyhow::bail!(
@@ -392,10 +428,14 @@ pub fn install_user(provider: Provider, force: bool) -> Result<Outcome> {
             provider.name()
         );
     };
+    crate::sync::ensure_user_not_newer(&provider.user_skills_dir(&home))?;
     // No caveat: pi's is about trusting a project before it loads that
     // project's skills, and a user folder is loaded without asking.
     let dest = crate::repo::shorten_home(&provider.user_skills_dir(&home));
-    let outcome = write_planned(&provider.plan_user(&home), None, force, dest)?;
+    let mut outcome = write_planned(&provider.plan_user(&home), None, force, dest)?;
+    outcome.also_wrote_marker(crate::sync::record_user_version(
+        &provider.user_skills_dir(&home),
+    )?);
     Ok(outcome)
 }
 
@@ -449,6 +489,7 @@ fn write_planned(
         caveat,
         dest,
         wrote,
+        markers: Vec::new(),
     })
 }
 
@@ -464,6 +505,9 @@ pub fn report(outcome: Outcome) {
     // these last week and has never seen them load wants this warning too.
     if let Some(caveat) = outcome.caveat {
         println!("  note  {caveat}");
+    }
+    for marker in &outcome.markers {
+        println!("{}", crate::commands::init::report_row("wrote", marker));
     }
     if outcome.wrote {
         println!("Skills installed successfully, into {}.", outcome.dest);
@@ -576,6 +620,81 @@ mod tests {
             assert!(planned.path.is_file(), "{} missing", planned.path.display());
         }
         assert!(!home.join(".claude").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `install` and `install --user` rewrite every skill that differs, so
+    /// under a marker naming a newer spoolway they would downgrade what that
+    /// spoolway wrote, which is the defect `sync` refuses for. `--force` is
+    /// no way round it, and the error names the version and the way out.
+    #[test]
+    fn install_refuses_skills_a_newer_spoolway_wrote_even_forced() {
+        let home = crate::scratch::root("install-newer");
+        let _ = std::fs::remove_dir_all(&home);
+        let root = home.join("project");
+        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+        let user_dir = Provider::Claude.user_skills_dir(&home);
+        let project_skill = Provider::Claude
+            .skills_dir(&root)
+            .join("spoolway-config")
+            .join("SKILL.md");
+        let user_skill = user_dir.join("spoolway-config").join("SKILL.md");
+        for skill in [&project_skill, &user_skill] {
+            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+            std::fs::write(skill, "written by a newer spoolway\n").unwrap();
+        }
+        let project_marker = root.join(".spoolway").join("spoolway-version");
+        let user_marker = user_dir.join(".spoolway-version");
+        std::fs::write(&project_marker, "999.0.0\n").unwrap();
+        std::fs::write(&user_marker, "999.0.0\n").unwrap();
+
+        for force in [false, true] {
+            let project = install(&root, Provider::Claude, force).err().unwrap();
+            let user = crate::platform::test_home::with_home(&home, || {
+                install_user(Provider::Claude, force).err().unwrap()
+            });
+            for error in [project, user] {
+                let text = format!("{error:#}");
+                assert!(text.contains("999.0.0"), "{text}");
+                assert!(text.contains("delete"), "{text}");
+            }
+        }
+
+        for skill in [&project_skill, &user_skill] {
+            assert_eq!(
+                std::fs::read_to_string(skill).unwrap(),
+                "written by a newer spoolway\n"
+            );
+        }
+        for marker in [&project_marker, &user_marker] {
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "999.0.0\n");
+        }
+
+        // The way out the error names: with the marker gone this binary's
+        // copies go in and its own version is recorded.
+        std::fs::remove_file(&project_marker).unwrap();
+        let outcome = install(&root, Provider::Claude, false).unwrap();
+        assert!(outcome.wrote);
+        assert_eq!(
+            std::fs::read_to_string(&project_marker).unwrap(),
+            format!("{}\n", crate::release::current())
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The marker is a tracked file the person finds in `git status`, so the
+    /// install report gives it a row of its own, and only when it was written.
+    #[test]
+    fn install_names_a_version_marker_it_wrote() {
+        let home = crate::scratch::root("install-marker-row");
+        let _ = std::fs::remove_dir_all(&home);
+        let root = home.join("project");
+        std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+
+        let first = install(&root, Provider::Claude, false).unwrap();
+        assert_eq!(first.markers, [".spoolway/spoolway-version"]);
+        let again = install(&root, Provider::Claude, false).unwrap();
+        assert!(again.markers.is_empty(), "{:?}", again.markers);
         let _ = std::fs::remove_dir_all(&home);
     }
 

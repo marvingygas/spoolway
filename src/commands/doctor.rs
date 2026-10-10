@@ -2315,7 +2315,7 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
             crate::sync::Outcome::Wrote { path, .. }
             | crate::sync::Outcome::Migrated { path, .. }
             | crate::sync::Outcome::Removed { path, .. } => {
-                if !behind.contains(&path.as_str()) {
+                if !crate::sync::is_version_marker(path) && !behind.contains(&path.as_str()) {
                     behind.push(path);
                 }
             }
@@ -4094,6 +4094,34 @@ mod tests {
             !dir.exists(),
             "live_pane left its scratch directory behind: {}",
             dir.display()
+        );
+    }
+
+    /// The version marker `sync` writes beside a stale file is not a second
+    /// file behind: one stale skill reads as one.
+    #[test]
+    fn the_version_marker_is_not_counted_as_a_file_behind() {
+        use crate::sync::Outcome;
+        let outcomes = vec![
+            Outcome::Wrote {
+                path: ".claude/skills/spoolway-config/SKILL.md".into(),
+                detail: "rewritten".into(),
+            },
+            Outcome::Wrote {
+                path: ".spoolway/spoolway-version".into(),
+                detail: "spoolway version recorded".into(),
+            },
+            Outcome::Wrote {
+                path: "~/.claude/skills/.spoolway-version".into(),
+                detail: "spoolway version recorded".into(),
+            },
+        ];
+
+        assert_eq!(
+            sync_notes(&outcomes, true),
+            vec![
+                "1 file(s) are behind this spoolway — run spoolway sync to apply them".to_string()
+            ]
         );
     }
 

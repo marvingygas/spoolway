@@ -796,7 +796,7 @@ fn pad_to_value_column(path: &str) -> String {
 /// Every verb is left-padded to nine columns — `project` and `skipped` plus
 /// two spaces, `wrote` plus four, `kept` and `made` plus five, `set` plus
 /// six — so all six line up whichever one a row starts with.
-fn report_row(verb: &str, what: &str) -> String {
+pub(crate) fn report_row(verb: &str, what: &str) -> String {
     format!("  {verb:<9}{what}")
 }
 
@@ -1079,6 +1079,19 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // What the closing lines say about where this checkout went. `bound` is
     // the row a new workspace prints; a join or a move says it in a sentence
     // instead, as the last thing the run prints.
+    // Before the first write below — a workspace, a binding, the scaffold —
+    // so a project a newer spoolway set up is left exactly as it was. The
+    // skills' own check, inside `install`, comes after all of those, and with
+    // `--force` the scaffold it follows has already overwritten the newer
+    // spoolway's files. A New, joined or moved checkout ends up in home mode,
+    // which keeps its skills in the user folder.
+    crate::install::ensure_not_newer(
+        root,
+        answers.provider,
+        !matches!(placement, Placement::Repo | Placement::Listed)
+            || crate::repo::workspace_clone(root).is_some(),
+    )?;
+
     let mut bound = None;
     let mut placed_lines = Vec::new();
     match &placement {
@@ -1302,6 +1315,15 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     }
 
     crate::usage::registry::register(root);
+
+    // The version marker is a tracked file in the setup folder, so it gets a
+    // row among the others, above the `stamped` line that closes them. Home
+    // mode's setup lives in the workspace, which `install_user` does not
+    // reach, so it is recorded here for both modes; `install` in repo mode
+    // then finds it already current.
+    if let Some(shown) = crate::sync::record_project_version(root)? {
+        placer.rows.push(report_row("wrote", &shown));
+    }
 
     for row in &placer.rows {
         println!("{row}");
