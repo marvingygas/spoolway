@@ -1551,7 +1551,7 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--pass` | | The step succeeded. Route along `on_pass`. On `blocked`, when the step this pass stands in for is `gate: true`, it lands on `paused` at that step's own gate instead |
+| `--pass` | | The step succeeded. Route along `on_pass`. On `blocked`, when the step this pass stands in for is a `gate: true` agent step, it lands on `paused` at that step's own gate instead. A command step is handed back to itself |
 | `--stage <STEP>` | | Only with `--pass` on `blocked`: land on `<STEP>` instead of the default. `<STEP>` must be one this task has already run, and never one past a gate this pass has not answered for |
 | `--fail` | | The step failed. Route along `on_fail` |
 | `--block` | | Something outside the step is in the way. Escalate |
