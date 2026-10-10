@@ -5867,6 +5867,17 @@ fn ensure_workspace(
                     .ok()
                     .map(|c| c.trim().to_string())
                 };
+                // Written down before the cut, not after it. `git worktree
+                // add -b` makes the branch first, so a dispatcher stopped
+                // mid-cut — a `SIGTERM`, a kill, a crash — leaves `task/<id>`
+                // behind with nothing on record, and the next pass took this
+                // task's own branch for somebody else's and refused it three
+                // times into `blocked`. With `run` and `base_commit` already
+                // on disk, `cut_before` reads the leftover as a re-cut and
+                // reuses it, still pinned to the commit it was cut from.
+                task.front.run = Some(crate::usage::new_run_id());
+                task.front.base_commit = base_commit;
+                persist_task(repo, task, file_seen)?;
                 let workspace = mux.create_workspace(
                     &repo.root,
                     &branch,
@@ -5883,8 +5894,6 @@ fn ensure_workspace(
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
                 task.front.starts_from = Some(starts_from);
-                task.front.base_commit = base_commit;
-                task.front.run = Some(crate::usage::new_run_id());
                 persist_task(repo, task, file_seen)?;
             }
         }
@@ -7163,6 +7172,10 @@ mod tests {
         /// worktree with git under it instead of answering with the one
         /// stand-in path every other test shares.
         cuts_real_worktrees: Option<PathBuf>,
+        /// Whether `create_workspace` makes the branch and then fails before
+        /// answering — the state a dispatcher killed mid-cut leaves, since
+        /// `git worktree add -b` creates the branch first.
+        dies_mid_cut: bool,
         /// What `read` answers for a lane, mutated by `prompt` the way a real
         /// pane's screen is: typing a message into it changes what is on it.
         /// Absent for a lane nothing has prompted, which is most of them —
@@ -7216,6 +7229,7 @@ mod tests {
                 resident: true,
                 shared_workspace: None,
                 cuts_real_worktrees: None,
+                dies_mid_cut: false,
                 shared_lookup_fails: false,
                 screen: Mutex::new(HashMap::new()),
                 forgotten: Mutex::new(HashSet::new()),
@@ -7252,6 +7266,12 @@ mod tests {
         /// under `root`, for a test about what the worktree contains.
         fn cutting_real_worktrees(mut self, root: PathBuf) -> FakeMux {
             self.cuts_real_worktrees = Some(root);
+            self
+        }
+        /// A backend whose `create_workspace` dies after making the branch
+        /// and before anything could record the cut.
+        fn dying_mid_cut(mut self) -> FakeMux {
+            self.dies_mid_cut = true;
             self
         }
         /// A backend whose lanes do not survive between turns — what
@@ -7445,6 +7465,10 @@ mod tests {
             self.log(format!("create_workspace on {branch} from {base}"));
             if let Some(path) = self.unqueue_on_create.lock().unwrap().take() {
                 unqueue_file(&path);
+            }
+            if self.dies_mid_cut {
+                crate::repo::run(cwd, "git", &["branch", branch, base])?;
+                anyhow::bail!("killed mid-cut");
             }
             if let Some(root) = &self.cuts_real_worktrees {
                 let path = root.join(crate::mux::branch_slug(branch));
@@ -17968,6 +17992,55 @@ mod tests {
             assert!(worktree.join("b.txt").exists());
         }
 
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// A dispatcher stopped mid-cut leaves `task/<id>` behind, made by
+    /// `git worktree add -b` before anything recorded the cut. The next
+    /// dispatcher, reading the task file from disk, must take that branch as
+    /// this task's own and re-cut onto it, pinned to the commit the first
+    /// attempt cut from — not refuse it as somebody else's and block the
+    /// task. The e2e `flow` suite's slot scenario hit this when its
+    /// `dispatcher_restart` landed between the two.
+    #[test]
+    fn a_first_cut_killed_after_making_the_branch_is_resumed_not_refused() {
+        let (repo, _root_guard) = fixture("first-cut-killed");
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        let cut_from = repo.git(&["rev-parse", "work"]).unwrap().trim().to_string();
+
+        let dying = FakeMux::new(vec![]).dying_mid_cut();
+        ensure_workspace(&repo, &dying, &mut task, &mut Default::default())
+            .expect_err("the first attempt dies mid-cut");
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/demo"])
+                .is_ok()
+        );
+
+        // The base moves on before anybody comes back to the task.
+        std::fs::write(repo.root.join("later.txt"), "later\n").unwrap();
+        repo.git(&["add", "later.txt"]).unwrap();
+        repo.git(&["commit", "-qm", "later"]).unwrap();
+
+        let mut task = reload(&path);
+        let mux = FakeMux::new(vec![]).cutting_real_worktrees(repo.worktree_root());
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
+            .expect("the leftover branch is this task's own, and is re-cut");
+
+        assert_eq!(
+            task.front.base_commit.as_deref(),
+            Some(cut_from.as_str()),
+            "still pinned to the commit the branch was really cut from"
+        );
+        let worktree = task
+            .front
+            .worktree_path
+            .clone()
+            .expect("a checkout on record");
+        assert!(
+            !worktree.join("later.txt").exists(),
+            "the branch is reused as it was, not re-cut from the moved base"
+        );
         std::fs::remove_dir_all(&worktree).ok();
     }
 

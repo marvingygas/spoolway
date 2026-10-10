@@ -715,7 +715,9 @@ had.
 A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
 the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
 The message names the branch. The branch is either left over from an earlier task with the same
-id, or it holds this task's own work saved by `spoolway queue unqueue --force`. Choose one:
+id, or it holds this task's own work saved by `spoolway queue unqueue --force`. A dispatcher
+stopped in the middle of a cut does not count: the task records the cut before the branch is made,
+so the next dispatcher re-cuts onto it. Otherwise, choose one:
 
 | Goal | Steps |
 |---|---|
