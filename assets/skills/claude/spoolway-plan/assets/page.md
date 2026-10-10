@@ -179,7 +179,7 @@ A figure argues the decision; the prose around it only says what to look at.
 
 ## The machine copy
 
-The `<script type="text/markdown" id="plan">` block at the foot of the page, above the theme
+The `<script type="text/markdown" id="plan">` block at the foot of the page, above the page's
 script, carries the plan's own words a second time, for a reader that opens the file rather than
 a browser — `spoolway-tasks` reads it by name and learns nothing about the markup around it.
 

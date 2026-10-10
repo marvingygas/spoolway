@@ -92,6 +92,20 @@ body {
 
 .rail .slug { font: 500 1.05rem/1.3 var(--serif); margin: 0; color: var(--accent); overflow-wrap: anywhere; }
 
+/* The copy button sits beside the name, not inside it, so the slug element's
+   text stays the bare name. Its box is fixed and both icons share it: the check
+   swaps in without moving the name or the rail. */
+.rail .name { display: flex; align-items: flex-start; gap: 0.4rem; }
+.rail .name .slug { flex: 0 1 auto; min-width: 0; }
+.copy {
+  flex: none; width: 1.3rem; height: 1.3rem; padding: 0; display: grid; place-items: center;
+  color: var(--ink-faint); background: none; border: 0; border-radius: 3px; cursor: pointer;
+}
+.copy:hover, .copy:focus-visible { color: var(--accent); }
+.copy svg { width: 0.95rem; height: 0.95rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.copy .check, .copy.done .glyph { display: none; }
+.copy.done .check { display: block; }
+
 .eyebrow {
   font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.16em;
   text-transform: uppercase; color: var(--ink-faint); margin: 0 0 0.35rem;
@@ -289,7 +303,13 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     <button class="theme" type="button" data-theme-toggle>Switch theme</button>
     <div>
       <p class="eyebrow">Plan</p>
-      <p class="slug">[[plan-slug]]</p>
+      <div class="name">
+        <p class="slug">[[plan-slug]]</p>
+        <button class="copy" type="button" aria-label="Copy plan name" data-copy-name>
+          <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h.5"/></svg>
+          <svg class="check" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>
+        </button>
+      </div>
     </div>
     <nav>
       <p class="eyebrow">On this page</p>
@@ -459,8 +479,9 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 </script>
 
 <script>
-// The only script in the file: a theme switch for someone reading it off disk,
-// where there is no host application to ask. Falls back to the OS preference.
+// The only script in the file, with two jobs for someone reading it off disk,
+// where there is no host application to ask. The theme switch falls back to the
+// OS preference. The copy button puts the plan's name on the clipboard.
 (function () {
   var root = document.documentElement;
   try {
@@ -469,14 +490,51 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
   } catch (e) {}
 
   var button = document.querySelector('[data-theme-toggle]');
-  if (!button) return;
-  button.addEventListener('click', function () {
+  // Each job checks only its own elements, so a page missing one still wires
+  // the other.
+  if (button) button.addEventListener('click', function () {
     var dark = root.getAttribute('data-theme')
       ? root.getAttribute('data-theme') === 'dark'
       : window.matchMedia('(prefers-color-scheme: dark)').matches;
     var next = dark ? 'light' : 'dark';
     root.setAttribute('data-theme', next);
     try { localStorage.setItem('spoolway-plan-theme', next); } catch (e) {}
+  });
+
+  var copy = document.querySelector('[data-copy-name]');
+  var slug = document.querySelector('.rail .slug');
+  if (!copy || !slug) return;
+  var timer;
+  function done() {
+    copy.classList.add('done');
+    clearTimeout(timer);
+    timer = setTimeout(function () { copy.classList.remove('done'); }, 1500);
+  }
+  // A file:// page is not a secure context in every browser, so the async
+  // clipboard can be missing or refuse; a hidden textarea still copies there.
+  function fallback(text) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(area);
+    // Selecting the textarea took focus; give it back so a keyboard user keeps
+    // their place.
+    copy.focus();
+    if (ok) done();
+  }
+  copy.addEventListener('click', function () {
+    var text = slug.textContent.trim();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallback(text); });
+    } else {
+      fallback(text);
+    }
   });
 })();
 </script>

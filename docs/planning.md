@@ -40,6 +40,13 @@ Several plans can be queued from one checkout. They all share one queue and one 
 `/spoolway-plan` talks the goal through with you and writes a plan page. It names no task and
 no pipeline. When you approve the shape, it calls `/spoolway-tasks`.
 
+`/spoolway-plan` asks its questions as a batch of options. You can answer one with free text
+instead of picking an option. If your text is a question or shows doubt, the skill explains the
+topic in the session output and asks the same question again, with the options revised if the
+explanation changed them. The answers you picked for the other questions in the batch stay. If
+your text is a statement, the skill replies with one line saying how it read you and what that
+changes.
+
 `/spoolway-tasks` cuts the shape into tasks. It picks a pipeline per task, sizes each
 task, chooses ids, and writes the dependency order. You can also run it directly when the
 shape is already agreed.
@@ -87,6 +94,9 @@ The binary never reads it. It lives outside the checkout, at
 Every page has three sections in this order: Context, Decisions and Mockup. Context opens on
 the one sentence a person can approve or reject, then two or three sentences on what is true
 today. The template is `assets/skills/claude/spoolway-plan/assets/template.html`.
+
+The page rail shows the plan name. A small copy icon sits right after it. Clicking the icon
+copies the name to the clipboard, and the icon shows a check mark for about 1.5 seconds.
 
 The page also carries a machine copy of its own words, in a `<script type="text/markdown"
 id="plan">` block at the foot of the page that a browser never shows. `/spoolway-plan` writes

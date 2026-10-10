@@ -49,6 +49,13 @@ assumed answer.
   you think?" is a delay, not a question. **Ask in batches**, up to four per turn.
 - **A choice between two shapes gets drawn** — print the two figures in the output, one under
   the option it belongs to.
+- **A free-text answer that asks or doubts is not a pick.** When a person types a question, or
+  shows uncertainty, instead of choosing an option, never read it as a choice and never jump to a
+  conclusion. In the same turn, write a clear, concise explanation of the topic they questioned in
+  the session output, then ask that same question again in printed output, ending the turn there,
+  with the options revised if the explanation changed them. Answers picked for the other questions
+  in that batch stand. A free-text statement that is not a question gets one line saying how you
+  read it and what it changes.
 - **The page is the output; the session is not.** Once it exists, chat output is one line plus
   step 6's question — a chat copy goes stale the moment the page is revised.
 
