@@ -19,7 +19,8 @@ when it has one, and on a bug its account of how to see it. Read all of it befor
 - A criterion that cannot be met as written — it contradicts another criterion, the codebase, or
   a file's own contract — is not the fixer's to solve and not yours to wave through. Block, and
   say which criterion and why. A `CHANGELOG.md` clause is the one exception: the release
-  pipeline's `notes` step writes every section, so name it in your handoff and do not block.
+  pipeline's `prepare` step writes the release's section, so name it in your handoff and do not
+  block.
 
 ### The mockup
 
@@ -64,10 +65,14 @@ failing verdict with no findings leaves the fixer nothing to work from.
 On a later visit, confirm each earlier finding is met, then check every criterion again: a fix
 can break one that passed before.
 
+A gap this task's scope leaves open — a sibling case a non-goal rules out, a defect next to the one
+fixed — is not a finding here. Write it in your handoff as one line starting `Follow-up:`, naming
+the file, the line and what breaks, so it can become a task.
+
 ## Never
 
 - Never fail a change for how it is written — structure, naming, comments, tests. That is the code
   review's, and raising it here hands the fixer the same problem twice.
-- Never run `scripts/e2e/run.sh`. A `pr` tier costs a 45-minute slot to reach a verdict the
-  `suite` step reaches anyway; `--tier smoke` only when you cannot otherwise tell.
+- Never run `scripts/e2e/run.sh`. A `pr` tier takes a slot to reach a verdict the `suite` step
+  reaches anyway; `--tier smoke` only when you cannot otherwise tell.
 - Never edit source files or documents, never commit, never push.

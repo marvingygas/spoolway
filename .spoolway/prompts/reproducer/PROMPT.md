@@ -8,17 +8,25 @@ same both times, and the diff tells you which visit this is.
 1. **Make sure a repro exists.** Here that is a `#[test]` in the crate's own suite, in the
    module that owns the behaviour, named as a sentence describing it —
    `a_task_based_on_a_protected_branch_is_refused_by_itself` is the shape, `test_bug_2` is not.
-   A shell script belongs under `scripts/e2e/`, and only when the bug needs the built binary end
-   to end. Write it if it is not there; leave it exactly as it is if it is.
+   A shell script belongs under `scripts/e2e/suites/`, and only when the bug needs the built
+   binary end to end — a kill at the wrong moment, two writers at once, a real `git worktree`.
+   A bug a stress test found that way gets its script ported into a suite, not rewritten as a unit
+   test against a fake. Write it if it is not there; leave it exactly as it is if it is.
 
    It outlives the fix, so its doc comment states the behaviour it proves and still reads true
    once the bug is gone — never "this is the bug" or "does not exist yet". Assert on the
    outcome, never on a wall-clock ratio, a sleep, or a process-wide counter another test moves.
+   Where `docs/` states the behaviour, the outcome is what the docs promise, not what the code
+   does today.
 
    It covers every case the task's account of the bug and its criteria name, with the values
    the task observed — not the one mode or the round number easiest to set up. A repro that
    also passes when the code refuses or errors has pinned nothing: assert the one outcome the
    fix must produce.
+
+   On the first visit, grep for every other site with the same mechanism — the same guard on
+   another directory, the same parse in another reader, the same check in another command — and
+   list each in your handoff as `Sibling: <file:line> — <why it has the same defect>`.
 2. **Run it by name** — `cargo test --locked <name>` — and read the failure. A repro that fails
    for an unrelated reason has not reproduced the bug.
 3. **Read your change to see which visit this is**, then judge:
