@@ -954,6 +954,55 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
     problems
 }
 
+/// Name every live task a pipeline edit has stranded.
+///
+/// A deleted pipeline stops the whole dispatcher at its next start, and a
+/// renamed step sends a plain `spoolway resume` of the task standing on it
+/// nowhere good, so both are caught here, while the edit can still be undone.
+/// Each of the four step fields is read because a task can be stopped on any
+/// of them: `stage:` for a running one, `paused_at` for a gate, `blocked_from`
+/// for a block and `parked_from` for a `p` park. The reserved stages are
+/// stand-ins rather than steps, so they are never reported as missing.
+///
+/// A task whose `pipeline:` is absent is left to the dispatcher's own start
+/// refusal; only a name the project no longer defines is reported here.
+fn live_task_problems(tasks: &[crate::task::Task], pipelines: &Pipelines) -> Vec<String> {
+    let mut problems = Vec::new();
+    for task in tasks {
+        let Some(name) = task.front.pipeline.as_deref().map(str::trim) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(pipeline) = pipelines.get(name) else {
+            problems.push(format!(
+                "live task `{}` names pipeline `{name}`, which this project no longer defines",
+                task.id()
+            ));
+            continue;
+        };
+        let recorded = [
+            ("stage", Some(task.stage())),
+            ("paused_at", task.front.paused_at.as_deref()),
+            ("blocked_from", task.front.blocked_from.as_deref()),
+            ("parked_from", task.front.parked_from.as_deref()),
+        ];
+        for (field, step) in recorded {
+            let Some(step) = step else { continue };
+            if crate::pipeline::RESERVED.contains(&step) || pipeline.step(step).is_some() {
+                continue;
+            }
+            problems.push(format!(
+                "live task `{}` has `{field}: {step}`, and pipeline `{}` has no such step",
+                task.id(),
+                pipeline.name
+            ));
+        }
+    }
+    problems
+}
+
 /// Split an old single `pipeline.yml` into one file per pipeline.
 ///
 /// Writes what it can and *says* what it cannot: `default:` and `observer:`
@@ -1018,6 +1067,11 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
     }
 
     let mut problems = step_problems(repo, pipelines, &repo.config);
+
+    problems.extend(live_task_problems(
+        &repo.tasks().unwrap_or_default(),
+        pipelines,
+    ));
 
     // A queued task's own `skip:` names steps by hand — a replay's copy, or
     // one a person edited in — and a pipeline's steps can be renamed out from
@@ -2159,6 +2213,56 @@ mod tests {
             )
             .expect("init")
         });
+    }
+
+    /// A live task standing on a pipeline the project dropped, or on a step
+    /// its pipeline renamed, is named by the check, in every field that can
+    /// record a step. The reserved stages are never reported as missing.
+    #[test]
+    fn live_task_problems_name_a_dropped_pipeline_and_each_renamed_step() {
+        let (repo, _root_guard) = repo_for("live-task-problems");
+        let pipelines = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+        let pipeline = pipelines.get("default").unwrap();
+        let task = |id: &str, pipeline: &str, extra: &str| {
+            crate::task::Task::parse(
+                std::path::PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\npipeline: {pipeline}\n{extra}---\n"),
+            )
+            .unwrap()
+        };
+        let tasks = vec![
+            task("gone", "nowhere", "stage: implement\n"),
+            task(
+                "renamed",
+                "default",
+                "stage: old-a\npaused_at: old-b\nblocked_from: old-c\nparked_from: old-d\n",
+            ),
+            task("fine", "default", &format!("stage: {}\n", pipeline.entry())),
+            task("held", "default", "stage: blocked\nblocked_from: blocked\n"),
+        ];
+
+        let problems = live_task_problems(&tasks, &pipelines);
+
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`gone`") && p.contains("nowhere")),
+            "{problems:?}"
+        );
+        for (field, step) in [
+            ("stage", "old-a"),
+            ("paused_at", "old-b"),
+            ("blocked_from", "old-c"),
+            ("parked_from", "old-d"),
+        ] {
+            assert!(
+                problems.iter().any(|p| p.contains("`renamed`")
+                    && p.contains(&format!("{field}: {step}"))
+                    && p.contains("`default`")),
+                "{problems:?}"
+            );
+        }
+        assert_eq!(problems.len(), 5, "{problems:?}");
     }
 
     // -----------------------------------------------------------------

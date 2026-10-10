@@ -1251,6 +1251,62 @@ pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
         .unwrap_or_else(|| pipeline.entry().to_string())
 }
 
+/// Whether `id` is a reserved stage rather than a step of any pipeline, so a
+/// pipeline lacking it has lost nothing. It is the same set `pipeline check`
+/// skips. `started` is not in it: a pipeline may name a step that, and a task
+/// recorded on one that was then renamed is as stranded as any other.
+fn is_stage_word(id: &str) -> bool {
+    crate::pipeline::RESERVED.contains(&id)
+}
+
+/// The step a task recorded that its pipeline no longer has, when a plain
+/// resume of it would otherwise land somewhere wrong.
+///
+/// A task standing on a step the pipeline renamed away has nothing to go
+/// back to: its `stage:` is the step itself, and sending it to the entry or
+/// to `last_report` would redo passed work or run a step early. A task
+/// stopped by a block is the same when its `blocked_from` and `last_report`
+/// both name steps the pipeline dropped, since [`resume_target`] would then
+/// answer with the entry. `blocked` is skipped for the reason
+/// [`resume_target`] gives. A recorded step that does still exist means
+/// [`resume_target`] has a real answer, and nothing is stranded. A task that
+/// never reported records nothing and rightly resumes at the entry.
+pub fn stranded_step(task: &Task, pipeline: &Pipeline) -> Option<String> {
+    let stage = task.stage();
+    if !is_stage_word(stage) && pipeline.step(stage).is_none() {
+        return Some(stage.to_string());
+    }
+    let recorded = [
+        task.front.blocked_from.as_deref(),
+        task.front.last_report.as_ref().map(|r| r.step.as_str()),
+    ];
+    let recorded = recorded
+        .into_iter()
+        .flatten()
+        .filter(|id| *id != crate::pipeline::BLOCKED);
+    let mut missing = None;
+    for id in recorded {
+        if pipeline.step(id).is_some() {
+            return None;
+        }
+        missing.get_or_insert(id);
+    }
+    missing.map(str::to_string)
+}
+
+/// The refusal for a plain resume of a task whose recorded step `pipeline`
+/// no longer has: it names the step and `--stage`, the way to say where the
+/// task goes instead of guessing.
+fn missing_step_refusal(task: &Task, pipeline: &Pipeline, missing: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "task `{id}` stopped at `{missing}`, which pipeline `{pipeline}` no longer defines, so a \
+         plain resume has no step to send it back to. Name one with `spoolway resume {id} \
+         --stage <step>`.",
+        id = task.front.id,
+        pipeline = pipeline.name
+    )
+}
+
 /// Which of the two roads holds a task at `step` for `outcome`/`destination`
 /// — the one predicate every reader of a gate now shares, rather than each
 /// deriving its own copy. `compose::report_contract` asks it of a
@@ -1594,6 +1650,12 @@ impl ResumeRoad {
 /// then a park, then a hook pause on `done`, then [`resume_target`], whose
 /// `queued` answer is a task that never started.
 ///
+/// A task whose recorded step the pipeline no longer has, whether it stands
+/// on it, is parked on it, is held at its gate or blocked on it, is refused
+/// rather than sent to the entry, which would redo passed work, or put back
+/// on a stage nothing can run. The message names the step and `--stage`, the
+/// way to resume at a step by hand.
+///
 /// Where a gate goes is read out of `pipelines` at resume time, from the step
 /// recorded in `paused_at`, rather than out of anything the pass wrote down.
 /// `pipelines` is the graph the resuming command routes on: the running
@@ -1605,12 +1667,9 @@ impl ResumeRoad {
 pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
     if let Some(gated) = task.front.paused_at.clone() {
         let pipeline = pipelines.for_task(task)?;
-        let step = pipeline.require_step(&gated).with_context(|| {
-            format!(
-                "task `{}` paused at `{gated}`, which pipeline `{}` no longer defines",
-                task.front.id, pipeline.name
-            )
-        })?;
+        let Some(step) = pipeline.step(&gated) else {
+            return Err(missing_step_refusal(task, pipeline, &gated));
+        };
         // What this pause actually caught — `None` for a pause raised from
         // `blocked` itself, which is not a catch of anything.
         let caught = caught_at(task, &gated);
@@ -1657,6 +1716,15 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
     // A `p` park is answered differently from a real stop: nothing was ever
     // in the way, so putting it back is not a lap — see `unpark`.
     if let Some(step) = &task.front.parked_from {
+        // A park needs no pipeline to resume, so a pipeline that is gone
+        // altogether is left alone here; one that lost this step would put
+        // the task back on a stage nothing can run.
+        if let Ok(pipeline) = pipelines.for_task(task)
+            && !is_stage_word(step)
+            && pipeline.step(step).is_none()
+        {
+            return Err(missing_step_refusal(task, pipeline, step));
+        }
         return Ok(ResumeRoad::Unpark(step.clone()));
     }
     // `done` has no later step to carry the task past, and is not a stage
@@ -1664,7 +1732,11 @@ pub fn resume_road(task: &Task, pipelines: &Pipelines) -> Result<ResumeRoad> {
     if task.front.hook_paused.as_deref() == Some(crate::pipeline::DONE) {
         return Ok(ResumeRoad::HookDone);
     }
-    let target = resume_target(task, pipelines.for_task(task)?);
+    let pipeline = pipelines.for_task(task)?;
+    if let Some(missing) = stranded_step(task, pipeline) {
+        return Err(missing_step_refusal(task, pipeline, &missing));
+    }
+    let target = resume_target(task, pipeline);
     Ok(match target == crate::pipeline::QUEUED {
         true => ResumeRoad::Queued,
         false => ResumeRoad::Step(target),
@@ -4230,6 +4302,128 @@ mod tests {
             pipeline.entry(),
             "an old task file carrying `blocked_from: blocked` is refused the same way"
         );
+    }
+
+    /// A task blocked on a step its pipeline has since renamed has nothing
+    /// to resume at but the entry, and the entry would redo passed work. A
+    /// plain resume is refused, naming the step and `--stage`. Naming a step
+    /// by hand still rescues it. A task that ran but never reported keeps
+    /// resuming at the entry as it always did.
+    #[test]
+    fn a_plain_resume_of_a_task_on_a_renamed_step_is_refused_and_stage_rescues_it() {
+        let (repo, _root_guard) = unattended_fixture("renamed-step");
+        let pipelines = staffed_pipelines();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        add(&repo, "stuck", &[]);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("old-name".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "older-name".into(),
+            outcome: "block".into(),
+            at: 1,
+            blocked: false,
+        });
+        task.save().unwrap();
+
+        let err = resume(&repo, &pipelines, &resume_args("stuck", None), None)
+            .expect_err("a step the pipeline dropped is not a resume target");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("old-name") && said.contains("--stage"),
+            "{said}"
+        );
+        assert_eq!(queued(&repo, "stuck").stage(), crate::pipeline::BLOCKED);
+
+        resume(
+            &repo,
+            &pipelines,
+            &resume_args("stuck", Some(pipeline.entry())),
+            None,
+        )
+        .expect("--stage still rescues it");
+        assert_eq!(queued(&repo, "stuck").stage(), pipeline.entry());
+
+        let mut task = queued(&repo, "stuck");
+        task.front.blocked_from = None;
+        task.front.last_report = None;
+        task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
+        match resume_road(&task, &pipelines).expect("nothing recorded, nothing stranded") {
+            ResumeRoad::Step(step) => assert_eq!(step, pipeline.entry()),
+            _ => panic!("a task that ran but never reported resumes at the entry"),
+        }
+    }
+
+    /// Every way a task can stand on a step its pipeline renamed away is
+    /// refused by a plain resume with the same message, naming the step and
+    /// `--stage`: running there (`stage:`), parked there, and held at its
+    /// gate. Before, the first landed on the entry, the second wrote the
+    /// dead step back as its stage, and the third never named `--stage`.
+    #[test]
+    fn a_plain_resume_is_refused_for_a_stage_a_park_and_a_gate_on_a_dropped_step() {
+        let pipelines = staffed_pipelines();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        for case in ["stage", "parked", "paused"] {
+            let (repo, _root_guard) = unattended_fixture(&format!("dropped-{case}"));
+            add(&repo, "stuck", &[]);
+            let mut task = queued(&repo, "stuck");
+            task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
+            match case {
+                "stage" => task.set_stage("old-name", None),
+                "parked" => {
+                    task.set_stage(crate::pipeline::PAUSED, None);
+                    task.front.parked_from = Some("old-name".into());
+                }
+                _ => {
+                    task.set_stage(crate::pipeline::PAUSED, None);
+                    task.front.paused_at = Some("old-name".into());
+                }
+            }
+            task.save().unwrap();
+
+            let err = resume(&repo, &pipelines, &resume_args("stuck", None), None)
+                .expect_err("a step the pipeline dropped is not a resume target");
+            let said = format!("{err:#}");
+            assert!(
+                said.contains("old-name") && said.contains("--stage"),
+                "{case}: {said}"
+            );
+            assert_eq!(queued(&repo, "stuck").stage(), task.stage(), "{case}");
+
+            resume(
+                &repo,
+                &pipelines,
+                &resume_args("stuck", Some(pipeline.entry())),
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{case}: --stage should rescue it: {err:#}"));
+            assert_eq!(queued(&repo, "stuck").stage(), pipeline.entry(), "{case}");
+        }
+    }
+
+    /// `started` is a hook event, not a reserved stage, so a pipeline may name
+    /// a step that. A task parked on one that was then renamed is stranded
+    /// like any other, and a plain resume refuses it rather than writing the
+    /// dead step back as its stage.
+    #[test]
+    fn a_plain_resume_is_refused_for_a_park_on_a_dropped_step_named_started() {
+        let (repo, _root_guard) = unattended_fixture("dropped-started");
+        let pipelines = staffed_pipelines();
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.front.parked_from = Some(crate::pipeline::STARTED.into());
+        task.save().unwrap();
+
+        let err = resume(&repo, &pipelines, &resume_args("stuck", None), None)
+            .expect_err("a step the pipeline dropped is not a resume target");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("`started`") && said.contains("--stage"),
+            "{said}"
+        );
+        assert_eq!(queued(&repo, "stuck").stage(), crate::pipeline::PAUSED);
     }
 
     /// A fail, a block or a pause from that same staffed step never lands back

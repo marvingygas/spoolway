@@ -1465,9 +1465,9 @@ fn picker_header(
 /// `blocked` or `done`, one pinned row under the steps names it, since
 /// neither is a row anyone may pick on purpose. A stopped step the pipeline
 /// no longer has leaves no `(next)` row at all: `resume_road` either refuses
-/// it, sends the task back onto that same missing step, or falls back to a
-/// step the task never stopped at. The cursor starts on the first step
-/// instead, for a person to pick a real one.
+/// it or, for a block whose `blocked_from` is gone, falls back to the step it
+/// last reported from. The cursor starts on the first step instead, for a
+/// person to pick a real one.
 fn resume_picker(
     task: &crate::task::Task,
     pipelines: &Pipelines,
@@ -3304,9 +3304,11 @@ fn landed(
 }
 
 /// The NEXT column of a blocked row parked for a person, prefixed for the
-/// column. Always `resume_target`, the step `spoolway resume` sends the task
+/// column. Normally `resume_target`, the step `spoolway resume` sends the task
 /// back to, and the only way off a parked block — so the row names one step
-/// whether or not the key is on offer yet.
+/// whether or not the key is on offer yet. A block whose recorded steps the
+/// pipeline dropped is the exception: a plain resume refuses it, so the row
+/// names the missing step and says to pick one instead of promising the entry.
 ///
 /// The key, then the arrow, exactly like a paused row's own `next` below.
 /// No command follows, because the key opens the step picker. The key shows
@@ -3325,6 +3327,13 @@ fn blocked_next(
     resumable: bool,
     dependents: usize,
 ) -> String {
+    if let Some(missing) = crate::commands::stranded_step(task, pipeline) {
+        let note = format!("pick a step — `{missing}` is gone");
+        return match resumable {
+            true => format!("[r] {note}"),
+            false => note,
+        };
+    }
     let target = crate::commands::resume_target(task, pipeline);
     let target = landed(pipeline, task, target, dependents);
     match resumable {
@@ -3381,7 +3390,12 @@ fn paused_next(
         };
         return Some(landed(pipeline, task, target, dependents));
     }
-    task.front.parked_from.clone()
+    // A park on a step the pipeline dropped is refused by a plain resume, so
+    // naming it as the destination would promise a resume that fails.
+    task.front
+        .parked_from
+        .clone()
+        .filter(|from| pipeline.step(from).is_some())
 }
 
 /// The word this pause caught, prefixed onto the arrow the NEXT column draws
@@ -3643,8 +3657,8 @@ fn build_rows(
                         }
                         (Some(step), true) => format!("[r] {arrow} {step}"),
                         (Some(step), false) => format!("{arrow} {step}"),
-                        // Nothing to name: `paused_at` names a step the
-                        // pipeline no longer has, a gated step has no pass
+                        // Nothing to name: `paused_at` or `parked_from`
+                        // names a step the pipeline no longer has, a gated step has no pass
                         // destination, or neither `paused_at` nor
                         // `parked_from` is set, as on a task an issue-tracking
                         // hook paused on `done`. The row must still say
@@ -9904,6 +9918,52 @@ mod tests {
         assert_eq!(
             paused_next(&task, agent, 0).as_deref(),
             Some(on_pass.as_str())
+        );
+    }
+
+    /// A plain resume refuses a task whose recorded step the pipeline no
+    /// longer has, so the NEXT column must not promise it a destination: a
+    /// stranded block names the missing step and says to pick one, and a
+    /// park on a missing step names nothing. A step that still exists reads
+    /// as it always did.
+    #[test]
+    fn the_next_column_promises_nothing_a_plain_resume_refuses() {
+        let (repo, _root_guard) = fixture("stranded-next-column");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.pipelines.get("default").unwrap();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
+        task.front.blocked_from = Some("old-name".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "old-name".into(),
+            outcome: "block".into(),
+            at: 1,
+            blocked: false,
+        });
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] pick a step — `old-name` is gone"
+        );
+        assert_eq!(
+            blocked_next(&task, pipeline, false, 0),
+            "pick a step — `old-name` is gone"
+        );
+
+        task.front.blocked_from = Some("implement".into());
+        assert_eq!(
+            blocked_next(&task, pipeline, true, 0),
+            "[r] → implement",
+            "a recorded step the pipeline still has is the destination"
+        );
+
+        task.front.paused_at = None;
+        task.front.parked_from = Some("old-name".into());
+        assert_eq!(paused_next(&task, pipeline, 0), None);
+        task.front.parked_from = Some("implement".into());
+        assert_eq!(
+            paused_next(&task, pipeline, 0).as_deref(),
+            Some("implement")
         );
     }
 
