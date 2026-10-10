@@ -659,8 +659,9 @@ impl Repo {
     }
 
     /// Every active task in id order, together with the queue files that
-    /// would not parse — for the dispatcher pass, which names the bad file
-    /// where a person will see it rather than leaving it only in the log.
+    /// would not parse — for the readers that name the bad file where a
+    /// person will see it rather than leaving it only in the log: the
+    /// dispatcher pass and its empty-queue checks, and `spoolway queue list`.
     /// The board reads the queue through `status::cached_queue` instead, a
     /// per-file cache over the same [`task::load_dir`] that skips reparsing a
     /// file whose bytes have not moved since the last frame.

@@ -33,12 +33,26 @@ pub(crate) fn dependency_note(graph: &Graph, id: &str) -> Option<String> {
 /// which is the one thing no task file records.
 pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
     let holder = crate::lock::Lock::holder(&repo.lock_file())?;
-    let rows = crate::status::rows(repo, pipelines)?;
+    // One read of the queue feeds both lists. Two reads would let a file
+    // edited between them land in neither (broken on the first read, fixed
+    // on the second) or in both.
+    let (tasks, problems) = repo.tasks_and_problems()?;
+    // The rows are built from the tasks that parsed, so a queue file that
+    // did not is absent from them. Named separately below, or it would look
+    // as if the task were never queued.
+    let rows = crate::status::rows_of(repo, pipelines, &tasks)?;
 
     if json {
         let payload = serde_json::json!({
             "dispatcher_pid": holder,
             "tasks": rows.iter().map(QueueRowJson::from).collect::<Vec<_>>(),
+            "unparseable": problems
+                .iter()
+                .map(|problem| serde_json::json!({
+                    "path": problem.path.display().to_string(),
+                    "error": problem.error,
+                }))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -49,7 +63,7 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
         None => println!("dispatcher: not running — start it with `spoolway dispatch`\n"),
     }
 
-    if rows.is_empty() {
+    if rows.is_empty() && problems.is_empty() {
         println!("No tasks queued. Add one with `spoolway queue add --from <path>`.");
         return Ok(());
     }
@@ -57,7 +71,26 @@ pub fn queue_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> 
     // The board's own table, in plain text. Not a second layout that happens
     // to agree with it: this is the same reading from somewhere else, and the
     // two disagreeing about a column would be two answers to one question.
-    print!("{}", crate::status::plain_table(&rows));
+    if !rows.is_empty() {
+        print!("{}", crate::status::plain_table(&rows));
+    }
+    if !problems.is_empty() {
+        if !rows.is_empty() {
+            println!();
+        }
+        println!(
+            "{} in the queue did not parse, so the dispatcher skips {}:",
+            plural(problems.len(), "file"),
+            match problems.len() {
+                1 => "it",
+                _ => "them",
+            }
+        );
+        for problem in &problems {
+            println!("  {} — {}", problem.path.display(), problem.error);
+        }
+        println!("Fix the file, or move it out of the queue directory.");
+    }
     Ok(())
 }
 
@@ -865,7 +898,7 @@ fn skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
     Ok(format!(
         "---\n\
          id: name-this-task\n\
-         title: a short, present-tense sentence naming what this task does\n\
+         title: \"type(scope): a short sentence naming what this task does\"   # quoted: YAML reads a bare `: ` as a key\n\
          group: group-name            # required — a lane runs in the tab its group shares with its siblings\n\
          # source: where this came from — an issue URL, a plan page path, never parsed\n\
          depends_on: []               # sibling task ids that must finish first\n\
@@ -947,7 +980,12 @@ fn split_stream(input: &str) -> Vec<String> {
         let mut cursor = 0usize;
         let mut cut = None;
         for line in remaining.split_inclusive('\n') {
-            if line.trim_end() == "---" {
+            // A byte order mark in front of a task's opening fence is not
+            // part of the fence, any more than it is to `split_fence`: left
+            // in, that fence goes uncounted and the stream is cut one fence
+            // late, running one task's front matter into the one before.
+            let fence = line.strip_prefix('\u{feff}').unwrap_or(line);
+            if fence.trim_end() == "---" {
                 fences += 1;
                 if fences == 3 {
                     cut = Some(cursor);
@@ -4001,6 +4039,19 @@ pub(crate) struct ScreenState {
     /// one before it closes — the queue tab's opening message, the one
     /// notice bare `spoolway` opens with.
     waiting: std::collections::VecDeque<Mode>,
+    /// The unparseable pending files this screen has already said something
+    /// about. `None` on a tab that does not name them — the routines tab,
+    /// which does not draw the pending groups they would be missing from.
+    named: Option<NamedFiles>,
+}
+
+/// What the queue tab has already named of the pending directory's
+/// unparseable files, so a file that appears or breaks while the screen is
+/// open is named once and a file that stays broken is not named again every
+/// second.
+struct NamedFiles {
+    dir: std::path::PathBuf,
+    files: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 impl ScreenState {
@@ -4020,6 +4071,7 @@ impl ScreenState {
             gates: Default::default(),
             board_branch: None,
             waiting: Default::default(),
+            named: None,
         }
     }
 
@@ -4058,8 +4110,8 @@ fn visible(groups: &[Group], scope: HideScope) -> Vec<&Group> {
 /// the one acceptance criterion `visible` alone could never satisfy, but
 /// never a queued one, which [`reachable`] keeps off this screen. A tie in
 /// score falls back to name order, the same tie-break
-/// [`super::pending::list_groups`] itself uses, so the list does not
-/// reshuffle between two draws that score identically.
+/// [`super::pending::list_groups_and_skipped`] itself uses, so the list does
+/// not reshuffle between two draws that score identically.
 fn shown<'a>(groups: &'a [Group], state: &ScreenState) -> Vec<&'a Group> {
     if state.filter.is_empty() {
         return visible(groups, state.hide_scope);
@@ -4119,53 +4171,76 @@ fn group_score(group: &Group, query: &str) -> Option<i64> {
 /// dependency of the binary; tasks reach that directory from anywhere,
 /// and this screen has no business naming one writer of them.
 ///
-/// The unreadable-tasks check is gated on no group being
-/// [`super::pending::GroupState::Queueable`] any more — true both when
-/// `groups` is empty outright and when it holds only rows nobody can select
-/// — rather than on `groups.is_empty()` alone. `groups` now also reflects
-/// the queue and archive directories (see [`super::pending::list_groups`]),
-/// so a group already queued or archived can leave it non-empty even when
-/// every task actually sitting in the pending directory is unreadable;
-/// gating on emptiness alone would either hide the diagnostic behind that
-/// unrelated row, or — the fix that overcorrected the first time — hide a
-/// perfectly queueable group behind a stray task that has nothing to do
-/// with it. `all` on an empty slice is `true`, so this one condition covers
-/// the ordinary empty-pending case together with both the queue-only and
-/// archive-only ones.
+/// A file in the pending directory that will not parse is one of those
+/// things, always — see [`super::pending::list_groups_and_skipped`]. It has no row to be,
+/// so with nothing else said it would look to the person as if the task
+/// were never written, and a group beside it would look complete when it
+/// is not. That holds beside a queueable group as much as when there is none,
+/// and whatever `groups` also holds from the queue and archive directories
+/// has no bearing on it. [`opening_title`] is the heading to show it under.
+///
+/// `skipped` is what [`super::pending::list_groups_and_skipped`] passed over
+/// under `dir`. The caller reads it so the same answer can seed
+/// [`NamedFiles`], and so a file that breaks while the screen is open is
+/// named by the same text — see [`announce_unreadable`].
 ///
 /// Pulled out of [`queue_tab`] so this can be checked without a real
 /// terminal or a captured stdout — the same split `skeleton_task` makes
 /// from `print_skeleton_task`.
-fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
-    let dir = repo.pending_dir();
-    if groups
-        .iter()
-        .all(|group| group.state != GroupState::Queueable)
-    {
-        let skipped = super::pending::unreadable(repo);
-        if !skipped.is_empty() {
-            let files: Vec<String> = skipped
-                .iter()
-                .map(|path| format!("  {}", path.display()))
-                .collect();
-            return Some(format!(
-                "Nothing to list under {} — {} there {} no `group:` this could read:\n\n\
-                 {}\n\n\
-                 A row on this screen is a `group:` value, so a task without one has no row \
-                 to be. Run `spoolway task contract --from {}` for the real reason on each.",
-                dir.display(),
-                plural(skipped.len(), "task"),
-                match skipped.len() {
-                    1 => "has",
-                    _ => "have",
-                },
-                files.join("\n"),
-                dir.display()
-            ));
-        }
+fn opening_message(
+    dir: &std::path::Path,
+    skipped: &[std::path::PathBuf],
+    groups: &[Group],
+) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
     }
+    let files: Vec<String> = skipped
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect();
+    let (has, them) = match skipped.len() {
+        1 => ("has", "it"),
+        _ => ("have", "them"),
+    };
+    let lead = match queueable_group_listed(groups) {
+        true => format!(
+            "Not listed under {}: {} there {has} no `group:` and `id:` this could read, so \
+             a group beside {them} may be missing tasks:",
+            dir.display(),
+            plural(skipped.len(), "task"),
+        ),
+        false => format!(
+            "Nothing to list under {} — {} there {has} no `group:` and `id:` this could read:",
+            dir.display(),
+            plural(skipped.len(), "task"),
+        ),
+    };
+    Some(format!(
+        "{lead}\n\n\
+         {}\n\n\
+         A row on this screen is a `group:` value, so a task without one has no row \
+         to be. Run `spoolway task contract --from {}` for the real reason on each.",
+        files.join("\n"),
+        dir.display()
+    ))
+}
 
-    None
+/// Whether `groups` holds a row a person could queue — what decides whether
+/// [`opening_message`] speaks of an empty screen or of a stray file beside
+/// real rows.
+fn queueable_group_listed(groups: &[Group]) -> bool {
+    groups
+        .iter()
+        .any(|group| group.state == GroupState::Queueable)
+}
+
+/// The heading [`opening_message`] is shown under.
+fn opening_title(groups: &[Group]) -> &'static str {
+    match queueable_group_listed(groups) {
+        true => "tasks not listed",
+        false => "nothing to queue",
+    }
 }
 
 /// Bare `spoolway`'s queue tab: the same screen `spoolway queue` used to open
@@ -4189,12 +4264,19 @@ pub(crate) fn queue_tab(
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
-    let groups = super::pending::list_groups(repo)?;
+    let (groups, skipped) = super::pending::list_groups_and_skipped(repo)?;
     let routines = super::routines::list_routines(repo)?;
     let mut state = ScreenState::new();
-    if let Some(msg) = opening_message(repo, &groups) {
-        state.waiting.push_back(outcome("nothing to queue", msg));
+    let dir = repo.pending_dir();
+    if let Some(msg) = opening_message(&dir, &skipped, &groups) {
+        state
+            .waiting
+            .push_back(outcome(opening_title(&groups), msg));
     }
+    state.named = Some(NamedFiles {
+        dir,
+        files: skipped.into_iter().collect(),
+    });
     state.mode = state.after_popup(Mode::Browsing);
     let exit = run_screen_from(
         repo,
@@ -4316,6 +4398,13 @@ fn run_screen_from(
         QueueSnapshot {
             groups: groups.clone(),
             branch: state.board_branch.clone(),
+            // What the opening message already named is what the seed holds;
+            // `refresh_from_reader` never announces the seed itself.
+            unreadable: state
+                .named
+                .iter()
+                .flat_map(|named| named.files.iter().cloned())
+                .collect(),
         },
     );
     // The seed above lands as generation 0 and is already in `groups`, so
@@ -4905,12 +4994,15 @@ fn reload(repo: &Repo, groups: &mut Vec<Group>, state: &mut ScreenState) {
 struct QueueSnapshot {
     groups: Vec<Group>,
     branch: Option<String>,
+    /// The pending files [`super::pending::list_groups_and_skipped`] passed
+    /// over, read in the same pass as `groups`.
+    unreadable: Vec<std::path::PathBuf>,
 }
 
 /// The read [`run_screen_from`]'s loop used to run on the key thread itself
 /// — `crate::repo::branch_at` for `state.board_branch`, every key, and
-/// `super::pending::list_groups` once a second while idle — kept off that
-/// thread by a thread of its own: [`crate::status`]'s own generic
+/// `super::pending::list_groups_and_skipped` once a second while idle — kept
+/// off that thread by a thread of its own: [`crate::status`]'s own generic
 /// `Reader<T>`, the same `board-reader-thread` decision the dispatch tab's
 /// board already reuses for its own `Snapshot`, rather than a second copy
 /// of that thread written by hand for this one. Before this, every key here
@@ -4941,16 +5033,21 @@ fn start_queue_reader(repo: Repo, cwd: std::path::PathBuf, initial: QueueSnapsho
     })
 }
 
-/// [`super::pending::list_groups`] and [`crate::repo::branch_at`], together
+/// [`super::pending::list_groups_and_skipped`] and
+/// [`crate::repo::branch_at`], together
 /// — what [`QueueReader`] reads on its own thread once its seed has been
 /// handed back once. `None` when the pending directory itself cannot be
 /// read; a detached checkout reads as no branch rather than a reason to
 /// fail the whole reading, the same tolerance the inline `branch_at` call
 /// this replaces always gave.
 fn build_queue_snapshot(repo: &Repo, cwd: &std::path::Path) -> Option<QueueSnapshot> {
-    let groups = super::pending::list_groups(repo).ok()?;
+    let (groups, unreadable) = super::pending::list_groups_and_skipped(repo).ok()?;
     let branch = crate::repo::branch_at(cwd).ok();
-    Some(QueueSnapshot { groups, branch })
+    Some(QueueSnapshot {
+        groups,
+        branch,
+        unreadable,
+    })
 }
 
 /// Ask [`QueueReader`] for one more reading, and adopt it into `groups` and
@@ -4979,7 +5076,36 @@ fn refresh_from_reader(
     }
     adopt_groups(snapshot.groups.clone(), groups, state);
     state.board_branch = snapshot.branch.clone();
+    announce_unreadable(&snapshot.unreadable, groups, state);
     *known = generation;
+}
+
+/// Name the pending files in `current` that this screen has not named yet.
+///
+/// The opening message names what is broken when the tab opens. A file
+/// written, or broken by an edit, while the tab stays open would otherwise
+/// leave its group showing fewer tasks than it has, and queueing it would
+/// queue short without a word. A file that stays broken is named once; one
+/// that is repaired is forgotten, so breaking it again is named again.
+///
+/// The popup opens only over plain browsing. Over any other mode, the files
+/// stay unnamed and the next reading names them once that mode is closed, so
+/// a notice never replaces a half-typed filter or an open question.
+fn announce_unreadable(current: &[std::path::PathBuf], groups: &[Group], state: &mut ScreenState) {
+    let browsing = matches!(state.mode, Mode::Browsing);
+    let Some(named) = state.named.as_mut() else {
+        return;
+    };
+    let now: std::collections::BTreeSet<std::path::PathBuf> = current.iter().cloned().collect();
+    let fresh: Vec<std::path::PathBuf> = now.difference(&named.files).cloned().collect();
+    if fresh.is_empty() || !browsing {
+        named.files.retain(|file| now.contains(file));
+        return;
+    }
+    named.files = now;
+    if let Some(msg) = opening_message(&named.dir, &fresh, groups) {
+        state.mode = outcome(opening_title(groups), msg);
+    }
 }
 
 /// The highlighted group's tasks, or `None` when nothing is under the cursor
@@ -5455,6 +5581,10 @@ fn handle_gate_key(
 /// [`write_back_ids`], which does — this only ever touches the text in
 /// memory; what happens to the result is each caller's own business.
 fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
+    // `split_fence` accepts a leading byte order mark, so a routine saved
+    // with one reaches here too. `trim` does not count it as whitespace, so
+    // left on, the fence would not be found and the id would go unminted.
+    let doc = doc.strip_prefix('\u{feff}').unwrap_or(doc);
     let Some(nl) = doc.find('\n') else {
         return doc.to_string();
     };
@@ -8019,6 +8149,20 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
         .collect()
 }
 
+/// Why a job's routine folder cannot be queued: the files in it that will
+/// not parse. `None` for a single file, a folder that reads cleanly, or one
+/// that will not read at all — [`queue_routine_target`] reports that last
+/// case itself.
+///
+/// Asked by the job runner ahead of the queueing call so it can note the
+/// refusal once per due minute rather than once per pass.
+pub(crate) fn routine_target_refusal(target: &std::path::Path) -> Option<String> {
+    if !target.is_dir() {
+        return None;
+    }
+    super::routines::read_folder_at(target).ok()?.refusal()
+}
+
 /// Queue a routine target the way the routines tab does, but driven by a job
 /// rather than the screen's nav. `target` is an absolute path under
 /// [`Repo::routines_dir`]: a folder queues every task at or below it as
@@ -8041,6 +8185,9 @@ pub(crate) fn queue_routine_target(
 ) -> Result<Vec<Task>> {
     let mut submitted = if target.is_dir() {
         let folder = super::routines::read_folder_at(target)?;
+        if let Some(refusal) = folder.refusal() {
+            bail!("{refusal}");
+        }
         // `folder.tasks` is already this folder's own tasks plus every
         // nested subfolder's, depth-first — the same list `enter` queues.
         if folder.tasks.is_empty() {
@@ -8142,6 +8289,17 @@ fn begin_routine_queue(
     tracking: Tracking,
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
+    // A ticked folder holding a file that will not parse is refused whole,
+    // before anything is minted: the batch would otherwise queue without a
+    // task the person can see sitting in that folder.
+    let refusals: Vec<String> = routines
+        .iter()
+        .filter(|folder| nav.selected.contains(&folder.path))
+        .filter_map(RoutineFolder::refusal)
+        .collect();
+    if !refusals.is_empty() {
+        return outcome_over(Some(nav), "queue refused", refusals.join("\n\n"));
+    }
     // Nothing to queue leaves the pane as it stands: the routines tab has
     // no pending screen behind it to drop back to.
     let tasks = routine_batch_tasks(repo, routines, nav);
@@ -9871,6 +10029,16 @@ mod tests {
             "pipeline: must not be commented out, unlike the optional rows around it:\n{doc}"
         );
 
+        // The title is shown quoted: unquoted, an example in the usual
+        // `type(scope): sentence` shape is not YAML at all.
+        let (yaml, _) = crate::task::split_fence(&doc).unwrap();
+        let front: serde_norway::Value = serde_norway::from_str(yaml)
+            .unwrap_or_else(|err| panic!("the skeleton's frontmatter is not YAML: {err}\n{doc}"));
+        assert!(
+            front.get("title").and_then(|t| t.as_str()).is_some(),
+            "{doc}"
+        );
+
         let args = QueueAddArgs {
             from: vec![],
             base: None,
@@ -10475,6 +10643,22 @@ mod tests {
         assert_eq!(docs[1], b);
     }
 
+    /// A byte order mark in front of a task's opening fence does not hide it
+    /// from the splitter. Before, the second task's fence went uncounted, so
+    /// its front matter was cut into the first task's body.
+    #[test]
+    fn a_stream_of_marked_tasks_splits_into_whole_tasks() {
+        let a = task_text("a", "group: demo\n", "## Goal\nFirst.\n");
+        let b = task_text("b", "group: demo\n", "## Goal\nSecond.\n");
+        let stream = format!("\u{feff}{a}\u{feff}{b}");
+
+        let docs = split_stream(&stream);
+
+        assert_eq!(docs.len(), 2, "{docs:?}");
+        assert_eq!(docs[0], format!("\u{feff}{a}"));
+        assert_eq!(docs[1], format!("\u{feff}{b}"));
+    }
+
     /// A directory named by `--from` expands to every `*.md` file in it, in
     /// filename order — non-markdown files beside them are not tasks.
     #[test]
@@ -10659,6 +10843,7 @@ mod tests {
             QueueSnapshot {
                 groups: Vec::new(),
                 branch: None,
+                unreadable: Vec::new(),
             },
         );
         let mut known = 0;
@@ -10683,6 +10868,101 @@ mod tests {
             Some("plan/demo"),
             "the landed reading should have read the fixture's own branch too"
         );
+    }
+
+    /// A file that breaks while the queue tab stays open is named when the
+    /// reader lands it, once — not only on the next visit to the tab. Before,
+    /// only the tab's opening message named such files, so a task written
+    /// with a bad title beside a queueable group queued short in silence.
+    #[test]
+    fn a_file_that_breaks_while_the_screen_is_open_is_named_once() {
+        let (repo, _root_guard) = fixture("queue-reader-names-new-unreadable");
+        write_pending(&repo, "login", &task_text("login", "group: auth\n", BODY));
+        let mut groups = super::super::pending::list_groups(&repo).unwrap();
+        let mut state = ScreenState::new();
+        state.named = Some(NamedFiles {
+            dir: repo.pending_dir(),
+            files: Default::default(),
+        });
+        let reader = start_queue_reader(
+            repo.clone(),
+            repo.root.clone(),
+            QueueSnapshot {
+                groups: groups.clone(),
+                branch: None,
+                unreadable: Vec::new(),
+            },
+        );
+        let mut known = 0;
+
+        std::fs::write(
+            repo.pending_dir().join("tokens.md"),
+            "---\nid: tokens\ngroup: auth\ntitle: feat(auth): tokens\n---\nbody\n",
+        )
+        .unwrap();
+        reader.wake();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(state.mode, Mode::Outcome { .. }) && std::time::Instant::now() < deadline {
+            refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Mode::Outcome { notice, .. } = &state.mode else {
+            panic!("the broken file was never named: {:?}", state.mode);
+        };
+        let text = &notice.text;
+        assert!(text.contains("tokens.md"), "{text}");
+        assert!(!text.contains("login.md"), "{text}");
+
+        // Closed and still broken: the next readings stay quiet.
+        state.mode = Mode::Browsing;
+        for _ in 0..3 {
+            reader.wake();
+            let before = known;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while known == before && std::time::Instant::now() < deadline {
+                refresh_from_reader(&reader, &mut known, &mut groups, &mut state);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        assert!(matches!(state.mode, Mode::Browsing), "{:?}", state.mode);
+    }
+
+    /// [`announce_unreadable`] leaves a half-typed filter or an open question
+    /// alone, names the file once browsing is back, and names a repaired
+    /// file again if it breaks again. The routines tab, which holds no
+    /// [`NamedFiles`], names nothing.
+    #[test]
+    fn unreadable_files_are_named_only_over_plain_browsing() {
+        let dir = std::path::PathBuf::from("/pending");
+        let bad = vec![dir.join("tokens.md")];
+        let mut state = ScreenState::new();
+        state.named = Some(NamedFiles {
+            dir: dir.clone(),
+            files: Default::default(),
+        });
+
+        state.mode = Mode::Filter;
+        announce_unreadable(&bad, &[], &mut state);
+        assert!(matches!(state.mode, Mode::Filter), "{:?}", state.mode);
+
+        state.mode = Mode::Browsing;
+        announce_unreadable(&bad, &[], &mut state);
+        assert!(matches!(state.mode, Mode::Outcome { .. }));
+
+        state.mode = Mode::Browsing;
+        announce_unreadable(&bad, &[], &mut state);
+        assert!(matches!(state.mode, Mode::Browsing), "named twice");
+
+        announce_unreadable(&[], &[], &mut state);
+        announce_unreadable(&bad, &[], &mut state);
+        assert!(
+            matches!(state.mode, Mode::Outcome { .. }),
+            "a repaired file that breaks again is named again"
+        );
+
+        let mut routines = ScreenState::new();
+        announce_unreadable(&bad, &[], &mut routines);
+        assert!(matches!(routines.mode, Mode::Browsing));
     }
 
     /// The bug `refresh_from_reader`'s first version had: it compared a
@@ -12215,7 +12495,7 @@ mod tests {
 
         let mut cache = std::collections::HashMap::new();
         let mut parsed = 0usize;
-        let groups = super::pending::list_groups_in(&repo, &mut cache, &mut parsed).unwrap();
+        let (groups, _) = super::pending::list_groups_in(&repo, &mut cache, &mut parsed).unwrap();
         assert_eq!(
             parsed, 1,
             "one task, new to the cache, is parsed exactly once while list_groups builds it"
@@ -14477,7 +14757,14 @@ mod tests {
     fn opening_the_screen_with_nothing_pending_does_not_error() {
         let (repo, _root_guard) = fixture("screen-nothing-pending");
         let groups = listed(&repo);
-        assert_eq!(opening_message(&repo, &groups), None);
+        assert_eq!(
+            opening_message(
+                &repo.pending_dir(),
+                &crate::commands::pending::unreadable(&repo),
+                &groups
+            ),
+            None
+        );
         let (exit, _) = screen_exit(&repo, groups, "");
         assert_eq!(exit, ScreenExit::Quit);
     }
@@ -14491,7 +14778,11 @@ mod tests {
         let groups = listed(&repo);
         assert!(groups.is_empty());
         assert_eq!(
-            opening_message(&repo, &groups),
+            opening_message(
+                &repo.pending_dir(),
+                &crate::commands::pending::unreadable(&repo),
+                &groups
+            ),
             None,
             "an empty pending directory has nothing to say instead of opening"
         );
@@ -14533,7 +14824,7 @@ mod tests {
     }
 
     /// A task with no readable `group:` is named, not silently skipped —
-    /// the one diagnostic `pending::unreadable` exists for.
+    /// the one diagnostic the skipped list exists for.
     #[test]
     fn opening_message_names_an_unreadable_task() {
         let (repo, _root_guard) = fixture("opening-message-unreadable");
@@ -14544,7 +14835,12 @@ mod tests {
         .unwrap();
 
         let groups = listed(&repo);
-        let msg = opening_message(&repo, &groups).expect("nothing readable to open onto");
+        let msg = opening_message(
+            &repo.pending_dir(),
+            &crate::commands::pending::unreadable(&repo),
+            &groups,
+        )
+        .expect("nothing readable to open onto");
         assert!(msg.contains("no-group.md"), "{msg}");
     }
 
@@ -14569,7 +14865,12 @@ mod tests {
 
         let groups = listed(&repo);
         assert!(!groups.is_empty(), "the queue-only group fills the list");
-        let msg = opening_message(&repo, &groups).expect("the unreadable task must still be named");
+        let msg = opening_message(
+            &repo.pending_dir(),
+            &crate::commands::pending::unreadable(&repo),
+            &groups,
+        )
+        .expect("the unreadable task must still be named");
         assert!(msg.contains("no-group.md"), "{msg}");
     }
 
@@ -14582,7 +14883,7 @@ mod tests {
     /// task and one stray one used to draw the good group's row and now
     /// printed "Nothing to list" instead.
     #[test]
-    fn opening_message_opens_the_screen_past_a_stray_task_beside_a_real_group() {
+    fn opening_message_names_a_stray_task_beside_a_real_group() {
         let (repo, _root_guard) = fixture("opening-message-stray-beside-real-group");
         write_pending(
             &repo,
@@ -14600,11 +14901,15 @@ mod tests {
             groups.iter().any(|g| g.state == GroupState::Queueable),
             "there is a real, queueable group here"
         );
-        assert_eq!(
-            opening_message(&repo, &groups),
-            None,
-            "a queueable group beside a stray task must still open the screen"
-        );
+        let msg = opening_message(
+            &repo.pending_dir(),
+            &crate::commands::pending::unreadable(&repo),
+            &groups,
+        )
+        .expect("a stray task beside a queueable group must still be named");
+        assert!(msg.contains("no-group.md"), "{msg}");
+        assert!(!msg.contains("Nothing to list"), "{msg}");
+        assert_eq!(opening_title(&groups), "tasks not listed");
     }
 
     /// An empty pending directory used to be indistinguishable from a project
@@ -16596,6 +16901,28 @@ mod tests {
                 std::fs::read_to_string(repo.tracking_dir().join("task-file.seen")).unwrap(),
                 source
             );
+        }
+
+        /// A routine folder holding a file that will not parse is refused
+        /// whole, naming the file, and nothing is queued: a batch that
+        /// quietly left the file out would run short of a task the person
+        /// can see in the folder.
+        #[test]
+        fn a_routine_folder_holding_an_unparseable_file_is_refused_and_queues_nothing() {
+            let (repo, _root_guard) = fixture("routine-unparseable");
+            let good = "---\nid: audit\ntitle: audit\ngroup: demo\n---\n## Goal\n\nDo it.\n";
+            write_routine(&repo, "nightly", "audit", good);
+            write_routine(&repo, "nightly", "broken", "no fence here\n");
+            let folder = repo.routines_dir().join("nightly");
+
+            let err =
+                queue_routine_target(&repo, &Pipelines::builtin(), "plan/demo", &folder, "bugfix")
+                    .unwrap_err();
+
+            assert!(format!("{err:#}").contains("broken.md"), "{err:#}");
+            assert!(repo.tasks().unwrap().is_empty(), "nothing was queued");
+            let refusal = routine_target_refusal(&folder).expect("the job runner asks first");
+            assert!(refusal.contains("broken.md"), "{refusal}");
         }
 
         /// A routine has no task on disk for a failed batch's ids to be

@@ -24,7 +24,7 @@ outside the checkout.
 ```markdown
 ---
 id: sessions
-title: feat(auth): add session tokens on top of login
+title: "feat(auth): add session tokens on top of login"
 group: auth
 depends_on:
   - login
@@ -35,6 +35,9 @@ depends_on:
 ## Acceptance criteria
 ## References
 ```
+
+A `title:` that holds `: `, such as `feat(auth): …`, must be in quotes, or YAML refuses the file. A
+UTF-8 byte order mark at the top of a task file is ignored.
 
 ### The frontmatter is spoolway's
 
@@ -217,7 +220,9 @@ step.
 | `spoolway queue resume <task>` | Same as `r` on the board. |
 | `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
 
-A task file that does not parse is skipped. The board names it in amber.
+A queue file that does not parse is skipped. The board names it in amber, `spoolway queue list`
+names it with its reason, and the dispatcher keeps running while it is in the queue. A pending file
+that does not parse is named on the queue screen. See [`spoolway queue list`](cli-reference.md#spoolway-queue-list).
 
 ## Expressing order
 

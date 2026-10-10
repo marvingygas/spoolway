@@ -2246,8 +2246,18 @@ fn next_cursor_after_chain(ids: &[String], chain: &[ChainEntry]) -> Option<Strin
 /// same answer without the redraw — `spoolway queue list`, above all. Reads the
 /// task files and the live lane list, and writes nothing.
 pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
-    let tasks = repo.tasks()?;
-    let graph = Graph::build(&tasks, &repo.archive_dir());
+    rows_of(repo, pipelines, &repo.tasks()?)
+}
+
+/// [`rows`] over tasks the caller has already read. `spoolway queue list`
+/// reads the queue once, for its rows and for the files that did not parse,
+/// so a file edited between two reads cannot land in neither list or both.
+pub fn rows_of(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+) -> Result<Vec<Row>> {
+    let graph = Graph::build(tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     let ledger = crate::usage::read_cached(repo);
@@ -2255,7 +2265,7 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     // last stage between calls, so it has nothing to tell "just arrived"
     // apart from "genuinely queued" with, and keeps reading the latter —
     // see `Board::arrived`.
-    build_rows(repo, &tasks, pipelines, &graph, &lanes, &ledger, None)
+    build_rows(repo, tasks, pipelines, &graph, &lanes, &ledger, None)
 }
 
 /// Everything [`build`] read and computed once, for [`paint`] to draw from
@@ -2360,8 +2370,9 @@ fn build(
     // `cached_queue`, not `repo.tasks_and_problems()`: the board's own
     // per-file byte cache, so a reading over an unchanged queue parses
     // nothing — see `cached_queue`. `tasks_and_problems` stays the
-    // dispatcher pass's own uncached read (`dispatch.rs`), which must see a
-    // just-written file immediately and runs far less often than a reading.
+    // uncached read of the dispatcher pass (`dispatch.rs`) and of `queue list`,
+    // which must see a just-written file immediately and run far less often
+    // than a reading.
     let (tasks, load_problems, _parsed) = cached_queue(&repo.queue_dir())?;
     let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;

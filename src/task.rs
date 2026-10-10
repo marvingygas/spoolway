@@ -1341,7 +1341,13 @@ impl Task {
 /// checked which ones a task may set at all — both need the same two
 /// fences found the same way, and a submitted task is this same shape
 /// before it is anything spoolway's.
+///
+/// A leading UTF-8 byte order mark is dropped first. Some Windows editors
+/// write one at the top of every file they save, and it is invisible there,
+/// so a task that looks like it starts with `---` would otherwise be refused
+/// for not starting with it.
 pub fn split_fence(raw: &str) -> Result<(&str, &str)> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let rest = raw
         .strip_prefix("---\n")
         .or_else(|| raw.strip_prefix("---\r\n"))
@@ -2297,6 +2303,18 @@ mod tests {
         assert!(problems[0].path.ends_with("broken.md"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An editor that saves a byte order mark at the top of the file leaves a
+    /// task that looks fenced and used to be refused for not being so.
+    #[test]
+    fn a_leading_byte_order_mark_is_not_part_of_the_file() {
+        let plain = "---\nid: demo\nstage: queued\n---\n## Goal\nok\n";
+        let marked = format!("\u{feff}{plain}");
+
+        assert_eq!(split_fence(&marked).unwrap(), split_fence(plain).unwrap());
+        let task = Task::parse(PathBuf::from("demo.md"), &marked).unwrap();
+        assert_eq!(task.id(), "demo");
     }
 
     #[test]
