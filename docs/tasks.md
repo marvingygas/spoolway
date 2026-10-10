@@ -308,6 +308,11 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
 not a plain pass.
 
+A `gate_at: blocked` that caught the unblocker's pass sends a plain resume to the `on_pass` of the
+step the task stopped at, which is where an unheld pass would have gone. A command step it stopped
+at runs again. The board's resume picker says the block was cleared. When the stopped step has
+`gate: true`, the task waits at that step's gate instead, and the `gate_at` is spent.
+
 A `gate_at` that caught a command step's failing exit sends a plain resume down that step's
 `on_fail`, the route the exit code chose.
 
