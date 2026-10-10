@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", "scripts/gate-quick.sh", ".github/workflows/**", "src/scratch.rs"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", "scripts/gate-quick.sh", ".github/workflows/**", "src/scratch.rs", "src/fault.rs"]
 ---
 
 # Testing
@@ -64,6 +64,32 @@ the suites that drive a screen over a pty call it, and `command-steps` does not.
 environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
 that runs on that backend.
 
+### Killing the dispatcher at a named point
+
+`SPOOLWAY_TEST_KILL_AT=<point>` makes `spoolway dispatch` kill itself with `SIGKILL` at one
+named moment. It does nothing unless `SPOOLWAY_TEST_BACKEND` is also set. No command other than
+`spoolway dispatch` reads it. A point fires once. It leaves a marker file in the repository's
+`.git` directory, so a restarted dispatcher carries on. A repository whose `.git` is a file, such
+as a linked worktree, has no hook. With the backend set, an unknown point name makes
+`spoolway dispatch` refuse to start and list the valid points.
+
+| Point | The dispatcher dies |
+|---|---|
+| `cut-before-add` | After the task file records `run` and `base_commit`, before the worktree is cut |
+| `cut-during-add` | While `git worktree add` is still writing the checkout |
+| `cut-after-add` | After the worktree is cut, before the task file records `workspace_id` |
+| `teardown-after-commit` | After the final commit, before the checkout is torn down |
+| `teardown-during-remove` | While `git worktree remove` is still deleting the checkout |
+| `teardown-before-archive` | After the checkout is torn down, before the task file moves to `archive/` |
+
+At a `during` point, the dispatcher also kills the whole process group of the `git` command, so
+the checkout stays half written or half deleted.
+
+A suite marks a case whose fix is not on `main` yet with `expect_fail <finding> <task>` before
+its checks and `expect_fail_end` after them. A failing check inside the mark prints `xfail` and
+does not fail the suite. When every check inside the mark passes, the suite prints a line saying
+the mark can come off.
+
 Each run's scratch root lives under `/tmp` and is removed on exit. A kept tree carries a
 `.keep` marker, and the next run sweeps any other run's root whose process is gone.
 
@@ -87,7 +113,7 @@ with a `// covers:` line.
 |---|---|---|
 | `smoke` | flow | A person, by hand |
 | `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides, kept-panes | The `suite` step of the pipelines, on the last task of a chain |
-| `nightly` | the `pr` suites plus `upgrade` | Daily CI and the release workflow |
+| `nightly` | the `pr` suites plus `upgrade` and `faults` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
 
@@ -116,6 +142,7 @@ with a `// covers:` line.
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one |
 | `home-mode` | A checkout with no `.spoolway/`, run in a workspace under `~/.spoolway/`. It also covers the clone's id: a superproject moved on disk that finds its queue again, an `init` cancelled at its first question that leaves `.git` and `~/.spoolway/` as they were (needs util-linux `script`), and several first commands started at once in a fresh clone that agree on one home |
 | `kept-panes` | A two-step task driven through the herdr double: `spoolway lane` still lists the first step's lane while the second step runs, and both lanes are gone once the task is done. A second task with `dispatch.keep_finished_lanes` set to `false` lists only the second step's lane while it runs |
+| `faults` | Faults injected where the stress test found bugs by hand. `SPOOLWAY_TEST_KILL_AT` makes a test dispatcher kill itself inside `git worktree add` and `git worktree remove` in a repository of ten thousand files. The suite also covers a command step's wrapper killed alone by `SIGKILL` and by `SIGTERM`, a dispatcher on a terminal while a cron job fires under an issue hook whose tool is missing, a `git fetch` over a stalled ssh transport, eight `config set` calls at once, and `resume` under a live unblocker. A case whose fix is not on `main` yet is marked expected-fail, and the suite prints a line once it passes. It takes about three and a half minutes, so it runs in `nightly` only |
 | `upgrade` | Whether this binary still reads what the 0.6.0 release wrote. The 0.6.0 `.spoolway/` tree under `scripts/e2e/fixtures/` goes through a real `spoolway sync`: its `housekeeping.retention_days` survives, the prose around the pipeline file's key block comes back byte for byte, `spoolway pipeline check` loads the result, and a task queues against it. A dry run changes no file, and the files it lists are the files a real run reports and changes on disk. A sync that cannot remove one file writes nothing, `config.toml` included |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. It ages sessions by waiting, so a run takes about ten minutes. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |

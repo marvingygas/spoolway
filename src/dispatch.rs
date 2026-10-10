@@ -5878,12 +5878,14 @@ fn ensure_workspace(
                 task.front.run = Some(crate::usage::new_run_id());
                 task.front.base_commit = base_commit;
                 persist_task(repo, task, file_seen)?;
+                crate::fault::kill_at(&repo.root, crate::fault::CUT_BEFORE_ADD);
                 let workspace = mux.create_workspace(
                     &repo.root,
                     &branch,
                     &starts_from,
                     &format!("spoolway/{}", task.id()),
                 )?;
+                crate::fault::kill_at(&repo.root, crate::fault::CUT_AFTER_ADD);
                 task.front.workspace_id = Some(workspace.workspace_id);
                 task.front.pane_id = Some(workspace.pane_id.clone());
                 task.front.tab_id = workspace.tab_id;

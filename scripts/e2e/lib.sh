@@ -39,8 +39,53 @@ annotate() {
   printf '::error title=%s::%s\n' "${SUITE:-e2e}" "$1"
 }
 
-ok()  { printf '  \033[32mok\033[0m    %s\n' "$1"; pass=$((pass+1)); }
-bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); annotate "$1"; }
+# Expected-fail marks. A case whose fix has not reached `main` is written
+# against the behaviour the fix promises and marked with `expect_fail`, so the
+# suite stays green until the fix lands and goes on checking the promise once
+# it has. Between `expect_fail` and `expect_fail_end`, `ok` and `bad` are
+# counted apart from the suite's tally: a failing check prints as `xfail` and
+# fails nothing, and `expect_fail_end` says so when every check in the span
+# passed, which is the sign the fix is in and the mark can come off.
+#
+# Only the checks about the fix go inside a mark. A check that the fault was
+# really injected stays outside it, or a kill that came too late would pass.
+E2E_XFAIL=""
+E2E_XFAIL_OK=0
+E2E_XFAIL_BAD=0
+
+# expect_fail <finding-id> <task-id>
+expect_fail() {
+  E2E_XFAIL="$1, task $2"
+  E2E_XFAIL_OK=0
+  E2E_XFAIL_BAD=0
+}
+
+# Close the span `expect_fail` opened.
+expect_fail_end() {
+  local mark=$E2E_XFAIL
+  E2E_XFAIL=""
+  [ -n "$mark" ] || return 0
+  if [ "$E2E_XFAIL_BAD" -eq 0 ] && [ "$E2E_XFAIL_OK" -gt 0 ]; then
+    printf '  \033[33mnote\033[0m  every check marked expected-fail (%s) passed: its mark can come off\n' "$mark"
+  fi
+}
+
+ok() {
+  if [ -n "$E2E_XFAIL" ]; then
+    printf '  \033[33mxpass\033[0m %s\n' "$1"
+    E2E_XFAIL_OK=$((E2E_XFAIL_OK+1))
+    return 0
+  fi
+  printf '  \033[32mok\033[0m    %s\n' "$1"; pass=$((pass+1))
+}
+bad() {
+  if [ -n "$E2E_XFAIL" ]; then
+    printf '  \033[33mxfail\033[0m %s (expected to fail until %s lands)\n' "$1" "$E2E_XFAIL"
+    E2E_XFAIL_BAD=$((E2E_XFAIL_BAD+1))
+    return 0
+  fi
+  printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); annotate "$1"
+}
 
 # Setup that fails makes every assertion after it meaningless. The suites run
 # without `set -e` on purpose — they count failures rather than aborting — so
