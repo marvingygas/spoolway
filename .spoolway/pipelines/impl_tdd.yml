@@ -60,7 +60,8 @@
 
 # 1.1: one review split into `review-spec` and `review-code`, each with its own fixer.
 # 1.2: `fix-spec-review` and `fix-code-review` at high effort.
-version: 1.2
+# 1.3: `e2e` on claude-sonnet-5-5, as impl_ui runs it.
+version: 1.3
 
 description: >-
   Test first, one criterion at a time, for work whose criteria are already
@@ -137,7 +138,7 @@ steps:
       while the suites are still cheap to read and fix.
     agent: claude
     prompt: e2e
-    model: claude-opus-5-5
+    model: claude-sonnet-5-5
     effort: medium
     loop: 2
     on_pass: test
